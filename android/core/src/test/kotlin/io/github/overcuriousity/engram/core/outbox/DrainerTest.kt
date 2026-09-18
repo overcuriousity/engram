@@ -137,11 +137,12 @@ class DrainerTest {
         box.enqueueGapForget(listOf(GapMember("ask", "g1", "why"), GapMember("ask", "g2", "how"))); now += 1
         box.enqueueArtifactOp("art-b", ArtifactOp.deprecate); now += 1
         box.enqueueMergeUndo("merge-1"); now += 1
-        box.enqueueCorpusResolve("cor-1", Resolution.discard)
-        repeat(10) { server.enqueue(MockResponse(code = 204)) }
+        box.enqueueCorpusResolve("cor-1", Resolution.discard); now += 1
+        box.enqueueArtifactDelete("art-c")
+        repeat(11) { server.enqueue(MockResponse(code = 204)) }
 
         assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
-        val sent = (1..10).map { server.takeRequest() }
+        val sent = (1..11).map { server.takeRequest() }
         assertEquals(
             listOf(
                 "/api/v1/pairs/7/supersede",
@@ -154,9 +155,11 @@ class DrainerTest {
                 "/api/v1/artifacts/art-b/deprecate",
                 "/api/v1/merges/merge-1/undo",
                 "/api/v1/corpora/cor-1/resolve",
+                "/api/v1/artifacts/art-c",
             ),
             sent.map { it.target },
         )
+        assertEquals("DELETE", sent[10].method)
         assertEquals("""{"keep":"art-a"}""", sent[0].body?.utf8())
         // Absent, not null: an absent `keep` is the side the judge proposed.
         assertEquals("{}", sent[1].body?.utf8())
@@ -172,6 +175,13 @@ class DrainerTest {
         val r = box.rows.first().single()
         assertEquals(State.held, r.state)
         assertEquals("keep must name one side of the pair", r.error)
+    }
+
+    @Test fun anArtifactAlreadyDeletedElsewhereIsSettledNotHeld() = runTest {
+        box.enqueueArtifactDelete("art-gone")
+        server.enqueue(MockResponse(code = 404, body = """{"error":"no such artifact"}"""))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        assertEquals(State.sent, box.rows.first().single().state)
     }
 
     @Test fun aPairSomebodyElseAlreadyAnsweredIsSettled() = runTest {

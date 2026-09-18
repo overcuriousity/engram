@@ -41,7 +41,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 @Composable
-fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onUnpair: () -> Unit) {
+fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: () -> Unit = {}, onUnpair: () -> Unit) {
     val ctx = LocalContext.current
     val c by engram.store.current.collectAsStateWithLifecycle()
     val latest by engram.latestMoment.collectAsStateWithLifecycle(null)
@@ -112,6 +112,13 @@ fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onUnpair: (
             JudgeLine("Duplicate pairs", pairs) { onJudging(Screen.Pairs) }
             JudgeLine("Gaps", gaps) { onJudging(Screen.Gaps) }
             JudgeLine("While you were away", aside) { onJudging(Screen.Journal) }
+        }
+        // The way to the queue while nothing is owed. It leaves the top bar
+        // then; this is where somebody who wants to look anyway can.
+        Section("Queue") {
+            val owed by engram.outbox.rows.collectAsStateWithLifecycle(emptyList())
+            val n = queuedCount(owed)
+            JudgeLine(if (n > 0) "$n owed to the server" else "Nothing owed", null, onQueue)
         }
         Section("This phone") {
             Line(engram.situation.bundle(placeOn).toString(), muted = true, mono = true)

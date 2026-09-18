@@ -208,6 +208,20 @@ internal class Transport(
         return send(Request.Builder().url(url("/api/v1/capture")).post(body).build())
     }
 
+    /**
+     * The microphone's door: one recording in, the words in it back. Not a
+     * write the device owes — a dictation nobody is waiting for is a dictation
+     * nobody wants — so this is sent once, now, and never queued. `audio` is
+     * the part the server reads, with a filename because a part without one is
+     * a field rather than a file to its multipart reader.
+     */
+    suspend fun transcribe(audio: ByteArray, mime: String): Answer {
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("audio", "recording", audio.toRequestBody(mime.toMediaTypeOrNull() ?: OCTET_STREAM))
+            .build()
+        return send(Request.Builder().url(url("/api/v1/transcribe")).post(body).build())
+    }
+
     suspend fun vapid(): String {
         val a = send(Request.Builder().url(url("/api/v1/push/vapid")).get().build())
         if (a.status != 200) throw IOException("vapid: ${a.status}")
@@ -256,6 +270,10 @@ internal class Transport(
 
     /** One of `verify`, `deprecate`, `reactivate`, `unsupersede`, each a route of its own. */
     suspend fun artifactOp(id: String, op: String): Answer = judge("/api/v1/artifacts/$id/$op", "{}")
+
+    /** Gone from both stores. The answer comes back as it came, like every other decision. */
+    suspend fun artifactDelete(id: String): Answer =
+        send(Request.Builder().url(url("/api/v1/artifacts/$id")).delete().build())
 
     suspend fun mergeUndo(id: String): Answer = judge("/api/v1/merges/$id/undo", "{}")
     suspend fun corpusResolve(id: String, action: String): Answer =

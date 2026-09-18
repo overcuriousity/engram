@@ -101,6 +101,8 @@ internal class Drainer(
                 transport.artifactOp(need("artifact"), need("op")),
                 goneIsSettled = true,
             )
+            // Deleted on the web while this phone was offline is deleted.
+            Kind.artifact_delete -> settle(row, transport.artifactDelete(need("artifact")), goneIsSettled = true)
             Kind.merge_undo -> settle(row, transport.mergeUndo(need("merge")), goneIsSettled = true)
             Kind.corpus_resolve -> settle(
                 row,

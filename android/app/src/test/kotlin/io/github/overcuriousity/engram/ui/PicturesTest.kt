@@ -4,12 +4,14 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.unit.dp
 import io.github.overcuriousity.engram.core.read.Beside
 import io.github.overcuriousity.engram.core.read.Hit
 import io.github.overcuriousity.engram.core.read.Pair
@@ -54,6 +56,27 @@ class PicturesTest {
             }
         }
         save("home-box")
+    }
+
+    /** An artifact's text, as text: the note from the screenshot that used to show its asterisks. */
+    @Test fun anArtifactRendered() {
+        compose.setContent {
+            EngramTheme {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
+                    Decisions(
+                        chunk = io.github.overcuriousity.engram.core.read.Chunk(id = "a", text = "", status = "active"),
+                        decided = null, onVerify = {}, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
+                    )
+                    Markdown(
+                        "## Öffnungszeiten Wertstoffhof Bad Aibling\n\n**Adresse:** Thürhamer Straße 21a, 83043 Bad Aibling\n\n" +
+                            "**Öffnungszeiten:**\n- Montag: geschlossen\n- Dienstag: 08:00–12:30 Uhr und 14:00–18:00 Uhr\n- Samstag: 08:00–13:00 Uhr\n\n" +
+                            "**Quelle:** https://www.rathaus-bad-aibling.de/adresse/Wertstoffhof-address509",
+                        Modifier.padding(16.dp, 8.dp),
+                    )
+                }
+            }
+        }
+        save("artifact")
     }
 
     @Test fun aResultList() {

@@ -58,6 +58,38 @@ class ModelsTest {
         assertEquals(1L, leaf.source?.startLine)
     }
 
+    @Test fun theRelatedListsAreLabelsAndOnlyALinkSaysWhy() {
+        val r = Decode.related(fixture("related.json"))
+        assertFalse(r.isEmpty)
+        val near = r.related.single()
+        assertTrue(near.named); assertEquals("Payload filters 1", near.label)
+        assertNull("a neighbour is near by resemblance and needs no why", near.why)
+        val link = r.seenTogether.single()
+        assertEquals(near.id, link.id)
+        assertEquals("when asking: payload filter", link.why)
+        assertEquals("Qdrant notes", link.corpusTitle)
+        assertNotNull("the fixture's passage stops mid-sentence, so there is a way onward", r.continuesAt)
+        assertTrue(Decode.related("""{"related":[],"seen_together":[]}""").isEmpty)
+    }
+
+    @Test fun theSourceSliceNumbersItsLinesAndSaysWhichOnesTheArtifactClaims() {
+        val s = Decode.source(fixture("source.json"))
+        assertNotNull(s.corpusId)
+        assertEquals("lines 1–2", s.label)
+        assertEquals(listOf(1L, 2L), s.lines.filter { it.inSpan }.map { it.number })
+        assertEquals("Third line.", s.lines.last().text)
+        assertFalse(s.lines.last().inSpan)
+        // A merge: no document, no lines, and not an error.
+        val merge = Decode.source("""{"corpus_id":null,"label":"corpus","lines":[]}""")
+        assertNull(merge.corpusId); assertTrue(merge.lines.isEmpty())
+    }
+
+    @Test fun statusSaysWhetherTheMicrophoneHasADoor() {
+        assertFalse(Decode.status(fixture("status.json")).transcribe)
+        assertTrue(Decode.status("""{"transcribe":true}""").transcribe)
+        assertFalse("an older server that does not say is one with no door", Decode.status("{}").transcribe)
+    }
+
     @Test fun versionsComeOldestFirst() {
         val v = Decode.versions(fixture("versions.json")).items
         assertEquals(1L, v.single().n)

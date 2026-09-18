@@ -65,4 +65,14 @@ interface Reader {
 
     /** Something the source is told and nothing waits on. Failure is silent. */
     suspend fun tell(path: String, json: String)
+
+    /**
+     * A recording in, the words in it back. Belongs to the moment like [ask]
+     * does and is never kept. Where the source has no speech model the answer
+     * is an error, not a value; `Api.status()` says so in advance.
+     *
+     * On the seam rather than beside it because a self-contained app hears on
+     * the device, and the screen holding the microphone must not know which.
+     */
+    suspend fun hear(audio: ByteArray, mime: String): Read<String>
 }

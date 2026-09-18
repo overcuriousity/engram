@@ -100,6 +100,15 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
     suspend fun enqueueArtifactOp(artifactId: String, op: ArtifactOp) =
         insert(Kind.artifact_op, buildJsonObject { put("artifact", artifactId); put("op", op.name) })
 
+    /**
+     * Delete for good. Not an [ArtifactOp]: those four are answers with an
+     * undo, and this is the one that has none — which is why the screen asks
+     * before it is enqueued, and why the queue is the last place it can be
+     * taken back from.
+     */
+    suspend fun enqueueArtifactDelete(artifactId: String) =
+        insert(Kind.artifact_delete, buildJsonObject { put("artifact", artifactId) })
+
     suspend fun enqueueMergeUndo(mergeId: String) =
         insert(Kind.merge_undo, buildJsonObject { put("merge", mergeId) })
 

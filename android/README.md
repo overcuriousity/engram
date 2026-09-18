@@ -20,11 +20,27 @@ a VPN. Ask sits beside the box and streams, drawing the answer as it grows and
 then drawing the server's whole answer in its place, with the commands and
 paths no excerpt carries marked.
 
-The bar holds Search, Capture, Today and Library. Queue and Settings are above,
-and the queue shows a count only while something is still owed. Today is one
-day of the base and pages by date; Library is everything captured, a page at a
-time; an artifact shows its text, where it came from, how it came to exist, and
-the wordings it has had.
+The microphone is the web's: held, not pressed, and what is said is typed into
+the box — dictation, so the same verbs still decide what the words are for. It
+is drawn only where the server reports a speech model (`status.transcribe`),
+records 16 kHz mono WAV as the browser converts to, and sends it to
+`POST /api/v1/transcribe` at once; nothing about it goes through the queue.
+
+The bar holds Search, Today and Library; Settings is above. The queue is
+above too, but only while something is still owed or was refused — the web has
+no queue, a phone has one because it is sometimes offline, and a mechanism for
+the offline case has no place on the bar while everything has gone through.
+Settings keeps the way in. After a capture the line under the box says what
+became of it — kept, on its way, refused — read off the row itself.
+
+Today is one day of the base and pages by date; Library is everything
+captured, a page at a time. An artifact is the web's pane: its text drawn as
+text (markdown for what a model wrote, verbatim for a passage), the decisions
+about it — still accurate, hide from results, put it back, and delete, which
+asks first — the lines it was drawn from with the span set apart, what it
+resembles and what it has been needed alongside, where it came from, and the
+wordings it has had. Every decision is an outbox row with an Undo while it is
+still queued.
 
 The result list keeps what the web's keeps: the rule that says *relevance falls
 off here*, and the rows beneath it that hold their rank and stop claiming to be

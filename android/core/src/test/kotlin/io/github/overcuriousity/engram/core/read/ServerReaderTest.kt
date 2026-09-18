@@ -142,6 +142,23 @@ class ServerReaderTest {
      * it and no error: a blank screen every retry reproduced, until the
      * thirty-day prune.
      */
+    @Test fun hearingIsNeverKeptAndAClosedDoorIsAnErrorNotAValue() = runTest {
+        server.enqueue(MockResponse(code = 200, body = "  tombstones in leveldb\n"))
+        val heard = reader.hear(byteArrayOf(1, 2, 3), "audio/wav")
+        assertEquals("tombstones in leveldb", heard.value)
+        assertEquals(Reach.Fresh, heard.reach)
+        assertEquals("nothing said is written down", 0, db.cacheDao().count())
+
+        server.enqueue(MockResponse(code = 404, body = """{"error":"no speech model"}"""))
+        val closed = reader.hear(byteArrayOf(1), "audio/wav")
+        assertNull(closed.value)
+        assertEquals("no speech model", closed.error)
+
+        // Nothing listens on port 1: the door cannot be reached, and says so.
+        val gone = readerFor("http://127.0.0.1:1").hear(byteArrayOf(1), "audio/wav")
+        assertEquals(Reach.Unreachable, gone.reach)
+    }
+
     @Test fun aHeldBodyThisBuildCannotReadIsDroppedAndAskedForAgainWholly() = runTest {
         server.enqueue(ok("one", "\"t1\""))
         reader.read(req) { it }.toList()

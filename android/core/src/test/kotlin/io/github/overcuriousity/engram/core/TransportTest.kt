@@ -49,6 +49,28 @@ class TransportTest {
         assertTrue(body.contains("bytes"))
     }
 
+    @Test fun aRecordingGoesAsTheAudioPartAndTheWordsComeBackPlain() = runTest {
+        server.enqueue(MockResponse(code = 200, body = "tombstones in leveldb"))
+        val a = t.transcribe(byteArrayOf(82, 73, 70, 70), "audio/wav")
+        assertEquals(200, a.status)
+        assertEquals("tombstones in leveldb", a.body)
+        val r = server.takeRequest()
+        assertEquals("/api/v1/transcribe", r.target)
+        assertTrue(r.headers["Content-Type"]!!.startsWith("multipart/form-data"))
+        val body = r.body!!.utf8()
+        assertTrue(body.contains("name=\"audio\"; filename=\"recording\""))
+        assertTrue(body.contains("Content-Type: audio/wav"))
+        assertTrue(body.contains("RIFF"))
+    }
+
+    @Test fun aDeleteIsADelete() = runTest {
+        server.enqueue(MockResponse(code = 204))
+        assertEquals(204, t.artifactDelete("a1").status)
+        val r = server.takeRequest()
+        assertEquals("DELETE", r.method)
+        assertEquals("/api/v1/artifacts/a1", r.target)
+    }
+
     @Test fun a401IsRefused() = runTest {
         server.enqueue(MockResponse(code = 401))
         try { t.momentDone("m1"); fail() } catch (e: Refused) {}

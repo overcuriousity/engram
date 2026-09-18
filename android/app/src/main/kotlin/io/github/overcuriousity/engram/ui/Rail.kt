@@ -64,9 +64,14 @@ fun nameOf(h: Hit): Pair<String, Boolean> {
     return if (title != null) title to true else opening(h.text, 60) to false
 }
 
-/** The first `max` characters of a text on one line, cut at a word where there is one. */
+/**
+ * The first `max` characters of a text on one line, cut at a word where there
+ * is one. The words, not the markup: a row that opened with `## Öffnungszeiten
+ * **Adresse:**` was showing syntax where the web shows a sentence — its
+ * snippet goes through `markdown::snippet`, and this is that reading.
+ */
 fun opening(text: String, max: Int): String {
-    val flat = text.trim().replace(Regex("\\s+"), " ")
+    val flat = plain(text)
     if (flat.length <= max) return flat
     val cut = flat.substring(0, max)
     val at = cut.lastIndexOf(' ')

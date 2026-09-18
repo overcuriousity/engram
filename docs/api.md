@@ -59,11 +59,14 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /artifacts/{id}` | One artifact and the document it came from. Records an open. |
 | `GET /artifacts/{id}/lineage` | `{ roots, also_replaced, truncated }`: what it was written from, nested by generation; what it replaced without being written from it; and whether the walk stopped early. A node's `source` is `{ corpus_id, label, start_line, end_line }` or `null` for a merge; `missing: true` is a source deleted since. |
 | `GET /artifacts/{id}/versions` | List of earlier wordings, oldest first. |
+| `GET /artifacts/{id}/related` | `{ related, seen_together, continues_at }`: the nearest artifacts by stored vector, what this one has been reached for alongside (empty while `[learn]` is off), and the next passage of the same document where this one stops mid-sentence. Each row is `{ id, label, named, snippet }`; a `seen_together` row also carries `why` and `corpus_title`. Does not record an open. |
+| `GET /artifacts/{id}/source` | `{ corpus_id, label, lines }`: the lines the artifact was drawn from with three of context either side, each `{ number, text, in_span }`. `corpus_id` is `null` and `lines` empty for a merge, or where the document is gone. |
 | `GET /days/{date}?tz=` | `{ date, tz, from, to, entries, captured, was_due, refers, sittings }` for one day read in an IANA zone. A date that is not one is a `404`. |
 | `GET /moments?kind=due\|event&from=&to=` | List of reminders, or of dates that refer to the window. |
 | `POST /context` | Body: the situation bundle. Answers `{ "offer": {…} \| null }`. Records the situation either way. |
 | `POST /context/seen` | Body `{ artifact_id, rung, slot }`, sent when the card is actually on screen. Always `204`. |
-| `GET /status`, `GET /consolidation` | The state of the base and of the review queue. |
+| `GET /status`, `GET /consolidation` | The state of the base and of the review queue. `status.transcribe` says whether the door below is open. |
+| `POST /transcribe` | Multipart, one part named `audio`: the recording. Answers the words in it as `text/plain`. Nothing is stored — dictation is typing, not capture. `404` where no speech model is configured. |
 
 ## Judging
 
@@ -83,6 +86,7 @@ the undo is on this list too.
 | `GET /insights` | `{ held, used, retrieval }`. Read-only. |
 | `GET /insights/set-aside` | What the base did on its own and left an undo for, and what it is waiting to be told. |
 | `POST /artifacts/{id}/verify` · `/deprecate` · `/reactivate` · `/unsupersede` | The four answers a set-aside row admits. `204`. |
+| `DELETE /artifacts/{id}` | Gone from both stores; anything written from it loses it as a source. The one decision here with no undo — `deprecate` is the one that hides and can be taken back. |
 | `POST /merges/{id}/undo` | Take a merge back: its sources return, the merge is retired. `204`. |
 | `POST /condensations/{id}/undo` | Put the version a condensation retired back. Answers `{ "artifact_id" }`, which the path does not carry. |
 | `POST /corpora/{id}/resolve` | The three-way answer to a parked capture. Already existed. |

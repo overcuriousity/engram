@@ -8,6 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -41,14 +42,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.overcuriousity.engram.core.Engram
 import io.github.overcuriousity.engram.core.read.Api
 import io.github.overcuriousity.engram.core.read.Decode
 import io.github.overcuriousity.engram.core.read.DueRow
 import io.github.overcuriousity.engram.core.read.Offer
 import io.github.overcuriousity.engram.core.sync.Sync
-import io.github.overcuriousity.engram.doors.AudioNote
 import io.github.overcuriousity.engram.doors.Intake
+import io.github.overcuriousity.engram.doors.Microphone
 import kotlinx.coroutines.launch
 import java.io.File
 import java.time.ZoneId
@@ -62,6 +64,11 @@ import java.time.ZoneId
  * There used to be a second box on a Capture tab. Two boxes is one question
  * the person has to answer before they can type: which of these did I mean.
  * The verb is a button under the one box, and never a guess made from the text.
+ *
+ * There also used to be a Record verb that kept a voice note as a file for the
+ * queue to send. That was not what the web's microphone does. Its button is
+ * held, and what is said is typed into the box — dictation, not capture — and
+ * the same press still decides what the words are for. `Microphone` is that.
  */
 @Composable
 fun SearchScreen(
@@ -77,8 +84,15 @@ fun SearchScreen(
     var note by rememberSaveable { mutableStateOf("") }
     var files by remember { mutableStateOf(listOf<Uri>()) }
     var queued by remember { mutableStateOf<String?>(null) }
-    var recording by remember { mutableStateOf(false) }
-    val audio = remember { AudioNote(ctx) }
+
+    // The microphone: held open while the button is, then the words come
+    // back into the box. Drawn only where the server says it has a speech
+    // model — the web draws its button on the same fact — and drawn while
+    // that is not yet known, because a door that may be open is worth a press.
+    val mic = remember { Microphone(ctx) }
+    var micState by remember { mutableStateOf(MicState()) }
+    val status = rememberRead(engram, Api.status(), Decode.status)
+    val micOpen = status.read.value?.transcribe ?: true
 
     // What the box has asked for. A keystroke does not ask; typing that has
     // stood still for a moment does. See `Typing.kt`.
@@ -105,8 +119,33 @@ fun SearchScreen(
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
         if (ok) shoot()
     }
-    val mic = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
-        if (ok) { audio.start(); recording = true }
+    val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        // The press that asked is spent, as it is on the web where the
+        // browser's prompt eats the first hold. The next one records.
+        micState = MicState(said = if (ok) "" else "No microphone — permission refused.")
+    }
+    fun micDown() {
+        if (micState.busy) return
+        if (!mic.allowed) { micPermission.launch(Manifest.permission.RECORD_AUDIO); return }
+        micState = if (mic.start()) MicState(listening = true, said = "Listening…") else MicState(said = "No microphone.")
+    }
+    fun micUp() {
+        if (!micState.listening) return
+        val heard = mic.stop()
+        // A press and a release with nothing in between: nothing happened,
+        // and saying so is noise.
+        if (heard.size <= Microphone.HEADER) { micState = MicState(); return }
+        micState = MicState(busy = true, said = "Transcribing…")
+        scope.launch {
+            val r = engram.reader.hear(heard, Microphone.MIME)
+            val words = r.value?.trim().orEmpty()
+            micState = MicState(said = if (r.value != null) "" else r.error ?: "Could not transcribe that.")
+            // At the end, never over what is there: the box may hold a
+            // question half typed, and a microphone is not a reason to lose
+            // it. The box that changes is the box that searches — dictation
+            // fills it, and what happens next is still a press.
+            if (words.isNotEmpty()) text = text.trimEnd().let { if (it.isEmpty()) words else "$it $words" }
+        }
     }
 
     fun capture() {
@@ -132,27 +171,28 @@ fun SearchScreen(
             onDrop = { files = files - it },
             title = title, onTitle = { title = it },
             note = note, onNote = { note = it },
-            recording = recording,
+            mic = if (micOpen) micState else null,
             focus = focusBox,
             onAttach = { pick.launch("*/*") },
             onPhoto = { camera.launch(Manifest.permission.CAMERA) },
-            onRecord = {
-                if (recording) {
-                    audio.stop()?.let { files = files + Uri.fromFile(it) }
-                    recording = false
-                } else {
-                    mic.launch(Manifest.permission.RECORD_AUDIO)
-                }
-            },
+            onMicDown = ::micDown,
+            onMicUp = ::micUp,
             onAsk = { onAsk(text.trim()) },
             onCapture = ::capture,
         )
-        if (queued != null && text.isBlank()) {
+        // What became of the last capture, from the row itself: kept, still
+        // on its way, or refused. It used to say "Queued · see Queue" for
+        // every capture, which sent a person to a screen to find out that
+        // nothing was wrong.
+        val id = queued
+        if (id != null && text.isBlank()) {
+            val rows by engram.outbox.rows.collectAsStateWithLifecycle(emptyList())
+            val words = captureWords(rows.firstOrNull { it.id == id })
             Text(
-                "Queued · see Queue",
+                words.text,
                 Modifier.padding(16.dp, 4.dp),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.tertiary,
+                color = if (words.wrong) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.tertiary,
             )
         }
         if (asked.isEmpty()) Idle(engram, onArtifact) else Results(engram, asked, onArtifact)
@@ -177,11 +217,13 @@ fun HomeBox(
     onTitle: (String) -> Unit = {},
     note: String = "",
     onNote: (String) -> Unit = {},
-    recording: Boolean = false,
+    /** The microphone, or null where the server has no speech model and there is no button to hold. */
+    mic: MicState? = MicState(),
     focus: Boolean = false,
     onAttach: () -> Unit = {},
     onPhoto: () -> Unit = {},
-    onRecord: () -> Unit = {},
+    onMicDown: () -> Unit = {},
+    onMicUp: () -> Unit = {},
     onAsk: () -> Unit = {},
     onCapture: () -> Unit = {},
 ) {
@@ -206,11 +248,16 @@ fun HomeBox(
         if (files.isNotEmpty()) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             items(files) { u -> AssistChip(onClick = { onDrop(u) }, label = { Text(u.lastPathSegment ?: "file", maxLines = 1) }) }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onAttach) { Text("Attach") }
             TextButton(onClick = onPhoto) { Text("Photo") }
-            TextButton(onClick = onRecord) { Text(if (recording) "Stop" else "Record") }
             TextButton(onClick = { more = !more }) { Text(if (more) "Less" else "Title · note") }
+            Spacer(Modifier.weight(1f))
+            // Held, not pressed: the web's button and every messenger's.
+            if (mic != null) MicButton(mic, onDown = onMicDown, onUp = onMicUp)
+        }
+        if (mic != null && mic.said.isNotEmpty()) {
+            Text(mic.said, style = MaterialTheme.typography.bodySmall, color = muted())
         }
         if (more) {
             OutlinedTextField(value = title, onValueChange = onTitle, label = { Text("Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -218,7 +265,7 @@ fun HomeBox(
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
             OutlinedButton(onClick = onAsk, enabled = text.isNotBlank()) { Text("Ask") }
-            Button(onClick = onCapture, enabled = !recording && (text.isNotBlank() || files.isNotEmpty())) { Text("Capture") }
+            Button(onClick = onCapture, enabled = text.isNotBlank() || files.isNotEmpty()) { Text("Capture") }
         }
     }
 }

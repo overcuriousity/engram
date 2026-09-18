@@ -39,6 +39,8 @@ enum class Kind {
     artifact_op,
     merge_undo,
     corpus_resolve,
+    /** The one decision with no undo: `DELETE /artifacts/{id}`. Its own kind, never an `op`. */
+    artifact_delete,
 }
 
 enum class State { queued, sent, refused, held }
@@ -141,7 +143,7 @@ class Converters {
 
 @Database(
     entities = [OutboxRow::class, OutboxFile::class, MomentRow::class, CacheRow::class, AskedRow::class],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -155,7 +157,7 @@ abstract class Db : RoomDatabase() {
         fun open(context: Context): Db =
             Room.databaseBuilder(context, Db::class.java, "engram.db")
                 .setQueryCoroutineContext(Dispatchers.IO)
-                .addMigrations(TO_2, TO_3)
+                .addMigrations(TO_2, TO_3, TO_4)
                 .build()
 
         /**
@@ -185,6 +187,11 @@ abstract class Db : RoomDatabase() {
          * is not written down is a step Room takes destructively.
          */
         val TO_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {}
+        }
+
+        /** Version 4 is one more word in `kind` — `artifact_delete` — and, as with 3, nothing else. */
+        val TO_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {}
         }
 

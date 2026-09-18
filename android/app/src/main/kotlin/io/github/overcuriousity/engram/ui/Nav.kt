@@ -128,10 +128,16 @@ fun EngramApp(
             TopAppBar(
                 title = { Wordmark() },
                 actions = {
-                    // A count only while something is still owed: the queue is
-                    // worth a glance exactly when it is not empty.
-                    val n = queuedCount(owed)
-                    TextButton(onClick = { go(Screen.Queue.route) }) { Text(if (n > 0) "Queue $n" else "Queue") }
+                    // The queue is worth a glance exactly when something is
+                    // still owed or was refused, and it is only there then.
+                    // The web has no queue at all; a phone has one because
+                    // it is offline sometimes, and a mechanism that exists
+                    // for the offline case has no business on the bar while
+                    // everything has gone through. Settings keeps the way in.
+                    if (queueWorthAGlance(owed)) {
+                        val n = queuedCount(owed)
+                        TextButton(onClick = { go(Screen.Queue.route) }) { Text(if (n > 0) "Queue $n" else "Queue") }
+                    }
                     TextButton(onClick = { go(Screen.Settings.route) }) { Text("Settings") }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
@@ -168,7 +174,7 @@ fun EngramApp(
                 composable(Screen.Library.route) { LibraryScreen(engram, onCorpus) }
                 composable(Screen.Queue.route) { QueueScreen(engram) }
                 composable(Screen.Settings.route) {
-                    SettingsScreen(engram, onJudging = { go(it.route) }, onUnpair = onUnpair)
+                    SettingsScreen(engram, onJudging = { go(it.route) }, onQueue = { go(Screen.Queue.route) }, onUnpair = onUnpair)
                 }
                 composable(Screen.Pairs.route) { PairReviewScreen(engram, onArtifact) }
                 composable(Screen.Gaps.route) { GapsScreen(engram) }

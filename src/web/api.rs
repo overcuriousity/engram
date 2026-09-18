@@ -178,6 +178,10 @@ pub struct StatusResponse {
     /// What the last reap sweep did, or `None` while the sweep is off —
     /// absent for the same honesty as `learning`.
     pub reap: Option<ReapStatus>,
+    /// Whether `POST /transcribe` is open: a speech model is configured. The
+    /// web draws its microphone only where this is true, and a client that
+    /// draws one should read this rather than find out with a 404.
+    pub transcribe: bool,
 }
 
 /// The reap line: the last run's counts, and how many retired rows still
@@ -1638,6 +1642,149 @@ async fn artifact_versions(
     )))
 }
 
+/// A neighbour, or something this artifact has been needed alongside, as one
+/// row a client can draw: a label that says whether it is a name, and the
+/// opening of the text under it.
+#[derive(serde::Serialize)]
+pub struct RelatedRow {
+    pub id: String,
+    pub label: String,
+    pub named: bool,
+    pub snippet: String,
+    /// The judge's line, or the question that bound the pair. Only on a row of
+    /// `seen_together`; a neighbour is near by resemblance and needs no why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// The document the other side came from. Only on `seen_together`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub corpus_title: Option<String>,
+}
+
+/// What the artifact pane lists beside an artifact, and where it continues.
+#[derive(serde::Serialize)]
+pub struct RelatedAnswer {
+    /// The nearest artifacts by the vector already stored: what this resembles.
+    pub related: Vec<RelatedRow>,
+    /// What this has been reached for together with, learned from co-retrieval
+    /// rather than resemblance. Empty while `[learn]` is off.
+    pub seen_together: Vec<RelatedRow>,
+    /// The next passage of the same document, where this one stops mid-sentence.
+    pub continues_at: Option<String>,
+}
+
+/// `GET /artifacts/{id}/related`: the two lists the web pane pivots through,
+/// and the way onward. Its own route rather than fields on the detail, because
+/// the detail records an open and this is read beside it, not instead of it —
+/// and because a neighbour list is a layer over the artifact: the vector store
+/// being down is not a reason to refuse the text.
+async fn artifact_related(tenant: Tenant, Path(id): Path<String>) -> Result<Json<RelatedAnswer>> {
+    let c = tenant.core.store.get_artifact(&id).await?;
+    let d = crate::web::artifact::pivots(&tenant.core, &c).await;
+    let row = |id: String, title: String, snippet: String| RelatedRow {
+        named: !title.is_empty(),
+        label: if title.is_empty() {
+            snippet.clone()
+        } else {
+            title
+        },
+        id,
+        snippet,
+        why: None,
+        corpus_title: None,
+    };
+    Ok(Json(RelatedAnswer {
+        related: d
+            .related
+            .into_iter()
+            .map(|r| row(r.id, r.title, r.snippet))
+            .collect(),
+        seen_together: d
+            .seen_together
+            .into_iter()
+            .map(|r| RelatedRow {
+                why: r.why,
+                corpus_title: Some(r.corpus_title),
+                ..row(r.id, r.title, r.snippet)
+            })
+            .collect(),
+        continues_at: d.continues_at,
+    }))
+}
+
+/// One line of the source beside an artifact, numbered as the document
+/// numbers it. `in_span` is the line the artifact was drawn from, as opposed
+/// to the context either side.
+#[derive(serde::Serialize)]
+pub struct SourceLine {
+    pub number: i64,
+    pub text: String,
+    pub in_span: bool,
+}
+
+/// The lines an artifact was drawn from, with a little context either side.
+#[derive(serde::Serialize)]
+pub struct SourceSlice {
+    /// The document, for the link onward. `None` for a merged artifact, which
+    /// belongs to no single document, and for one whose document is gone.
+    pub corpus_id: Option<String>,
+    /// What to call the range: `lines 118–141`, `line 6`, or `extraction
+    /// lines 118–141` where the lines are docling's rather than the source's.
+    pub label: String,
+    pub lines: Vec<SourceLine>,
+}
+
+/// `GET /artifacts/{id}/source`: the source column of the web pane, as data.
+/// The same slice the pane draws — `corpus_view::slice` — so the two cannot
+/// disagree about which lines an artifact claims. Empty, with no `corpus_id`,
+/// for a merge: it has no document to claim lines of, and the lineage route
+/// is what says where it came from.
+async fn artifact_source(tenant: Tenant, Path(id): Path<String>) -> Result<Json<SourceSlice>> {
+    let c = tenant.core.store.get_artifact(&id).await?;
+    let src = match &c.corpus_id {
+        Some(cid) => match tenant.core.store.get_corpus(cid).await {
+            Ok(s) => Some(s),
+            // A document deleted since leaves its artifacts readable, and this
+            // answers with nothing to show rather than a 404 for the artifact.
+            Err(Error::NotFound) => None,
+            Err(e) => return Err(e),
+        },
+        None => None,
+    };
+    let slice = match &src {
+        Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
+        None => crate::web::corpus_view::CorpusSlice::default(),
+    };
+    Ok(Json(SourceSlice {
+        corpus_id: src.map(|s| s.id),
+        label: slice.label,
+        lines: slice
+            .lines
+            .into_iter()
+            .map(|l| SourceLine {
+                number: l.number,
+                text: l.text,
+                in_span: l.in_span,
+            })
+            .collect(),
+    }))
+}
+
+/// `POST /transcribe`: one recording in as the `audio` part of a multipart
+/// body, the words in it back as `text/plain`. Nothing is stored — see
+/// `workspace::hear`, which is the whole of it. `404` where no speech model is
+/// configured; `GET /status` says so in advance as `transcribe`.
+async fn transcribe(tenant: Tenant, multipart: axum::extract::Multipart) -> Result<Response> {
+    let text = crate::web::workspace::hear(&tenant, multipart).await?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response())
+}
+
 async fn patch_artifact(
     tenant: Tenant,
     Path(cid): Path<String>,
@@ -1807,6 +1954,7 @@ async fn status(tenant: Tenant) -> Result<Json<StatusResponse>> {
     Ok(Json(StatusResponse {
         learning,
         reap,
+        transcribe: tenant.core.transcriber.is_some(),
         sources: corpus_rows
             .iter()
             .map(|r| (r.get("status"), r.get("n")))
@@ -2039,6 +2187,15 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         )
         .route("/artifacts/{id}/lineage", get(artifact_lineage))
         .route("/artifacts/{id}/versions", get(artifact_versions))
+        .route("/artifacts/{id}/related", get(artifact_related))
+        .route("/artifacts/{id}/source", get(artifact_source))
+        // The microphone's door, the same one the web's button presses. A
+        // recording is a few hundred kilobytes of PCM; the global limit is
+        // for text.
+        .route(
+            "/transcribe",
+            post(transcribe).layer(axum::extract::DefaultBodyLimit::max(image_max_bytes)),
+        )
         .route("/vectors/sample", get(crate::web::vbg::sample))
         .route("/status", get(status))
         .route("/moments", get(list_moments))
@@ -5884,5 +6041,283 @@ mod patch_tests {
             core.store.open_due(0, i64::MAX).await.unwrap()[0].moment.tz,
             "Europe/Berlin"
         );
+    }
+}
+
+/// The doors the phone uses that the browser reaches otherwise: the pane's
+/// neighbour lists and source column as data, and the microphone's door under
+/// a bearer token.
+#[cfg(test)]
+mod phone_doors {
+    use super::tests::{app_from_core, app_token_and_core};
+    use crate::web::test_support::{FilePart, body_of, json_of, multipart};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use tower::ServiceExt;
+
+    async fn app_and_token() -> (axum::Router, String) {
+        let (app, token, _core) = app_token_and_core().await;
+        (app, token)
+    }
+
+    fn get(uri: &str, token: Option<&str>) -> Request<Body> {
+        let mut b = Request::builder().uri(uri).method("GET");
+        if let Some(t) = token {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        b.body(Body::empty()).unwrap()
+    }
+
+    // ── The phone's doors: related, source, transcribe ─────────────────────
+
+    #[tokio::test]
+    async fn related_lists_the_neighbours_and_the_links_the_pane_lists() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        crate::jobs::embed::run_corpus(&core, &out.id)
+            .await
+            .unwrap();
+        let arts = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(arts.len() > 1);
+        core.store
+            .bump_link(
+                &arts[0].id,
+                &arts[1].id,
+                5.0,
+                Some("mount forensic image"),
+                30.0,
+                crate::store::now(),
+            )
+            .await
+            .unwrap();
+        let (app, token, _core) = app_from_core(core).await;
+
+        let v = json_of(
+            app.oneshot(get(
+                &format!("/api/v1/artifacts/{}/related", arts[0].id),
+                Some(&token),
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        let related = v["related"].as_array().unwrap();
+        assert!(!related.is_empty(), "{v}");
+        assert!(
+            related.iter().all(|r| r["id"] != arts[0].id),
+            "an artifact is not its own neighbour: {v}"
+        );
+        assert!(
+            related
+                .iter()
+                .all(|r| r["label"].is_string() && r["named"].is_boolean()),
+            "every row is a label that says whether it is a name: {v}"
+        );
+        let seen = v["seen_together"].as_array().unwrap();
+        assert_eq!(seen.len(), 1, "{v}");
+        assert_eq!(seen[0]["id"], arts[1].id);
+        assert_eq!(seen[0]["why"], "when asking: mount forensic image");
+        assert!(seen[0]["corpus_title"].is_string(), "{v}");
+        assert_eq!(
+            v["continues_at"], arts[1].id,
+            "\"alpha line\" stops mid-sentence, so the way onward is the next passage: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_answers_the_lines_an_artifact_was_drawn_from_and_the_context_around_them() {
+        let (app, token, core) = app_token_and_core().await;
+        let doc = core
+            .store
+            .insert_corpus(
+                "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight",
+                "web",
+                Some("Lines"),
+            )
+            .await
+            .unwrap();
+        let arts = core
+            .store
+            .insert_artifacts(
+                &doc.id,
+                &[crate::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: "four five".into(),
+                    corpus_span: Some(crate::store::artifacts::CorpusSpan {
+                        start_line: 4,
+                        end_line: 5,
+                        source: crate::store::artifacts::SpanSource::Located,
+                    }),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+
+        let v = json_of(
+            app.oneshot(get(
+                &format!("/api/v1/artifacts/{}/source", arts[0].id),
+                Some(&token),
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(v["corpus_id"], doc.id);
+        assert_eq!(v["label"], "lines 4–5");
+        let lines = v["lines"].as_array().unwrap();
+        // Three lines of context either side, clipped to the document.
+        assert_eq!(lines.first().unwrap()["number"], 1);
+        assert_eq!(lines.last().unwrap()["number"], 8);
+        let claimed: Vec<i64> = lines
+            .iter()
+            .filter(|l| l["in_span"] == true)
+            .map(|l| l["number"].as_i64().unwrap())
+            .collect();
+        assert_eq!(claimed, vec![4, 5], "{v}");
+        assert_eq!(lines[3]["text"], "four");
+    }
+
+    #[tokio::test]
+    async fn a_merge_has_no_source_lines_and_says_so_without_a_404() {
+        let (app, token, core) = app_token_and_core().await;
+        let merged = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "Both, merged.".into(),
+                    title: Some("Merged".into()),
+                    ..Default::default()
+                },
+                &[],
+            )
+            .await
+            .unwrap();
+        let res = app
+            .oneshot(get(
+                &format!("/api/v1/artifacts/{}/source", merged.id),
+                Some(&token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = json_of(res).await;
+        assert!(v["corpus_id"].is_null(), "{v}");
+        assert!(v["lines"].as_array().unwrap().is_empty(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn status_says_whether_the_transcribe_door_is_open() {
+        let (app, token) = app_and_token().await;
+        let v = json_of(
+            app.oneshot(get("/api/v1/status", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            v["transcribe"], false,
+            "shipped default has no speech model: {v}"
+        );
+
+        let core = crate::core::test_support::test_core_with_transcriber(std::sync::Arc::new(
+            crate::infer::fake::FakeTranscriber::default(),
+        ))
+        .await;
+        let (app, token, _core) = app_from_core(core).await;
+        let v = json_of(
+            app.oneshot(get("/api/v1/status", Some(&token)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(v["transcribe"], true, "{v}");
+    }
+
+    /// The phone's microphone presses the same door the browser's does, with a
+    /// bearer token: the words come back as plain text, nothing is stored.
+    #[tokio::test]
+    async fn transcribe_hands_back_the_words_over_a_bearer_token() {
+        let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::saying(
+            "tombstones in leveldb",
+        ));
+        let core = crate::core::test_support::test_core_with_transcriber(heard.clone()).await;
+        let (app, token, core) = app_from_core(core).await;
+        let before = core.store.list_corpora(10, 0).await.unwrap().len();
+
+        let res = app
+            .clone()
+            .oneshot(multipart(
+                "/api/v1/transcribe",
+                &token,
+                &[],
+                &[FilePart {
+                    field: "audio",
+                    filename: "recording.wav",
+                    mime: Some("audio/wav"),
+                    body: b"RIFF fake",
+                }],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()[header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        assert_eq!(body_of(res).await, "tombstones in leveldb");
+        assert_eq!(heard.calls(), 1);
+        assert_eq!(heard.last_mime(), "audio/wav");
+        assert_eq!(
+            core.store.list_corpora(10, 0).await.unwrap().len(),
+            before,
+            "dictation is not a capture"
+        );
+
+        // A press and a release with nothing in between: the empty transcript,
+        // and no call spent on it.
+        let res = app
+            .clone()
+            .oneshot(multipart(
+                "/api/v1/transcribe",
+                &token,
+                &[],
+                &[FilePart {
+                    field: "audio",
+                    filename: "recording.wav",
+                    mime: Some("audio/wav"),
+                    body: b"",
+                }],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(body_of(res).await, "");
+        assert_eq!(heard.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn transcribe_is_a_404_where_no_speech_model_is_configured() {
+        let (app, token) = app_and_token().await;
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/transcribe",
+                &token,
+                &[],
+                &[FilePart {
+                    field: "audio",
+                    filename: "recording.wav",
+                    mime: Some("audio/wav"),
+                    body: b"RIFF fake",
+                }],
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }

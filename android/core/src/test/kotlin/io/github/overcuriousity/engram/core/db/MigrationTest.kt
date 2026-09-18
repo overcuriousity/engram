@@ -87,4 +87,32 @@ class MigrationTest {
             db.close()
         }
     }
+
+    /** Version 4 is one more word in `kind`, and the step from 3 keeps what was owed. */
+    @Test fun aQueuedAnswerSurvivesTheStepToVersionFour() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val file = context.getDatabasePath("engram.db").apply { parentFile?.mkdirs() }
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { v3 ->
+            v3.execSQL("CREATE TABLE IF NOT EXISTS `outbox` (`id` TEXT NOT NULL, `kind` TEXT NOT NULL, `payload` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `nextAt` INTEGER NOT NULL, `state` TEXT NOT NULL, `status` INTEGER, `answer` TEXT, `error` TEXT, PRIMARY KEY(`id`))")
+            v3.execSQL("CREATE TABLE IF NOT EXISTS `outbox_files` (`outboxId` TEXT NOT NULL, `path` TEXT NOT NULL, `name` TEXT NOT NULL, `mime` TEXT NOT NULL, PRIMARY KEY(`outboxId`, `path`))")
+            v3.execSQL("CREATE TABLE IF NOT EXISTS `moments` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `at` INTEGER NOT NULL, `fetchedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+            v3.execSQL("CREATE TABLE IF NOT EXISTS `cache` (`key` TEXT NOT NULL, `origin` TEXT NOT NULL, `etag` TEXT, `body` TEXT NOT NULL, `fetchedAt` INTEGER NOT NULL, PRIMARY KEY(`key`, `origin`))")
+            v3.execSQL("CREATE TABLE IF NOT EXISTS `asked` (`question` TEXT NOT NULL, `origin` TEXT NOT NULL, `body` TEXT NOT NULL, `askedAt` INTEGER NOT NULL, PRIMARY KEY(`question`))")
+            v3.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+            v3.execSQL("INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7ba9d68c3cc3f00e9491a0e00ff25cc0')")
+            v3.execSQL("INSERT INTO outbox (id, kind, payload, createdAt, attempts, nextAt, state) VALUES ('o4', 'artifact_op', '{\"artifact\":\"a\",\"op\":\"verify\"}', 1, 0, 1, 'queued')")
+            v3.version = 3
+        }
+
+        val db = Db.open(context)
+        try {
+            val row = db.outboxDao().all().first().single()
+            assertEquals("o4", row.id)
+            assertEquals(Kind.artifact_op, row.kind)
+            db.outboxDao().insert(row.copy(id = "o5", kind = Kind.artifact_delete, payload = """{"artifact":"a"}"""))
+            assertEquals(Kind.artifact_delete, db.outboxDao().get("o5")!!.kind)
+        } finally {
+            db.close()
+        }
+    }
 }

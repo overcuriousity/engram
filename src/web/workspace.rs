@@ -652,9 +652,31 @@ struct AskForm {
 /// the button is not rendered where no speech model is configured. The answer
 /// is `text/plain` rather than a fragment because the destination is a
 /// textarea's value, not the DOM.
-async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> UiResult<Response> {
+async fn transcribe(tenant: Tenant, multipart: axum::extract::Multipart) -> UiResult<Response> {
+    let text = hear(&tenant, multipart).await?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        text,
+    )
+        .into_response())
+}
+
+/// One recording in, the words in it back. The whole of what `/ui/transcribe`
+/// and `/api/v1/transcribe` do, so the phone's microphone and the browser's
+/// are one door with two addresses rather than two doors that drift.
+///
+/// A closed door is a 404. A recording of nothing is a press and a release,
+/// which happens by accident on every touch screen: answered as the empty
+/// transcript it is, without spending a call on it.
+pub(crate) async fn hear(
+    tenant: &Tenant,
+    mut multipart: axum::extract::Multipart,
+) -> Result<String> {
     let Some(model) = tenant.core.transcriber.clone() else {
-        return Err(Error::NotFound.into());
+        return Err(Error::NotFound);
     };
 
     let mut audio: Option<(Vec<u8>, String)> = None;
@@ -679,31 +701,12 @@ async fn transcribe(tenant: Tenant, mut multipart: axum::extract::Multipart) -> 
         break;
     }
     let Some((bytes, mime)) = audio else {
-        return Err(Error::Validation("no audio part".into()).into());
+        return Err(Error::Validation("no audio part".into()));
     };
-    // A recording of nothing is a press and a release, which happens by
-    // accident on every touch screen. Answered as the empty transcript it is,
-    // without spending a call on it.
     if bytes.is_empty() {
-        return Ok((
-            [(
-                axum::http::header::CONTENT_TYPE,
-                "text/plain; charset=utf-8",
-            )],
-            String::new(),
-        )
-            .into_response());
+        return Ok(String::new());
     }
-
-    let text = model.transcribe(&bytes, &mime).await?;
-    Ok((
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/plain; charset=utf-8",
-        )],
-        text,
-    )
-        .into_response())
+    model.transcribe(&bytes, &mime).await
 }
 
 async fn ask_submit(

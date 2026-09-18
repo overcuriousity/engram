@@ -130,6 +130,21 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         .await
         .unwrap();
     let ids: Vec<String> = arts.iter().map(|a| a.id.clone()).collect();
+    // Embedded, so the related route has a neighbour to list; and linked, so
+    // it has something seen together to list beside it.
+    crate::jobs::embed::run_corpus(&core, &doc.id)
+        .await
+        .unwrap();
+    s.bump_link(
+        &ids[0],
+        &ids[1],
+        5.0,
+        Some("payload filter"),
+        30.0,
+        crate::store::now(),
+    )
+    .await
+    .unwrap();
     // A merge of the two, and an earlier wording of it.
     let merged = s
         .insert_merged_artifact(
@@ -278,6 +293,15 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         "lineage.json",
         &get(format!("/api/v1/artifacts/{}/lineage", merged.id)).await,
     );
+    check(
+        "related.json",
+        &get(format!("/api/v1/artifacts/{}/related", ids[0])).await,
+    );
+    check(
+        "source.json",
+        &get(format!("/api/v1/artifacts/{}/source", ids[0])).await,
+    );
+    check("status.json", &get("/api/v1/status".into()).await);
     check(
         "versions.json",
         &get(format!("/api/v1/artifacts/{}/versions", merged.id)).await,

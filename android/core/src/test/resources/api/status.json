@@ -1,0 +1,31 @@
+{
+  "sources": [
+    [
+      "raw",
+      5
+    ]
+  ],
+  "jobs": [
+    [
+      "pending",
+      2
+    ]
+  ],
+  "failed": [],
+  "oldest_pending_secs": 0,
+  "chunks": 6,
+  "vectors": 2,
+  "learning": {
+    "pursuits_open": 1,
+    "pursuits_unsatisfied": 0,
+    "from_pursuits": 0,
+    "gaps_open": 1
+  },
+  "reap": {
+    "judged": 0,
+    "reaped": 0,
+    "rescued": 0,
+    "retired_waiting": 1
+  },
+  "transcribe": false
+}

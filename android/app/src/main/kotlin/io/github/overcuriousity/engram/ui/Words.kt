@@ -51,6 +51,26 @@ fun dayHeading(date: LocalDate): String =
 /** What is still owed. Only `queued`: a sent row is history and a held one is waiting on a person, not the network. */
 fun queuedCount(rows: List<OutboxRow>): Int = rows.count { it.state == State.queued }
 
+/** Whether the queue is worth a glance: something still owed, or something the server would not take. */
+fun queueWorthAGlance(rows: List<OutboxRow>): Boolean = rows.any { it.state == State.queued || it.state == State.held || it.state == State.refused }
+
+/** A line under the box, and whether it is bad news. */
+data class CaptureWords(val text: String, val wrong: Boolean = false)
+
+/**
+ * What became of a capture, read off its outbox row. The line the web's
+ * `_idle_foot` says — what was last kept — with the two states a phone has
+ * that a browser does not: on its way, and refused.
+ */
+fun captureWords(row: OutboxRow?): CaptureWords = when {
+    // Swept, or delivered and gone: kept.
+    row == null || row.state == State.sent -> CaptureWords("Kept")
+    row.state == State.held -> CaptureWords("Not kept · ${row.error ?: "the server refused it"} · see Queue", wrong = true)
+    row.state == State.refused -> CaptureWords("Kept on the phone · unpaired on the server · see Queue", wrong = true)
+    row.attempts > 0 -> CaptureWords("Kept on the phone · sent when the server can be reached")
+    else -> CaptureWords("Keeping…")
+}
+
 /**
  * The line under the offer card, from the ladder's own word. A client owns its
  * wording; the rung is what the server sends and what `seen` sends back.

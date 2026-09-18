@@ -1,6 +1,6 @@
 {
-  "id": "01a0b0be-82de-76b5-8071-0a476676a20c",
-  "corpus_id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+  "id": "01a0b400-7420-708c-930a-8f8a313ce756",
+  "corpus_id": "01a0b400-741e-7322-9a3d-c6232d2aa831",
   "provenance": "captured",
   "source_count": 0,
   "ordinal": 0,
@@ -15,21 +15,21 @@
   "tags": [
     "qdrant"
   ],
-  "embed_state": "pending",
-  "embed_model": null,
-  "created_at": 1789671670,
+  "embed_state": "embedded",
+  "embed_model": "fake-embed",
+  "created_at": 1789726323,
   "segment_idx": null,
   "flags": [],
   "flag_detail": null,
   "superseded_by": null,
   "caveats": [],
   "status": "active",
-  "last_verified_at": 1789671670,
+  "last_verified_at": 1789726323,
   "cues": [],
   "retired_at": null,
   "reaped_at": null,
   "source": {
-    "id": "01a0b0be-82dd-7037-b1d6-b22543a0465f",
+    "id": "01a0b400-741e-7322-9a3d-c6232d2aa831",
     "title": "Qdrant notes",
     "origin": "web",
     "source_url": null

@@ -96,6 +96,59 @@ data class CorpusDetail(
 @Serializable
 data class SourceRef(val id: String, val title: String? = null, val origin: String = "", @SerialName("source_url") val sourceUrl: String? = null)
 
+/**
+ * A neighbour, or something this artifact has been needed alongside. [why]
+ * and [corpusTitle] are only on a `seen_together` row: a neighbour is near by
+ * resemblance and needs no explaining.
+ */
+@Serializable
+data class RelatedRow(
+    val id: String,
+    val label: String = "",
+    val named: Boolean = false,
+    val snippet: String = "",
+    val why: String? = null,
+    @SerialName("corpus_title") val corpusTitle: String? = null,
+)
+
+/**
+ * What the web pane lists beside an artifact, and where it continues. Two
+ * lists and not one, because they answer different questions: what this
+ * resembles, and what it has been reached for together with.
+ */
+@Serializable
+data class Related(
+    val related: List<RelatedRow> = emptyList(),
+    @SerialName("seen_together") val seenTogether: List<RelatedRow> = emptyList(),
+    /** The next passage of the same document, where this one stops mid-sentence. */
+    @SerialName("continues_at") val continuesAt: String? = null,
+) {
+    val isEmpty: Boolean get() = related.isEmpty() && seenTogether.isEmpty() && continuesAt == null
+}
+
+/** One line of the source beside an artifact. [inSpan] is a line the artifact was drawn from, not context. */
+@Serializable
+data class SourceLine(val number: Long, val text: String = "", @SerialName("in_span") val inSpan: Boolean = false)
+
+/**
+ * The lines an artifact was drawn from, with a little context either side —
+ * the source column of the web pane. [corpusId] is null for a merge, which
+ * belongs to no document, and where the document is gone.
+ */
+@Serializable
+data class SourceSlice(
+    @SerialName("corpus_id") val corpusId: String? = null,
+    val label: String = "",
+    val lines: List<SourceLine> = emptyList(),
+)
+
+/** What the base says about itself. Only the one fact the screens draw is read. */
+@Serializable
+data class Status(
+    /** Whether `POST /transcribe` is open: a speech model is configured. The mic is drawn only where it is. */
+    val transcribe: Boolean = false,
+)
+
 /** The server flattens the chunk into the top level and sets `source` beside it; read twice, once for each. */
 data class ArtifactDetail(val chunk: Chunk, val source: SourceRef?)
 
@@ -412,6 +465,9 @@ object Decode {
     val day: (String) -> Day = { ApiJson.decodeFromString(Day.serializer(), it) }
     val offer: (String) -> OfferAnswer = { ApiJson.decodeFromString(OfferAnswer.serializer(), it) }
     val artifact: (String) -> ArtifactDetail = ::decodeArtifact
+    val related: (String) -> Related = { ApiJson.decodeFromString(Related.serializer(), it) }
+    val source: (String) -> SourceSlice = { ApiJson.decodeFromString(SourceSlice.serializer(), it) }
+    val status: (String) -> Status = { ApiJson.decodeFromString(Status.serializer(), it) }
     val pairs: (String) -> PairQueue = { ApiJson.decodeFromString(PairQueue.serializer(), it) }
     val gaps = page(GapCluster.serializer())
     val insights: (String) -> Insights = { ApiJson.decodeFromString(Insights.serializer(), it) }
@@ -428,6 +484,9 @@ object Api {
     fun artifact(id: String) = Request("/api/v1/artifacts/$id")
     fun lineage(id: String) = Request("/api/v1/artifacts/$id/lineage")
     fun versions(id: String) = Request("/api/v1/artifacts/$id/versions")
+    fun related(id: String) = Request("/api/v1/artifacts/$id/related")
+    fun source(id: String) = Request("/api/v1/artifacts/$id/source")
+    fun status() = Request("/api/v1/status")
     fun day(date: String, tz: String) = Request("/api/v1/days/$date", mapOf("tz" to tz))
     fun pairs() = Request("/api/v1/pairs")
     fun gaps() = Request("/api/v1/gaps")

@@ -129,6 +129,24 @@ internal class ServerReader(
         runCatching { transport()?.post(path, json) }
     }
 
+    override suspend fun hear(audio: ByteArray, mime: String): Read<String> {
+        val t = transport() ?: return Read(null, null, Reach.Refused, loading = false)
+        val a = try {
+            t.transcribe(audio, mime)
+        } catch (e: Refused) {
+            onRefused()
+            return Read(null, null, Reach.Refused, loading = false)
+        } catch (e: PinMismatch) {
+            onPinMismatch(e)
+            return Read(null, null, Reach.Unreachable, loading = false)
+        } catch (e: IOException) {
+            return Read(null, null, Reach.Unreachable, loading = false)
+        }
+        // A 404 is the door being closed, and the wording is the screen's.
+        if (a.status !in 200..299) return Read(null, null, Reach.Fresh, loading = false, error = said(a.body, a.status))
+        return Read(a.body.trim(), clock(), Reach.Fresh, loading = false)
+    }
+
     /** Drop everything held. Unpairing calls this; so does nothing else. */
     suspend fun forget() = dao.clear()
 
