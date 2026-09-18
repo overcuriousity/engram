@@ -77,6 +77,12 @@ internal class Transport(
     val connection: Connection,
     val userAgent: String,
     client: OkHttpClient? = null,
+    /**
+     * What this phone files under when it keeps something from here. A
+     * server's origin is its name. The core in this process listens on a new
+     * port at every launch, so its origin names nothing, and it says so.
+     */
+    val source: String = connection.origin,
 ) {
     private val base = connection.origin.toHttpUrl()
     private val client: OkHttpClient = client ?: baseClient(userAgent, connection.pin, base.host)
