@@ -508,19 +508,12 @@ async fn corpus_bands(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<Co
         .filter(|c| c.in_results())
         .map(|c| c.id.clone())
         .collect();
-    let promoted = segments
-        .iter()
-        .filter(|w| w.state == crate::store::segments::SegmentState::Done)
-        .filter(|w| {
-            chunks.iter().any(|c| {
-                c.segment_idx == Some(w.idx)
-                    && c.provenance == crate::store::artifacts::Provenance::Captured
-            })
-        })
+    let promoted = crate::web::corpus::promoted_windows(&segments, &chunks)
+        .into_iter()
         .map(|w| PromotedOut {
             idx: w.idx,
-            from: w.start_line,
-            to: w.end_line,
+            from: w.from,
+            to: w.to,
         })
         .collect();
     Ok(Json(CorpusPage {
@@ -1223,6 +1216,80 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    }
+
+    /// The phone's Undo is offered on exactly the windows the browser offers
+    /// it on. A window whose synthesis superseded nothing is not promoted, and
+    /// listing it here would put an Undo under a model's only copy of the text
+    /// — `undo_promotion` would deprecate it and restore nothing.
+    #[tokio::test]
+    async fn only_a_window_that_superseded_a_passage_is_promoted() {
+        use crate::store::artifacts::{CorpusSpan, NewArtifact, Provenance, SpanSource};
+        use crate::store::corpora::CorpusStatus;
+        use crate::store::segments::{NewSegment, SegmentState};
+
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let (app, token, core) = app_from_core(core).await;
+        let src = core
+            .store
+            .insert_corpus("l1\nl2", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[NewSegment {
+                    start_line: 1,
+                    end_line: 2,
+                    text: "l1\nl2",
+                }],
+            )
+            .await
+            .unwrap();
+        let na = |o: i64, t: &str| NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            corpus_span: Some(CorpusSpan {
+                start_line: 1,
+                end_line: 2,
+                source: SpanSource::Located,
+            }),
+            segment_idx: Some(0),
+            ..Default::default()
+        };
+        let a = core
+            .store
+            .insert_artifacts(&src.id, &[na(0, "window")])
+            .await
+            .unwrap();
+        core.store
+            .set_segment_state(&src.id, 0, SegmentState::Done, None)
+            .await
+            .unwrap();
+        core.store
+            .set_corpus_status(&src.id, CorpusStatus::Ready)
+            .await
+            .unwrap();
+
+        let uri = format!("/api/v1/corpora/{}/bands", src.id);
+        let v = json_of(app.clone().oneshot(get(&uri, &token)).await.unwrap()).await;
+        assert_eq!(
+            v["promoted"].as_array().unwrap().len(),
+            0,
+            "a done window that superseded nothing is not promoted: {v}"
+        );
+
+        // Now the window does stand over a passage, as a promotion leaves it.
+        let p = core
+            .store
+            .insert_artifacts_with_provenance(&src.id, &[na(1, "passage")], Provenance::Passage)
+            .await
+            .unwrap();
+        core.supersede(&p[0].id, &a[0].id).await.unwrap();
+        let v = json_of(app.oneshot(get(&uri, &token)).await.unwrap()).await;
+        assert_eq!(v["promoted"].as_array().unwrap().len(), 1, "{v}");
+        assert_eq!(v["promoted"][0]["idx"], 0, "{v}");
     }
 
     #[tokio::test]

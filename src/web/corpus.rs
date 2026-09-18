@@ -406,23 +406,7 @@ async fn corpus_detail(
         .filter(|c| c.in_results())
         .map(artifact_view)
         .collect();
-    // A promoted window: `done`, and owning at least one superseded passage.
-    let promoted: Vec<PromotedWindow> = segments
-        .iter()
-        .filter(|w| w.state == crate::store::segments::SegmentState::Done)
-        .filter(|w| {
-            chunks.iter().any(|c| {
-                c.segment_idx == Some(w.idx)
-                    && c.provenance == crate::store::artifacts::Provenance::Passage
-                    && c.superseded_by.is_some()
-            })
-        })
-        .map(|w| PromotedWindow {
-            idx: w.idx,
-            from: w.start_line,
-            to: w.end_line,
-        })
-        .collect();
+    let promoted = promoted_windows(&segments, &chunks);
     Ok(HtmlTemplate(CorpusTemplate {
         id: s.id,
         badge: status_badge(&s.status),
@@ -518,6 +502,31 @@ async fn reprocess_ui(
     };
     tenant.core.reprocess(&cid, stage).await?;
     Ok(Redirect::to(&format!("/ui/corpora/{cid}")).into_response())
+}
+
+/// A promoted window: `done`, and owning at least one superseded passage.
+/// The one reading of "promoted" — the browser's page and the phone's door
+/// both take it from here, so an Undo is offered in exactly one shape.
+pub fn promoted_windows(
+    segments: &[crate::store::segments::Segment],
+    chunks: &[crate::store::artifacts::Chunk],
+) -> Vec<PromotedWindow> {
+    segments
+        .iter()
+        .filter(|w| w.state == crate::store::segments::SegmentState::Done)
+        .filter(|w| {
+            chunks.iter().any(|c| {
+                c.segment_idx == Some(w.idx)
+                    && c.provenance == crate::store::artifacts::Provenance::Passage
+                    && c.superseded_by.is_some()
+            })
+        })
+        .map(|w| PromotedWindow {
+            idx: w.idx,
+            from: w.start_line,
+            to: w.end_line,
+        })
+        .collect()
 }
 
 /// A window a promotion has synthesized, for the corpus page's undo list.

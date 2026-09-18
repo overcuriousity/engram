@@ -74,12 +74,14 @@ fun ArtifactScreen(
     val scope = rememberCoroutineScope()
     val doors = rememberRead(engram, Api.status(), Decode.status).read.value
     // How long this was on screen, told when it leaves: the dwell the web's
-    // pane reports. Fire and forget, as the web's is.
+    // pane reports. Fire and forget, as the web's is — and told from a scope
+    // that outlives the screen, because this one's is cancelled by the very
+    // departure that is being reported.
     DisposableEffect(id) {
         val opened = System.currentTimeMillis()
         onDispose {
             val secs = (System.currentTimeMillis() - opened) / 1000
-            if (secs > 0) scope.launch { engram.reader.tell(Api.dwell(id), Api.json("secs" to secs)) }
+            if (secs > 0) engram.telling.launch { engram.reader.tell(Api.dwell(id), Api.json("secs" to secs)) }
         }
     }
     var editing by remember { mutableStateOf<String?>(null) }

@@ -90,7 +90,12 @@ fun CorpusScreen(
             val p = page.read.value
             Column(Modifier.padding(16.dp, 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Label(c.title ?: opening(c.text, 60).ifEmpty { c.origin }, named = c.title != null, Modifier.weight(1f))
+                    // The text this stands in for is the whole capture, so the
+                    // reading of it is kept: a scroll must not re-read a PDF.
+                    val label = remember(c.id, c.title, c.text, c.origin) {
+                        c.title ?: opening(c.text, 60).ifEmpty { c.origin }
+                    }
+                    Label(label, named = c.title != null, Modifier.weight(1f))
                     if (c.status.isNotEmpty()) Badge(c.status, if (c.status == "failed" || c.status == "parked") MaterialTheme.colorScheme.secondary else muted())
                 }
                 val from = listOfNotNull(c.origin.takeIf { it.isNotEmpty() }, dayWords(c.createdAt, System.currentTimeMillis(), zone))

@@ -71,12 +71,36 @@ fun nameOf(h: Hit): Pair<String, Boolean> {
  * snippet goes through `markdown::snippet`, and this is that reading.
  */
 fun opening(text: String, max: Int): String {
-    val flat = plain(text)
+    val head = headOf(text, maxOf(WINDOW, max * 4))
+    var flat = plain(head)
+    // Almost all of what was read was markup — a page of addresses, or a
+    // table of rules — so the words are further in than the window reached.
+    if (flat.length <= max && head.length < text.length) flat = plain(text)
     if (flat.length <= max) return flat
     val cut = flat.substring(0, max)
     val at = cut.lastIndexOf(' ')
     return (if (at > max / 2) cut.substring(0, at) else cut).trimEnd() + "…"
 }
+
+/**
+ * As much of a text as [opening] reads before deciding it has enough.
+ *
+ * `plain` parses everything it is handed, and some of what is handed here is
+ * a whole document — a corpus's text is the entire PDF, read to label a row
+ * with sixty characters. Markup never grows a text, so a few thousand
+ * characters hold the answer. The cut is made at a paragraph break, or a line
+ * break where there is no paragraph: markup severed halfway comes back as the
+ * asterisks this function exists to take away.
+ */
+private fun headOf(text: String, window: Int): String {
+    if (text.length <= window) return text
+    val at = text.lastIndexOf("\n\n", window).takeIf { it > 0 }
+        ?: text.lastIndexOf('\n', window).takeIf { it > 0 }
+    return text.take(at ?: window)
+}
+
+/** The least of a text [opening] reads before it decides it has enough. */
+private const val WINDOW = 4096
 
 /**
  * Where a row's document goes on, said on the row: the rank of the next

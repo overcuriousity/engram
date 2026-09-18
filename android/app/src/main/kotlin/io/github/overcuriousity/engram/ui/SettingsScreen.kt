@@ -138,16 +138,23 @@ fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: ()
             var token by remember { mutableStateOf("") }
             var endpoint by remember(n?.upEndpoint) { mutableStateOf(n?.upEndpoint ?: "") }
             var result by remember { mutableStateOf<String?>(null) }
+            // Nothing may be typed or saved before the answer is in. Save
+            // writes all three fields, and an empty field switches a channel
+            // off — so a Save pressed while the read was still in flight would
+            // send the empty defaults and delete this phone's own UnifiedPush
+            // registration, endpoint and keys, along with any Gotify channel.
+            val known = n != null
+            Waiting(notify)
             Line("A due reminder is pushed here. Leave a field empty to switch that channel off.", muted = true)
-            OutlinedTextField(value = url, onValueChange = { url = it }, label = { Text("Gotify message URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = token, onValueChange = { token = it }, label = { Text(if (n?.gotifyTokenSet == true) "Gotify app token · kept unless you type a new one" else "Gotify app token") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value = endpoint, onValueChange = { endpoint = it }, label = { Text("UnifiedPush endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = url, onValueChange = { url = it }, enabled = known, label = { Text("Gotify message URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = token, onValueChange = { token = it }, enabled = known, label = { Text(if (n?.gotifyTokenSet == true) "Gotify app token · kept unless you type a new one" else "Gotify app token") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = endpoint, onValueChange = { endpoint = it }, enabled = known, label = { Text("UnifiedPush endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             when {
                 n?.upLegacy == true -> Line("Legacy endpoint · plaintext. Pair the app to encrypt.", muted = true)
                 n?.upDevice != null -> Line("Registered by ${n.upDevice} · encrypted", muted = true)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                Button(onClick = {
+                Button(enabled = known, onClick = {
                     scope.launch {
                         val r = engram.reader.call("PUT", Api.NOTIFY, Api.json("gotify_url" to url, "gotify_token" to token, "up_endpoint" to endpoint), Decode.nothing)
                         result = if (r.value != null) "Saved." else r.error ?: "Server unreachable"

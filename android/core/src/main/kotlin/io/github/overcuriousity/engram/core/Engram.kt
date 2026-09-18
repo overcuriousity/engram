@@ -11,6 +11,9 @@ import io.github.overcuriousity.engram.core.push.Push
 import io.github.overcuriousity.engram.core.read.Reader
 import io.github.overcuriousity.engram.core.read.ServerReader
 import io.github.overcuriousity.engram.core.sync.Sync
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.File
@@ -30,6 +33,14 @@ class Engram private constructor(val app: Context, versionName: String) {
     private val prefs = app.getSharedPreferences("engram", Context.MODE_PRIVATE)
     val counters = ViewCounters(prefs)
     val situation = Situation(AndroidSituationSource(app, counters), Stable.of(app))
+
+    /**
+     * Fire-and-forget telling that must outlive the screen that started it:
+     * a dwell reported as the pane closes, where the composable's own scope
+     * is already cancelled and the launch would never run. Process-lifetime
+     * on purpose, and only for what nothing on screen waits for.
+     */
+    val telling = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val refused = MutableStateFlow(false)
     val pinMismatch = MutableStateFlow<PinMismatch?>(null)

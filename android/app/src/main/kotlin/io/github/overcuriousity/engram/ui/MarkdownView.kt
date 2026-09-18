@@ -173,6 +173,17 @@ fun marked(a: AnnotatedString, literals: List<String>, style: SpanStyle): Annota
     }
 }
 
+/**
+ * Whether a link's destination may be handed to the system. The three the
+ * parser's autolinks already allow, and no more: an ingested page can name
+ * any scheme it likes, and `file:`, `intent:` and `javascript:` all mean
+ * something to Android that a reader never asked for.
+ */
+private fun tappable(url: String): Boolean {
+    val u = url.trimStart().lowercase()
+    return u.startsWith("http://") || u.startsWith("https://") || u.startsWith("mailto:")
+}
+
 private fun AnnotatedString.Builder.append(list: List<Inline>, link: TextLinkStyles, codeBg: Color, onCite: ((Int) -> Unit)?) {
     list.forEach { i ->
         when (i) {
@@ -186,8 +197,13 @@ private fun AnnotatedString.Builder.append(list: List<Inline>, link: TextLinkSty
                 if (i.url.startsWith("cite:") && n != null && onCite != null) {
                     // A citation is a place in this screen, not an address.
                     withLink(LinkAnnotation.Clickable("cite", link) { onCite(n) }) { append(i.inlines, link, codeBg, onCite) }
-                } else {
+                } else if (tappable(i.url)) {
                     withLink(LinkAnnotation.Url(i.url, link)) { append(i.inlines, link, codeBg, onCite) }
+                } else {
+                    // Anything else — `file:`, `intent:`, `javascript:` — is
+                    // drawn as the words it is. The text came from a page
+                    // somebody else wrote, and a tap here leaves this app.
+                    append(i.inlines, link, codeBg, onCite)
                 }
             }
             Inline.Break -> append('\n')

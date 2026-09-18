@@ -27,6 +27,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -111,6 +112,11 @@ fun SearchScreen(
     val mic = remember { Microphone(ctx) }
     var micState by remember { mutableStateOf(MicState()) }
     val micOpen = doors?.transcribe ?: true
+    // A hold that never gets its release: the screen can leave composition
+    // mid-press — a rotation is enough — and `tryAwaitRelease` is cancelled
+    // with it, so nothing would ever close the door. The recorder and its
+    // thread would then hold the microphone for as long as the process lives.
+    DisposableEffect(mic) { onDispose { mic.stop() } }
 
     // What the box has asked for. A keystroke does not ask; typing that has
     // stood still for a moment does. See `Typing.kt`. A box filled by a door

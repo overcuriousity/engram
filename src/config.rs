@@ -2142,18 +2142,6 @@ pub enum ConfigError {
     Invalid(String),
 }
 
-/// Replace `path` with `body` in one step, or leave it exactly as it was.
-///
-/// `fs::write` truncates and then writes. A crash or a full disk in between
-/// leaves the operator holding a half-written configuration — and since a
-/// configuration that will not parse is refused rather than ignored, a server
-/// that will not start. The file this function exists to preserve byte for
-/// byte would be destroyed by the one failure it is most likely to meet.
-///
-/// The temporary file is a sibling so the rename stays within one filesystem,
-/// and it carries the original's permissions: a config file holding a password
-/// hash or a client secret must not come back world-readable because it was
-/// rewritten.
 impl Config {
     pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
         let mut builder = config::Config::builder();

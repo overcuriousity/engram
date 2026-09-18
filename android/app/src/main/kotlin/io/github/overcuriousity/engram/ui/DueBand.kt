@@ -18,7 +18,9 @@ import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -66,12 +68,14 @@ fun DueBand(engram: Engram, onArtifact: (String) -> Unit, head: Boolean = false)
     val zone = ZoneId.systemDefault()
     val events = rememberRead(engram, Api.events(now / 1000, now / 1000 + COMING_UP_DAYS * 86_400), Decode.due)
     var all by remember { mutableStateOf(false) }
+    // What this band has already settled, held above the rows — see [Settled].
+    val settled = remember { Settled() }
     ReadFrame(due) { page ->
         val coming = events.read.value?.items.orEmpty()
         if (page.items.isEmpty() && coming.isEmpty()) return@ReadFrame
         if (head && page.items.isNotEmpty()) SectionHead("Due")
         val shown = if (all) page.items else page.items.take(DUE_FOLD)
-        shown.forEach { DueLine(engram, it, onArtifact) }
+        shown.forEach { key(it.moment.id) { DueLine(engram, it, settled, onArtifact) } }
         val hidden = page.items.size - shown.size
         if (hidden > 0) TextButton(onClick = { all = true }, modifier = Modifier.padding(start = 8.dp)) { Text("$hidden more · show all") }
         else if (all && page.items.size > DUE_FOLD) TextButton(onClick = { all = false }, modifier = Modifier.padding(start = 8.dp)) { Text("Show less") }
@@ -90,19 +94,40 @@ fun DueBand(engram: Engram, onArtifact: (String) -> Unit, head: Boolean = false)
 fun DueList(engram: Engram, onArtifact: (String) -> Unit) = DueBand(engram, onArtifact, head = true)
 
 /** What was just done to a row, shown struck through with its own undo — for this render only. */
-private data class Just(val verb: String, val row: String?)
+internal data class Just(val verb: String, val row: String?)
+
+/**
+ * What the band has settled, by moment: a row struck through and its undo,
+ * and the rows taken out of the band altogether.
+ *
+ * It belongs to the band and not to the row. A row's own `remember` is held
+ * by the slot it was composed in, not by the moment it was drawn from, so a
+ * list that comes back reordered hands slot zero's memory to a different
+ * moment: the row that was settled comes back unsettled — and can be Done a
+ * second time — while its struck-through line sits on somebody else's. One
+ * map above the rows, keyed by the moment, is what the rows were promised.
+ */
+@Stable
+internal class Settled {
+    /** Struck through, awaiting its outbox row. */
+    val just = mutableStateMapOf<String, Just>()
+
+    /** Not a reminder: gone from the band, the server having said so. */
+    val gone = mutableStateListOf<String>()
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DueLine(engram: Engram, row: DueRow, onArtifact: (String) -> Unit) {
+internal fun DueLine(engram: Engram, row: DueRow, settled: Settled, onArtifact: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val now = System.currentTimeMillis()
     val zone = ZoneId.systemDefault()
     val m = row.moment
-    // Kept across reads, keyed by the moment: a settled row must not come back
-    // when the list is revalidated before the write lands.
-    val just = remember { mutableStateMapOf<String, Just>() }
-    val gone = remember { mutableStateListOf<String>() }
+    // Kept across reads, keyed by the moment, and held by the band rather than
+    // by this row: a settled row must not come back when the list is
+    // revalidated before the write lands, whatever order it comes back in.
+    val just = settled.just
+    val gone = settled.gone
     var later by remember { mutableStateOf(false) }
     var picking by remember { mutableStateOf(false) }
     val read = m.source != "set"

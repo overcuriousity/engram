@@ -60,6 +60,25 @@ class RailTest {
         assertEquals("short", opening("short", 60))
     }
 
+    /**
+     * A label costs what a label costs. `opening` reads markdown, and what it
+     * is handed can be a whole capture — a megabyte of PDF for sixty
+     * characters — so it reads only as far as it needs and answers the same
+     * either way.
+     */
+    @Test fun aLabelIsTheSameWhateverFollowsIt() {
+        val head = "**Alpha** bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+        assertEquals(opening(head, 60), opening(head + "\n\ntail ".repeat(20_000), 60))
+    }
+
+    /** A text that is almost all markup still gives up its words: the rest is read. */
+    @Test fun aTextThatFlattensToAlmostNothingIsReadToTheEnd() {
+        // Twenty links, each four hundred characters of address and one of
+        // words: what is read first is full long before the words are.
+        val filler = "[a](https://example.invalid/${"x".repeat(400)})\n\n".repeat(20)
+        assertTrue(opening(filler + "and then the words", 60).endsWith("and then the words"))
+    }
+
     @Test fun theSmallWordsSayWhyARowIsWhereItIs() {
         assertEquals(
             listOf("done reminder", "primed · seen", "due in 2 h", "model-written · 3"),
