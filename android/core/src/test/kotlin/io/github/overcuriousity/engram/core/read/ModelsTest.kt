@@ -11,6 +11,75 @@ import org.junit.Test
 class ModelsTest {
     private fun fixture(name: String) = javaClass.getResource("/api/$name")!!.readText()
 
+    @Test fun theAppsSearchCarriesItsEventAndWhereEachRowGoesOn() {
+        val page = Decode.search(fixture("search.json"))
+        assertEquals("ev-search", page.event)
+        assertFalse(page.reranked)
+        val (sure, loose) = page.items
+        assertEquals("art-loose", sure.continuesTo)
+        assertNull(loose.continuesTo)
+        assertNull(sure.whyRanked)
+        // A server that records nothing sends no event, and the rows still read.
+        assertNull(Decode.search("""{"items":[],"next":null}""").event)
+    }
+
+    @Test fun anOpenAttributedToASearchSaysSo() {
+        val a = decodeArtifact(fixture("artifact.json"))
+        assertNull("the fixture opened it without a search", a.searchEvent)
+        val b = decodeArtifact("""{"id":"x","text":"t","search_event":"ev"}""")
+        assertEquals("ev", b.searchEvent)
+    }
+
+    @Test fun theAboutLinesAndTheCorpusPage() {
+        val a = Decode.about(fixture("about.json"))
+        assertTrue(a.probes.isEmpty()); assertNull(a.condensed)
+        val p = Decode.bands(fixture("bands.json"))
+        assertFalse(p.image); assertFalse(p.restored)
+        val first = p.bands.first()
+        assertEquals(1L, first.from)
+        assertEquals(1L, first.lines.first().number)
+        assertTrue(first.artifactIds.isNotEmpty())
+        assertTrue(p.unplaced.isEmpty() || p.unplaced.all { it.isNotEmpty() })
+    }
+
+    @Test fun facetsFeedbackLanguageAndNotifications() {
+        assertTrue(Decode.facets(fixture("facets.json")).categories.isEmpty())
+        assertTrue(Decode.echo(fixture("echo.json")).kind.isNotEmpty())
+        assertEquals("", Decode.echo("""{"kind":"","detail":""}""").kind)
+        val f = Decode.feedback(fixture("feedback.json"))
+        assertEquals(1L, f.asks?.asked)
+        assertNull("off, both are absent", Decode.feedback("""{"searches":null,"asks":null}""").searches)
+        val l = Decode.lang(fixture("lang.json"))
+        assertEquals("", l.chosen); assertEquals(10, l.langs.size); assertEquals("Deutsch", l.langs[1].label)
+        val n = Decode.notify(fixture("notify.json"))
+        assertFalse(n.gotifyTokenSet); assertNull(n.upDevice)
+    }
+
+    @Test fun theMachineAndTheReport() {
+        val m = Decode.machine(fixture("machine.json"))
+        assertEquals(6L, m.artifacts)
+        assertEquals("pending", m.jobs.first()[0].content); assertEquals("2", m.jobs.first()[1].content)
+        assertEquals(1L, m.links?.total)
+        val r = Decode.report(fixture("report.json"))
+        assertNull(r.sleep); assertEquals(listOf(1L, 0L), r.pursuits); assertEquals(0L, r.morePairs)
+        assertNull("learning off says nothing about pursuits", Decode.report("""{"pursuits":null,"more_pairs":0}""").pursuits)
+    }
+
+    @Test fun statusSaysWhichDoorsAreOpenAndWhatTheIdleLineNeeds() {
+        val s = Decode.status(fixture("status.json"))
+        assertTrue(s.asks); assertTrue(s.learn); assertFalse(s.recommend)
+        assertEquals(5L, s.held.corpora)
+        assertEquals("Older", s.lastKept?.label)
+        assertEquals("en", s.examples.lang)
+        assertTrue(s.examples.remind.isNotEmpty())
+        assertFalse(s.teach)
+    }
+
+    @Test fun anAnswerFromTheAppsDoorNamesItsEvent() {
+        assertEquals("ev-1", ApiJson.decodeFromString(AskAnswer.serializer(), """{"answer":"a","event_id":"ev-1"}""").eventId)
+        assertNull(ApiJson.decodeFromString(AskAnswer.serializer(), """{"answer":"a"}""").eventId)
+    }
+
     @Test fun aLooseHitPastTheCliffKeepsBothFactsAndASureOneHasNeither() {
         val page = Decode.hits(fixture("search.json"))
         assertNull(page.next)
@@ -106,6 +175,12 @@ class ModelsTest {
         assertEquals("today", d.refers.single().span)
         assertEquals("payload filter", d.sittings.single().query)
         assertFalse(d.isEmpty)
+    }
+
+    @Test fun aMomentSaysWhoSetIt() {
+        val rows = Decode.due(fixture("moments.json")).items
+        assertEquals("set", rows.first().moment.source)
+        assertEquals("due", rows.first().moment.kind)
     }
 
     @Test fun aDueRowIsDueWhenItsSnoozeSaysSo() {

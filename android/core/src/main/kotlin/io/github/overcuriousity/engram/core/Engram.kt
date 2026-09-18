@@ -39,6 +39,13 @@ class Engram private constructor(val app: Context, versionName: String) {
         get() = prefs.getBoolean("place", false)
         set(v) = prefs.edit().putBoolean("place", v).apply()
 
+    /** The theme chosen on this phone: `system`, `light` or `dark`. A word, so the screens own the enum. */
+    val theme = MutableStateFlow(prefs.getString("theme", "system") ?: "system")
+    fun setTheme(word: String) {
+        prefs.edit().putString("theme", word).apply()
+        theme.value = word
+    }
+
     internal fun transport(): Transport? = store.current.value?.let { Transport(it, userAgent) }
 
     private val server = ServerReader(
@@ -64,6 +71,10 @@ class Engram private constructor(val app: Context, versionName: String) {
         transport()?.let { Drainer(outbox, it, { ZoneId.systemDefault().id }, System::currentTimeMillis) }
 
     suspend fun vapid(): String = transport()?.vapid() ?: throw IllegalStateException("unpaired")
+
+    /** A captured photo's preview, as bytes. Null where there is none, or the server cannot be reached. */
+    suspend fun picture(corpusId: String): ByteArray? =
+        runCatching { transport()?.bytes("/api/v1/corpora/$corpusId/image") }.getOrNull()
 
     suspend fun pair(uri: PairUri) {
         val c = Pairing.claim(uri, deviceName, userAgent)

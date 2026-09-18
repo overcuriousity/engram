@@ -43,13 +43,25 @@ data class OutFile(val path: String, val name: String, val mime: String)
 
 fun userAgent(versionName: String, model: String) = "engram-android/$versionName ($model)"
 
-internal fun baseClient(userAgent: String, pin: String?, host: String?): OkHttpClient {
+internal fun baseClient(
+    userAgent: String,
+    pin: String?,
+    host: String?,
+    acceptLanguage: String = java.util.Locale.getDefault().toLanguageTag(),
+): OkHttpClient {
     val b = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .retryOnConnectionFailure(false)
+        // The phone's language, as a browser sends it: what the box hint's
+        // example phrasings and a capture's reading follow.
         .addInterceptor(Interceptor { chain ->
-            chain.proceed(chain.request().newBuilder().header("User-Agent", userAgent).build())
+            chain.proceed(
+                chain.request().newBuilder()
+                    .header("User-Agent", userAgent)
+                    .header("Accept-Language", acceptLanguage)
+                    .build(),
+            )
         })
     if (pin != null && host != null) {
         b.certificatePinner(CertificatePinner.Builder().add(host, "sha256/$pin").build())
@@ -114,9 +126,35 @@ internal class Transport(
             }
         }
 
+    /** The bytes at a path — a captured photo's preview — or null where the server did not answer 200. */
+    suspend fun bytes(path: String, query: Map<String, String?> = emptyMap()): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            client.newCall(authed(Request.Builder().url(url(path, query)).get().build())).execute().use { res ->
+                if (res.code == 401) throw Refused()
+                if (res.code != 200) null else res.body.bytes()
+            }
+        } catch (e: SSLPeerUnverifiedException) {
+            throw mismatch(e)
+        }
+    }
+
     /** A POST whose answer is data rather than an outcome — the offer. Not a write the device owes. */
     suspend fun post(path: String, json: String): Answer =
         send(Request.Builder().url(url(path)).post(jsonBody(json)).build())
+
+    /**
+     * Any call by its route: the outbox's `call` rows and the screens'
+     * immediate writes both come through here. A null [json] is a bare
+     * request, which a POST still needs a body for.
+     */
+    suspend fun call(method: String, path: String, json: String?): Answer {
+        val body: RequestBody? = when {
+            json != null -> jsonBody(json)
+            method == "POST" || method == "PUT" || method == "PATCH" -> jsonBody("{}")
+            else -> null
+        }
+        return send(Request.Builder().url(url(path)).method(method, body).build())
+    }
 
     // An answer may think for longer than any read timeout worth having on an
     // ordinary call; the stream's own silence is bounded by the server's
@@ -185,10 +223,10 @@ internal class Transport(
         }
     }
 
-    suspend fun captureText(text: String, title: String?, note: String?, tz: String): Answer =
+    suspend fun captureText(text: String, title: String?, note: String?, tz: String, fromAsk: String? = null): Answer =
         send(
             Request.Builder()
-                .url(url("/api/v1/capture", mapOf("tz" to tz, "title" to title, "note" to note)))
+                .url(url("/api/v1/capture", mapOf("tz" to tz, "title" to title, "note" to note, "from_ask" to fromAsk)))
                 .post(text.toRequestBody("text/plain; charset=utf-8".toMediaType()))
                 .build(),
         )

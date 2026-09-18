@@ -142,6 +142,19 @@ class ServerReaderTest {
      * it and no error: a blank screen every retry reproduced, until the
      * thirty-day prune.
      */
+    @Test fun aCallAnswersInWordsAndANoContentIsAValue() = runTest {
+        server.enqueue(MockResponse(code = 200, body = """{"state":"hit","already":false}"""))
+        val v = reader.call("POST", "/api/v1/search/ev/verdict", """{"verdict":"hit","artifact_id":"a"}""", Decode.verdict)
+        assertEquals("hit", v.value?.state)
+        server.enqueue(MockResponse(code = 204))
+        val n = reader.call("PUT", "/api/v1/settings/lang", """{"lang":"de"}""", Decode.nothing)
+        assertNotNull("a 204 is an answer", n.value); assertNull(n.error)
+        server.enqueue(MockResponse(code = 404, body = """{"error":"no such search"}"""))
+        val gone = reader.call("POST", "/api/v1/search/x/gap", """{"q":"q"}""", Decode.gap)
+        assertNull(gone.value); assertEquals("no such search", gone.error)
+        assertEquals("a press is never kept", 0, db.cacheDao().count())
+    }
+
     @Test fun hearingIsNeverKeptAndAClosedDoorIsAnErrorNotAValue() = runTest {
         server.enqueue(MockResponse(code = 200, body = "  tombstones in leveldb\n"))
         val heard = reader.hear(byteArrayOf(1, 2, 3), "audio/wav")

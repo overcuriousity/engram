@@ -50,7 +50,7 @@ server broke. There are no error codes; the status is the vocabulary.
 
 | Route | Answers |
 |---|---|
-| `GET /search?q=&limit=&tags=&category=&explain=&door=` | List of hits. Each may carry `weak` (a loose match) and `past_cliff` (it sits below the point where relevance falls off). Absent means false. A client that draws a result list draws both: the divider goes above the first `past_cliff` row. `door=app` says a person is typing in the phone app: the search is recorded under them like the web's, waits for its id, and answers `event` beside `items` — what an open, a verdict and a gap name. With `explain`, `reranked` and a per-row `why_ranked` sentence come too. |
+| `GET /search?q=&limit=&tags=&category=&explain=&door=` | List of hits. Each may carry `weak` (a loose match) and `past_cliff` (it sits below the point where relevance falls off). Absent means false. A client that draws a result list draws both: the divider goes above the first `past_cliff` row. `door=app` says a person is typing in the phone app: the search is recorded under them like the web's, waits for its id, and answers `event` beside `items` — what an open, a verdict and a gap name. With `explain`, `reranked` and a per-row `why_ranked` sentence come too. A row whose document goes on carries `continues_to`, the next passage's id. |
 | `GET /search/stream`, `POST /ask/stream` | Server-sent events. `POST /ask` is the same answer in one piece. |
 | `GET /resurface?limit=` | List of hits worth seeing again. |
 | `GET /corpora?limit=&after=` | Paged list of corpus summaries, newest first. |
@@ -69,6 +69,7 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /status`, `GET /consolidation` | The state of the base and of the review queue. `status` also says which doors are open — `transcribe`, `asks`, `vision`, `learn`, `recommend` — and carries the idle line's facts: `held`, `last_kept`, the box hint's `examples` (in the `Accept-Language` asked for), and `teach`. |
 | `GET /corpora/{id}/bands` | The corpus page as data: `image`, `pdf`, `unread`, `restored`, `note`, `coverage`, `meta`, `exif`, `promoted`, `unplaced`, `written_from`, and `bands` — each `{ from, to, gap, reread, lines, artifact_ids, echoes }`. |
 | `GET /facets` | `{ categories: [{ value, count }] }`: what the box's chips narrow by. |
+| `GET /echo?q=` | `{ kind, detail }`: what capture will do with that text, said before it is pressed — the line under the web's box. Empty `kind` for an empty box. No model call. |
 | `GET /feedback` | What is being recorded: `{ searches: { captured, pending, judged }, asks: { asked, judged } }`, both null while `[learn]` is off. `DELETE` forgets it all and answers `{ dropped }`. |
 | `GET /settings/lang`, `PUT` | `{ chosen, langs }`; `PUT { lang }` with a tag from `langs`, or empty for automatic. |
 | `GET /settings/notify`, `PUT`, `POST …/test` | The channels: `{ gotify_url, gotify_token_set, up_endpoint, up_device, up_legacy }`. `PUT { gotify_url, gotify_token, up_endpoint }`; an empty field switches that channel off. `POST /settings/notify/test { channel }` answers `{ sent, error }`. |

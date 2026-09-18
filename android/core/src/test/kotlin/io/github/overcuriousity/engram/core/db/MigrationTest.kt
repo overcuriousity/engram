@@ -115,4 +115,31 @@ class MigrationTest {
             db.close()
         }
     }
+
+    /** Version 5 is the last word added to `kind`: `call`, which carries its route. */
+    @Test fun aQueuedRowSurvivesTheStepToVersionFive() = runTest {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val file = context.getDatabasePath("engram.db").apply { parentFile?.mkdirs() }
+        SQLiteDatabase.openOrCreateDatabase(file, null).use { v4 ->
+            v4.execSQL("CREATE TABLE IF NOT EXISTS `outbox` (`id` TEXT NOT NULL, `kind` TEXT NOT NULL, `payload` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `nextAt` INTEGER NOT NULL, `state` TEXT NOT NULL, `status` INTEGER, `answer` TEXT, `error` TEXT, PRIMARY KEY(`id`))")
+            v4.execSQL("CREATE TABLE IF NOT EXISTS `outbox_files` (`outboxId` TEXT NOT NULL, `path` TEXT NOT NULL, `name` TEXT NOT NULL, `mime` TEXT NOT NULL, PRIMARY KEY(`outboxId`, `path`))")
+            v4.execSQL("CREATE TABLE IF NOT EXISTS `moments` (`id` TEXT NOT NULL, `title` TEXT NOT NULL, `at` INTEGER NOT NULL, `fetchedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))")
+            v4.execSQL("CREATE TABLE IF NOT EXISTS `cache` (`key` TEXT NOT NULL, `origin` TEXT NOT NULL, `etag` TEXT, `body` TEXT NOT NULL, `fetchedAt` INTEGER NOT NULL, PRIMARY KEY(`key`, `origin`))")
+            v4.execSQL("CREATE TABLE IF NOT EXISTS `asked` (`question` TEXT NOT NULL, `origin` TEXT NOT NULL, `body` TEXT NOT NULL, `askedAt` INTEGER NOT NULL, PRIMARY KEY(`question`))")
+            v4.execSQL("CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)")
+            v4.execSQL("INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7ba9d68c3cc3f00e9491a0e00ff25cc0')")
+            v4.execSQL("INSERT INTO outbox (id, kind, payload, createdAt, attempts, nextAt, state) VALUES ('o5', 'artifact_delete', '{\"artifact\":\"a\"}', 1, 0, 1, 'queued')")
+            v4.version = 4
+        }
+
+        val db = Db.open(context)
+        try {
+            val row = db.outboxDao().all().first().single()
+            assertEquals(Kind.artifact_delete, row.kind)
+            db.outboxDao().insert(row.copy(id = "o6", kind = Kind.call, payload = """{"method":"POST","path":"/x"}"""))
+            assertEquals(Kind.call, db.outboxDao().get("o6")!!.kind)
+        } finally {
+            db.close()
+        }
+    }
 }

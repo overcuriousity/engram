@@ -35,6 +35,7 @@ pub fn routes() -> Router<AppState> {
         .route("/corpora/{id}/segments/{idx}/unpromote", post(unpromote))
         .route("/days/{date}/entry", post(day_entry))
         .route("/facets", get(facets))
+        .route("/echo", get(echo))
         .route("/feedback", get(feedback).delete(purge_feedback))
         .route("/settings/lang", get(get_lang).put(put_lang))
         .route("/settings/notify", get(get_notify).put(put_notify))
@@ -632,6 +633,34 @@ async fn day_entry(
 }
 
 // ── Facets, feedback, settings ───────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct EchoParams {
+    #[serde(default)]
+    pub q: String,
+}
+
+/// What capture will do with the box, said before it is pressed. The same
+/// count the web's echo makes — the tokenizer and the budget the fork itself
+/// uses, no model call. Empty `kind` for an empty box.
+#[derive(serde::Serialize)]
+pub struct Echo {
+    pub kind: String,
+    pub detail: String,
+}
+
+async fn echo(
+    tenant: Tenant,
+    headers: axum::http::HeaderMap,
+    axum::extract::Query(p): axum::extract::Query<EchoParams>,
+) -> Result<Json<Echo>> {
+    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
+    let t = crate::web::ui::fate_echo(&tenant.core, &p.q, lang);
+    Ok(Json(Echo {
+        kind: t.kind.to_string(),
+        detail: t.detail,
+    }))
+}
 
 /// `GET /facets`: what the box's chips narrow by.
 async fn facets(tenant: Tenant) -> Result<Json<crate::vector::Facets>> {
@@ -1307,6 +1336,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_echo_says_what_a_paste_becomes() {
+        let (app, token) = {
+            let (app, token, _core) = app_token_and_core().await;
+            (app, token)
+        };
+        let v = json_of(
+            app.clone()
+                .oneshot(get("/api/v1/echo?q=a%20short%20note", &token))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(v["kind"].is_string() && v["detail"].is_string(), "{v}");
+        let v = json_of(app.oneshot(get("/api/v1/echo?q=", &token)).await.unwrap()).await;
+        assert_eq!(v["kind"], "", "an empty box says nothing");
     }
 
     #[tokio::test]

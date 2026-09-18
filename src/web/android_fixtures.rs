@@ -311,6 +311,10 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         &get(format!("/api/v1/corpora/{}/bands", doc.id)).await,
     );
     check("facets.json", &get("/api/v1/facets".into()).await);
+    check(
+        "echo.json",
+        &get("/api/v1/echo?q=a%20short%20note".into()).await,
+    );
     check("feedback.json", &get("/api/v1/feedback".into()).await);
     check("lang.json", &get("/api/v1/settings/lang".into()).await);
     check("notify.json", &get("/api/v1/settings/notify".into()).await);
@@ -350,6 +354,7 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
     // beside the rows, which is what an open, a verdict and a gap name.
     let mut search = crate::web::api::search_body(&hits, None).unwrap();
     search["event"] = serde_json::Value::String("ev-search".into());
+    search["items"][0]["continues_to"] = serde_json::Value::String("art-loose".into());
     check("search.json", &search);
     check(
         "offer.json",

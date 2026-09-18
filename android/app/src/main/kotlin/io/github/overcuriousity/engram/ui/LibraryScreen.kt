@@ -94,27 +94,3 @@ fun LibraryScreen(engram: Engram, onCorpus: (String) -> Unit) {
 }
 
 /** One captured document: what it is called, where it came from, its text, and what was made of it. */
-@Composable
-fun CorpusScreen(engram: Engram, id: String, onArtifact: (String) -> Unit) {
-    val state = rememberRead(engram, Api.corpus(id), Decode.corpus)
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
-        ReadFrame(state) { c ->
-            Column(Modifier.padding(16.dp, 8.dp)) {
-                Label(c.title ?: opening(c.text, 60).ifEmpty { c.origin }, named = c.title != null)
-                val from = listOfNotNull(c.origin.takeIf { it.isNotEmpty() }, dayWords(c.createdAt, System.currentTimeMillis(), ZoneId.systemDefault()), c.status.takeIf { it != "complete" && it.isNotEmpty() })
-                Text(from.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = muted())
-                c.sourceUrl?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
-            }
-            if (c.text.isNotEmpty()) {
-                SelectionContainer { Text(c.text, Modifier.padding(16.dp, 8.dp), style = MaterialTheme.typography.bodyLarge) }
-            }
-            val live = c.chunks.filter { it.status == "active" && it.supersededBy == null }
-            if (live.isNotEmpty()) {
-                SectionHead("Artifacts")
-                live.forEach { a ->
-                    LinkRow(if (a.named) a.title!! else opening(a.text, 60), a.named) { onArtifact(a.id) }
-                }
-            }
-        }
-    }
-}

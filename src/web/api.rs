@@ -1413,6 +1413,19 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
     if let Some(ev) = outcome.event {
         body["event"] = serde_json::Value::String(ev);
     }
+    // Where each hit's document goes on, for a rail that says *continues in
+    // #4* or *continues in the next passage*. Best-effort, as the web's is: a
+    // marker is a bonus, and failing to read one must not cost the results.
+    let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+    if let Ok(next) = tenant.core.store.continuations_of(&ids).await
+        && let Some(items) = body["items"].as_array_mut()
+    {
+        for (item, r) in items.iter_mut().zip(&results) {
+            if let Some(n) = next.get(&r.artifact_id) {
+                item["continues_to"] = serde_json::Value::String(n.clone());
+            }
+        }
+    }
     Ok(Json(body))
 }
 

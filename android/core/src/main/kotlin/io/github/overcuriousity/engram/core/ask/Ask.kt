@@ -56,6 +56,8 @@ data class AskState(
     val shown: Int? = null,
     val dropped: Int? = null,
     val needs: List<String> = emptyList(),
+    /** What the model said on the way to the answer. Behind a disclosure on the screen. */
+    val reasoning: String = "",
     val answer: AskAnswer? = null,
     val error: String? = null,
 ) {
@@ -71,7 +73,7 @@ fun reduce(s: AskState, f: AskFrame): AskState = when (f) {
     is AskFrame.Retrieved -> s.copy(shown = f.shown, dropped = f.dropped)
     is AskFrame.Needs -> s.copy(needs = f.queries)
     is AskFrame.Citations -> s.copy(citations = f.hits)
-    is AskFrame.Reasoning -> s
+    is AskFrame.Reasoning -> s.copy(reasoning = s.reasoning + f.text)
     is AskFrame.Token -> s.copy(phase = Phase.Writing, draft = s.draft + f.text)
     is AskFrame.Done -> s.copy(phase = Phase.Done, answer = f.answer, citations = f.answer.citations.ifEmpty { s.citations })
     is AskFrame.Failed -> s.copy(phase = Phase.Failed, error = f.message)
@@ -149,7 +151,9 @@ class Ask internal constructor(
         }
         val body = JsonObject(mapOf("q" to JsonPrimitive(question))).toString()
         val failed: String? = try {
-            val a = t.stream("/api/v1/ask/stream", emptyMap(), body) { event, data ->
+            // The app's door: the question is recorded under the person, and
+            // `done` carries the id the verdict bar and the keep name.
+            val a = t.stream("/api/v1/ask/stream", mapOf("door" to "app"), body) { event, data ->
                 val f = parseFrame(event, data) ?: return@stream
                 s = reduce(s, f)
                 send(s)

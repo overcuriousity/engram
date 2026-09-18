@@ -7,8 +7,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import io.github.overcuriousity.engram.core.LightSample
 import io.github.overcuriousity.engram.ui.EngramApp
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.overcuriousity.engram.ui.EngramTheme
 import io.github.overcuriousity.engram.ui.Screen
+import io.github.overcuriousity.engram.ui.ThemeMode
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -27,7 +30,12 @@ class MainActivity : ComponentActivity() {
         // with the box focused and the keyboard already up. "compose" is what
         // a shortcut pinned by an older build still says.
         val focusBox = asked == "capture" || asked == "compose"
-        setContent { EngramTheme { EngramApp(app.engram, start, pairText, focusBox, onUnpair = app::unpairAsync) } }
+        setContent {
+            val theme by app.engram.theme.collectAsStateWithLifecycle()
+            EngramTheme(mode = ThemeMode.entries.firstOrNull { it.name.equals(theme, ignoreCase = true) } ?: ThemeMode.System) {
+                EngramApp(app.engram, start, pairText, focusBox, onUnpair = app::unpairAsync)
+            }
+        }
     }
 
     override fun onNewIntent(intent: Intent) {

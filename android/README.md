@@ -46,7 +46,26 @@ The result list keeps what the web's keeps: the rule that says *relevance falls
 off here*, and the rows beneath it that hold their rank and stop claiming to be
 answers. A loose hit is badged rather than ranked. That is not decoration —
 retrieval always returns its best candidates however bad they are, and a list
-without the rule shows a typo exactly as it shows an answer.
+without the rule shows a typo exactly as it shows an answer. The rest of the
+rail is the web's too: the kind chips, the two passes (typing, then the
+refining one that marks the list *refined*), why a row is here in a sentence,
+where a passage sits and where its document goes on, and *nothing here has
+it* over an empty or all-loose list.
+
+Searches and questions from the app are recorded under the person, as the
+web's are (`door=app`), so the web's two verdict bars are here: *was this
+what you were looking for?* under a result opened from a search, and *was
+this right?* under an answer, with *carried the answer* on each excerpt,
+*keep this answer*, and *edit first*. An answer is drawn as markdown with its
+citations linked and the literals no excerpt carries marked.
+
+Everything else the web client has, this has: the due band with its snoozes,
+dates and *not a reminder*; the corpus page band by band with re-read,
+re-segment and delete; a day's entry box; Insights, language, notifications
+and what is being recorded behind Settings; and a theme choice. Every owed
+write is an outbox row — the newer ones under one kind, `call`, carrying their
+route — and every press whose answer is what the screen shows next goes to the
+server at once and says so if it cannot.
 
 ## Judging, and why it is quiet
 

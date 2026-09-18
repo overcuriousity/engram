@@ -69,16 +69,28 @@ val EngramShapes = Shapes(
     large = RoundedCornerShape(6.dp),
 )
 
+/** Whether the scheme in force is the dark one — the chosen theme, not the system's. */
 @Composable
-fun muted(): Color = if (isSystemInDarkTheme()) EngramColors.mutedDark else EngramColors.mutedLight
+private fun isDark(): Boolean = MaterialTheme.colorScheme.background == EngramColors.dark.background
 
 @Composable
-fun due(): Color = if (isSystemInDarkTheme()) EngramColors.dueDark else EngramColors.dueLight
+fun muted(): Color = if (isDark()) EngramColors.mutedDark else EngramColors.mutedLight
 
 @Composable
-fun EngramTheme(content: @Composable () -> Unit) {
+fun due(): Color = if (isDark()) EngramColors.dueDark else EngramColors.dueLight
+
+/** The web's toggle: follow the system, or one of the two on purpose. */
+enum class ThemeMode { System, Light, Dark }
+
+@Composable
+fun EngramTheme(mode: ThemeMode = ThemeMode.System, content: @Composable () -> Unit) {
+    val dark = when (mode) {
+        ThemeMode.System -> isSystemInDarkTheme()
+        ThemeMode.Light -> false
+        ThemeMode.Dark -> true
+    }
     MaterialTheme(
-        colorScheme = if (isSystemInDarkTheme()) EngramColors.dark else EngramColors.light,
+        colorScheme = if (dark) EngramColors.dark else EngramColors.light,
         typography = EngramType,
         shapes = EngramShapes,
         content = content,

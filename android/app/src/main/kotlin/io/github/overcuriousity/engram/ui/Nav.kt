@@ -35,10 +35,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
 import io.github.overcuriousity.engram.R
 import io.github.overcuriousity.engram.core.Engram
 import io.github.overcuriousity.engram.core.PinMismatch
@@ -59,6 +61,8 @@ sealed class Screen(val route: String, val label: String) {
     object Pairs : Screen("judge/pairs", "Duplicate pairs")
     object Gaps : Screen("judge/gaps", "Gaps")
     object Journal : Screen("judge/journal", "While you were away")
+    /** What this memory is like, and what the base did on its own. Reached from Settings, like judging. */
+    object Insights : Screen("insights", "Insights")
 }
 
 /**
@@ -68,16 +72,25 @@ sealed class Screen(val route: String, val label: String) {
  */
 internal val BAR = listOf(Screen.Search, Screen.Today, Screen.Library)
 
-/** Where a row leads. Ids and dates travel in the route; nothing else does. */
+/**
+ * Where a row leads. Ids, dates and the search an open came from travel in
+ * the route; so does what fills the box when a door opens it — an answer to
+ * edit first — and nothing else does.
+ */
 private object Routes {
-    const val ARTIFACT = "artifact/{id}"
-    const val CORPUS = "corpus/{id}"
+    const val ARTIFACT = "artifact/{id}?event={event}"
+    const val CORPUS = "corpus/{id}?from={from}&to={to}"
     const val DAY = "day/{date}"
     const val ASK = "ask?q={q}"
-    fun artifact(id: String) = "artifact/${Uri.encode(id)}"
-    fun corpus(id: String) = "corpus/${Uri.encode(id)}"
+    const val SEARCH = "search?prefill={prefill}&from_ask={from_ask}&question={question}"
+    fun artifact(id: String, event: String? = null) = "artifact/${Uri.encode(id)}" + (event?.let { "?event=${Uri.encode(it)}" } ?: "")
+    fun corpus(id: String, from: Long? = null, to: Long? = null) =
+        "corpus/${Uri.encode(id)}" + (if (from != null) "?from=$from&to=${to ?: from}" else "")
     fun day(date: LocalDate) = "day/$date"
     fun ask(q: String) = "ask?q=${Uri.encode(q)}"
+    fun search(prefill: String, fromAsk: String, question: String) =
+        "search?prefill=${Uri.encode(prefill)}&from_ask=${Uri.encode(fromAsk)}&question=${Uri.encode(question)}"
+    val optional = listOf("prefill", "from_ask", "question", "event", "from", "to").map { navArgument(it) { type = NavType.StringType; defaultValue = "" } }
 }
 
 /** The mark from logo.svg beside the name in Inter: wordmark.svg, without the SVG's text element. */
@@ -145,11 +158,13 @@ fun EngramApp(
         },
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                val current = nav.currentBackStackEntryAsState().value?.destination?.route
+                // The route as registered carries its optional arguments; the
+                // bar's word is what stands before them.
+                val current = nav.currentBackStackEntryAsState().value?.destination?.route?.substringBefore('?')
                 bar.forEach { s ->
                     NavigationBarItem(
                         selected = current == s.route,
-                        onClick = { nav.navigate(s.route) { launchSingleTop = true; popUpTo(Screen.Search.route) } },
+                        onClick = { nav.navigate(s.route) { launchSingleTop = true; popUpTo(Routes.SEARCH) } },
                         icon = {},
                         label = { Text(s.label) },
                     )
@@ -166,8 +181,23 @@ fun EngramApp(
             val startAt = start ?: if (pairText != null) Screen.Pair else Screen.Search
             val onArtifact: (String) -> Unit = { go(Routes.artifact(it)) }
             val onCorpus: (String) -> Unit = { go(Routes.corpus(it)) }
-            NavHost(nav, startDestination = startAt.route) {
-                composable(Screen.Search.route) { SearchScreen(engram, onArtifact, onAsk = { go(Routes.ask(it)) }, focusBox = focusBox) }
+            // Home is registered with its optional arguments, and the graph
+            // starts on the route as registered.
+            NavHost(nav, startDestination = if (startAt == Screen.Search) Routes.SEARCH else startAt.route) {
+                composable(Routes.SEARCH, arguments = Routes.optional) { entry ->
+                    val arg = { k: String -> entry.arguments?.getString(k).orEmpty() }
+                    SearchScreen(
+                        engram,
+                        onArtifact = onArtifact,
+                        onHit = { id, event -> go(Routes.artifact(id, event)) },
+                        onAsk = { go(Routes.ask(it)) },
+                        onCorpus = onCorpus,
+                        focusBox = focusBox,
+                        prefill = arg("prefill"),
+                        fromAsk = arg("from_ask").ifEmpty { null },
+                        question = arg("question"),
+                    )
+                }
                 composable(Screen.Today.route) {
                     DayScreen(engram, LocalDate.now(ZoneId.systemDefault()), onDay = { go(Routes.day(it)) }, onCorpus, onArtifact)
                 }
@@ -176,13 +206,34 @@ fun EngramApp(
                 composable(Screen.Settings.route) {
                     SettingsScreen(engram, onJudging = { go(it.route) }, onQueue = { go(Screen.Queue.route) }, onUnpair = onUnpair)
                 }
+                composable(Screen.Insights.route) {
+                    InsightsScreen(engram, onJudging = { go(it.route) }, onArtifact, onCorpus, onLibrary = { go(Screen.Library.route) })
+                }
                 composable(Screen.Pairs.route) { PairReviewScreen(engram, onArtifact) }
                 composable(Screen.Gaps.route) { GapsScreen(engram) }
                 composable(Screen.Journal.route) { JournalScreen(engram, onArtifact, onCorpus) }
                 composable(Screen.Pair.route) { PairScreen(engram, initialText = pairText, knownOrigin = connection?.origin) }
-                composable(Routes.ASK) { AskScreen(engram, it.arguments?.getString("q").orEmpty(), onArtifact) }
-                composable(Routes.ARTIFACT) { ArtifactScreen(engram, it.arguments?.getString("id").orEmpty(), onCorpus, onArtifact) }
-                composable(Routes.CORPUS) { CorpusScreen(engram, it.arguments?.getString("id").orEmpty(), onArtifact) }
+                composable(Routes.ASK) {
+                    AskScreen(
+                        engram, it.arguments?.getString("q").orEmpty(), onArtifact, onCorpus,
+                        onEditFirst = { answer, event, q -> go(Routes.search(answer, event, q)) },
+                    )
+                }
+                composable(Routes.ARTIFACT, arguments = Routes.optional) { entry ->
+                    ArtifactScreen(
+                        engram, entry.arguments?.getString("id").orEmpty(),
+                        onCorpus = { id, from, to -> go(Routes.corpus(id, from, to)) },
+                        onArtifact = onArtifact,
+                        event = entry.arguments?.getString("event")?.ifEmpty { null },
+                    )
+                }
+                composable(Routes.CORPUS, arguments = Routes.optional) { entry ->
+                    CorpusScreen(
+                        engram, entry.arguments?.getString("id").orEmpty(), onArtifact,
+                        highlight = entry.arguments?.getString("from")?.toLongOrNull()?.let { f -> f to (entry.arguments?.getString("to")?.toLongOrNull() ?: f) },
+                        onGone = { nav.popBackStack() },
+                    )
+                }
                 composable(Routes.DAY) { entry ->
                     // A date that does not parse is today: the route is built
                     // here and never typed, so this is a guard, not a feature.

@@ -14,13 +14,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -57,10 +61,30 @@ import java.time.ZoneId
  * beneath a text that could.
  */
 @Composable
-fun ArtifactScreen(engram: Engram, id: String, onCorpus: (String) -> Unit, onArtifact: (String) -> Unit) {
-    val state = rememberRead(engram, Api.artifact(id), Decode.artifact)
+fun ArtifactScreen(
+    engram: Engram,
+    id: String,
+    onCorpus: (String, Long?, Long?) -> Unit,
+    onArtifact: (String) -> Unit,
+    /** The search this was opened from, where it was: the open is attributed to it and the bar is drawn. */
+    event: String? = null,
+) {
+    val state = rememberRead(engram, Api.artifact(id, event), Decode.artifact)
     val zone = ZoneId.systemDefault()
     val scope = rememberCoroutineScope()
+    val doors = rememberRead(engram, Api.status(), Decode.status).read.value
+    // How long this was on screen, told when it leaves: the dwell the web's
+    // pane reports. Fire and forget, as the web's is.
+    DisposableEffect(id) {
+        val opened = System.currentTimeMillis()
+        onDispose {
+            val secs = (System.currentTimeMillis() - opened) / 1000
+            if (secs > 0) scope.launch { engram.reader.tell(Api.dwell(id), Api.json("secs" to secs)) }
+        }
+    }
+    var editing by remember { mutableStateOf<String?>(null) }
+    var reviewed by remember { mutableStateOf(false) }
+    val dismissed = remember { mutableStateListOf<String>() }
     // What was decided here, before the server has been told. The read above
     // will not show it until the row is delivered and the screen is opened
     // again, and a person who pressed Hide must not be shown an artifact that
@@ -88,6 +112,17 @@ fun ArtifactScreen(engram: Engram, id: String, onCorpus: (String) -> Unit, onArt
                 if (c.tags.isNotEmpty()) Text(c.tags.joinToString("  ") { "#$it" }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
 
+            // Verification failures, and the judgement that clears them: the
+            // operator looked at the chunk beside its source lines and decided
+            // the warning was noise.
+            if (c.flags.isNotEmpty() && !reviewed) {
+                Flag(c.flags.joinToString(", "), c.flagDetail ?: "") {
+                    TextButton(onClick = {
+                        reviewed = true
+                        scope.launch { engram.outbox.enqueueCall("Artifact · marked reviewed", "POST", Api.reviewed(c.id)); Sync.kick(engram.app) }
+                    }) { Text("Mark reviewed") }
+                }
+            }
             Decisions(
                 chunk = c,
                 decided = decided,
@@ -104,10 +139,66 @@ fun ArtifactScreen(engram: Engram, id: String, onCorpus: (String) -> Unit, onArt
                 onWinner = onArtifact,
             )
 
-            // A passage is kept as the document wrote it; everything else was
-            // written as markdown by a model. The same rule as `artifact_html`.
-            if (c.provenance == "passage") Verbatim(c.text, Modifier.padding(16.dp, 8.dp))
-            else Markdown(c.text, Modifier.padding(16.dp, 8.dp))
+            // The same box the corpus page edits in, and the same route: the
+            // vector describes wording that no longer exists, so a save
+            // re-embeds. Pressed where the server is and answered in words.
+            val draft = editing
+            if (draft != null) {
+                var saidNo by remember { mutableStateOf<String?>(null) }
+                Column(Modifier.padding(16.dp, 8.dp)) {
+                    OutlinedTextField(value = draft, onValueChange = { editing = it }, modifier = Modifier.fillMaxWidth(), minLines = 6)
+                    saidNo?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+                    Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            scope.launch {
+                                val r = engram.reader.call("PATCH", Api.artifactEdit(c.id), Api.json("text" to draft), Decode.nothing)
+                                if (r.value != null) { editing = null; state.retry() } else saidNo = r.error ?: "Server unreachable"
+                            }
+                        }, enabled = draft.isNotBlank()) { Text("Save and re-embed") }
+                        TextButton(onClick = { editing = null }) { Text("Cancel") }
+                    }
+                }
+            } else {
+                // A passage is kept as the document wrote it; everything else was
+                // written as markdown by a model. The same rule as `artifact_html`.
+                if (c.provenance == "passage") Verbatim(c.text, Modifier.padding(16.dp, 8.dp))
+                else Markdown(c.text, Modifier.padding(16.dp, 8.dp))
+                Row(Modifier.padding(horizontal = 8.dp)) {
+                    TextButton(onClick = { editing = c.text }) { Text("Edit") }
+                }
+            }
+            // Under the text, once it has been read: was it the one? Only where
+            // this was opened from a list and the search was recorded.
+            val ev = a.searchEvent
+            if (ev != null && doors?.learn != false) SearchVerdictBar(engram, ev, c.id)
+            // What the base found when this arrived, what has asked for it,
+            // and the way back to the last wording where the live one is
+            // condensed. Its own read: none of it is the artifact.
+            val about = rememberRead(engram, Api.about(id), Decode.about)
+            about.read.value?.let { ab ->
+                Column(Modifier.padding(16.dp, 4.dp)) {
+                    ab.tag?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = muted()) }
+                    val badges = listOfNotNull(c.category, ab.dueIn?.let { "due $it" })
+                    if (badges.isNotEmpty()) Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
+                        c.category?.let { Badge(it, MaterialTheme.colorScheme.primary) }
+                        ab.dueIn?.let { Badge("due $it", due()) }
+                    }
+                    if (ab.probes.isNotEmpty()) Fold("what has asked for this (${ab.probes.size})") {
+                        ab.probes.forEach { Text(it, style = MaterialTheme.typography.labelMedium, color = muted()) }
+                    }
+                    ab.condensed?.let { action ->
+                        TextButton(onClick = {
+                            scope.launch { engram.outbox.enqueueCall("Condensation · undone", "POST", Api.condensationUndo(action)); Sync.kick(engram.app); state.retry() }
+                        }) { Text("Restore the last version") }
+                    }
+                }
+            }
+            if (c.cues.isNotEmpty()) {
+                // Not "a model guessed you would want this" but "this was written
+                // because these things were asked and the base had no answer".
+                SectionHead("Written because these were asked")
+                c.cues.forEach { Text(it, Modifier.padding(16.dp, 2.dp), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            }
             if (c.caveats.isNotEmpty()) {
                 Column(Modifier.padding(16.dp, 8.dp)) {
                     Text("Before you rely on this", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.secondary)
@@ -126,16 +217,29 @@ fun ArtifactScreen(engram: Engram, id: String, onCorpus: (String) -> Unit, onArt
                 SectionHead("Related")
                 r.related.forEach { RelatedLine(it, onArtifact) }
             }
-            if (r.seenTogether.isNotEmpty()) {
+            val links = r.seenTogether.filter { it.id !in dismissed }
+            if (links.isNotEmpty()) {
                 SectionHead("Seen together")
-                r.seenTogether.forEach { RelatedLine(it, onArtifact) }
+                links.forEach { l ->
+                    Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) { RelatedLine(l, onArtifact) }
+                        // The operator saying this pair does not belong together. Final for that pair.
+                        TextButton(onClick = {
+                            dismissed += l.id
+                            scope.launch { engram.outbox.enqueueCall("Link · not related", "POST", Api.dismissLink(id, l.id)); Sync.kick(engram.app) }
+                        }) { Text("Not related", style = MaterialTheme.typography.labelSmall) }
+                    }
+                }
             }
         }
 
         // The lines this was drawn from, with a little context either side.
         // A merge has none and the lineage below is what says where it came from.
         val source = rememberRead(engram, Api.source(id), Decode.source)
-        ReadFrame(source) { s -> if (s.corpusId != null) SourceLines(s, state.read.value?.source?.let { it.title ?: it.sourceUrl ?: it.origin }, onCorpus) }
+        ReadFrame(source) { s ->
+            val span = state.read.value?.chunk?.span
+            if (s.corpusId != null) SourceLines(s, state.read.value?.source?.let { it.title ?: it.sourceUrl ?: it.origin }) { onCorpus(it, span?.startLine, span?.endLine) }
+        }
 
         val lineage = rememberRead(engram, Api.lineage(id), Decode.lineage)
         ReadFrame(lineage) { l ->
@@ -238,6 +342,16 @@ fun Decisions(
         },
         dismissButton = { TextButton(onClick = { confirm = false }) { Text("Keep it") } },
     )
+}
+
+/** A disclosure: closed by default, a line that opens. */
+@Composable
+fun Fold(summary: String, content: @Composable () -> Unit) {
+    var open by rememberSaveable(summary) { mutableStateOf(false) }
+    Column {
+        Text("${if (open) "▾" else "▸"} $summary", Modifier.clickable { open = !open }.padding(vertical = 6.dp), style = MaterialTheme.typography.labelMedium, color = muted())
+        if (open) content()
+    }
 }
 
 @Composable

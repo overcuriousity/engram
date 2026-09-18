@@ -71,6 +71,20 @@ class TransportTest {
         assertEquals("/api/v1/artifacts/a1", r.target)
     }
 
+    @Test fun aCallIsAnyMethodOnAnyRouteAndEveryRequestSaysItsLanguage() = runTest {
+        server.enqueue(MockResponse(code = 204))
+        server.enqueue(MockResponse(code = 200, body = """{"chosen":"de"}"""))
+        server.enqueue(MockResponse(code = 204))
+        assertEquals(204, t.call("DELETE", "/api/v1/feedback", null).status)
+        assertEquals("""{"chosen":"de"}""", t.call("PUT", "/api/v1/settings/lang", """{"lang":"de"}""").body)
+        t.call("POST", "/api/v1/artifacts/a/reviewed", null)
+        val d = server.takeRequest(); val p = server.takeRequest(); val q = server.takeRequest()
+        assertEquals("DELETE", d.method); assertEquals(0L, d.body?.size ?: 0L)
+        assertEquals("PUT", p.method); assertEquals("""{"lang":"de"}""", p.body?.utf8())
+        assertEquals("POST", q.method); assertEquals("{}", q.body?.utf8())
+        assertTrue("the phone's language rides every request", d.headers["Accept-Language"]!!.isNotEmpty())
+    }
+
     @Test fun a401IsRefused() = runTest {
         server.enqueue(MockResponse(code = 401))
         try { t.momentDone("m1"); fail() } catch (e: Refused) {}

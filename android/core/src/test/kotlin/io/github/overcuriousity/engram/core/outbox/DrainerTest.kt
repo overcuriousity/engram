@@ -177,6 +177,29 @@ class DrainerTest {
         assertEquals("keep must name one side of the pair", r.error)
     }
 
+    @Test fun aCallRowGoesByItsRouteAndAGoneSubjectIsSettled() = runTest {
+        box.enqueueCall("Reminder · dated", "POST", "/api/v1/moments/m1/date", """{"at":5,"tz":"UTC"}"""); now += 1
+        box.enqueueCall("Source · deleted", "DELETE", "/api/v1/corpora/c1"); now += 1
+        box.enqueueCall("Artifact · reviewed", "POST", "/api/v1/artifacts/a1/reviewed")
+        server.enqueue(MockResponse(code = 204))
+        server.enqueue(MockResponse(code = 404, body = """{"error":"no such corpus"}"""))
+        server.enqueue(MockResponse(code = 204))
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        val sent = (1..3).map { server.takeRequest() }
+        assertEquals(listOf("POST", "DELETE", "POST"), sent.map { it.method })
+        assertEquals(listOf("/api/v1/moments/m1/date", "/api/v1/corpora/c1", "/api/v1/artifacts/a1/reviewed"), sent.map { it.target })
+        assertEquals("""{"at":5,"tz":"UTC"}""", sent[0].body?.utf8())
+        assertEquals("a bare POST still carries a body the server can parse", "{}", sent[2].body?.utf8())
+        assertTrue(box.rows.first().all { it.state == State.sent })
+    }
+
+    @Test fun aTextKeptFromAnAnswerNamesTheQuestion() = runTest {
+        server.enqueue(MockResponse(code = 201, body = "{}"))
+        box.enqueueText("my wording", null, null, fromAsk = "ev-1")
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        assertEquals("/api/v1/capture?tz=Europe%2FBerlin&from_ask=ev-1", server.takeRequest().target)
+    }
+
     @Test fun anArtifactAlreadyDeletedElsewhereIsSettledNotHeld() = runTest {
         box.enqueueArtifactDelete("art-gone")
         server.enqueue(MockResponse(code = 404, body = """{"error":"no such artifact"}"""))

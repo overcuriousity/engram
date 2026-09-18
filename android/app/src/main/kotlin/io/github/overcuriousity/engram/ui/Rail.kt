@@ -78,6 +78,37 @@ fun opening(text: String, max: Int): String {
     return (if (at > max / 2) cut.substring(0, at) else cut).trimEnd() + "…"
 }
 
+/**
+ * Where a row's document goes on, said on the row: the rank of the next
+ * passage where it placed in this list, or that it did not — exclusive by
+ * construction, as the web's `mark_continuations` makes them.
+ */
+fun continuesWords(h: Hit, items: List<RailItem>): String? {
+    val next = h.continuesTo ?: return null
+    val rank = items.filterIsInstance<RailItem.Row>().firstOrNull { it.hit.artifactId == next }?.rank
+    return if (rank != null) "↓ continues in #$rank" else "↳ continues in the next passage"
+}
+
+/**
+ * Where in its source a passage sits, under the snippet and prefixed. A
+ * borrowed name is the heading of the section it was cut from, and emptying
+ * the name slot for it would take the row's only statement of whereabouts.
+ */
+fun sectionOf(h: Hit): String? =
+    h.title?.takeIf { h.borrowedName && it.isNotBlank() && !plain(h.text).startsWith(it) }
+
+/**
+ * Why this row is *here*, as one sentence rather than a row of chips — the
+ * web's `rail-why`. The badges say what a result is; this says why.
+ */
+fun whyOf(h: Hit, allLoose: Boolean): String? = buildList {
+    if (h.primed) add(if (h.inSitting) "moved up — you have been in this one already" else "moved up — opened, confirmed or cited more than the hits it passed")
+    if (h.weak && !allLoose) add("a loose match")
+    if (h.modelWritten) add("written by a model" + if (h.originCount > 0) " from ${h.originCount} source${if (h.originCount > 1) "s" else ""}" else "")
+    h.dueIn?.let { add("a reminder on this is due $it") }
+    h.whyRanked?.let { add(it) }
+}.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+
 /** The small words under a row, in the order the web rail says them. */
 fun wordsOf(h: Hit): List<String> = buildList {
     if (h.retired) add("done reminder")

@@ -107,10 +107,10 @@ internal class ServerReader(
         }
     }
 
-    override suspend fun <T> ask(path: String, json: String, decode: (String) -> T): Read<T> {
+    override suspend fun <T> call(method: String, path: String, json: String?, decode: (String) -> T): Read<T> {
         val t = transport() ?: return Read(null, null, Reach.Refused, loading = false)
         val a = try {
-            t.post(path, json)
+            t.call(method, path, json)
         } catch (e: Refused) {
             onRefused()
             return Read(null, null, Reach.Refused, loading = false)

@@ -41,6 +41,14 @@ enum class Kind {
     corpus_resolve,
     /** The one decision with no undo: `DELETE /artifacts/{id}`. Its own kind, never an `op`. */
     artifact_delete,
+    /**
+     * Any other write the device owes, named by its route: `{method, path,
+     * body, label}`. The kinds above each carry a meaning the queue screen
+     * words; this one carries its wording in the row, so the doors the web
+     * grew after them — dating a reminder, re-reading a passage, clearing a
+     * flag — need no new word in this column and no new database version.
+     */
+    call,
 }
 
 enum class State { queued, sent, refused, held }
@@ -143,7 +151,7 @@ class Converters {
 
 @Database(
     entities = [OutboxRow::class, OutboxFile::class, MomentRow::class, CacheRow::class, AskedRow::class],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 @TypeConverters(Converters::class)
@@ -157,7 +165,7 @@ abstract class Db : RoomDatabase() {
         fun open(context: Context): Db =
             Room.databaseBuilder(context, Db::class.java, "engram.db")
                 .setQueryCoroutineContext(Dispatchers.IO)
-                .addMigrations(TO_2, TO_3, TO_4)
+                .addMigrations(TO_2, TO_3, TO_4, TO_5)
                 .build()
 
         /**
@@ -192,6 +200,11 @@ abstract class Db : RoomDatabase() {
 
         /** Version 4 is one more word in `kind` — `artifact_delete` — and, as with 3, nothing else. */
         val TO_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {}
+        }
+
+        /** Version 5 is the last such word — `call` — after which a new route is a new row, not a new version. */
+        val TO_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {}
         }
 

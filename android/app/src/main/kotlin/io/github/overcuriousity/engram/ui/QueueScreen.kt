@@ -86,6 +86,8 @@ private fun firstLine(kind: Kind, payload: String): String {
             else -> "Artifact"
         }
         Kind.artifact_delete -> "Artifact · deleted"
+        // The row carries its own wording.
+        Kind.call -> p["label"]?.jsonPrimitive?.contentOrNull ?: "Write"
         Kind.merge_undo -> "Merge · undone"
         Kind.corpus_resolve -> when (p["action"]?.jsonPrimitive?.contentOrNull) {
             "replace" -> "Parked capture · replaced the old one"
