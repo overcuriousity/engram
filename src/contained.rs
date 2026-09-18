@@ -21,6 +21,23 @@ pub struct Started {
     pub token: String,
 }
 
+/// An OpenAI-compatible endpoint of the person's choosing, for the one role a
+/// phone may not be able to carry a model for.
+#[derive(Clone, Default)]
+pub struct Endpoint {
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+}
+
+/// What a launch is given: the model files on the device, and where to ask
+/// when there is no file for that.
+#[derive(Default)]
+pub struct Setup {
+    pub models: LocalModels,
+    pub ask: Option<Endpoint>,
+}
+
 pub struct Running {
     shutdown: tokio::sync::watch::Sender<bool>,
     server: tokio::task::JoinHandle<()>,
@@ -84,9 +101,15 @@ fn local_hash(data_dir: &Path) -> Result<String> {
 /// on this device allocates, so it is as small as an answer over retrieved
 /// passages allows. `plan = false` spares a phone the second completion per
 /// question.
-fn config_for(data_dir: &Path, local_hash: &str) -> String {
+fn config_for(data_dir: &Path, local_hash: &str, ask: Option<&Endpoint>) -> String {
     let dir = data_dir.join("bases");
     let control = data_dir.join("control.db");
+    let ask_url = ask.map_or("http://127.0.0.1:9/v1", |e| e.base_url.as_str());
+    let ask_model = ask.map_or("device", |e| e.model.as_str());
+    let ask_key = ask
+        .and_then(|e| e.api_key.as_deref())
+        .map(|k| format!("api_key = {}\n", quoted(k)))
+        .unwrap_or_default();
     format!(
         r#"[server]
 bind = "127.0.0.1:0"
@@ -107,9 +130,9 @@ context_tokens = 32768
 max_output_tokens = 4096
 
 [infer.tiers.device-ask]
-base_url = "http://127.0.0.1:9/v1"
-model = "device"
-context_tokens = 8192
+base_url = {ask_url}
+model = {ask_model}
+{ask_key}context_tokens = 8192
 max_output_tokens = 1024
 
 [infer.synthesize]
@@ -135,15 +158,25 @@ password_hash = {hash}
         dir = quoted(&dir.to_string_lossy()),
         control = quoted(&control.to_string_lossy()),
         hash = quoted(local_hash),
+        ask_url = quoted(ask_url),
+        ask_model = quoted(ask_model),
     )
 }
 
 pub async fn start(data_dir: &Path, models: LocalModels) -> Result<(Started, Running)> {
+    start_with(data_dir, Setup { models, ask: None }).await
+}
+
+pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Running)> {
     std::fs::create_dir_all(data_dir).map_err(internal)?;
     let config_path = data_dir.join("config.toml");
     // Written on every launch, not only the first: the file is this build's
     // defaults rendered for this directory, not a place anyone edits.
-    std::fs::write(&config_path, config_for(data_dir, &local_hash(data_dir)?)).map_err(internal)?;
+    std::fs::write(
+        &config_path,
+        config_for(data_dir, &local_hash(data_dir)?, setup.ask.as_ref()),
+    )
+    .map_err(internal)?;
     let cfg = crate::config::Config::load(Some(&config_path)).map_err(internal)?;
 
     let control = crate::store::control::Control::connect(&cfg.store.control_path).await?;
@@ -164,7 +197,7 @@ pub async fn start(data_dir: &Path, models: LocalModels) -> Result<(Started, Run
                 },
             }),
         )
-        .with_local_models(models),
+        .with_local_models(setup.models),
     );
     tenants.get_or_provision(SUBJECT, None).await?;
 
@@ -243,6 +276,34 @@ mod tests {
             req = req.bearer_auth(t);
         }
         req.send().await.unwrap().status()
+    }
+
+    fn parsed(ask: Option<&Endpoint>) -> crate::config::Config {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, config_for(dir.path(), "$argon2id$x", ask)).unwrap();
+        crate::config::Config::load(Some(&path)).unwrap()
+    }
+
+    #[test]
+    fn with_no_endpoint_ask_points_where_nothing_listens() {
+        let cfg = parsed(None);
+        assert_eq!(cfg.infer.ask.unwrap().base_url, "http://127.0.0.1:9/v1");
+    }
+
+    #[test]
+    fn an_endpoint_is_asks_and_nobody_elses() {
+        let e = Endpoint {
+            base_url: "https://llm.example/v1".into(),
+            model: "some \"quoted\" model".into(),
+            api_key: Some("sk-\\odd".into()),
+        };
+        let cfg = parsed(Some(&e));
+        let ask = cfg.infer.ask.as_ref().unwrap();
+        assert_eq!(ask.base_url, "https://llm.example/v1");
+        assert_eq!(ask.model, "some \"quoted\" model");
+        assert_eq!(ask.api_key.as_deref(), Some("sk-\\odd"));
+        assert_eq!(cfg.infer.synthesize.base_url, "http://127.0.0.1:9/v1");
     }
 
     #[tokio::test(flavor = "multi_thread")]

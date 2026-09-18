@@ -72,7 +72,7 @@
     #[test]
     fn with_no_endpoint_ask_points_where_nothing_listens() {
         let cfg = parsed(None);
-        assert_eq!(cfg.infer.tiers["device-ask"].base_url, "http://127.0.0.1:9/v1");
+        assert_eq!(cfg.infer.ask.unwrap().base_url, "http://127.0.0.1:9/v1");
     }
 
     #[test]
@@ -83,11 +83,11 @@
             api_key: Some("sk-\\odd".into()),
         };
         let cfg = parsed(Some(&e));
-        let ask = &cfg.infer.tiers["device-ask"];
+        let ask = cfg.infer.ask.as_ref().unwrap(); // tiers are folded into the roles on load
         assert_eq!(ask.base_url, "https://llm.example/v1");
         assert_eq!(ask.model, "some \"quoted\" model");
         assert_eq!(ask.api_key.as_deref(), Some("sk-\\odd"));
-        assert_eq!(cfg.infer.tiers["device-synthesize"].base_url, "http://127.0.0.1:9/v1");
+        assert_eq!(cfg.infer.synthesize.base_url, "http://127.0.0.1:9/v1");
     }
 ```
 
