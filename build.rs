@@ -25,7 +25,15 @@ fn main() {
     println!("cargo:rerun-if-changed=extension/shared");
     println!("cargo:rerun-if-changed=extension/chrome/manifest.json");
     println!("cargo:rerun-if-changed=extension/firefox/manifest.json");
-    println!("cargo:rerun-if-changed={SIGNED}");
+    // Only where it exists. Cargo reads a watched path that is missing as one
+    // that has always just changed, and this file is missing from every
+    // checkout but a release's — so naming it unconditionally rebuilt the
+    // whole crate on every build, for everyone. What that gives up: dropping a
+    // signed package into a warm tree does not by itself trigger a rebuild. A
+    // release builds from a fresh checkout, where there is nothing to be stale.
+    if std::path::Path::new(SIGNED).exists() {
+        println!("cargo:rerun-if-changed={SIGNED}");
+    }
 
     stamp_assets();
 
