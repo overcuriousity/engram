@@ -112,6 +112,9 @@ class Engram internal constructor(
     /** What contained mode cannot open without, and does not have. Empty in server mode. */
     fun requiredMissing(): List<Model> = if (contained == null) emptyList() else ModelManifest.required.filterNot(::installed)
 
+    /** The phone could take dictation and has no model to do it with, and nobody has said "not now". */
+    val speechWanted: Boolean get() = contained != null && state.models().speech == null && !modes.speechDeclined
+
     /** Ask is set to the phone and the phone has nothing to answer with: the moment for the offer. */
     val askWantsAModel: Boolean get() = contained != null && modes.ask == AskVia.device && state.models().ask == null
 

@@ -67,12 +67,12 @@ fun ModeSection(engram: Engram) {
     }
 }
 
-/** What is on the phone and what could be. The speech model is not here until the phone can use one. */
+/** What is on the phone and what could be. */
 @Composable
 fun ModelsSection(engram: Engram) {
     val scope = rememberCoroutineScope()
     SettingsSection("Models") {
-        ModelManifest.all.filter { it.role == Role.embed || it.role == Role.ask }.forEach { m ->
+        ModelManifest.all.filter { it.role != Role.rerank }.forEach { m ->
             ModelLine(engram, m, onChanged = { scope.launch { engram.restartCore() } })
         }
     }

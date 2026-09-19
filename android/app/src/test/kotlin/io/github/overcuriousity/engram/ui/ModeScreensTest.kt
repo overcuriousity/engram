@@ -119,4 +119,13 @@ class ModeScreensTest {
         compose.onNodeWithText("Settings").performClick()
         assertEquals(1, opened)
     }
+
+    @Test fun theMicrophonesOfferNamesTheModelAndCanBeDeclined() {
+        val pressed = mutableListOf<String>()
+        compose.setContent { EngramTheme { SpeechOfferDialog({ Text("the model") }, { pressed += "not now" }, { pressed += "close" }) } }
+        compose.onNodeWithText("Dictation · no model yet").assertExists()
+        compose.onNodeWithText("the model").assertExists()
+        compose.onNodeWithText("Not now").performClick()
+        assertEquals(listOf("not now"), pressed)
+    }
 }

@@ -9,7 +9,7 @@ data class Started(val port: Int, val token: String)
 
 /** The model file for each role that runs on this device. Absent: that role does not. */
 @Serializable
-data class Models(val embed: String? = null, val rerank: String? = null, val ask: String? = null)
+data class Models(val embed: String? = null, val rerank: String? = null, val ask: String? = null, val speech: String? = null)
 
 /** An OpenAI-compatible endpoint of the person's choosing, for ask where the phone carries no model for it. */
 @Serializable
@@ -22,8 +22,10 @@ data class Setup(
     val rerank: String? = null,
     val ask: String? = null,
     val askEndpoint: Endpoint? = null,
+    /** A whisper.cpp model. Where there is one, the core opens the microphone's door. */
+    val speech: String? = null,
 ) {
-    constructor(models: Models, askEndpoint: Endpoint? = null) : this(models.embed, models.rerank, models.ask, askEndpoint)
+    constructor(models: Models, askEndpoint: Endpoint? = null) : this(models.embed, models.rerank, models.ask, askEndpoint, models.speech)
 }
 
 class CoreFailed(message: String) : Exception(message)

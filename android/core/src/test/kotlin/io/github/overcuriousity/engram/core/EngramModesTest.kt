@@ -258,4 +258,24 @@ class EngramModesTest {
         assertTrue(refused is IllegalStateException)
         assertNull(e.store.current.value)
     }
+
+    @Test fun aSpeechModelReachesTheCoreAndTheOfferIsMadeOnlyWhileItWouldHelp() = runTest {
+        assertFalse(engram().speechWanted)
+        choose(Mode.contained)
+        val e = engram()
+        assertTrue(e.ready())
+        assertNull(given!!.speech)
+        assertTrue(e.speechWanted)
+        e.modes.speechDeclined = true
+        assertFalse(e.speechWanted)
+        e.modes.speechDeclined = false
+        val f = install(Role.speech)
+        assertFalse(e.speechWanted)
+        assertTrue(e.restartCore())
+        assertEquals(f.path, given!!.speech)
+        // Ask set elsewhere does not cost the phone its ears.
+        e.modes.ask = AskVia.off
+        assertTrue(e.restartCore())
+        assertEquals(f.path, given!!.speech)
+    }
 }

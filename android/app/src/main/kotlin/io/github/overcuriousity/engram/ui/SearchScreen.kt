@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -46,6 +47,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.overcuriousity.engram.core.Engram
+import io.github.overcuriousity.engram.core.contained.ModelManifest
+import io.github.overcuriousity.engram.core.contained.Role
 import io.github.overcuriousity.engram.core.read.Api
 import io.github.overcuriousity.engram.core.read.Decode
 import io.github.overcuriousity.engram.core.read.Offer
@@ -111,7 +114,12 @@ fun SearchScreen(
     // that is not yet known, because a door that may be open is worth a press.
     val mic = remember { Microphone(ctx) }
     var micState by remember { mutableStateOf(MicState()) }
-    val micOpen = doors?.transcribe ?: true
+    // On a phone that is its own engram the button is there before the model
+    // is: the first press is where the model is offered.
+    var speechLooked by remember { mutableIntStateOf(0) }
+    val speechWanted = remember(speechLooked) { engram.speechWanted }
+    var speechOffer by remember { mutableStateOf(false) }
+    val micOpen = (doors?.transcribe ?: true) || speechWanted
     // A hold that never gets its release: the screen can leave composition
     // mid-press — a rotation is enough — and `tryAwaitRelease` is cancelled
     // with it, so nothing would ever close the door. The recorder and its
@@ -151,6 +159,7 @@ fun SearchScreen(
     }
     fun micDown() {
         if (micState.busy) return
+        if (speechWanted) { speechOffer = true; return }
         if (!mic.allowed) { micPermission.launch(Manifest.permission.RECORD_AUDIO); return }
         micState = if (mic.start()) MicState(listening = true, said = "Listening…") else MicState(said = "No microphone.")
     }
@@ -189,6 +198,17 @@ fun SearchScreen(
         }
     }
 
+    if (speechOffer) SpeechOfferDialog(
+        model = {
+            ModelManifest.defaultFor(Role.speech)?.let { m ->
+                // Arrived: a new core over it, and the status read again, which
+                // is what turns the offer's button into the microphone.
+                ModelLine(engram, m, onChanged = { scope.launch { engram.restartCore(); speechLooked++; status.retry() } })
+            }
+        },
+        onNotNow = { engram.modes.speechDeclined = true; speechOffer = false; speechLooked++ },
+        onDismiss = { speechOffer = false; speechLooked++ },
+    )
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         if (keptFrom != null) {
             Text(

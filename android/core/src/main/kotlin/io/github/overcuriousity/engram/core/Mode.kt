@@ -15,6 +15,11 @@ class ModeStore(private val prefs: SharedPreferences) {
         get() = prefs.getString("mode", null)?.let { w -> Mode.entries.firstOrNull { it.name == w } }
         set(v) = prefs.edit().putString("mode", v?.name).apply()
 
+    /** The microphone's offer was answered "not now". It is not made twice; Settings' Models is the way back. */
+    var speechDeclined: Boolean
+        get() = prefs.getBoolean("speech_declined", false)
+        set(v) = prefs.edit().putBoolean("speech_declined", v).apply()
+
     /** How a contained phone answers questions. Unset is `device`: a model that is installed is used. */
     var ask: AskVia
         get() = prefs.getString("ask", null)?.let { w -> AskVia.entries.firstOrNull { it.name == w } } ?: AskVia.device
@@ -41,7 +46,7 @@ class ModeState(val dbName: String, val outbox: File, val core: File?, val model
     fun models(): Models {
         fun at(role: Role) = ModelManifest.all.filter { it.role == role }.sortedBy { it.default }
             .firstNotNullOfOrNull { m -> models?.let { File(it, m.file) }?.takeIf { f -> f.isFile && f.length() == m.bytes }?.path }
-        return Models(embed = at(Role.embed), rerank = at(Role.rerank), ask = at(Role.ask))
+        return Models(embed = at(Role.embed), rerank = at(Role.rerank), ask = at(Role.ask), speech = at(Role.speech))
     }
 
     companion object {
