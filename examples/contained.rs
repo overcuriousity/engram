@@ -3,6 +3,9 @@
 //! serves until interrupted.
 //!
 //!     cargo run --features contained --example contained -- /tmp/engram-contained [models-dir]
+//!
+//! `ENGRAM_ASK_URL` and `ENGRAM_ASK_MODEL` name an endpoint, as Settings does
+//! on the phone, and the gate on generation is opened as a charging phone's is.
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -29,7 +32,16 @@ async fn main() -> anyhow::Result<()> {
         ask: pick("ask.gguf"),
         speech: pick("speech.bin"),
     };
-    let (started, running) = engram::contained::start(&dir, models).await?;
+    let ask = std::env::var("ENGRAM_ASK_URL")
+        .ok()
+        .map(|base_url| engram::contained::Endpoint {
+            base_url,
+            model: std::env::var("ENGRAM_ASK_MODEL").unwrap_or_default(),
+            api_key: None,
+        });
+    let (started, running) =
+        engram::contained::start_with(&dir, engram::contained::Setup { models, ask }).await?;
+    running.allow_generation(true);
     println!("origin=http://127.0.0.1:{}", started.port);
     println!("token={}", started.token);
     tokio::signal::ctrl_c().await?;

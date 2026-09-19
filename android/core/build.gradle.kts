@@ -44,6 +44,9 @@ val buildNative by tasks.registering(Exec::class) {
         .orElse(androidComponents.sdkComponents.sdkDirectory.map { it.dir("ndk/28.2.13676358").asFile.absolutePath })
     workingDir = rootProject.file("native")
     environment("ANDROID_NDK_HOME", ndk.get())
+    // llama.cpp's build reads this one and not the other, and failing it takes
+    // whatever NDK it finds: one library from two NDKs.
+    environment("ANDROID_NDK", ndk.get())
     commandLine(
         "cargo", "+stable", "ndk", "-t", "arm64-v8a", "--platform", "29",
         "-o", file("src/main/jniLibs").absolutePath, "build", "--release",
