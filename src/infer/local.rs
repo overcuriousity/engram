@@ -606,6 +606,52 @@ pub struct LocalModels {
     pub embed: Option<PathBuf>,
     pub rerank: Option<PathBuf>,
     pub ask: Option<PathBuf>,
+    /// A whisper.cpp model. Where there is one, the microphone's door is open.
+    pub speech: Option<PathBuf>,
+}
+
+// ---- speech ---------------------------------------------------------------
+
+/// Speech to words on this device, over whisper.cpp.
+///
+/// The model is loaded for a recording and dropped when the words are out.
+/// Dictation is a held button a few times a day, not a stream, and on a phone
+/// the memory is worth more than the second a load costs: this is the one
+/// model here that does not keep a thread of its own. One recording at a time
+/// — two held buttons do not exist, and two loaded models should not either.
+pub struct LocalTranscriber {
+    path: PathBuf,
+    /// An ISO-639-1 code, or `None` to let the model decide from the audio.
+    lang: Option<String>,
+    one: tokio::sync::Mutex<()>,
+}
+
+impl LocalTranscriber {
+    pub fn new(path: PathBuf, lang: Option<String>) -> LocalTranscriber {
+        LocalTranscriber {
+            path,
+            lang,
+            one: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[async_trait]
+impl crate::infer::Transcriber for LocalTranscriber {
+    async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String> {
+        let samples = crate::infer::pcm::samples_16k(audio, mime)?;
+        if samples.is_empty() {
+            return Ok(String::new());
+        }
+        let _one = self.one.lock().await;
+        let (path, lang) = (self.path.clone(), self.lang.clone());
+        tokio::task::spawn_blocking(move || {
+            let mut model = crate::infer::whisper::Whisper::open(&path)?;
+            model.run(&samples, lang.as_deref(), threads())
+        })
+        .await
+        .map_err(|e| failed("transcribe", e))?
+    }
 }
 
 #[cfg(test)]
@@ -776,5 +822,43 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("2048"), "{err}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recording_becomes_its_words() {
+        use crate::infer::Transcriber;
+        let (Some(model), Some(wav)) = (model("speech.bin"), model("speech.wav")) else {
+            return;
+        };
+        let t = LocalTranscriber::new(model, None);
+        let words = t
+            .transcribe(&std::fs::read(wav).unwrap(), "audio/wav")
+            .await
+            .unwrap()
+            .to_lowercase();
+        assert!(words.contains("ask not what your country"), "{words}");
+    }
+
+    #[tokio::test]
+    async fn silence_of_no_length_is_no_words_and_no_model_is_loaded_for_it() {
+        use crate::infer::Transcriber;
+        let t = LocalTranscriber::new("/nowhere/speech.bin".into(), None);
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        hound::WavWriter::new(&mut bytes, spec)
+            .unwrap()
+            .finalize()
+            .unwrap();
+        assert_eq!(
+            t.transcribe(&bytes.into_inner(), "audio/wav")
+                .await
+                .unwrap(),
+            ""
+        );
     }
 }

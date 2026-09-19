@@ -512,6 +512,14 @@ impl Core {
         if let (Some(path), Some(role)) = (&models.ask, cfg.infer.ask.as_ref()) {
             self.completer = Some(Arc::new(LocalCompleter::new(path.clone(), role)));
         }
+        // No role in the config stands behind this one: the file is the whole
+        // of it, and its presence is what opens the microphone's door.
+        if let Some(path) = &models.speech {
+            self.transcriber = Some(Arc::new(crate::infer::local::LocalTranscriber::new(
+                path.clone(),
+                None,
+            )));
+        }
         self
     }
 
@@ -1411,6 +1419,7 @@ mod contained_tests {
             embed: Some(dir.join("embed.gguf")),
             rerank: None,
             ask: None,
+            speech: None,
         };
         let tmp = tempfile::tempdir().unwrap();
         let factory = crate::tenants::SqliteFactory {

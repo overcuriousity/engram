@@ -23,6 +23,7 @@ struct Setup {
     embed: Option<std::path::PathBuf>,
     rerank: Option<std::path::PathBuf>,
     ask: Option<std::path::PathBuf>,
+    speech: Option<std::path::PathBuf>,
     ask_endpoint: Option<Endpoint>,
 }
 
@@ -58,6 +59,7 @@ fn start(data_dir: String, setup: String) -> Result<serde_json::Value, String> {
                     embed: s.embed,
                     rerank: s.rerank,
                     ask: s.ask,
+                    speech: s.speech,
                 },
                 ask: s.ask_endpoint.map(|e| engram::contained::Endpoint {
                     base_url: e.base_url,

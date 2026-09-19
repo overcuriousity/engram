@@ -399,6 +399,54 @@ mod tests {
         running.stop().await;
     }
 
+    async fn dictate(started: &Started, wav: Vec<u8>) -> reqwest::Response {
+        let part = reqwest::multipart::Part::bytes(wav)
+            .file_name("recording")
+            .mime_str("audio/wav")
+            .unwrap();
+        reqwest::Client::new()
+            .post(format!(
+                "http://127.0.0.1:{}/api/v1/transcribe",
+                started.port
+            ))
+            .bearer_auth(&started.token)
+            .multipart(reqwest::multipart::Form::new().part("audio", part))
+            .send()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn with_no_speech_model_the_microphones_door_is_shut() {
+        let dir = tempfile::tempdir().unwrap();
+        let (started, running) = start(dir.path(), Default::default()).await.unwrap();
+        assert_eq!(status_json(&started).await["transcribe"], false);
+        assert_eq!(dictate(&started, b"RIFF".to_vec()).await.status(), 404);
+        running.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_speech_model_opens_it() {
+        let (Some(model), Some(wav)) = (
+            crate::infer::whisper::tests::file("speech.bin"),
+            crate::infer::whisper::tests::file("speech.wav"),
+        ) else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let models = LocalModels {
+            speech: Some(model),
+            ..Default::default()
+        };
+        let (started, running) = start(dir.path(), models).await.unwrap();
+        assert_eq!(status_json(&started).await["transcribe"], true);
+        let heard = dictate(&started, std::fs::read(wav).unwrap()).await;
+        assert_eq!(heard.status(), 200);
+        let words = heard.text().await.unwrap().to_lowercase();
+        assert!(words.contains("ask not what your country"), "{words}");
+        running.stop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn with_an_endpoint_the_app_decides() {
         let dir = tempfile::tempdir().unwrap();

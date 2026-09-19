@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
         embed: pick("embed.gguf"),
         rerank: pick("rerank.gguf"),
         ask: pick("ask.gguf"),
+        speech: pick("speech.bin"),
     };
     let (started, running) = engram::contained::start(&dir, models).await?;
     println!("origin=http://127.0.0.1:{}", started.port);
