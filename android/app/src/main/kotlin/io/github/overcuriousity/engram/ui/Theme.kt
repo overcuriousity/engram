@@ -1,5 +1,6 @@
 package io.github.overcuriousity.engram.ui
 
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
@@ -88,6 +89,13 @@ fun EngramTheme(mode: ThemeMode = ThemeMode.System, content: @Composable () -> U
         ThemeMode.System -> isSystemInDarkTheme()
         ThemeMode.Light -> false
         ThemeMode.Dark -> true
+    }
+    // The bars' icons follow the system unless told, and a light app on a dark
+    // phone then has white icons on its light background.
+    val activity = androidx.activity.compose.LocalActivity.current as? androidx.activity.ComponentActivity
+    androidx.compose.runtime.LaunchedEffect(dark) {
+        val style = androidx.activity.SystemBarStyle.auto(android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT) { dark }
+        activity?.enableEdgeToEdge(style, style)
     }
     MaterialTheme(
         colorScheme = if (dark) EngramColors.dark else EngramColors.light,

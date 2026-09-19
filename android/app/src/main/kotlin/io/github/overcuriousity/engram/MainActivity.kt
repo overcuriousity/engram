@@ -42,7 +42,11 @@ class MainActivity : ComponentActivity() {
             val engram = current ?: app.engram
             val theme by engram.theme.collectAsStateWithLifecycle()
             EngramTheme(mode = ThemeMode.entries.firstOrNull { it.name.equals(theme, ignoreCase = true) } ?: ThemeMode.System) {
-                key(engram) { EngramApp(engram, start, pairText, focusBox, onUnpair = app::unpairAsync) }
+                // The screens before there is a connection have no Scaffold, and
+                // text outside a Surface is black whatever the theme says.
+                androidx.compose.material3.Surface(color = androidx.compose.material3.MaterialTheme.colorScheme.background) {
+                    key(engram) { EngramApp(engram, start, pairText, focusBox, onUnpair = app::unpairAsync) }
+                }
             }
         }
     }

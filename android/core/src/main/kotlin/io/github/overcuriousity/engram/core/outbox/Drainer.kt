@@ -74,7 +74,7 @@ internal class Drainer(
             Kind.capture_text -> settle(row, transport.captureText(s("text") ?: "", s("title"), s("note"), tz(), s("from_ask")))
             Kind.capture_files -> {
                 val files = outbox.filesOf(row.id).map { OutFile(it.path, it.name, it.mime) }
-                settle(row, transport.captureFiles(files, s("title"), s("note"), tz()))
+                settle(row, transport.captureFiles(files, s("title"), s("note")))
             }
             // A moment the server no longer has is a moment nobody still owes:
             // 404 settles the row rather than holding it for a review that has
