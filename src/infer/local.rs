@@ -534,7 +534,33 @@ fn generate(
         LlamaSampler::dist(0),
     ]);
     let mut decoder = encoding_rs::UTF_8.new_decoder();
+    // Some templates open the thinking themselves, and then the model only
+    // ever writes the closing tag.
+    let mut split = ThinkSplit::new(prompt.trim_end().ends_with(THINK_OPEN));
     let mut text = String::new();
+    let emit = |parts: Vec<(bool, String)>, text: &mut String| {
+        for (thinking, mut part) in parts {
+            // What follows the closing tag is a blank line before the answer.
+            if !thinking && text.is_empty() {
+                part = part.trim_start().to_string();
+            }
+            if part.is_empty() {
+                continue;
+            }
+            if !thinking {
+                text.push_str(&part);
+            }
+            if let Some(sink) = &job.sink {
+                // A reader that went away does not stop the answer; see
+                // `Completer::answer_streaming`.
+                let _ = sink.blocking_send(if thinking {
+                    Delta::Reasoning(part)
+                } else {
+                    Delta::Token(part)
+                });
+            }
+        }
+    };
     let mut truncated = true;
     for step in 0..job.ceiling {
         let pos = (tokens.len() + step) as i32;
@@ -547,21 +573,77 @@ fn generate(
         let piece = model
             .token_to_piece(token, &mut decoder, false, None)
             .map_err(|e| failed("ask", e))?;
-        if !piece.is_empty() {
-            text.push_str(&piece);
-            if let Some(sink) = &job.sink {
-                // A reader that went away does not stop the answer; see
-                // `Completer::answer_streaming`.
-                let _ = sink.blocking_send(Delta::Token(piece));
-            }
-        }
+        emit(split.feed(&piece), &mut text);
         batch.clear();
         batch
             .add(token, pos, &[0], true)
             .map_err(|e| failed("ask", e))?;
         ctx.decode(&mut batch).map_err(|e| failed("ask", e))?;
     }
+    emit(split.finish(), &mut text);
     Ok(Completion { text, truncated })
+}
+
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// Parts a reasoning model's thinking from its answer, as the pieces arrive.
+///
+/// An endpoint does this on its side and sends `reasoning_content`; in process
+/// the tags are in the text. A piece can end inside a tag, so what might be
+/// the start of one is held back until the next piece settles it.
+struct ThinkSplit {
+    thinking: bool,
+    held: String,
+}
+
+impl ThinkSplit {
+    fn new(thinking: bool) -> ThinkSplit {
+        ThinkSplit {
+            thinking,
+            held: String::new(),
+        }
+    }
+
+    /// `(is thinking, text)` for everything now known to be one or the other.
+    fn feed(&mut self, piece: &str) -> Vec<(bool, String)> {
+        self.held.push_str(piece);
+        let mut out = Vec::new();
+        loop {
+            let tag = if self.thinking {
+                THINK_CLOSE
+            } else {
+                THINK_OPEN
+            };
+            if let Some(at) = self.held.find(tag) {
+                let rest = self.held.split_off(at + tag.len());
+                self.held.truncate(at);
+                out.push((self.thinking, std::mem::replace(&mut self.held, rest)));
+                self.thinking = !self.thinking;
+                continue;
+            }
+            // The longest tail that a tag could still grow out of.
+            let keep = (1..tag.len())
+                .rev()
+                .find(|n| self.held.ends_with(&tag[..*n]))
+                .unwrap_or(0);
+            let tail = self.held.split_off(self.held.len() - keep);
+            out.push((self.thinking, std::mem::replace(&mut self.held, tail)));
+            break;
+        }
+        out.retain(|(_, part)| !part.is_empty());
+        out
+    }
+
+    /// A held tail that never became a tag was text after all.
+    fn finish(&mut self) -> Vec<(bool, String)> {
+        let held = std::mem::take(&mut self.held);
+        if held.is_empty() {
+            Vec::new()
+        } else {
+            vec![(self.thinking, held)]
+        }
+    }
 }
 
 #[async_trait]
@@ -757,6 +839,44 @@ mod tests {
 
     use crate::infer::{Completer, Delta};
 
+    fn split(thinking: bool, pieces: &[&str]) -> (String, String) {
+        let mut s = ThinkSplit::new(thinking);
+        let mut parts: Vec<_> = pieces.iter().flat_map(|p| s.feed(p)).collect();
+        parts.extend(s.finish());
+        let of = |want: bool| {
+            parts
+                .iter()
+                .filter(|(t, _)| *t == want)
+                .map(|(_, p)| p.as_str())
+                .collect::<String>()
+        };
+        (of(true), of(false))
+    }
+
+    #[test]
+    fn thinking_is_parted_from_the_answer_even_when_a_tag_is_cut_in_two() {
+        assert_eq!(
+            split(false, &["<thi", "nk>hm, ", "two</th", "ink>\n\nFour."]),
+            ("hm, two".into(), "\n\nFour.".into())
+        );
+    }
+
+    #[test]
+    fn a_template_that_opened_the_thinking_needs_only_the_closing_tag() {
+        assert_eq!(
+            split(true, &["hm</think>Four."]),
+            ("hm".into(), "Four.".into())
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_thinking_and_a_stray_bracket_comes_through_whole() {
+        assert_eq!(
+            split(false, &["a <", "b and 1 <t"]),
+            (String::new(), "a <b and 1 <t".into())
+        );
+    }
+
     fn ask_role() -> crate::config::AskRole {
         let mut role = crate::config::Config::test_default()
             .infer
@@ -783,6 +903,38 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(done.text.to_lowercase().contains("blue"), "{}", done.text);
+        let mut streamed = String::new();
+        while let Some(d) = rx.recv().await {
+            if let Delta::Token(t) = d {
+                streamed.push_str(&t)
+            }
+        }
+        assert_eq!(streamed, done.text);
+    }
+
+    /// Passes over a model that does not think, which has nothing to part.
+    #[tokio::test]
+    async fn a_model_that_thinks_aloud_answers_without_its_thinking() {
+        let Some(path) = model("ask.gguf") else {
+            return;
+        };
+        // Thinking is billed against the ceiling, and sixty-four tokens of it
+        // leave none for the answer.
+        let mut role = ask_role();
+        role.max_output_tokens = 1024;
+        let c = LocalCompleter::new(path, &role);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4096);
+        let done = c
+            .answer_streaming(
+                "Answer in one short sentence, using only the note.",
+                "Note: the invoice is in the blue folder.\nQuestion: where is the invoice?",
+                1024,
+                tx,
+            )
+            .await
+            .unwrap();
+        assert!(!done.text.contains("think>"), "{}", done.text);
         assert!(done.text.to_lowercase().contains("blue"), "{}", done.text);
         let mut streamed = String::new();
         while let Some(d) = rx.recv().await {
