@@ -237,9 +237,10 @@ internal class Transport(
                 .build(),
         )
 
-    suspend fun captureFiles(files: List<OutFile>, title: String?, note: String?, tz: String): Answer {
+    // No `tz`: the server reads a file on the file's own terms and refuses a
+    // zone sent beside one, which held every shared file for review.
+    suspend fun captureFiles(files: List<OutFile>, title: String?, note: String?): Answer {
         val body = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
-            addFormDataPart("tz", tz)
             if (title != null) addFormDataPart("title", title)
             if (note != null) addFormDataPart("note", note)
             // A provider is free to hand back a type no parser accepts, and one

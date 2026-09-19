@@ -41,9 +41,11 @@ class TransportTest {
     @Test fun filesGoAsMultipartNamedFile() = runTest {
         server.enqueue(MockResponse(code = 202, body = "{}"))
         val f = kotlin.io.path.createTempFile("cap", ".txt").toFile().apply { writeText("bytes") }
-        t.captureFiles(listOf(OutFile(f.path, "note.txt", "text/plain")), null, "n", "UTC")
+        t.captureFiles(listOf(OutFile(f.path, "note.txt", "text/plain")), null, "n")
         val r = server.takeRequest()
         val body = r.body!!.utf8()
+        // The server refuses a zone beside a file; see `refuse_time_fields`.
+        assertTrue(!body.contains("name=\"tz\""))
         assertTrue(body.contains("name=\"file\"; filename=\"note.txt\""))
         assertTrue(body.contains("name=\"note\""))
         assertTrue(body.contains("bytes"))
