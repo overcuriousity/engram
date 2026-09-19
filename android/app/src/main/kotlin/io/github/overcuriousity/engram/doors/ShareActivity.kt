@@ -20,7 +20,9 @@ class ShareActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val engram = (application as App).engram
-        if (engram.store.current.value == null) {
+        // Contained, there is always somewhere to keep it: the worker starts
+        // the core to deliver what was shared.
+        if (!engram.loopback && engram.store.current.value == null) {
             Toast.makeText(this, "Pair engram first", Toast.LENGTH_SHORT).show()
             startActivity(Intent(this, MainActivity::class.java))
             finish()

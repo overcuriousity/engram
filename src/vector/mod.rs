@@ -1,6 +1,11 @@
 pub mod memory;
 pub mod qdrant;
 pub mod sparse;
+#[cfg(feature = "contained")]
+pub mod sqlite;
+
+#[cfg(test)]
+pub(crate) mod conformance;
 
 use crate::error::Result;
 use crate::store::artifacts::ArtifactStatus;

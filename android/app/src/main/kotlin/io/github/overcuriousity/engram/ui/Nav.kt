@@ -27,6 +27,12 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ColorFilter
@@ -43,7 +49,13 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import io.github.overcuriousity.engram.R
 import io.github.overcuriousity.engram.core.Engram
+import io.github.overcuriousity.engram.core.Mode
+import io.github.overcuriousity.engram.core.contained.Core
+import io.github.overcuriousity.engram.core.contained.ModelManifest
+import kotlinx.coroutines.launch
 import io.github.overcuriousity.engram.core.PinMismatch
+import io.github.overcuriousity.engram.core.contained.CoreState
+import kotlinx.coroutines.flow.StateFlow
 import java.time.LocalDate
 import java.time.ZoneId
 
@@ -115,7 +127,7 @@ fun EngramApp(
     focusBox: Boolean = false,
     onUnpair: () -> Unit,
 ) {
-    val connection by engram.store.current.collectAsStateWithLifecycle()
+    val connection by engram.connection.collectAsStateWithLifecycle()
     val refused by engram.refused.collectAsStateWithLifecycle()
     val pinned by engram.pinMismatch.collectAsStateWithLifecycle()
     val nav = rememberNavController()
@@ -124,8 +136,39 @@ fun EngramApp(
         PinMismatchScreen(pinned!!, onUnpair = onUnpair)
         return
     }
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    // A new install chooses where its engram lives. One that holds a
+    // connection never sees this, and a pairing code goes straight to pairing.
+    var pairing by rememberSaveable { mutableStateOf(false) }
+    if (connection == null && engram.modes.chosen == null && pairText == null && !pairing) {
+        ModeChooser(
+            Core.available, sizeWords(ModelManifest.required.sumOf { it.bytes }),
+            onPhone = { scope.launch { Engram.switch(ctx, Mode.contained) } },
+            onServer = { pairing = true },
+        )
+        return
+    }
+    // A pairing code reaching a phone that is its own engram means "use that
+    // server". The mode changes first; the next instance is handed the same
+    // code and pairs with it.
+    if (engram.loopback && pairText != null) {
+        LaunchedEffect(pairText) { Engram.switch(ctx, Mode.server) }
+        return
+    }
+    if (engram.loopback) {
+        var missing by remember { mutableStateOf(engram.requiredMissing()) }
+        if (missing.isNotEmpty()) {
+            DownloadScreen(
+                engram, missing, onChanged = { missing = engram.requiredMissing() },
+                onServer = { scope.launch { Engram.switch(ctx, Mode.server) } },
+            )
+            return
+        }
+    }
     if (connection == null) {
-        PairScreen(engram, initialText = pairText)
+        val core = engram.core
+        if (core == null) PairScreen(engram, initialText = pairText) else CoreStarting(engram, core)
         return
     }
 
@@ -217,6 +260,7 @@ fun EngramApp(
                     AskScreen(
                         engram, it.arguments?.getString("q").orEmpty(), onArtifact, onCorpus,
                         onEditFirst = { answer, event, q -> go(Routes.search(answer, event, q)) },
+                        onSettings = { go(Screen.Settings.route) },
                     )
                 }
                 composable(Routes.ARTIFACT, arguments = Routes.optional) { entry ->
@@ -256,6 +300,23 @@ fun RefusedBanner(onRescan: () -> Unit) {
         ) {
             Text("Unpaired on the server · queue holds", style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onRescan) { Text("Scan a new code") }
+        }
+    }
+}
+
+/** Contained mode before the core answers: a word while it starts, and the reason where it cannot. */
+@Composable
+fun CoreStarting(engram: Engram, core: StateFlow<CoreState>) {
+    val state by core.collectAsStateWithLifecycle()
+    LaunchedEffect(Unit) { engram.ready() }
+    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.Center) {
+        when (val s = state) {
+            is CoreState.Unavailable -> {
+                Text("On this phone · unavailable", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(12.dp))
+                Text(s.why, style = MaterialTheme.typography.labelMedium)
+            }
+            else -> Text("Starting", style = MaterialTheme.typography.titleLarge)
         }
     }
 }

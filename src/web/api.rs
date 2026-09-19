@@ -190,6 +190,10 @@ pub struct StatusResponse {
     pub learn: bool,
     pub recommend: bool,
     /// What the base holds, for the idle line: sources and live artifacts.
+    /// Units in the stages that call a generation model, still waiting. On a
+    /// server this is the ordinary backlog. On an engram a phone carries, it
+    /// is what the closed gate is holding back.
+    pub waiting_generation: i64,
     pub held: HeldBrief,
     /// The last capture, for the idle line. Null on an empty base.
     pub last_kept: Option<LastKept>,
@@ -2084,6 +2088,15 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
         vision: tenant.core.describer.is_some(),
         learn: tenant.core.learn.enabled,
         recommend: tenant.core.recommends(),
+        waiting_generation: tenant
+            .core
+            .store
+            .control
+            .waiting_on(
+                &tenant.core.store.subject,
+                &crate::store::jobs::Stage::GENERATORS,
+            )
+            .await?,
         held: HeldBrief {
             corpora: held_corpora,
             artifacts: held_artifacts,

@@ -1,7 +1,18 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Situation reads the active network on every bundle. The app only ever
          had this because WorkManager's manifest merged it in; the module that
          makes the call is the one that should ask for it. -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- The model download runs in the foreground. Here and not in the app,
+         for the same reason: DownloadWorker is this module's, and lint reads
+         this manifest when it checks it. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <application>
+        <!-- WorkManager's own service, told what kind of foreground work it carries. -->
+        <service android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync" tools:node="merge" />
+    </application>
 </manifest>

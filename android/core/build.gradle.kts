@@ -11,6 +11,7 @@ android {
     defaultConfig {
         minSdk = 29
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles("consumer-rules.pro")
     }
     // Every launch-time crash this app had was an API newer than minSdk, which
     // the compiler cannot see and only lint does. Fatal, and run in CI.
@@ -33,6 +34,33 @@ android {
     }
 }
 
+
+// The Rust core, built for the phone. Only with `-Pengram.native=1`: a
+// checkout with no Rust toolchain must still build the app, and then runs in
+// server mode only. `cargo +stable` because the Android target lives on the
+// rustup toolchain, whatever the machine's everyday cargo is.
+val buildNative by tasks.registering(Exec::class) {
+    val ndk = providers.environmentVariable("ANDROID_NDK_HOME")
+        .orElse(androidComponents.sdkComponents.sdkDirectory.map { it.dir("ndk/28.2.13676358").asFile.absolutePath })
+    workingDir = rootProject.file("native")
+    environment("ANDROID_NDK_HOME", ndk.get())
+    // llama.cpp's build reads this one and not the other, and failing it takes
+    // whatever NDK it finds: one library from two NDKs.
+    environment("ANDROID_NDK", ndk.get())
+    commandLine(
+        "cargo", "+stable", "ndk", "-t", "arm64-v8a", "--platform", "29",
+        "-o", file("src/main/jniLibs").absolutePath, "build", "--release",
+    )
+}
+if (providers.gradleProperty("engram.native").isPresent) {
+    tasks.named("preBuild") { dependsOn(buildNative) }
+}
+
+// What the core's certificate verifier calls into over JNI. With the .so or
+// not at all; the repository it comes from is in settings.gradle.kts.
+if (providers.gradleProperty("engram.native").isPresent) {
+    dependencies { implementation("rustls:rustls-platform-verifier:0.1.1") }
+}
 
 room { schemaDirectory("$projectDir/schemas") }
 

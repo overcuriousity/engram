@@ -38,7 +38,7 @@ internal class ServerReader(
         }
         // Keyed by origin as well: after a re-pair elsewhere, the previous
         // server's notes must not appear under the new one's name.
-        val origin = t.connection.origin
+        val origin = t.source
         // Every cache call is guarded, not only the decode. `body` is the
         // whole answer and nothing caps it — `GET /corpora/{id}` carries
         // `raw_text`, which for a captured book is the book — and reading a

@@ -6,8 +6,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import io.github.overcuriousity.engram.core.LightSample
+import io.github.overcuriousity.engram.core.contained.Passes
+import io.github.overcuriousity.engram.core.reminders.LocalReminders
+import kotlinx.coroutines.launch
 import io.github.overcuriousity.engram.ui.EngramApp
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import io.github.overcuriousity.engram.core.Engram
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.overcuriousity.engram.ui.EngramTheme
 import io.github.overcuriousity.engram.ui.Screen
@@ -31,9 +36,13 @@ class MainActivity : ComponentActivity() {
         // a shortcut pinned by an older build still says.
         val focusBox = asked == "capture" || asked == "compose"
         setContent {
-            val theme by app.engram.theme.collectAsStateWithLifecycle()
+            // Changing the mode replaces the engram. Keyed on the instance, the
+            // whole composition goes with the one it was remembered from.
+            val current by Engram.current.collectAsStateWithLifecycle()
+            val engram = current ?: app.engram
+            val theme by engram.theme.collectAsStateWithLifecycle()
             EngramTheme(mode = ThemeMode.entries.firstOrNull { it.name.equals(theme, ignoreCase = true) } ?: ThemeMode.System) {
-                EngramApp(app.engram, start, pairText, focusBox, onUnpair = app::unpairAsync)
+                key(engram) { EngramApp(engram, start, pairText, focusBox, onUnpair = app::unpairAsync) }
             }
         }
     }
@@ -47,7 +56,15 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         LightSample.start(this)
-        (application as App).engram.counters.mark()
+        val app = application as App
+        app.engram.counters.mark()
+        // A phone that is its own engram: look at what is due, and keep the
+        // background pass scheduled for as long as there is somewhere for its
+        // work to go.
+        if (app.engram.loopback) {
+            app.scope.launch { if (app.engram.ready()) LocalReminders.refresh(app.engram) }
+            if (app.engram.passWanted) Passes.schedule(this) else Passes.cancel(this)
+        }
     }
 
     override fun onPause() {

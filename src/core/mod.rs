@@ -488,6 +488,41 @@ impl Core {
     /// `main`, so the evaluation harness drives exactly the `Core` the binary
     /// does — a benchmark against a differently wired core measures the wrong
     /// program.
+    /// The same core with the named roles served by models in this process.
+    #[cfg(feature = "contained")]
+    pub fn with_local_models(
+        mut self,
+        cfg: &Config,
+        models: &crate::infer::local::LocalModels,
+    ) -> Core {
+        use crate::infer::local::{LocalCompleter, LocalEmbedder, LocalReranker};
+        if let Some(path) = &models.embed {
+            self.embedder = Arc::new(LocalEmbedder::new(path.clone(), &cfg.infer.embed));
+        }
+        if let Some(path) = &models.rerank {
+            // A pair is a query and one passage; 512 holds both with room.
+            self.reranker = Some(Arc::new(LocalReranker::new(path.clone(), 512)));
+            if self.rerank_apply.is_empty() {
+                self.rerank_apply = vec![
+                    crate::config::RerankApply::Ask,
+                    crate::config::RerankApply::Search,
+                ];
+            }
+        }
+        if let (Some(path), Some(role)) = (&models.ask, cfg.infer.ask.as_ref()) {
+            self.completer = Some(Arc::new(LocalCompleter::new(path.clone(), role)));
+        }
+        // No role in the config stands behind this one: the file is the whole
+        // of it, and its presence is what opens the microphone's door.
+        if let Some(path) = &models.speech {
+            self.transcriber = Some(Arc::new(crate::infer::local::LocalTranscriber::new(
+                path.clone(),
+                None,
+            )));
+        }
+        self
+    }
+
     pub fn from_config(cfg: &Config, vectors: Arc<dyn VectorStore>, store: Store) -> Core {
         Core::from_config_with(cfg, vectors, store, Working::default())
     }
@@ -1311,5 +1346,118 @@ mod tests {
             .to_string();
         assert!(err.contains("2026-09 capture reshape"), "{err}");
         assert!(err.contains("infer.synthesis"), "{err}");
+    }
+}
+
+#[cfg(all(test, feature = "contained"))]
+mod contained_tests {
+    use crate::core::test_support::{TEST_DIM, test_core};
+    use crate::store::feedback::Door;
+    use crate::tenants::VectorFactory;
+
+    /// The whole of part 1 in one test: a capture goes in, the jobs run, and a
+    /// search finds it — with no Qdrant anywhere, and the base is still there
+    /// for a second store opened over the same file.
+    #[tokio::test]
+    async fn a_capture_is_found_again_with_only_a_file_for_a_vector_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let factory = crate::tenants::SqliteFactory {
+            dir: dir.path().into(),
+            prefix: "artifacts".into(),
+            scoring: crate::vector::sqlite::Scoring::off(),
+        };
+        let mut core = test_core().await;
+        core.vectors = factory.open("artifacts_phone", TEST_DIM).await.unwrap();
+
+        let out = core
+            .ingest(
+                "Die Rechnung für den Steuerberater liegt im blauen Ordner.",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+
+        let q = crate::core::search::SearchQuery {
+            q: "Steuerberater".into(),
+            limit: 5,
+            tags: vec![],
+            category: None,
+            mark: true,
+            rerank: false,
+            explain: false,
+            include_deprecated: false,
+            include_superseded: false,
+        };
+        let hits = core.search(&q, Door::Cli).await.unwrap();
+        assert!(
+            hits.iter().any(|h| h.corpus_id == out.id),
+            "the capture was not found"
+        );
+
+        let again = factory.open("artifacts_phone", TEST_DIM).await.unwrap();
+        assert!(again.count().await.unwrap() > 0);
+        assert_eq!(
+            again.count().await.unwrap(),
+            core.vectors.count().await.unwrap()
+        );
+    }
+
+    /// Part 1's test with the fake embedder gone: real vectors from a real
+    /// model, into a file, found by a query in another language.
+    #[tokio::test]
+    async fn a_german_capture_is_found_by_an_english_question_with_no_endpoint_anywhere() {
+        let Some(dir) = std::env::var_os("ENGRAM_TEST_MODELS").map(std::path::PathBuf::from) else {
+            eprintln!("skipped: ENGRAM_TEST_MODELS is not set");
+            return;
+        };
+        let mut cfg = crate::config::Config::test_default();
+        cfg.infer.embed.dim = 768;
+        cfg.infer.embed.max_input_tokens = 512;
+        let models = crate::infer::local::LocalModels {
+            embed: Some(dir.join("embed.gguf")),
+            rerank: None,
+            ask: None,
+            speech: None,
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let factory = crate::tenants::SqliteFactory {
+            dir: tmp.path().into(),
+            prefix: "artifacts".into(),
+            scoring: crate::vector::sqlite::Scoring::off(),
+        };
+        let mut core = test_core().await.with_local_models(&cfg, &models);
+        core.vectors = factory.open("artifacts_phone", 768).await.unwrap();
+
+        let out = core
+            .ingest(
+                "Die Rechnung für den Steuerberater liegt im blauen Ordner.",
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        core.ingest("Brot braucht Mehl, Wasser, Salz und Zeit.", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+
+        let q = crate::core::search::SearchQuery {
+            q: "where did I put the invoice for the tax adviser".into(),
+            limit: 5,
+            tags: vec![],
+            category: None,
+            mark: true,
+            rerank: false,
+            explain: false,
+            include_deprecated: false,
+            include_superseded: false,
+        };
+        let hits = core.search(&q, Door::Cli).await.unwrap();
+        assert_eq!(
+            hits[0].corpus_id, out.id,
+            "no word is shared; only the meaning is"
+        );
     }
 }

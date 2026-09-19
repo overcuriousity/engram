@@ -32,15 +32,16 @@
   "vision": true,
   "learn": true,
   "recommend": false,
+  "waiting_generation": 0,
   "held": {
     "corpora": 5,
     "artifacts": 5
   },
   "last_kept": {
-    "id": "01a0b430-ba92-7028-9c02-903a4b886223",
+    "id": "01a0b6cb-4fc0-72b6-ae20-9d6ea706fc2b",
     "label": "Older",
     "named": true,
-    "at": 1789729487
+    "at": 1789773172
   },
   "examples": {
     "lang": "en",

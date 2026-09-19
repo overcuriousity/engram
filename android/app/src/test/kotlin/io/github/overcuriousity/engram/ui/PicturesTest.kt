@@ -27,6 +27,8 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import java.io.File
 
+private typealias St = io.github.overcuriousity.engram.core.contained.Progress.State
+
 /**
  * Pictures of the screens' parts, written to `build/pictures/`. Not
  * assertions: there is no device in the loop while this is being built, and a
@@ -179,5 +181,35 @@ class PicturesTest {
             }
         }
         save("journal")
+    }
+
+    /** A new install's first screen. */
+    @Test fun theChooser() {
+        compose.setContent {
+            EngramTheme {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) { ModeChooser(true, "334 MB", {}, {}) }
+            }
+        }
+        save("mode-chooser")
+    }
+
+    /** A model's row in each thing it can be, then the offer on Ask. */
+    @Test fun modelsAndTheAskOffer() {
+        val all = io.github.overcuriousity.engram.core.contained.ModelManifest.all
+        val embed = all[0]; val ask = all[1]; val large = all[2]
+        fun p(bytes: Long, of: Long, st: io.github.overcuriousity.engram.core.contained.Progress.State, e: String? = null) =
+            io.github.overcuriousity.engram.core.contained.Progress(bytes, of, st, e)
+        compose.setContent {
+            EngramTheme {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(16.dp)) {
+                    ModelRow(embed, p(embed.bytes, embed.bytes, St.Done), true, {}, {}, {})
+                    ModelRow(ask, p(512_000_000, ask.bytes, St.Running), false, {}, {}, {})
+                    ModelRow(large, p(0, large.bytes, St.Waiting), false, {}, {}, {})
+                    ModelRow(ask, p(0, ask.bytes, St.Failed, "Qwen3.5-2B did not verify"), false, {}, {}, {})
+                    AskOfferPane({ ModelRow(ask, p(0, ask.bytes, St.Idle), false, {}, {}, {}); ModelRow(large, p(0, large.bytes, St.Idle), false, {}, {}, {}) }, {}, {})
+                }
+            }
+        }
+        save("models-and-ask-offer")
     }
 }

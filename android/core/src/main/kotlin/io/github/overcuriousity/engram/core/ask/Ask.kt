@@ -175,7 +175,7 @@ class Ask internal constructor(
         if (failed != null) send(s.copy(phase = Phase.Failed, error = failed))
         val answer = s.answer
         if (failed == null && answer != null) {
-            dao.put(AskedRow(question, t.connection.origin, ApiJson.encodeToString(AskAnswer.serializer(), answer), clock()))
+            dao.put(AskedRow(question, t.source, ApiJson.encodeToString(AskAnswer.serializer(), answer), clock()))
         }
     }
 
@@ -190,12 +190,12 @@ class Ask internal constructor(
      * collection restarted after a change of server reads the new one.
      */
     val history: Flow<List<Kept>> = flow {
-        val origin = transport()?.connection?.origin ?: return@flow
+        val origin = transport()?.source ?: return@flow
         emitAll(dao.recent(origin).map { rows -> rows.mapNotNull(::kept) })
     }
 
     suspend fun kept(question: String): Kept? {
-        val origin = transport()?.connection?.origin ?: return null
+        val origin = transport()?.source ?: return null
         return dao.get(question, origin)?.let(::kept)
     }
 

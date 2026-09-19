@@ -3,11 +3,17 @@ pub mod context;
 pub mod fake;
 pub mod gate;
 pub mod lang;
+#[cfg(feature = "contained")]
+pub mod local;
 pub mod openai;
+#[cfg(feature = "contained")]
+pub mod pcm;
 pub mod prompt;
 pub mod retry;
 pub mod split;
 pub mod verify;
+#[cfg(feature = "contained")]
+pub mod whisper;
 
 use crate::error::Result;
 use async_trait::async_trait;

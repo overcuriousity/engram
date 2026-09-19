@@ -50,7 +50,44 @@ impl VectorFactory for QdrantFactory {
     }
 }
 
+/// The contained build's: the vectors go in the tenant's own database.
+///
+/// `vec_*` tables beside the artifacts, so a base is one file to keep rather
+/// than two. The registry names a collection `<prefix>_<slug>` (`alias`) and
+/// names the database `<slug>.db` (`db_path`); this undoes the first to arrive
+/// at the second, and refuses an alias that is not of that form rather than
+/// open a file of its own invention.
+#[cfg(feature = "contained")]
+pub struct SqliteFactory {
+    pub dir: std::path::PathBuf,
+    pub prefix: String,
+    pub scoring: crate::vector::sqlite::Scoring,
+}
+
+#[cfg(feature = "contained")]
+#[async_trait::async_trait]
+impl VectorFactory for SqliteFactory {
+    async fn open(&self, alias: &str, dim: usize) -> Result<Arc<dyn crate::vector::VectorStore>> {
+        let slug = alias
+            .strip_prefix(self.prefix.as_str())
+            .and_then(|rest| rest.strip_prefix('_'))
+            .filter(|slug| !slug.is_empty())
+            .ok_or_else(|| {
+                Error::Vector(format!(
+                    "`{alias}` is not a collection of `{}`",
+                    self.prefix
+                ))
+            })?;
+        let path = self.dir.join(format!("{slug}.db"));
+        let vectors: Arc<dyn crate::vector::VectorStore> =
+            Arc::new(crate::vector::sqlite::SqliteVectors::connect(&path, self.scoring).await?);
+        vectors.ensure_collection(dim).await?;
+        Ok(vectors)
+    }
+}
+
 pub struct Tenants {
+    generation: Arc<std::sync::atomic::AtomicBool>,
     cfg: Arc<Config>,
     control: Control,
     vectors: Arc<dyn VectorFactory>,
@@ -100,6 +137,9 @@ pub struct Tenants {
     /// Whether this registry holds one tenant that answers for every subject.
     /// See `Tenants::single`.
     solo: bool,
+    /// The roles every core opened here serves in process, where any are.
+    #[cfg(feature = "contained")]
+    local: Option<crate::infer::local::LocalModels>,
 }
 
 /// Who is opening a tenant, which decides how much rides along with it.
@@ -123,7 +163,18 @@ impl Tenants {
             provisioning: Mutex::new(HashMap::new()),
             working: Mutex::new(HashMap::new()),
             solo: false,
+            #[cfg(feature = "contained")]
+            local: None,
+            generation: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
+    }
+
+    /// Whether this instance has anything to generate with, right now. Open on
+    /// a server, always. An engram carried on a phone shuts it, and opens it
+    /// while a model is reachable and the phone can afford the work; the queue
+    /// passes the generating stages over for as long as it is shut.
+    pub fn generation(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.generation.clone()
     }
 
     pub fn control(&self) -> &Control {
@@ -136,6 +187,13 @@ impl Tenants {
 
     pub fn db_path(&self, user: &User) -> std::path::PathBuf {
         std::path::Path::new(&self.cfg.store.dir).join(format!("{}.db", user.slug))
+    }
+
+    /// Every core this registry opens has these roles served in process.
+    #[cfg(feature = "contained")]
+    pub fn with_local_models(mut self, models: crate::infer::local::LocalModels) -> Tenants {
+        self.local = Some(models);
+        self
     }
 
     pub fn alias(&self, user: &User) -> String {
@@ -320,6 +378,11 @@ impl Tenants {
         .await;
         let core =
             Core::from_config_with(&self.cfg, vectors, store, self.working_for(&user.subject));
+        #[cfg(feature = "contained")]
+        let core = match &self.local {
+            Some(models) => core.with_local_models(&self.cfg, models),
+            None => core,
+        };
         // One `meta` read, before this core serves anything. `weak_below`
         // reads an unmeasured line as the configured floor, and the floor is
         // low enough that a base running at it calls unrelated things related
@@ -557,6 +620,54 @@ pub mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::*;
+
+    #[cfg(feature = "contained")]
+    #[tokio::test]
+    async fn the_vectors_live_in_the_tenants_own_database_file() {
+        use crate::vector::sqlite::Scoring;
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = crate::config::Config::test_default();
+        cfg.store.dir = dir.path().to_string_lossy().to_string();
+        let prefix = cfg.vector.collection.clone();
+        let cfg = std::sync::Arc::new(cfg);
+        let control = crate::store::control::Control::memory().await.unwrap();
+        let tenants = super::Tenants::new(
+            cfg.clone(),
+            control,
+            std::sync::Arc::new(super::SqliteFactory {
+                dir: dir.path().into(),
+                prefix,
+                scoring: Scoring::off(),
+            }),
+        );
+        let t = tenants.get_or_provision("phone", None).await.unwrap();
+        let files: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.ends_with(".db"))
+            .collect();
+        assert_eq!(files, [format!("{}.db", t.user.slug)], "one base, one file");
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE name LIKE 'vec_%' AND type='table'",
+        )
+        .fetch_all(&t.core.store.pool)
+        .await
+        .unwrap();
+        assert!(tables.contains(&"vec_points".to_string()), "{tables:?}");
+    }
+
+    #[cfg(feature = "contained")]
+    #[tokio::test]
+    async fn an_alias_the_registry_did_not_build_is_refused() {
+        use super::VectorFactory;
+        use crate::vector::sqlite::Scoring;
+        let f = super::SqliteFactory {
+            dir: "/tmp".into(),
+            prefix: "artifacts".into(),
+            scoring: Scoring::off(),
+        };
+        assert!(f.open("something_else", 8).await.is_err());
+    }
 
     #[tokio::test]
     async fn a_first_request_provisions_and_a_second_reuses() {

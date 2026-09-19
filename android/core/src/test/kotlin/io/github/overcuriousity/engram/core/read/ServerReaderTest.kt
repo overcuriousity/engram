@@ -226,4 +226,20 @@ class ServerReaderTest {
         server.close()
         assertEquals(Reach.Unreachable, reader.ask("/api/v1/context", "{}") { it }.reach)
     }
+
+    @Test fun aSourceThatMovesPortKeepsWhatItHeld() = runTest {
+        // The contained core listens somewhere new at every launch.
+        val second = MockWebServer().apply { start() }
+        fun contained(s: MockWebServer) = ServerReader(
+            transport = { Transport(Connection(s.url("/").toString().trimEnd('/'), "t", null, "", "dev"), "ua", source = "contained") },
+            dao = db.cacheDao(), clock = { now }, onRefused = {}, onPinMismatch = {},
+        )
+        server.enqueue(ok("one", "\"t1\""))
+        contained(server).read(req) { it }.toList()
+        second.enqueue(MockResponse(code = 304))
+        val seen = contained(second).read(req) { it }.toList()
+        assertEquals("one", seen.first().value)
+        assertEquals("\"t1\"", second.takeRequest().headers["If-None-Match"])
+        second.close()
+    }
 }

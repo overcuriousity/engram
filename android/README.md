@@ -109,10 +109,39 @@ a snooze go to the outbox and are delivered when the server can be reached
 again.
 
 Every screen asks `Reader` in `core` and never learns where the answer came
-from. That is deliberate: a later version of this app is meant to be
-self-contained, an engram on the device replacing the server by default, and it
-is a second implementation of that one interface rather than a rewrite of the
-screens.
+from. That is deliberate, and it is what contained mode stands on.
+
+## On this phone
+
+Contained mode is the server's own core, compiled with the `contained` feature
+into `libengram_android.so` and started inside the app on a loopback port that
+changes every launch. The app is its client as it would be any server's: the
+same routes, a token held in memory and never written down. Vectors are in
+SQLite, embedding and Ask run over llama.cpp, dictation over whisper.cpp, and
+the models are downloaded from the manifest in
+`core/.../contained/ModelManifest.kt`, each pinned to a revision and given its
+name only once its SHA-256 matches. Only the embedder is needed to start.
+
+The phone's ask model answers questions and reads nothing. Synthesis — what
+turns a capture into more than its text — waits until an endpoint is named
+under Settings → Mode → Ask, and then runs only while the phone is charging,
+idle and on an unmetered network. Reminders ring from local alarms; there is
+nothing to push.
+
+The two modes keep their state apart, and switching does not move anything
+across. The design is
+`docs/superpowers/specs/2026-09-18-android-contained-mode-design.md`. None of
+this has been measured on a phone yet; the runbook is
+`docs/superpowers/plans/2026-09-19-contained-7-device-pass.md`.
+
+The library is built only with `-Pengram.native=1`, so that a checkout with no
+Rust toolchain still builds the app, which then offers server mode alone:
+
+```bash
+# once: rustup target add aarch64-linux-android && cargo install cargo-ndk
+# and the NDK 28.2.13676358, cmake, libclang
+./gradlew :app:assembleRelease -Pengram.native=1
+```
 
 ## Tests
 
@@ -138,8 +167,9 @@ downloaded and installed by hand, but the point of publishing it that way is
 [Obtainium](https://github.com/ImranR98/Obtainium), which watches a GitHub
 repository's releases and offers each new one as an update. Add
 `https://github.com/overcuriousity/engram` as an app, take the defaults, and
-the phone follows the same version the server does — there is one APK for every
-architecture, so nothing needs filtering.
+the phone follows the same version the server does — there is one APK, so
+nothing needs filtering. The core inside it is built for `arm64-v8a`; on
+anything else the app installs and offers server mode alone.
 
 A release is cut on nearly every push to master, and most of them change the
 server rather than the app. The APK is rebuilt for each one regardless, so
@@ -164,7 +194,8 @@ every push touching `android/`, and runs the device tests on a headless
 emulator in a second job.
 
 The release itself is built by the `android` job in
-`.github/workflows/release.yml`, which runs `:app:assembleRelease` and attaches
+`.github/workflows/release.yml`, which runs `:app:assembleRelease` with the
+native core, refuses an APK that came out without it or unsigned, and attaches
 the APK to the release the server binaries go to. `versionName` is the release's
 CalVer and `versionCode` is that same date packed into an integer
 (`2026.917.0` → `26091700`), which is what lets a phone tell one build from the

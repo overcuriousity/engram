@@ -140,6 +140,9 @@ interface OutboxDao {
 interface MomentsDao {
     @Upsert suspend fun upsert(rows: List<MomentRow>)
     @Query("SELECT * FROM moments ORDER BY at DESC LIMIT 1") fun latest(): Flow<MomentRow?>
+    @Query("SELECT * FROM moments ORDER BY at") suspend fun all(): List<MomentRow>
+    @Query("SELECT * FROM moments WHERE id = :id") suspend fun get(id: String): MomentRow?
+    @Query("DELETE FROM moments WHERE id NOT IN (:ids)") suspend fun deleteExcept(ids: List<String>)
 }
 
 class Converters {
@@ -162,8 +165,9 @@ abstract class Db : RoomDatabase() {
     abstract fun askedDao(): AskedDao
 
     companion object {
-        fun open(context: Context): Db =
-            Room.databaseBuilder(context, Db::class.java, "engram.db")
+        /** [name] is the mode's: each keeps its outbox and its cache in a file of its own. */
+        fun open(context: Context, name: String = "engram.db"): Db =
+            Room.databaseBuilder(context, Db::class.java, name)
                 .setQueryCoroutineContext(Dispatchers.IO)
                 .addMigrations(TO_2, TO_3, TO_4, TO_5)
                 .build()

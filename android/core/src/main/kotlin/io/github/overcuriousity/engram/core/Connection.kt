@@ -2,6 +2,7 @@ package io.github.overcuriousity.engram.core
 
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import io.github.overcuriousity.engram.core.contained.Endpoint
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.Serializable
@@ -73,7 +74,12 @@ class KeystoreBox(private val alias: String = "engram-connection") : SecretBox {
 }
 
 @Serializable
-private data class Stored(val connection: Connection? = null, val pushKeys: PushKeys? = null)
+private data class Stored(
+    val connection: Connection? = null,
+    val pushKeys: PushKeys? = null,
+    /** Contained mode's ask endpoint. Here because it carries a key, and this is the file that is sealed. */
+    val askEndpoint: Endpoint? = null,
+)
 
 /**
  * One sealed file. Small enough to rewrite whole on every change, which is
@@ -100,7 +106,12 @@ class ConnectionStore(private val file: File, private val box: SecretBox) {
 
     fun set(c: Connection) { stored = stored.copy(connection = c); save(); _current.value = c }
 
-    fun clear() { stored = Stored(); save(); _current.value = null; _pushKeys.value = null }
+    /** Unpairing forgets the server. The ask endpoint is not the server's, and stays. */
+    fun clear() { stored = Stored(askEndpoint = stored.askEndpoint); save(); _current.value = null; _pushKeys.value = null }
+
+    var askEndpoint: Endpoint?
+        get() = stored.askEndpoint
+        set(v) { stored = stored.copy(askEndpoint = v); save() }
 
     private fun load(): Stored =
         if (!file.exists()) Stored()

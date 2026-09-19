@@ -885,4 +885,8 @@ mod tests {
         let capped = v.sample(2).await.unwrap();
         assert_eq!(capped.len(), 2, "the limit is respected");
     }
+
+    mod conforms {
+        crate::vector::conformance::suite!(async { Box::new(super::super::MemoryVectors::new()) });
+    }
 }

@@ -70,13 +70,11 @@ fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: ()
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         Text("Settings", style = MaterialTheme.typography.titleLarge)
-        Section("Server") {
-            Line(c?.origin ?: "—")
-            Line("version ${c?.serverVersion ?: "—"}", muted = true)
-            Line(c?.deviceName ?: "", muted = true)
-            Line(if (c?.pin != null) "pinned · ${c!!.pin!!.take(12)}…" else "public certificate · no pin", muted = true)
-        }
-        Section("Reminders") {
+        ModeSection(engram)
+        if (engram.loopback) { ModelsSection(engram); AskSection(engram) }
+        // Reminders and Notifications are about distributors and endpoints a
+        // server pushes through. Nothing pushes to a phone that is its own.
+        if (!engram.loopback) Section("Reminders") {
             val k = keys
             when {
                 k != null -> Line("registered · ${k.distributor}", muted = true)
@@ -131,7 +129,7 @@ fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: ()
         // The channels a due reminder is pushed to. The phone's own
         // registration is the UnifiedPush row; the fields are the web's, for
         // Gotify or an endpoint pasted by hand.
-        Section("Notifications") {
+        if (!engram.loopback) Section("Notifications") {
             val notify = rememberRead(engram, Api.notify(), Decode.notify)
             val n = notify.read.value
             var url by remember(n?.gotifyUrl) { mutableStateOf(n?.gotifyUrl ?: "") }
@@ -257,7 +255,8 @@ fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: ()
         Section("This phone") {
             Line(engram.situation.bundle(placeOn).toString(), muted = true, mono = true)
         }
-        OutlinedButton(
+        // Shown where there is a server to unpair from, whichever mode is on.
+        if (c != null) OutlinedButton(
             onClick = { confirmUnpair = true },
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
         ) { Text("Unpair") }
@@ -285,6 +284,13 @@ private fun JudgeLine(label: String, count: Int?, onClick: () -> Unit) {
         count?.let { Line(it.toString(), muted = true) }
     }
 }
+
+/** The other files of Settings draw with the same two pieces, under names that say whose they are. */
+@Composable
+internal fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) = Section(title, content)
+
+@Composable
+internal fun SettingsLine(text: String, muted: Boolean = false) = Line(text, muted)
 
 @Composable
 private fun Section(title: String, content: @Composable ColumnScope.() -> Unit) {
