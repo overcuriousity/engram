@@ -35,6 +35,26 @@ jobs:
       # vector store sit behind traits with deterministic fakes.
       - run: cargo test --locked
 
+  contained:
+    name: contained feature
+    runs-on: ubuntu-latest
+    # The phone's core: llama.cpp and whisper.cpp in process, off by default
+    # and so compiled by nothing above. The tests that want model files skip
+    # themselves where `ENGRAM_TEST_MODELS` is unset; what this proves is that
+    # the feature builds, lints and passes everything else.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: contained
+      # For the bindings llama.cpp's crate generates; cmake is on the runner.
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - run: cargo clippy --features contained --all-targets --locked -- -D warnings
+      - run: cargo test --features contained --lib --locked
+
   msrv:
     name: minimum supported rust version
     runs-on: ubuntu-latest

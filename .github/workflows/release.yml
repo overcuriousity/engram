@@ -192,6 +192,39 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # The core, for contained mode. Without it the APK still builds and
+      # still installs, and never offers "On this phone" — which is how every
+      # release before this one went out. Gradle calls `cargo +stable ndk`,
+      # so the toolchain has to be the one named `stable`.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-android
+          workspaces: android/native
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+
+      # The NDK version `core/build.gradle.kts` names, and libclang for the
+      # bindings llama.cpp's crate generates; cmake is already on the runner.
+      - name: Install the NDK and libclang
+        run: |
+          set -euo pipefail
+          "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" "ndk;28.2.13676358" > /dev/null
+          sudo apt-get update && sudo apt-get install -y libclang-dev
+
+      - name: Stamp the version into this checkout
+        run: |
+          set -euo pipefail
+          # The core reports this version as the server does. The native
+          # crate's lock is not built `--locked`, so Cargo follows it there.
+          sed -i '0,/^version = /s/^version = .*/version = "${{ needs.version.outputs.version }}"/' Cargo.toml
+          grep -m1 '^version = ' Cargo.toml
+
       # An unsigned APK is one no phone will install, and an APK signed by a
       # key that is not the usual one is worse: it installs nowhere an older
       # build already sits, and the person has to uninstall — losing the
@@ -217,7 +250,7 @@ jobs:
         run: |
           set -euo pipefail
           cd android
-          ./gradlew :app:assembleRelease --no-daemon \
+          ./gradlew :app:assembleRelease --no-daemon -Pengram.native=1 \
             -PengramVersion="${{ needs.version.outputs.version }}"
 
       - name: Name it after the version, and prove it is signed
@@ -230,6 +263,10 @@ jobs:
           # key that did not load, whatever the secrets said.
           test -f "$apk" || { echo "::error::the APK came out unsigned" >&2; exit 1; }
           "$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)apksigner" verify --print-certs "$apk"
+          # And that the core is inside: an APK without it is server mode only,
+          # and nothing else about it would say so.
+          unzip -l "$apk" | grep -q 'lib/arm64-v8a/libengram_android\.so' \
+            || { echo "::error::the APK has no native core" >&2; exit 1; }
           mkdir -p dist && cp "$apk" "dist/engram-${v}.apk"
 
       - uses: actions/upload-artifact@v4

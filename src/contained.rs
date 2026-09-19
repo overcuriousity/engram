@@ -76,10 +76,10 @@ fn quoted(s: &str) -> String {
 /// file rather than made per launch because Argon2 is slow on purpose.
 fn local_hash(data_dir: &Path) -> Result<String> {
     let path = data_dir.join("local.hash");
-    if let Ok(hash) = std::fs::read_to_string(&path) {
-        if hash.starts_with("$argon2") {
-            return Ok(hash.trim().to_string());
-        }
+    if let Ok(hash) = std::fs::read_to_string(&path)
+        && hash.starts_with("$argon2")
+    {
+        return Ok(hash.trim().to_string());
     }
     use argon2::password_hash::rand_core::{OsRng, RngCore};
     let mut bytes = [0u8; 32];
