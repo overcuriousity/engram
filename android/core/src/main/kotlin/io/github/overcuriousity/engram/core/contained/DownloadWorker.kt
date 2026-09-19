@@ -39,6 +39,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
             ?: return Result.failure(workDataOf(ERROR to "not in contained mode"))
         setForeground(info(model, 0))
         var told = 0L
+        var shown = 0L
         return try {
             downloader.fetch(model) { bytes ->
                 // Four times a second is as often as anybody can read a number.
@@ -46,6 +47,12 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                 if (now - told >= 250) {
                     told = now
                     setProgressAsync(workDataOf(BYTES to bytes))
+                }
+                // The shade is allowed five a second for the whole app and
+                // sheds the rest, as the first phone's log showed; a bar in
+                // it moves well enough once a second.
+                if (now - shown >= 1000) {
+                    shown = now
                     notifications().notify(model.file.hashCode(), notification(model, bytes))
                 }
             }
