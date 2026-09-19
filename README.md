@@ -261,12 +261,17 @@ numbered as the same kind of list, so the `[9]` an answer cites is
 `engram --show 9`. Exit `1` means nothing was found, so `engram -s "x" || …` is
 a usable branch.
 
-**Android** is a client of `/api/v1` and nothing more. It pairs by scanning a QR
+**Android** is a client of `/api/v1`, of a server or of itself. Paired, it is
+that and nothing more. It pairs by scanning a QR
 the server shows, over a two-minute window, pinning the certificate it is given;
 set `server.tls_fingerprint` and it pins from the first byte. Search is home,
 Ask beside it, the due band beneath. Capture goes through an outbox, so a
 capture on a train is a capture. The microphone is the web's — held rather than
-pressed, drawn only where the server reports a speech model. Building it and
+pressed, drawn only where the server reports a speech model. "On this phone",
+chosen at first start or under Settings → Mode, needs no server: the same core
+runs inside the app on loopback, embedding, searching, answering and hearing
+with models it downloads, and holds the work that needs a larger model until an
+endpoint is named. Built, and not yet measured on a phone. Building it and
 what each screen does: [android/README.md](android/README.md). The APK is on the
 [releases page](https://github.com/overcuriousity/engram/releases).
 
