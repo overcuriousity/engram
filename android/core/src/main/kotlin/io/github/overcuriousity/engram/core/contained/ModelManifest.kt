@@ -44,6 +44,15 @@ object ModelManifest {
             "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4", 2_740_937_888, "Apache 2.0",
             default = false,
         ),
+        // What the ask default is measured against in the device pass. Twice
+        // the 2B's bytes for the same "2B": its per-layer embeddings are
+        // stored, not computed. Read on 2026-09-19 as the rest were.
+        Model(
+            Role.ask, "Gemma 4 E2B", "gemma-4-e2b-it-q4_k_m.gguf",
+            hf("unsloth/gemma-4-E2B-it-GGUF", "0314792d7f1f7e229411f620751375812bb9faf2", "gemma-4-E2B-it-Q4_K_M.gguf"),
+            "740185b21d22ceb83a11c3aa62ad5842ef32c70f6096d756bbee85a1e4ec34b8", 3_106_738_272, "Apache 2.0",
+            default = false,
+        ),
         Model(
             Role.speech, "Whisper small", "whisper-small-q5_1.bin",
             hf("ggerganov/whisper.cpp", "5359861c739e955e79d9a303bcbc70fb988958b1", "ggml-small-q5_1.bin"),

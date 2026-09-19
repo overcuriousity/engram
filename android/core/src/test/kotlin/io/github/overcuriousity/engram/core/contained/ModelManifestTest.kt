@@ -25,7 +25,7 @@ class ModelManifestTest {
 
     @Test fun eachOfferedRoleHasOneDefault() {
         assertEquals("Qwen3.5-2B", ModelManifest.defaultFor(Role.ask)!!.name)
-        assertEquals(2, ModelManifest.all.count { it.role == Role.ask })
+        assertEquals(3, ModelManifest.all.count { it.role == Role.ask })
         assertNotNull(ModelManifest.defaultFor(Role.speech))
     }
 }
