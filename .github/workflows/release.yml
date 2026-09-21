@@ -181,7 +181,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with: { distribution: temurin, java-version: "21" }
 
       # The same dance as the android workflow: the runner's SDK is used
@@ -190,7 +190,7 @@ jobs:
       - name: accept SDK licences
         run: yes | "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" --licenses > /dev/null || true
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       # The core, for contained mode. Without it the APK still builds and
       # still installs, and never offers "On this phone" — which is how every
@@ -269,7 +269,7 @@ jobs:
             || { echo "::error::the APK has no native core" >&2; exit 1; }
           mkdir -p dist && cp "$apk" "dist/engram-${v}.apk"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: engram-android
           path: dist/*.apk
