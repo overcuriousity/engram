@@ -532,6 +532,12 @@ impl PkdbTools {
             Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
             // A flagged capture is read and indexed like any other; the flag
             // is for a person who may want to keep only one of the two.
+            Ok(o) if o.link_unread.is_some() => format!(
+                "Stored as `{}`, but the page could not be read ({}). The link and any \
+                 note are stored and searchable; the page is fetched again in the background.",
+                o.id,
+                o.link_unread.as_deref().unwrap_or("")
+            ),
             Ok(o) if o.near_duplicate.is_some() => {
                 let n = o.near_duplicate.expect("just checked");
                 format!(

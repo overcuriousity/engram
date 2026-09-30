@@ -649,7 +649,9 @@ async fn capture(
             )?;
         }
         if let Some(raw) = shared_url {
-            fields.remove("text");
+            // Kept for the one case it matters: a link that cannot be read is
+            // stored as the link and this text. See `Core::ingest_link`.
+            let shared = fields.remove("text");
             let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
             if !matches!(u.scheme(), "http" | "https") {
                 return Err(Error::Validation(format!(
@@ -660,7 +662,7 @@ async fn capture(
             out.push(
                 tenant
                     .core
-                    .ingest_url(&u, title.clone(), note.clone(), lang)
+                    .ingest_link(&u, title.clone(), note.clone(), shared, lang)
                     .await?,
             );
         } else if let Some(text) = fields.remove("text") {

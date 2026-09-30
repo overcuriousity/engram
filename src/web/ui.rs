@@ -207,6 +207,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "reap" => "Reaping the retired",
         "probe" => "Minting probes",
         "condense" => "Condensing",
+        "fetch" => "Fetching links again",
         other => other,
     }
 }

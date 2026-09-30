@@ -548,7 +548,10 @@ mod tests {
         while let Some(j) = core.store.claim_job().await.unwrap() {
             targets.push(j.target_id);
         }
-        assert!(targets.contains(&b.id), "the flagged capture was left unread");
+        assert!(
+            targets.contains(&b.id),
+            "the flagged capture was left unread"
+        );
     }
 
     #[tokio::test]

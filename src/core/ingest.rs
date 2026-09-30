@@ -74,6 +74,11 @@ pub struct IngestOutcome {
     /// discard later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub near_duplicate: Option<NearDuplicate>,
+    /// Set when this is a link that could not be read: why. The link and
+    /// what came with it are stored and searchable, and the page is tried
+    /// again in the background. See `Core::ingest_link`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_unread: Option<String>,
 }
 
 impl IngestOutcome {
@@ -84,6 +89,7 @@ impl IngestOutcome {
             status: c.status,
             duplicate: true,
             near_duplicate: None,
+            link_unread: None,
         }
     }
 }
@@ -303,6 +309,18 @@ pub fn typed_from(metadata: &serde_json::Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// What a link turned out to hold, read as far as this end reads it before
+/// storing: a page extracted, a PDF or an image as sent.
+#[derive(Debug)]
+pub(crate) enum ReadLink {
+    Page {
+        markdown: String,
+        title: Option<String>,
+    },
+    Pdf(Vec<u8>),
+    Image(Vec<u8>),
+}
+
 /// The last path segment of a URL, when it reads as a file name. `plan.pdf`
 /// out of `/papers/plan.pdf`; nothing out of `/` or `/papers/`.
 fn url_filename(url: &url::Url) -> Option<String> {
@@ -329,8 +347,9 @@ impl Core {
     /// `fetch` capture, a PDF or an image is stored for its reading stage.
     /// The link is provenance on the corpus whichever it was.
     ///
-    /// Both link doors — paste-a-link and MCP — come through here, so that
-    /// what one can read the other can too.
+    /// Every link door comes through here, so that what one can read the
+    /// others can too. A link that cannot be read is stored anyway — see
+    /// `ingest_link`.
     pub async fn ingest_url(
         &self,
         url: &url::Url,
@@ -338,9 +357,47 @@ impl Core {
         note: Option<String>,
         lang: crate::infer::lang::Lang,
     ) -> Result<IngestOutcome> {
+        self.ingest_link(url, title, note, None, lang).await
+    }
+
+    /// `ingest_url`, with the text a share sheet sent beside the link.
+    ///
+    /// A link that cannot be read now — the site is down, answers an error,
+    /// serves a type nothing here reads, or a login wall too short to be the
+    /// page — used to be refused, and the link, the text beside it and the
+    /// note went with the refusal: nothing was stored and nothing was
+    /// searchable. Now the link and whatever came with it are stored as a
+    /// capture of their own, read and embedded like any other, and a `Fetch`
+    /// unit tries the page again; if it arrives it replaces that text.
+    ///
+    /// `shared` is only kept when the link cannot be read: the text a share
+    /// sheet sends is usually the page's title repeated, and the page is the
+    /// better capture of the two.
+    pub async fn ingest_link(
+        &self,
+        url: &url::Url,
+        title: Option<String>,
+        note: Option<String>,
+        shared: Option<String>,
+        lang: crate::infer::lang::Lang,
+    ) -> Result<IngestOutcome> {
+        // A scheme nothing reads is not a link that failed; it is not a link.
+        crate::core::fetch::ensure_readable(url)?;
+        match self.read_link(url).await {
+            Ok(read) => self.ingest_read(url, read, title, note, lang).await,
+            Err(Error::Validation(why)) => {
+                self.hold_link(url, title, note, shared, lang, &why).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fetch a link and, for a page, extract it. Everything that can refuse
+    /// a link happens here, so the one caller that stores a refused link and
+    /// the one that tries it again agree on what refused means.
+    pub(crate) async fn read_link(&self, url: &url::Url) -> Result<ReadLink> {
         use crate::core::fetch::Fetched;
-        let source_url = Some(url.to_string());
-        match crate::core::fetch::fetch(url, &self.capture).await? {
+        Ok(match crate::core::fetch::fetch(url, &self.capture).await? {
             Fetched::Html(html) => {
                 let page = crate::core::extract::extract(
                     html,
@@ -348,20 +405,44 @@ impl Core {
                     self.capture.min_extracted_chars,
                 )
                 .await?;
+                ReadLink::Page {
+                    markdown: page.markdown,
+                    title: page.title,
+                }
+            }
+            Fetched::Pdf(bytes) => ReadLink::Pdf(bytes),
+            Fetched::Image { bytes, .. } => ReadLink::Image(bytes),
+        })
+    }
+
+    async fn ingest_read(
+        &self,
+        url: &url::Url,
+        read: ReadLink,
+        title: Option<String>,
+        note: Option<String>,
+        lang: crate::infer::lang::Lang,
+    ) -> Result<IngestOutcome> {
+        let source_url = Some(url.to_string());
+        match read {
+            ReadLink::Page {
+                markdown,
+                title: page_title,
+            } => {
                 // A title the caller gave wins; the page's own is the fallback,
                 // ahead of the first heading `derive_title` would otherwise
                 // take — which, readability having dropped the `<h1>`, is the
                 // first *section* of the article.
                 self.ingest_capture(
-                    Capture::new(page.markdown, ORIGIN_FETCH)
+                    Capture::new(markdown, ORIGIN_FETCH)
                         .with_lang(lang)
-                        .with_title(title.or(page.title))
+                        .with_title(title.or(page_title))
                         .with_note(note)
                         .with_source_url(source_url),
                 )
                 .await
             }
-            Fetched::Pdf(bytes) => {
+            ReadLink::Pdf(bytes) => {
                 self.ingest_pdf_from(
                     PdfCapture {
                         bytes,
@@ -374,7 +455,7 @@ impl Core {
                 )
                 .await
             }
-            Fetched::Image { bytes, .. } => {
+            ReadLink::Image(bytes) => {
                 self.ingest_image_from(
                     ImageCapture {
                         bytes,
@@ -388,6 +469,102 @@ impl Core {
                 .await
             }
         }
+    }
+
+    /// Store a link that could not be read as what is known of it: the link,
+    /// the text that came with it, the note, the title. Read and embedded
+    /// like any capture, and a `Fetch` unit armed to try the page again.
+    async fn hold_link(
+        &self,
+        url: &url::Url,
+        title: Option<String>,
+        note: Option<String>,
+        shared: Option<String>,
+        lang: crate::infer::lang::Lang,
+        why: &str,
+    ) -> Result<IngestOutcome> {
+        let shared = shared
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != url.as_str());
+        let text = match &shared {
+            Some(s) => format!("{url}\n\n{s}"),
+            None => url.to_string(),
+        };
+        let mut c = Capture::new(text, ORIGIN_FETCH)
+            .with_lang(lang)
+            .with_title(title.clone())
+            .with_note(note)
+            .with_source_url(Some(url.to_string()));
+        c.metadata["fetch"] = serde_json::json!({
+            "pending": true,
+            "error": why,
+            // Whether the title is the person's: a page that arrives later may
+            // name itself only where nobody else did.
+            "title_given": title.is_some(),
+        });
+        let mut out = self.ingest_capture(c).await?;
+        if !out.duplicate {
+            self.store.enqueue(Stage::Fetch, "corpus", &out.id).await?;
+        }
+        out.link_unread = Some(why.to_string());
+        tracing::info!(
+            corpus_id = %out.id,
+            url = %url,
+            reason = why,
+            "link could not be read; stored as the link and trying again later"
+        );
+        Ok(out)
+    }
+
+    /// A held link's page arrived: put it where the link was.
+    ///
+    /// A page replaces the text in place and the corpus is read again, so
+    /// the id every door already answered with stays good. A PDF or an image
+    /// needs its own reading stage and its bytes attached, so it becomes a
+    /// capture of its own and the held link is deleted.
+    pub(crate) async fn fill_held_link(&self, src: &Corpus, read: ReadLink) -> Result<()> {
+        let url = src
+            .source_url
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok())
+            .ok_or_else(|| Error::Validation("a held link with no link".into()))?;
+        let title_given = src.metadata["fetch"]["title_given"]
+            .as_bool()
+            .unwrap_or(false);
+        let note = src.metadata["note"].as_str().map(str::to_string);
+        match read {
+            ReadLink::Page { markdown, title } => {
+                let sig = crate::store::shingle::signature(&markdown);
+                self.store.set_read_text(&src.id, &markdown, sig).await?;
+                if !title_given && let Some(t) = title.as_deref() {
+                    self.store.set_title_hint(&src.id, t).await?;
+                }
+                let mut meta = src.metadata.clone();
+                meta["fetch"] = serde_json::json!({ "fetched_at": now() });
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.reprocess(&src.id, Stage::Synthesize).await?;
+                tracing::info!(corpus_id = %src.id, url = %url, "a held link was read");
+            }
+            read @ (ReadLink::Pdf(_) | ReadLink::Image(_)) => {
+                let lang = crate::infer::lang::of_corpus(&src.metadata);
+                let title = title_given.then(|| src.title_hint.clone()).flatten();
+                let out = self.ingest_read(&url, read, title, note, lang).await?;
+                self.delete_corpus(&src.id).await?;
+                tracing::info!(corpus_id = %src.id, now = %out.id, url = %url, "a held link was read into a file capture");
+            }
+        }
+        Ok(())
+    }
+
+    /// A held link that is still unread after every try: left as it is,
+    /// searchable as the link, with the last reason on it. `reprocess(Fetch)`
+    /// tries again.
+    pub(crate) async fn give_up_on_link(&self, corpus_id: &str, why: &str) -> Result<()> {
+        let src = self.store.get_corpus(corpus_id).await?;
+        let mut meta = src.metadata.clone();
+        meta["fetch"]["pending"] = serde_json::Value::Bool(false);
+        meta["fetch"]["error"] = serde_json::Value::String(why.to_string());
+        self.store.set_corpus_metadata(corpus_id, &meta).await
     }
 
     /// A door asking for a reminder over text too large to be judged as one.
@@ -574,6 +751,7 @@ impl Core {
             // What the doors read off this field is "flagged". A forced
             // reminder is not flagged, so it is not reported as one.
             near_duplicate: near.filter(|_| !forced_remind),
+            link_unread: None,
         })
     }
 
@@ -841,6 +1019,7 @@ impl Core {
                     status: c.status,
                     duplicate: false,
                     near_duplicate: None,
+                    link_unread: None,
                 }
             }
         })
@@ -968,6 +1147,7 @@ impl Core {
             status: CorpusStatus::Describing,
             duplicate: false,
             near_duplicate: None,
+            link_unread: None,
         })
     }
 
@@ -2104,6 +2284,23 @@ impl Core {
                 return Err(Error::Validation(
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
+            }
+            // A captured link can always be fetched again: one held because
+            // it could not be read, or a page that has changed since.
+            Stage::Fetch => {
+                if src.origin != ORIGIN_FETCH || src.source_url.is_none() {
+                    return Err(Error::Validation(
+                        "only a captured link can be fetched again".into(),
+                    ));
+                }
+                let mut meta = src.metadata.clone();
+                let title_given = meta["fetch"]["title_given"].as_bool().unwrap_or(false);
+                meta["fetch"] = serde_json::json!({
+                    "pending": true,
+                    "title_given": title_given,
+                });
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.store.enqueue(Stage::Fetch, "corpus", &src.id).await?;
             }
             // A stored PDF can always be read again — with the ML build, or
             // after a docling upgrade. The extraction and everything derived

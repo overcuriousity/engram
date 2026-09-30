@@ -87,13 +87,20 @@ pub enum Stage {
     /// itself. One generation, under "full" and the weekly budget; a draft
     /// that would lose a value or a literal is refused without writing.
     Condense,
+    /// One link that could not be read when it was captured, tried again.
+    /// The capture is already stored and searchable as the link and whatever
+    /// came with it; a page that arrives replaces that text and is read like
+    /// any other. Local work and no call. Background: nobody is waiting on
+    /// it, and a page that stays down is retried at the backoff ceiling for a
+    /// while and then left as it is.
+    Fetch,
 }
 
 impl Stage {
     /// Every stage there is. Written out rather than derived, and the compiler
     /// is no help here — a stage left out of this list is not an error, it is a
     /// stage the class backfill silently never sees.
-    pub const ALL: [Stage; 20] = [
+    pub const ALL: [Stage; 21] = [
         Stage::Synthesize,
         Stage::SegmentWindow,
         Stage::Title,
@@ -114,6 +121,7 @@ impl Stage {
         Stage::Reap,
         Stage::Probe,
         Stage::Condense,
+        Stage::Fetch,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -138,6 +146,7 @@ impl Stage {
             Stage::Reap => "reap",
             Stage::Probe => "probe",
             Stage::Condense => "condense",
+            Stage::Fetch => "fetch",
         }
     }
     /// The stages `calls_a_generator` says yes to, in `ALL`'s order: what a
@@ -183,7 +192,8 @@ impl Stage {
             | Stage::ArmDedupe
             | Stage::Context
             | Stage::Remind
-            | Stage::Probe => false,
+            | Stage::Probe
+            | Stage::Fetch => false,
         }
     }
 
@@ -219,7 +229,8 @@ impl Stage {
             | Stage::Remind
             | Stage::Reap
             | Stage::Probe
-            | Stage::Condense => 1,
+            | Stage::Condense
+            | Stage::Fetch => 1,
         }
     }
 
@@ -254,7 +265,8 @@ impl Stage {
             | Stage::Remind
             | Stage::Reap
             | Stage::Probe
-            | Stage::Condense => false,
+            | Stage::Condense
+            | Stage::Fetch => false,
         }
     }
 
@@ -280,6 +292,7 @@ impl Stage {
             "reap" => Some(Stage::Reap),
             "probe" => Some(Stage::Probe),
             "condense" => Some(Stage::Condense),
+            "fetch" => Some(Stage::Fetch),
             _ => None,
         }
     }

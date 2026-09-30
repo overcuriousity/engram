@@ -358,6 +358,14 @@ async fn post(
         }
         // Said, because a person may want to replace or discard one of the
         // two. Not a wait: a flagged capture is read and searchable as usual.
+        // A link that could not be read is stored as the link and tried
+        // again; said, so nobody wonders why the page's words do not match.
+        if let Some(why) = body.get("link_unread").and_then(|v| v.as_str()) {
+            eprintln!(
+                "{target}: the page could not be read ({why}) — stored as the link, \
+                 and tried again in the background."
+            );
+        }
         if let Some(n) = body.get("near_duplicate").filter(|v| !v.is_null()) {
             eprintln!(
                 "{target}: stored, and {:.0}% similar to {} — \

@@ -63,6 +63,12 @@
       <button class="btn btn-sm" type="submit">Re-extract</button>
     </form>
     {% endif %}
+    {% if link %}
+    <form method="post" action="/ui/corpora/{{ id }}/reprocess">
+      <input type="hidden" name="stage" value="fetch">
+      <button class="btn btn-sm" type="submit">Fetch again</button>
+    </form>
+    {% endif %}
     <form method="post" action="/ui/corpora/{{ id }}/delete"
           onsubmit="return confirm('Delete this source and all its artifacts?')">
       <button class="btn btn-sm btn-danger" type="submit">Delete</button>

@@ -46,9 +46,13 @@ async fn share(
             .get("text")
             .and_then(|t| only_a_url(t).map(|u| u.to_string()))
     });
-    if shared_url.is_some() {
-        fields.remove("text");
-    }
+    // Kept for the one case it matters: a link that cannot be read is stored
+    // as the link and this text. See `Core::ingest_link`.
+    let shared_text = if shared_url.is_some() {
+        fields.remove("text")
+    } else {
+        None
+    };
 
     // Read before anything is stored, so a bad scheme costs nothing.
     let shared_url = shared_url
@@ -68,7 +72,7 @@ async fn share(
     if let Some(u) = shared_url {
         let out = tenant
             .core
-            .ingest_url(&u, title.clone(), None, lang)
+            .ingest_link(&u, title.clone(), None, shared_text, lang)
             .await?;
         landing = Some(out.id);
     }
