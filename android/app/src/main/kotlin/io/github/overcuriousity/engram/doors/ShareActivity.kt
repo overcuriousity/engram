@@ -12,22 +12,19 @@ import io.github.overcuriousity.engram.MainActivity
 import kotlinx.coroutines.launch
 
 /**
- * Every share lands here and leaves at once. Unpaired, it says so and opens
- * the app; paired, it copies, enqueues, toasts, and finishes — the sending
- * app never sees a screen of ours.
+ * Every share lands here and leaves at once: it copies, enqueues, toasts, and
+ * finishes — the sending app never sees a screen of ours. Unpaired, the share
+ * is kept all the same and the app opens on pairing; the outbox delivers it
+ * once there is a server, which is what `Engram.pair` kicks for.
  */
 class ShareActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val engram = (application as App).engram
-        // Contained, there is always somewhere to keep it: the worker starts
-        // the core to deliver what was shared.
-        if (!engram.loopback && engram.store.current.value == null) {
-            Toast.makeText(this, "Pair engram first", Toast.LENGTH_SHORT).show()
-            startActivity(Intent(this, MainActivity::class.java))
-            finish()
-            return
-        }
+        // Contained, there is always somewhere to deliver it: the worker starts
+        // the core. In server mode with no pairing there is not yet, and a
+        // share used to be dropped with a toast — kept here instead, owed.
+        val unpaired = !engram.loopback && engram.store.current.value == null
         val i = intent
         val title = i.getStringExtra(Intent.EXTRA_SUBJECT) ?: i.getStringExtra(Intent.EXTRA_TITLE)
         lifecycleScope.launch {
@@ -50,7 +47,12 @@ class ShareActivity : ComponentActivity() {
                         if (streams.isNotEmpty()) Intake.uris(engram, streams, title, i.getStringExtra(Intent.EXTRA_TEXT))
                     }
                 }
-                Toast.makeText(this@ShareActivity, "Kept · engram", Toast.LENGTH_SHORT).show()
+                if (unpaired) {
+                    Toast.makeText(this@ShareActivity, "Kept on this phone · pair engram to deliver it", Toast.LENGTH_LONG).show()
+                    startActivity(Intent(this@ShareActivity, MainActivity::class.java))
+                } else {
+                    Toast.makeText(this@ShareActivity, "Kept · engram", Toast.LENGTH_SHORT).show()
+                }
             } catch (e: Exception) {
                 Toast.makeText(this@ShareActivity, "Could not read that: ${e.message}", Toast.LENGTH_LONG).show()
             } finally {
