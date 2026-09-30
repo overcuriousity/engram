@@ -530,16 +530,13 @@ impl PkdbTools {
         };
         match outcome {
             Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
-            // A parked capture is stored and nothing more: no segmentation, no
-            // embedding, and nothing searchable until a person decides. Saying
-            // "runs in the background" here would have the agent report a
-            // success that never happens.
+            // A flagged capture is read and indexed like any other; the flag
+            // is for a person who may want to keep only one of the two.
             Ok(o) if o.near_duplicate.is_some() => {
                 let n = o.near_duplicate.expect("just checked");
                 format!(
-                    "Stored as `{}`, but held for review: it is {:.0}% similar to `{}`, \
-                     so it is not segmented or indexed until someone decides between \
-                     them in the web UI.",
+                    "Stored as `{}` and being indexed. It is {:.0}% similar to `{}`; \
+                     the person can replace or discard one of them on Insights.",
                     o.id,
                     n.similarity * 100.0,
                     n.corpus_id

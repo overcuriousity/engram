@@ -191,9 +191,22 @@ pub enum Followup {
     Nothing,
     /// Queue this stage. Text captures queue Synthesize; images queue Describe.
     Queue(Stage),
-    /// Park beside a near-duplicate: `near_dupe_of`, its score, and
-    /// `needs_review`, written on the row itself. No job.
-    Park { of: String, similarity: f64 },
+    /// Queue Synthesize like any capture, and flag the row beside the
+    /// near-duplicate it resembles: `near_dupe_of` and its score, for a person
+    /// to look at later. Never a wait — see `Core::park_or_queue`.
+    Flag { of: String, similarity: f64 },
+}
+
+impl Followup {
+    /// The stage this followup arms, if any. A flagged capture is read like
+    /// any other: the flag is a note for a person, not a gate.
+    fn stage(&self) -> Option<Stage> {
+        match self {
+            Followup::Nothing => None,
+            Followup::Queue(stage) => Some(*stage),
+            Followup::Flag { .. } => Some(Stage::Synthesize),
+        }
+    }
 }
 
 /// The one INSERT every captured corpus row goes through, on whatever executor
@@ -331,11 +344,9 @@ impl Store {
         followup: Followup,
     ) -> Result<Insertion> {
         let (status, near_dupe_of, near_dupe_score) = match &followup {
-            Followup::Park { of, similarity } => (
-                CorpusStatus::NeedsReview,
-                Some(of.clone()),
-                Some(*similarity),
-            ),
+            Followup::Flag { of, similarity } => {
+                (CorpusStatus::Raw, Some(of.clone()), Some(*similarity))
+            }
             Followup::Queue(_) | Followup::Nothing => (CorpusStatus::Raw, None, None),
         };
         let src = Corpus {
@@ -377,7 +388,7 @@ impl Store {
         // and leaves the capture at `raw` with nothing that will ever pick it
         // up. See `jobs::enqueue_with` for the failure this order leaves
         // instead, which is the recoverable one.
-        if let Followup::Queue(stage) = followup {
+        if let Some(stage) = followup.stage() {
             super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", &src.id)
                 .await?;
         }
@@ -480,11 +491,9 @@ impl Store {
     /// unit with no visible corpus is one a worker closes as deleted.
     pub async fn apply_followup(&self, corpus_id: &str, followup: Followup) -> Result<()> {
         let (status, near_dupe_of, near_dupe_score) = match &followup {
-            Followup::Park { of, similarity } => (
-                CorpusStatus::NeedsReview,
-                Some(of.clone()),
-                Some(*similarity),
-            ),
+            Followup::Flag { of, similarity } => {
+                (CorpusStatus::Raw, Some(of.clone()), Some(*similarity))
+            }
             Followup::Queue(_) | Followup::Nothing => (CorpusStatus::Raw, None, None),
         };
         let mut tx = self.pool.begin().await?;
@@ -503,7 +512,7 @@ impl Store {
         // The commit first, for the reason `insert_corpus_with_signature`
         // gives: a claim that lands before the status write is visible is a
         // unit closed against a corpus the worker cannot see.
-        if let Followup::Queue(stage) = followup {
+        if let Some(stage) = followup.stage() {
             super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", corpus_id)
                 .await?;
         }
@@ -636,9 +645,9 @@ impl Store {
         Ok(())
     }
 
-    /// Captures waiting on a near-duplicate decision, newest first. They are
-    /// the one corpus state nothing else advances, so Ops has to show them or
-    /// they sit unprocessed with no indication why.
+    /// Captures flagged as near-duplicates, newest first. They are read and
+    /// searchable like any other; the list is where a person can still
+    /// replace, keep or discard one.
     pub async fn parked_corpora(&self, limit: i64) -> Result<Vec<Corpus>> {
         let rows = sqlx::query(
             "SELECT * FROM corpora WHERE near_dupe_of IS NOT NULL
@@ -1209,7 +1218,7 @@ mod tests {
 
         s.apply_followup(
             &src.id,
-            Followup::Park {
+            Followup::Flag {
                 of: other.id.clone(),
                 similarity: 0.94,
             },
@@ -1218,10 +1227,13 @@ mod tests {
         .unwrap();
 
         let got = s.get_corpus(&src.id).await.unwrap();
-        assert_eq!(got.status, CorpusStatus::NeedsReview);
+        assert_eq!(got.status, CorpusStatus::Raw);
         assert_eq!(got.near_dupe_of.as_deref(), Some(other.id.as_str()));
         assert_eq!(got.near_dupe_score, Some(0.94));
-        assert!(!s.live_job(Stage::Synthesize, &src.id).await.unwrap());
+        assert!(
+            s.live_job(Stage::Synthesize, &src.id).await.unwrap(),
+            "a flag is not a gate"
+        );
     }
 
     #[tokio::test]
@@ -1409,7 +1421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_parked_capture_is_written_parked_with_no_job() {
+    async fn a_flagged_capture_is_written_flagged_and_queued() {
         let s = Store::memory().await.unwrap();
         let other = s.insert_corpus("other", "web", None).await.unwrap();
         let src = s
@@ -1420,7 +1432,7 @@ mod tests {
                 vec![],
                 None,
                 &serde_json::json!({}),
-                Followup::Park {
+                Followup::Flag {
                     of: other.id.clone(),
                     similarity: 0.9,
                 },
@@ -1428,12 +1440,12 @@ mod tests {
             .await
             .unwrap()
             .into_corpus();
-        assert_eq!(src.status, CorpusStatus::NeedsReview);
+        assert_eq!(src.status, CorpusStatus::Raw);
         assert_eq!(src.near_dupe_of.as_deref(), Some(other.id.as_str()));
         let back = s.get_corpus(&src.id).await.unwrap();
-        assert_eq!(back.status, CorpusStatus::NeedsReview);
+        assert_eq!(back.status, CorpusStatus::Raw);
         assert_eq!(back.near_dupe_score, Some(0.9));
-        assert!(!s.live_job(Stage::Synthesize, &src.id).await.unwrap());
+        assert!(s.live_job(Stage::Synthesize, &src.id).await.unwrap());
         assert_eq!(s.parked_corpora(10).await.unwrap().len(), 1);
     }
 

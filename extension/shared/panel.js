@@ -200,7 +200,7 @@ async function grab(scope) {
 /// second set of words for the same three cases.
 function verdict(out) {
   if (out.duplicate) say('Already captured.');
-  else if (out.near_duplicate) say('Captured, and parked: it looks like something you already have.');
+  else if (out.near_duplicate) say('Captured. It looks like something you already have — compare on Insights.');
   else say('Captured.', 'good');
 }
 

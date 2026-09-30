@@ -188,7 +188,7 @@ pub struct KeptAnswer {
     /// The source it became.
     pub id: String,
     pub duplicate: bool,
-    /// Stored, but waiting on a decision between it and a near-identical source.
+    /// Stored and flagged as resembling a near-identical source; read and searchable as usual.
     pub parked: bool,
     pub near_dupe_percent: i64,
 }

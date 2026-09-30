@@ -54,7 +54,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     tracing::info!(
         corpus_id,
         chars = text.len(),
-        parked = near.is_some(),
+        flagged = near.is_some(),
         "image read"
     );
     Ok(())
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reading_that_matches_an_existing_corpus_is_parked_as_a_near_duplicate() {
+    async fn a_reading_that_matches_an_existing_corpus_is_flagged_and_still_read() {
         let text = "The quarterly plan lists three goals: ship the beta, hire two engineers, and cut latency in half by autumn.";
         let core = test_core_with_describer(Arc::new(FakeDescriber::saying(text))).await;
         let first = core.ingest(text, "web", None).await.unwrap();
@@ -220,9 +220,13 @@ mod tests {
         core.store.claim_job().await.unwrap(); // describe
         run(&core, &id).await.unwrap();
         let src = core.store.get_corpus(&id).await.unwrap();
-        assert_eq!(src.status, CorpusStatus::NeedsReview);
+        assert_eq!(src.status, CorpusStatus::Raw);
         assert_eq!(src.near_dupe_of.as_deref(), Some(first.id.as_str()));
-        assert_eq!(src.raw_text, text, "the reading is kept even when parked");
+        assert_eq!(src.raw_text, text, "the reading is kept");
+        assert!(
+            core.store.live_job(Stage::Synthesize, &id).await.unwrap(),
+            "and synthesized like any other"
+        );
     }
 
     async fn clear_backoff(core: &Core) {

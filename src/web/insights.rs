@@ -368,8 +368,8 @@ impl SetAsideAction {
 /// the seven sources changed, and the row carries an undo, so the difference
 /// would be about what can still be taken back.
 pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>, bool)> {
-    // A parked capture is the one corpus state no worker advances. It has to be
-    // shown here or it sits unprocessed with nothing saying why.
+    // A capture flagged as a near-duplicate is read and searchable as usual;
+    // this is the one place a person can still keep only one of the two.
     let mut parked = Vec::new();
     for c in tenant.core.store.parked_corpora(50).await? {
         let other_id = c.near_dupe_of.clone().unwrap_or_default();
@@ -552,7 +552,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
         .collect();
 
     // Seven lists into one. Order is by how much the row wants a person:
-    // a parked capture is blocked until it is answered, an unverified artifact
+    // a flagged near-duplicate may be a copy to drop, an unverified artifact
     // is a question, and the rest are the base's own work with the undo left
     // where it can be found.
     let set_aside_capped = more_merged || more_superseded || more_deprecated || more_reaped;
@@ -568,7 +568,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
             title: p_.title,
             subtitle: format!("{} B", p_.bytes),
             kind: "parked",
-            why: format!("{}% the same as the capture beside it, so nothing has been spent on reading it yet", p_.percent),
+            why: format!("{}% the same as the capture beside it — both are searchable; keep one if they are the same", p_.percent),
             beside: vec![crate::web::ui::SourceRow {
                 id: String::new(),
                 title: p_.other_title,
@@ -588,7 +588,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
                     action: format!("/ui/ops/corpora/{}/resolve", p_.id),
                     label: "Keep both",
                     field: Some(("action", "keep_both")),
-                    hint: "Read this one too; both stay in the base",
+                    hint: "They differ; both stay in the base",
                 },
                 SetAsideAction {
                     action: format!("/ui/ops/corpora/{}/resolve", p_.id),

@@ -97,10 +97,10 @@ private fun firstLine(kind: Kind, payload: String): String {
         Kind.call -> p["label"]?.jsonPrimitive?.contentOrNull ?: "Write"
         Kind.merge_undo -> "Merge · undone"
         Kind.corpus_resolve -> when (p["action"]?.jsonPrimitive?.contentOrNull) {
-            "replace" -> "Parked capture · replaced the old one"
-            "keep_both" -> "Parked capture · kept both"
-            "discard" -> "Parked capture · discarded"
-            else -> "Parked capture"
+            "replace" -> "Near-duplicate · replaced the old one"
+            "keep_both" -> "Near-duplicate · kept both"
+            "discard" -> "Near-duplicate · discarded"
+            else -> "Near-duplicate"
         }
     }
 }

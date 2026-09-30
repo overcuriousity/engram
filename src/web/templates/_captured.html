@@ -24,7 +24,7 @@
 <div class="card">
   <div class="card-head">
     <span class="card-title">
-      {% if duplicate %}Already stored{% else %}Waiting on a decision{% endif %}
+      {% if duplicate %}Already stored{% else %}Looks like something stored{% endif %}
     </span>
   </div>
   {% if duplicate %}
@@ -35,9 +35,9 @@
   {% if let Some(other) = near_dupe_of %}
   <p class="muted">
     This looks {{ near_dupe_percent }}% like
-    <a href="/ui/corpora/{{ other }}">an existing source</a>, so it is stored but
-    not processed until someone decides between them.
-    <a href="/ui/insights">Decide on Insights</a>.
+    <a href="/ui/corpora/{{ other }}">an existing source</a>. It is stored and
+    searchable like any other capture; if the two are the same, replace or
+    discard one <a href="/ui/insights">on Insights</a>.
   </p>
   {% endif %}
   <a href="/ui/corpora/{{ id }}">View source</a>

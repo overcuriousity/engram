@@ -68,9 +68,10 @@ pub struct IngestOutcome {
     /// True when the text was already stored byte for byte and no new source
     /// was created.
     pub duplicate: bool,
-    /// Set when the text is not identical to anything stored but is close
-    /// enough that segmenting it would produce artifacts competing with ones
-    /// that already exist. The capture is stored and parked, never dropped.
+    /// Set when the text is not identical to anything stored but close to
+    /// something that is. The capture is stored, read and searchable like any
+    /// other; this only says it was flagged for a person to replace, keep or
+    /// discard later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub near_duplicate: Option<NearDuplicate>,
 }
@@ -87,15 +88,15 @@ impl IngestOutcome {
     }
 }
 
-/// What an operator decided about a parked capture.
+/// What an operator decided about a capture flagged as a near-duplicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NearDupeAction {
     /// The new capture is the better copy: delete the old corpus and its
-    /// artifacts, then process this one.
+    /// artifacts, and keep this one.
     Replace,
-    /// They are genuinely different despite the score. Process this one and
-    /// leave the other alone.
+    /// They are genuinely different despite the score. Clear the flag and
+    /// leave both alone.
     KeepBoth,
     /// The new capture adds nothing. Delete it.
     Discard,
@@ -498,18 +499,17 @@ impl Core {
             .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
 
-        // Parked, or queued. Synthesis is the expensive stage and text that
-        // resembles something stored may not deserve it; an operator decides
-        // on Ops. Nothing is lost either way — the corpus is stored verbatim
-        // like any other. Written with the row, not after it.
+        // Queued either way, and flagged where it resembles something stored.
+        // It used to be parked — stored with no job until a person decided on
+        // Ops — and a capture nobody decided on was never searchable. Short
+        // notes and a journal line repeated on another day scored as
+        // near-duplicates of what they were not, and went the same way. The
+        // pair judging downstream is what reconciles competing artifacts; the
+        // flag is left for a person to replace or discard later if they want.
         let followup = match &near {
-            // A forced reminder is never parked. Parking is a decision about
-            // whether text that resembles something stored deserves the
-            // synthesis call; a door saying "remind me" has already asked for
-            // that call, and parked, the capture got no `Synthesize` job, no
-            // judgement and no moment — the operator was told "held for
-            // review" and no reminder was ever set.
-            Some(n) if !forced_remind => Followup::Park {
+            // A forced reminder is not flagged. "Remind me" has already said
+            // what it is, and a reminder repeated is a reminder, not a copy.
+            Some(n) if !forced_remind => Followup::Flag {
                 of: n.corpus_id.clone(),
                 similarity: n.similarity,
             },
@@ -558,7 +558,7 @@ impl Core {
                 corpus_id = %src.id,
                 near = %n.corpus_id,
                 similarity = n.similarity,
-                parked = !forced_remind,
+                flagged = !forced_remind,
                 "capture looks like an existing corpus"
             ),
             None => tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested"),
@@ -571,28 +571,23 @@ impl Core {
             id: src.id,
             status: src.status,
             duplicate: false,
-            // What the doors read off this field is "parked", not "resembles
-            // something": `cli/capture.rs` and `mcp/mod.rs` both print *held
-            // for review — nothing is indexed until it is resolved in the web
-            // UI*, and `web/workspace.rs` sets `parked: true`. A forced
-            // reminder was never parked — it went straight to `Synthesize`
-            // above — so reporting the resemblance told the operator their
-            // `engram -r` was waiting for them while it was in fact
-            // synthesized, embedded, armed, and on its way to their phone.
+            // What the doors read off this field is "flagged". A forced
+            // reminder is not flagged, so it is not reported as one.
             near_duplicate: near.filter(|_| !forced_remind),
         })
     }
 
-    /// The fork every capture reaches once its text is known: parked next to
-    /// what it resembles, or queued for synthesis. The status write is here so
-    /// no caller can park without saying what it parked beside.
+    /// The fork every capture reaches once its text is known: queued for
+    /// synthesis, and flagged beside what it resembles if it resembles
+    /// something. Never held: a flag is for a person to look at later, and
+    /// the capture is read and searchable meanwhile.
     pub(crate) async fn park_or_queue(
         &self,
         corpus_id: &str,
         near: Option<&crate::store::corpora::NearDuplicate>,
     ) -> Result<()> {
         let followup = match near {
-            Some(n) => crate::store::corpora::Followup::Park {
+            Some(n) => crate::store::corpora::Followup::Flag {
                 of: n.corpus_id.clone(),
                 similarity: n.similarity,
             },
@@ -606,7 +601,7 @@ impl Core {
                 corpus_id,
                 near = %n.corpus_id,
                 similarity = n.similarity,
-                "looks like an existing corpus; parked for review"
+                "looks like an existing corpus; flagged, and read as usual"
             );
         }
         Ok(())
@@ -976,9 +971,8 @@ impl Core {
         })
     }
 
-    /// Act on a parked capture. Every branch ends with a corpus that is either
-    /// in the pipeline or gone; none of them leaves a corpus stuck in
-    /// `needs_review` with no way out.
+    /// Act on a capture flagged as a near-duplicate. Every branch ends with
+    /// the flag gone: the capture kept and in the pipeline, or deleted.
     pub async fn resolve_near_duplicate(
         &self,
         corpus_id: &str,
@@ -987,7 +981,7 @@ impl Core {
         let src = self.store.get_corpus(corpus_id).await?;
         let Some(other) = src.near_dupe_of.clone() else {
             return Err(Error::Validation(
-                "this corpus is not parked as a near-duplicate".into(),
+                "this corpus is not flagged as a near-duplicate".into(),
             ));
         };
 
@@ -999,15 +993,15 @@ impl Core {
             NearDupeAction::Replace | NearDupeAction::KeepBoth => {
                 if action == NearDupeAction::Replace {
                     // The older corpus goes first. If this fails the new one is
-                    // still parked, which is a state an operator can retry from;
-                    // releasing it first would leave both live on a failure.
+                    // still flagged, which is a state an operator can retry
+                    // from.
                     //
                     // Unless it is already gone: `near_dupe_of` can name a
                     // corpus that has since been deleted — including another
-                    // parked capture that was discarded, since a parked corpus
-                    // is still matchable. Failing there would leave the only
-                    // way out of the queue behind a 404, with nothing on the
-                    // page to say that "keep both" is now the same decision.
+                    // flagged capture that was discarded. Failing there would
+                    // leave the only way out of the list behind a 404, with
+                    // nothing on the page to say that "keep both" is now the
+                    // same decision.
                     match self.delete_corpus(&other).await {
                         Ok(()) => {
                             tracing::info!(corpus_id = %src.id, replaced = %other, "replaced an older corpus");
@@ -1023,14 +1017,30 @@ impl Core {
                     }
                 }
                 self.store.set_near_dupe(&src.id, None, None).await?;
-                self.store
-                    .set_corpus_status(&src.id, CorpusStatus::Raw)
-                    .await?;
-                self.store
-                    .enqueue(Stage::Synthesize, "corpus", &src.id)
-                    .await?;
+                // A capture parked by a build before flags were read like any
+                // other is still at `needs_review` with no job, and this is
+                // its way into the pipeline. A flagged one is there already.
+                if src.status == CorpusStatus::NeedsReview {
+                    self.release_parked(&src.id).await?;
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Put a capture parked by an older build into the pipeline: `raw` and a
+    /// `Synthesize` job, the flag left where it is. The one way out of
+    /// `needs_review`, which nothing writes any more.
+    pub(crate) async fn release_parked(&self, corpus_id: &str) -> Result<()> {
+        // Status first, then the job: the order `apply_followup` keeps, so an
+        // interruption leaves a `raw` corpus with no unit, which is what the
+        // reconcile sweep looks for.
+        self.store
+            .set_corpus_status(corpus_id, CorpusStatus::Raw)
+            .await?;
+        self.store
+            .enqueue(Stage::Synthesize, "corpus", corpus_id)
+            .await?;
         Ok(())
     }
 
@@ -2844,26 +2854,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_near_identical_capture_is_parked_rather_than_synthesised() {
-        // The whole point: a re-pasted chapter must not cost a model call, and
-        // must not become a second set of artifacts competing with the first.
+    async fn a_near_identical_capture_is_flagged_and_still_read_and_embedded() {
+        // It used to be parked: stored with no job until a person decided on
+        // Insights, and a capture nobody decided on was never searchable.
         let core = test_core().await;
         let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
+        crate::jobs::test_support::drain(&core).await;
 
         let edited = manual("mount").replacen("step 7:", "step seven:", 1);
         let second = core.ingest(&edited, "web", None).await.unwrap();
 
         assert_ne!(second.id, first.id, "the capture must still be stored");
         assert!(!second.duplicate, "it is not a byte-identical duplicate");
-        assert_eq!(second.status, CorpusStatus::NeedsReview);
+        assert_eq!(second.status, CorpusStatus::Raw);
         let near = second.near_duplicate.expect("no near-duplicate reported");
         assert_eq!(near.corpus_id, first.id);
         assert!(near.similarity > 0.90);
-        assert!(
-            core.store.claim_job().await.unwrap().is_none(),
-            "a parked capture must not queue synthesis"
+        let row = core.store.get_corpus(&second.id).await.unwrap();
+        assert_eq!(row.near_dupe_of.as_deref(), Some(first.id.as_str()));
+        assert_eq!(core.store.parked_corpora(10).await.unwrap().len(), 1);
+
+        crate::jobs::test_support::drain(&core).await;
+        assert_eq!(
+            core.store.get_corpus(&second.id).await.unwrap().status,
+            CorpusStatus::Ready,
+            "a flagged capture is read and embedded like any other"
         );
+        assert!(
+            core.store
+                .get_corpus(&second.id)
+                .await
+                .unwrap()
+                .near_dupe_of
+                .is_some(),
+            "and stays flagged for a person to look at"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_an_older_build_parked_is_released_by_the_sweep() {
+        // `needs_review` with no job is what an older build wrote. Nothing
+        // writes it now; the reconcile sweep puts what is left of it into
+        // the pipeline, the flag kept.
+        let core = test_core().await;
+        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let src = core
+            .store
+            .insert_corpus_with_signature(
+                &manual("pastry"),
+                "web",
+                None,
+                vec![],
+                None,
+                &serde_json::json!({}),
+                crate::store::corpora::Followup::Nothing,
+            )
+            .await
+            .unwrap();
+        let crate::store::corpora::Insertion::Created(src) = src else {
+            panic!("fixture corpus already existed")
+        };
+        core.store
+            .set_corpus_status(&src.id, CorpusStatus::NeedsReview)
+            .await
+            .unwrap();
+        core.store
+            .set_near_dupe(&src.id, Some(&first.id), Some(0.9))
+            .await
+            .unwrap();
+
+        crate::jobs::reconcile::run(&core).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+
+        let got = core.store.get_corpus(&src.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Ready);
+        assert_eq!(got.near_dupe_of.as_deref(), Some(first.id.as_str()));
     }
 
     #[tokio::test]
@@ -2882,7 +2948,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeping_both_releases_the_capture_into_the_pipeline() {
+    async fn keeping_both_clears_the_flag_and_leaves_the_capture_in_the_pipeline() {
         let core = test_core().await;
         core.ingest(&manual("mount"), "web", None).await.unwrap();
         while core.store.claim_job().await.unwrap().is_some() {}
@@ -2902,6 +2968,38 @@ mod tests {
         let got = core.store.get_corpus(&second.id).await.unwrap();
         assert_eq!(got.status, CorpusStatus::Raw);
         assert!(got.near_dupe_of.is_none(), "the flag must be cleared");
+        assert!(
+            core.store.claim_job().await.unwrap().is_some(),
+            "the synthesis the capture armed is still there"
+        );
+    }
+
+    #[tokio::test]
+    async fn keeping_both_releases_a_capture_an_older_build_parked() {
+        let core = test_core().await;
+        core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        // What an older build wrote: parked, and no job.
+        while core.store.claim_job().await.unwrap().is_some() {}
+        core.store
+            .set_corpus_status(&second.id, CorpusStatus::NeedsReview)
+            .await
+            .unwrap();
+
+        core.resolve_near_duplicate(&second.id, NearDupeAction::KeepBoth)
+            .await
+            .unwrap();
+
+        let got = core.store.get_corpus(&second.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Raw);
         assert!(core.store.claim_job().await.unwrap().is_some());
     }
 
@@ -2963,9 +3061,8 @@ mod tests {
     #[tokio::test]
     async fn replacing_a_corpus_that_is_already_gone_still_releases_the_capture() {
         // `near_dupe_of` can name a corpus that has since been deleted —
-        // including another parked capture that was discarded, since a parked
-        // corpus is still matchable. Failing here put the only way out of the
-        // review queue behind a 404.
+        // including another flagged capture that was discarded. Failing here
+        // put the only way off the list behind a 404.
         let core = test_core().await;
         let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
         while core.store.claim_job().await.unwrap().is_some() {}
@@ -2990,9 +3087,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reprocessing_a_parked_capture_takes_it_off_the_review_queue() {
-        // Reprocessing is a decision to process. Leaving the park set left a
-        // fully synthesized corpus on the queue where "discard" deletes it.
+    async fn reprocessing_a_flagged_capture_takes_it_off_the_list() {
+        // Reprocessing is a decision about the capture, and the flag goes
+        // with it.
         let core = test_core().await;
         core.ingest(&manual("mount"), "web", None).await.unwrap();
         while core.store.claim_job().await.unwrap().is_some() {}
@@ -3004,9 +3101,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            core.store.get_corpus(&second.id).await.unwrap().status,
-            CorpusStatus::NeedsReview
+        assert!(
+            core.store
+                .get_corpus(&second.id)
+                .await
+                .unwrap()
+                .near_dupe_of
+                .is_some()
         );
 
         core.reprocess(&second.id, Stage::Synthesize).await.unwrap();
@@ -3014,7 +3115,7 @@ mod tests {
         let got = core.store.get_corpus(&second.id).await.unwrap();
         assert!(
             got.near_dupe_of.is_none(),
-            "the capture is being processed and still asks to be decided on"
+            "the capture was reprocessed and is still flagged"
         );
         assert_eq!(got.status, CorpusStatus::Raw);
     }
@@ -3685,7 +3786,7 @@ mod tests {
     /// which is what normally arms the embed. Without arming it here, the one
     /// thing a person typed about an unreadable document waits forever.
     #[tokio::test]
-    async fn a_note_arms_the_embed_so_a_parked_capture_still_becomes_findable() {
+    async fn a_note_arms_the_embed_so_an_unread_capture_still_becomes_findable() {
         let core = test_core().await;
         let out = core
             .ingest_pdf(PdfCapture {
@@ -4074,11 +4175,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_forced_reminder_is_never_parked_beside_what_it_resembles() {
-        // Parking is a decision about whether text worth little deserves the
-        // synthesis call. A door saying "remind me" has asked for that call:
-        // parked, the capture got no job, no judgement and no moment, and the
-        // operator was told it was held for review.
+    async fn a_forced_reminder_is_never_flagged_beside_what_it_resembles() {
+        // "Remind me" has said what it is; a reminder repeated is a reminder,
+        // not a copy to drop.
         let core = test_core().await;
         let first: String = (1..=30)
             .map(|n| format!("Schritt {n}: die Unterlagen für den Termin durchsehen.\n"))
@@ -4107,18 +4206,18 @@ mod tests {
             )
             .await
             .unwrap();
-        // And the receipt says so. Every door reads this field as "parked" and
-        // nothing else — the CLI and MCP both answer *held for review, nothing
-        // is indexed* on it — so reporting the resemblance on a capture that
-        // was queued anyway told the operator the opposite of what happened.
         assert!(
             out.near_duplicate.is_none(),
-            "nothing was parked, so nothing is reported as parked"
+            "nothing was flagged, so nothing is reported as flagged"
         );
-        assert_ne!(
-            core.store.get_corpus(&out.id).await.unwrap().status,
-            CorpusStatus::NeedsReview,
-            "a forced reminder is not held for review"
+        assert!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .near_dupe_of
+                .is_none(),
+            "a forced reminder is not flagged"
         );
         crate::jobs::test_support::drain(&core).await;
         assert_eq!(

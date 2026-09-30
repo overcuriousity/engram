@@ -153,8 +153,8 @@ pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static st
         Ready => "badge-success",
         Partial => "badge-warning",
         Failed => "badge-danger",
-        // A parked capture is waiting on a person, not on a worker. It reads as
-        // a warning because nothing will advance it on its own.
+        // Only an older build's parked capture, until the reconcile sweep
+        // releases it into the pipeline.
         NeedsReview => "badge-warning",
         Describing | Extracting | Raw | Segmenting | Segmented | Embedding => "badge-accent",
     }
@@ -4896,9 +4896,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_parked_capture_says_so_instead_of_claiming_it_is_processing() {
-        // The confirmation is the only page the writer sees. Telling them a
-        // parked capture is "processing" means it silently never is.
+    async fn a_flagged_capture_says_what_it_resembles_and_that_it_is_searchable() {
+        // The confirmation is the only page the writer sees: it names what the
+        // capture resembles, and does not claim it is waiting on anyone.
         let (app, cookie, core) = app_session_and_core().await;
         let body: String = (0..200)
             .map(|i| format!("step {i} run the mount command and read its output"))
@@ -4919,12 +4919,16 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let html = flat(&body_of(res).await).to_lowercase();
         assert!(
-            html.contains("waiting on a decision"),
-            "the parked capture rendered as an ordinary one: {html}"
+            html.contains("looks like something stored"),
+            "the flagged capture rendered as an ordinary one: {html}"
         );
         assert!(
-            !html.contains("badge-accent\">processing"),
-            "a parked capture must not claim to be processing: {html}"
+            html.contains("searchable like any other capture"),
+            "it must say the capture is not held: {html}"
+        );
+        assert!(
+            !html.contains("waiting on a decision"),
+            "a flagged capture waits on nobody: {html}"
         );
     }
 

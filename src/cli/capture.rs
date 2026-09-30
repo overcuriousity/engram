@@ -356,13 +356,12 @@ async fn post(
                 .unwrap_or("the server refused it without saying why");
             return Err(Error::Validation(format!("{target}: {said}")));
         }
-        // Said out loud rather than folded into a success: a parked capture is
-        // stored and nothing more — not segmented, not embedded, not searchable
-        // until someone decides between it and what it resembles.
+        // Said, because a person may want to replace or discard one of the
+        // two. Not a wait: a flagged capture is read and searchable as usual.
         if let Some(n) = body.get("near_duplicate").filter(|v| !v.is_null()) {
             eprintln!(
-                "{target}: held for review — {:.0}% similar to {}. \
-                 Nothing is indexed until it is resolved in the web UI.",
+                "{target}: stored, and {:.0}% similar to {} — \
+                 replace or discard one on Insights if they are the same.",
                 n["similarity"].as_f64().unwrap_or(0.0) * 100.0,
                 n["corpus_id"]
                     .as_str()

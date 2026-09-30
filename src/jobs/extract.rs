@@ -63,7 +63,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     tracing::info!(
         corpus_id,
         chars = text.len(),
-        parked = near.is_some(),
+        flagged = near.is_some(),
         "pdf extracted"
     );
     Ok(())

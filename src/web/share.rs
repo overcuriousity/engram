@@ -20,10 +20,8 @@ use axum::routing::post;
 /// Store what was shared and land on the corpus it became.
 ///
 /// The corpus page rather than a confirmation that closes itself, because it is
-/// the one surface that can say *held for review* when a share is parked as a
-/// near-duplicate (`Core::ingest_capture`). On a phone that is the only moment
-/// the operator would ever learn that what they shared is stored but not
-/// searchable.
+/// the one surface that can say a share was flagged as a near-duplicate
+/// (`Core::ingest_capture`) and link to what it resembles.
 ///
 /// A share may carry more than one thing at once, and every part of it is
 /// stored. What differs from `/api/v1/capture` is what becomes of `text` when
