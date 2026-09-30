@@ -1035,10 +1035,13 @@ impl Core {
         c: ImageCapture,
         source_url: Option<String>,
     ) -> Result<IngestOutcome> {
+        // No vision role is not a refusal. The photo is stored with its note
+        // and its file facts, and `Stage::Describe` waits for the role rather
+        // than failing — the same wait it has always had for a role that goes
+        // away. Refused, as it was, a phone in contained mode (which has no
+        // vision section) had every shared photo held and never stored.
         if self.describer.is_none() {
-            return Err(Error::Validation(
-                "image capture is not configured — set [infer.vision] to enable it".into(),
-            ));
+            tracing::info!("no vision role: storing the image to be read when one is configured");
         }
         let ImageCapture {
             bytes,
@@ -3733,21 +3736,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_vision_role_the_image_door_is_closed() {
+    async fn without_a_vision_role_the_image_is_stored_to_be_read_later() {
+        // Refused, as it was, every photo shared from a phone in contained
+        // mode was held and never stored. The note on it is findable now; the
+        // picture is read when a vision role is configured.
         let core = crate::core::test_support::test_core_without_vision().await;
-        let e = core
+        let out = core
             .ingest_image(ImageCapture {
                 bytes: a_seeded_png(7),
                 filename: None,
                 title_hint: None,
-                note: None,
+                note: Some("the whiteboard after the planning meeting".into()),
                 lang: crate::infer::lang::Lang::default(),
             })
             .await
-            .unwrap_err();
-        assert!(matches!(e, Error::Validation(_)));
-        assert!(e.to_string().contains("not configured"), "{e}");
-        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+            .expect("a photo is stored without a vision role");
+        assert_eq!(out.status, CorpusStatus::Describing);
+        assert!(core.store.has_job(Stage::Describe, &out.id).await.unwrap());
+        assert_eq!(
+            core.store
+                .pending_artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the note is waiting for its vector, so it is findable"
+        );
     }
 
     #[tokio::test]

@@ -2498,10 +2498,10 @@ mod tests {
         );
     }
 
-    /// The file control offers what the installation can actually read. Off,
-    /// it offers text only rather than a picker that fails.
+    /// The file control offers an image either way: without a vision role it
+    /// is stored and read once one is configured, and the hint says so.
     #[tokio::test]
-    async fn the_file_control_offers_images_only_when_vision_is_configured() {
+    async fn the_file_control_offers_images_whether_or_not_vision_is_configured() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
         let html = get(&app, "/ui", &cookie).await;
         assert!(html.contains("image/*"), "the picker accepts images");
@@ -2509,8 +2509,8 @@ mod tests {
         let (app, cookie) =
             app_for(crate::core::test_support::test_core_without_vision().await).await;
         let html = get(&app, "/ui", &cookie).await;
-        assert!(!html.contains("image/*"));
-        assert!(html.contains(r#"accept=".txt,text/plain,.pdf,application/pdf""#));
+        assert!(html.contains("image/*"));
+        assert!(html.contains("read once a vision model is configured"));
     }
 
     /// The one page. Capture, search and ask were three of them, and moving
@@ -3151,16 +3151,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_capture_page_offers_images_only_when_vision_is_configured() {
-        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
-        let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(html.contains("image/*"), "picker accepts images");
-
-        let (app, cookie) =
-            app_for(crate::core::test_support::test_core_without_vision().await).await;
-        let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(!html.contains("image/*"));
-        assert!(html.contains("accept=\".txt,text/plain,.pdf,application/pdf\""));
+    async fn the_capture_page_offers_images_whether_or_not_vision_is_configured() {
+        // A photo without a vision role is stored and read later, so the
+        // picker offers it either way.
+        for core in [
+            crate::core::test_support::test_core().await,
+            crate::core::test_support::test_core_without_vision().await,
+        ] {
+            let (app, cookie) = app_for(core).await;
+            let html = get(&app, "/ui/capture", &cookie).await;
+            assert!(html.contains("image/*"), "picker accepts images");
+        }
     }
 
     #[tokio::test]

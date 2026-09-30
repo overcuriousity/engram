@@ -213,14 +213,9 @@
        camera come free. app.js hides this while a file is waiting: the staged
        box above is the file, this is only the invitation. #}
     <label class="btn btn-ghost" id="drop"
-           title="{% if vision_enabled %}A .txt file, a PDF or an image — or drop one anywhere on the page{% else %}A .txt file or a PDF — or drop one anywhere on the page{% endif %}">
-      {% if vision_enabled %}
+           title="{% if vision_enabled %}A .txt file, a PDF or an image — or drop one anywhere on the page{% else %}A .txt file, a PDF or an image (read once a vision model is configured) — or drop one anywhere on the page{% endif %}">
       <input type="file" name="file" accept=".txt,text/plain,.pdf,application/pdf,image/*"
              aria-label="Attach a file — a .txt file, a PDF or an image; on a phone this can take a photo">
-      {% else %}
-      <input type="file" name="file" accept=".txt,text/plain,.pdf,application/pdf"
-             aria-label="Attach a file — a .txt file or a PDF">
-      {% endif %}
       <span>Attach</span>
     </label>
     {# A way out of a wait whose length nothing on the page predicts. Closing

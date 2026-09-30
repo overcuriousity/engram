@@ -3656,7 +3656,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_image_door_refuses_junk_missing_parts_and_a_closed_door() {
+    async fn the_image_door_refuses_junk_and_missing_parts_and_stores_without_vision() {
         let (app, token, core) = app_token_and_core().await;
         let res = app
             .clone()
@@ -3713,13 +3713,9 @@ pub(crate) mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            json_of(res).await["error"]
-                .as_str()
-                .unwrap()
-                .contains("not configured")
-        );
+        // Not a closed door any more: stored, and read when a vision role is
+        // configured.
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
