@@ -229,7 +229,8 @@ internal class Transport(
         }
     }
 
-    suspend fun captureText(text: String, title: String?, note: String?, tz: String, fromAsk: String? = null): Answer =
+    /** [tz] is null where it must not go: see [Drainer]'s `capture_text`. */
+    suspend fun captureText(text: String, title: String?, note: String?, tz: String?, fromAsk: String? = null): Answer =
         send(
             Request.Builder()
                 .url(url("/api/v1/capture", mapOf("tz" to tz, "title" to title, "note" to note, "from_ask" to fromAsk)))
@@ -237,8 +238,9 @@ internal class Transport(
                 .build(),
         )
 
-    // No `tz`: the server reads a file on the file's own terms and refuses a
-    // zone sent beside one, which held every shared file for review.
+    // No `tz`: the server reads a file on the file's own terms, and a server
+    // older than the one that lets a zone through refuses one sent beside a
+    // file — which held every shared file for review.
     suspend fun captureFiles(files: List<OutFile>, title: String?, note: String?): Answer {
         val body = MultipartBody.Builder().setType(MultipartBody.FORM).apply {
             if (title != null) addFormDataPart("title", title)

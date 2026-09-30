@@ -43,6 +43,9 @@ struct CorpusTemplate {
     /// than the document as it was laid out, and the original is one click
     /// away.
     pdf: bool,
+    /// A captured link: it can be fetched again — one held because the page
+    /// could not be read, or a page that has changed.
+    link: bool,
     /// A capture whose reading has not landed — still `describing` or
     /// `extracting`, or parked before any text was read. Nothing to
     /// re-segment; only read it again.
@@ -392,6 +395,7 @@ async fn corpus_detail(
     };
     let image = s.origin == crate::core::ingest::ORIGIN_IMAGE;
     let pdf = s.origin == crate::core::ingest::ORIGIN_PDF;
+    let link = s.origin == crate::core::ingest::ORIGIN_FETCH && s.source_url.is_some();
     let unread = (image && (s.status == CorpusStatus::Describing || s.raw_text.trim().is_empty()))
         || (pdf && (s.status == CorpusStatus::Extracting || s.raw_text.trim().is_empty()));
     let note = s.metadata["note"].as_str().map(str::to_string);
@@ -415,6 +419,7 @@ async fn corpus_detail(
         source_url: s.source_url.clone(),
         image,
         pdf,
+        link,
         unread,
         meta_rows,
         exif_rows,
@@ -473,6 +478,17 @@ pub(crate) fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     }
     if let Some(e) = m["extract"]["error"].as_str() {
         rows.push(("Extraction".into(), e.into()));
+    }
+    // A link stored because its page could not be read: what is shown is the
+    // link and what came with it, and this says why and whether it is still
+    // being tried.
+    if let Some(e) = m["fetch"]["error"].as_str() {
+        let said = if m["fetch"]["pending"].as_bool() == Some(true) {
+            format!("not read yet ({e}) — tried again in the background")
+        } else {
+            format!("could not be read ({e}) — Fetch again to retry")
+        };
+        rows.push(("Page".into(), said));
     }
     rows
 }
@@ -585,6 +601,29 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
+
+    /// A link stored because its page could not be read says so, and says
+    /// whether it is still being tried.
+    #[test]
+    fn a_held_link_names_why_its_page_is_missing() {
+        let pending =
+            serde_json::json!({"fetch": {"pending": true, "error": "the server answered 503"}});
+        let rows = metadata_rows(&pending);
+        assert!(
+            rows.iter()
+                .any(|(k, v)| k == "Page" && v.contains("503") && v.contains("tried again")),
+            "{rows:?}"
+        );
+        let given_up = serde_json::json!({"fetch": {"pending": false, "error": "timed out"}});
+        let rows = metadata_rows(&given_up);
+        assert!(
+            rows.iter()
+                .any(|(k, v)| k == "Page" && v.contains("Fetch again")),
+            "{rows:?}"
+        );
+        let read = serde_json::json!({"fetch": {"fetched_at": 1}});
+        assert!(metadata_rows(&read).is_empty());
+    }
 
     /// A band echo is a link and nothing else — "↑ ⟨label⟩", pointing up at
     /// the card in the band that owns it. A passage there was pointed at by

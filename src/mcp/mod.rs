@@ -488,15 +488,12 @@ impl PkdbTools {
             return "Ingest failed: supply exactly one of `text`, `url` or `file_base64`."
                 .to_string();
         }
-        // Before `capture_time` takes them: the three fields reach only the
-        // text branch, and a client told "Stored" while its zone was dropped
-        // has been lied to.
+        // Before `capture_time` takes them: `origin` and `intent` reach only
+        // the text branch, and a client told "Stored" while they were dropped
+        // has been lied to. A `tz` is let through; see `refuse_time_fields`.
         if p.text.is_none()
-            && let Err(e) = crate::web::api::refuse_time_fields(
-                p.tz.as_deref(),
-                p.origin.as_deref(),
-                p.intent.as_deref(),
-            )
+            && let Err(e) =
+                crate::web::api::refuse_time_fields(p.origin.as_deref(), p.intent.as_deref())
         {
             return format!("Ingest failed: {e}");
         }
@@ -533,16 +530,19 @@ impl PkdbTools {
         };
         match outcome {
             Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
-            // A parked capture is stored and nothing more: no segmentation, no
-            // embedding, and nothing searchable until a person decides. Saying
-            // "runs in the background" here would have the agent report a
-            // success that never happens.
+            // A flagged capture is read and indexed like any other; the flag
+            // is for a person who may want to keep only one of the two.
+            Ok(o) if o.link_unread.is_some() => format!(
+                "Stored as `{}`, but the page could not be read ({}). The link and any \
+                 note are stored and searchable; the page is fetched again in the background.",
+                o.id,
+                o.link_unread.as_deref().unwrap_or("")
+            ),
             Ok(o) if o.near_duplicate.is_some() => {
                 let n = o.near_duplicate.expect("just checked");
                 format!(
-                    "Stored as `{}`, but held for review: it is {:.0}% similar to `{}`, \
-                     so it is not segmented or indexed until someone decides between \
-                     them in the web UI.",
+                    "Stored as `{}` and being indexed. It is {:.0}% similar to `{}`; \
+                     the person can replace or discard one of them on Insights.",
                     o.id,
                     n.similarity * 100.0,
                     n.corpus_id
@@ -1150,6 +1150,7 @@ mod tests {
             displaced: 4,
             refilled: 4,
             reranked: false,
+            keyword_only: false,
         };
         let out = format_search_results(&[explained("a1")], Some(&summary));
 
@@ -1186,6 +1187,7 @@ mod tests {
             displaced: 4,
             refilled: 0,
             reranked: false,
+            keyword_only: false,
         };
         let out = format_search_results(&[hit("a1", None)], Some(&summary));
         assert!(

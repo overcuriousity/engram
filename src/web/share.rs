@@ -20,10 +20,8 @@ use axum::routing::post;
 /// Store what was shared and land on the corpus it became.
 ///
 /// The corpus page rather than a confirmation that closes itself, because it is
-/// the one surface that can say *held for review* when a share is parked as a
-/// near-duplicate (`Core::ingest_capture`). On a phone that is the only moment
-/// the operator would ever learn that what they shared is stored but not
-/// searchable.
+/// the one surface that can say a share was flagged as a near-duplicate
+/// (`Core::ingest_capture`) and link to what it resembles.
 ///
 /// A share may carry more than one thing at once, and every part of it is
 /// stored. What differs from `/api/v1/capture` is what becomes of `text` when
@@ -48,9 +46,13 @@ async fn share(
             .get("text")
             .and_then(|t| only_a_url(t).map(|u| u.to_string()))
     });
-    if shared_url.is_some() {
-        fields.remove("text");
-    }
+    // Kept for the one case it matters: a link that cannot be read is stored
+    // as the link and this text. See `Core::ingest_link`.
+    let shared_text = if shared_url.is_some() {
+        fields.remove("text")
+    } else {
+        None
+    };
 
     // Read before anything is stored, so a bad scheme costs nothing.
     let shared_url = shared_url
@@ -70,7 +72,7 @@ async fn share(
     if let Some(u) = shared_url {
         let out = tenant
             .core
-            .ingest_url(&u, title.clone(), None, lang)
+            .ingest_link(&u, title.clone(), None, shared_text, lang)
             .await?;
         landing = Some(out.id);
     }

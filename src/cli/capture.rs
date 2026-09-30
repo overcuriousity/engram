@@ -224,16 +224,17 @@ pub(crate) fn local_zone() -> Option<String> {
 /// The zone to send for a capture whose kind this end has not been told — a
 /// path, a link, a pipe — which is to say: only where the server will take it.
 ///
-/// `/capture` refuses the three time fields on every branch that is not a
-/// verbatim text capture, because a PDF, a photo and a fetched page are read on
-/// the server's own terms and a zone attached to one is a parameter that would
-/// be silently dropped. Sent unconditionally, as it was, this made every
+/// A server before `refuse_time_fields` let `tz` through refused it on every
+/// branch that is not a verbatim text capture, because a PDF, a photo and a
+/// fetched page are read on the server's own terms. Sent unconditionally to
+/// one of those, as it was, this made every
 /// `engram -c report.pdf`, `-c photo.jpg`, `-c https://example.com` and
 /// `echo https://x | engram` fail with `tz only applies to a text capture` on
 /// any host that can name its zone at all.
 ///
-/// The condition is `refuse_time_fields`' own, mirrored: text/plain, and not a
-/// body that is nothing but a link — which the server reads as a fetch.
+/// The condition is that server's, mirrored: text/plain, and not a body that
+/// is nothing but a link — which the server reads as a fetch. A current server
+/// ignores a zone there, so this only keeps an older one working.
 fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
     if !content_type.starts_with("text/plain") {
         return None;
@@ -251,10 +252,9 @@ fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
 ///
 /// A body that is nothing but a link is refused here rather than sent. The
 /// server reads such a body as a page to fetch, and a fetched page carries none
-/// of the three fields this path sets — `refuse_time_fields` answers with a 400
-/// naming `tz, intent`, which is two fields the operator did not type and one
-/// verb they did. Said in the client, in terms of what they wrote: `-c` is the
-/// verb that captures a link.
+/// of the fields this path sets — `refuse_time_fields` answers with a 400
+/// naming a field the operator did not type for a verb they did. Said in the
+/// client, in terms of what they wrote: `-c` is the verb that captures a link.
 pub async fn run_text(
     e: &Endpoint,
     text: String,
@@ -356,13 +356,20 @@ async fn post(
                 .unwrap_or("the server refused it without saying why");
             return Err(Error::Validation(format!("{target}: {said}")));
         }
-        // Said out loud rather than folded into a success: a parked capture is
-        // stored and nothing more — not segmented, not embedded, not searchable
-        // until someone decides between it and what it resembles.
+        // Said, because a person may want to replace or discard one of the
+        // two. Not a wait: a flagged capture is read and searchable as usual.
+        // A link that could not be read is stored as the link and tried
+        // again; said, so nobody wonders why the page's words do not match.
+        if let Some(why) = body.get("link_unread").and_then(|v| v.as_str()) {
+            eprintln!(
+                "{target}: the page could not be read ({why}) — stored as the link, \
+                 and tried again in the background."
+            );
+        }
         if let Some(n) = body.get("near_duplicate").filter(|v| !v.is_null()) {
             eprintln!(
-                "{target}: held for review — {:.0}% similar to {}. \
-                 Nothing is indexed until it is resolved in the web UI.",
+                "{target}: stored, and {:.0}% similar to {} — \
+                 replace or discard one on Insights if they are the same.",
                 n["similarity"].as_f64().unwrap_or(0.0) * 100.0,
                 n["corpus_id"]
                     .as_str()
@@ -832,8 +839,8 @@ mod tests {
 
     /// A body that is one link is read by the server as a page to fetch, and a
     /// fetched page carries none of the fields this path sets. The server said
-    /// so by naming `tz, intent` — two fields the operator never typed and one
-    /// verb they did.
+    /// so by naming `intent` or `origin` — a field the operator never typed for
+    /// a verb they did.
     #[tokio::test]
     async fn a_bare_link_cannot_be_a_reminder_or_an_entry() {
         let (e, _core) = endpoint().await;

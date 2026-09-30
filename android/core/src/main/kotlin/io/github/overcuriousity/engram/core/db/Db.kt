@@ -131,6 +131,8 @@ interface OutboxDao {
     @Query("SELECT * FROM outbox_files WHERE outboxId = :id") suspend fun filesOf(id: String): List<OutboxFile>
     @Query("UPDATE outbox SET state = 'refused' WHERE state = 'queued'") suspend fun refuseAll()
     @Query("UPDATE outbox SET state = 'queued', nextAt = :now WHERE state = 'refused'") suspend fun requeueRefused(now: Long)
+    @Query("UPDATE outbox SET state = 'queued', nextAt = :now, attempts = 0, status = NULL, answer = NULL, error = NULL WHERE state = 'held'")
+    suspend fun requeueHeld(now: Long)
     @Query("DELETE FROM outbox WHERE id = :id") suspend fun delete(id: String)
     @Query("DELETE FROM outbox_files WHERE outboxId = :id") suspend fun deleteFiles(id: String)
     @Query("SELECT id FROM outbox WHERE state = 'sent' AND createdAt < :before") suspend fun sentBefore(before: Long): List<String>

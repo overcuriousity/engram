@@ -153,8 +153,8 @@ pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static st
         Ready => "badge-success",
         Partial => "badge-warning",
         Failed => "badge-danger",
-        // A parked capture is waiting on a person, not on a worker. It reads as
-        // a warning because nothing will advance it on its own.
+        // Only an older build's parked capture, until the reconcile sweep
+        // releases it into the pipeline.
         NeedsReview => "badge-warning",
         Describing | Extracting | Raw | Segmenting | Segmented | Embedding => "badge-accent",
     }
@@ -207,6 +207,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "reap" => "Reaping the retired",
         "probe" => "Minting probes",
         "condense" => "Condensing",
+        "fetch" => "Fetching links again",
         other => other,
     }
 }
@@ -2497,10 +2498,10 @@ mod tests {
         );
     }
 
-    /// The file control offers what the installation can actually read. Off,
-    /// it offers text only rather than a picker that fails.
+    /// The file control offers an image either way: without a vision role it
+    /// is stored and read once one is configured, and the hint says so.
     #[tokio::test]
-    async fn the_file_control_offers_images_only_when_vision_is_configured() {
+    async fn the_file_control_offers_images_whether_or_not_vision_is_configured() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
         let html = get(&app, "/ui", &cookie).await;
         assert!(html.contains("image/*"), "the picker accepts images");
@@ -2508,8 +2509,8 @@ mod tests {
         let (app, cookie) =
             app_for(crate::core::test_support::test_core_without_vision().await).await;
         let html = get(&app, "/ui", &cookie).await;
-        assert!(!html.contains("image/*"));
-        assert!(html.contains(r#"accept=".txt,text/plain,.pdf,application/pdf""#));
+        assert!(html.contains("image/*"));
+        assert!(html.contains("read once a vision model is configured"));
     }
 
     /// The one page. Capture, search and ask were three of them, and moving
@@ -3150,16 +3151,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_capture_page_offers_images_only_when_vision_is_configured() {
-        let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
-        let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(html.contains("image/*"), "picker accepts images");
-
-        let (app, cookie) =
-            app_for(crate::core::test_support::test_core_without_vision().await).await;
-        let html = get(&app, "/ui/capture", &cookie).await;
-        assert!(!html.contains("image/*"));
-        assert!(html.contains("accept=\".txt,text/plain,.pdf,application/pdf\""));
+    async fn the_capture_page_offers_images_whether_or_not_vision_is_configured() {
+        // A photo without a vision role is stored and read later, so the
+        // picker offers it either way.
+        for core in [
+            crate::core::test_support::test_core().await,
+            crate::core::test_support::test_core_without_vision().await,
+        ] {
+            let (app, cookie) = app_for(core).await;
+            let html = get(&app, "/ui/capture", &cookie).await;
+            assert!(html.contains("image/*"), "picker accepts images");
+        }
     }
 
     #[tokio::test]
@@ -4896,9 +4898,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_parked_capture_says_so_instead_of_claiming_it_is_processing() {
-        // The confirmation is the only page the writer sees. Telling them a
-        // parked capture is "processing" means it silently never is.
+    async fn a_flagged_capture_says_what_it_resembles_and_that_it_is_searchable() {
+        // The confirmation is the only page the writer sees: it names what the
+        // capture resembles, and does not claim it is waiting on anyone.
         let (app, cookie, core) = app_session_and_core().await;
         let body: String = (0..200)
             .map(|i| format!("step {i} run the mount command and read its output"))
@@ -4919,12 +4921,16 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let html = flat(&body_of(res).await).to_lowercase();
         assert!(
-            html.contains("waiting on a decision"),
-            "the parked capture rendered as an ordinary one: {html}"
+            html.contains("looks like something stored"),
+            "the flagged capture rendered as an ordinary one: {html}"
         );
         assert!(
-            !html.contains("badge-accent\">processing"),
-            "a parked capture must not claim to be processing: {html}"
+            html.contains("searchable like any other capture"),
+            "it must say the capture is not held: {html}"
+        );
+        assert!(
+            !html.contains("waiting on a decision"),
+            "a flagged capture waits on nobody: {html}"
         );
     }
 

@@ -45,6 +45,34 @@ class DrainerTest {
         assertEquals("/api/v1/capture?tz=Europe%2FBerlin", server.takeRequest().target)
     }
 
+    @Test fun aSharedLinkGoesWithoutAZone() = runTest {
+        // A link is a fetch on the server, and an older server refuses a zone
+        // beside one: every link shared from a browser was held, never stored.
+        server.enqueue(MockResponse(code = 202, body = "{}"))
+        box.enqueueText("  https://www.redhat.com/en/topics/api/what-is-a-rest-api\n", null, null)
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        assertEquals("/api/v1/capture", server.takeRequest().target)
+        assertEquals(State.sent, box.rows.first().single().state)
+    }
+
+    @Test fun proseThatOpensWithALinkKeepsItsZone() = runTest {
+        server.enqueue(MockResponse(code = 201, body = "{}"))
+        box.enqueueText("https://example.com is where the invoice is, pay it friday", null, null)
+        drainer.drainOnce()
+        assertEquals("/api/v1/capture?tz=Europe%2FBerlin", server.takeRequest().target)
+    }
+
+    @Test fun aRowHeldAndRetriedIsDelivered() = runTest {
+        server.enqueue(MockResponse(code = 400, body = """{"error":"not yet"}"""))
+        server.enqueue(MockResponse(code = 201, body = "{}"))
+        val id = box.enqueueText("hi", null, null)
+        drainer.drainOnce()
+        assertEquals(State.held, box.rows.first().single().state)
+        box.retry(id)
+        assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
+        assertEquals(State.sent, box.rows.first().single().state)
+    }
+
     @Test fun rowsGoInOrderAndAFailureMovesOneOut() = runTest {
         box.enqueueText("first", null, null); now += 1; box.enqueueText("second", null, null)
         server.enqueue(MockResponse.Builder().onRequestStart(SocketEffect.CloseSocket()).build())

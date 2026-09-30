@@ -434,25 +434,28 @@ pub(crate) fn capture_time(
     })
 }
 
-/// Refuse the three time fields on a capture that is not verbatim text.
+/// Refuse `origin` and `intent` on a capture that is not verbatim text, and
+/// let `tz` through unread.
 ///
 /// They used to be validated and then silently dropped: only the text branch
-/// applies them, so `{"url": …, "tz": "Europe/Berlin"}` came back a success
-/// with any date in the fetched page read in the server's zone, and
-/// `origin=journal` on a URL was accepted and ignored.
+/// applies them, so `origin=journal` on a URL was accepted and ignored.
 ///
-/// Refused rather than honoured, because for a fetched page and an uploaded
-/// file two of the three cannot mean anything: `origin` there is the *reader*
-/// — `web`, `pdf`, `image`, decided by what came back — not a claim the caller
-/// gets to make, and `intent` is a statement about a sentence somebody typed.
-/// `tz` would mean something, and does not reach the segmentation path for
-/// those captures; saying so is the honest answer until it does.
-pub(crate) fn refuse_time_fields(
-    tz: Option<&str>,
-    origin: Option<&str>,
-    intent: Option<&str>,
-) -> Result<()> {
-    let named: Vec<&str> = [("tz", tz), ("origin", origin), ("intent", intent)]
+/// `origin` and `intent` are refused because for a fetched page and an
+/// uploaded file they cannot mean anything, and a caller sends them on
+/// purpose: `origin` there is the *reader* — `web`, `pdf`, `image`, decided by
+/// what came back — not a claim the caller gets to make, and `intent` is a
+/// statement about a sentence somebody typed.
+///
+/// `tz` is not refused. It is ambient — every client that can name its zone
+/// sends it — and whether a body is "only a link" is the server's own guess
+/// (`only_a_url`), which no client should have to repeat to the letter. When
+/// it was refused, every client that did not got the capture itself turned
+/// away: the CLI's links and files, then the phone's files, then the phone's
+/// shared links, each held for review and absent from search. A zone that
+/// does not reach the segmentation path costs nothing; a capture that never
+/// arrives costs the capture.
+pub(crate) fn refuse_time_fields(origin: Option<&str>, intent: Option<&str>) -> Result<()> {
+    let named: Vec<&str> = [("origin", origin), ("intent", intent)]
         .into_iter()
         .filter(|(_, v)| v.is_some_and(|v| !v.trim().is_empty()))
         .map(|(k, _)| k)
@@ -580,7 +583,7 @@ async fn capture(
             Some(u) => {
                 // The body is one link, so this is a fetch and not a capture
                 // of what was sent. See `refuse_time_fields`.
-                refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
+                refuse_time_fields(q.origin.as_deref(), q.intent.as_deref())?;
                 tenant.core.ingest_url(&u, q.title, q.note, lang).await?
             }
             None => {
@@ -633,20 +636,22 @@ async fn capture(
                 .get("text")
                 .and_then(|t| only_a_url(t).map(|u| u.to_string()))
         });
-        // Nothing here will be a text capture, so nothing here can carry the
-        // three fields. Judged after `shared_url` is resolved, because a `url`
+        // Nothing here will be a text capture, so nothing here can carry
+        // `origin` or `intent` (a `tz` is let through; see
+        // `refuse_time_fields`). Judged after `shared_url` is resolved, because a `url`
         // takes the text with it and a share that turns out to be a link is a
         // fetch. Where a text part *is* captured they apply to it, and the
         // files beside it are read on their own terms as they always were.
         if shared_url.is_some() || !fields.contains_key("text") {
             refuse_time_fields(
-                q.tz.as_deref().or(raw_tz.as_deref()),
                 q.origin.as_deref().or(raw_origin.as_deref()),
                 q.intent.as_deref().or(raw_intent.as_deref()),
             )?;
         }
         if let Some(raw) = shared_url {
-            fields.remove("text");
+            // Kept for the one case it matters: a link that cannot be read is
+            // stored as the link and this text. See `Core::ingest_link`.
+            let shared = fields.remove("text");
             let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
             if !matches!(u.scheme(), "http" | "https") {
                 return Err(Error::Validation(format!(
@@ -657,7 +662,7 @@ async fn capture(
             out.push(
                 tenant
                     .core
-                    .ingest_url(&u, title.clone(), note.clone(), lang)
+                    .ingest_link(&u, title.clone(), note.clone(), shared, lang)
                     .await?,
             );
         } else if let Some(text) = fields.remove("text") {
@@ -742,7 +747,7 @@ async fn capture(
             )));
         }
         // A PDF or a photo, read by the server on its own terms.
-        refuse_time_fields(q.tz.as_deref(), q.origin.as_deref(), q.intent.as_deref())?;
+        refuse_time_fields(q.origin.as_deref(), q.intent.as_deref())?;
         let out = tenant
             .core
             .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB, lang)
@@ -3651,7 +3656,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn the_image_door_refuses_junk_missing_parts_and_a_closed_door() {
+    async fn the_image_door_refuses_junk_and_missing_parts_and_stores_without_vision() {
         let (app, token, core) = app_token_and_core().await;
         let res = app
             .clone()
@@ -3708,13 +3713,9 @@ pub(crate) mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        assert!(
-            json_of(res).await["error"]
-                .as_str()
-                .unwrap()
-                .contains("not configured")
-        );
+        // Not a closed door any more: stored, and read when a vision role is
+        // configured.
+        assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
@@ -5109,15 +5110,11 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// The three fields reach only the text branch, so a capture that is not
-    /// verbatim text has to refuse them rather than take them and drop them.
-    ///
-    /// They were validated and then silently ignored: a client sending
-    /// `?tz=Europe/Berlin` with a link got a 201 and any date in the fetched
-    /// page read in the server's zone, and `origin=journal` on a link was
-    /// accepted and had no effect at all.
+    /// `origin` and `intent` reach only the text branch, so a capture that is
+    /// not verbatim text has to refuse them rather than take them and drop
+    /// them: `origin=journal` on a link was accepted and had no effect at all.
     #[tokio::test]
-    async fn the_time_fields_are_refused_where_they_would_be_dropped() {
+    async fn origin_and_intent_are_refused_where_they_would_be_dropped() {
         let (app, token) = app_and_token().await;
         let text = |uri: &str, body: &str| {
             Request::builder()
@@ -5130,7 +5127,6 @@ pub(crate) mod tests {
         };
         // A body that is one link is a fetch, not a capture of what was sent.
         for uri in [
-            "/api/v1/capture?tz=Europe/Berlin",
             "/api/v1/capture?origin=journal",
             "/api/v1/capture?intent=remind",
         ] {
@@ -5149,27 +5145,10 @@ pub(crate) mod tests {
         let res = app
             .clone()
             .oneshot(raw_post(
-                "/api/v1/capture?tz=Europe/Berlin",
+                "/api/v1/capture?origin=journal",
                 &token,
                 "image/png",
                 &a_png(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        // A multipart carrying only files, same answer.
-        let res = app
-            .clone()
-            .oneshot(multipart(
-                "/api/v1/capture?tz=Europe/Berlin",
-                &token,
-                &[],
-                &[FilePart {
-                    field: "file",
-                    filename: "a.txt",
-                    mime: Some("text/plain"),
-                    body: b"a procedure worth keeping",
-                }],
             ))
             .await
             .unwrap();
@@ -5182,12 +5161,100 @@ pub(crate) mod tests {
                 &[
                     ("text", "Heute war ein langer Tag."),
                     ("tz", "Europe/Berlin"),
+                    ("origin", "journal"),
                 ],
                 &[],
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
+    }
+
+    /// A zone is ambient: every client that can name one sends it, and none
+    /// should have to know which bodies the server will read as a fetch. It
+    /// was refused beside a link or a file, and the phone — which sends its
+    /// zone with every text — had each shared link held for review and never
+    /// stored, so never searchable. Beside a capture it cannot apply to, it
+    /// is now let through unread and the capture is stored.
+    #[tokio::test]
+    async fn a_zone_beside_a_link_or_a_file_never_costs_the_capture() {
+        let (app, token) = app_and_token().await;
+        // The link: this fixture has nothing to fetch, so it is the *reason*
+        // that is asserted — the door must not turn it away over the zone.
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/capture?tz=Europe/Berlin")
+                    .method("POST")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "text/plain")
+                    .body(Body::from("https://example.com/a"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let said = String::from_utf8(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            !said.contains("only applies"),
+            "the door refused a link over its zone: {said}"
+        );
+        // A photo, stored.
+        let res = app
+            .clone()
+            .oneshot(raw_post(
+                "/api/v1/capture?tz=Europe/Berlin",
+                &token,
+                "image/png",
+                &a_png(),
+            ))
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", res.status());
+        // A multipart carrying only a file, zone in the form, stored.
+        let res = app
+            .clone()
+            .oneshot(multipart(
+                "/api/v1/capture",
+                &token,
+                &[("tz", "Europe/Berlin")],
+                &[FilePart {
+                    field: "file",
+                    filename: "a.txt",
+                    mime: Some("text/plain"),
+                    body: b"a procedure worth keeping",
+                }],
+            ))
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", res.status());
+        // And a shared link in a form, same as the plain body.
+        let res = app
+            .oneshot(multipart(
+                "/api/v1/capture?tz=Europe/Berlin",
+                &token,
+                &[("text", "https://example.com/b")],
+                &[],
+            ))
+            .await
+            .unwrap();
+        let said = String::from_utf8(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(
+            !said.contains("only applies"),
+            "the door refused a shared link over its zone: {said}"
+        );
     }
 }
 

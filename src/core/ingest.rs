@@ -68,11 +68,17 @@ pub struct IngestOutcome {
     /// True when the text was already stored byte for byte and no new source
     /// was created.
     pub duplicate: bool,
-    /// Set when the text is not identical to anything stored but is close
-    /// enough that segmenting it would produce artifacts competing with ones
-    /// that already exist. The capture is stored and parked, never dropped.
+    /// Set when the text is not identical to anything stored but close to
+    /// something that is. The capture is stored, read and searchable like any
+    /// other; this only says it was flagged for a person to replace, keep or
+    /// discard later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub near_duplicate: Option<NearDuplicate>,
+    /// Set when this is a link that could not be read: why. The link and
+    /// what came with it are stored and searchable, and the page is tried
+    /// again in the background. See `Core::ingest_link`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_unread: Option<String>,
 }
 
 impl IngestOutcome {
@@ -83,19 +89,20 @@ impl IngestOutcome {
             status: c.status,
             duplicate: true,
             near_duplicate: None,
+            link_unread: None,
         }
     }
 }
 
-/// What an operator decided about a parked capture.
+/// What an operator decided about a capture flagged as a near-duplicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NearDupeAction {
     /// The new capture is the better copy: delete the old corpus and its
-    /// artifacts, then process this one.
+    /// artifacts, and keep this one.
     Replace,
-    /// They are genuinely different despite the score. Process this one and
-    /// leave the other alone.
+    /// They are genuinely different despite the score. Clear the flag and
+    /// leave both alone.
     KeepBoth,
     /// The new capture adds nothing. Delete it.
     Discard,
@@ -302,6 +309,18 @@ pub fn typed_from(metadata: &serde_json::Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
+/// What a link turned out to hold, read as far as this end reads it before
+/// storing: a page extracted, a PDF or an image as sent.
+#[derive(Debug)]
+pub(crate) enum ReadLink {
+    Page {
+        markdown: String,
+        title: Option<String>,
+    },
+    Pdf(Vec<u8>),
+    Image(Vec<u8>),
+}
+
 /// The last path segment of a URL, when it reads as a file name. `plan.pdf`
 /// out of `/papers/plan.pdf`; nothing out of `/` or `/papers/`.
 fn url_filename(url: &url::Url) -> Option<String> {
@@ -328,8 +347,9 @@ impl Core {
     /// `fetch` capture, a PDF or an image is stored for its reading stage.
     /// The link is provenance on the corpus whichever it was.
     ///
-    /// Both link doors — paste-a-link and MCP — come through here, so that
-    /// what one can read the other can too.
+    /// Every link door comes through here, so that what one can read the
+    /// others can too. A link that cannot be read is stored anyway — see
+    /// `ingest_link`.
     pub async fn ingest_url(
         &self,
         url: &url::Url,
@@ -337,9 +357,47 @@ impl Core {
         note: Option<String>,
         lang: crate::infer::lang::Lang,
     ) -> Result<IngestOutcome> {
+        self.ingest_link(url, title, note, None, lang).await
+    }
+
+    /// `ingest_url`, with the text a share sheet sent beside the link.
+    ///
+    /// A link that cannot be read now — the site is down, answers an error,
+    /// serves a type nothing here reads, or a login wall too short to be the
+    /// page — used to be refused, and the link, the text beside it and the
+    /// note went with the refusal: nothing was stored and nothing was
+    /// searchable. Now the link and whatever came with it are stored as a
+    /// capture of their own, read and embedded like any other, and a `Fetch`
+    /// unit tries the page again; if it arrives it replaces that text.
+    ///
+    /// `shared` is only kept when the link cannot be read: the text a share
+    /// sheet sends is usually the page's title repeated, and the page is the
+    /// better capture of the two.
+    pub async fn ingest_link(
+        &self,
+        url: &url::Url,
+        title: Option<String>,
+        note: Option<String>,
+        shared: Option<String>,
+        lang: crate::infer::lang::Lang,
+    ) -> Result<IngestOutcome> {
+        // A scheme nothing reads is not a link that failed; it is not a link.
+        crate::core::fetch::ensure_readable(url)?;
+        match self.read_link(url).await {
+            Ok(read) => self.ingest_read(url, read, title, note, lang).await,
+            Err(Error::Validation(why)) => {
+                self.hold_link(url, title, note, shared, lang, &why).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Fetch a link and, for a page, extract it. Everything that can refuse
+    /// a link happens here, so the one caller that stores a refused link and
+    /// the one that tries it again agree on what refused means.
+    pub(crate) async fn read_link(&self, url: &url::Url) -> Result<ReadLink> {
         use crate::core::fetch::Fetched;
-        let source_url = Some(url.to_string());
-        match crate::core::fetch::fetch(url, &self.capture).await? {
+        Ok(match crate::core::fetch::fetch(url, &self.capture).await? {
             Fetched::Html(html) => {
                 let page = crate::core::extract::extract(
                     html,
@@ -347,20 +405,44 @@ impl Core {
                     self.capture.min_extracted_chars,
                 )
                 .await?;
+                ReadLink::Page {
+                    markdown: page.markdown,
+                    title: page.title,
+                }
+            }
+            Fetched::Pdf(bytes) => ReadLink::Pdf(bytes),
+            Fetched::Image { bytes, .. } => ReadLink::Image(bytes),
+        })
+    }
+
+    async fn ingest_read(
+        &self,
+        url: &url::Url,
+        read: ReadLink,
+        title: Option<String>,
+        note: Option<String>,
+        lang: crate::infer::lang::Lang,
+    ) -> Result<IngestOutcome> {
+        let source_url = Some(url.to_string());
+        match read {
+            ReadLink::Page {
+                markdown,
+                title: page_title,
+            } => {
                 // A title the caller gave wins; the page's own is the fallback,
                 // ahead of the first heading `derive_title` would otherwise
                 // take — which, readability having dropped the `<h1>`, is the
                 // first *section* of the article.
                 self.ingest_capture(
-                    Capture::new(page.markdown, ORIGIN_FETCH)
+                    Capture::new(markdown, ORIGIN_FETCH)
                         .with_lang(lang)
-                        .with_title(title.or(page.title))
+                        .with_title(title.or(page_title))
                         .with_note(note)
                         .with_source_url(source_url),
                 )
                 .await
             }
-            Fetched::Pdf(bytes) => {
+            ReadLink::Pdf(bytes) => {
                 self.ingest_pdf_from(
                     PdfCapture {
                         bytes,
@@ -373,7 +455,7 @@ impl Core {
                 )
                 .await
             }
-            Fetched::Image { bytes, .. } => {
+            ReadLink::Image(bytes) => {
                 self.ingest_image_from(
                     ImageCapture {
                         bytes,
@@ -387,6 +469,102 @@ impl Core {
                 .await
             }
         }
+    }
+
+    /// Store a link that could not be read as what is known of it: the link,
+    /// the text that came with it, the note, the title. Read and embedded
+    /// like any capture, and a `Fetch` unit armed to try the page again.
+    async fn hold_link(
+        &self,
+        url: &url::Url,
+        title: Option<String>,
+        note: Option<String>,
+        shared: Option<String>,
+        lang: crate::infer::lang::Lang,
+        why: &str,
+    ) -> Result<IngestOutcome> {
+        let shared = shared
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s != url.as_str());
+        let text = match &shared {
+            Some(s) => format!("{url}\n\n{s}"),
+            None => url.to_string(),
+        };
+        let mut c = Capture::new(text, ORIGIN_FETCH)
+            .with_lang(lang)
+            .with_title(title.clone())
+            .with_note(note)
+            .with_source_url(Some(url.to_string()));
+        c.metadata["fetch"] = serde_json::json!({
+            "pending": true,
+            "error": why,
+            // Whether the title is the person's: a page that arrives later may
+            // name itself only where nobody else did.
+            "title_given": title.is_some(),
+        });
+        let mut out = self.ingest_capture(c).await?;
+        if !out.duplicate {
+            self.store.enqueue(Stage::Fetch, "corpus", &out.id).await?;
+        }
+        out.link_unread = Some(why.to_string());
+        tracing::info!(
+            corpus_id = %out.id,
+            url = %url,
+            reason = why,
+            "link could not be read; stored as the link and trying again later"
+        );
+        Ok(out)
+    }
+
+    /// A held link's page arrived: put it where the link was.
+    ///
+    /// A page replaces the text in place and the corpus is read again, so
+    /// the id every door already answered with stays good. A PDF or an image
+    /// needs its own reading stage and its bytes attached, so it becomes a
+    /// capture of its own and the held link is deleted.
+    pub(crate) async fn fill_held_link(&self, src: &Corpus, read: ReadLink) -> Result<()> {
+        let url = src
+            .source_url
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok())
+            .ok_or_else(|| Error::Validation("a held link with no link".into()))?;
+        let title_given = src.metadata["fetch"]["title_given"]
+            .as_bool()
+            .unwrap_or(false);
+        let note = src.metadata["note"].as_str().map(str::to_string);
+        match read {
+            ReadLink::Page { markdown, title } => {
+                let sig = crate::store::shingle::signature(&markdown);
+                self.store.set_read_text(&src.id, &markdown, sig).await?;
+                if !title_given && let Some(t) = title.as_deref() {
+                    self.store.set_title_hint(&src.id, t).await?;
+                }
+                let mut meta = src.metadata.clone();
+                meta["fetch"] = serde_json::json!({ "fetched_at": now() });
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.reprocess(&src.id, Stage::Synthesize).await?;
+                tracing::info!(corpus_id = %src.id, url = %url, "a held link was read");
+            }
+            read @ (ReadLink::Pdf(_) | ReadLink::Image(_)) => {
+                let lang = crate::infer::lang::of_corpus(&src.metadata);
+                let title = title_given.then(|| src.title_hint.clone()).flatten();
+                let out = self.ingest_read(&url, read, title, note, lang).await?;
+                self.delete_corpus(&src.id).await?;
+                tracing::info!(corpus_id = %src.id, now = %out.id, url = %url, "a held link was read into a file capture");
+            }
+        }
+        Ok(())
+    }
+
+    /// A held link that is still unread after every try: left as it is,
+    /// searchable as the link, with the last reason on it. `reprocess(Fetch)`
+    /// tries again.
+    pub(crate) async fn give_up_on_link(&self, corpus_id: &str, why: &str) -> Result<()> {
+        let src = self.store.get_corpus(corpus_id).await?;
+        let mut meta = src.metadata.clone();
+        meta["fetch"]["pending"] = serde_json::Value::Bool(false);
+        meta["fetch"]["error"] = serde_json::Value::String(why.to_string());
+        self.store.set_corpus_metadata(corpus_id, &meta).await
     }
 
     /// A door asking for a reminder over text too large to be judged as one.
@@ -498,18 +676,17 @@ impl Core {
             .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
 
-        // Parked, or queued. Synthesis is the expensive stage and text that
-        // resembles something stored may not deserve it; an operator decides
-        // on Ops. Nothing is lost either way — the corpus is stored verbatim
-        // like any other. Written with the row, not after it.
+        // Queued either way, and flagged where it resembles something stored.
+        // It used to be parked — stored with no job until a person decided on
+        // Ops — and a capture nobody decided on was never searchable. Short
+        // notes and a journal line repeated on another day scored as
+        // near-duplicates of what they were not, and went the same way. The
+        // pair judging downstream is what reconciles competing artifacts; the
+        // flag is left for a person to replace or discard later if they want.
         let followup = match &near {
-            // A forced reminder is never parked. Parking is a decision about
-            // whether text that resembles something stored deserves the
-            // synthesis call; a door saying "remind me" has already asked for
-            // that call, and parked, the capture got no `Synthesize` job, no
-            // judgement and no moment — the operator was told "held for
-            // review" and no reminder was ever set.
-            Some(n) if !forced_remind => Followup::Park {
+            // A forced reminder is not flagged. "Remind me" has already said
+            // what it is, and a reminder repeated is a reminder, not a copy.
+            Some(n) if !forced_remind => Followup::Flag {
                 of: n.corpus_id.clone(),
                 similarity: n.similarity,
             },
@@ -558,7 +735,7 @@ impl Core {
                 corpus_id = %src.id,
                 near = %n.corpus_id,
                 similarity = n.similarity,
-                parked = !forced_remind,
+                flagged = !forced_remind,
                 "capture looks like an existing corpus"
             ),
             None => tracing::info!(corpus_id = %src.id, origin, bytes = text.len(), "ingested"),
@@ -571,28 +748,24 @@ impl Core {
             id: src.id,
             status: src.status,
             duplicate: false,
-            // What the doors read off this field is "parked", not "resembles
-            // something": `cli/capture.rs` and `mcp/mod.rs` both print *held
-            // for review — nothing is indexed until it is resolved in the web
-            // UI*, and `web/workspace.rs` sets `parked: true`. A forced
-            // reminder was never parked — it went straight to `Synthesize`
-            // above — so reporting the resemblance told the operator their
-            // `engram -r` was waiting for them while it was in fact
-            // synthesized, embedded, armed, and on its way to their phone.
+            // What the doors read off this field is "flagged". A forced
+            // reminder is not flagged, so it is not reported as one.
             near_duplicate: near.filter(|_| !forced_remind),
+            link_unread: None,
         })
     }
 
-    /// The fork every capture reaches once its text is known: parked next to
-    /// what it resembles, or queued for synthesis. The status write is here so
-    /// no caller can park without saying what it parked beside.
+    /// The fork every capture reaches once its text is known: queued for
+    /// synthesis, and flagged beside what it resembles if it resembles
+    /// something. Never held: a flag is for a person to look at later, and
+    /// the capture is read and searchable meanwhile.
     pub(crate) async fn park_or_queue(
         &self,
         corpus_id: &str,
         near: Option<&crate::store::corpora::NearDuplicate>,
     ) -> Result<()> {
         let followup = match near {
-            Some(n) => crate::store::corpora::Followup::Park {
+            Some(n) => crate::store::corpora::Followup::Flag {
                 of: n.corpus_id.clone(),
                 similarity: n.similarity,
             },
@@ -606,7 +779,7 @@ impl Core {
                 corpus_id,
                 near = %n.corpus_id,
                 similarity = n.similarity,
-                "looks like an existing corpus; parked for review"
+                "looks like an existing corpus; flagged, and read as usual"
             );
         }
         Ok(())
@@ -846,6 +1019,7 @@ impl Core {
                     status: c.status,
                     duplicate: false,
                     near_duplicate: None,
+                    link_unread: None,
                 }
             }
         })
@@ -861,10 +1035,13 @@ impl Core {
         c: ImageCapture,
         source_url: Option<String>,
     ) -> Result<IngestOutcome> {
+        // No vision role is not a refusal. The photo is stored with its note
+        // and its file facts, and `Stage::Describe` waits for the role rather
+        // than failing — the same wait it has always had for a role that goes
+        // away. Refused, as it was, a phone in contained mode (which has no
+        // vision section) had every shared photo held and never stored.
         if self.describer.is_none() {
-            return Err(Error::Validation(
-                "image capture is not configured — set [infer.vision] to enable it".into(),
-            ));
+            tracing::info!("no vision role: storing the image to be read when one is configured");
         }
         let ImageCapture {
             bytes,
@@ -973,12 +1150,12 @@ impl Core {
             status: CorpusStatus::Describing,
             duplicate: false,
             near_duplicate: None,
+            link_unread: None,
         })
     }
 
-    /// Act on a parked capture. Every branch ends with a corpus that is either
-    /// in the pipeline or gone; none of them leaves a corpus stuck in
-    /// `needs_review` with no way out.
+    /// Act on a capture flagged as a near-duplicate. Every branch ends with
+    /// the flag gone: the capture kept and in the pipeline, or deleted.
     pub async fn resolve_near_duplicate(
         &self,
         corpus_id: &str,
@@ -987,7 +1164,7 @@ impl Core {
         let src = self.store.get_corpus(corpus_id).await?;
         let Some(other) = src.near_dupe_of.clone() else {
             return Err(Error::Validation(
-                "this corpus is not parked as a near-duplicate".into(),
+                "this corpus is not flagged as a near-duplicate".into(),
             ));
         };
 
@@ -999,15 +1176,15 @@ impl Core {
             NearDupeAction::Replace | NearDupeAction::KeepBoth => {
                 if action == NearDupeAction::Replace {
                     // The older corpus goes first. If this fails the new one is
-                    // still parked, which is a state an operator can retry from;
-                    // releasing it first would leave both live on a failure.
+                    // still flagged, which is a state an operator can retry
+                    // from.
                     //
                     // Unless it is already gone: `near_dupe_of` can name a
                     // corpus that has since been deleted — including another
-                    // parked capture that was discarded, since a parked corpus
-                    // is still matchable. Failing there would leave the only
-                    // way out of the queue behind a 404, with nothing on the
-                    // page to say that "keep both" is now the same decision.
+                    // flagged capture that was discarded. Failing there would
+                    // leave the only way out of the list behind a 404, with
+                    // nothing on the page to say that "keep both" is now the
+                    // same decision.
                     match self.delete_corpus(&other).await {
                         Ok(()) => {
                             tracing::info!(corpus_id = %src.id, replaced = %other, "replaced an older corpus");
@@ -1023,14 +1200,30 @@ impl Core {
                     }
                 }
                 self.store.set_near_dupe(&src.id, None, None).await?;
-                self.store
-                    .set_corpus_status(&src.id, CorpusStatus::Raw)
-                    .await?;
-                self.store
-                    .enqueue(Stage::Synthesize, "corpus", &src.id)
-                    .await?;
+                // A capture parked by a build before flags were read like any
+                // other is still at `needs_review` with no job, and this is
+                // its way into the pipeline. A flagged one is there already.
+                if src.status == CorpusStatus::NeedsReview {
+                    self.release_parked(&src.id).await?;
+                }
             }
         }
+        Ok(())
+    }
+
+    /// Put a capture parked by an older build into the pipeline: `raw` and a
+    /// `Synthesize` job, the flag left where it is. The one way out of
+    /// `needs_review`, which nothing writes any more.
+    pub(crate) async fn release_parked(&self, corpus_id: &str) -> Result<()> {
+        // Status first, then the job: the order `apply_followup` keeps, so an
+        // interruption leaves a `raw` corpus with no unit, which is what the
+        // reconcile sweep looks for.
+        self.store
+            .set_corpus_status(corpus_id, CorpusStatus::Raw)
+            .await?;
+        self.store
+            .enqueue(Stage::Synthesize, "corpus", corpus_id)
+            .await?;
         Ok(())
     }
 
@@ -2095,6 +2288,23 @@ impl Core {
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
+            // A captured link can always be fetched again: one held because
+            // it could not be read, or a page that has changed since.
+            Stage::Fetch => {
+                if src.origin != ORIGIN_FETCH || src.source_url.is_none() {
+                    return Err(Error::Validation(
+                        "only a captured link can be fetched again".into(),
+                    ));
+                }
+                let mut meta = src.metadata.clone();
+                let title_given = meta["fetch"]["title_given"].as_bool().unwrap_or(false);
+                meta["fetch"] = serde_json::json!({
+                    "pending": true,
+                    "title_given": title_given,
+                });
+                self.store.set_corpus_metadata(&src.id, &meta).await?;
+                self.store.enqueue(Stage::Fetch, "corpus", &src.id).await?;
+            }
             // A stored PDF can always be read again — with the ML build, or
             // after a docling upgrade. The extraction and everything derived
             // from it are replaced wholesale, because an artifact of the old
@@ -2844,26 +3054,82 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_near_identical_capture_is_parked_rather_than_synthesised() {
-        // The whole point: a re-pasted chapter must not cost a model call, and
-        // must not become a second set of artifacts competing with the first.
+    async fn a_near_identical_capture_is_flagged_and_still_read_and_embedded() {
+        // It used to be parked: stored with no job until a person decided on
+        // Insights, and a capture nobody decided on was never searchable.
         let core = test_core().await;
         let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
+        crate::jobs::test_support::drain(&core).await;
 
         let edited = manual("mount").replacen("step 7:", "step seven:", 1);
         let second = core.ingest(&edited, "web", None).await.unwrap();
 
         assert_ne!(second.id, first.id, "the capture must still be stored");
         assert!(!second.duplicate, "it is not a byte-identical duplicate");
-        assert_eq!(second.status, CorpusStatus::NeedsReview);
+        assert_eq!(second.status, CorpusStatus::Raw);
         let near = second.near_duplicate.expect("no near-duplicate reported");
         assert_eq!(near.corpus_id, first.id);
         assert!(near.similarity > 0.90);
-        assert!(
-            core.store.claim_job().await.unwrap().is_none(),
-            "a parked capture must not queue synthesis"
+        let row = core.store.get_corpus(&second.id).await.unwrap();
+        assert_eq!(row.near_dupe_of.as_deref(), Some(first.id.as_str()));
+        assert_eq!(core.store.parked_corpora(10).await.unwrap().len(), 1);
+
+        crate::jobs::test_support::drain(&core).await;
+        assert_eq!(
+            core.store.get_corpus(&second.id).await.unwrap().status,
+            CorpusStatus::Ready,
+            "a flagged capture is read and embedded like any other"
         );
+        assert!(
+            core.store
+                .get_corpus(&second.id)
+                .await
+                .unwrap()
+                .near_dupe_of
+                .is_some(),
+            "and stays flagged for a person to look at"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_an_older_build_parked_is_released_by_the_sweep() {
+        // `needs_review` with no job is what an older build wrote. Nothing
+        // writes it now; the reconcile sweep puts what is left of it into
+        // the pipeline, the flag kept.
+        let core = test_core().await;
+        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let src = core
+            .store
+            .insert_corpus_with_signature(
+                &manual("pastry"),
+                "web",
+                None,
+                vec![],
+                None,
+                &serde_json::json!({}),
+                crate::store::corpora::Followup::Nothing,
+            )
+            .await
+            .unwrap();
+        let crate::store::corpora::Insertion::Created(src) = src else {
+            panic!("fixture corpus already existed")
+        };
+        core.store
+            .set_corpus_status(&src.id, CorpusStatus::NeedsReview)
+            .await
+            .unwrap();
+        core.store
+            .set_near_dupe(&src.id, Some(&first.id), Some(0.9))
+            .await
+            .unwrap();
+
+        crate::jobs::reconcile::run(&core).await.unwrap();
+        crate::jobs::test_support::drain(&core).await;
+
+        let got = core.store.get_corpus(&src.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Ready);
+        assert_eq!(got.near_dupe_of.as_deref(), Some(first.id.as_str()));
     }
 
     #[tokio::test]
@@ -2882,7 +3148,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeping_both_releases_the_capture_into_the_pipeline() {
+    async fn keeping_both_clears_the_flag_and_leaves_the_capture_in_the_pipeline() {
         let core = test_core().await;
         core.ingest(&manual("mount"), "web", None).await.unwrap();
         while core.store.claim_job().await.unwrap().is_some() {}
@@ -2902,6 +3168,38 @@ mod tests {
         let got = core.store.get_corpus(&second.id).await.unwrap();
         assert_eq!(got.status, CorpusStatus::Raw);
         assert!(got.near_dupe_of.is_none(), "the flag must be cleared");
+        assert!(
+            core.store.claim_job().await.unwrap().is_some(),
+            "the synthesis the capture armed is still there"
+        );
+    }
+
+    #[tokio::test]
+    async fn keeping_both_releases_a_capture_an_older_build_parked() {
+        let core = test_core().await;
+        core.ingest(&manual("mount"), "web", None).await.unwrap();
+        while core.store.claim_job().await.unwrap().is_some() {}
+        let second = core
+            .ingest(
+                &manual("mount").replacen("step 7:", "step seven:", 1),
+                "web",
+                None,
+            )
+            .await
+            .unwrap();
+        // What an older build wrote: parked, and no job.
+        while core.store.claim_job().await.unwrap().is_some() {}
+        core.store
+            .set_corpus_status(&second.id, CorpusStatus::NeedsReview)
+            .await
+            .unwrap();
+
+        core.resolve_near_duplicate(&second.id, NearDupeAction::KeepBoth)
+            .await
+            .unwrap();
+
+        let got = core.store.get_corpus(&second.id).await.unwrap();
+        assert_eq!(got.status, CorpusStatus::Raw);
         assert!(core.store.claim_job().await.unwrap().is_some());
     }
 
@@ -2963,9 +3261,8 @@ mod tests {
     #[tokio::test]
     async fn replacing_a_corpus_that_is_already_gone_still_releases_the_capture() {
         // `near_dupe_of` can name a corpus that has since been deleted —
-        // including another parked capture that was discarded, since a parked
-        // corpus is still matchable. Failing here put the only way out of the
-        // review queue behind a 404.
+        // including another flagged capture that was discarded. Failing here
+        // put the only way off the list behind a 404.
         let core = test_core().await;
         let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
         while core.store.claim_job().await.unwrap().is_some() {}
@@ -2990,9 +3287,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reprocessing_a_parked_capture_takes_it_off_the_review_queue() {
-        // Reprocessing is a decision to process. Leaving the park set left a
-        // fully synthesized corpus on the queue where "discard" deletes it.
+    async fn reprocessing_a_flagged_capture_takes_it_off_the_list() {
+        // Reprocessing is a decision about the capture, and the flag goes
+        // with it.
         let core = test_core().await;
         core.ingest(&manual("mount"), "web", None).await.unwrap();
         while core.store.claim_job().await.unwrap().is_some() {}
@@ -3004,9 +3301,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            core.store.get_corpus(&second.id).await.unwrap().status,
-            CorpusStatus::NeedsReview
+        assert!(
+            core.store
+                .get_corpus(&second.id)
+                .await
+                .unwrap()
+                .near_dupe_of
+                .is_some()
         );
 
         core.reprocess(&second.id, Stage::Synthesize).await.unwrap();
@@ -3014,7 +3315,7 @@ mod tests {
         let got = core.store.get_corpus(&second.id).await.unwrap();
         assert!(
             got.near_dupe_of.is_none(),
-            "the capture is being processed and still asks to be decided on"
+            "the capture was reprocessed and is still flagged"
         );
         assert_eq!(got.status, CorpusStatus::Raw);
     }
@@ -3435,21 +3736,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn without_a_vision_role_the_image_door_is_closed() {
+    async fn without_a_vision_role_the_image_is_stored_to_be_read_later() {
+        // Refused, as it was, every photo shared from a phone in contained
+        // mode was held and never stored. The note on it is findable now; the
+        // picture is read when a vision role is configured.
         let core = crate::core::test_support::test_core_without_vision().await;
-        let e = core
+        let out = core
             .ingest_image(ImageCapture {
                 bytes: a_seeded_png(7),
                 filename: None,
                 title_hint: None,
-                note: None,
+                note: Some("the whiteboard after the planning meeting".into()),
                 lang: crate::infer::lang::Lang::default(),
             })
             .await
-            .unwrap_err();
-        assert!(matches!(e, Error::Validation(_)));
-        assert!(e.to_string().contains("not configured"), "{e}");
-        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+            .expect("a photo is stored without a vision role");
+        assert_eq!(out.status, CorpusStatus::Describing);
+        assert!(core.store.has_job(Stage::Describe, &out.id).await.unwrap());
+        assert_eq!(
+            core.store
+                .pending_artifacts_for_corpus(&out.id)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the note is waiting for its vector, so it is findable"
+        );
     }
 
     #[tokio::test]
@@ -3685,7 +3997,7 @@ mod tests {
     /// which is what normally arms the embed. Without arming it here, the one
     /// thing a person typed about an unreadable document waits forever.
     #[tokio::test]
-    async fn a_note_arms_the_embed_so_a_parked_capture_still_becomes_findable() {
+    async fn a_note_arms_the_embed_so_an_unread_capture_still_becomes_findable() {
         let core = test_core().await;
         let out = core
             .ingest_pdf(PdfCapture {
@@ -4074,11 +4386,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_forced_reminder_is_never_parked_beside_what_it_resembles() {
-        // Parking is a decision about whether text worth little deserves the
-        // synthesis call. A door saying "remind me" has asked for that call:
-        // parked, the capture got no job, no judgement and no moment, and the
-        // operator was told it was held for review.
+    async fn a_forced_reminder_is_never_flagged_beside_what_it_resembles() {
+        // "Remind me" has said what it is; a reminder repeated is a reminder,
+        // not a copy to drop.
         let core = test_core().await;
         let first: String = (1..=30)
             .map(|n| format!("Schritt {n}: die Unterlagen für den Termin durchsehen.\n"))
@@ -4107,18 +4417,18 @@ mod tests {
             )
             .await
             .unwrap();
-        // And the receipt says so. Every door reads this field as "parked" and
-        // nothing else — the CLI and MCP both answer *held for review, nothing
-        // is indexed* on it — so reporting the resemblance on a capture that
-        // was queued anyway told the operator the opposite of what happened.
         assert!(
             out.near_duplicate.is_none(),
-            "nothing was parked, so nothing is reported as parked"
+            "nothing was flagged, so nothing is reported as flagged"
         );
-        assert_ne!(
-            core.store.get_corpus(&out.id).await.unwrap().status,
-            CorpusStatus::NeedsReview,
-            "a forced reminder is not held for review"
+        assert!(
+            core.store
+                .get_corpus(&out.id)
+                .await
+                .unwrap()
+                .near_dupe_of
+                .is_none(),
+            "a forced reminder is not flagged"
         );
         crate::jobs::test_support::drain(&core).await;
         assert_eq!(

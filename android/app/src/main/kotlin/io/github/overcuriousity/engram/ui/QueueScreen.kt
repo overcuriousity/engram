@@ -43,7 +43,9 @@ fun QueueScreen(engram: Engram) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text("Queue", style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = { Sync.kick(engram.app) }) { Text("Deliver now") }
+            // Held rows too: "now" means everything owed, and a hold is one
+            // answer to one request, not a verdict.
+            TextButton(onClick = { scope.launch { engram.outbox.retryHeld(); Sync.kick(engram.app) } }) { Text("Deliver now") }
         }
         if (rows.isEmpty()) Text("Nothing owed", Modifier.padding(16.dp), color = muted())
         LazyColumn {
@@ -54,7 +56,12 @@ fun QueueScreen(engram: Engram) {
                     supportingContent = { Text(rowWords(row, now), style = MaterialTheme.typography.bodySmall, color = muted()) },
                     trailingContent = {
                         if (row.state == State.held) {
-                            TextButton(onClick = { scope.launch { engram.outbox.delete(row.id) } }) { Text("Delete") }
+                            Row {
+                                TextButton(onClick = {
+                                    scope.launch { if (engram.outbox.retry(row.id)) Sync.kick(engram.app) }
+                                }) { Text("Retry") }
+                                TextButton(onClick = { scope.launch { engram.outbox.delete(row.id) } }) { Text("Delete") }
+                            }
                         }
                     },
                 )
@@ -90,10 +97,10 @@ private fun firstLine(kind: Kind, payload: String): String {
         Kind.call -> p["label"]?.jsonPrimitive?.contentOrNull ?: "Write"
         Kind.merge_undo -> "Merge · undone"
         Kind.corpus_resolve -> when (p["action"]?.jsonPrimitive?.contentOrNull) {
-            "replace" -> "Parked capture · replaced the old one"
-            "keep_both" -> "Parked capture · kept both"
-            "discard" -> "Parked capture · discarded"
-            else -> "Parked capture"
+            "replace" -> "Near-duplicate · replaced the old one"
+            "keep_both" -> "Near-duplicate · kept both"
+            "discard" -> "Near-duplicate · discarded"
+            else -> "Near-duplicate"
         }
     }
 }

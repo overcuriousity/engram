@@ -149,4 +149,27 @@ class OutboxTest {
         assertFalse("what the server already has is not ours to take back", box.undo(sent))
         assertEquals(1, box.rows.first().size)
     }
+
+    @Test fun aHeldRowIsOwedAgainOnRetryWithItsFilesAndNothingElseIs() = runTest {
+        val id = box.enqueueFiles(listOf(Incoming("a", "text/plain") { "a".byteInputStream() }), null, null)
+        box.failed(id, "offline"); box.held(id, 400, "tz only applies to a text capture")
+        val sent = box.enqueueText("s", null, null); box.sent(sent, 201, "{}")
+        now += 60_000
+        assertTrue(box.retry(id))
+        val row = box.rows.first().single { it.id == id }
+        assertEquals(State.queued, row.state); assertEquals(now, row.nextAt); assertEquals(0, row.attempts)
+        assertNull(row.error); assertNull(row.status)
+        assertEquals("the files it was shared with go again", 1, box.filesOf(id).size)
+        assertFalse("only a held row is retried", box.retry(sent))
+        assertFalse("a queued row is already owed", box.retry(id))
+    }
+
+    @Test fun everyHeldRowIsOwedAgainAtOnce() = runTest {
+        val a = box.enqueueText("a", null, null); box.held(a, 400, "x")
+        val b = box.enqueueText("b", null, null); box.held(b, 400, "y")
+        val c = box.enqueueText("c", null, null); box.sent(c, 201, "{}")
+        box.retryHeld()
+        assertEquals(setOf(a, b), box.dueQueued(now).map { it.id }.toSet())
+        assertEquals(State.sent, box.rows.first().single { it.id == c }.state)
+    }
 }

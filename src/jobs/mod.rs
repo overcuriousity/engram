@@ -16,6 +16,7 @@ pub mod promote;
 pub mod pursuit;
 pub mod reap;
 pub mod reconcile;
+pub mod refetch;
 pub mod relate;
 pub mod remind;
 pub mod retention;
@@ -159,6 +160,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Condense, _) => condense::run(core, &job.target_id).await,
         (Stage::Describe, _) => describe::run(core, &job.target_id).await,
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
+        (Stage::Fetch, _) => refetch::run(core, &job.target_id).await,
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
         // Every periodic unit goes through one path, because every periodic
         // unit is accounted for. The sweeps below look at the whole collection,
@@ -286,6 +288,23 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 (Stage::Describe | Stage::Extract, _) => {
                     park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
+                }
+                // A link still unread. Every refusal is the site's answer
+                // today, not a verdict, so it is asked again on the ordinary
+                // backoff — until `refetch::ATTEMPTS`, after which the capture
+                // stays what it is: the link, searchable, with the reason.
+                (Stage::Fetch, _) => {
+                    if job.attempts >= refetch::ATTEMPTS {
+                        match core.give_up_on_link(&job.target_id, &e.to_string()).await {
+                            Ok(()) | Err(Error::NotFound) => {}
+                            Err(err) => return Err(err),
+                        }
+                        core.store.complete_job(job.id).await?;
+                    } else {
+                        core.store
+                            .fail_job(job.id, job.attempts, &e.to_string())
+                            .await?;
+                    }
                 }
                 // Kept armed at the unit's own attempt count, floored at
                 // `MAX_ATTEMPTS`: the first refusal waits out the ordinary

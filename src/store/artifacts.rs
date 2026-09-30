@@ -961,6 +961,58 @@ impl Store {
         )
     }
 
+    /// Artifacts in results whose text or title holds every one of `terms`,
+    /// read from SQLite rather than the vector store: the keyword fallback
+    /// `Core::search` uses for what the index cannot answer.
+    ///
+    /// `unembedded_only` narrows it to what has no vector yet — a capture
+    /// seconds old, a chunk the embedder refused, everything while the
+    /// embedder is down. Search reads only the vector store, so without this
+    /// those were invisible until their embed landed. Otherwise every artifact
+    /// in results is a candidate: the whole base, for when the query itself
+    /// cannot be embedded.
+    ///
+    /// A scan, not an index: `LIKE` over one person's base, capped by
+    /// `limit`, on a path that only runs when the index cannot answer or has
+    /// something missing. Case-insensitive for ASCII, which is what SQLite's
+    /// `LIKE` is; newest first.
+    pub async fn keyword_matches(
+        &self,
+        terms: &[String],
+        unembedded_only: bool,
+        limit: usize,
+    ) -> Result<Vec<Chunk>> {
+        if terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut sql = String::from(
+            "SELECT * FROM artifacts
+              WHERE status = 'active' AND superseded_by IS NULL AND reaped_at IS NULL",
+        );
+        if unembedded_only {
+            sql.push_str(" AND embed_state != 'embedded'");
+        }
+        for _ in terms {
+            sql.push_str(
+                " AND (text LIKE ? ESCAPE '\\' OR COALESCE(title, '') LIKE ? ESCAPE '\\')",
+            );
+        }
+        sql.push_str(" ORDER BY created_at DESC, id LIMIT ?");
+        // `AssertSqlSafe`: what is interpolated is a fixed clause repeated
+        // once per term; every value is bound.
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for t in terms {
+            let escaped = t
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let pattern = format!("%{escaped}%");
+            q = q.bind(pattern.clone()).bind(pattern);
+        }
+        let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
+        Ok(rows.iter().map(row_to_artifact).collect())
+    }
+
     /// Chunks of a source still waiting for a vector. The embed job batches
     /// these into one inference call, so it needs them as rows, not a count.
     pub async fn pending_artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {

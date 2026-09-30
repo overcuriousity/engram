@@ -227,7 +227,7 @@ private fun Answer(
                             Text(
                                 when {
                                     k.duplicate -> "already in the base"
-                                    k.parked -> "stored — waiting on a decision · ${k.nearDupePercent}% like an existing source"
+                                    k.parked -> "kept · ${k.nearDupePercent}% like an existing source"
                                     else -> "kept"
                                 },
                                 Modifier.padding(8.dp, 12.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,

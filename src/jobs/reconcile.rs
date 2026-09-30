@@ -23,9 +23,10 @@ use crate::store::segments::SegmentState;
 ///
 /// These three statuses are written beside an enqueue and cleared by the stage
 /// that enqueue arms, so a corpus still holding one with nothing queued against
-/// it is a capture whose unit was never armed. Every other status is either
-/// somebody's decision (`needs_review`) or a state a later stage moved the row
-/// into, and the branches below already cover those.
+/// it is a capture whose unit was never armed. Every other status is a state a
+/// later stage moved the row into, and the branches below already cover those
+/// — `needs_review` included, which an older build parked and the sweep now
+/// releases.
 fn awaiting(status: &CorpusStatus) -> Option<Stage> {
     match status {
         CorpusStatus::Raw => Some(Stage::Synthesize),
@@ -45,9 +46,15 @@ pub async fn run(core: &Core) -> Result<usize> {
         let Some(last) = page.last() else { break };
         cursor = Some((last.created_at, last.id.clone()));
         for c in &page {
-            // A corpus parked as a near-duplicate is waiting on a person by
-            // design, and segmenting it is the decision they have not made.
-            if c.near_dupe_of.is_some() {
+            // A capture parked by a build that held near-duplicates for a
+            // person: `needs_review`, no job, never searchable until somebody
+            // decided. Nothing writes that state any more, so what is still
+            // in it is released into the pipeline with its flag kept — the
+            // person can still replace or discard it, and meanwhile it is
+            // found.
+            if c.status == CorpusStatus::NeedsReview {
+                core.release_parked(&c.id).await?;
+                armed += 1;
                 continue;
             }
             // A corpus with no window rows at all is deliberately left alone —
@@ -517,9 +524,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_capture_parked_for_a_decision_is_not_dragged_into_the_pipeline() {
-        // Parking withholds the model call until someone chooses. Re-arming it
-        // here would spend exactly what parking exists to save.
+    async fn a_flagged_capture_left_without_its_unit_is_armed_like_any_other() {
+        // A flag is not a gate. Parking used to withhold the model call until
+        // someone chose, and a capture nobody chose on was never searchable.
         let core = test_core().await;
         let a = core
             .store
@@ -541,7 +548,10 @@ mod tests {
         while let Some(j) = core.store.claim_job().await.unwrap() {
             targets.push(j.target_id);
         }
-        assert!(!targets.contains(&b.id), "the parked capture was queued");
+        assert!(
+            targets.contains(&b.id),
+            "the flagged capture was left unread"
+        );
     }
 
     #[tokio::test]

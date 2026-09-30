@@ -177,6 +177,22 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
         dao.update(row.copy(state = State.held, status = status, answer = body, error = body))
     }
 
+    /**
+     * Send a held row again, as if it had just been owed. A hold is the server's
+     * answer to one request, and that answer can change: a client or a server
+     * that is fixed, a limit that is raised. Deleting and sharing again is not
+     * a way back — the share sheet is gone by the time the Queue shows it.
+     */
+    suspend fun retry(id: String): Boolean {
+        val row = dao.get(id) ?: return false
+        if (row.state != State.held) return false
+        dao.update(row.copy(state = State.queued, nextAt = clock(), attempts = 0, status = null, answer = null, error = null))
+        return true
+    }
+
+    /** Every held row, owed again. See [retry]. */
+    suspend fun retryHeld() = dao.requeueHeld(clock())
+
     suspend fun refuseAll() = dao.refuseAll()
     suspend fun requeueRefused() = dao.requeueRefused(clock())
 
