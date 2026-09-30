@@ -72,6 +72,11 @@ pub struct HitExplanation {
     pub prime: Option<StageEffect>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
+    /// Found by its words in SQLite, not by the index: text with no vector
+    /// yet, or every hit while the query itself could not be embedded. See
+    /// `Store::keyword_matches`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyword: bool,
     /// Set for the one row an exploring search lifted into the window: from
     /// the rank the ranking gave it, to the row it was lent.
     ///
@@ -122,6 +127,10 @@ pub struct SearchExplanation {
     /// out and had nothing to put in their place.
     pub refilled: usize,
     pub reranked: bool,
+    /// The query could not be embedded and the answer is keyword matches
+    /// only: degraded, and said so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keyword_only: bool,
 }
 
 /// The two score terms Qdrant applied, reconstructed from the payload.

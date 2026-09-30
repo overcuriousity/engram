@@ -1150,6 +1150,7 @@ mod tests {
             displaced: 4,
             refilled: 4,
             reranked: false,
+            keyword_only: false,
         };
         let out = format_search_results(&[explained("a1")], Some(&summary));
 
@@ -1186,6 +1187,7 @@ mod tests {
             displaced: 4,
             refilled: 0,
             reranked: false,
+            keyword_only: false,
         };
         let out = format_search_results(&[hit("a1", None)], Some(&summary));
         assert!(

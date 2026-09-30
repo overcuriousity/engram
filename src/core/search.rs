@@ -286,6 +286,24 @@ impl Default for SearchResult {
     }
 }
 
+/// The words of a query the keyword fallback asks for: split on whitespace,
+/// trimmed of punctuation at either end, at least two characters, each once,
+/// at most eight. Every one of them has to appear in a hit.
+fn keyword_terms(q: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for w in q.split_whitespace() {
+        let w = w.trim_matches(|c: char| !c.is_alphanumeric());
+        if w.chars().count() < 2 || out.iter().any(|o| o.eq_ignore_ascii_case(w)) {
+            continue;
+        }
+        out.push(w.to_string());
+        if out.len() == 8 {
+            break;
+        }
+    }
+    out
+}
+
 fn is_zero(n: &usize) -> bool {
     *n == 0
 }
@@ -1265,6 +1283,76 @@ impl Core {
         out
     }
 
+    /// Artifacts found by the words of `q` in SQLite, as results. See
+    /// `Store::keyword_matches`; `unembedded_only` narrows it to what has no
+    /// vector yet. The filters a search was asked for hold here too. A read
+    /// that fails is logged and answers nothing: this is the fallback, and it
+    /// must not be the reason a search fails.
+    async fn keyword_hits(
+        &self,
+        q: &str,
+        unembedded_only: bool,
+        limit: usize,
+        category: &Option<String>,
+        tags: &[String],
+    ) -> Vec<SearchResult> {
+        let terms = keyword_terms(q);
+        let found = match self
+            .store
+            .keyword_matches(&terms, unembedded_only, limit * 2)
+            .await
+        {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(error = %e, "keyword search failed");
+                return Vec::new();
+            }
+        };
+        found
+            .into_iter()
+            .filter(|c| {
+                tags.iter().all(|t| c.tags.contains(t))
+                    && category
+                        .as_ref()
+                        .is_none_or(|want| c.category.as_ref() == Some(want))
+            })
+            .take(limit)
+            .map(|c| SearchResult {
+                artifact_id: c.id,
+                corpus_id: c.corpus_id.unwrap_or_default(),
+                title: c.title,
+                text: c.text,
+                category: c.category,
+                tags: c.tags,
+                // Not a rank: the caller places these.
+                score: 0.0,
+                status: Some(c.status),
+                superseded_by: c.superseded_by,
+                last_verified_at: c.last_verified_at,
+                // It holds every word of the query; weakness has to be
+                // demonstrated, and nothing here can.
+                weak: false,
+                primed: false,
+                in_sitting: false,
+                due_at: None,
+                due_in: None,
+                past_cliff: false,
+                retired: false,
+                similarity: None,
+                borrowed_name: !c.provenance.names_its_own_text(),
+                explanation: Some(crate::core::explain::HitExplanation {
+                    keyword: true,
+                    ..Default::default()
+                }),
+                via: None,
+                reason: None,
+                model_written: c.provenance.is_model_written(),
+                synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
+                origin_count: 0,
+            })
+            .collect()
+    }
+
     /// A random handful of chunks that have not surfaced in a month.
     ///
     /// Random rather than ranked, because there is no query: the question is
@@ -1562,15 +1650,61 @@ impl Core {
                 // and the job layer already owns backoff for it — spending a
                 // budget per search there would turn a rate-limited minute
                 // into a run that never finishes.
-                let v = match waited_on {
+                let embedded = match waited_on {
                     true => {
                         crate::infer::retry::transiently(
                             crate::infer::retry::INTERACTIVE_BUDGET,
                             || self.embedder.embed_query(q),
                         )
-                        .await?
+                        .await
                     }
-                    false => self.embedder.embed_query(q).await?,
+                    false => self.embedder.embed_query(q).await,
+                };
+                let v = match embedded {
+                    Ok(v) => v,
+                    // The embedder is down, or refused the query. A person
+                    // waiting gets what the words alone can find rather than
+                    // an error — the index is unreachable, the text is not.
+                    // Not a sweep: nobody is watching one, and a tuning pass
+                    // scored on keyword hits would learn from a ranking that
+                    // is not the ranking. Nothing found is the error again,
+                    // so an outage is still said.
+                    Err(e)
+                        if waited_on
+                            && door != Door::Judge
+                            && !matches!(e, Error::Validation(_)) =>
+                    {
+                        tracing::warn!(error = %e, "the query could not be embedded; answering on keywords");
+                        let mut results = self
+                            .keyword_hits(q, false, limit, &query.category, &query.tags)
+                            .await;
+                        if results.is_empty() {
+                            return Err(e);
+                        }
+                        self.fill_titles(&mut results).await;
+                        // Every stage promised above is entered, so a client
+                        // following them is not left waiting on one.
+                        say(SearchEvent::Stage(SearchStage::Retrieve));
+                        if reranking && self.reranker.is_some() {
+                            say(SearchEvent::Stage(SearchStage::Rerank));
+                        }
+                        return Ok((
+                            results,
+                            SearchOutcome {
+                                timing: SearchTiming {
+                                    embed_ms: started.elapsed().as_millis(),
+                                    total_ms: started.elapsed().as_millis(),
+                                    reranked: false,
+                                },
+                                explanation: crate::core::explain::SearchExplanation {
+                                    keyword_only: true,
+                                    ..explanation
+                                },
+                                event: None,
+                            },
+                        ));
+                    }
+                    Err(e) => return Err(e),
                 };
                 if let Ok(mut c) = self.query_cache.lock() {
                     c.put(key, v.clone());
@@ -1749,6 +1883,39 @@ impl Core {
                 }
             })
             .collect();
+
+        // What the index does not hold yet, found by its words: a capture
+        // seconds old whose passages are still waiting for a vector, a chunk
+        // the embedder refused. Search reads only the vector store, so those
+        // were invisible until their embed landed. A hit here contains every
+        // term of the query verbatim, which is stronger evidence than a fused
+        // rank, so a few go at the head — few, so a long embed backlog cannot
+        // push the index's answers out — and the reranker, where one runs,
+        // orders them with everything else. Not on the judging door, whose
+        // pool has to be the ranking's.
+        if door != Door::Judge {
+            let have: std::collections::HashSet<String> =
+                results.iter().map(|r| r.artifact_id.clone()).collect();
+            let room = (limit / 3).max(1);
+            let top = results.first().map(|r| r.score).unwrap_or(1.0);
+            let fresh: Vec<SearchResult> = self
+                .keyword_hits(
+                    q,
+                    true,
+                    room + have.len().min(room),
+                    &query.category,
+                    &query.tags,
+                )
+                .await
+                .into_iter()
+                .filter(|r| !have.contains(&r.artifact_id))
+                .take(room)
+                .map(|r| SearchResult { score: top, ..r })
+                .collect();
+            if !fresh.is_empty() {
+                results.splice(0..0, fresh);
+            }
+        }
 
         self.fill_titles(&mut results).await;
 
@@ -2515,6 +2682,85 @@ mod tests {
     /// Real time rather than `start_paused`, for the reason the lane test
     /// above gives: the pool's own timeouts are timers too. One refusal, so
     /// the test pays at most one jittered gap.
+    /// Search reads the vector store, and a capture's passages have no vector
+    /// until their embed lands — seconds normally, for ever if the embedder
+    /// refuses them. Found by their words meanwhile.
+    #[tokio::test]
+    async fn text_with_no_vector_yet_is_found_by_its_words() {
+        let core = test_core().await;
+        seed(
+            &core,
+            &[("mounting an image with losetup", "procedure", &[])],
+        )
+        .await;
+        let src = core
+            .store
+            .insert_corpus("raw-unembedded", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    text: "Erinnere mich am Freitag an die Bereinigung der Signal-Gruppe".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+
+        let (got, _) = core
+            .search_with(&q("Signal-Gruppe Freitag"), None, Door::Ui)
+            .await
+            .unwrap();
+        let hit = got
+            .iter()
+            .find(|r| r.text.contains("Signal-Gruppe"))
+            .expect("the unembedded passage was not found");
+        assert!(
+            hit.explanation.as_ref().is_some_and(|e| e.keyword),
+            "and it says how it was found"
+        );
+        // Every word has to be there: a partial match is not a keyword hit.
+        let (got, _) = core
+            .search_with(&q("Signal-Gruppe Montag"), None, Door::Ui)
+            .await
+            .unwrap();
+        assert!(!got.iter().any(|r| r.text.contains("Signal-Gruppe")));
+    }
+
+    /// With the embedder down a search used to fail outright. A person gets
+    /// what the words find, and the answer says it is keywords only.
+    #[tokio::test]
+    async fn with_the_embedder_down_a_person_still_gets_what_the_words_find() {
+        let mut core = test_core().await;
+        seed(
+            &core,
+            &[("mounting an image with losetup", "procedure", &[])],
+        )
+        .await;
+        core.embedder = std::sync::Arc::new(crate::infer::fake::FakeEmbedder::rejecting(
+            "the endpoint is down",
+        ));
+
+        let (got, out) = core
+            .search_with(&q("losetup"), None, Door::Ui)
+            .await
+            .expect("keyword hits, not an error");
+        assert!(got.iter().any(|r| r.text.contains("losetup")));
+        assert!(out.explanation.keyword_only);
+
+        // Nothing found is the outage again, said as one.
+        assert!(core.search(&q("zzzqqq"), Door::Ui).await.is_err());
+        // And a sweep is not handed keyword hits to learn from.
+        let params = *core.ranking.read().unwrap();
+        assert!(
+            core.search_with_ranking(&q("losetup"), params, Door::Judge)
+                .await
+                .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn a_rate_limited_keystroke_is_asked_again() {
         let mut core = test_core().await;
