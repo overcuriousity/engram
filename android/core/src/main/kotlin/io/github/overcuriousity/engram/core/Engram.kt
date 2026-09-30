@@ -42,6 +42,7 @@ class Engram internal constructor(
     boot: ((String, Setup) -> Started)? = null,
     halt: (() -> Unit)? = null,
 ) {
+    private val version = versionName
     val userAgent = userAgent(versionName, Build.MODEL)
     val deviceName = "engram for Android $versionName · ${Build.MODEL}"
     private val prefs = app.getSharedPreferences("engram", Context.MODE_PRIVATE)
@@ -195,6 +196,21 @@ class Engram internal constructor(
 
     /** The one thing that is not a read: a question put to the server, answered as a stream. */
     val ask = Ask({ transport() }, db.askedDao(), { refused.value = true }, { pinMismatch.value = it })
+
+    /**
+     * Every held row, owed again the first time a new build drains. What one
+     * build held may be what the next was fixed to send — a zone beside a
+     * shared link held every one of them — and a person should not have to
+     * know which rows those were. A row the server still refuses is held
+     * again after one request. True where this build had not yet done it,
+     * so the caller knows a drain is owed.
+     */
+    suspend fun retryHeldOnUpdate(): Boolean {
+        if (prefs.getString("held_retried_for", null) == version) return false
+        outbox.retryHeld()
+        prefs.edit().putString("held_retried_for", version).apply()
+        return true
+    }
 
     /** Housekeeping the app runs once when it opens: what has not been current for a month goes. */
     suspend fun prune() = server.prune()

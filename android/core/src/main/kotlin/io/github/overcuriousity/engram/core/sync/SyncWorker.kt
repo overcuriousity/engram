@@ -22,6 +22,7 @@ class SyncWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, 
         if (!engram.ready()) return Result.success()
         val drainer = engram.drainer() ?: return Result.success() // unpaired: nothing owed to anyone
         engram.outbox.sweepSent(olderThanMs = 7L * 24 * 3600 * 1000)
+        engram.retryHeldOnUpdate()
         val out = drainer.drainOnce()
         // A capture, a Done, a snooze, a new date: any of what was just
         // delivered can move what is due. Nothing pushes to a phone that is

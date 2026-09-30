@@ -71,7 +71,16 @@ internal class Drainer(
         fun need(k: String) = s(k) ?: throw Malformed("the row carries no $k")
         fun pair() = p["pair"]?.jsonPrimitive?.longOrNull ?: throw Malformed("the row carries no pair")
         when (row.kind) {
-            Kind.capture_text -> settle(row, transport.captureText(s("text") ?: "", s("title"), s("note"), tz(), s("from_ask")))
+            Kind.capture_text -> {
+                val text = s("text") ?: ""
+                // A text that is only a link is a fetch on the server, and a
+                // server older than the one that lets a zone through refuses
+                // one beside a fetch: every link shared from a browser was
+                // held for review and never stored. The zone means nothing to
+                // a fetched page, so it stays here.
+                val zone = if (onlyALink(text)) null else tz()
+                settle(row, transport.captureText(text, s("title"), s("note"), zone, s("from_ask")))
+            }
             Kind.capture_files -> {
                 val files = outbox.filesOf(row.id).map { OutFile(it.path, it.name, it.mime) }
                 settle(row, transport.captureFiles(files, s("title"), s("note")))
@@ -144,4 +153,16 @@ internal class Drainer(
     /** The server's `{"error": "..."}` if that is what came back, else the body. */
     private fun message(body: String): String =
         runCatching { Json.parseToJsonElement(body).jsonObject["error"]?.jsonPrimitive?.content }.getOrNull() ?: body
+}
+
+/**
+ * Whether a text is one link and nothing else: the server's `only_a_url`,
+ * asked a little wider. One token over http or https. Wider on purpose — a
+ * zone left off a text that the server reads as prose costs nothing, and one
+ * sent beside a link an older server reads as a fetch costs the capture.
+ */
+internal fun onlyALink(text: String): Boolean {
+    val t = text.trim()
+    if (t.isEmpty() || t.any(Char::isWhitespace)) return false
+    return t.startsWith("http://", ignoreCase = true) || t.startsWith("https://", ignoreCase = true)
 }

@@ -16,7 +16,7 @@ class RowWordsTest {
         assertEquals("stored", rowWords(row(State.sent, 201), now = 0))
         assertEquals("already held", rowWords(row(State.sent, 200), now = 0))
         assertEquals("stored · still being read", rowWords(row(State.sent, 202), now = 0))
-        assertEquals("held for review · that body is not valid UTF-8 text", rowWords(row(State.held, 400, "that body is not valid UTF-8 text"), now = 0))
+        assertEquals("not delivered · that body is not valid UTF-8 text", rowWords(row(State.held, 400, "that body is not valid UTF-8 text"), now = 0))
         assertEquals("refused · scan a new code", rowWords(row(State.refused), now = 0))
     }
 }

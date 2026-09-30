@@ -55,6 +55,7 @@ import io.github.overcuriousity.engram.core.contained.ModelManifest
 import kotlinx.coroutines.launch
 import io.github.overcuriousity.engram.core.PinMismatch
 import io.github.overcuriousity.engram.core.contained.CoreState
+import io.github.overcuriousity.engram.core.sync.Sync
 import kotlinx.coroutines.flow.StateFlow
 import java.time.LocalDate
 import java.time.ZoneId
@@ -173,7 +174,10 @@ fun EngramApp(
     }
 
     val owed by engram.outbox.rows.collectAsStateWithLifecycle(emptyList())
-    LaunchedEffect(Unit) { engram.prune() }
+    LaunchedEffect(Unit) {
+        engram.prune()
+        if (engram.retryHeldOnUpdate()) Sync.kick(engram.app)
+    }
 
     val bar = BAR
     fun go(route: String) = nav.navigate(route) { launchSingleTop = true }

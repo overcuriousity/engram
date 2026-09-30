@@ -14,7 +14,10 @@ fun rowWords(row: OutboxRow, now: Long): String = when (row.state) {
         202 -> "stored · still being read"
         else -> "stored"
     }
-    State.held -> "held for review · ${row.error ?: ""}".trimEnd(' ', '·')
+    // Not "held for review": nothing reviews it, and the server has none of
+    // it — a shared link held under those words read as kept, and was not
+    // searchable. Retry and Delete sit beside it.
+    State.held -> "not delivered · ${row.error ?: ""}".trimEnd(' ', '·')
     State.refused -> "refused · scan a new code"
 }
 
