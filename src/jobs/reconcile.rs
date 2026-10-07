@@ -8,7 +8,8 @@
 //!
 //! Cheap and idempotent: the queue is keyed by (stage, target), and this arms
 //! only units nothing is going to run — a base with nothing wrong costs one
-//! query per hundred corpora and changes not a row. Deliberately *not*
+//! query per hundred corpora, and the two statements of the pair drain, and
+//! changes not a row. Deliberately *not*
 //! `enqueue`: that resets attempts, and a sweep that keeps winding a failing
 //! unit's attempts back to zero is a sweep that stops its document ever
 //! settling.
@@ -45,6 +46,18 @@ fn awaiting(status: &CorpusStatus) -> Option<Stage> {
 const AUTO_REREADS_PER_PASS: usize = 5;
 
 pub async fn run(core: &Core) -> Result<usize> {
+    // Pairs an older base left waiting on a person, moved into states the base
+    // answers itself. Here rather than at the head of the dedupe sweep, because
+    // this runs on the repair ticker whatever `[consolidate]` says: a base with
+    // the dedupe model off, or the sweep off, still has nothing left waiting.
+    // Two statements that match nothing once drained, and no corpus action.
+    let drained = core.store.drain_waiting_pairs().await?;
+    if drained.closed + drained.rejudged > 0 {
+        tracing::info!(
+            ?drained,
+            "moved what was waiting on a person into the sweep"
+        );
+    }
     let mut armed = 0;
     let mut rereads = 0;
     // A cursor, not an offset: captures land while this runs, and an offset

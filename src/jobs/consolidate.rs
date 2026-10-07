@@ -473,17 +473,11 @@ async fn follow_supersessions(core: &Core) -> Result<crate::store::pairs::Follow
 /// unit the queue cannot get through does not stop every other pair from
 /// being judged. `live_job` arms a pair at most once.
 pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
-    // Zero is the off switch for the model: no read, no log line.
+    // Zero is the off switch for the model: no read, no log line. What an
+    // older base left waiting on a person is drained by `reconcile`, which
+    // runs whether or not this does.
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
-    }
-    // Free, and before the budget check: the drain writes no corpus action.
-    let drained = core.store.drain_waiting_pairs().await?;
-    if drained.closed + drained.rejudged > 0 {
-        tracing::info!(
-            ?drained,
-            "moved what was waiting on a person into the sweep"
-        );
     }
     // Dedupe's own day, before anything is armed. `dedupe::run` reads the
     // same budget and returns with the pair still `Pending` — correct for the
@@ -712,7 +706,26 @@ pub(crate) mod tests {
                 ("F", "zeta", [0.71, 0.69]),
                 ("G", "eta", [0.5, 0.86]),
                 ("H", "theta", [0.52, 0.85]),
+                ("I", "iota", [-1.0, 0.0]),
+                ("J", "kappa", [-0.99, 0.1]),
+                ("K", "lambda", [0.0, -1.0]),
+                ("L", "mu", [0.1, -0.99]),
             ],
+        )
+        .await;
+        // A vacuous recommendation an older base left for a person to press.
+        let vacuous = leave_pair(&core, &ids, (8, 9), PairState::Vacuous, Some("empty")).await;
+        // The loss check's refusal, as an older build filed it: a disagreement
+        // the notes never had.
+        let refused = leave_pair(
+            &core,
+            &ids,
+            (10, 11),
+            PairState::Contradiction,
+            Some(
+                "These two state a value differently, and merging them would have dropped \
+                 one of them. Which is current is the judgement this hands over.",
+            ),
         )
         .await;
         let dup = leave_pair(
@@ -745,13 +758,18 @@ pub(crate) mod tests {
         let first = core.store.drain_waiting_pairs().await.unwrap();
         let second = core.store.drain_waiting_pairs().await.unwrap();
 
-        assert_eq!(first.rejudged, 1);
-        assert_eq!(first.closed, 2);
+        assert_eq!(first.rejudged, 2);
+        assert_eq!(first.closed, 3);
         assert_eq!((second.closed, second.rejudged), (0, 0), "idempotent");
         let d = core.store.get_pair(dup).await.unwrap();
         assert_eq!(d.state, PairState::Pending, "the judge reads it again");
         assert!(!d.synthesis_asked);
-        for id in [unmergeable, taken_back] {
+        assert_eq!(
+            core.store.get_pair(vacuous).await.unwrap().state,
+            PairState::Pending,
+            "a vacuous recommendation is judged again, not left for a press"
+        );
+        for id in [unmergeable, taken_back, refused] {
             assert_eq!(
                 core.store.get_pair(id).await.unwrap().state,
                 PairState::NoConflict
@@ -760,6 +778,37 @@ pub(crate) mod tests {
         let a = core.store.get_pair(asked).await.unwrap();
         assert_eq!(a.state, PairState::Duplicate, "an operator's ask stands");
         assert!(a.synthesis_asked);
+    }
+
+    /// The drain does not wait on the dedupe model: a base with it off, and
+    /// with the sweep off, still has nothing left waiting on a person once
+    /// the repair ticker's reconcile pass has run.
+    #[tokio::test]
+    async fn the_drain_runs_with_the_dedupe_model_off() {
+        let mut core = test_core().await;
+        core.consolidate.max_dedupe_per_tick = 0;
+        core.consolidate.enabled = false;
+        let ids = seed_titled(
+            &core,
+            &[("A", "alpha", [1.0, 0.0]), ("B", "beta", [0.99, 0.1])],
+        )
+        .await;
+        let id = leave_pair(&core, &ids, (0, 1), PairState::Vacuous, Some("empty")).await;
+
+        // Neither the arming pass nor the sweep drains with these settings.
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0);
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Vacuous
+        );
+
+        crate::jobs::reconcile::run(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Pending
+        );
     }
 
     #[tokio::test]

@@ -55,9 +55,8 @@ pub const AWAITING_REVIEW: [PairState; 6] = [
     PairState::Duplicate,
     // Only ever rows an older base filed: a vacuous verdict is now carried
     // out where it is found (`jobs::dedupe::discard_both`) and its pair
-    // settles `Dismissed`. Still listed, because those rows are a
-    // recommendation nobody has pressed yet, and without this key they are on
-    // no queue at all.
+    // settles `Dismissed`. The drain puts what an older base left here back
+    // to `Pending` for the judge; listed until it has run.
     PairState::Vacuous,
     // Only rows an older base filed: a refused writing now leaves both as they
     // are and closes the pair `NoConflict`.
@@ -130,7 +129,8 @@ pub enum PairState {
     /// replacement does. Deprecation is reversible, so the undo is the review.
     ///
     /// The variant and everything that renders it stay for the rows an older
-    /// base filed, which are still waiting on that press.
+    /// base filed; the drain puts those back to `Pending`, and the judge's
+    /// verdict on them is carried out like any other.
     Vacuous,
     /// The judge read both and found they cover the same ground: one artifact
     /// should hold what both say.
@@ -731,15 +731,19 @@ impl Store {
 
     /// What a base from before autonomous curation left waiting on a person,
     /// moved into states the base answers itself. Run at the head of every
-    /// dedupe sweep; a second run finds nothing, which is what makes it safe
-    /// to leave there for good.
+    /// reconcile sweep, which runs whether or not the dedupe model is on; a
+    /// second run finds nothing, which is what makes it safe to leave there
+    /// for good.
     ///
-    /// - `Duplicate` with no merge and no ask, and `Superseded`: put back to
-    ///   `Pending`, so the judge reads them again and acts through the one
-    ///   path that checks newest-wins, liveness, the loss check and
-    ///   taken-back, recording the result as the model's own.
+    /// - `Duplicate` with no merge and no ask, `Superseded` and `Vacuous`: put
+    ///   back to `Pending`, so the judge reads them again and acts through the
+    ///   one path that checks newest-wins, liveness, the loss check and
+    ///   taken-back, recording the result as the model's own. A vacuous
+    ///   verdict found again is carried out where it is found.
     /// - `Unmergeable`, and `Contradiction` carrying a refusal rather than a
-    ///   finding: `NoConflict`, both sides left as they are.
+    ///   finding — "resolve by hand", or the loss check's refusal of a draft,
+    ///   which an older build filed as a disagreement and which is a refused
+    ///   writing, not two readings: `NoConflict`, both sides left as they are.
     ///
     /// `Oversized` is not touched: `reopen_oversized` already puts those back
     /// to `Pending` for the judge on every consolidate pass.
@@ -751,7 +755,8 @@ impl Store {
         let rejudged = sqlx::query(
             "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL
               WHERE (state = 'duplicate' AND merged_into IS NULL AND synthesis_asked = 0)
-                 OR state = 'superseded'",
+                 OR state = 'superseded'
+                 OR state = 'vacuous'",
         )
         .execute(&mut *tx)
         .await?
@@ -759,7 +764,9 @@ impl Store {
         let closed = sqlx::query(
             "UPDATE artifact_pairs SET state = 'no_conflict', synthesis_asked = 0
               WHERE state = 'unmergeable'
-                 OR (state = 'contradiction' AND detail LIKE '%esolve by hand%')",
+                 OR (state = 'contradiction' AND detail LIKE '%esolve by hand%')
+                 OR (state = 'contradiction'
+                     AND detail LIKE '%merging them would have dropped one of them%')",
         )
         .execute(&mut *tx)
         .await?
