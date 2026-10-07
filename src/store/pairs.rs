@@ -736,8 +736,11 @@ impl Store {
     ///   `Pending`, so the judge reads them again and acts through the one
     ///   path that checks newest-wins, liveness, the loss check and
     ///   taken-back, recording the result as the model's own.
-    /// - `Unmergeable`, `Oversized`, and `Contradiction` carrying a refusal
-    ///   rather than a finding: `NoConflict`, both sides left as they are.
+    /// - `Unmergeable`, and `Contradiction` carrying a refusal rather than a
+    ///   finding: `NoConflict`, both sides left as they are.
+    ///
+    /// `Oversized` is not touched: `reopen_oversized` already puts those back
+    /// to `Pending` for the judge on every consolidate pass.
     ///
     /// A `Duplicate` an operator already pressed Synthese on keeps its ask;
     /// the sweep writes it as the operator's.
@@ -753,7 +756,7 @@ impl Store {
         .rows_affected();
         let closed = sqlx::query(
             "UPDATE artifact_pairs SET state = 'no_conflict', synthesis_asked = 0
-              WHERE state IN ('unmergeable', 'oversized')
+              WHERE state = 'unmergeable'
                  OR (state = 'contradiction' AND detail LIKE '%esolve by hand%')",
         )
         .execute(&mut *tx)

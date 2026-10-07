@@ -312,9 +312,9 @@ impl Undone {
 /// Deprecated rather than deleted for the same reason `undo` deprecates: the
 /// lineage is the record of what was attempted.
 ///
-/// The reopened pairs go to `Contradiction`, not back to `Pending`: re-arming
-/// the model would regenerate the same unembeddable draft, at full price,
-/// forever.
+/// The released pairs go to `NoConflict` with both sides left as they are, not
+/// back to `Pending`: re-arming the model would regenerate the same
+/// unembeddable draft, at full price, forever.
 pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
     let m = core.store.get_artifact(merged_id).await?;
     if m.provenance != Provenance::Merged
