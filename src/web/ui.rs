@@ -1556,9 +1556,7 @@ async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
                 | CorpusStatus::NeedsReview
                 | CorpusStatus::Partial
         );
-        let low_coverage = s
-            .coverage
-            .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
+        let low_coverage = crate::core::coverage::low_coverage(s.coverage);
         rows.push(QueueRow {
             progress,
             locatable: total > 0,

@@ -5,6 +5,17 @@
 
 use crate::store::artifacts::CorpusSpan;
 
+/// A capture the queue calls low-coverage: measured, and below the line
+/// `verify::LOW_COVERAGE` draws.
+///
+/// One rule for the two places that act on it — the queue row that offers a
+/// person the re-read, and the reconcile sweep that does it unasked — so the
+/// sweep never re-reads a capture the page would call well read. Unmeasured is
+/// not low: a capture with no coverage yet has not been judged at all.
+pub fn low_coverage(coverage: Option<f64>) -> bool {
+    coverage.is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE)
+}
+
 pub struct CorpusLine {
     pub number: i64,
     pub text: String,

@@ -36,8 +36,17 @@ fn awaiting(status: &CorpusStatus) -> Option<Stage> {
     }
 }
 
+/// How many captures one sweep re-reads unasked.
+///
+/// Each is a model call per window it lost, and the first sweep after an
+/// upgrade finds every low-coverage capture the base ever took in at once. A
+/// small number per pass spreads that over the sweeps that follow rather than
+/// handing the queue the whole backlog in one go.
+const AUTO_REREADS_PER_PASS: usize = 5;
+
 pub async fn run(core: &Core) -> Result<usize> {
     let mut armed = 0;
+    let mut rereads = 0;
     // A cursor, not an offset: captures land while this runs, and an offset
     // over a newest-first list would step over one corpus per insertion.
     let mut cursor: Option<(i64, String)> = None;
@@ -58,10 +67,20 @@ pub async fn run(core: &Core) -> Result<usize> {
                 continue;
             }
             // Lines a finished read never turned into an artifact, read once
-            // more without being asked. Once: a second miss is what the
-            // document is, and the queue row still says how much is covered.
-            // Stamped first so a read that fails cannot loop on every sweep.
-            if c.auto_reread_at.is_none() && crate::core::ingest::coverage_final(&c.status) {
+            // more without being asked — but only for a capture the queue
+            // already calls low-coverage. Any uncovered line would do as a
+            // trigger, and on an upgrade it re-read most of the base: nearly
+            // every document has a heading or a signature nothing was written
+            // from. Once: a second miss is what the document is, and the queue
+            // row still says how much is covered. Stamped first so a read that
+            // fails cannot loop on every sweep; a capture past this pass's
+            // bound is left unstamped and taken up by the next one.
+            if rereads < AUTO_REREADS_PER_PASS
+                && c.auto_reread_at.is_none()
+                && crate::core::ingest::coverage_final(&c.status)
+                && crate::core::coverage::low_coverage(c.coverage)
+            {
+                rereads += 1;
                 core.store.mark_auto_reread(&c.id).await?;
                 if core.reread_uncovered(&c.id, 1, i64::MAX).await? {
                     armed += 1;
@@ -611,15 +630,25 @@ mod tests {
         core: &Core,
         status: CorpusStatus,
     ) -> crate::store::corpora::Corpus {
+        a_capture_that_lost_its_second_half_named(core, status, "eight").await
+    }
+
+    /// The same capture with its last line given, so several can be told
+    /// apart — the store folds identical captures into one.
+    async fn a_capture_that_lost_its_second_half_named(
+        core: &Core,
+        status: CorpusStatus,
+        last: &str,
+    ) -> crate::store::corpora::Corpus {
         use crate::store::artifacts::{CorpusSpan, SpanSource};
-        let raw = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight";
-        let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+        let raw = format!("one\ntwo\nthree\nfour\nfive\nsix\nseven\n{last}");
+        let src = core.store.insert_corpus(&raw, "web", None).await.unwrap();
         core.store
             .upsert_segments(
                 &src.id,
                 &[
                     seg(1, 4, "one\ntwo\nthree\nfour"),
-                    seg(5, 8, "five\nsix\nseven\neight"),
+                    seg(5, 8, &format!("five\nsix\nseven\n{last}")),
                 ],
             )
             .await
@@ -745,5 +774,82 @@ mod tests {
                 .is_none(),
             "a capture not yet final was stamped as reread"
         );
+    }
+
+    #[tokio::test]
+    async fn a_well_read_capture_with_an_uncovered_line_is_not_reread() {
+        let core = test_core().await;
+        // Lines nothing claims, on a capture whose coverage the queue calls
+        // fine — a heading or a signature, the case that made the first sweep
+        // after an upgrade re-read the whole base.
+        let c = a_capture_that_lost_its_second_half(&core, CorpusStatus::Ready).await;
+        core.store
+            .set_corpus_coverage(&c.id, Some(0.95))
+            .await
+            .unwrap();
+
+        run(&core).await.unwrap();
+
+        assert_eq!(
+            window_jobs(&core).await,
+            0,
+            "a well-read capture was reread"
+        );
+        assert!(
+            core.store
+                .get_corpus(&c.id)
+                .await
+                .unwrap()
+                .auto_reread_at
+                .is_none(),
+            "a capture the gate passed over was stamped"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_sweep_rereads_at_most_its_bound_and_the_next_takes_the_rest() {
+        let core = test_core().await;
+        let mut ids = Vec::new();
+        for i in 0..=AUTO_REREADS_PER_PASS {
+            ids.push(
+                a_capture_that_lost_its_second_half_named(
+                    &core,
+                    CorpusStatus::Partial,
+                    &format!("eight {i}"),
+                )
+                .await
+                .id,
+            );
+        }
+        let stamped = |core: &Core, ids: Vec<String>| {
+            let store = core.store.clone();
+            async move {
+                let mut n = 0;
+                for id in ids {
+                    if store
+                        .get_corpus(&id)
+                        .await
+                        .unwrap()
+                        .auto_reread_at
+                        .is_some()
+                    {
+                        n += 1;
+                    }
+                }
+                n
+            }
+        };
+
+        run(&core).await.unwrap();
+        assert_eq!(window_jobs(&core).await, AUTO_REREADS_PER_PASS as i64);
+        assert_eq!(stamped(&core, ids.clone()).await, AUTO_REREADS_PER_PASS);
+
+        run(&core).await.unwrap();
+        assert_eq!(
+            window_jobs(&core).await,
+            AUTO_REREADS_PER_PASS as i64 + 1,
+            "the capture past the bound was not taken up by the next sweep"
+        );
+        assert_eq!(stamped(&core, ids).await, AUTO_REREADS_PER_PASS + 1);
     }
 }
