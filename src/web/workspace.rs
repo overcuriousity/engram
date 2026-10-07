@@ -942,7 +942,7 @@ async fn ask_verdict(
         v => {
             let verdict = crate::store::asks::AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
-            tenant.core.store.judge_ask(&id, verdict).await?;
+            tenant.core.judge_ask(&id, verdict).await?;
         }
     }
     Ok(axum::response::Html(ask_verdict_bar(&tenant, &id, false).await?).into_response())
@@ -1018,7 +1018,15 @@ pub(crate) async fn judge_search(
             // rather than replace it. The same line "no" gets, for the same
             // reason.
             match store.judge_hit(id, artifact_id, Labeller::Confirm).await {
-                Ok(()) => "hit",
+                Ok(()) => {
+                    // A person who said this result was the one has said the
+                    // note is still right.
+                    tenant
+                        .core
+                        .confirm_cited(std::slice::from_ref(&artifact_id.to_string()))
+                        .await;
+                    "hit"
+                }
                 Err(Error::NotFound) => return Ok(None),
                 Err(e) => return Err(e),
             }

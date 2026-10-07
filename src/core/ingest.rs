@@ -1663,6 +1663,39 @@ impl Core {
         Ok(())
     }
 
+    /// A judged answer is the confirmation "Still accurate" used to ask a
+    /// person for. Best-effort: the verdict is the person's and is already
+    /// recorded; a stamp that cannot be written costs the stamp, not the
+    /// verdict. Out-of-results artifacts are skipped — confirming something
+    /// search will not return changes nothing it ranks.
+    pub async fn confirm_cited(&self, ids: &[String]) {
+        for id in ids {
+            match self.store.get_artifact(id).await {
+                Ok(c) if c.in_results() => {
+                    if let Err(e) = self.verify(id).await {
+                        tracing::warn!(artifact_id = %id, error = %e, "could not stamp a confirmed artifact");
+                    }
+                }
+                Ok(_) | Err(Error::NotFound) => {}
+                Err(e) => {
+                    tracing::warn!(artifact_id = %id, error = %e, "could not read a confirmed artifact")
+                }
+            }
+        }
+    }
+
+    /// Record a verdict on an answer. A right answer also confirms the notes
+    /// it drew on; wrong or empty ones say nothing about their sources, which
+    /// may have been fine and merely not the ones needed.
+    pub async fn judge_ask(&self, id: &str, verdict: crate::store::asks::AskVerdict) -> Result<()> {
+        self.store.judge_ask(id, verdict).await?;
+        if verdict == crate::store::asks::AskVerdict::Right {
+            let cited = self.store.used_citations(id).await?;
+            self.confirm_cited(&cited).await;
+        }
+        Ok(())
+    }
+
     /// Stamp an artifact as confirmed accurate now — what search ranking's
     /// recency decay reads.
     ///
@@ -2904,6 +2937,88 @@ mod tests {
                 .is_empty(),
             "the healed artifact is still marked as an unfinished write"
         );
+    }
+
+    async fn stamped_at(core: &crate::core::Core, id: &str) -> Option<i64> {
+        core.store.get_artifact(id).await.unwrap().last_verified_at
+    }
+
+    fn an_ask_citing(ids: &[(&str, bool)]) -> crate::store::asks::NewAsk {
+        crate::store::asks::NewAsk {
+            question: "how do I mount it".into(),
+            scope: Some("me".into()),
+            filters: "{}".into(),
+            query_vec: vec![0.1, 0.2],
+            embed_model: "fake".into(),
+            answer: "an answer".into(),
+            citations: ids
+                .iter()
+                .map(|(id, used)| crate::store::asks::NewAskCitation {
+                    artifact_id: (*id).to_string(),
+                    score: 1.0,
+                    used: *used,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_right_answer_confirms_what_it_cited_and_a_wrong_one_does_not() {
+        use crate::store::asks::AskVerdict;
+        let core = test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("used", [1.0, 0.0]), ("shown only", [0.0, 1.0])],
+        )
+        .await;
+        for id in &ids {
+            core.store.set_last_verified_at(id, 1).await.unwrap();
+        }
+
+        let right = core
+            .store
+            .record_ask(an_ask_citing(&[(&ids[0], true), (&ids[1], false)]))
+            .await
+            .unwrap();
+        core.judge_ask(&right, AskVerdict::Right).await.unwrap();
+        assert!(
+            stamped_at(&core, &ids[0]).await.unwrap() > 1,
+            "the note the answer used was not confirmed"
+        );
+        assert_eq!(
+            stamped_at(&core, &ids[1]).await,
+            Some(1),
+            "a note that was only shown was confirmed"
+        );
+
+        core.store.set_last_verified_at(&ids[0], 1).await.unwrap();
+        let wrong = core
+            .store
+            .record_ask(an_ask_citing(&[(&ids[0], true)]))
+            .await
+            .unwrap();
+        core.judge_ask(&wrong, AskVerdict::Wrong).await.unwrap();
+        assert_eq!(
+            stamped_at(&core, &ids[0]).await,
+            Some(1),
+            "a wrong answer confirmed its source"
+        );
+        let ev = core.store.ask_event(&wrong).await.unwrap().unwrap();
+        assert!(matches!(ev.verdict, Some(AskVerdict::Wrong)));
+    }
+
+    #[tokio::test]
+    async fn confirming_an_artifact_out_of_results_is_skipped_not_an_error() {
+        let core = test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(&core, &[("retired", [1.0, 0.0])]).await;
+        core.store.set_last_verified_at(&ids[0], 1).await.unwrap();
+        core.deprecate(&ids[0]).await.unwrap();
+
+        core.confirm_cited(&[ids[0].clone(), "no-such-artifact".to_string()])
+            .await;
+
+        assert_eq!(stamped_at(&core, &ids[0]).await, Some(1));
     }
 
     #[tokio::test]

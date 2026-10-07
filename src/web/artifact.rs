@@ -2657,6 +2657,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_hit_verdict_confirms_the_note_it_names() {
+        let (app, cookie, handle, a, event) = searched_app().await;
+        handle.store.set_last_verified_at(&a, 1).await.unwrap();
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/search/{event}/verdict"),
+                &cookie,
+                &format!("verdict=hit&artifact_id={a}"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let stamp = handle
+            .store
+            .get_artifact(&a)
+            .await
+            .unwrap()
+            .last_verified_at;
+        assert!(stamp.unwrap() > 1, "the confirmed result was not stamped");
+    }
+
+    #[tokio::test]
     async fn the_bar_takes_yes_no_and_not_sure_and_each_can_be_taken_back() {
         let (app, cookie, handle, a, event) = searched_app().await;
         let verdict = |v: &str| {

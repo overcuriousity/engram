@@ -480,7 +480,10 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     // Free, and before the budget check: the drain writes no corpus action.
     let drained = core.store.drain_waiting_pairs().await?;
     if drained.closed + drained.rejudged > 0 {
-        tracing::info!(?drained, "moved what was waiting on a person into the sweep");
+        tracing::info!(
+            ?drained,
+            "moved what was waiting on a person into the sweep"
+        );
     }
     // Dedupe's own day, before anything is armed. `dedupe::run` reads the
     // same budget and returns with the pair still `Pending` — correct for the
@@ -675,7 +678,10 @@ pub(crate) mod tests {
         detail: Option<&str>,
     ) -> i64 {
         use crate::store::pairs::DecidedBy;
-        core.store.record_pair(&ids[a], &ids[b], 0.91).await.unwrap();
+        core.store
+            .record_pair(&ids[a], &ids[b], 0.91)
+            .await
+            .unwrap();
         let id = core
             .store
             .pairs_by_state(PairState::Pending, 10)
@@ -709,9 +715,15 @@ pub(crate) mod tests {
             ],
         )
         .await;
-        let dup = leave_pair(&core, &ids, (0, 1), PairState::Duplicate, Some("same thing")).await;
-        let unmergeable =
-            leave_pair(&core, &ids, (2, 3), PairState::Unmergeable, Some("x")).await;
+        let dup = leave_pair(
+            &core,
+            &ids,
+            (0, 1),
+            PairState::Duplicate,
+            Some("same thing"),
+        )
+        .await;
+        let unmergeable = leave_pair(&core, &ids, (2, 3), PairState::Unmergeable, Some("x")).await;
         let taken_back = leave_pair(
             &core,
             &ids,
@@ -720,7 +732,14 @@ pub(crate) mod tests {
             Some(crate::jobs::dedupe::TAKEN_BACK_OLD),
         )
         .await;
-        let asked = leave_pair(&core, &ids, (6, 7), PairState::Duplicate, Some("same thing")).await;
+        let asked = leave_pair(
+            &core,
+            &ids,
+            (6, 7),
+            PairState::Duplicate,
+            Some("same thing"),
+        )
+        .await;
         assert!(core.store.ask_pair_synthesis(asked).await.unwrap());
 
         let first = core.store.drain_waiting_pairs().await.unwrap();

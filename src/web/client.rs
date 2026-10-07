@@ -133,7 +133,7 @@ async fn ask_verdict(
         v => {
             let verdict = crate::store::asks::AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
-            tenant.core.store.judge_ask(&id, verdict).await?;
+            tenant.core.judge_ask(&id, verdict).await?;
         }
     }
     let ev = tenant

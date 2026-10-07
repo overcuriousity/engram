@@ -1931,7 +1931,10 @@ mod tests {
         .await
         .unwrap();
 
-        let got = s.open_contradictions(&[a.clone(), b.clone()]).await.unwrap();
+        let got = s
+            .open_contradictions(&[a.clone(), b.clone()])
+            .await
+            .unwrap();
         assert_eq!(got.len(), 2, "one row per side asked about");
         let from_a = got.iter().find(|d| d.artifact_id == a).unwrap();
         assert_eq!(from_a.other_id, b);
@@ -1961,9 +1964,14 @@ mod tests {
         for other in &ids[1..] {
             s.record_pair(&ids[0], other, 0.9).await.unwrap();
             let id = s.pair_between(&ids[0], other).await.unwrap().unwrap().id;
-            s.set_pair_state(id, PairState::Contradiction, Some("differs"), DecidedBy::Model)
-                .await
-                .unwrap();
+            s.set_pair_state(
+                id,
+                PairState::Contradiction,
+                Some("differs"),
+                DecidedBy::Model,
+            )
+            .await
+            .unwrap();
         }
         let got = s.open_contradictions(&[ids[0].clone()]).await.unwrap();
         let mut others: Vec<&str> = got.iter().map(|d| d.other_id.as_str()).collect();

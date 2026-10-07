@@ -5396,7 +5396,11 @@ mod tests {
             .unwrap();
 
         let after = core.search(&q("t0\nalpha text"), Door::Ui).await.unwrap();
-        assert_eq!(ranked(&after), ranked(&before), "a disagreement moves nothing");
+        assert_eq!(
+            ranked(&after),
+            ranked(&before),
+            "a disagreement moves nothing"
+        );
         for h in &after {
             let other = if h.artifact_id == a { &b } else { &a };
             assert_eq!(h.disagrees_with.len(), 1, "{:?}", h.artifact_id);
