@@ -303,8 +303,8 @@ impl Undone {
     }
 }
 
-/// Retire a merge whose embedding can never arrive, and hand its pairs back
-/// to a person.
+/// Retire a merge whose embedding can never arrive, and leave its pairs with
+/// both sides as they are.
 ///
 /// Safe by the write path's own ordering: the roots are superseded only after
 /// the embed lands, so a stranded merge has hidden nothing — the base is
@@ -339,7 +339,7 @@ pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
         .store
         .reopen_pairs_merged_into(
             &m.id,
-            "the merged text could not be indexed; resolve by hand",
+            "the merged text could not be indexed; both stay as they are",
         )
         .await?;
     // The forever-retrying job was this state's only signal; with the merge

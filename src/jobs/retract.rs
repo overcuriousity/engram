@@ -36,9 +36,9 @@ const ACTION_LIMIT: usize = 200;
 /// superseded near-duplicate sits within a hundredth of its survivor on half
 /// the queries near them. "Any amount more similar" therefore restores on a
 /// coin toss. Getting that wrong is not free and not reversible by the base:
-/// `dedupe` routes any repeat verdict on a taken-back action to a person, so
-/// one noise-triggered restore permanently converts an automatic decision into
-/// human queue work.
+/// `dedupe` leaves both sides of any repeat verdict on a taken-back action as
+/// they are, so one noise-triggered restore permanently ends an automatic
+/// decision.
 const RESTORE_MARGIN: f32 = 0.05;
 
 /// What the corpus half of one pass did. Flat counts, so `jobs::did_work`

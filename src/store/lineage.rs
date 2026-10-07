@@ -45,7 +45,7 @@ impl Store {
     /// synthesis, and handing it back as a root is how a paraphrase of a
     /// paraphrase ends up in a prompt as an original, or recorded as another
     /// merge's `root_id`. The empty answer makes that state visible to the
-    /// caller instead; the dedupe unit escalates such a component to a person.
+    /// caller instead; the dedupe unit leaves both sides of such a component as they are.
     pub async fn roots_of(&self, artifact_ids: &[String]) -> Result<BTreeMap<String, Vec<String>>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for id in artifact_ids {

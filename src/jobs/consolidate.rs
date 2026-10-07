@@ -2494,7 +2494,7 @@ pub(crate) mod tests {
         assert_eq!(
             p.state,
             PairState::NoConflict,
-            "the reopened pair says to resolve by hand, which is a refusal the drain closes: both stay as they are"
+            "the reaped merge's pair leaves both sides as they are"
         );
         for id in &ids {
             assert_eq!(

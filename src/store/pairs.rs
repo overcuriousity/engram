@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 /// close-out in `run_one` hands the pair to the next sweep — which without this
 /// ceiling would arm it for five more, every sweep, forever.
 ///
-/// The pair stays `pending`, so nothing is lost: it is still on the review
-/// queue, and an operator settles it by hand.
+/// The pair stays `pending`, so nothing is lost: an operator can still
+/// settle it from the pair's own page.
 pub const MAX_UNREADABLE_JUDGEMENTS: i64 = super::jobs::MAX_ATTEMPTS;
 
 /// How many pending pairs `open_component` may follow outward from its seed.
@@ -844,19 +844,20 @@ impl Store {
         Ok(())
     }
 
-    /// Reopen every pair a now-dead merge had settled, handing them to a
-    /// person. Contradiction rather than Pending on purpose: re-arming the
+    /// Release every pair a now-dead merge had settled, leaving both sides as
+    /// they are. `NoConflict` rather than Pending on purpose: re-arming the
     /// model would regenerate the same unembeddable draft, at full price,
-    /// forever.
+    /// forever. The roots are only superseded once the embed lands, so they are
+    /// still in results when this runs.
     ///
     /// `decided_by` is rewritten and not left standing: the row is being moved
-    /// to a state nobody has answered yet by a rule the sweep applied on its
-    /// own, so the name on it is the model's — the same attribution
+    /// to a new state by a rule the sweep applied on its own, so the name on
+    /// it is the model's — the same attribution
     /// `follow_supersession` writes when it settles a row the same way.
     pub async fn reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'contradiction', detail = ?, decided_by = 'model',
+                SET state = 'no_conflict', detail = ?, decided_by = 'model',
                     merged_into = NULL
               WHERE merged_into = ?",
         )
@@ -2609,7 +2610,7 @@ mod tests {
             1
         );
         let p = s.get_pair(id).await.unwrap();
-        assert_eq!(p.state, PairState::Contradiction);
+        assert_eq!(p.state, PairState::NoConflict);
         assert_eq!(p.merged_into, None);
         assert_eq!(
             p.decided_by,
