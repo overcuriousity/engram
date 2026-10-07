@@ -6953,11 +6953,8 @@ mod tests {
         );
     }
 
-    /// A disagreement is a line under the row naming the other note and what
-    /// differs, a link of its own outside the row's link.
-    #[test]
-    fn a_row_names_the_note_that_disagrees_with_it() {
-        let hit = crate::core::search::SearchResult {
+    fn hit_disagreeing() -> crate::core::search::SearchResult {
+        crate::core::search::SearchResult {
             artifact_id: "a1".into(),
             text: "Retention is 30 days.".into(),
             disagrees_with: vec![crate::store::pairs::Disagreement {
@@ -6969,7 +6966,14 @@ mod tests {
                 detail: Some("30 days there, 14 here".into()),
             }],
             ..Default::default()
-        };
+        }
+    }
+
+    /// A disagreement is a line under the row naming the other note and what
+    /// differs, a link of its own outside the row's link.
+    #[test]
+    fn a_row_names_the_note_that_disagrees_with_it() {
+        let hit = hit_disagreeing();
         let row = render_hit(0, hit, &Default::default(), false);
         let html = askama::Template::render(&ResultsTemplate {
             results: vec![row],
@@ -6981,6 +6985,22 @@ mod tests {
         assert!(html.contains("Backup policy"), "{html}");
         assert!(html.contains("(2026-01-01)"), "{html}");
         assert!(html.contains("30 days there, 14 here"), "{html}");
+
+        // A recalled row says it too: being under the rule changes why the
+        // row is there, not what is known about the note.
+        let mut recalled = hit_disagreeing();
+        recalled.via = Some("x".into());
+        let html = askama::Template::render(&ResultsTemplate {
+            associated: vec![render_hit(0, recalled, &Default::default(), false)],
+            ..Default::default()
+        })
+        .unwrap();
+        let below = html
+            .split("Recalled by association")
+            .nth(1)
+            .expect("the associated block was not drawn");
+        assert!(below.contains("Disagrees with"), "{html}");
+        assert!(below.contains(r#"href="/ui/artifacts/b2""#), "{html}");
     }
 
     /// The chips under the box fire a search on a base that holds nothing, and

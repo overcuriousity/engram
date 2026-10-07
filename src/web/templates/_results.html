@@ -194,14 +194,7 @@
       <p class="rail-continues"><span class="arrow" aria-hidden="true">↳</span> continues in the next passage</p>
       {% endif %}
     </a>
-    {# Under the row and not in it: the row is one link, and these are others.
-       Said on both notes, and neither is picked — see `Store::open_contradictions`. #}
-    {% for d in r.disagrees %}
-    <div class="muted row-sub disagrees">
-      Disagrees with <a href="/ui/artifacts/{{ d.other_id }}">{{ d.other_title }}</a>
-      ({{ d.day }}){% if let Some(x) = d.detail %}: {{ x }}{% endif %}
-    </div>
-    {% endfor %}
+    {% include "_disagrees.html" %}
     {# No delete control here. It was the only irreversible act in the app that
        could be fired on something nobody had opened — a title, a snippet and a
        confirm dialog were the whole of what stood behind it — and it was the
@@ -238,6 +231,7 @@
       {% endif %}
       <div class="rail-snippet">{{ r.snippet }}</div>
     </a>
+    {% include "_disagrees.html" %}
   </div>
   {% endfor %}
   {% endif %}
