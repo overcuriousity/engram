@@ -115,10 +115,11 @@ The routes that used to ask for a decision are gone and answer `404`:
 Three things these shapes say that are easy to miss:
 
 **A disagreement names both sides and picks neither.** `Disagreement` is
-`{ artifact_id, other_id, other_title, other_created_at, detail }`:
-`artifact_id` is the hit or citation the row hangs on, `other_id` the note it
-disagrees with, `other_title` that note's title or `null`, `other_created_at`
-when it was written (unix seconds, so a client can say which reading is newer),
+`{ artifact_id, created_at, other_id, other_title, other_created_at, detail }`:
+`artifact_id` is the hit or citation the row hangs on and `created_at` when it
+was written, `other_id` the note it disagrees with, `other_title` that note's
+title or `null`, `other_created_at` when it was written (unix seconds both, so
+a client can say which reading is newer),
 and `detail` the judge's sentence on what differs, or `null`. The base keeps
 both notes in results and never settles the pair; draw both, with their dates.
 
