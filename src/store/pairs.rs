@@ -268,6 +268,11 @@ impl DecidedBy {
 pub struct Disagreement {
     /// The artifact this row is attached to.
     pub artifact_id: String,
+    /// When that artifact was written — the same clock as `other_created_at`,
+    /// so a prompt can date both readings. Defaulted for a row serialized
+    /// before it was carried.
+    #[serde(default)]
+    pub created_at: i64,
     /// The artifact it disagrees with.
     pub other_id: String,
     pub other_title: Option<String>,
@@ -1055,6 +1060,7 @@ impl Store {
             if wanted.contains(a_id.as_str()) {
                 out.push(Disagreement {
                     artifact_id: a_id.clone(),
+                    created_at: r.get("a_created"),
                     other_id: b_id.clone(),
                     other_title: r.get("b_title"),
                     other_created_at: r.get("b_created"),
@@ -1064,6 +1070,7 @@ impl Store {
             if wanted.contains(b_id.as_str()) {
                 out.push(Disagreement {
                     artifact_id: b_id,
+                    created_at: r.get("b_created"),
                     other_id: a_id,
                     other_title: r.get("a_title"),
                     other_created_at: r.get("a_created"),

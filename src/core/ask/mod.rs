@@ -194,12 +194,10 @@ impl Core {
                 return;
             }
 
-            let mut blocks = core.excerpts(&hits).await;
-
             let budget = core.excerpt_budget(&req.q);
 
             // Highest score first, so what gets cut is what mattered least.
-            let mut kept = pack_by_budget(&blocks, &core.counter, budget);
+            let (mut blocks, mut kept) = core.packed_excerpts(&hits, budget).await;
             core.stitch_passages(&hits[..kept], &mut blocks[..kept]).await;
             let mut ranked = first.ranked;
             let mut dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
@@ -308,8 +306,8 @@ impl Core {
                     // appended to what round one packed: the fanned-out
                     // excerpts have to fit the same window as the first, and
                     // the only honest way to know what fits is to pack it.
-                    let mut merged_blocks = core.excerpts(&merged.hits).await;
-                    let merged_kept = pack_by_budget(&merged_blocks, &core.counter, budget);
+                    let (mut merged_blocks, merged_kept) =
+                        core.packed_excerpts(&merged.hits, budget).await;
                     core.stitch_passages(
                         &merged.hits[..merged_kept],
                         &mut merged_blocks[..merged_kept],
@@ -634,6 +632,25 @@ impl Core {
         })
     }
 
+    /// The excerpts a set of hits becomes, and how many of them fit `budget`.
+    ///
+    /// Packing is a greedy prefix, so which partners the prompt carries is known
+    /// only once it is done. Rendered first as though no partner were shown —
+    /// the long form of a disagreement caveat, which names the other note in
+    /// full — and packed; the kept prefix is then rendered again with its
+    /// partners numbered. A numbered caveat is shorter than the long form, so
+    /// what was packed still fits, and no caveat names an excerpt the packing
+    /// cut.
+    async fn packed_excerpts(&self, hits: &[SearchResult], budget: usize) -> (Vec<String>, usize) {
+        let mut blocks = self.excerpts(hits, 0).await;
+        let kept = pack_by_budget(&blocks, &self.counter, budget);
+        if hits[..kept].iter().any(|h| !h.disagrees_with.is_empty()) {
+            let numbered = self.excerpts(&hits[..kept], kept).await;
+            blocks.splice(..kept, numbered);
+        }
+        (blocks, kept)
+    }
+
     /// The numbered excerpts a set of hits becomes, caveats and all.
     ///
     /// Caveats are the conditions under which an excerpt does not apply, and an
@@ -647,7 +664,13 @@ impl Core {
     /// One query for the lot rather than one per hit: this runs once per round,
     /// over the whole list — round two's call covers round one's hits again —
     /// so per-hit round trips would sit in front of every model call twice.
-    async fn excerpts(&self, hits: &[SearchResult]) -> Vec<String> {
+    ///
+    /// `shown` is how many of `hits`, from the front, the prompt will carry. A
+    /// disagreement names its partner by excerpt number only when the partner
+    /// is among those; otherwise it says the other note is not among these
+    /// excerpts and gives its title, date and what differs. Use
+    /// `packed_excerpts`, which knows `shown` only after packing.
+    async fn excerpts(&self, hits: &[SearchResult], shown: usize) -> Vec<String> {
         let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
         let caveats = match self.store.caveats_for(&ids).await {
             Ok(m) => m,
@@ -669,19 +692,35 @@ impl Core {
                 // one side of a pair, so `stitch_passages`, which re-reads
                 // caveats from the rows, has no disagreement to lose.
                 for d in &h.disagrees_with {
-                    lines.push(format!(
-                        "another note, \"{}\" ({}), states this differently{}",
-                        d.other_title.as_deref().unwrap_or("untitled"),
-                        crate::fmt::fmt_day(d.other_created_at),
-                        d.detail
-                            .as_deref()
-                            .map(|x| format!(": {x}"))
-                            .unwrap_or_default(),
-                    ));
+                    let detail = d
+                        .detail
+                        .as_deref()
+                        .map(|x| format!(": {x}"))
+                        .unwrap_or_default();
+                    let partner = hits[..shown.min(hits.len())]
+                        .iter()
+                        .position(|o| o.artifact_id == d.other_id);
+                    lines.push(match partner {
+                        Some(j) => format!("excerpt [{}] states this differently{detail}", j + 1),
+                        None => format!(
+                            "another note, \"{}\" ({}), not among these excerpts, states this \
+                             differently{detail}",
+                            d.other_title.as_deref().unwrap_or("untitled"),
+                            crate::fmt::fmt_day(d.other_created_at),
+                        ),
+                    });
                 }
+                // Dated in its own header where it takes part in a
+                // disagreement: the answer gives both readings with their
+                // dates, and the other side's caveat dates only the other side.
+                let dated = h
+                    .disagrees_with
+                    .first()
+                    .map(|d| crate::fmt::fmt_day(d.created_at));
                 ask_excerpt(
                     i + 1,
                     h.title.as_deref().unwrap_or_default(),
+                    dated.as_deref(),
                     &h.text,
                     &lines,
                 )
@@ -792,8 +831,13 @@ impl Core {
                     }
                 }
             }
-            blocks[head_pos] =
-                crate::infer::prompt::ask_excerpt(head_pos + 1, head, &text.join("\n"), &caveats);
+            blocks[head_pos] = crate::infer::prompt::ask_excerpt(
+                head_pos + 1,
+                head,
+                None,
+                &text.join("\n"),
+                &caveats,
+            );
             // Every other member keeps its slot and points at the block its
             // text went into. Cheap — one line each — and it is what lets the
             // model cite the passage it drew on rather than the one that
@@ -2962,8 +3006,8 @@ mod tests {
             };
         let hits = vec![hit(&made[1], 0.9), hit(&made[0], 0.5)];
         let mut blocks = vec![
-            crate::infer::prompt::ask_excerpt(1, "Backups", &made[1].text, &[]),
-            crate::infer::prompt::ask_excerpt(2, "Recovery", &made[0].text, &[]),
+            crate::infer::prompt::ask_excerpt(1, "Backups", None, &made[1].text, &[]),
+            crate::infer::prompt::ask_excerpt(2, "Recovery", None, &made[0].text, &[]),
         ];
         core.stitch_passages(&hits, &mut blocks).await;
 
@@ -3080,10 +3124,25 @@ mod tests {
         assert_eq!(partner.via.as_deref(), Some(a.as_str()));
         assert_eq!(partner.reason.as_deref(), Some("states this differently"));
 
+        // Each side names the other by the number it carries in this prompt,
+        // and each header carries the day its note was written.
         let prompt = probe.prompts().pop().expect("the model was called");
-        assert!(prompt.contains("states this differently"), "{prompt}");
-        assert!(prompt.contains("Retention, revised"), "{prompt}");
-        assert!(prompt.contains("30 days there, 14 here"), "{prompt}");
+        assert!(
+            prompt.contains("Caveat: excerpt [2] states this differently: 30 days there, 14 here"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Caveat: excerpt [1] states this differently: 30 days there, 14 here"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("not among these excerpts"), "{prompt}");
+        for (n, id, title) in [(1, &a, "Retention policy"), (2, &b, "Retention, revised")] {
+            let day = crate::fmt::fmt_day(core.store.get_artifact(id).await.unwrap().created_at);
+            assert!(
+                prompt.contains(&format!("[{n}] {title} ({day})")),
+                "{prompt}"
+            );
+        }
 
         assert_eq!(out.disagreements.len(), 1, "{:?}", out.disagreements);
         assert_eq!(
@@ -3091,6 +3150,81 @@ mod tests {
             "read from the side cited first"
         );
         assert_eq!(out.disagreements[0].other_id, b);
+    }
+
+    /// Two hits that disagree with each other, built by hand: the numbering is
+    /// a fact about the prompt, not the store.
+    fn disagreeing_hits() -> Vec<SearchResult> {
+        let side =
+            |id: &str, other: &str, title: &str, other_title: &str, text: &str| SearchResult {
+                artifact_id: id.into(),
+                title: Some(title.into()),
+                text: text.into(),
+                disagrees_with: vec![crate::store::pairs::Disagreement {
+                    artifact_id: id.into(),
+                    created_at: 1_767_225_600,
+                    other_id: other.into(),
+                    other_title: Some(other_title.into()),
+                    other_created_at: 1_772_366_400,
+                    detail: Some("30 days there, 14 here".into()),
+                }],
+                ..Default::default()
+            };
+        vec![
+            side(
+                "a",
+                "b",
+                "Retention policy",
+                "Retention, revised",
+                "retention is 30 days",
+            ),
+            side(
+                "b",
+                "a",
+                "Retention, revised",
+                "Retention policy",
+                &"retention is 14 days, as revised. ".repeat(40),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_partner_the_packing_cut_is_not_named_by_a_number() {
+        let core = test_core().await;
+        let hits = disagreeing_hits();
+
+        let (blocks, kept) = core.packed_excerpts(&hits, usize::MAX).await;
+        assert_eq!(kept, 2);
+        assert!(
+            blocks[0].contains("excerpt [2] states this differently"),
+            "{}",
+            blocks[0]
+        );
+
+        // Room for the first excerpt and not the second: the caveat must not
+        // point at a number the prompt does not carry.
+        let first = core.excerpts(&hits[..1], 0).await;
+        let budget = core.counter.count(&first[0]);
+        let (blocks, kept) = core.packed_excerpts(&hits, budget).await;
+        assert_eq!(kept, 1);
+        assert!(!blocks[0].contains("excerpt [2]"), "{}", blocks[0]);
+        assert!(
+            blocks[0].contains(&format!(
+                "another note, \"Retention, revised\" ({}), not among these excerpts, \
+                 states this differently: 30 days there, 14 here",
+                crate::fmt::fmt_day(1_772_366_400)
+            )),
+            "{}",
+            blocks[0]
+        );
+        assert!(
+            blocks[0].starts_with(&format!(
+                "[1] Retention policy ({})",
+                crate::fmt::fmt_day(1_767_225_600)
+            )),
+            "{}",
+            blocks[0]
+        );
     }
 
     /// Ties every hit, so no cliff is drawn and the anchors are exactly the

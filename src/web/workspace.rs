@@ -2040,6 +2040,7 @@ mod tests {
             unsupported: vec![],
             disagreements: vec![crate::store::pairs::Disagreement {
                 artifact_id: "a1".into(),
+                created_at: 1_767_139_200,
                 other_id: "b2".into(),
                 other_title: Some("Retention, revised".into()),
                 other_created_at: 1_767_225_600,

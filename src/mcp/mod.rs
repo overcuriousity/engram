@@ -1064,6 +1064,7 @@ mod tests {
     fn disagreement(on: &str, other: &str) -> crate::store::pairs::Disagreement {
         crate::store::pairs::Disagreement {
             artifact_id: on.into(),
+            created_at: 1_772_280_000,
             other_id: other.into(),
             other_title: Some("Backup schedule (2025)".into()),
             // 2026-03-01, midday UTC, so the day reads the same in any zone

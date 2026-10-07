@@ -6962,6 +6962,7 @@ mod tests {
             text: "Retention is 30 days.".into(),
             disagrees_with: vec![crate::store::pairs::Disagreement {
                 artifact_id: "a1".into(),
+                created_at: 1_767_139_200,
                 other_id: "b2".into(),
                 other_title: Some("Backup policy".into()),
                 other_created_at: 1_767_225_600,
