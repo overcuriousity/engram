@@ -75,6 +75,10 @@ async fn taken_back_before(core: &Core, kind: Kind, subjects: &[&str]) -> Result
     Ok(false)
 }
 
+/// Why a pair whose merge draft was refused by the loss check is closed: the
+/// draft, not the notes, was at fault, so both stay as they are.
+const LOSS_REFUSED: &str = "a draft dropped a value one of them states; both stay as they are";
+
 const TAKEN_BACK: &str =
     "This was done to one of these before and taken back, so both stay as they are.";
 
@@ -463,42 +467,31 @@ fn interpret(
         // rather than compound it.
         let lost = crate::jobs::merge::losses(&members, d);
         if !lost.is_empty() {
-            // Kept as a disagreement rather than retried: the merge is the
-            // thing that was wrong, and two texts that state a value
-            // differently are exactly what a disagreement is. Search and Ask
-            // show both sides of one, and the base picks neither.
+            // Refused, and the pair closed with both sides as they are. Not a
+            // disagreement: the judge found the two say the same thing, and it
+            // is the draft that dropped a value, not the notes that state one
+            // differently. Filing it as `Contradiction` put a "these two
+            // disagree" line under two notes that agree, in search and Ask
+            // both. Not retried either — the same draft would be refused
+            // again — and nothing waits on a person.
             //
-            // Two sentences are still not written here. Not the lost tokens —
-            // those are as often a bare "1, 4" as a version number, evidence
-            // too thin to show beside an answer, in a voice unlike every other
-            // line beside it. And not the judge's own detail: it was written
-            // to say why the two are the *same* ("same claim"), and under
-            // Contradiction it is read as the reason the two disagree, so the
-            // pair would state the opposite of its own finding.
-            //
-            // What is written is a third thing, true of this disagreement and
-            // of no other: the merge was refused because it would have lost
-            // something. Saying nothing at all was the state before, and five
-            // pairs reading "these two disagree" with nothing under them sat
-            // on a deployment.
+            // The reason goes on the row rather than the lost tokens: those are
+            // as often a bare "1, 4" as a version number, evidence too thin to
+            // read as a reason. Nor the judge's own detail, which says why the
+            // two are the same and would read as the opposite of what
+            // happened.
             //
             // Logged, though. Keeping the tokens off the row is a judgement
             // about what a reader can use; keeping them out of the process
-            // entirely left a refusal nothing anywhere could explain. Three
-            // pairs sat as unexplained "these two disagree" for a day, and
-            // finding out why meant reconstructing the tokenizer's output by
-            // hand against the two texts. This is the one place that knows.
+            // entirely left a refusal nothing anywhere could explain. This is
+            // the one place that knows.
             tracing::warn!(
                 pair = pair.id,
                 lost = lost.join(", "),
                 "refused a merge that would have dropped these"
             );
-            relation = Relation::Conflict;
-            detail = Some(
-                "These two state a value differently, and merging them would have dropped \
-                 one of them, so both are kept and both are shown."
-                    .to_string(),
-            );
+            relation = Relation::Distinct;
+            detail = Some(LOSS_REFUSED.to_string());
             merged = None;
         }
     }
@@ -1765,10 +1758,9 @@ mod tests {
         // written here: the lost tokens, which are as often a bare "1, 4" as a
         // version number and are evidence too thin to act on; and the judge's
         // own line, which was written to say the two are the *same* and would
-        // contradict the "these two disagree" it renders under. Neither of
-        // those is an argument for saying nothing at all — a card naming no
-        // dispute is one nobody can decide, and five of them sat on the
-        // deployment.
+        // read as the reason the pair was closed. Neither of those is an
+        // argument for saying nothing at all — a closed pair with no reason on
+        // it leaves nobody able to tell why two near-copies both stand.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
@@ -1782,19 +1774,19 @@ mod tests {
 
         let found = core
             .store
-            .pairs_by_state(PairState::Contradiction, 10)
+            .pairs_by_state(PairState::NoConflict, 10)
             .await
             .unwrap();
         assert_eq!(found.len(), 1);
         let detail = found[0].detail.as_deref().unwrap_or_default();
         assert!(
             detail.contains("dropped"),
-            "the card says nothing about why it was escalated: {detail:?}"
+            "the row says nothing about why it was closed: {detail:?}"
         );
         assert!(
             !detail.contains("same claim"),
-            "the judge's line said these two were the same; under \"these two \
-             disagree\" it contradicts the card it sits on: {detail:?}"
+            "the judge's line said these two were the same, not why the pair \
+             was closed: {detail:?}"
         );
         assert!(
             !detail.contains("1.30.0"),
@@ -2695,7 +2687,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_that_would_lose_a_value_is_a_disagreement_not_a_card() {
+    async fn a_merge_that_would_lose_a_value_leaves_both_and_closes_the_pair() {
         use crate::store::actions::Kind;
         let mut core = test_core().await;
         // The draft keeps `ro` and drops `rw`.
@@ -2712,13 +2704,17 @@ mod tests {
         let p = core.store.get_pair(pair).await.unwrap();
         assert_eq!(
             p.state,
-            PairState::Contradiction,
-            "two texts stating a value differently are a disagreement"
+            PairState::NoConflict,
+            "a refused draft is not a disagreement between the notes"
         );
-        let detail = p.detail.as_deref().unwrap_or_default();
+        assert_eq!(p.detail.as_deref(), Some(LOSS_REFUSED));
         assert!(
-            detail.contains("state a value differently"),
-            "the detail does not say what was found: {detail:?}"
+            core.store
+                .open_contradictions(&ids)
+                .await
+                .unwrap()
+                .is_empty(),
+            "search would say two agreeing notes disagree"
         );
         assert!(
             p.merged_into.is_none(),
