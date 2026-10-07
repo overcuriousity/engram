@@ -430,7 +430,10 @@ private fun Results(engram: Engram, q: String, category: String, doors: Status?,
             // The deck's "gap" key, where the person is when they know:
             // beside an empty list, or the notice over a list that is all loose.
             if ((p.items.isEmpty() || allLoose) && event != null && doors?.learn == true) GapButton(engram, event, q)
-            Rail(rail, onOpen = { id -> onHit(id, p.event) })
+            // The note a disagreement names is opened with no event: it is not
+            // a result this search ranked, and counting it as an open under
+            // the search would credit the ranking with a find it never made.
+            Rail(rail, onOpenOther = { id -> onHit(id, null) }, onOpen = { id -> onHit(id, p.event) })
         }
     }
 }

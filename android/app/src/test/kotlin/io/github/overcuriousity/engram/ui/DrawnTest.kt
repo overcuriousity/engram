@@ -88,12 +88,14 @@ class DrawnTest {
             Hit("c", title = "Untroubled", text = "nothing disagrees with this"),
         )
         var opened = ""
-        compose.setContent { EngramTheme { Rail(railOf(hits)) { opened = it } } }
+        var other = ""
+        compose.setContent { EngramTheme { Rail(railOf(hits), onOpenOther = { other = it }) { opened = it } } }
 
         compose.onNodeWithText("Disagrees with NAS: 30 days there, 14 here").assertExists()
         compose.onAllNodesWithText("Disagrees with", substring = true).assertCountEquals(1)
         compose.onNodeWithText("Disagrees with NAS: 30 days there, 14 here").performClick()
-        assertEquals("the line opens the other note, not this one", "b", opened)
+        assertEquals("the line opens the other note, not this one", "b", other)
+        assertEquals("and not as an open of the hit under its search", "", opened)
     }
 
     @Test fun aDisagreementWithNoTitleOrDetailStillSaysThereIsOne() {
