@@ -100,14 +100,14 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     // Settled by an operator, by a later sweep, or by the unit that merged one
     // of its members while this one waited out a backoff.
     //
-    // `synthesis_asked` is the exception, and it has to be: an ask is set on a
-    // pair that is already settled — `PairState::Duplicate`, by `apply` when a
-    // duplicate verdict came without a draft, or by an operator's press on an
-    // older base — so the path to a synthesis arrives here in a state that is
-    // not `Pending`. Without the second half of this test every one of those
-    // asks was sent home having done nothing, and since every caller of
-    // `clear_pair_synthesis` sits below this line, the pair was frozen for good
-    // on the one ask that is supposed to resolve it.
+    // `synthesis_asked` is the exception, and it has to be: the ask is an
+    // operator's press from before autonomous curation, made on a pair that
+    // was already settled — most often `PairState::Duplicate` — so the path to
+    // a synthesis arrives here in a state that is not `Pending`. Without the
+    // second half of this test every one of those asks was sent home having
+    // done nothing, and since every caller of `clear_pair_synthesis` sits
+    // below this line, the pair was frozen for good on the one ask that is
+    // supposed to resolve it.
     //
     // Every test seeded a `Pending` pair, which is why the suite was green.
     if p.state != PairState::Pending && !p.synthesis_asked {
@@ -240,15 +240,15 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .await;
     }
 
-    // A synthesis was asked for: by an operator's "Write one" on an older
-    // base, or by `apply` arming one for a duplicate verdict that came without
-    // a draft. The verdict is not asked for again, because it has been given:
-    // someone already read both sides as covering the same ground. Asking the model to decide again invites it to answer `distinct`
-    // and leave the press with nothing to show for it — and it does not decide
-    // this class reliably. Asked twelve times about two artifacts describing
-    // one veterinary practice, one carrying the contact details and the other
-    // the services, the live judge wrote the same reasoning every time and
-    // labelled it `distinct` nine times and `duplicate` three. The prompt's own
+    // An operator pressed "Write one", on a base from before autonomous
+    // curation; nothing sets the ask now. The verdict is not asked for again,
+    // because it has been given: they read both sides and decided these cover
+    // the same ground. Asking the model to decide again invites it to answer
+    // `distinct` and leave the press with nothing to show for it — and it does
+    // not decide this class reliably. Asked twelve times about two artifacts
+    // describing one veterinary practice, one carrying the contact details and
+    // the other the services, the live judge wrote the same reasoning every
+    // time and labelled it `distinct` nine times and `duplicate` three. The prompt's own
     // categories both fit that shape, so the label was a coin flip on an action
     // that hides two artifacts behind a third.
     //
@@ -507,11 +507,13 @@ fn interpret(
     }
 }
 
-/// Write one artifact from a pair a synthesis was asked for: by an operator's
-/// press on an older base, or by `apply` for a duplicate verdict that came
-/// without a draft.
+/// Write one artifact from a pair an operator asked to have synthesized.
 ///
-/// The judgement is given and is not revisited; only the writing is asked for.
+/// Only an operator's press sets that ask, and only before autonomous
+/// curation: nothing on this path arms one now, so this answers the asks an
+/// older base still holds, and keeps them recorded as the operator's.
+///
+/// The judgement is theirs and is not revisited; only the writing is asked for.
 /// From the draft on this is `write_merge`, the `Relation::Duplicate` tail, and
 /// deliberately the same one: a synthesis and a merge the judge applied must
 /// leave the base in the same shape, or the journal has two kinds of merge in
@@ -831,15 +833,19 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 // passing only the roots would leave that earlier merge active
                 // and near-identical to the new one.
                 Some(draft) => write_merge(core, &s.pair, &ids, draft, DecidedBy::Model).await,
-                // No draft to write. `parse_dedupe` refuses such a reply, so
-                // nothing reaches here from a call today; if something does,
-                // the synthesis pass writes one rather than the pair waiting
-                // for a press. Settled first, because the ask is only taken on
-                // a pair in `AWAITING_REVIEW`.
+                // No draft to write. Unreachable today: `parse_dedupe` refuses
+                // a duplicate reply that carries no merged artifact. Should
+                // one arrive, there is nothing to merge and nobody to ask —
+                // a synthesis ask is an operator's press, and recording the
+                // judge's verdict as one would misattribute it — so both
+                // stay as they are.
                 None => {
-                    settle(core, &s.pair, PairState::Duplicate, s.detail.as_deref()).await?;
-                    core.store.ask_pair_synthesis(s.pair.id).await?;
-                    Ok(())
+                    leave_both(
+                        core,
+                        &s.pair,
+                        "the judge read these as one but wrote no draft; both stay as they are",
+                    )
+                    .await
                 }
             }
         }
@@ -928,7 +934,12 @@ pub(crate) async fn discard_both(
             // parameter at all.
             return match by {
                 DecidedBy::Model => leave_both(core, pair, why).await,
-                _ => settle_as(core, pair, PairState::NoConflict, Some(why), by).await,
+                _ => {
+                    if pair.synthesis_asked {
+                        core.store.clear_pair_synthesis(pair.id).await?;
+                    }
+                    settle_as(core, pair, PairState::NoConflict, Some(why), by).await
+                }
             };
         }
     }
@@ -2722,9 +2733,10 @@ mod tests {
 
     /// A duplicate settlement with no draft to write — `parse_dedupe` refuses
     /// such a reply, so only a caller building a `Settlement` by hand reaches
-    /// it — arms the synthesis pass rather than waiting on a press.
+    /// it — leaves both as they are. It does not arm a synthesis: that ask is
+    /// an operator's press, and the merge it wrote would be recorded as theirs.
     #[tokio::test]
-    async fn a_duplicate_without_a_draft_asks_the_writer_for_one() {
+    async fn a_duplicate_without_a_draft_leaves_both_and_arms_nothing() {
         let core = test_core().await;
         let ids = seed_titled(
             &core,
@@ -2756,12 +2768,20 @@ mod tests {
         .unwrap();
 
         let p = core.store.get_pair(pair_id).await.unwrap();
-        assert_eq!(p.state, PairState::Duplicate);
-        assert!(p.synthesis_asked, "nothing will ever write this pair");
-        assert_eq!(
-            core.store.pairs_awaiting_synthesis(10).await.unwrap().len(),
-            1
+        assert_eq!(p.state, PairState::NoConflict);
+        assert_eq!(p.decided_by, Some(DecidedBy::Model));
+        assert!(!p.synthesis_asked, "a judge verdict was filed as a press");
+        assert!(p.merged_into.is_none());
+        assert!(
+            core.store
+                .pairs_awaiting_synthesis(10)
+                .await
+                .unwrap()
+                .is_empty()
         );
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
     }
 
     /// A merge's journal line says what happened.

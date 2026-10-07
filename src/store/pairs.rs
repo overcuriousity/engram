@@ -42,20 +42,16 @@ const COMPONENT_WINDOW: i64 = 3;
 /// refuse an ask on anything else.
 ///
 /// Besides `Pending`, which is a pair nobody has asked about yet, nothing new
-/// is settled into these except `Contradiction`, a real disagreement, and
-/// `Duplicate` as the passing state before an armed synthesis. `jobs::dedupe`
-/// closes every other pair itself. The rest are rows an older base filed
+/// is settled into these except `Contradiction`, a real disagreement.
+/// `jobs::dedupe` closes every other pair itself. The rest are rows an older base filed
 /// while the judge still handed pairs to a person, and the drain that follows
 /// this change clears them.
 pub const AWAITING_REVIEW: [PairState; 6] = [
     PairState::Contradiction,
     // Only rows an older base filed: nothing settles a pair here now.
     PairState::Superseded,
-    // The judge read both and found one artifact should hold what both say.
-    // A duplicate verdict now writes its merge where it is found; this state
-    // holds a pair only between `apply` and the synthesis it arms when the
-    // verdict came without a draft — and the rows older bases filed as
-    // proposals, which the drain clears.
+    // Only rows an older base filed as proposals: a duplicate verdict now
+    // writes its merge where it is found. The drain clears them.
     PairState::Duplicate,
     // Only ever rows an older base filed: a vacuous verdict is now carried
     // out where it is found (`jobs::dedupe::discard_both`) and its pair
@@ -148,10 +144,9 @@ pub enum PairState {
     /// acting on it safe is the loss check, the journal and the undo that
     /// `jobs::retract` applies against later searches.
     ///
-    /// So nothing new rests here. A pair passes through it only when a verdict
-    /// came without a draft and a synthesis is armed (`synthesis_asked`) to
-    /// write one. Rows an older base filed as proposals for a person to press
-    /// are cleared by the drain that follows this change.
+    /// So nothing settles a pair here any more. The variant stays for the rows
+    /// an older base filed as proposals for a person to press, which the drain
+    /// that follows this change clears.
     Duplicate,
     /// A lifecycle event took one of the two artifacts out of results, so the
     /// question cannot be acted on — not because anyone answered it.
@@ -693,6 +688,11 @@ impl Store {
 
     /// Record that a person asked for this pair to be synthesized.
     ///
+    /// Only an operator's press, and only one from before autonomous curation:
+    /// the judge writes its own merges now and never sets this. What an older
+    /// base holds is still answered by `jobs::dedupe::synthesize_asked_pair`,
+    /// and recorded as the operator's.
+    ///
     /// The press is the judgement: an operator has read both sides and decided
     /// they cover the same ground. The dedupe unit reads this and takes the
     /// write-only prompt instead of the verdict prompt, because asking the
@@ -727,9 +727,9 @@ impl Store {
         Ok(())
     }
 
-    /// Pairs a synthesis was asked for and nothing has written yet — by an
-    /// operator's Synthese press on an older base, or by `jobs::dedupe::apply`
-    /// for a duplicate verdict that came without a draft.
+    /// Pairs an operator pressed Synthese on, before autonomous curation, and
+    /// nothing has written yet. Nothing sets the ask now; these are what an
+    /// older base still holds.
     ///
     /// Not `state = 'pending'`, which is the one thing that separates this from
     /// `pairs_to_judge`: by the time a synthesis is asked for the pair is far
