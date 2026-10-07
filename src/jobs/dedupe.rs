@@ -78,6 +78,12 @@ async fn taken_back_before(core: &Core, kind: Kind, subjects: &[&str]) -> Result
 const TAKEN_BACK: &str =
     "This was done to one of these before and taken back, so both stay as they are.";
 
+/// The wording rows on bases from before autonomous curation carry for the
+/// same refusal. The drain reads it to close what was waiting on a person.
+#[cfg(test)]
+pub(crate) const TAKEN_BACK_OLD: &str =
+    "This was done to one of these before and taken back. Resolve by hand.";
+
 /// What the model decided, with everything the write path needs already read.
 pub struct Settlement {
     pub relation: Relation,

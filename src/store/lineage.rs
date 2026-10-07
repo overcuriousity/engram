@@ -344,6 +344,18 @@ impl Store {
         Ok(rows.iter().map(|r| r.get("id")).collect())
     }
 
+    /// Artifacts carrying `flag`, for sweeps that retire a flag they used to set.
+    pub async fn artifacts_flagged(&self, flag: &str, limit: i64) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT id FROM artifacts WHERE flags LIKE ? ORDER BY created_at DESC, id LIMIT ?",
+        )
+        .bind(format!("%\"{flag}\"%"))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.iter().map(|r| r.get("id")).collect())
+    }
+
     /// Every pair, in any state, both of whose artifacts are in this set.
     ///
     /// Each captured root of `child_id`, with the direct parent it entered

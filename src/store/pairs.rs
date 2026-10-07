@@ -317,6 +317,16 @@ pub struct Followed {
     pub staled: u64,
 }
 
+/// What `drain_waiting_pairs` moved.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DrainCounts {
+    /// Refusals an older base filed as waiting on a person, now `NoConflict`.
+    pub closed: u64,
+    /// Proposals and replacements an older base left for a person, put back
+    /// to `Pending` so the judge reads them again.
+    pub rejudged: u64,
+}
+
 impl Followed {
     /// Rows this supersession settled one way or the other. What a caller
     /// asking "did anything happen" wants, and what a caller logging what it
@@ -715,6 +725,42 @@ impl Store {
             q = q.bind(state.as_str());
         }
         Ok(q.execute(&self.pool).await?.rows_affected() == 1)
+    }
+
+    /// What a base from before autonomous curation left waiting on a person,
+    /// moved into states the base answers itself. Run at the head of every
+    /// dedupe sweep; a second run finds nothing, which is what makes it safe
+    /// to leave there for good.
+    ///
+    /// - `Duplicate` with no merge and no ask, and `Superseded`: put back to
+    ///   `Pending`, so the judge reads them again and acts through the one
+    ///   path that checks newest-wins, liveness, the loss check and
+    ///   taken-back, recording the result as the model's own.
+    /// - `Unmergeable`, `Oversized`, and `Contradiction` carrying a refusal
+    ///   rather than a finding: `NoConflict`, both sides left as they are.
+    ///
+    /// A `Duplicate` an operator already pressed Synthese on keeps its ask;
+    /// the sweep writes it as the operator's.
+    pub async fn drain_waiting_pairs(&self) -> Result<DrainCounts> {
+        let mut tx = self.pool.begin().await?;
+        let rejudged = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL
+              WHERE (state = 'duplicate' AND merged_into IS NULL AND synthesis_asked = 0)
+                 OR state = 'superseded'",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let closed = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'no_conflict', synthesis_asked = 0
+              WHERE state IN ('unmergeable', 'oversized')
+                 OR (state = 'contradiction' AND detail LIKE '%esolve by hand%')",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(DrainCounts { closed, rejudged })
     }
 
     /// Clear it. Called when the merge path refuses the draft, so the card

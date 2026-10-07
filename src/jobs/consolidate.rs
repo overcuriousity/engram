@@ -477,6 +477,11 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
+    // Free, and before the budget check: the drain writes no corpus action.
+    let drained = core.store.drain_waiting_pairs().await?;
+    if drained.closed + drained.rejudged > 0 {
+        tracing::info!(?drained, "moved what was waiting on a person into the sweep");
+    }
     // Dedupe's own day, before anything is armed. `dedupe::run` reads the
     // same budget and returns with the pair still `Pending` — correct for the
     // unit, but it meant this pass re-armed the same pairs every interval for
@@ -659,6 +664,109 @@ pub(crate) mod tests {
             crate::jobs::relate::run(core, id).await.unwrap();
         }
         ids
+    }
+
+    /// File a pair between `ids[a]` and `ids[b]` the way an older base left it.
+    async fn leave_pair(
+        core: &crate::core::Core,
+        ids: &[String],
+        (a, b): (usize, usize),
+        state: PairState,
+        detail: Option<&str>,
+    ) -> i64 {
+        use crate::store::pairs::DecidedBy;
+        core.store.record_pair(&ids[a], &ids[b], 0.91).await.unwrap();
+        let id = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.a_id == ids[a] || p.b_id == ids[a])
+            .unwrap()
+            .id;
+        core.store
+            .set_pair_state(id, state, detail, DecidedBy::Model)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn an_old_base_has_nothing_waiting_after_two_sweeps() {
+        let core = test_core().await;
+        let ids = seed_titled(
+            &core,
+            &[
+                ("A", "alpha", [1.0, 0.0]),
+                ("B", "beta", [0.99, 0.1]),
+                ("C", "gamma", [0.0, 1.0]),
+                ("D", "delta", [0.1, 0.99]),
+                ("E", "eps", [0.7, 0.7]),
+                ("F", "zeta", [0.71, 0.69]),
+                ("G", "eta", [0.5, 0.86]),
+                ("H", "theta", [0.52, 0.85]),
+            ],
+        )
+        .await;
+        let dup = leave_pair(&core, &ids, (0, 1), PairState::Duplicate, Some("same thing")).await;
+        let unmergeable =
+            leave_pair(&core, &ids, (2, 3), PairState::Unmergeable, Some("x")).await;
+        let taken_back = leave_pair(
+            &core,
+            &ids,
+            (4, 5),
+            PairState::Contradiction,
+            Some(crate::jobs::dedupe::TAKEN_BACK_OLD),
+        )
+        .await;
+        let asked = leave_pair(&core, &ids, (6, 7), PairState::Duplicate, Some("same thing")).await;
+        assert!(core.store.ask_pair_synthesis(asked).await.unwrap());
+
+        let first = core.store.drain_waiting_pairs().await.unwrap();
+        let second = core.store.drain_waiting_pairs().await.unwrap();
+
+        assert_eq!(first.rejudged, 1);
+        assert_eq!(first.closed, 2);
+        assert_eq!((second.closed, second.rejudged), (0, 0), "idempotent");
+        let d = core.store.get_pair(dup).await.unwrap();
+        assert_eq!(d.state, PairState::Pending, "the judge reads it again");
+        assert!(!d.synthesis_asked);
+        for id in [unmergeable, taken_back] {
+            assert_eq!(
+                core.store.get_pair(id).await.unwrap().state,
+                PairState::NoConflict
+            );
+        }
+        let a = core.store.get_pair(asked).await.unwrap();
+        assert_eq!(a.state, PairState::Duplicate, "an operator's ask stands");
+        assert!(a.synthesis_asked);
+    }
+
+    #[tokio::test]
+    async fn a_real_disagreement_is_left_for_search_to_show() {
+        let core = test_core().await;
+        let ids = seed_titled(
+            &core,
+            &[("A", "alpha", [1.0, 0.0]), ("B", "beta", [0.99, 0.1])],
+        )
+        .await;
+        let id = leave_pair(
+            &core,
+            &ids,
+            (0, 1),
+            PairState::Contradiction,
+            Some("A says port 80, B says port 8080."),
+        )
+        .await;
+
+        let drained = core.store.drain_waiting_pairs().await.unwrap();
+
+        assert_eq!((drained.closed, drained.rejudged), (0, 0));
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Contradiction
+        );
     }
 
     pub(crate) async fn seed_titled(
@@ -2323,7 +2431,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_reopened() {
+    async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_left_with_both_sides() {
         // The pairs are settled the moment the merge is written. If the embed
         // then fails permanently the merge is stranded active-but-unindexed,
         // the roots are never superseded, and the settled pairs mean the
@@ -2385,8 +2493,8 @@ pub(crate) mod tests {
         let p = core.store.get_pair(pid).await.unwrap();
         assert_eq!(
             p.state,
-            PairState::Contradiction,
-            "the pair goes back to a person"
+            PairState::NoConflict,
+            "the reopened pair says to resolve by hand, which is a refusal the drain closes: both stay as they are"
         );
         for id in &ids {
             assert_eq!(
