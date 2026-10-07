@@ -441,8 +441,8 @@ const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 /// next boot, but the process-wide `Config` a core is rebuilt from is loaded
 /// once and never reloaded — so a base evicted and reopened later can be
 /// handed *stale* file params by `generation_check`, and under
-/// `learn.mode = "learning"` (which resolves to `autonomous = "off"`) the old
-/// unconditional `!autonomous` undid the edit in both the journal and the
+/// `learn.mode = "learning"` (which once resolved to `autonomous = "off"`) the
+/// old unconditional `!autonomous` undid the edit in both the journal and the
 /// serving core.
 ///
 /// The caller serves under whatever comes back. Without this a restart would

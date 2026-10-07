@@ -566,7 +566,7 @@ where
 ///
 /// The budget does not gate it any more either. That check was here because
 /// filing is what leads to a merge; with nothing written there is nothing to
-/// withhold, and a count that fell to zero when the week ran out would report
+/// withhold, and a count that fell to zero when the day ran out would report
 /// that the competition had stopped rather than that the spending had.
 pub async fn interference(
     core: &Core,
@@ -1305,13 +1305,13 @@ mod tests {
         }
     }
 
-    /// The week's budget is about acting, and observing is not acting. It used
+    /// The day's budget is about acting, and observing is not acting. It used
     /// to gate this rule because the rule filed pairs, and filing is what leads
     /// to a merge; with nothing written there is nothing to withhold, and a
     /// count that went to zero when the budget ran out would have Ops report
     /// that the competition stopped rather than that the spending did.
     #[tokio::test]
-    async fn interference_keeps_counting_when_the_week_is_spent() {
+    async fn interference_keeps_counting_when_the_day_is_spent() {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         core.evolve.max_actions_per_day = 0;

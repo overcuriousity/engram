@@ -84,7 +84,7 @@ pub enum Stage {
     /// fail the artifact's embed.
     Probe,
     /// One model-written artifact, rewritten shorter as a new version of
-    /// itself. One generation, under "full" and the weekly budget; a draft
+    /// itself. One generation, under the daily pace; a draft
     /// that would lose a value or a literal is refused without writing.
     Condense,
     /// One link that could not be read when it was captured, tried again.

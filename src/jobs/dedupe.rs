@@ -130,11 +130,11 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         core.store.clear_pair_synthesis(p.id).await?;
         return Ok(());
     }
-    // Dedupe's own week, read before the judge call: a verdict this unit may
+    // Dedupe's own day, read before the judge call: a verdict this unit may
     // not act on is a call spent for nothing. The pair stays pending and the
     // next arming asks again once the window has moved. Only under "full";
     // below it this sweep is under its own switch, as it was. Counted per job,
-    // so a week of promotions or condensations cannot close this one.
+    // so a day of promotions or condensations cannot close this one.
     if !core.may_act(crate::store::actions::Job::Dedupe).await? {
         tracing::info!(
             pair = id,

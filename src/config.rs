@@ -179,8 +179,9 @@ pub enum LearnMode {
     /// consolidate only the exact and near duplicates capture finds for a
     /// hash. What is left is capture, hybrid search and ask.
     Off,
-    /// Record and accumulate, read none of it on the query path. The mode to
-    /// run the harness in before any of this is allowed to move a rank.
+    /// Record and accumulate, read none of it on the query path: no priming,
+    /// spread, promotion, offers or pursuits. The idle pass still curates, as
+    /// under every mode.
     Learning,
     /// Today's defaults, unchanged.
     #[default]

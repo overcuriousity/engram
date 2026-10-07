@@ -477,10 +477,10 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
-    // Dedupe's own week, before anything is armed. `dedupe::run` reads the
+    // Dedupe's own day, before anything is armed. `dedupe::run` reads the
     // same budget and returns with the pair still `Pending` — correct for the
     // unit, but it meant this pass re-armed the same pairs every interval for
-    // the rest of the week and reported `armed = n` each time, so the
+    // the rest of the day and reported `armed = n` each time, so the
     // empty-run backoff that exists to stop exactly this treadmill never
     // engaged. Arming nothing is what lets it engage.
     if !core.may_act(crate::store::actions::Job::Dedupe).await? {
@@ -496,7 +496,7 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     // They lead because the press is somebody waiting. `ask_pair_synthesis_ui`
     // arms the unit once itself, so this is not what makes the writing happen
     // the first time; it is what keeps the promise the card makes when that
-    // run comes back having written nothing — the week's budget was spent,
+    // run comes back having written nothing — the day's budget was spent,
     // `[infer.pair_synthesizer]` had not arrived yet. The unit closes, and
     // without this nothing would ever arm it again while the card went on
     // saying "it is written on the next pass" for ever.
@@ -2220,10 +2220,10 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_spent_week_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
+    async fn a_spent_day_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
         // `dedupe::run` reads the budget too and returns with the pair still
         // `Pending` — correct for the unit, but this pass then re-armed the
-        // same pairs every interval for the rest of the week and reported
+        // same pairs every interval for the rest of the day and reported
         // `armed = n` each time, so the empty-run backoff that exists to stop
         // exactly this treadmill never engaged.
         let mut core = test_core().await;

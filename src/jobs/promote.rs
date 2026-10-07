@@ -23,10 +23,10 @@ pub fn window_key(corpus_id: &str, idx: i64) -> String {
 }
 
 pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize> {
-    // The week's budget, asked before anything is armed — as dedupe, reap,
+    // The day's budget, asked before anything is armed — as dedupe, reap,
     // consolidate and sleep all ask it.
     //
-    // Promotion's own week, and only its own. It is counted rather than
+    // Promotion's own day, and only its own. It is counted rather than
     // exempt — a promotion is the base acting on the corpus unasked, which is
     // what the cap bounds — but these arrive on ordinary use rather than on a
     // sweep: `maybe_promote` runs from `mark_artifact_opened` and
@@ -35,10 +35,10 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
     // cap and stood dedupe, reap and condense down until the window moved,
     // silently. Per job, it can only ever exhaust its own.
     //
-    // Nothing is lost when it does: the window is read again once the week
+    // Nothing is lost when it does: the window is read again once the day
     // moves, and the passages keep the activation that armed this.
     if !core.may_act(crate::store::actions::Job::Promote).await? {
-        tracing::info!("a window is over the promotion line, but the week's budget is spent");
+        tracing::info!("a window is over the promotion line, but the day's budget is spent");
         return Ok(0);
     }
     let activation = core.store.activation_of(ids).await?;
@@ -639,15 +639,15 @@ mod tests {
     }
 
     /// A promotion is the base acting on the corpus unasked, and it is counted
-    /// against the week's budget — so it has to read the budget, which is the
+    /// against the day's budget — so it has to read the budget, which is the
     /// one thing it never did.
     ///
     /// The row it writes is a `Kind::Promote`, counted against `Job::Promote`
-    /// and nothing else. It reads its own week because these arrive on
-    /// ordinary reading rather than on a sweep — ten in a week is a person
+    /// and nothing else. It reads its own day because these arrive on
+    /// ordinary reading rather than on a sweep — ten in a day is a person
     /// going carefully through their own base — and, before the count was
     /// split per job, that also stood dedupe, reap, condense and `arm_dedupe`
-    /// down for the rest of the week without a word.
+    /// down for the rest of the day without a word.
     #[tokio::test]
     async fn a_spent_budget_arms_no_promotion() {
         let (mut core, corpus, p) = earned_with_one_passage().await;

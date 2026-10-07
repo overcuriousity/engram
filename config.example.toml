@@ -33,11 +33,9 @@
 # learning record searches and asks, write the activation and the links — and
 #          read none of it on the query path. No priming, no associative
 #          spread, no promotion, no offers under the search box, and no
-#          pursuit generation, so the corpus holds still as well as the
-#          ranking. This is the mode to run the evaluation harness in: a
-#          default that changes ranking moves only after it has been measured,
-#          and it cannot be measured against a ranking its own inputs have
-#          already moved — nor against a corpus they have grown.
+#          pursuit generation, so nothing learned is read back into a result
+#          list or grown into the corpus. The idle pass still curates under
+#          this mode, as it does under every one: the base looks after itself.
 # full     all of it, which is what the tuning section below describes.
 mode = "full"
 
@@ -500,11 +498,10 @@ near_dupe_min = 0.60
 # Passages are outside this entirely: they are the verbatim substrate and are
 # never one side of a pair, whatever they score.
 #
-# The starting rung. The base lowers this when the
-# pairs just above it lead to a merge, a replacement or a discard as often as
-# the pairs higher up do, and raises it when the actions taken just above it
-# are taken back more often; the database holds what is live, and
-# /ui/insights says which generation that is.
+# The starting rung. The base lowers this when the pairs just above it lead to
+# a merge, a replacement or a discard as often as the pairs higher up do, and
+# raises it when the actions taken just above it are taken back more often; the
+# database holds what is live, and /ui/insights says which generation that is.
 review_min = 0.88
 # The lane judged first. It hides nothing on its own: a pair at or above it
 # goes to the judge before one below it, and the judge decides. Well clear of
@@ -520,9 +517,9 @@ interval_hours = 24
 # side carries something the other lacks. A disagreement about a value is never
 # settled this way. It is kept as a disagreement that both search and Ask show,
 # because deciding which of two facts is current is the judgement a model is
-# worst at, and nothing waits on a person. Nothing
-# is deleted, no merge that would drop a number, command or path is written,
-# and every merge has an undo on Ops.
+# worst at, and nothing waits on a person. Nothing is deleted, no merge that
+# would drop a number, command or path is written, and every merge has an undo
+# on Ops.
 # How often the dedupe pass arms model calls, and how many per tick. Together
 # these are a rate — twenty an hour by default — and a rate is the right shape
 # because the fixed quantity is what the hardware gets through, not how big the
@@ -630,9 +627,9 @@ judge_min_queries = 3
 judge_per_sweep = 10
 # How many top hits are asked what they are linked to, and how many associated
 # hits may be appended after the ranked list — outside `limit`, never instead
-# of a ranked hit. `spread_max` is the starting rung: the idle pass widens or narrows the band from here on whether the
-# band is used more or less than the ranked tail beside it, and the database
-# holds what is live.
+# of a ranked hit. `spread_max` is the starting rung: the idle pass widens or
+# narrows the band from here on whether the band is used more or less than the
+# ranked tail beside it, and the database holds what is live.
 spread_from = 3
 spread_max = 3
 # How much more accessible a hit must be than the one above it to pass it, as a
@@ -1037,8 +1034,8 @@ max_actions_per_day = 20
 # artifact (one neighbour read each — was anything near it when it came? new,
 # known, or a conflict for you), *rehearses* what it holds (the wording of
 # your later captures replayed as questions for your earlier ones, the base's
-# own probes), *reorganises* on what that showed (under "ranking" the ranking
-# generations; under "full" the corpus rules too), and *wakes* with one row
+# own probes), *reorganises* on what that showed (its own
+# ranking generations and the corpus rules), and *wakes* with one row
 # on /ui/insights under "Last night" saying what it did. Its searches embed
 # nothing and take the background lane, so a person who comes back gets ahead
 # of it; this is what keeps it from starting under somebody at all. Half an

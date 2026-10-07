@@ -1,6 +1,6 @@
 //! Condense: one artifact, one shorter version of itself, losing no literal.
 //!
-//! Armed by `sleep::condense_candidates` under "full" and the budget; one
+//! Armed by `sleep::condense_candidates` under the daily pace; one
 //! generation. The reply is checked twice — `merge::losses` for the machine
 //! literals, `verify::missing_numbers` for the numbers `merge::losses`
 //! deliberately does not look at — and a draft that would lose either is
@@ -490,9 +490,10 @@ mod tests {
     }
 
     /// A `Condense` row outlives the permission it was armed under: it is
-    /// persisted, so dropping to "ranking" and restarting used to find it
-    /// still on the queue and rewrite the artifact anyway — with
-    /// `jobs::retract`, the only way back, switched off at that same level.
+    /// persisted, so a core built below "full" that finds it still on the
+    /// queue must not rewrite the artifact — `jobs::retract`, the only way
+    /// back, is switched off at that same level. The base itself always runs
+    /// as "full"; this guards the gate, not a setting an operator can reach.
     #[tokio::test]
     async fn a_row_armed_under_full_writes_nothing_once_the_permission_is_gone() {
         for level in [

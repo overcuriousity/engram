@@ -341,8 +341,9 @@ impl Core {
     /// `Store::actions_since`. Each caller names itself, so nothing here has
     /// to guess which budget a write belongs to.
     ///
-    /// Only under `"full"`: below it the sweeps that were autonomous before
-    /// these stages existed are held by their own switches, as they were.
+    /// The base always runs as `"full"`, so the answer is whether the job has
+    /// spent its own day; the `acts_on_corpus` guard stays for a test that
+    /// builds a core below it.
     pub async fn may_act(&self, job: crate::store::actions::Job) -> crate::error::Result<bool> {
         if !self.evolve.autonomous.acts_on_corpus() {
             return Ok(true);
