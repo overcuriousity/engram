@@ -37,17 +37,25 @@ const COMPONENT_WINDOW: i64 = 5_000;
 const COMPONENT_WINDOW: i64 = 3;
 
 /// The states a review card is drawn for, in the order the queue lists them —
-/// and so the only states a press on a card can still be answering.
+/// and so the only states a synthesis ask can still be answering.
 /// `web::ops` renders these; `ask_pair_synthesis` and `jobs::dedupe::run`
-/// refuse a Synthese press on anything else.
+/// refuse an ask on anything else.
+///
+/// Besides `Pending`, which is a pair nobody has asked about yet, nothing new
+/// is settled into these except `Contradiction`, a real disagreement, and
+/// `Duplicate` as the passing state before an armed synthesis. `jobs::dedupe`
+/// closes every other pair itself. The rest are rows an older base filed
+/// while the judge still handed pairs to a person, and the drain that follows
+/// this change clears them.
 pub const AWAITING_REVIEW: [PairState; 6] = [
     PairState::Contradiction,
+    // Only rows an older base filed: nothing settles a pair here now.
     PairState::Superseded,
-    // The judge read both and found one artifact should hold what both say. A
-    // proposal rather than a merge already applied: see `PairState::Duplicate`
-    // for the measurements that took the action off this verdict. The card
-    // renders it through the same branch a pending pair uses — "these two cover
-    // the same ground" — and the Synthese button is the press that acts on it.
+    // The judge read both and found one artifact should hold what both say.
+    // A duplicate verdict now writes its merge where it is found; this state
+    // holds a pair only between `apply` and the synthesis it arms when the
+    // verdict came without a draft — and the rows older bases filed as
+    // proposals, which the drain clears.
     PairState::Duplicate,
     // Only ever rows an older base filed: a vacuous verdict is now carried
     // out where it is found (`jobs::dedupe::discard_both`) and its pair
@@ -55,9 +63,8 @@ pub const AWAITING_REVIEW: [PairState; 6] = [
     // recommendation nobody has pressed yet, and without this key they are on
     // no queue at all.
     PairState::Vacuous,
-    // An operator asked for one artifact and the writing was refused. Their
-    // reading is not overturned by that; what is left is the same decision
-    // they were making before they pressed, minus the one answer that failed.
+    // Only rows an older base filed: a refused writing now leaves both as they
+    // are and closes the pair `NoConflict`.
     PairState::Unmergeable,
     PairState::Pending,
 ];
@@ -69,24 +76,30 @@ pub enum PairState {
     Pending,
     /// The fact-token prefilter or the judge found nothing to disagree about.
     NoConflict,
-    /// An operator pressed the synthesis button and the writing was refused —
-    /// a member's lineage names stored source text a merge may not rewrite, or
-    /// the draft would have dropped a value one of them states.
+    /// A synthesis was asked for and the writing was refused — a member's
+    /// lineage names stored source text a merge may not rewrite, or the draft
+    /// would have dropped a value one of them states.
     ///
-    /// Its own state because `Contradiction` was carrying it, and the card
-    /// draws that as "these two disagree". So the operator read both, said
-    /// they cover the same ground, pressed, and the card came back telling
-    /// them they disagree — the exact overload of `Contradiction` the decide
-    /// queue's own design set out to remove, re-created by the button that
-    /// design added. The judgement stands; only the automatic writing of it
-    /// was refused, and the detail says which of the two reasons it was.
+    /// Nothing settles a pair here any more. `jobs::dedupe` now leaves both as
+    /// they are and closes such a pair `NoConflict` with the reason on it,
+    /// because there is nobody left to hand the decision to. The variant stays
+    /// for the rows an older base filed, which the drain that follows this
+    /// change clears.
     Unmergeable,
     /// The judge found a detail the two artifacts state differently, with no
     /// clear direction — both readings could still be current.
+    ///
+    /// The one state the judge still leaves open on purpose. The base never
+    /// picks a side of it: both artifacts stay in results, and search and Ask
+    /// show the two together. Nothing about it waits on a person.
     Contradiction,
-    /// The judge named which artifact is obsolete (`obsolete_id`) with enough
-    /// confidence to propose a supersede, but it is not applied automatically:
-    /// an operator confirms via the pair's "apply supersede" action.
+    /// The judge named which artifact is obsolete (`obsolete_id`) as a
+    /// proposal for an operator to confirm.
+    ///
+    /// Nothing settles a pair here any more: a replacement is applied where it
+    /// is found and the pair settles `Dismissed`. The variant stays for the
+    /// rows an older base filed, which the drain that follows this change
+    /// clears.
     Superseded,
     /// An operator looked and decided there is nothing here.
     Dismissed,
@@ -126,15 +139,19 @@ pub enum PairState {
     /// The judge read both and found they cover the same ground: one artifact
     /// should hold what both say.
     ///
-    /// A proposal, not an action. It used to merge on the spot, and the label
-    /// is not steady enough to carry that: asked twelve times about two
-    /// artifacts describing one veterinary practice — one the contact details,
-    /// the other the services — the live judge wrote the same reasoning every
-    /// time and split nine to three between `distinct` and `duplicate`. The
-    /// prompt's own categories both fit that shape. A coin flip is a poor thing
-    /// to hide two artifacts behind a third on, so the reading is the model's
-    /// and the press is the operator's — `synthesis_asked`, and the writing
-    /// follows.
+    /// A duplicate verdict writes its merge where it is found, and the pair
+    /// settles `NoConflict` with `merged_into` set. The label is not steady on
+    /// every pair — asked twelve times about two artifacts describing one
+    /// veterinary practice, one the contact details and the other the
+    /// services, the live judge wrote the same reasoning every time and split
+    /// nine to three between `distinct` and `duplicate` — and what makes
+    /// acting on it safe is the loss check, the journal and the undo that
+    /// `jobs::retract` applies against later searches.
+    ///
+    /// So nothing new rests here. A pair passes through it only when a verdict
+    /// came without a draft and a synthesis is armed (`synthesis_asked`) to
+    /// write one. Rows an older base filed as proposals for a person to press
+    /// are cleared by the drain that follows this change.
     Duplicate,
     /// A lifecycle event took one of the two artifacts out of results, so the
     /// question cannot be acted on — not because anyone answered it.
@@ -710,15 +727,16 @@ impl Store {
         Ok(())
     }
 
-    /// Pairs an operator pressed Synthese on and nothing has written yet.
+    /// Pairs a synthesis was asked for and nothing has written yet — by an
+    /// operator's Synthese press on an older base, or by `jobs::dedupe::apply`
+    /// for a duplicate verdict that came without a draft.
     ///
     /// Not `state = 'pending'`, which is the one thing that separates this from
-    /// `pairs_to_judge`: the press is offered on every card the queue renders,
-    /// and by the time it is pressed the pair is far more often `Duplicate` —
-    /// the judge read both sides, said they cover the same ground, and left the
-    /// action to a person. So the state says nothing about whether the writing
-    /// is owed; `synthesis_asked` does, and `merged_into` says whether it has
-    /// happened.
+    /// `pairs_to_judge`: by the time a synthesis is asked for the pair is far
+    /// more often `Duplicate`, the judge having read both sides and said they
+    /// cover the same ground. So the state says nothing about whether the
+    /// writing is owed; `synthesis_asked` does, and `merged_into` says whether
+    /// it has happened.
     ///
     /// This exists because the press alone cannot keep the promise the card
     /// makes. `ask_pair_synthesis_ui` arms the unit once, and the unit is
