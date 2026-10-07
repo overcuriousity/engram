@@ -57,6 +57,16 @@ pub async fn run(core: &Core) -> Result<usize> {
                 armed += 1;
                 continue;
             }
+            // Lines a finished read never turned into an artifact, read once
+            // more without being asked. Once: a second miss is what the
+            // document is, and the queue row still says how much is covered.
+            // Stamped first so a read that fails cannot loop on every sweep.
+            if c.auto_reread_at.is_none() && crate::core::ingest::coverage_final(&c.status) {
+                core.store.mark_auto_reread(&c.id).await?;
+                if core.reread_uncovered(&c.id, 1, i64::MAX).await? {
+                    armed += 1;
+                }
+            }
             // A corpus with no window rows at all is deliberately left alone —
             // the placeholder corpora `heal_dangling_supersessions` writes are
             // the case. Capture arms the planning job; this sweep is for work
@@ -592,6 +602,148 @@ mod tests {
                 )
                 .await
                 .unwrap()
+        );
+    }
+
+    /// A finished capture whose windows are all resolved and whose one
+    /// artifact claims only lines 1..4 of eight: lines 5..8 were lost.
+    async fn a_capture_that_lost_its_second_half(
+        core: &Core,
+        status: CorpusStatus,
+    ) -> crate::store::corpora::Corpus {
+        use crate::store::artifacts::{CorpusSpan, SpanSource};
+        let raw = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight";
+        let src = core.store.insert_corpus(raw, "web", None).await.unwrap();
+        core.store
+            .upsert_segments(
+                &src.id,
+                &[
+                    seg(1, 4, "one\ntwo\nthree\nfour"),
+                    seg(5, 8, "five\nsix\nseven\neight"),
+                ],
+            )
+            .await
+            .unwrap();
+        for idx in [0, 1] {
+            core.store
+                .set_segment_state(&src.id, idx, SegmentState::Done, None)
+                .await
+                .unwrap();
+        }
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    text: "one to four".into(),
+                    segment_idx: Some(0),
+                    corpus_span: Some(CorpusSpan {
+                        start_line: 1,
+                        end_line: 4,
+                        source: SpanSource::Located,
+                    }),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        // Measured, so the settle branch has nothing to repair; the artifact
+        // is embedded so the embed branch has nothing to arm either.
+        core.store
+            .set_corpus_coverage(&src.id, Some(0.5))
+            .await
+            .unwrap();
+        core.store.set_corpus_status(&src.id, status).await.unwrap();
+        sqlx::query("UPDATE artifacts SET status = 'ready' WHERE corpus_id = ?")
+            .bind(&src.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store.get_corpus(&src.id).await.unwrap()
+    }
+
+    async fn window_jobs(core: &Core) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE stage = 'segment_window'")
+            .fetch_one(&core.store.control.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_finished_capture_with_lost_lines_is_reread_once() {
+        let core = test_core().await;
+        let c = a_capture_that_lost_its_second_half(&core, CorpusStatus::Partial).await;
+        assert!(c.auto_reread_at.is_none());
+
+        run(&core).await.unwrap();
+
+        assert!(
+            core.store
+                .live_job(
+                    Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&c.id, 1)
+                )
+                .await
+                .unwrap(),
+            "the window holding the lost lines was not queued"
+        );
+        assert!(
+            !core
+                .store
+                .live_job(
+                    Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&c.id, 0)
+                )
+                .await
+                .unwrap(),
+            "a window that was fully covered was read again"
+        );
+        assert!(
+            core.store
+                .get_corpus(&c.id)
+                .await
+                .unwrap()
+                .auto_reread_at
+                .is_some()
+        );
+
+        // The read comes back having found nothing more. A second sweep must
+        // not queue it again: a second miss is what the document is.
+        core.store
+            .set_segment_state(&c.id, 1, SegmentState::Done, None)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM jobs WHERE stage = 'segment_window'")
+            .execute(&core.store.control.pool)
+            .await
+            .unwrap();
+        run(&core).await.unwrap();
+        assert_eq!(
+            window_jobs(&core).await,
+            0,
+            "the capture was read a third time"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_still_being_read_is_left_alone() {
+        let core = test_core().await;
+        let c = a_capture_that_lost_its_second_half(&core, CorpusStatus::Segmenting).await;
+
+        run(&core).await.unwrap();
+
+        assert_eq!(
+            window_jobs(&core).await,
+            0,
+            "unread lines were queued as lost"
+        );
+        assert!(
+            core.store
+                .get_corpus(&c.id)
+                .await
+                .unwrap()
+                .auto_reread_at
+                .is_none(),
+            "a capture not yet final was stamped as reread"
         );
     }
 }

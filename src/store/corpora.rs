@@ -149,6 +149,12 @@ pub struct Corpus {
     /// document, so nothing that reasons about the original text should trust
     /// it. `None` for every ordinary capture.
     pub restored_at: Option<i64>,
+    /// When the reconcile sweep read this capture's uncovered lines a second
+    /// time on its own. Set once, before the read, so that a read which fails
+    /// cannot be retried on every sweep. `None` until then. Not part of the
+    /// API shape: it is the sweep's own bookkeeping.
+    #[serde(skip)]
+    pub auto_reread_at: Option<i64>,
     /// What the door knew about the capture beyond the text: a `note`, `file`
     /// facts, `exif`. Namespaced JSON; `{}` when nothing was recorded.
     pub metadata: serde_json::Value,
@@ -286,6 +292,7 @@ fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
         near_dupe_score: r.get("near_dupe_score"),
         source_url: r.get("source_url"),
         restored_at: r.get("restored_at"),
+        auto_reread_at: r.get("auto_reread_at"),
         metadata: r
             .get::<Option<String>, _>("metadata")
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -364,6 +371,7 @@ impl Store {
             near_dupe_score,
             source_url: source_url.map(str::to_string),
             restored_at: None,
+            auto_reread_at: None,
             metadata: metadata.clone(),
         };
         let mut tx = self.pool.begin().await?;
@@ -659,6 +667,17 @@ impl Store {
         Ok(rows.iter().map(row_to_corpus).collect())
     }
 
+    /// Record that the sweep has read this capture's lost lines again, so it
+    /// does so once.
+    pub async fn mark_auto_reread(&self, corpus_id: &str) -> Result<()> {
+        sqlx::query("UPDATE corpora SET auto_reread_at = ? WHERE id = ?")
+            .bind(now())
+            .bind(corpus_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// The last reminder read out of this note is done, so the note stops
     /// being *recent*. Not a delete and not a hide: see `schema.sql`.
     pub async fn retire_corpus(&self, corpus_id: &str, at: i64) -> Result<()> {
@@ -921,6 +940,7 @@ impl Store {
             near_dupe_score: None,
             source_url: source_url.map(str::to_string),
             restored_at: None,
+            auto_reread_at: None,
             metadata: metadata.clone(),
         };
         let mut tx = self.pool.begin().await?;

@@ -436,7 +436,7 @@ async fn corpus_bands(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<Co
         .map(|c| c.id.clone())
         .collect();
     let segments = tenant.core.store.segments_for_corpus(&cid).await?;
-    let losses_are_final = crate::web::corpus::coverage_final(&s.status)
+    let losses_are_final = crate::core::ingest::coverage_final(&s.status)
         && !segments.is_empty()
         && unplaced.is_empty();
     let mut carded: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -547,7 +547,7 @@ async fn corpus_reread(
     Json(b): Json<RereadBody>,
 ) -> Result<StatusCode> {
     Ok(
-        match crate::web::corpus::reread(&tenant, &cid, b.from, b.to).await? {
+        match tenant.core.reread_uncovered(&cid, b.from, b.to).await? {
             true => StatusCode::ACCEPTED,
             false => StatusCode::NO_CONTENT,
         },

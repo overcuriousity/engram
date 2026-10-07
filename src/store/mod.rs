@@ -132,7 +132,7 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 19] = [
+        const ADDITIVE: [(&str, &str, &str); 20] = [
             (
                 "artifacts",
                 "updated_at",
@@ -176,6 +176,13 @@ impl Store {
                 "corpora",
                 "retired_at",
                 "ALTER TABLE corpora ADD COLUMN retired_at INTEGER",
+            ),
+            // NULL on every row that predates it, and truthfully: nothing had
+            // reread a capture on its own before this column existed.
+            (
+                "corpora",
+                "auto_reread_at",
+                "ALTER TABLE corpora ADD COLUMN auto_reread_at INTEGER",
             ),
             // Both nullable, no default. NULL on an old retired row truthfully
             // says "never stamped", and the reap sweep stamps it fresh before
