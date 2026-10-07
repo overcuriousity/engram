@@ -1619,8 +1619,17 @@ impl Core {
     pub async fn judge_ask(&self, id: &str, verdict: crate::store::asks::AskVerdict) -> Result<()> {
         self.store.judge_ask(id, verdict).await?;
         if verdict == crate::store::asks::AskVerdict::Right {
-            let cited = self.store.used_citations(id).await?;
-            self.confirm_cited(&cited).await;
+            // Best-effort past this point, as `confirm_cited` is: the verdict
+            // is written, and failing the press over the stamps would tell the
+            // person it did not take when it did.
+            match self.store.used_citations(id).await {
+                Ok(cited) => self.confirm_cited(&cited).await,
+                Err(e) => tracing::warn!(
+                    ask_id = id,
+                    error = %e,
+                    "could not read what a right answer cited; its notes are not confirmed"
+                ),
+            }
         }
         Ok(())
     }
