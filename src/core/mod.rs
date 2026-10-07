@@ -300,14 +300,14 @@ pub struct Core {
     pub ranking: Arc<std::sync::RwLock<crate::core::ranking::RankingParams>>,
 }
 
-/// What the idle pass has written to the corpus on its own in the last seven
-/// days, against the week's cap. A bound on the blast radius, not a rate limit
+/// What a job has written to the corpus on its own in the last twenty-four
+/// hours, against its daily pace. A bound on the blast radius, not a rate limit
 /// on finding.
 ///
 /// The pass's own writes and no others — see `sleep_actions_since`. Dedupe,
 /// reap and promotion were autonomous before this budget existed and keep
 /// their own gates; charging them here meant condense, which runs last in the
-/// pass, found the week already spent in every week the base had been used.
+/// pass, found the day already spent on every day the base had been used.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     pub used: u32,
@@ -321,20 +321,20 @@ impl Budget {
 }
 
 impl Core {
-    /// One job's week: what it has written, and what it may.
+    /// One job's day: what it has written, and what it may.
     pub async fn budget(&self, job: crate::store::actions::Job) -> crate::error::Result<Budget> {
         let used = self
             .store
-            .actions_since(job, crate::store::now() - 7 * 86_400)
+            .actions_since(job, crate::store::now() - 86_400)
             .await?;
         Ok(Budget {
             used: used.clamp(0, u32::MAX as i64) as u32,
-            cap: self.evolve.max_actions_per_week,
+            cap: self.evolve.max_actions_per_day,
         })
     }
 
     /// Whether `job` may write to the corpus now: it is permitted to act at
-    /// all, and it has not spent its own week.
+    /// all, and it has not spent its own day.
     ///
     /// Per job, because a shared count meant four independent units spent one
     /// another's allowance and the one that ran last never had any — see

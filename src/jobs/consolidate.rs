@@ -2228,7 +2228,7 @@ pub(crate) mod tests {
         // exactly this treadmill never engaged.
         let mut core = test_core().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         disagreeing(&core).await;
         assert_eq!(arm_dedupe(&core).await.unwrap(), 0, "nothing is armed");
         assert_eq!(

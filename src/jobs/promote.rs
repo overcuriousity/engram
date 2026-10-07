@@ -652,7 +652,7 @@ mod tests {
     async fn a_spent_budget_arms_no_promotion() {
         let (mut core, corpus, p) = earned_with_one_passage().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         let now = crate::store::now();
         core.store
             .bump_activation(

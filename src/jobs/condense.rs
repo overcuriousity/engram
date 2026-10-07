@@ -482,7 +482,7 @@ mod tests {
         assert!(core.store.versions_of(&id).await.unwrap().is_empty());
 
         let (mut core, writer) = core_with(vec![reply("`mount -o loop /dev/loop0`")]).await;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         let id = synthesized(&core).await;
         run(&core, &id).await.unwrap();
         assert_eq!(writer.calls(), 0, "the budget is read before the call");

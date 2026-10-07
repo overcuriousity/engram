@@ -1314,7 +1314,7 @@ mod tests {
     async fn interference_keeps_counting_when_the_week_is_spent() {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         let live = live_generation(&core).await;
         let pids = two_probes_on(&core, &a1).await;
         outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;

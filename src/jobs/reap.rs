@@ -873,7 +873,7 @@ mod tests {
         ]));
         core.reaper = Some(scripted.clone());
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         let ids = seed(&core, &["stale duplicate fact"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         deprecate_long_ago(&core, &ids[0]).await;

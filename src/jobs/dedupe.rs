@@ -1529,7 +1529,7 @@ mod tests {
         ]));
         core.judge = Some(judge.clone());
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         let ids = disagreeing(&core).await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
         run(&core, &pair.to_string()).await.unwrap();

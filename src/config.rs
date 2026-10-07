@@ -317,7 +317,7 @@ pub struct AssociateConfig {
     /// Normalised within one result list, so this is a fraction, not a weight.
     pub prime_margin: f64,
     /// Positions a hit may climb. `0` turns priming off; it ships at one. The
-    /// file's value is the starting rung: a base with `evolve.autonomous` on
+    /// file's value is the starting rung: the idle pass
     /// moves it from here on what use leaves behind.
     pub prime_lift: usize,
 }
@@ -509,12 +509,11 @@ impl Default for SittingConfig {
 pub enum Autonomy {
     /// The idle pass does not run. Integration still files and writes probes.
     Off,
-    /// Integrate, rehearse, watch; adopt and revert ranking generations. The
-    /// default: every move it makes is a row `revert` undoes exactly, and it
-    /// can no longer move where there is nothing to measure it against.
-    #[default]
+    /// Integrate, rehearse, watch; adopt and revert ranking generations.
     Ranking,
-    /// Everything above, plus the corpus rules under the weekly budget.
+    /// Everything above, plus the corpus rules under the daily pace. The only
+    /// stage the base runs in: `Config::normalize` sets it whatever the file says.
+    #[default]
     Full,
 }
 
@@ -588,34 +587,24 @@ pub struct EvolveConfig {
     ///
     /// Zero turns the give-up signal off and leaves the rest recording.
     pub give_up_window_secs: i64,
-    /// How much a quiet base may do on its own: nothing, move its own
-    /// ranking, or also act on the corpus. See `Autonomy`.
+    /// How much a quiet base may do on its own. Always `"full"`: it moves its
+    /// own ranking and acts on the corpus under `max_actions_per_day`, because
+    /// every move it makes has an undo on the insights page and nothing is
+    /// deleted, so there is nothing a person has to approve first.
     ///
-    /// `"ranking"`, and only the reversible half of the loop is a default:
-    /// every move that stage makes is a row `revert` undoes exactly, while a
-    /// merge, a burial or a condensation is a corpus write and is asked for.
-    /// Under `"ranking"` the idle pass adopts a candidate that clears the
-    /// replay's gate as a new generation, watches what it earns while serving,
-    /// and reverts it when it does not hold — on observations and on the
-    /// base's own probes both. What it replays is the answers people confirmed
-    /// on the bar and the excerpts use drew on, under the live generation. What it may move there is the recency weight
-    /// and its half-life, the per-source cap, the candidate pool depth, the
-    /// prime lift, the sitting flip, the reranker and the width of the
-    /// associated band.
-    /// `consolidate.review_min` is on the same ladder and is *not* in that
-    /// list: stepping it down widens what the dedupe judge considers, and the
-    /// merges and supersessions that follow are corpus writes reverting the
-    /// generation row does not undo. Its "wrong" signal reads `undone` rows
-    /// that only the corpus rules produce, so under `"ranking"` the ladder
-    /// could only ever have walked one way — down. It moves under `"full"`.
-    /// Under `"full"` the corpus rules run too, behind `max_actions_per_week`.
-    /// The file is never written; the insights page says which generation is
-    /// live. `true` and `false` still read, as `"full"` and `"off"`.
+    /// The key is read only so that an older file with `"off"`, `"ranking"` or
+    /// a boolean still loads; `Config::normalize` says so in the log and sets
+    /// it to `"full"`. The file is never written.
     pub autonomous: Autonomy,
-    /// Corpus actions the base may take on its own in any seven days under
-    /// `"full"`. Undone or not, an action counts: it was taken. Reached, the
-    /// corpus jobs keep finding and stop acting until the window moves.
-    pub max_actions_per_week: u32,
+    /// Corpus actions each job may take on its own in any twenty-four hours:
+    /// merges, supersessions, discards, burials and condensations. A pace, not
+    /// a cap: a backlog drains a day at a time rather than stopping at a weekly
+    /// ceiling with nobody left to clear what is behind it. Undos are never
+    /// counted. `0` stops the corpus jobs acting at all.
+    pub max_actions_per_day: u32,
+    /// Read only to say it is no longer read.
+    #[serde(default)]
+    max_actions_per_week: Option<u32>,
     /// How long a base has to have been quiet before the idle pass runs.
     ///
     /// Quiet means no search and no question. The pass takes its searches on
@@ -628,8 +617,9 @@ impl Default for EvolveConfig {
     fn default() -> Self {
         Self {
             give_up_window_secs: 300,
-            autonomous: Autonomy::Ranking,
-            max_actions_per_week: 10,
+            autonomous: Autonomy::Full,
+            max_actions_per_day: 20,
+            max_actions_per_week: None,
             idle_secs: 1800,
         }
     }
@@ -2298,26 +2288,6 @@ impl Config {
                     self.pursuit.min_engagement,
                     f64::INFINITY
                 );
-                // And the idle pass, which is the fourth reader and the one
-                // that reads the log hardest. `evolve.autonomous` defaults to
-                // `ranking`, so a base left at that default under `learning`
-                // walked the prime-lift ladder anyway and could adopt a
-                // generation carrying `prime_lift = 1` — the reordering this
-                // mode's whole promise is that it will not do, arrived at from
-                // underneath, with `--print-config` still reporting `0`
-                // because a resolved key is never written back to the file.
-                //
-                // `off` and not `ranking`, because "the mode to run the
-                // harness in before any of this is allowed to move a rank" is
-                // the definition of `learning`, and `Autonomy::Off` still
-                // integrates and writes probes: the evidence keeps
-                // accumulating, and the verdict-paid sweep — which is gated on
-                // `learn.enabled`, not on this — still recommends. What stops
-                // is the base moving itself.
-                if raw.get::<config::Value>("evolve.autonomous").is_err() {
-                    self.evolve.autonomous = Autonomy::Off;
-                    resolved.push(("evolve.autonomous", self.evolve.autonomous.as_str().into()));
-                }
             }
         }
         match self.learn.mode {
@@ -2365,6 +2335,19 @@ impl Config {
     /// legal search already costs: `MAX_LIMIT` results over-fetched by the
     /// candidate multiplier.
     fn normalize(&mut self) {
+        if self.evolve.autonomous != Autonomy::Full {
+            tracing::warn!(
+                configured = self.evolve.autonomous.as_str(),
+                "evolve.autonomous is no longer read: the base curates itself, and every \
+                 action it takes has an undo on Insights"
+            );
+            self.evolve.autonomous = Autonomy::Full;
+        }
+        if self.evolve.max_actions_per_week.take().is_some() {
+            tracing::warn!(
+                "evolve.max_actions_per_week is no longer read; see max_actions_per_day"
+            );
+        }
         if self.feedback.candidates == 0 {
             let d = FeedbackConfig::default().candidates;
             self.feedback.candidates = d;
@@ -2962,10 +2945,45 @@ mod tests {
             EvolveConfig::default().give_up_window_secs,
         );
         assert_eq!(
-            one.max_actions_per_week,
-            EvolveConfig::default().max_actions_per_week,
+            one.max_actions_per_day,
+            EvolveConfig::default().max_actions_per_day,
         );
         assert_eq!(one.idle_secs, EvolveConfig::default().idle_secs);
+    }
+
+    fn parse_with(body: &str) -> Config {
+        config::Config::builder()
+            .add_source(config::File::from_str(
+                &format!("{MINIMAL}\n{body}\n"),
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap()
+            .try_deserialize::<Config>()
+            .unwrap()
+    }
+
+    #[test]
+    fn autonomy_is_full_whatever_the_file_says() {
+        for body in [
+            r#"autonomous = "off""#,
+            r#"autonomous = "ranking""#,
+            "autonomous = false",
+            "",
+        ] {
+            let mut cfg = parse_with(&format!("[evolve]\n{body}"));
+            cfg.normalize();
+            assert_eq!(cfg.evolve.autonomous, Autonomy::Full, "{body}");
+        }
+    }
+
+    #[test]
+    fn the_pace_is_per_day_and_the_week_key_is_ignored() {
+        let mut cfg = parse_with("[evolve]\nmax_actions_per_week = 3");
+        cfg.normalize();
+        assert_eq!(cfg.evolve.max_actions_per_day, 20);
+        let cfg = parse_with("[evolve]\nmax_actions_per_day = 0");
+        assert_eq!(cfg.evolve.max_actions_per_day, 0);
     }
 
     #[test]
@@ -2974,7 +2992,8 @@ mod tests {
         assert!(Autonomy::Ranking.moves_ranking());
         assert!(!Autonomy::Ranking.acts_on_corpus());
         assert!(Autonomy::Full.acts_on_corpus());
-        assert_eq!(EvolveConfig::default().max_actions_per_week, 10);
+        assert_eq!(EvolveConfig::default().max_actions_per_day, 20);
+        assert_eq!(EvolveConfig::default().autonomous, Autonomy::Full);
     }
 
     /// Environment variables are process-global, but `cargo test` runs tests on
@@ -3472,19 +3491,14 @@ mode = "off"
         // generates while it measures is measuring its own inputs.
         assert!(cfg.pursuit.min_engagement.is_infinite());
         assert!(cfg.consolidate.enabled);
-        // And the idle pass does not move the base. `evolve.autonomous`
-        // defaults to `ranking`, so this mode's whole promise — the harness is
-        // run before any of it is allowed to move a rank — was undone by the
-        // default underneath it: the pass walked the prime-lift ladder and
-        // could adopt `prime_lift = 1` while `--print-config` went on
-        // reporting `0`. Integration and the probes still run under `off`, so
-        // the evidence keeps accumulating.
-        assert_eq!(cfg.evolve.autonomous, Autonomy::Off);
+        // The idle pass is not held back by this mode: `evolve.autonomous` is
+        // always `full` now, so there is nothing for the mode to resolve there.
+        assert_eq!(cfg.evolve.autonomous, Autonomy::Full);
         assert!(
-            cfg.learn
+            !cfg.learn
                 .resolved
                 .iter()
-                .any(|(k, v)| *k == "evolve.autonomous" && v == "off"),
+                .any(|(k, _)| *k == "evolve.autonomous"),
             "{:?}",
             cfg.learn.resolved
         );
@@ -3493,7 +3507,7 @@ mode = "off"
     /// The same key, written: a mode fills in what was left unsaid and never
     /// overrides an operator who asked for the loop by name.
     #[test]
-    fn a_learning_base_told_to_move_ranking_anyway_still_does() {
+    fn a_learning_base_told_full_by_name_is_full() {
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         let p = write(
