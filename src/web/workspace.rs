@@ -581,6 +581,10 @@ struct AnswerTemplate {
     /// kind of answer and the reader is the one who decides what to do about
     /// it.
     retired_only: bool,
+    /// Contradictions the answer was written across, both sides cited. A
+    /// badge each, naming the other note: the base picks neither, so the
+    /// reader is told there are two readings to weigh.
+    disagreements: Vec<crate::store::pairs::Disagreement>,
     /// Set when the question was recorded; the verdict bar exists only then.
     event_id: Option<String>,
     /// The bar, rendered — empty when there is no event.
@@ -881,6 +885,7 @@ fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
         retired_only: out.retired_only,
         abstained: out.abstained,
         unsupported: out.unsupported,
+        disagreements: out.disagreements,
         verdict_bar: match &out.event_id {
             Some(id) => AskVerdictTemplate {
                 event_id: id.clone(),
@@ -1984,6 +1989,7 @@ mod tests {
             retired_only: false,
             abstained: false,
             unsupported: vec![],
+            disagreements: vec![],
             event_id: None,
             verdict_bar: String::new(),
         })
@@ -2005,10 +2011,45 @@ mod tests {
             retired_only: false,
             abstained: false,
             unsupported: vec![],
+            disagreements: vec![],
             event_id: None,
             verdict_bar: String::new(),
         })
         .unwrap()
+    }
+
+    /// An answer written across a disagreement says so on its face, naming the
+    /// other note and what differs, and picks neither.
+    #[test]
+    fn an_answer_across_a_disagreement_is_badged_with_the_other_note() {
+        let html = askama::Template::render(&AnswerTemplate {
+            answer: "<p>30 days [1], or 14 [2].</p>".into(),
+            citations: vec![],
+            dropped: 0,
+            truncated: false,
+            retired_only: false,
+            abstained: false,
+            unsupported: vec![],
+            disagreements: vec![crate::store::pairs::Disagreement {
+                artifact_id: "a1".into(),
+                other_id: "b2".into(),
+                other_title: Some("Retention, revised".into()),
+                other_created_at: 1_767_225_600,
+                detail: Some("30 days there, 14 here".into()),
+            }],
+            event_id: None,
+            verdict_bar: String::new(),
+        })
+        .unwrap();
+        assert!(
+            html.contains("your notes disagree: Retention, revised"),
+            "{html}"
+        );
+        assert!(html.contains(r#"title="30 days there, 14 here""#), "{html}");
+        assert!(
+            !answer_fixture(0).contains("your notes disagree"),
+            "no disagreement, no badge"
+        );
     }
 
     /// The rail's why-line is reachable only if the flag survives three

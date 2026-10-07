@@ -381,6 +381,7 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
             abstained: false,
             unsupported: vec!["qdrant-cli index create".into()],
             retired_only: false,
+            disagreements: vec![],
             event_id: None,
         })
         .unwrap(),

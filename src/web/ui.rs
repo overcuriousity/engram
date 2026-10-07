@@ -1530,9 +1530,7 @@ pub(crate) fn render_hit(
                     .other_title
                     .clone()
                     .unwrap_or_else(|| "another note".into()),
-                day: chrono::DateTime::from_timestamp(d.other_created_at, 0)
-                    .map(|t| t.format("%Y-%m-%d").to_string())
-                    .unwrap_or_default(),
+                day: crate::fmt::fmt_day(d.other_created_at),
                 detail: d.detail.clone(),
             })
             .collect(),

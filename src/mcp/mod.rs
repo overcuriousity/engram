@@ -997,6 +997,7 @@ mod tests {
             abstained: false,
             unsupported: unsupported.iter().map(|s| s.to_string()).collect(),
             retired_only: false,
+            disagreements: vec![],
             event_id: None,
         }
     }

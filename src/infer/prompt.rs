@@ -1549,7 +1549,8 @@ A subject the excerpts carry in part is answered in part and never abstained on.
 `(continues [n])` marks an excerpt whose text is printed under excerpt n; cite whichever of the two \
 numbers holds the words you used. \
 Lines beginning `Caveat:` give the conditions under which an excerpt does not apply — repeat any \
-that bears on your answer.";
+that bears on your answer. \
+Where a caveat says another note states something differently and your answer rests on it, give both readings with their dates and cite each; do not choose between them.";
 
 /// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace, markdown
 /// emphasis, heading and list marks, and opening quotes are skipped, because

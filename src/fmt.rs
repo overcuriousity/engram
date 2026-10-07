@@ -60,6 +60,15 @@ pub fn fmt_time(ts: i64) -> String {
     )
 }
 
+/// Unix seconds as the day they fall on, `YYYY-MM-DD` in UTC: the date part
+/// of `fmt_time`. Enough to tell two notes that disagree apart by when each
+/// was written, which is all a reader is offered it for.
+pub fn fmt_day(ts: i64) -> String {
+    let mut s = fmt_time(ts);
+    s.truncate(10);
+    s
+}
+
 /// Roughly how long ago, in the words someone would use out loud. Precision
 /// past "days" would suggest the timestamp matters; it is here to jog a memory.
 pub(crate) fn ago(then: i64) -> String {
