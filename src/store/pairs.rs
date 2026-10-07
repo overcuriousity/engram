@@ -261,6 +261,21 @@ impl DecidedBy {
     }
 }
 
+/// One side's view of an open contradiction: which other note says something
+/// different, and what the judge found differing. Read onto search results, so
+/// the base never picks a side — it shows both and says they disagree.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Disagreement {
+    /// The artifact this row is attached to.
+    pub artifact_id: String,
+    /// The artifact it disagrees with.
+    pub other_id: String,
+    pub other_title: Option<String>,
+    pub other_created_at: i64,
+    /// The judge's sentence on what differs.
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ArtifactPair {
     pub id: i64,
@@ -1019,6 +1034,62 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.as_ref().map(row_to_pair))
+    }
+
+    /// What each of `ids` is known to disagree with: one row per side asked
+    /// about, for every `Contradiction` pair whose two sides are both still in
+    /// results — the condition `artifact_in_results` answers. A side that has
+    /// left results is not something to disagree with, so the row goes with it
+    /// and comes back if the side does.
+    pub async fn open_contradictions(&self, ids: &[String]) -> Result<Vec<Disagreement>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let holes = vec!["?"; ids.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT p.a_id, p.b_id, p.detail,
+                    a.title AS a_title, a.created_at AS a_created,
+                    b.title AS b_title, b.created_at AS b_created
+               FROM artifact_pairs p
+               JOIN artifacts a ON a.id = p.a_id
+               JOIN artifacts b ON b.id = p.b_id
+              WHERE p.state = 'contradiction'
+                AND a.status = 'active' AND a.superseded_by IS NULL
+                AND b.status = 'active' AND b.superseded_by IS NULL
+                AND (p.a_id IN ({holes}) OR p.b_id IN ({holes}))
+              ORDER BY p.id"
+        )));
+        for _ in 0..2 {
+            for id in ids {
+                q = q.bind(id);
+            }
+        }
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut out = Vec::new();
+        for r in q.fetch_all(&self.pool).await? {
+            let a_id: String = r.get("a_id");
+            let b_id: String = r.get("b_id");
+            let detail: Option<String> = r.get("detail");
+            if wanted.contains(a_id.as_str()) {
+                out.push(Disagreement {
+                    artifact_id: a_id.clone(),
+                    other_id: b_id.clone(),
+                    other_title: r.get("b_title"),
+                    other_created_at: r.get("b_created"),
+                    detail: detail.clone(),
+                });
+            }
+            if wanted.contains(b_id.as_str()) {
+                out.push(Disagreement {
+                    artifact_id: b_id,
+                    other_id: a_id,
+                    other_title: r.get("a_title"),
+                    other_created_at: r.get("a_created"),
+                    detail,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Put a pair back in the judge queue, whatever it was carrying.
@@ -1843,6 +1914,63 @@ mod tests {
             .await
             .unwrap();
         (made[0].id.clone(), made[1].id.clone())
+    }
+
+    #[tokio::test]
+    async fn a_contradiction_is_read_from_both_sides_while_both_are_live() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.9).await.unwrap();
+        let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 days there, 14 here"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
+
+        let got = s.open_contradictions(&[a.clone(), b.clone()]).await.unwrap();
+        assert_eq!(got.len(), 2, "one row per side asked about");
+        let from_a = got.iter().find(|d| d.artifact_id == a).unwrap();
+        assert_eq!(from_a.other_id, b);
+        assert_eq!(from_a.detail.as_deref(), Some("30 days there, 14 here"));
+        let from_b = got.iter().find(|d| d.artifact_id == b).unwrap();
+        assert_eq!(from_b.other_id, a);
+
+        assert_eq!(
+            s.open_contradictions(&[a.clone()]).await.unwrap().len(),
+            1,
+            "only the side asked about gets a row"
+        );
+
+        s.set_artifact_status(&b, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert!(
+            s.open_contradictions(&[a]).await.unwrap().is_empty(),
+            "a side out of results is not something to disagree with"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_disagreeing_with_two_lists_both() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        for other in &ids[1..] {
+            s.record_pair(&ids[0], other, 0.9).await.unwrap();
+            let id = s.pair_between(&ids[0], other).await.unwrap().unwrap().id;
+            s.set_pair_state(id, PairState::Contradiction, Some("differs"), DecidedBy::Model)
+                .await
+                .unwrap();
+        }
+        let got = s.open_contradictions(&[ids[0].clone()]).await.unwrap();
+        let mut others: Vec<&str> = got.iter().map(|d| d.other_id.as_str()).collect();
+        others.sort();
+        let mut want: Vec<&str> = ids[1..].iter().map(String::as_str).collect();
+        want.sort();
+        assert_eq!(others, want);
     }
 
     #[tokio::test]

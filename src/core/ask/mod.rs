@@ -591,7 +591,7 @@ impl Core {
         self.reach_sideways(&mut hits, cliff_at).await;
         // The neighbours just appended came off the store, not the ranking,
         // and so never passed the titling the ranked hits got.
-        self.fill_titles(&mut hits).await;
+        self.finish_hits(&mut hits).await;
 
         Ok(Round {
             query: q.to_string(),
@@ -953,6 +953,7 @@ impl Core {
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.
                 // Reached beside a ranked hit, never ranked itself.
+                disagrees_with: Vec::new(),
                 explanation: Some(crate::core::explain::HitExplanation::recalled(&via)),
                 via: Some(via),
                 reason,

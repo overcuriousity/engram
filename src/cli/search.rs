@@ -390,6 +390,7 @@ pub(crate) mod fixture {
             borrowed_name: false,
             via: None,
             reason: None,
+            disagrees_with: Vec::new(),
             explanation: None,
         }
     }

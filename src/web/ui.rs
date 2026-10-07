@@ -90,6 +90,19 @@ pub struct RenderedResult {
     /// — `#2`, as the row beside it is labelled. Empty otherwise, including
     /// when the next passage placed as something with no rank of its own.
     pub continues_in: String,
+    /// The notes this one is known to disagree with, shown under the row. The
+    /// rail names both and picks neither.
+    pub disagrees: Vec<DisagreementRow>,
+}
+
+/// One line under a result: `Disagrees with <title> (day): <what differs>`.
+#[derive(Clone)]
+pub struct DisagreementRow {
+    pub other_id: String,
+    pub other_title: String,
+    /// `%Y-%m-%d`, the short day the idle page's recent rows use.
+    pub day: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Default)]
@@ -443,6 +456,7 @@ impl Default for RenderedResult {
             origin_count: 0,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 }
@@ -1507,6 +1521,21 @@ pub(crate) fn render_hit(
         // about the hit, and one row cannot answer it.
         continues: false,
         continues_in: String::new(),
+        disagrees: h
+            .disagrees_with
+            .iter()
+            .map(|d| DisagreementRow {
+                other_id: d.other_id.clone(),
+                other_title: d
+                    .other_title
+                    .clone()
+                    .unwrap_or_else(|| "another note".into()),
+                day: chrono::DateTime::from_timestamp(d.other_created_at, 0)
+                    .map(|t| t.format("%Y-%m-%d").to_string())
+                    .unwrap_or_default(),
+                detail: d.detail.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -4041,6 +4070,7 @@ mod tests {
             reason: None,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 
@@ -4196,6 +4226,7 @@ mod tests {
             origin_count: 0,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 
@@ -4444,6 +4475,7 @@ mod tests {
             origin_count: 0,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 
@@ -7294,6 +7326,35 @@ mod tests {
             "{}",
             rail(true)
         );
+    }
+
+    /// A disagreement is a line under the row naming the other note and what
+    /// differs, a link of its own outside the row's link.
+    #[test]
+    fn a_row_names_the_note_that_disagrees_with_it() {
+        let hit = crate::core::search::SearchResult {
+            artifact_id: "a1".into(),
+            text: "Retention is 30 days.".into(),
+            disagrees_with: vec![crate::store::pairs::Disagreement {
+                artifact_id: "a1".into(),
+                other_id: "b2".into(),
+                other_title: Some("Backup policy".into()),
+                other_created_at: 1_767_225_600,
+                detail: Some("30 days there, 14 here".into()),
+            }],
+            ..Default::default()
+        };
+        let row = render_hit(0, hit, &Default::default(), false);
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![row],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(html.contains("Disagrees with"), "{html}");
+        assert!(html.contains(r#"href="/ui/artifacts/b2""#), "{html}");
+        assert!(html.contains("Backup policy"), "{html}");
+        assert!(html.contains("(2026-01-01)"), "{html}");
+        assert!(html.contains("30 days there, 14 here"), "{html}");
     }
 
     /// The chips under the box fire a search on a base that holds nothing, and
