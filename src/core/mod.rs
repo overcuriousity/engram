@@ -702,6 +702,20 @@ impl Core {
         self.learn.enabled
     }
 
+    /// May the idle pass move ranking — adopt a generation, take one back, step
+    /// a ladder?
+    ///
+    /// Only under `[learn] mode = "full"`. `learning` is the mode the harness is
+    /// run in before anything learned is allowed to move a rank: a pass that
+    /// adopted a generation while the sweep measured would be measuring a
+    /// ranking its own inputs had already moved. `off` learns nothing, and a
+    /// generation adopted on probes is learning. The corpus half of the pass is
+    /// not this question — dedupe, reap, condense and the retraction of corpus
+    /// actions curate under every mode.
+    pub fn moves_ranking(&self) -> bool {
+        self.evolve.autonomous.moves_ranking() && self.learn.mode == crate::config::LearnMode::Full
+    }
+
     /// Is there an ask model to call? `false` means no `[infer.ask]`: no ask
     /// page, no nav entry, no MCP tool, no `/api/ask`.
     pub fn asks(&self) -> bool {

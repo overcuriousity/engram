@@ -177,11 +177,15 @@ impl Default for LearnConfig {
 pub enum LearnMode {
     /// Record nothing, learn nothing, prime nothing, promote nothing;
     /// consolidate only the exact and near duplicates capture finds for a
-    /// hash. What is left is capture, hybrid search and ask.
+    /// hash, and hold ranking where it is. What is left is capture, hybrid
+    /// search and ask, and the idle pass's corpus curation.
     Off,
     /// Record and accumulate, read none of it on the query path: no priming,
-    /// spread, promotion, offers or pursuits. The idle pass still curates, as
-    /// under every mode.
+    /// spread, promotion, offers or pursuits — and ranking holds still: the
+    /// idle pass rehearses and records, but adopts no generation, reverts
+    /// none and steps no ladder (`Core::moves_ranking`). Corpus curation still
+    /// runs — dedupe, reap, condense, and the retraction of corpus actions use
+    /// shows were wrong — as under every mode.
     Learning,
     /// Today's defaults, unchanged.
     #[default]
@@ -1095,8 +1099,8 @@ pub(crate) fn default_candidate_multiplier() -> usize {
 /// The shipped `associate.prime_lift`: the lowest non-zero rung, one place.
 /// Same as `config.example.toml`, so a base that never wrote the key is
 /// primed the way one started from the file is. `learn.mode = off` and
-/// `learning` still resolve it to zero, and the idle pass may walk it back
-/// down on what the base's own probes and observations say.
+/// `learning` still resolve it to zero, and under `full` the idle pass may
+/// walk it back down on what the base's own probes and observations say.
 pub(crate) fn default_prime_lift() -> usize {
     1
 }
@@ -3492,8 +3496,9 @@ mode = "off"
         // generates while it measures is measuring its own inputs.
         assert!(cfg.pursuit.min_engagement.is_infinite());
         assert!(cfg.consolidate.enabled);
-        // The idle pass is not held back by this mode: `evolve.autonomous` is
-        // always `full` now, so there is nothing for the mode to resolve there.
+        // `evolve.autonomous` is always `full` now, so there is nothing for the
+        // mode to resolve there. Ranking is held still by the mode itself, read
+        // at the pass (`Core::moves_ranking`), and the corpus half still runs.
         assert_eq!(cfg.evolve.autonomous, Autonomy::Full);
         assert!(
             !cfg.learn

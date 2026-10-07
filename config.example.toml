@@ -29,13 +29,17 @@
 [learn]
 # off      record nothing, learn nothing, prime nothing, promote nothing;
 #          consolidate only the exact and near duplicates capture finds for a
-#          hash. What is left is capture, hybrid search and ask.
+#          hash, and hold ranking where it is. What is left is capture, hybrid
+#          search and ask, and the idle pass's curation of the corpus.
 # learning record searches and asks, write the activation and the links — and
 #          read none of it on the query path. No priming, no associative
 #          spread, no promotion, no offers under the search box, and no
 #          pursuit generation, so nothing learned is read back into a result
-#          list or grown into the corpus. The idle pass still curates under
-#          this mode, as it does under every one: the base looks after itself.
+#          list or grown into the corpus. Ranking holds still: the idle pass
+#          adopts no ranking generation and takes none back. The corpus is
+#          still curated — duplicates merged, retired notes reaped, clusters
+#          condensed, and its own corpus actions retracted where use shows
+#          they were wrong — as under every mode.
 # full     all of it, which is what the tuning section below describes.
 mode = "full"
 

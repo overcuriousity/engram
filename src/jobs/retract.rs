@@ -1116,6 +1116,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn learning_curates_the_corpus_and_holds_ranking_still() {
+        // A generation under watch whose evidence would take it back under
+        // `full`: sixteen give-ups against two positives.
+        let (mut core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        crate::jobs::tune::test_support::observe_badly_under_live(&core, 16).await;
+        let before = core.store.live_generation().await.unwrap().unwrap().id;
+        core.learn.mode = crate::config::LearnMode::Learning;
+        let loser = superseded_after_use_on(&core).await;
+
+        let p = crate::jobs::tune::pass(&core).await.unwrap();
+
+        assert_eq!(p.undone, 1, "the corpus half did not curate: {p:?}");
+        assert!(
+            core.store
+                .get_artifact(&loser)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none()
+        );
+        assert!(
+            p.adopted.is_none() && p.reverted.is_none(),
+            "learning moved ranking: {p:?}"
+        );
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            before,
+            "ranking moved under learning"
+        );
+    }
+
+    #[tokio::test]
     async fn an_untrustworthy_anchor_stops_the_corpus_rules_too() {
         let (core, _) = crate::jobs::tune::test_support::suspended().await;
         let loser = superseded_after_use_on(&core).await;
