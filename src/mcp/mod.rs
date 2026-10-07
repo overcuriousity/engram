@@ -542,7 +542,8 @@ impl PkdbTools {
                 let n = o.near_duplicate.expect("just checked");
                 format!(
                     "Stored as `{}` and being indexed. It is {:.0}% similar to `{}`; \
-                     the person can replace or discard one of them on Insights.",
+                     the base merges or hides what the two repeat on its own, with an \
+                     undo on Insights.",
                     o.id,
                     n.similarity * 100.0,
                     n.corpus_id

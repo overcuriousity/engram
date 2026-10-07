@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn a_token_table_with_no_tokens_says_so_instead_of_showing_its_headings() {
         // Five column headings over nothing is a table pretending to have
-        // rows — the same thing `_decide.html` names at its top: the old Ops
+        // rows — the same thing the old review card named at its top: the Ops
         // page answered five headings with "None." and made an empty base look
         // like a backlog.
         let html = settings_fixture(vec![]);

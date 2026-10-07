@@ -653,20 +653,6 @@ impl Store {
         Ok(())
     }
 
-    /// Captures flagged as near-duplicates, newest first. They are read and
-    /// searchable like any other; the list is where a person can still
-    /// replace, keep or discard one.
-    pub async fn parked_corpora(&self, limit: i64) -> Result<Vec<Corpus>> {
-        let rows = sqlx::query(
-            "SELECT * FROM corpora WHERE near_dupe_of IS NOT NULL
-              ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(row_to_corpus).collect())
-    }
-
     /// Record that the sweep has read this capture's lost lines again, so it
     /// does so once.
     pub async fn mark_auto_reread(&self, corpus_id: &str) -> Result<()> {
@@ -1466,7 +1452,6 @@ mod tests {
         assert_eq!(back.status, CorpusStatus::Raw);
         assert_eq!(back.near_dupe_score, Some(0.9));
         assert!(s.live_job(Stage::Synthesize, &src.id).await.unwrap());
-        assert_eq!(s.parked_corpora(10).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

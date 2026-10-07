@@ -80,43 +80,29 @@
      sentences competing with it. Each carries its meaning in `title` and
      `aria-label`, so the tooltip and the screen reader say the same thing.
 
-     Verify and deprecate only apply to an artifact that is actually in results
-     — the flag above already offers the way back for one that is not — but
-     delete is offered whatever the status, because "get rid of this" is a
-     decision that does not depend on whether it is currently hidden.
+     Hide only applies to an artifact that is actually in results — the flag
+     above already offers the way back for one that is not — but delete is
+     offered whatever the status, because "get rid of this" is a decision that
+     does not depend on whether it is currently hidden.
 
      `.actions` rather than `.chips`: it pushes delete to the far end, so the
-     one control that cannot be undone is never flush against two that can. It
+     one control that cannot be undone is never flush against one that can. It
      is also a `.pane-header`, which anchors the row to the artifact under a
      rule rather than leaving it floating at the top of a wide column — at
      three-up the lone trash button ended a thousand pixels from its siblings
      and read as stranded rather than as caution.
 
      Every one of them carries its word, and the word has to be the whole of
-     what the control does. "Verified" was not: directly under this row sits
-     *Was this what you were looking for?* with a Yes on it, and the two read
-     as one question asked twice. They are not. Yes answers *this search found
-     the right thing* and feeds the retrieval measure; this one answers *the
-     text is still accurate*, which resets the artifact's age and is what
-     search's recency term reads in place of `created_at`. Naming the subject
-     — the claim, not the hit — is what tells them apart without a sentence
-     explaining the difference.
+     what the control does. There was a *Still accurate* beside these, which
+     reset the artifact's age; it went when a good answer began confirming the
+     notes it was drawn from, which is the same reset made by the verdict a
+     person was already giving under the result.
 
-     "Hide" had the same shape of problem one step further on. What it hides
-     from, and that the artifact survives it, lived only in a `title`, and the
-     phone this base is mostly read on has no hover. #}
+     "Hide" says what it hides from, and that the artifact survives it, in
+     its label: that lived only in a `title` once, and the phone this base is
+     mostly read on has no hover. #}
   <div class="actions pane-header">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
-    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/verify"
-          hx-post="/ui/ops/artifacts/{{ d.id }}/verify?terms={{ d.terms|urlencode }}"
-          hx-target="closest [data-artifact]" hx-swap="outerHTML">
-      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-      <button class="btn-icon" type="submit"
-              title="Confirm this is still accurate — it resets the artifact's age, which search reads"
-              aria-label="Confirm this is still accurate; it resets the artifact's age, which search reads">
-        {% include "_icon_check.html" %}<span>Still accurate</span>
-      </button>
-    </form>
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate"
           hx-post="/ui/ops/artifacts/{{ d.id }}/deprecate?terms={{ d.terms|urlencode }}"
           hx-target="closest [data-artifact]" hx-swap="outerHTML">
@@ -154,17 +140,16 @@
   </div>
   {% endif %}
 
+  {# What a check found, as a badge and nothing to press. There was a *Mark
+     reviewed* here that cleared the flag; the one flag a person could act on
+     — a merge whose source was deleted — is accepted by the sweep on its own
+     now, and the rest are facts about the text that a press does not change.
+     The detail stays, because it is what says which number or path no source
+     carries. #}
   {% if !d.flags.is_empty() %}
-  <div class="flag" role="status">
-    <div aria-hidden="true">⚠</div>
-    <div>
-      <b>{{ d.flags|join(", ") }}</b>
-      {% if let Some(detail) = d.flag_detail %}<div class="mono">{{ detail }}</div>{% endif %}
-      <div class="chips">
-        <button class="btn btn-sm" hx-post="/ui/artifacts/{{ d.id }}/reviewed"
-                hx-target="closest .flag" hx-swap="outerHTML">Mark reviewed</button>
-      </div>
-    </div>
+  <div class="chips" role="status">
+    {% for f in d.flags %}<span class="badge badge-warning">{{ f }}</span>{% endfor %}
+    {% if let Some(detail) = d.flag_detail %}<div class="mono muted">{{ detail }}</div>{% endif %}
   </div>
   {% endif %}
 

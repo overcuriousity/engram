@@ -199,11 +199,7 @@ mod tests {
                 .unwrap()
                 .contains("no text")
         );
-        assert!(
-            src.near_dupe_of.is_none(),
-            "not a near-duplicate; not on the review queue"
-        );
-        assert!(core.store.parked_corpora(10).await.unwrap().is_empty());
+        assert!(src.near_dupe_of.is_none(), "not a near-duplicate");
         assert!(
             core.store.claim_job().await.unwrap().is_none(),
             "nothing further queued"

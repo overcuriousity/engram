@@ -2326,7 +2326,7 @@ mod tests {
     /// wait for a person; the "Write one" button was drawn on that card, and by
     /// then the pair was not `Pending`. Old bases still hold such rows with the
     /// ask set, so the path stays. The unit's opening guard sent every one of those
-    /// presses home having done nothing — and `_decide.html` had already
+    /// presses home having done nothing — and the review card had already
     /// replaced all four answer buttons, so the card was frozen for good on the
     /// one press that resolves it.
     ///

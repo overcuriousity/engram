@@ -49,9 +49,9 @@ pub async fn run(core: &Core) -> Result<usize> {
             // A capture parked by a build that held near-duplicates for a
             // person: `needs_review`, no job, never searchable until somebody
             // decided. Nothing writes that state any more, so what is still
-            // in it is released into the pipeline with its flag kept — the
-            // person can still replace or discard it, and meanwhile it is
-            // found.
+            // in it is released into the pipeline with its flag kept, and the
+            // pair judging downstream settles what it repeats like any other
+            // pair.
             if c.status == CorpusStatus::NeedsReview {
                 core.release_parked(&c.id).await?;
                 armed += 1;

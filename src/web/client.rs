@@ -25,7 +25,6 @@ pub fn routes() -> Router<AppState> {
         .route("/moments/{id}/date", post(moment_date))
         .route("/moments/{id}/not-a-reminder", post(not_a_reminder))
         .route("/artifacts/{id}/is-a-reminder", post(is_a_reminder))
-        .route("/artifacts/{id}/reviewed", post(artifact_reviewed))
         .route("/artifacts/{id}/links/{other}/dismiss", post(dismiss_link))
         .route("/artifacts/{id}/dwell", post(artifact_dwell))
         .route("/artifacts/{id}/about", get(artifact_about))
@@ -300,17 +299,6 @@ async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>) -> Result<StatusC
 }
 
 // ── Artifacts ────────────────────────────────────────────────────────────
-
-/// `POST /artifacts/{id}/reviewed`: clear the verification flags. A
-/// judgement, not a fix — `artifact::mark_artifact_reviewed`'s rule.
-async fn artifact_reviewed(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
-    let c = tenant.core.store.get_artifact(&id).await?;
-    if c.flags.iter().any(|f| f == "orphaned_source") {
-        tenant.core.store.accept_source_loss(&id).await?;
-    }
-    tenant.core.store.clear_artifact_flags(&id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
 
 /// `POST /artifacts/{id}/links/{other}/dismiss`: *not related*. Final for
 /// that pair.
@@ -1163,19 +1151,12 @@ mod tests {
             "{v}"
         );
 
+        // A flag is a fact about the text, not a question: there is no door
+        // that clears one, and a client pressing the old one finds nothing.
         core.store
             .set_artifact_flags(&aid, &["stale".to_string()], Some("a detail"))
             .await
             .unwrap();
-        assert!(
-            !core
-                .store
-                .get_artifact(&aid)
-                .await
-                .unwrap()
-                .flags
-                .is_empty()
-        );
         let res = app
             .clone()
             .oneshot(bare(
@@ -1185,9 +1166,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
         assert!(
-            core.store
+            !core
+                .store
                 .get_artifact(&aid)
                 .await
                 .unwrap()
@@ -1563,7 +1545,8 @@ mod tests {
             v["pursuits"].is_array(),
             "learning is on, so the line is there: {v}"
         );
-        assert!(v["more_pairs"].is_number());
+        // No pair waits on anyone, so there is nothing to count.
+        assert!(v.get("more_pairs").is_none(), "{v}");
 
         let v = json_of(
             app.oneshot(

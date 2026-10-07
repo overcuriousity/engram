@@ -36,10 +36,10 @@ const COMPONENT_WINDOW: i64 = 5_000;
 #[cfg(test)]
 const COMPONENT_WINDOW: i64 = 3;
 
-/// The states a review card is drawn for, in the order the queue lists them —
-/// and so the only states a synthesis ask can still be answering.
-/// `web::ops` renders these; `ask_pair_synthesis` and `jobs::dedupe::run`
-/// refuse an ask on anything else.
+/// The states a pair can still be open in, in the order `/consolidation`
+/// reports them — and so the only states a synthesis ask can still be
+/// answering. No page draws a card for them any more; `ask_pair_synthesis`
+/// and `jobs::dedupe::run` refuse an ask on anything else.
 ///
 /// Besides `Pending`, which is a pair nobody has asked about yet, nothing new
 /// is settled into these except `Contradiction`, a real disagreement.
@@ -581,12 +581,13 @@ impl Store {
     /// The pairs in a state that a person can still act on: both artifacts are
     /// in results.
     ///
-    /// The review queue's buttons all end in `Core::supersede`, `deprecate` or
-    /// a merge, and every one of those refuses a side that is not active. A row
+    /// Every way a pair is settled ends in `Core::supersede`, `deprecate` or a
+    /// merge, and every one of those refuses a side that is not active. A row
     /// naming an artifact that has since been hidden or deprecated is therefore
-    /// a question with no answer available — offering it produced
-    /// `cannot supersede: loser … is superseded` on the press, which is a
-    /// correct guard reporting a queue that should never have listed the row.
+    /// a question with no answer available — the review queue that used to
+    /// list such rows answered a press on one with `cannot supersede: loser …
+    /// is superseded`, a correct guard reporting a row that should never have
+    /// been listed.
     ///
     /// Read-side and not the whole story, because both ways out of results are
     /// reversible: an operator restores the artifact and the pair is a real
@@ -616,25 +617,6 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_pair).collect())
-    }
-
-    /// How many pairs `pairs_awaiting_review` would return without a limit.
-    ///
-    /// Counted under the same rule as the listing, so the "N more waiting" line
-    /// under a queue that shows the first few cannot promise rows the queue
-    /// will never render.
-    pub async fn count_pairs_awaiting_review(&self, state: PairState) -> Result<i64> {
-        Ok(sqlx::query_scalar(
-            "SELECT COUNT(*) FROM artifact_pairs p
-               JOIN artifacts a ON a.id = p.a_id
-               JOIN artifacts b ON b.id = p.b_id
-              WHERE p.state = ?
-                AND a.status = 'active' AND a.superseded_by IS NULL
-                AND b.status = 'active' AND b.superseded_by IS NULL",
-        )
-        .bind(state.as_str())
-        .fetch_one(&self.pool)
-        .await?)
     }
 
     /// Move a pair to any state other than `Superseded`, clearing the judge's
@@ -1943,7 +1925,10 @@ mod tests {
         assert_eq!(from_b.other_id, a);
 
         assert_eq!(
-            s.open_contradictions(&[a.clone()]).await.unwrap().len(),
+            s.open_contradictions(std::slice::from_ref(&a))
+                .await
+                .unwrap()
+                .len(),
             1,
             "only the side asked about gets a row"
         );
@@ -3501,10 +3486,10 @@ mod tests {
         assert!(kept.a_id == *loser || kept.b_id == *loser);
     }
 
-    /// The review queue offers a button that supersedes one side of the pair,
-    /// and `Core::supersede` refuses a side that is not active. A pair naming
-    /// an artifact that has left results is therefore a question nobody can
-    /// answer — it must not be listed, and it must not be counted.
+    /// `Core::supersede` refuses a side that is not active, and search and Ask
+    /// read a disagreement only between two notes still in results. A pair
+    /// naming an artifact that has left results is therefore something
+    /// nothing can act on or show — it must not be listed.
     #[tokio::test]
     async fn a_pair_whose_member_left_results_is_not_awaiting_review() {
         let s = Store::memory().await.unwrap();
@@ -3521,12 +3506,6 @@ mod tests {
             .unwrap();
         assert_eq!(open.len(), 1, "a pair nobody can act on is still listed");
         assert_eq!(open[0].a_id, ids[2]);
-        assert_eq!(
-            s.count_pairs_awaiting_review(PairState::Pending)
-                .await
-                .unwrap(),
-            1
-        );
     }
 
     /// Superseded, not deprecated: the other half of `in_results`, and the one
@@ -3552,12 +3531,6 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
-        );
-        assert_eq!(
-            s.count_pairs_awaiting_review(PairState::Contradiction)
-                .await
-                .unwrap(),
-            0
         );
     }
 }

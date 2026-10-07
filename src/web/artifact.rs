@@ -768,20 +768,6 @@ async fn dismiss_link(
     Ok(axum::response::Html(String::new()).into_response())
 }
 
-/// Clearing a flag is a judgement, not a fix: the operator looked at the chunk
-/// beside its source lines and decided the warning was noise.
-async fn mark_artifact_reviewed(tenant: Tenant, Path(cid): Path<String>) -> UiResult<Response> {
-    // For an orphaned merge, "reviewed" means accepted as a merge of what
-    // remains — recorded on source_count, or the next sweep re-flags it and
-    // the operator's judgement lasts one tick.
-    let c = tenant.core.store.get_artifact(&cid).await?;
-    if c.flags.iter().any(|f| f == "orphaned_source") {
-        tenant.core.store.accept_source_loss(&cid).await?;
-    }
-    tenant.core.store.clear_artifact_flags(&cid).await?;
-    Ok(axum::response::Html(String::new()).into_response())
-}
-
 /// The bracket scan, over one run of prose between tags.
 fn link_text(text: &str, n: usize) -> String {
     let mut out = String::with_capacity(text.len());
@@ -843,7 +829,6 @@ pub(crate) fn link_citations(html: &str, n: usize) -> String {
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/ui/artifacts/{id}", get(artifact_detail).put(put_artifact))
-        .route("/ui/artifacts/{cid}/reviewed", post(mark_artifact_reviewed))
         .route(
             "/ui/artifacts/{id}/links/{other}/dismiss",
             post(dismiss_link),
@@ -1823,10 +1808,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_lifecycle_button_comes_back_to_the_page_that_offered_it() {
-        // These four actions are rendered both on Ops and on an artifact's own
-        // page. Always redirecting to Ops threw a reader who pressed "Confirm
-        // still accurate" while reading an artifact onto a queue they were not
-        // working through.
+        // These actions are rendered both on Insights and on an artifact's own
+        // page. Always redirecting to Insights threw a reader who pressed
+        // "Hide from results" while reading an artifact onto a list they were
+        // not working through.
         let (app, cookie) = app_with_embedded_corpus().await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
         let id = rail
@@ -1840,7 +1825,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(form(
-                &format!("/ui/ops/artifacts/{id}/verify"),
+                &format!("/ui/ops/artifacts/{id}/deprecate"),
                 &cookie,
                 &format!("to=/ui/artifacts/{id}"),
             ))
@@ -1851,11 +1836,11 @@ mod tests {
             format!("/ui/artifacts/{id}").as_str()
         );
 
-        // Ops sends no `to` and keeps the default.
+        // Insights sends no `to` and keeps the default.
         let res = app
             .clone()
             .oneshot(form(
-                &format!("/ui/ops/artifacts/{id}/deprecate"),
+                &format!("/ui/ops/artifacts/{id}/reactivate"),
                 &cookie,
                 "",
             ))
@@ -1868,7 +1853,7 @@ mod tests {
     async fn a_lifecycle_button_pressed_in_the_pane_swaps_the_artifact_not_the_page() {
         // The same fragment is the standalone page and the pane beside the
         // search results, and the hidden `to` can only name one of them. It
-        // named the page, so pressing "Confirm still accurate" on a result
+        // named the page, so pressing "Hide from results" on a result
         // navigated the whole window there and took the results with it.
         let (app, cookie) = app_with_embedded_corpus().await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
@@ -1881,7 +1866,7 @@ mod tests {
             .to_string();
 
         let mut req = form(
-            &format!("/ui/ops/artifacts/{id}/verify"),
+            &format!("/ui/ops/artifacts/{id}/deprecate"),
             &cookie,
             &format!("to=/ui/artifacts/{id}"),
         );
@@ -1918,21 +1903,25 @@ mod tests {
             .expect("no result to open")
             .to_string();
 
+        // Hidden and put back for each, so every press is one the artifact's
+        // state admits and only the return path is under test.
         for hostile in ["https://evil.example/x", "//evil.example/x", "/ui//evil"] {
-            let res = app
-                .clone()
-                .oneshot(form(
-                    &format!("/ui/ops/artifacts/{id}/verify"),
-                    &cookie,
-                    &format!("to={}", urlencoding_of(hostile)),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(
-                res.headers().get("location").unwrap(),
-                "/ui/insights",
-                "followed {hostile}"
-            );
+            for action in ["deprecate", "reactivate"] {
+                let res = app
+                    .clone()
+                    .oneshot(form(
+                        &format!("/ui/ops/artifacts/{id}/{action}"),
+                        &cookie,
+                        &format!("to={}", urlencoding_of(hostile)),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    res.headers().get("location").unwrap(),
+                    "/ui/insights",
+                    "{action} followed {hostile}"
+                );
+            }
         }
     }
 

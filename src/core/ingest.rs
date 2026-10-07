@@ -94,20 +94,6 @@ impl IngestOutcome {
     }
 }
 
-/// What an operator decided about a capture flagged as a near-duplicate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NearDupeAction {
-    /// The new capture is the better copy: delete the old corpus and its
-    /// artifacts, and keep this one.
-    Replace,
-    /// They are genuinely different despite the score. Clear the flag and
-    /// leave both alone.
-    KeepBoth,
-    /// The new capture adds nothing. Delete it.
-    Discard,
-}
-
 /// One PDF, whichever door it arrived through.
 #[derive(Debug, Clone)]
 pub struct PdfCapture {
@@ -682,7 +668,7 @@ impl Core {
         // notes and a journal line repeated on another day scored as
         // near-duplicates of what they were not, and went the same way. The
         // pair judging downstream is what reconciles competing artifacts; the
-        // flag is left for a person to replace or discard later if they want.
+        // flag is left as a note on the capture, and asks nobody anything.
         let followup = match &near {
             // A forced reminder is not flagged. "Remind me" has already said
             // what it is, and a reminder repeated is a reminder, not a copy.
@@ -1152,63 +1138,6 @@ impl Core {
             near_duplicate: None,
             link_unread: None,
         })
-    }
-
-    /// Act on a capture flagged as a near-duplicate. Every branch ends with
-    /// the flag gone: the capture kept and in the pipeline, or deleted.
-    pub async fn resolve_near_duplicate(
-        &self,
-        corpus_id: &str,
-        action: NearDupeAction,
-    ) -> Result<()> {
-        let src = self.store.get_corpus(corpus_id).await?;
-        let Some(other) = src.near_dupe_of.clone() else {
-            return Err(Error::Validation(
-                "this corpus is not flagged as a near-duplicate".into(),
-            ));
-        };
-
-        match action {
-            NearDupeAction::Discard => {
-                self.delete_corpus(&src.id).await?;
-                tracing::info!(corpus_id = %src.id, "discarded a near-duplicate capture");
-            }
-            NearDupeAction::Replace | NearDupeAction::KeepBoth => {
-                if action == NearDupeAction::Replace {
-                    // The older corpus goes first. If this fails the new one is
-                    // still flagged, which is a state an operator can retry
-                    // from.
-                    //
-                    // Unless it is already gone: `near_dupe_of` can name a
-                    // corpus that has since been deleted — including another
-                    // flagged capture that was discarded. Failing there would
-                    // leave the only way out of the list behind a 404, with
-                    // nothing on the page to say that "keep both" is now the
-                    // same decision.
-                    match self.delete_corpus(&other).await {
-                        Ok(()) => {
-                            tracing::info!(corpus_id = %src.id, replaced = %other, "replaced an older corpus");
-                        }
-                        Err(Error::NotFound) => {
-                            tracing::info!(
-                                corpus_id = %src.id,
-                                replaced = %other,
-                                "the corpus this capture replaces was already deleted"
-                            );
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                self.store.set_near_dupe(&src.id, None, None).await?;
-                // A capture parked by a build before flags were read like any
-                // other is still at `needs_review` with no job, and this is
-                // its way into the pipeline. A flagged one is there already.
-                if src.status == CorpusStatus::NeedsReview {
-                    self.release_parked(&src.id).await?;
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Put a capture parked by an older build into the pipeline: `raw` and a
@@ -2497,8 +2426,7 @@ mod tests {
 
     use crate::core::ingest::MAX_TEXT_BYTES;
     use crate::core::ingest::{
-        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_FETCH, ORIGIN_IMAGE,
-        ORIGIN_PDF, PdfCapture,
+        Capture, ImageCapture, MAX_NOTE_CHARS, ORIGIN_FETCH, ORIGIN_IMAGE, ORIGIN_PDF, PdfCapture,
     };
     use crate::core::test_support::test_core;
     use crate::error::Error;
@@ -3278,7 +3206,6 @@ mod tests {
         assert!(near.similarity > 0.90);
         let row = core.store.get_corpus(&second.id).await.unwrap();
         assert_eq!(row.near_dupe_of.as_deref(), Some(first.id.as_str()));
-        assert_eq!(core.store.parked_corpora(10).await.unwrap().len(), 1);
 
         crate::jobs::test_support::drain(&core).await;
         assert_eq!(
@@ -3293,7 +3220,7 @@ mod tests {
                 .unwrap()
                 .near_dupe_of
                 .is_some(),
-            "and stays flagged for a person to look at"
+            "and stays flagged, which is a note on it rather than a question"
         );
     }
 
@@ -3354,146 +3281,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeping_both_clears_the_flag_and_leaves_the_capture_in_the_pipeline() {
-        let core = test_core().await;
-        core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::KeepBoth)
-            .await
-            .unwrap();
-
-        let got = core.store.get_corpus(&second.id).await.unwrap();
-        assert_eq!(got.status, CorpusStatus::Raw);
-        assert!(got.near_dupe_of.is_none(), "the flag must be cleared");
-        assert!(
-            core.store.claim_job().await.unwrap().is_some(),
-            "the synthesis the capture armed is still there"
-        );
-    }
-
-    #[tokio::test]
-    async fn keeping_both_releases_a_capture_an_older_build_parked() {
-        let core = test_core().await;
-        core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-        // What an older build wrote: parked, and no job.
-        while core.store.claim_job().await.unwrap().is_some() {}
-        core.store
-            .set_corpus_status(&second.id, CorpusStatus::NeedsReview)
-            .await
-            .unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::KeepBoth)
-            .await
-            .unwrap();
-
-        let got = core.store.get_corpus(&second.id).await.unwrap();
-        assert_eq!(got.status, CorpusStatus::Raw);
-        assert!(core.store.claim_job().await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn replacing_deletes_the_older_corpus_and_its_vectors() {
-        let core = test_core().await;
-        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while crate::jobs::run_one(&core).await.unwrap() {}
-        assert!(core.vectors.count().await.unwrap() > 0);
-
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-        core.resolve_near_duplicate(&second.id, NearDupeAction::Replace)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            core.store.get_corpus(&first.id).await,
-            Err(crate::error::Error::NotFound)
-        ));
-        assert_eq!(
-            core.store.get_corpus(&second.id).await.unwrap().status,
-            CorpusStatus::Raw
-        );
-        assert!(core.store.claim_job().await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn discarding_removes_the_new_capture_only() {
-        let core = test_core().await;
-        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::Discard)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            core.store.get_corpus(&second.id).await,
-            Err(crate::error::Error::NotFound)
-        ));
-        assert!(core.store.get_corpus(&first.id).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn replacing_a_corpus_that_is_already_gone_still_releases_the_capture() {
-        // `near_dupe_of` can name a corpus that has since been deleted —
-        // including another flagged capture that was discarded. Failing here
-        // put the only way off the list behind a 404.
-        let core = test_core().await;
-        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-        core.delete_corpus(&first.id).await.unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::Replace)
-            .await
-            .unwrap();
-
-        let got = core.store.get_corpus(&second.id).await.unwrap();
-        assert_eq!(got.status, CorpusStatus::Raw);
-        assert!(got.near_dupe_of.is_none());
-        assert!(core.store.claim_job().await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn reprocessing_a_flagged_capture_takes_it_off_the_list() {
+    async fn reprocessing_a_flagged_capture_clears_its_flag() {
         // Reprocessing is a decision about the capture, and the flag goes
         // with it.
         let core = test_core().await;
@@ -3524,17 +3312,6 @@ mod tests {
             "the capture was reprocessed and is still flagged"
         );
         assert_eq!(got.status, CorpusStatus::Raw);
-    }
-
-    #[tokio::test]
-    async fn resolving_a_corpus_that_is_not_parked_is_rejected() {
-        let core = test_core().await;
-        let out = core.ingest("ordinary text", "web", None).await.unwrap();
-        assert!(matches!(
-            core.resolve_near_duplicate(&out.id, NearDupeAction::Replace)
-                .await,
-            Err(crate::error::Error::Validation(_))
-        ));
     }
 
     #[tokio::test]

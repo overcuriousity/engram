@@ -1,9 +1,10 @@
-//! Insights: what is true about this installation, and what needs a person.
+//! Insights: what is true about this installation, and what the base did.
 //!
-//! Two halves. The maintenance half is Housekeeping relocated — hidden, stale
-//! and retrying artifacts, the merge undo log, tokens, sources — plus the
-//! surfaces that used to sit on Capture, which is now a verb rather than a
-//! page. The measures half reads aggregates over tables that already exist.
+//! Two halves. The journal half is Housekeeping relocated — what the base
+//! merged, wrote, hid and buried on its own, each with its undo, and the
+//! machine's own readout — and asks nothing of anyone: every decision it
+//! used to queue for a person, the base now makes itself. The measures half
+//! reads aggregates over tables that already exist.
 //!
 //! `/ui/ops` redirects here rather than answering 404: it is in bookmarks, in
 //! the quiet link at the bottom of the workspace, and in at least one runbook.
@@ -21,7 +22,6 @@ use axum::routing::get;
 use crate::error::Result;
 use crate::fmt::{ago, fmt_duration, fmt_elapsed, fmt_time};
 use crate::web::auth_routes::HtmlTemplate;
-use crate::web::markdown;
 use crate::web::state::AppState;
 use crate::web::ui::{SourceRow, row_label, row_subtitle, source_rows, sweep_label, tally_sweep};
 use crate::web::ui_error::UiResult;
@@ -87,17 +87,6 @@ pub struct RetryingRow {
     pub last_error: String,
 }
 
-/// A parked capture, with enough of the corpus it resembles to decide without
-/// opening both.
-pub struct ParkedRow {
-    pub id: String,
-    pub title: String,
-    pub bytes: usize,
-    pub other_id: String,
-    pub other_title: String,
-    pub percent: i64,
-}
-
 /// An artifact the sweep hid, with the one it lost to.
 pub struct SupersededRow {
     pub id: String,
@@ -142,16 +131,6 @@ pub struct GraveRow {
     pub reason: Option<String>,
 }
 
-/// An active artifact nobody has confirmed or retrieved in a while.
-pub struct StaleRow {
-    pub id: String,
-    pub title: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`.
-    pub named: bool,
-    pub last_verified: String,
-}
-
 /// One phrase of the last day: "412 links forgotten".
 #[derive(serde::Serialize)]
 pub(crate) struct SweepCount {
@@ -178,17 +157,6 @@ pub(crate) struct SweepRunRow {
 #[derive(Template)]
 #[template(path = "insights.html")]
 struct InsightsTemplate {
-    /// Decisions waiting on a person. Empty renders nothing at all. Grouped,
-    /// because one artifact against three others is one decision and arrived
-    /// as three — see `group_pairs`.
-    ///
-    /// It used to sit on Capture, "where the work arrives". Capture is a verb
-    /// now and not a page, and this was never work *with* the base anyway —
-    /// it is work on it, which is what this page is.
-    pairs: Vec<crate::web::ops::PairCluster>,
-    /// How many more are behind the ones shown. Said once under the list, so a
-    /// short list does not read as an empty one when it is a capped one.
-    more_pairs: i64,
     /// How much is held, and how densely.
     held: crate::store::insights::Held,
     /// How much use is standing on the base, bucketed in units of an open.
@@ -203,16 +171,13 @@ struct InsightsTemplate {
     /// What the base did to its own ranking. `None` before a generation
     /// exists, which is a base whose boot path has not run yet.
     evolve: Option<EvolveView>,
-    /// The holes, one row each: a group the sweep named, or a question it has
-    /// not grouped yet, shown under itself. Empty when feedback is off.
-    gaps: Vec<crate::web::ui::GapGroup>,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
     vector_count: u64,
     retrying: Vec<RetryingRow>,
-    /// Everything the base has set aside, in one list. See [`SetAsideRow`] for
-    /// what this replaced and why.
+    /// What the base did on its own and left an undo for, in one list. See
+    /// [`SetAsideRow`] for what this replaced and why.
     set_aside: Vec<SetAsideRow>,
     /// Any of the reads behind the list hit its cap, so there are rows this
     /// page is not showing. Said out loud, because a list that stops without
@@ -223,10 +188,9 @@ struct InsightsTemplate {
     /// feature that is switched off.
     links: Option<crate::store::links::LinkCounts>,
     /// Recent pursuits, only when the feature is on. A count and not a table:
-    /// a pursuit that ended unsatisfied is a hole in the base and belongs on
-    /// the one list of those, not on a second list of its own; one that ended
-    /// satisfied needs nobody; and one that was written up is in `generated`
-    /// above.
+    /// a pursuit that ended unsatisfied is a hole the base goes on working on
+    /// by itself; one that ended satisfied needs nobody; and one that was
+    /// written up is a `generated` row on the journal below.
     pursuit_enabled: bool,
     pursuit_recent: usize,
     pursuit_unsatisfied: usize,
@@ -286,7 +250,7 @@ pub(crate) struct MergedRow {
     orphaned: bool,
 }
 
-/// One thing the base has set aside for a person.
+/// One thing the base did on its own, with the button that takes it back.
 ///
 /// Seven tables stood here — Merged, Generated, Hidden as stale, Reaped, Worth
 /// a second look, Hidden as near-identical, and Captures waiting on a decision
@@ -294,7 +258,13 @@ pub(crate) struct MergedRow {
 /// column layout. They were the same shape: a thing, why the base touched it,
 /// what it put beside it, and the button that takes it back. Seven paragraphs
 /// of that is a page about the machine's internal categories; one table with a
-/// reason on each row is a page about what is waiting.
+/// reason on each row is a page about what the base did.
+///
+/// Two of the seven were questions rather than work: a capture that resembled
+/// another, and an artifact nobody had confirmed in a while. The base settles
+/// both itself now — the duplicates pass compares what the two say, and a good
+/// answer confirms the notes it was drawn from — so every row left is a
+/// journal entry with its undo.
 ///
 /// The reads are unchanged — each source still runs its own query with its own
 /// cap — and this is the fold. `kind` is what the row is called; `why` is the
@@ -302,21 +272,21 @@ pub(crate) struct MergedRow {
 /// differs per row.
 pub(crate) struct SetAsideRow {
     href: String,
-    /// What the row's actions name. Which thing that is depends on `kind` —
-    /// a corpus for `parked`, the artifact for every other kind, `merged`
+    /// What the row's undo names: the artifact, for every kind — `merged`
     /// included, whose undo route takes the artifact the merge wrote and not
-    /// the journal action that wrote it — and a client reads it against
-    /// `kind` rather than taking it apart. Carried beside `href` rather than
-    /// parsed out of it: a link is a route, not an identity.
+    /// the journal action that wrote it — so a client reads it against `kind`
+    /// rather than taking it apart. Carried beside `href` rather than parsed
+    /// out of it: a link is a route, not an identity.
     ///
-    /// Not an identity on its own either: two of the seven questions can be
-    /// true of one artifact at once, so a row is identified by `kind` and
+    /// Not an identity on its own either: one artifact can be both written by
+    /// the base and later hidden by it, so a row is identified by `kind` and
     /// `subject_id` together. Under one `kind` a subject appears once — see
     /// `Store::artifacts_by_status`, which is where that is kept true.
     pub(crate) subject_id: String,
-    /// The artifact to open where the row is about one. `None` for a parked
-    /// capture, which is a corpus.
-    pub(crate) artifact_id: Option<String>,
+    /// The artifact to open. The same as `subject_id` on every row now that
+    /// none is about a corpus, and named apart so a client opening one does
+    /// not have to know that.
+    pub(crate) artifact_id: String,
     pub(crate) title: String,
     /// See `ui::RowLabel::named`. A label that is the artifact's own opening
     /// is set as text, not in the place a name would go.
@@ -329,7 +299,7 @@ pub(crate) struct SetAsideRow {
     /// from 3 others" rather than "the dedupe pass wrote this".
     pub(crate) why: String,
     /// What the base put beside it: the sources a merge came from, the artifact
-    /// a near-duplicate lost to, the capture a park collided with.
+    /// a near-duplicate lost to.
     pub(crate) beside: Vec<crate::web::ui::SourceRow>,
     /// A note under the row for the one thing that is not simply reversible.
     pub(crate) caveat: Option<String>,
@@ -340,9 +310,6 @@ pub(crate) struct SetAsideRow {
 pub(crate) struct SetAsideAction {
     action: String,
     label: &'static str,
-    /// The name/value pair the three-way park decision posts. Empty for every
-    /// other row, whose action is the whole of what it says.
-    field: Option<(&'static str, &'static str)>,
     /// Why the button is there, for a pointer and for a screen reader. The
     /// icons these replaced carried it in a `title`, which is nowhere on a
     /// phone; the labels carry it now and this is the long form.
@@ -354,39 +321,19 @@ impl SetAsideAction {
         Self {
             action,
             label,
-            field: None,
             hint,
         }
     }
 }
 
-/// The seven things the base set aside, folded into one list, and whether any
-/// of their caps bit.
+/// The five things the base did on its own, folded into one list, and whether
+/// any of their caps bit.
 ///
 /// Extracted from the page so the JSON door answers the same rows: two
-/// accounts of what is waiting for a person would differ the first time one of
-/// the seven sources changed, and the row carries an undo, so the difference
+/// accounts of what the base did would differ the first time one of the five
+/// sources changed, and the row carries an undo, so the difference
 /// would be about what can still be taken back.
 pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>, bool)> {
-    // A capture flagged as a near-duplicate is read and searchable as usual;
-    // this is the one place a person can still keep only one of the two.
-    let mut parked = Vec::new();
-    for c in tenant.core.store.parked_corpora(50).await? {
-        let other_id = c.near_dupe_of.clone().unwrap_or_default();
-        let other_title = match tenant.core.store.get_corpus(&other_id).await {
-            Ok(o) => o.title_hint.unwrap_or_else(|| "untitled".into()),
-            Err(_) => "(deleted)".into(),
-        };
-        parked.push(ParkedRow {
-            percent: (c.near_dupe_score.unwrap_or(0.0) * 100.0).round() as i64,
-            bytes: c.raw_text.len(),
-            title: c.title_hint.clone().unwrap_or_else(|| "untitled".into()),
-            id: c.id,
-            other_id,
-            other_title,
-        });
-    }
-
     let mut superseded = Vec::new();
     // One past the cap, so the page can say it is capped rather than truncate
     // in silence — a table that stops at 25 with nothing said reads as a table
@@ -521,119 +468,18 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
     let more_reaped = reaped.len() > DEPRECATED_CAP as usize;
     reaped.truncate(DEPRECATED_CAP as usize);
 
-    // Read-only candidates: nothing here has been changed, only listed.
-    let stale: Vec<StaleRow> = tenant
-        .core
-        .stale_candidates(50)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "no stale candidates for ops");
-            vec![]
-        })
-        .into_iter()
-        .map(|r| StaleRow {
-            // A stale candidate is a search result, so the flag is already on
-            // it: `borrowed_name` covers a passage carrying its section's
-            // heading as well as one that never had a title at all.
-            named: !r.borrowed_name && r.title.is_some(),
-            title: match r.borrowed_name {
-                true => markdown::snippet(&r.text, 60),
-                false => r
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| markdown::snippet(&r.text, 60)),
-            },
-            id: r.artifact_id,
-            last_verified: r
-                .last_verified_at
-                .map(fmt_time)
-                .unwrap_or_else(|| "never".to_string()),
-        })
-        .collect();
-
-    // Seven lists into one. Order is by how much the row wants a person:
-    // a flagged near-duplicate may be a copy to drop, an unverified artifact
-    // is a question, and the rest are the base's own work with the undo left
-    // where it can be found.
+    // Five lists into one, newest kind of work first: what the base wrote,
+    // then what it hid, then what it buried. Every row is something the base
+    // did on its own, with the undo left where it can be found — nothing on
+    // this list is waiting to be told anything.
     let set_aside_capped = more_merged || more_superseded || more_deprecated || more_reaped;
     let mut set_aside: Vec<SetAsideRow> = Vec::new();
-    for p_ in parked {
-        set_aside.push(SetAsideRow {
-            href: format!("/ui/corpora/{}", p_.id),
-            subject_id: p_.id.clone(),
-            artifact_id: None,
-            // A corpus label is always a name: `corpus_label` falls back to
-            // "document" or the opening rather than to nothing.
-            named: true,
-            title: p_.title,
-            subtitle: format!("{} B", p_.bytes),
-            kind: "parked",
-            why: format!("{}% the same as the capture beside it — both are searchable; keep one if they are the same", p_.percent),
-            beside: vec![crate::web::ui::SourceRow {
-                id: String::new(),
-                title: p_.other_title,
-                named: true,
-                subtitle: String::new(),
-                corpus_id: p_.other_id,
-            }],
-            caveat: None,
-            actions: vec![
-                SetAsideAction {
-                    action: format!("/ui/ops/corpora/{}/resolve", p_.id),
-                    label: "Replace the old one",
-                    field: Some(("action", "replace")),
-                    hint: "Keep this capture and retire the one beside it",
-                },
-                SetAsideAction {
-                    action: format!("/ui/ops/corpora/{}/resolve", p_.id),
-                    label: "Keep both",
-                    field: Some(("action", "keep_both")),
-                    hint: "They differ; both stay in the base",
-                },
-                SetAsideAction {
-                    action: format!("/ui/ops/corpora/{}/resolve", p_.id),
-                    label: "Discard this",
-                    field: Some(("action", "discard")),
-                    hint: "Drop this capture and keep the one beside it",
-                },
-            ],
-        });
-    }
-    for s in stale {
-        set_aside.push(SetAsideRow {
-            href: format!("/ui/artifacts/{}", s.id),
-            subject_id: s.id.clone(),
-            artifact_id: Some(s.id.clone()),
-            named: s.named,
-            title: s.title,
-            subtitle: String::new(),
-            kind: "unverified",
-            why: format!(
-                "last confirmed {}, and rarely reached since — nothing has been changed, and this never moves search",
-                s.last_verified
-            ),
-            beside: Vec::new(),
-            caveat: None,
-            actions: vec![
-                SetAsideAction::new(
-                    format!("/ui/ops/artifacts/{}/verify", s.id),
-                    "Still accurate",
-                    "Confirm this is still accurate — it resets the artifact's age, which search reads",
-                ),
-                SetAsideAction::new(
-                    format!("/ui/ops/artifacts/{}/deprecate", s.id),
-                    "Hide",
-                    "Hide from results — the artifact is kept, and this can be undone",
-                ),
-            ],
-        });
-    }
     for m in merged {
         let n = m.sources.len();
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", m.id),
             subject_id: m.id.clone(),
-            artifact_id: Some(m.id.clone()),
+            artifact_id: m.id.clone(),
             named: m.named,
             title: m.title,
             subtitle: m.subtitle,
@@ -659,7 +505,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", g.id),
             subject_id: g.id.clone(),
-            artifact_id: Some(g.id.clone()),
+            artifact_id: g.id.clone(),
             named: g.named,
             title: g.title,
             subtitle: g.subtitle,
@@ -688,7 +534,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", s.id),
             subject_id: s.id.clone(),
-            artifact_id: Some(s.id.clone()),
+            artifact_id: s.id.clone(),
             named: s.named,
             title: s.title,
             subtitle: s.subtitle,
@@ -718,7 +564,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", d.id),
             subject_id: d.id.clone(),
-            artifact_id: Some(d.id.clone()),
+            artifact_id: d.id.clone(),
             named: d.named,
             title: d.title,
             subtitle: String::new(),
@@ -737,7 +583,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
         set_aside.push(SetAsideRow {
             href: format!("/ui/artifacts/{}", g.id),
             subject_id: g.id.clone(),
-            artifact_id: Some(g.id.clone()),
+            artifact_id: g.id.clone(),
             named: g.named,
             title: g.title,
             subtitle: String::new(),
@@ -879,12 +725,9 @@ pub(crate) struct Report {
     /// Runs of searches that went quiet, and how many are on the gap list.
     /// Null while `[learn]` is off.
     pub pursuits: Option<(usize, usize)>,
-    /// How many pairs are waiting beyond the ones `GET /pairs` lists.
-    pub more_pairs: i64,
 }
 
 pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
-    let (_, more_pairs) = crate::web::ops::pair_rows(tenant).await?;
     let pursuits = match tenant.core.learn.enabled {
         true => {
             let recent = tenant.core.store.recent_pursuits(50).await?;
@@ -906,45 +749,11 @@ pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
         sleep: sleep_view(&tenant.core).await?,
         evolve: evolve_view(&tenant.core).await?,
         pursuits,
-        more_pairs,
     })
 }
 
 async fn page(tenant: Tenant) -> UiResult<Response> {
     use sqlx::Row;
-
-    let (pairs, more_pairs) = crate::web::ops::pair_rows(&tenant).await?;
-    let pairs = crate::web::ops::group_pairs(pairs);
-
-    // Read, never computed: the page shows what the sweep grouped and named,
-    // and whatever has been judged since sits under itself until the next
-    // pass. Nothing here embeds or calls a model.
-    let gaps = if tenant.core.learn.enabled {
-        let (rows, loose) = tenant
-            .core
-            .store
-            .gap_rows(tenant.core.embedder.model(), tenant.core.weak_below())
-            .await?;
-        // A group and a lone question are one row each and read the same:
-        // what the sweep called the group, or what somebody typed. Which of
-        // the two it is matters to nobody deciding what to do about it.
-        rows.into_iter()
-            .map(|r| crate::web::ui::GapGroup {
-                label: r.label,
-                members: r
-                    .members
-                    .into_iter()
-                    .map(crate::web::ui::gap_member)
-                    .collect(),
-            })
-            .chain(loose.into_iter().map(|g| crate::web::ui::GapGroup {
-                label: g.text.clone(),
-                members: vec![crate::web::ui::gap_member(g)],
-            }))
-            .collect()
-    } else {
-        vec![]
-    };
 
     let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
@@ -1091,9 +900,6 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                 note: "not recording searches, so there is nothing to measure".into(),
             },
         },
-        pairs,
-        more_pairs,
-        gaps,
         retrying,
         set_aside,
         set_aside_capped,
@@ -1149,9 +955,9 @@ pub(crate) struct SleepView {
     unrehearsed: Vec<(String, String)>,
 }
 
-/// One sleep as a sentence chain. Every number a person can act on has a
-/// page: conflicts are on the pair set_aside, adoptions and undos on the evolve
-/// block below this one.
+/// One sleep as a sentence chain. Every number that has an undo has a place
+/// on this page: adoptions and corpus actions on the evolve block below this
+/// one, merges and hidings on the journal further down.
 fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
     let mut s = format!("{} — ", ago(r.started));
     match r.stopped.as_str() {
@@ -1606,8 +1412,7 @@ mod tests {
             html.contains(r#"href="/ui""#),
             "and a way back to the one place there is anything to do"
         );
-        // Only the measures are gated. A gap is a question the base could not
-        // answer, which is exactly what an empty base produces, and the sweeps
+        // Only the measures are gated. A reminder can be due and the sweeps
         // run whether or not anything was ever captured — a page-wide guard
         // would hide both. What is noisy rather than absent goes behind the
         // disclosure at the foot instead.
@@ -1779,6 +1584,188 @@ mod tests {
         let before = embedder.calls();
         let _ = insights(core).await;
         assert_eq!(embedder.calls(), before, "the page embeds something");
+    }
+
+    /// Every decision the base used to wait on a person for is one it now
+    /// makes itself, so the page that listed them lists what it did instead.
+    /// Seeded with one of each thing that used to put a question here: a
+    /// disagreement, a capture that resembles another, an artifact nobody has
+    /// confirmed in a year, a question nothing answered — and a merge, which
+    /// is the base's own work and keeps its undo.
+    #[tokio::test]
+    async fn insights_asks_nothing_of_anyone() {
+        use crate::store::actions::{Job, Kind, NewAction};
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+
+        // A disagreement the judge filed and nobody may settle.
+        let ids =
+            crate::web::test_support::artifacts(&core, &["the timeout is 30", "the timeout is 90"])
+                .await;
+        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
+        let pid = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+            .id;
+        core.store
+            .set_pair_state(
+                pid,
+                crate::store::pairs::PairState::Contradiction,
+                Some("30 against 90"),
+                crate::store::pairs::DecidedBy::Model,
+            )
+            .await
+            .unwrap();
+
+        // A capture flagged as resembling another.
+        let first = core
+            .store
+            .insert_corpus("mount the volume first", "web", None)
+            .await
+            .unwrap();
+        let second = core
+            .store
+            .insert_corpus("mount the volume first, then write", "web", None)
+            .await
+            .unwrap();
+        core.store
+            .set_near_dupe(&second.id, Some(&first.id), Some(0.95))
+            .await
+            .unwrap();
+
+        // An artifact last confirmed at the epoch and never retrieved since.
+        core.ingest("an old note nobody reads", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        for id in core.store.list_all_artifact_ids().await.unwrap() {
+            core.vectors
+                .set_last_verified_at(&id, 1, false)
+                .await
+                .unwrap();
+        }
+        assert!(
+            !core.stale_candidates(10).await.unwrap().is_empty(),
+            "the fixture has no unverified artifact to leave off the page"
+        );
+
+        // A question nothing answered.
+        let ask = core
+            .store
+            .record_ask(crate::store::asks::NewAsk {
+                question: "how do ticks work".into(),
+                filters: "{}".into(),
+                query_vec: vec![1.0, 0.0],
+                embed_model: core.embedder.model().into(),
+                answer: "Not in the knowledge base.".into(),
+                abstained: true,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        core.store
+            .judge_ask(&ask, crate::store::asks::AskVerdict::NothingHere)
+            .await
+            .unwrap();
+
+        // And a merge the base wrote and journaled.
+        let roots = crate::web::test_support::artifacts(&core, &["left half", "right half"]).await;
+        let merged = core
+            .store
+            .insert_merged_artifact(
+                &crate::store::artifacts::NewMerged {
+                    text: "left half and right half".into(),
+                    title: Some("Both halves".into()),
+                    ..Default::default()
+                },
+                &roots,
+            )
+            .await
+            .unwrap();
+        core.store
+            .record_action(&NewAction {
+                job: Job::Dedupe,
+                kind: Kind::Merge,
+                subject_id: roots[0].clone(),
+                survivor_id: Some(merged.id.clone()),
+                detail: None,
+                evidence: serde_json::json!({}),
+                pair_score: None,
+            })
+            .await
+            .unwrap();
+
+        let html = insights(core).await;
+        assert!(!html.contains("Needs you"), "{html}");
+        assert!(!html.contains("Knowledge gaps"), "{html}");
+        assert!(!html.contains("Still accurate"), "{html}");
+        assert!(!html.contains("Keep both"), "{html}");
+        assert!(!html.contains("/ui/ops/pairs/"), "{html}");
+        assert!(!html.contains("/resolve"), "{html}");
+        assert!(!html.contains("/ui/gaps/"), "{html}");
+        assert!(html.contains("What the base did"), "{html}");
+        assert!(html.contains("Undo"), "the merge keeps its undo: {html}");
+        assert!(
+            html.contains(&format!("/ui/ops/merges/{}/undo", merged.id)),
+            "and the undo is the merge's own: {html}"
+        );
+    }
+
+    /// No door is left that asks for a decision. Every one of these answered
+    /// a question the base now settles itself, so each is a path nobody
+    /// routed — whichever of 404 or 405 the router gives a path it half
+    /// knows.
+    #[tokio::test]
+    async fn the_decision_routes_are_gone() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        for (method, uri) in [
+            ("POST", "/api/v1/pairs/1/supersede"),
+            ("POST", "/api/v1/pairs/1/synthesize"),
+            ("POST", "/api/v1/pairs/1/dismiss"),
+            ("POST", "/api/v1/pairs/1/discard"),
+            ("GET", "/api/v1/pairs"),
+            ("GET", "/api/v1/gaps"),
+            ("POST", "/api/v1/gaps/forget"),
+            ("POST", "/api/v1/gaps/ask/x/dismiss"),
+            ("POST", "/api/v1/artifacts/x/verify"),
+            ("POST", "/api/v1/artifacts/x/reviewed"),
+            ("POST", "/api/v1/corpora/x/resolve"),
+            ("POST", "/ui/ops/pairs/1/supersede"),
+            ("POST", "/ui/ops/pairs/1/synthesize"),
+            ("POST", "/ui/ops/pairs/1/dismiss"),
+            ("POST", "/ui/ops/pairs/1/discard"),
+            ("POST", "/ui/ops/corpora/x/resolve"),
+            ("POST", "/ui/ops/artifacts/x/verify"),
+            ("POST", "/ui/artifacts/x/reviewed"),
+            ("POST", "/ui/gaps/forget"),
+            ("POST", "/ui/gaps/ask/x/dismiss"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    res.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{method} {uri} answered {}",
+                res.status()
+            );
+        }
     }
 
     /// The deck is gone: pairs are made at the moment of the search — a result

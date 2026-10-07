@@ -550,8 +550,8 @@ where
 ///
 /// It files nothing, and that is the point. It used to record an
 /// `artifact_pairs` row per interferer, which put a ranking observation onto a
-/// queue whose cards make claims about meaning: `_decide.html` renders a pair
-/// as "these two disagree", and two documents sharing a template outrank each
+/// queue whose cards made claims about meaning: the review card rendered a
+/// pair as "these two disagree", as search and Ask still say of a real one, and two documents sharing a template outrank each
 /// other constantly while agreeing about everything. A base's whole queue was
 /// this rule's output — cover pages against cover pages, one town's shop
 /// listings against another's — and not one of them was a disagreement.
