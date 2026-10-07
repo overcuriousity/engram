@@ -48,7 +48,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
 @Composable
-fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: () -> Unit = {}, onUnpair: () -> Unit) {
+fun SettingsScreen(engram: Engram, onScreen: (Screen) -> Unit = {}, onQueue: () -> Unit = {}, onUnpair: () -> Unit) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val c by engram.store.current.collectAsStateWithLifecycle()
@@ -232,25 +232,20 @@ fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: ()
             }
         }
         Section("Insights") {
-            JudgeLine("What this memory is like", null) { onJudging(Screen.Insights) }
-        }
-        // Where judging lives, and the only place it is offered from. Not a
-        // tab, not a section on home, and no count until somebody has opened
-        // the screen that fetched one.
-        Section("Judging") {
-            val pairs by JudgeCounts.pairs.collectAsStateWithLifecycle()
-            val gaps by JudgeCounts.gaps.collectAsStateWithLifecycle()
-            val aside by JudgeCounts.setAside.collectAsStateWithLifecycle()
-            JudgeLine("Duplicate pairs", pairs) { onJudging(Screen.Pairs) }
-            JudgeLine("Gaps", gaps) { onJudging(Screen.Gaps) }
-            JudgeLine("While you were away", aside) { onJudging(Screen.Journal) }
+            GoLine("What this memory is like", null) { onScreen(Screen.Insights) }
+            // The journal of what the base did on its own. It was one of three
+            // judging lines here; the pairs and the gaps went when the base
+            // began settling them itself. Not a tab, not a section on home,
+            // and no count until somebody has opened the screen that fetched one.
+            val done by journalCount.collectAsStateWithLifecycle()
+            GoLine("What the base did", done) { onScreen(Screen.Journal) }
         }
         // The way to the queue while nothing is owed. It leaves the top bar
         // then; this is where somebody who wants to look anyway can.
         Section("Queue") {
             val owed by engram.outbox.rows.collectAsStateWithLifecycle(emptyList())
             val n = queuedCount(owed)
-            JudgeLine(if (n > 0) "$n owed to the server" else "Nothing owed", null, onQueue)
+            GoLine(if (n > 0) "$n owed to the server" else "Nothing owed", null, onQueue)
         }
         Section("This phone") {
             Line(engram.situation.bundle(placeOn).toString(), muted = true, mono = true)
@@ -273,7 +268,7 @@ fun SettingsScreen(engram: Engram, onJudging: (Screen) -> Unit = {}, onQueue: ()
 }
 
 @Composable
-private fun JudgeLine(label: String, count: Int?, onClick: () -> Unit) {
+private fun GoLine(label: String, count: Int?, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,

@@ -16,8 +16,8 @@ import org.robolectric.annotation.Config
 
 /**
  * The answers an artifact admits, and the one that asks first. The rule is the
- * web pane's: verify and hide for an artifact in results, the way back for one
- * that is not, delete whatever its status — and delete never on one press.
+ * web pane's: hide for an artifact in results, the way back for one that is
+ * not, delete whatever its status — and delete never on one press.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [35])
@@ -25,13 +25,12 @@ class DecisionsTest {
     @get:Rule val compose = createComposeRule()
 
     @Test fun whichAnswersAnArtifactAdmitsDependsOnWhetherItIsInResults() {
-        assertEquals(listOf(ArtifactAnswer.Verify, ArtifactAnswer.Hide, ArtifactAnswer.Delete), answersFor("active", null))
+        assertEquals(listOf(ArtifactAnswer.Hide, ArtifactAnswer.Delete), answersFor("active", null))
         assertEquals(listOf(ArtifactAnswer.Reactivate, ArtifactAnswer.Delete), answersFor("deprecated", null))
         assertEquals(listOf(ArtifactAnswer.Reactivate, ArtifactAnswer.Delete), answersFor("active", "winner"))
     }
 
     @Test fun deleteAsksFirstAndTheOthersDoNot() {
-        var verified = 0
         var hidden = 0
         var deleted = 0
         compose.setContent {
@@ -39,14 +38,16 @@ class DecisionsTest {
                 Decisions(
                     chunk = Chunk(id = "a", text = "t", status = "active"),
                     decided = null,
-                    onVerify = { verified++ }, onHide = { hidden++ }, onReactivate = {}, onDelete = { deleted++ },
+                    onHide = { hidden++ }, onReactivate = {}, onDelete = { deleted++ },
                     onUndo = {}, onWinner = {},
                 )
             }
         }
-        compose.onNodeWithText("Still accurate").performClick()
+        // A good answer confirms the notes it was drawn from now; there is no
+        // press here that asks a person to.
+        compose.onNodeWithText("Still accurate").assertDoesNotExist()
         compose.onNodeWithText("Hide from results").performClick()
-        assertEquals(1, verified); assertEquals(1, hidden)
+        assertEquals(1, hidden)
 
         compose.onNodeWithText("Delete").performClick()
         assertEquals("a press is a question, not a deletion", 0, deleted)
@@ -67,7 +68,7 @@ class DecisionsTest {
             EngramTheme {
                 Decisions(
                     chunk = Chunk(id = "a", text = "t", status = "active", supersededBy = "w"),
-                    decided = null, onVerify = {}, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
+                    decided = null, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
                 )
             }
         }
@@ -85,7 +86,7 @@ class DecisionsTest {
                 Decisions(
                     chunk = Chunk(id = "a", text = "t", status = "active"),
                     decided = Decision(ArtifactAnswer.Hide, row = "row-1"),
-                    onVerify = {}, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = { undone = it }, onWinner = {},
+                    onHide = {}, onReactivate = {}, onDelete = {}, onUndo = { undone = it }, onWinner = {},
                 )
             }
         }

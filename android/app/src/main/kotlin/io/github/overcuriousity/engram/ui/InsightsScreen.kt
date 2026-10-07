@@ -3,35 +3,52 @@ package io.github.overcuriousity.engram.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import io.github.overcuriousity.engram.core.Engram
+import io.github.overcuriousity.engram.core.outbox.ArtifactOp
 import io.github.overcuriousity.engram.core.read.Api
 import io.github.overcuriousity.engram.core.read.Decode
 import io.github.overcuriousity.engram.core.read.Machine
+import io.github.overcuriousity.engram.core.read.SetAsideAction
+import io.github.overcuriousity.engram.core.read.SetAsideRow
+import io.github.overcuriousity.engram.core.read.actionsFor
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * What this memory is like, and what the base did on its own: the web's
- * Insights, behind Settings for the reason judging is. The measures are
- * aggregates over tables that exist; nothing here embeds or calls a model.
- * Disclosure and nothing else: the base tunes itself, and this page says
- * what it did.
+ * Insights, behind Settings rather than on the screen the app opens on. The
+ * measures are aggregates over tables that exist; nothing here embeds or calls
+ * a model. Disclosure and nothing else: the base tunes and curates itself, and
+ * this page says what it did.
  */
 @Composable
 fun InsightsScreen(
     engram: Engram,
-    onJudging: (Screen) -> Unit,
+    onJournal: () -> Unit,
     onArtifact: (String) -> Unit,
     onCorpus: (String) -> Unit,
     onLibrary: () -> Unit,
@@ -44,7 +61,7 @@ fun InsightsScreen(
         ReadFrame(insights) { i ->
             if (i.held.corpora == 0L) {
                 Text("Nothing is held yet", Modifier.padding(16.dp, 8.dp), style = MaterialTheme.typography.titleMedium)
-                Text("This page measures what the base holds and lists what needs you. The measures wait on there being something in it.", Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted())
+                Text("This page measures what the base holds and says what it did on its own. The measures wait on there being something in it.", Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted())
                 return@ReadFrame
             }
             SectionHead("What this memory is like")
@@ -89,13 +106,16 @@ fun InsightsScreen(
                     if (e.actions.isNotEmpty()) Fold("what the base did to the corpus (${e.actions.size})") { e.actions.forEach { Text(it, style = MaterialTheme.typography.labelMedium, color = muted()) } }
                 }
             }
-            SectionHead("Needs you")
-            Line("Duplicate pairs" + (if (rep.morePairs > 0) " · ${rep.morePairs} more waiting" else "")) { onJudging(Screen.Pairs) }
-            Line("Gaps") { onJudging(Screen.Gaps) }
-            Line("Set aside for you") { onJudging(Screen.Journal) }
+            // There were lines here to the duplicate pairs and the gaps. The base
+            // answers both itself now, so what is left is the journal of what
+            // it did, each row with the answer that takes it back.
+            SectionHead("What the base did")
+            Line("What it merged, wrote, hid and buried") { onJournal() }
+            // A run that ended unanswered is a hole the base keeps working on by
+            // itself; there is no list of them for anybody to answer.
             rep.pursuits?.let { (recent, unsatisfied) ->
                 if (recent > 0) Text(
-                    "$recent run${if (recent != 1L) "s" else ""} of searches went quiet" + (if (unsatisfied > 0) ", of which $unsatisfied went unanswered and ${if (unsatisfied == 1L) "is" else "are"} on the gap list" else "") + ".",
+                    "$recent run${if (recent != 1L) "s" else ""} of searches went quiet" + (if (unsatisfied > 0) ", of which $unsatisfied went unanswered" else "") + ".",
                     Modifier.padding(16.dp, 4.dp), style = MaterialTheme.typography.bodySmall, color = muted(),
                 )
             }
@@ -150,6 +170,165 @@ fun MachineView(m: Machine) {
                 m.retrying.forEach { Text("${it.stage} · ${it.targetId} · ${it.attempts} attempts · next ${it.due} · ${it.lastError}", style = MaterialTheme.typography.labelSmall, color = muted()) }
             }
             if (!wrong && m.retrying.isEmpty()) Text("Nothing retrying.", style = MaterialTheme.typography.bodySmall, color = muted())
+        }
+    }
+}
+
+// ── What the base did ────────────────────────────────────────────────────────
+
+/*
+ * The journal: what the base merged, wrote, hid and buried on its own, each
+ * row with the answer that takes it back. Nothing in it is a question. It was
+ * one screen of three behind Settings — duplicate pairs and gaps were the
+ * others — and is the one left, because the base settles those itself now.
+ *
+ * Every answer goes through the outbox like every other write the device owes.
+ * That is what makes an answer on a train an answer, and it is where the undo
+ * gets its window for free: until the row is delivered, taking it back is
+ * deleting a row.
+ *
+ * The list is drawn by a composable that knows nothing about Engram, so what a
+ * row may say can be checked without a device.
+ */
+
+/**
+ * How many rows the last opened journal read held. Session-lived, and never
+ * fetched for: a count appears on the Settings line only once somebody has
+ * opened the screen that fetched it. Nothing here is a badge, and nothing polls.
+ */
+internal val journalCount = MutableStateFlow<Int?>(null)
+
+@Composable
+fun JournalScreen(engram: Engram, onArtifact: (String) -> Unit, onCorpus: (String) -> Unit) {
+    val state = rememberRead(engram, Api.setAside(), Decode.setAside)
+    Column(Modifier.fillMaxSize()) {
+        Text("What the base did", Modifier.padding(16.dp, 8.dp), style = MaterialTheme.typography.titleLarge)
+        ReadFrame(state) { s ->
+            LaunchedEffect(s.items.size) { journalCount.value = s.items.size }
+            Journal(
+                rows = s.items,
+                capped = s.capped,
+                onAction = { row, a ->
+                    when (a) {
+                        SetAsideAction.Deprecate -> engram.outbox.enqueueArtifactOp(row.subjectId, ArtifactOp.deprecate)
+                        SetAsideAction.Reactivate -> engram.outbox.enqueueArtifactOp(row.subjectId, ArtifactOp.reactivate)
+                        SetAsideAction.UndoMerge -> engram.outbox.enqueueMergeUndo(row.subjectId)
+                    }
+                },
+                onUndo = { engram.outbox.undo(it) },
+                // A row from a server old enough to list parked captures names
+                // a corpus and no artifact; it opens where it can.
+                onOpen = { row -> row.artifactId?.let(onArtifact) ?: onCorpus(row.subjectId) },
+            )
+        }
+    }
+}
+
+/** What a journal row's button says. The answer is the server's; the words are ours. */
+fun setAsideWords(a: SetAsideAction): String = when (a) {
+    SetAsideAction.Deprecate -> "Hide"
+    SetAsideAction.Reactivate -> "Return to results"
+    SetAsideAction.UndoMerge -> "Undo the merge"
+}
+
+/**
+ * What tells one journal row from another.
+ *
+ * Not `subject_id` alone: one artifact can be under two kinds at once — one
+ * the base wrote and later hid is a `generated` row and a `hidden` one — and
+ * they take different answers. Keyed by the subject alone, answering either
+ * made both disappear, the second having been enqueued for nothing, and one
+ * Undo put both back. Under one `kind` a subject appears once; the server
+ * keeps that true.
+ */
+internal fun keyOf(row: SetAsideRow): String = "${row.kind}\u0000${row.subjectId}"
+
+@Composable
+fun Journal(
+    rows: List<SetAsideRow>,
+    capped: Boolean,
+    onAction: suspend (SetAsideRow, SetAsideAction) -> String,
+    onUndo: suspend (String) -> Boolean,
+    onOpen: (SetAsideRow) -> Unit,
+    modifier: Modifier = Modifier.verticalScroll(rememberScrollState()),
+) {
+    val scope = rememberCoroutineScope()
+    // Kept across reads, not keyed on `rows`. A read emits twice — the held
+    // answer, then the server's — and the second is a different object, so an
+    // answer given during the held one would otherwise be forgotten and the
+    // row answerable twice. `keyOf` is stable across reads, which is what
+    // this holds.
+    val answered = remember { mutableStateListOf<String>() }
+    var undo by remember { mutableStateOf<Undoable?>(null) }
+
+    Column(modifier) {
+        undo?.let { u ->
+            UndoBar(u.words) {
+                scope.launch {
+                    if (onUndo(u.outboxId)) answered.remove(u.subject)
+                    undo = null
+                }
+            }
+        }
+        if (rows.isEmpty()) {
+            Text("Nothing the base did is waiting to be taken back", Modifier.padding(16.dp), color = muted())
+            return@Column
+        }
+        rows.filter { keyOf(it) !in answered }.forEach { row ->
+            Column(Modifier.fillMaxWidth().padding(16.dp, 10.dp)) {
+                Label(row.label, row.named)
+                if (row.subtitle.isNotEmpty()) {
+                    Text(row.subtitle, style = MaterialTheme.typography.labelSmall, color = muted())
+                }
+                Text(row.why, style = MaterialTheme.typography.bodyMedium, color = muted())
+                row.beside.forEach {
+                    Text("· ${it.label}", style = MaterialTheme.typography.bodySmall, color = muted())
+                }
+                row.caveat?.let {
+                    Text("⚠ $it", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { onOpen(row) }) { Text("Open") }
+                    // A kind this build has never heard of draws no buttons.
+                    // It is still worth showing: what the base did is worth
+                    // knowing even where this app cannot answer it.
+                    actionsFor(row.kind).forEach { a ->
+                        TextButton(onClick = {
+                            scope.launch {
+                                val id = onAction(row, a)
+                                answered += keyOf(row)
+                                undo = Undoable(id, keyOf(row), setAsideWords(a))
+                            }
+                        }) { Text(setAsideWords(a)) }
+                    }
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        }
+        if (capped) {
+            Text("…and more than is listed", Modifier.padding(16.dp, 8.dp), style = MaterialTheme.typography.labelSmall, color = muted())
+        }
+    }
+}
+
+/** An answer that is on its way and can still be taken back. */
+data class Undoable(val outboxId: String, val subject: String, val words: String)
+
+/**
+ * The window an outbox row gives for free. It stays until the next answer, and
+ * takes the row back out of the queue while it is still queued — never a
+ * second write undoing the first, which is a different and less honest thing.
+ */
+@Composable
+private fun UndoBar(words: String, onUndo: () -> Unit) {
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.padding(start = 16.dp, end = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(words, style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onUndo) { Text("Undo") }
         }
     }
 }

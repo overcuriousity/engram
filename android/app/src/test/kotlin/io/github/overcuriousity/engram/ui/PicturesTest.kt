@@ -14,8 +14,6 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.unit.dp
 import io.github.overcuriousity.engram.core.read.Beside
 import io.github.overcuriousity.engram.core.read.Hit
-import io.github.overcuriousity.engram.core.read.Pair
-import io.github.overcuriousity.engram.core.read.PairSide
 import io.github.overcuriousity.engram.core.read.SetAsideRow
 import io.github.overcuriousity.engram.core.read.Reach
 import io.github.overcuriousity.engram.core.read.Read
@@ -67,7 +65,7 @@ class PicturesTest {
                 Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
                     Decisions(
                         chunk = io.github.overcuriousity.engram.core.read.Chunk(id = "a", text = "", status = "active"),
-                        decided = null, onVerify = {}, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
+                        decided = null, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
                     )
                     Markdown(
                         "## Öffnungszeiten Wertstoffhof Bad Aibling\n\n**Adresse:** Thürhamer Straße 21a, 83043 Bad Aibling\n\n" +
@@ -107,55 +105,6 @@ class PicturesTest {
         save("results-all-loose")
     }
 
-    @Test fun aPairCard() {
-        val cards = listOf(
-            PairCard(
-                Pair(
-                    id = 1,
-                    percent = 91,
-                    a = PairSide("art-a", "Qdrant payload filters", named = true, excerpt = "Filters narrow a search before the vectors are compared, and a payload index is what makes that fast."),
-                    b = PairSide("art-b", "the same thing, said in a note I made later", named = false, excerpt = "payload filtering happens first; without an index on the field it is a full scan."),
-                    finding = "both say filtering happens before the comparison; the second adds what it costs without an index",
-                    mergeable = true,
-                    keeps = "art-a",
-                ),
-                siblings = 3,
-            ),
-        )
-        compose.setContent {
-            EngramTheme {
-                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
-                    PairReview(cards, onAnswer = { _, _ -> "row" }, onUndo = { true }, onArtifact = {}, modifier = Modifier)
-                }
-            }
-        }
-        save("pair-card")
-    }
-
-    @Test fun anUnjudgedPairCard() {
-        val cards = listOf(
-            PairCard(
-                Pair(
-                    id = 2,
-                    percent = 88,
-                    a = PairSide("art-a", "Timeout 0", named = true, excerpt = "the timeout is 30 seconds"),
-                    b = PairSide("art-b", "Timeout 1", named = true, excerpt = "the timeout is 90 seconds"),
-                    unjudged = true,
-                    mergeable = false,
-                ),
-                siblings = 1,
-            ),
-        )
-        compose.setContent {
-            EngramTheme {
-                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
-                    PairReview(cards, onAnswer = { _, _ -> "row" }, onUndo = { true }, onArtifact = {}, modifier = Modifier)
-                }
-            }
-        }
-        save("pair-card-unjudged")
-    }
-
     @Test fun theJournal() {
         val rows = listOf(
             SetAsideRow(
@@ -167,10 +116,10 @@ class PicturesTest {
                 caveat = "a source has since been deleted",
             ),
             SetAsideRow(
-                kind = "parked", subjectId = "c9",
-                label = "meeting-notes.pdf", named = true, subtitle = "184 kB",
-                why = "96% the same as the capture beside it, so nothing has been spent on reading it yet",
-                beside = listOf(Beside("", "c8", "meeting notes (2).pdf", true)),
+                kind = "hidden", subjectId = "h1", artifactId = "h1",
+                label = "Superseded", named = true, subtitle = "17 Sep 19:01 · an older way of saying it",
+                why = "near-identical to the one beside it, so it is kept out of results — still stored, still readable",
+                beside = listOf(Beside("m1", "", "Payload filtering, in one place", true)),
             ),
         )
         compose.setContent {

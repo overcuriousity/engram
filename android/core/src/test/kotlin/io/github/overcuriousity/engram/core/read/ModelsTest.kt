@@ -61,8 +61,8 @@ class ModelsTest {
         assertEquals("pending", m.jobs.first()[0].content); assertEquals("2", m.jobs.first()[1].content)
         assertEquals(1L, m.links?.total)
         val r = Decode.report(fixture("report.json"))
-        assertNull(r.sleep); assertEquals(listOf(1L, 0L), r.pursuits); assertEquals(0L, r.morePairs)
-        assertNull("learning off says nothing about pursuits", Decode.report("""{"pursuits":null,"more_pairs":0}""").pursuits)
+        assertNull(r.sleep); assertEquals(listOf(1L, 0L), r.pursuits)
+        assertNull("learning off says nothing about pursuits", Decode.report("""{"pursuits":null}""").pursuits)
     }
 
     @Test fun statusSaysWhichDoorsAreOpenAndWhatTheIdleLineNeeds() {
@@ -209,52 +209,6 @@ class ModelsTest {
         assertFalse(h.pastCliff)
     }
 
-    @Test fun aPairSaysOnlyWhatSomebodyEstablished() {
-        val cluster = Decode.pairs(fixture("pairs.json")).items.first()
-        assertTrue("a cluster says how many artifacts the one question is about", cluster.members >= 2)
-        val p = cluster.pairs.first()
-        // The sweep filed this one on a score and nothing has read it since,
-        // so there is no finding to print over it.
-        assertTrue(p.unjudged)
-        assertNull(p.finding)
-        assertFalse(p.viaLink)
-        assertTrue("a measurement there is one of", p.percent > 0)
-        assertTrue(p.a.label.isNotEmpty() && p.a.excerpt.isNotEmpty())
-        assertTrue(p.b.id != p.a.id)
-        assertNull("nobody proposed a side", p.keeps)
-    }
-
-    /**
-     * The queue is capped and never paged, so the cap is the only thing that
-     * can say there is more of it. Dropped, five answered pairs read as the
-     * whole backlog.
-     */
-    @Test fun thePairQueueSaysHowManyAreWaitingBeyondIt() {
-        assertEquals(0, Decode.pairs(fixture("pairs.json")).more)
-        assertEquals(2, Decode.pairs("""{"items":[],"next":null,"more":2}""").more)
-        // A server too old to send it says nothing, rather than a guess.
-        assertEquals(0, Decode.pairs("""{"items":[]}""").more)
-    }
-
-    @Test fun mergeableIsFalseUnlessTheServerSaysOtherwise() {
-        // The default a missing field falls to decides whether a button is
-        // drawn whose press can only come back a validation error.
-        val p = ApiJson.decodeFromString(
-            Pair.serializer(),
-            """{"id":1,"a":{"id":"a"},"b":{"id":"b"}}""",
-        )
-        assertFalse(p.mergeable)
-        assertFalse(p.unjudged)
-    }
-
-    @Test fun aGapClusterSaysWhoNamedIt() {
-        val g = Decode.gaps(fixture("gaps.json")).items.first()
-        assertTrue(g.label.isNotEmpty())
-        assertTrue("a name from the words, or from a model", g.labelledBy in setOf("terms", "model"))
-        val m = g.members.first()
-        assertTrue(m.kind.isNotEmpty() && m.id.isNotEmpty() && m.text.isNotEmpty())
-    }
-
     @Test fun retrievalIsAbsentRatherThanZeroWhereNothingWasJudged() {
         val i = Decode.insights(fixture("insights.json"))
         assertTrue(i.held.artifacts > 0)
@@ -282,7 +236,33 @@ class ModelsTest {
         assertEquals(listOf(SetAsideAction.Reactivate), actionsFor("buried"))
         assertEquals(listOf(SetAsideAction.UndoMerge), actionsFor("merged"))
         assertEquals(listOf(SetAsideAction.Deprecate), actionsFor("generated"))
-        assertEquals(listOf(SetAsideAction.Verify, SetAsideAction.Deprecate), actionsFor("unverified"))
-        assertEquals(3, actionsFor("parked").size)
+        // An older server's questions: the base answers both itself now, and
+        // the routes that answered them are gone, so a row of either kind is
+        // shown and offers nothing to press.
+        assertEquals(emptyList<SetAsideAction>(), actionsFor("unverified"))
+        assertEquals(emptyList<SetAsideAction>(), actionsFor("parked"))
+    }
+
+    @Test fun aHitAndAnAnswerSayWhatTheyDisagreeWith() {
+        val d = """{"artifact_id":"a","other_id":"b","other_title":"NAS","other_created_at":1726099200,"detail":"30 days there, 14 here"}"""
+        val hit = Decode.search("""{"items":[{"artifact_id":"a","disagrees_with":[$d]}],"next":null}""").items.single()
+        assertEquals("b", hit.disagreesWith.single().otherId)
+        assertEquals("NAS", hit.disagreesWith.single().otherTitle)
+        assertEquals(1726099200L, hit.disagreesWith.single().otherCreatedAt)
+        val ask = ApiJson.decodeFromString(AskAnswer.serializer(), """{"answer":"x","disagreements":[$d]}""")
+        assertEquals("30 days there, 14 here", ask.disagreements.single().detail)
+        // Absent on the wire where there are none, on both.
+        assertTrue(Decode.search("""{"items":[{"artifact_id":"a"}]}""").items.single().disagreesWith.isEmpty())
+        assertTrue(ApiJson.decodeFromString(AskAnswer.serializer(), """{"answer":"x"}""").disagreements.isEmpty())
+        // A title and a detail are both allowed to be missing.
+        val bare = ApiJson.decodeFromString(Disagreement.serializer(), """{"artifact_id":"a","other_id":"b","other_title":null,"other_created_at":0,"detail":null}""")
+        assertNull(bare.otherTitle); assertNull(bare.detail)
+    }
+
+    @Test fun theFixturesSayNothingDisagrees() {
+        // The server's own answers, with nothing in the base to disagree: the
+        // keys are absent, and the lists come back empty rather than failing.
+        assertTrue(Decode.search(fixture("search.json")).items.all { it.disagreesWith.isEmpty() })
+        assertTrue(ApiJson.decodeFromString(AskAnswer.serializer(), fixture("ask_done.json")).disagreements.isEmpty())
     }
 }

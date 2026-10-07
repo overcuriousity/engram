@@ -295,38 +295,22 @@ internal class Transport(
                 .post(jsonBody("""{"until":$until}""")).build(),
         )
 
-    // ── Judging ──────────────────────────────────────────────────────────────
-    // Every one of these is a decision somebody made, delivered by the outbox.
-    // The answer comes back as it came; what a status means is the outbox's.
+    // ── Decisions ────────────────────────────────────────────────────────────
+    // What a person still decides about the base: hiding a note, bringing one
+    // back, taking back something the base did. Each is delivered by the
+    // outbox, and the answer comes back as it came; what a status means is
+    // the outbox's.
 
-    /** `keep` absent, not null: the server reads an absent side as the one the judge proposed. */
-    suspend fun pairSupersede(id: Long, keep: String?): Answer =
-        judge("/api/v1/pairs/$id/supersede", keep?.let { """{"keep":${q(it)}}""" } ?: "{}")
-
-    suspend fun pairSynthesize(id: Long): Answer = judge("/api/v1/pairs/$id/synthesize", "{}")
-    suspend fun pairDiscard(id: Long): Answer = judge("/api/v1/pairs/$id/discard", "{}")
-    suspend fun pairDismiss(id: Long): Answer = judge("/api/v1/pairs/$id/dismiss", "{}")
-    suspend fun gapDismiss(kind: String, id: String): Answer = judge("/api/v1/gaps/$kind/$id/dismiss", "{}")
-
-    /** A whole cluster, named by the members the person was shown. */
-    suspend fun gapForget(members: List<kotlin.Pair<String, String>>): Answer =
-        judge(
-            "/api/v1/gaps/forget",
-            members.joinToString(",", """{"members":[""", "]}") { (k, i) -> """{"kind":${q(k)},"id":${q(i)}}""" },
-        )
-
-    /** One of `verify`, `deprecate`, `reactivate`, `unsupersede`, each a route of its own. */
-    suspend fun artifactOp(id: String, op: String): Answer = judge("/api/v1/artifacts/$id/$op", "{}")
+    /** One of `deprecate`, `reactivate`, `unsupersede`, each a route of its own. */
+    suspend fun artifactOp(id: String, op: String): Answer = decide("/api/v1/artifacts/$id/$op", "{}")
 
     /** Gone from both stores. The answer comes back as it came, like every other decision. */
     suspend fun artifactDelete(id: String): Answer =
         send(Request.Builder().url(url("/api/v1/artifacts/$id")).delete().build())
 
-    suspend fun mergeUndo(id: String): Answer = judge("/api/v1/merges/$id/undo", "{}")
-    suspend fun corpusResolve(id: String, action: String): Answer =
-        judge("/api/v1/corpora/$id/resolve", """{"action":${q(action)}}""")
+    suspend fun mergeUndo(id: String): Answer = decide("/api/v1/merges/$id/undo", "{}")
 
-    private suspend fun judge(path: String, json: String): Answer =
+    private suspend fun decide(path: String, json: String): Answer =
         send(Request.Builder().url(url(path)).post(jsonBody(json)).build())
 
     private fun jsonBody(s: String): RequestBody = s.toRequestBody("application/json".toMediaType())

@@ -85,7 +85,6 @@ fun ArtifactScreen(
         }
     }
     var editing by remember { mutableStateOf<String?>(null) }
-    var reviewed by remember { mutableStateOf(false) }
     val dismissed = remember { mutableStateListOf<String>() }
     // What was decided here, before the server has been told. The read above
     // will not show it until the row is delivered and the screen is opened
@@ -114,21 +113,16 @@ fun ArtifactScreen(
                 if (c.tags.isNotEmpty()) Text(c.tags.joinToString("  ") { "#$it" }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
 
-            // Verification failures, and the judgement that clears them: the
-            // operator looked at the chunk beside its source lines and decided
-            // the warning was noise.
-            if (c.flags.isNotEmpty() && !reviewed) {
-                Flag(c.flags.joinToString(", "), c.flagDetail ?: "") {
-                    TextButton(onClick = {
-                        reviewed = true
-                        scope.launch { engram.outbox.enqueueCall("Artifact · marked reviewed", "POST", Api.reviewed(c.id)); Sync.kick(engram.app) }
-                    }) { Text("Mark reviewed") }
-                }
-            }
+            // What a check found, said and nothing to press. There was a *Mark
+            // reviewed* here that cleared the flag; the one flag a person could
+            // act on — a merge whose source was deleted — the sweep accepts on
+            // its own now, and the rest are facts about the text that a press
+            // does not change. The detail stays: it says which number or path
+            // no source carries.
+            if (c.flags.isNotEmpty()) Flag(c.flags.joinToString(", "), c.flagDetail ?: "")
             Decisions(
                 chunk = c,
                 decided = decided,
-                onVerify = { decide(Decision(ArtifactAnswer.Verify)) { engram.outbox.enqueueArtifactOp(c.id, ArtifactOp.verify) } },
                 onHide = { decide(Decision(ArtifactAnswer.Hide)) { engram.outbox.enqueueArtifactOp(c.id, ArtifactOp.deprecate) } },
                 onReactivate = {
                     // The server's own unsupersede for a superseded one; a
@@ -270,21 +264,25 @@ fun ArtifactScreen(
 // ── The decisions ────────────────────────────────────────────────────────
 
 /** An answer this screen can give about an artifact. Each is a route; delete is the one with no undo. */
-enum class ArtifactAnswer { Verify, Hide, Reactivate, Delete }
+enum class ArtifactAnswer { Hide, Reactivate, Delete }
 
 /** One made here, and the outbox row it became — the handle Undo takes it back by while it is still queued. */
 data class Decision(val answer: ArtifactAnswer, val row: String? = null)
 
 /**
  * Which answers an artifact admits, from what the server said about it and
- * nothing else — the rule `_artifact_detail.html` follows. Verify and hide
- * only apply to one that is in results; the way back is offered to one that
- * is not; delete is offered whatever the status, because "get rid of this" is
- * a decision that does not depend on whether it is currently hidden.
+ * nothing else — the rule `_artifact_detail.html` follows. Hide only applies
+ * to one that is in results; the way back is offered to one that is not;
+ * delete is offered whatever the status, because "get rid of this" is a
+ * decision that does not depend on whether it is currently hidden.
+ *
+ * There was a *Still accurate* beside hide, which reset the artifact's age.
+ * It went when a good answer began confirming the notes it was drawn from:
+ * the same reset, made by the verdict a person was already giving.
  */
 fun answersFor(status: String, supersededBy: String?): List<ArtifactAnswer> = when {
     supersededBy != null || status == "deprecated" -> listOf(ArtifactAnswer.Reactivate, ArtifactAnswer.Delete)
-    else -> listOf(ArtifactAnswer.Verify, ArtifactAnswer.Hide, ArtifactAnswer.Delete)
+    else -> listOf(ArtifactAnswer.Hide, ArtifactAnswer.Delete)
 }
 
 /**
@@ -297,7 +295,6 @@ fun answersFor(status: String, supersededBy: String?): List<ArtifactAnswer> = wh
 fun Decisions(
     chunk: Chunk,
     decided: Decision?,
-    onVerify: () -> Unit,
     onHide: () -> Unit,
     onReactivate: () -> Unit,
     onDelete: () -> Unit,
@@ -307,7 +304,6 @@ fun Decisions(
     var confirm by rememberSaveable { mutableStateOf(false) }
     if (decided != null) {
         val words = when (decided.answer) {
-            ArtifactAnswer.Verify -> "Marked still accurate"
             ArtifactAnswer.Hide -> "Hidden from results · the artifact is kept"
             ArtifactAnswer.Reactivate -> "Back in results"
             ArtifactAnswer.Delete -> "Deleted · gone from both stores once delivered"
@@ -327,12 +323,11 @@ fun Decisions(
     }
     val answers = answersFor(chunk.status, chunk.supersededBy)
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-        if (ArtifactAnswer.Verify in answers) TextButton(onClick = onVerify) { Text("Still accurate") }
         if (ArtifactAnswer.Hide in answers) TextButton(onClick = onHide) { Text("Hide from results") }
         if (ArtifactAnswer.Reactivate in answers) TextButton(onClick = onReactivate) { Text(if (chunk.supersededBy != null) "Put it back" else "Reactivate") }
         Spacer(Modifier.weight(1f))
         // At the far end, so the one control that cannot be undone is never
-        // flush against two that can.
+        // flush against one that can.
         TextButton(onClick = { confirm = true }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
     }
     if (confirm) AlertDialog(

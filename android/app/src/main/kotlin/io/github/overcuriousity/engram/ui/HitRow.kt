@@ -21,6 +21,7 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.overcuriousity.engram.core.read.Disagreement
 
 /** One result. Past the rule it is drawn back: it placed, and it is not claimed as an answer. */
 @Composable
@@ -57,8 +58,23 @@ fun HitRow(row: RailItem.Row, onOpen: (String) -> Unit, items: List<RailItem> = 
         // Its own line, under the ones that say why this row is here: what
         // the document does next is something else.
         continuesWords(h, items)?.let { Text(it, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+        // A note that says otherwise. The base does not pick a side, so both
+        // stay in results and each says the other is there; the line opens
+        // the other one rather than this.
+        h.disagreesWith.forEach { d ->
+            Text(
+                disagreementWords(d),
+                Modifier.padding(top = 2.dp).clickable { onOpen(d.otherId) },
+                style = MaterialTheme.typography.labelSmall,
+                color = muted(),
+            )
+        }
     }
 }
+
+/** What a hit says about a note that disagrees with it. */
+fun disagreementWords(d: Disagreement): String =
+    "Disagrees with ${d.otherTitle ?: "another note"}" + (d.detail?.let { ": $it" } ?: "")
 
 @Composable
 fun Badge(text: String, color: androidx.compose.ui.graphics.Color) {

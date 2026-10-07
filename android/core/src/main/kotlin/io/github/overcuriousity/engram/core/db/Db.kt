@@ -20,7 +20,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 
 /**
- * What a row owes the server. The judging answers are here for the same reason
+ * What a row owes the server. A person's decisions are here for the same reason
  * a capture is: a decision made on a train is a decision, and the queue is the
  * one place that knows what is owed — and the one place an answer can be taken
  * back out of before it goes.
@@ -30,6 +30,14 @@ enum class Kind {
     capture_files,
     done,
     snooze,
+    /*
+     * The pair and gap answers, and `corpus_resolve` below. The base settles
+     * all of these itself now and the server has no route for any of them, so
+     * nothing writes these kinds any more. They stay words of this column: a
+     * phone updated with one still queued holds a row that says so, and
+     * `Converters.kindFrom` reading a word it no longer knows would throw on
+     * every read of the outbox. The drainer retires such a row unsent.
+     */
     pair_supersede,
     pair_synthesize,
     pair_discard,
@@ -38,6 +46,7 @@ enum class Kind {
     gap_forget,
     artifact_op,
     merge_undo,
+    /** See `pair_supersede`: kept so an old row reads, never written. */
     corpus_resolve,
     /** The one decision with no undo: `DELETE /artifacts/{id}`. Its own kind, never an `op`. */
     artifact_delete,
