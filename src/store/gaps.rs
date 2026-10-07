@@ -346,12 +346,6 @@ macro_rules! subject_gaps_sql {
     };
 }
 
-/// A run of searches the base did not answer.
-///
-/// The text is the leading clustered query rather than all of them joined: the
-/// naming prompt keeps the first twelve members, and a member that is itself a
-/// paragraph of queries would crowd out eleven other gaps. `queries` is JSON,
-/// so the first element is read out in Rust rather than in SQL.
 /// Which pursuits are on the gap list, written once so that the page and the
 /// count of it cannot come to disagree about what "still unsatisfied" means.
 macro_rules! pursuit_gaps_from {
@@ -374,7 +368,13 @@ macro_rules! pursuit_gaps_sql {
     };
 }
 
-/// The words a pursuit gap shows: its leading clustered query.
+/// The words a pursuit gap shows — a run of searches the base did not
+/// answer — which is its leading clustered query.
+///
+/// The leading query rather than all of them joined: the naming prompt keeps
+/// the first twelve members, and a member that is itself a paragraph of
+/// queries would crowd out eleven other gaps. `queries` is JSON, so the first
+/// element is read out in Rust rather than in SQL.
 fn pursuit_text(queries_json: &str) -> String {
     serde_json::from_str::<Vec<String>>(queries_json)
         .ok()
@@ -695,8 +695,8 @@ impl Store {
 
     /// The ids of the pursuits the capture page's gap list is showing.
     ///
-    /// Housekeeping says how many recent pursuits went unanswered and links
-    /// that sentence to the list. `state = 'unsatisfied'` on its own is not
+    /// Insights says how many recent pursuits went unanswered and links that
+    /// sentence to the list. `state = 'unsatisfied'` on its own is not
     /// that number: a pursuit a later capture answered keeps the state it ended
     /// with — coverage never rewrites what happened — while the gap list drops
     /// it. On a base where captures are answering pursuits the sentence sent
@@ -719,12 +719,6 @@ impl Store {
             .collect())
     }
 
-    /// How many pursuits are on the gap list, with no page over it.
-    ///
-    /// `open_pursuit_gap_ids` answers a page — `MAX_OPEN_GAPS` of them — because
-    /// its caller draws a list. A status line reports a total, and a total that
-    /// silently stops at the page size is a number that stops moving on exactly
-    /// the base whose operator most needs it to move.
     /// How many gaps are open, all five kinds, with no page over any of them.
     ///
     /// `open_gap_refs` answers the capture page's list and caps each kind at
@@ -762,6 +756,12 @@ impl Store {
         Ok(n)
     }
 
+    /// How many pursuits are on the gap list, with no page over it.
+    ///
+    /// `open_pursuit_gap_ids` answers a page — `MAX_OPEN_GAPS` of them — because
+    /// its caller draws a list. A status line reports a total, and a total that
+    /// silently stops at the page size is a number that stops moving on exactly
+    /// the base whose operator most needs it to move.
     pub async fn count_open_pursuit_gaps(&self, embed_model: &str) -> Result<i64> {
         use sqlx::Row;
         Ok(

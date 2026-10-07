@@ -23,7 +23,7 @@
     {# Both sides were cited and the answer was told to give both readings;
        the badge says so where the reader looks first. Neither side is picked. #}
     {% for d in disagreements %}
-      <span class="card-meta"><span class="badge" title="{{ d.detail.as_deref().unwrap_or("") }}">your notes disagree: {{ d.other_title.as_deref().unwrap_or("another note") }}</span></span>
+      <span class="card-meta"><span class="badge badge-warning" title="{{ d.detail.as_deref().unwrap_or("") }}">your notes disagree: {{ d.other_title.as_deref().unwrap_or("another note") }}</span></span>
     {% endfor %}
     {% if dropped > 0 %}
       {# In words a reader uses. "excerpt(s) omitted for context budget" is

@@ -305,10 +305,11 @@ pub struct Core {
 /// hours, against its daily pace. A bound on the blast radius, not a rate limit
 /// on finding.
 ///
-/// The pass's own writes and no others — see `sleep_actions_since`. Dedupe,
-/// reap and promotion were autonomous before this budget existed and keep
-/// their own gates; charging them here meant condense, which runs last in the
-/// pass, found the day already spent on every day the base had been used.
+/// One per job, not one for the base: dedupe, reap, promotion and the idle
+/// pass each call `Core::may_act` with their own name and spend only their own
+/// day — see `Store::actions_since`. A shared count meant condense, which runs
+/// last in the pass, found the day already spent on every day the base had
+/// been used.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     pub used: u32,

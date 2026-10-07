@@ -583,16 +583,16 @@ impl Store {
         })
     }
 
-    /// The pairs in a state that a person can still act on: both artifacts are
-    /// in results.
+    /// The pairs in a state that can still be acted on: both artifacts are in
+    /// results. What `/api` counts as open; nothing here waits on a person.
     ///
     /// Every way a pair is settled ends in `Core::supersede`, `deprecate` or a
     /// merge, and every one of those refuses a side that is not active. A row
     /// naming an artifact that has since been hidden or deprecated is therefore
-    /// a question with no answer available — the review queue that used to
-    /// list such rows answered a press on one with `cannot supersede: loser …
-    /// is superseded`, a correct guard reporting a row that should never have
-    /// been listed.
+    /// a question with no answer available — the review queue an older build
+    /// drew from these rows answered a press on one with `cannot supersede:
+    /// loser … is superseded`, a correct guard reporting a row that should
+    /// never have been listed.
     ///
     /// Read-side and not the whole story, because both ways out of results are
     /// reversible: an operator restores the artifact and the pair is a real
@@ -600,9 +600,9 @@ impl Store {
     /// elsewhere — `follow_supersession` moves a supersession's rows onto the
     /// winner, and `stale_unreachable_pairs` settles what is left `Stale`,
     /// reversibly, so that a verdict nobody can act on is not merely invisible.
-    /// This filter is what keeps the queue honest in between: the row is off it
-    /// from the moment the artifact leaves results, without waiting for a
-    /// sweep.
+    /// This filter is what keeps the count honest in between: the row is out
+    /// of it from the moment the artifact leaves results, without waiting for
+    /// a sweep.
     pub async fn pairs_awaiting_review(
         &self,
         state: PairState,

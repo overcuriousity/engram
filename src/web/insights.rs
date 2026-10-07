@@ -716,8 +716,8 @@ pub(crate) async fn machine(tenant: &Tenant) -> Result<Machine> {
 }
 
 /// What the base did on its own, in the sentences Insights says: last night,
-/// the ranking, and the pursuits line. Disclosure, not control — the tuning
-/// offer stays on the web, where the person who may apply it is at a keyboard.
+/// the ranking, and the pursuits line. Disclosure, not control: nothing in it
+/// asks for a decision, and what the base did is taken back from the journal.
 #[derive(serde::Serialize)]
 pub(crate) struct Report {
     pub sleep: Option<SleepView>,
