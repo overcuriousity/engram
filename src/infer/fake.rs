@@ -103,15 +103,17 @@ impl Embedder for FakeEmbedder {
         }
         // Counted as a call before it is refused, because it was one: the
         // limiter is in front of the endpoint and the request reached it.
-        if self
+        // `try_update` is the new name, but it is newer than the MSRV.
+        #[allow(deprecated)]
+        let refused = self
             .busy_for
             .fetch_update(
                 std::sync::atomic::Ordering::Relaxed,
                 std::sync::atomic::Ordering::Relaxed,
                 |n| n.checked_sub(1),
             )
-            .is_ok()
-        {
+            .is_ok();
+        if refused {
             return Err(Error::InferenceBusy {
                 role: "embed",
                 detail: "HTTP 429 Too Many Requests".into(),

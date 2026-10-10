@@ -2550,7 +2550,9 @@ mod tests {
             .insert_moment(&crate::store::moments::NewMoment {
                 artifact_id: aid.clone(),
                 kind: crate::store::moments::Kind::Due,
-                at: Some(now + 2 * 3_600),
+                // Half an hour of slack: the badge rounds down, and a slow runner
+                // can let a second pass before the search reads the clock.
+                at: Some(now + 2 * 3_600 + 1_800),
                 tz: "UTC".into(),
                 rule: None,
                 source: crate::store::moments::Source::Set,
@@ -2561,7 +2563,7 @@ mod tests {
             .unwrap();
         core.time.lift = false;
         let out = core.search(&q("invoice"), Door::Cli).await.unwrap();
-        assert_eq!(out[0].due_at, Some(now + 2 * 3_600));
+        assert_eq!(out[0].due_at, Some(now + 2 * 3_600 + 1_800));
         assert_eq!(
             out[0].due_in.as_deref(),
             Some("in 2 h"),
