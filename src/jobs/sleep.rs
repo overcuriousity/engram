@@ -550,8 +550,8 @@ where
 ///
 /// It files nothing, and that is the point. It used to record an
 /// `artifact_pairs` row per interferer, which put a ranking observation onto a
-/// queue whose cards make claims about meaning: `_decide.html` renders a pair
-/// as "these two disagree", and two documents sharing a template outrank each
+/// queue whose cards made claims about meaning: the review card rendered a
+/// pair as "these two disagree", as search and Ask still say of a real one, and two documents sharing a template outrank each
 /// other constantly while agreeing about everything. A base's whole queue was
 /// this rule's output — cover pages against cover pages, one town's shop
 /// listings against another's — and not one of them was a disagreement.
@@ -566,7 +566,7 @@ where
 ///
 /// The budget does not gate it any more either. That check was here because
 /// filing is what leads to a merge; with nothing written there is nothing to
-/// withhold, and a count that fell to zero when the week ran out would report
+/// withhold, and a count that fell to zero when the day ran out would report
 /// that the competition had stopped rather than that the spending had.
 pub async fn interference(
     core: &Core,
@@ -1305,16 +1305,16 @@ mod tests {
         }
     }
 
-    /// The week's budget is about acting, and observing is not acting. It used
+    /// The day's budget is about acting, and observing is not acting. It used
     /// to gate this rule because the rule filed pairs, and filing is what leads
     /// to a merge; with nothing written there is nothing to withhold, and a
     /// count that went to zero when the budget ran out would have Ops report
     /// that the competition stopped rather than that the spending did.
     #[tokio::test]
-    async fn interference_keeps_counting_when_the_week_is_spent() {
+    async fn interference_keeps_counting_when_the_day_is_spent() {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         let live = live_generation(&core).await;
         let pids = two_probes_on(&core, &a1).await;
         outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;

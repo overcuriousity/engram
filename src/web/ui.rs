@@ -1,5 +1,5 @@
 use crate::core::search::SearchQuery;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::fmt::{ago, fmt_time};
 use crate::store::corpora::CorpusStatus;
 use crate::tenants::Tenant;
@@ -9,7 +9,7 @@ use crate::web::state::AppState;
 use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Router;
-use axum::extract::{Form, Path, Query};
+use axum::extract::{Form, Query};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
@@ -90,6 +90,19 @@ pub struct RenderedResult {
     /// — `#2`, as the row beside it is labelled. Empty otherwise, including
     /// when the next passage placed as something with no rank of its own.
     pub continues_in: String,
+    /// The notes this one is known to disagree with, shown under the row. The
+    /// rail names both and picks neither.
+    pub disagrees: Vec<DisagreementRow>,
+}
+
+/// One line under a result: `Disagrees with <title> (day): <what differs>`.
+#[derive(Clone)]
+pub struct DisagreementRow {
+    pub other_id: String,
+    pub other_title: String,
+    /// `%Y-%m-%d`, the short day the idle page's recent rows use.
+    pub day: String,
+    pub detail: Option<String>,
 }
 
 #[derive(Default)]
@@ -261,29 +274,6 @@ pub(crate) fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView 
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
-/// One hole in the base, as the gap list carries it: enough to dismiss it,
-/// and its text for a hole the sweep has not grouped yet, which is shown
-/// under itself.
-pub struct GapMember {
-    /// The `GapKind`, for the forget route.
-    pub kind: String,
-    pub id: String,
-    pub text: String,
-}
-
-pub struct GapGroup {
-    pub label: String,
-    pub members: Vec<GapMember>,
-}
-
-pub(crate) fn gap_member(g: crate::store::gaps::Gap) -> GapMember {
-    GapMember {
-        kind: g.kind.as_str().into(),
-        id: g.id,
-        text: g.text,
-    }
-}
-
 #[derive(Template)]
 #[template(path = "_intent_echo.html")]
 pub(crate) struct IntentEchoTemplate {
@@ -443,6 +433,7 @@ impl Default for RenderedResult {
             origin_count: 0,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 }
@@ -811,81 +802,6 @@ pub(crate) async fn source_rows(
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
-
-#[derive(serde::Deserialize)]
-struct ForgetForm {
-    /// `kind:id` pairs, comma-joined — one row of `_gaps.html` is a group,
-    /// and forgetting is said of the group.
-    members: String,
-}
-
-/// The operator's word that a hole is not worth an answer: every question in
-/// the group is dismissed, and the row is gone.
-///
-/// A pair that does not parse is a 400 rather than a skipped member. The
-/// template writes every pair, so a bad one is a bug, and a row that stays
-/// half-forgotten would come back on reload under the same name.
-///
-/// A member that is *gone*, though, is not a bug and must not stop the loop.
-/// The group's members are resolved when the page is rendered, and retention
-/// expires the very rows they name — so a `search_events` row dropped between
-/// the render and the press made `dismiss_gap` answer `NotFound`, aborting
-/// part-way: the members before it were dismissed, the rest were not, htmx saw
-/// a 404 and swapped nothing, and the row came back on reload under the same
-/// label carrying the remainder. A question that no longer exists is already
-/// forgotten, which is what was asked for.
-async fn gap_forget(tenant: Tenant, Form(f): Form<ForgetForm>) -> UiResult<Response> {
-    let mut members = Vec::new();
-    for pair in f.members.split(',').filter(|p| !p.is_empty()) {
-        let (kind, id) = pair
-            .split_once(':')
-            .ok_or_else(|| Error::Validation(format!("malformed gap member {pair}")))?;
-        let kind = crate::store::gaps::GapKind::parse(kind)
-            .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
-        members.push((kind, id.to_string()));
-    }
-    for (kind, id) in members {
-        match tenant.core.store.dismiss_gap(kind, &id).await {
-            Ok(()) | Err(Error::NotFound) => {}
-            Err(e) => return Err(e.into()),
-        }
-    }
-    Ok(().into_response())
-}
-
-/// Every member of one cluster, forgotten together.
-///
-/// A member that is already gone is not a failure: the list was drawn before
-/// the press, and a question answered since is a question covered.
-pub(crate) async fn forget_gaps(
-    tenant: &Tenant,
-    members: &[(String, String)],
-) -> crate::error::Result<()> {
-    for (kind, id) in members {
-        match dismiss_gap(tenant, kind, id).await {
-            Ok(()) | Err(Error::NotFound) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
-/// Cover a question by saying it does not need one. The kind is checked
-/// against the vocabulary rather than passed through: a word this base does
-/// not know would delete nothing and report success.
-pub(crate) async fn dismiss_gap(tenant: &Tenant, kind: &str, id: &str) -> crate::error::Result<()> {
-    let kind = crate::store::gaps::GapKind::parse(kind)
-        .ok_or_else(|| Error::Validation(format!("unknown gap kind {kind}")))?;
-    tenant.core.store.dismiss_gap(kind, id).await
-}
-
-async fn gap_dismiss(
-    tenant: Tenant,
-    Path((kind, id)): Path<(String, String)>,
-) -> UiResult<Response> {
-    dismiss_gap(&tenant, &kind, &id).await?;
-    Ok(axum::http::StatusCode::OK.into_response())
-}
 
 /// Chips per row. Long enough to cover a real vocabulary, short enough that the
 /// row stays a row.
@@ -1507,6 +1423,19 @@ pub(crate) fn render_hit(
         // about the hit, and one row cannot answer it.
         continues: false,
         continues_in: String::new(),
+        disagrees: h
+            .disagrees_with
+            .iter()
+            .map(|d| DisagreementRow {
+                other_id: d.other_id.clone(),
+                other_title: d
+                    .other_title
+                    .clone()
+                    .unwrap_or_else(|| "another note".into()),
+                day: crate::fmt::fmt_day(d.other_created_at),
+                detail: d.detail.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -1627,9 +1556,7 @@ async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
                 | CorpusStatus::NeedsReview
                 | CorpusStatus::Partial
         );
-        let low_coverage = s
-            .coverage
-            .is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE);
+        let low_coverage = crate::core::coverage::low_coverage(s.coverage);
         rows.push(QueueRow {
             progress,
             locatable: total > 0,
@@ -1806,8 +1733,6 @@ pub fn ui_router() -> Router<AppState> {
             "/ui/browse",
             get(|_: Tenant| async { Redirect::to("/ui/capture") }),
         )
-        .route("/ui/gaps/{kind}/{id}/dismiss", post(gap_dismiss))
-        .route("/ui/gaps/forget", post(gap_forget))
         // The page's spoken names. Housekeeping was the nav word for a while,
         // and `/ui/ops` still answers as the old door — but this goes straight
         // to the page rather than chaining through that shim, and it takes an
@@ -1993,52 +1918,6 @@ mod tests {
         .unwrap();
         assert!(html.contains("qtitle-opening"), "{html}");
         assert!(html.contains("Fachbereich Angewandte"), "{html}");
-    }
-
-    #[test]
-    fn a_gap_row_offers_a_box_to_fill_it_and_a_word_to_forget_it() {
-        // One row per hole, whether the sweep named it or not, and nothing on
-        // it about how the question failed: a person deciding what to do
-        // about a hole has the same two choices whichever way it was made.
-        // `_gaps.html` is only ever included, so it has no template struct of
-        // its own; this is one, standing in for the page that includes it.
-        #[derive(Template)]
-        #[template(path = "_gaps.html")]
-        struct Gaps {
-            gaps: Vec<GapGroup>,
-        }
-        let html = askama::Template::render(&Gaps {
-            gaps: vec![GapGroup {
-                label: "Chipkarten".into(),
-                members: vec![
-                    GapMember {
-                        kind: "ask".into(),
-                        id: "g1".into(),
-                        text: "wie werden bei chipkarten die private keys geschützt?".into(),
-                    },
-                    GapMember {
-                        kind: "unmatched".into(),
-                        id: "s2".into(),
-                        text: "chipkarte schlüssel".into(),
-                    },
-                ],
-            }],
-        })
-        .unwrap();
-        assert!(
-            html.contains(r#"hx-post="/ui/capture""#),
-            "no box to fill it: {html}"
-        );
-        assert!(
-            html.contains(r#""members": "ask:g1,unmatched:s2""#),
-            "forget names every question in the group: {html}"
-        );
-        assert!(!html.contains("ask again"), "{html}");
-        assert!(!html.contains("covered"), "{html}");
-        assert!(
-            !html.contains("nothing near") && !html.contains("chipkarte schlüssel"),
-            "a group is its name, not its members: {html}"
-        );
     }
 
     #[test]
@@ -2309,8 +2188,8 @@ mod tests {
         app_with_cookie(core).await
     }
 
-    /// A core holding one pair waiting on a person, so "Needs you" has
-    /// something to say on whichever page is supposed to be carrying it.
+    /// A core holding one pair the judge has not read yet — the state that
+    /// used to put a card in front of a person, and now waits on nobody.
     async fn app_with_a_waiting_pair() -> (axum::Router, String) {
         let core = crate::core::test_support::test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -2907,17 +2786,22 @@ mod tests {
         // `sittings.touched()` still runs on every artifact open.
     }
 
-    /// The three surfaces that are maintenance rather than searching. Capture
-    /// is about to stop being a page at all, and none of these belonged on it
-    /// even while it was one: a merge decision, a hole in the base and a list
-    /// of what was just stored are all work *on* the base rather than work
-    /// with it.
+    /// The surfaces that are maintenance rather than searching. Capture is
+    /// about to stop being a page at all, and none of these belonged on it
+    /// even while it was one: a list of what was just stored is work *on* the
+    /// base rather than work with it. A pair the judge has not read yet was
+    /// the third of them, and is on neither page now — the judge reads it on
+    /// its own and nobody is asked.
     #[tokio::test]
-    async fn the_three_maintenance_surfaces_are_on_insights_and_not_on_capture() {
+    async fn the_maintenance_surfaces_are_on_insights_and_a_waiting_pair_is_on_neither() {
         let (app, cookie) = app_with_a_waiting_pair().await;
 
         let insights = get(&app, "/ui/insights", &cookie).await;
-        assert!(insights.contains("Needs you"), "pairs are on Insights");
+        assert!(!insights.contains("Needs you"), "a pair asks nobody");
+        assert!(
+            !insights.contains("reindex holds an fd"),
+            "and is not listed for a decision: {insights}"
+        );
         assert!(
             insights.contains("Recent"),
             "the capture queue is on Insights"
@@ -4041,6 +3925,7 @@ mod tests {
             reason: None,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 
@@ -4196,6 +4081,7 @@ mod tests {
             origin_count: 0,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 
@@ -4444,6 +4330,7 @@ mod tests {
             origin_count: 0,
             continues: false,
             continues_in: String::new(),
+            disagrees: Vec::new(),
         }
     }
 
@@ -4556,7 +4443,7 @@ mod tests {
         // The words themselves are `the_pane_controls_name_the_question_they
         // _answer`'s subject; this is only that each control has one.
         let tpl = include_str!("templates/_artifact_detail.html");
-        for word in ["Still accurate", "Hide from results", "Delete"] {
+        for word in ["Hide from results", "Delete"] {
             assert!(
                 tpl.contains(&format!("<span>{word}</span>")),
                 "the {word} control has no label"
@@ -4568,7 +4455,7 @@ mod tests {
         // the permanent choice was the easy one, while hiding, which can be
         // undone, meant opening the artifact first. The square icon button is
         // still right where controls repeat down a list the operator is working
-        // through: the corpus page's own artifacts, and the pairs on Ops.
+        // through: the corpus page's own artifacts.
         let rail = include_str!("templates/_results.html");
         assert!(
             !rail.contains("/delete"),
@@ -4599,21 +4486,22 @@ mod tests {
         );
     }
 
-    /// The two controls in the pane say which question they answer.
+    /// The pane's controls say what they do, and none of them asks a
+    /// question the verdict bar already asks.
     ///
-    /// "Verified" sat a few lines above *Was this what you were looking for?*
-    /// and its Yes, and read as the same question asked twice. They are not:
-    /// Yes labels the search — this query found the right artifact — and feeds
-    /// recall; this one labels the artifact — the text is still accurate — and
-    /// resets the age that search's recency term reads in place of
-    /// `created_at`. "Hide" carried what it hides from, and that the artifact
-    /// survives it, only in a `title`, which a phone never shows.
+    /// "Verified", later *Still accurate*, sat a few lines above *Was this
+    /// what you were looking for?* and its Yes. It reset the age that search's
+    /// recency term reads; a Yes on an answer now confirms the notes it was
+    /// drawn from, which is the same reset made by the press a person was
+    /// already giving, so the second control went. "Hide" carried what it
+    /// hides from, and that the artifact survives it, only in a `title`, which
+    /// a phone never shows.
     #[test]
     fn the_pane_controls_name_the_question_they_answer() {
         let html = include_str!("templates/_artifact_detail.html");
         assert!(
-            html.contains("<span>Still accurate</span>"),
-            "the confirm control still reads as an answer about the search"
+            !html.contains("<span>Still accurate</span>") && !html.contains("/verify"),
+            "the pane still asks for a confirmation the verdict already gives"
         );
         assert!(
             html.contains("<span>Hide from results</span>"),
@@ -4874,7 +4762,7 @@ mod tests {
             "/ui/ops/tokens",
             "/ui/corpora/abc/delete",
             "/ui/corpora/abc/reprocess",
-            "/ui/ops/pairs/1/dismiss",
+            "/ui/ops/artifacts/abc/deprecate",
             "/ui/ask",
         ] {
             let res = app
@@ -5433,10 +5321,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn capture_offers_a_few_decisions_and_counts_the_rest() {
-        // The whole backlog used to render here, on what is now the app's
-        // start page: three fifty-row queries and two point lookups per pair
-        // on every open, and a screen of warning boxes above the captures.
+    async fn insights_offers_no_decision_however_many_pairs_are_open() {
+        // Five of these used to render here with two Keep buttons each and
+        // "2 more waiting" under them. The judge reads every open pair on its
+        // own now, so seven of them put nothing on the page and nothing in
+        // front of anyone.
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(
             &core,
@@ -5450,17 +5339,11 @@ mod tests {
         }
 
         let body = get_body(&app, &cookie, "/ui/insights").await;
-        assert_eq!(
-            body.matches("/supersede").count(),
-            crate::web::ops::PAIR_LIMIT * 2,
-            "five pairs, both sides offered for each, and nothing beyond that"
-        );
-        // Seven pairs, five shown. Said on the page, because there is no
-        // second page to go and find the other two on.
         assert!(
-            body.contains("2 more waiting"),
-            "a capped list that does not say it is capped reads as an empty queue"
+            !body.contains("/supersede"),
+            "a Keep button is back: {body}"
         );
+        assert!(!body.contains("more waiting"), "a queue is back: {body}");
     }
 
     #[tokio::test]
@@ -5540,7 +5423,7 @@ mod tests {
         // is where they are asserted now.
         // An empty base says so once, instead of answering five headings with
         // "None."
-        assert!(html.contains("Nothing set aside"));
+        assert!(html.contains("Nothing done on its own yet"));
         assert!(!html.contains("<h3>Hidden as stale</h3>"));
     }
 
@@ -5591,20 +5474,6 @@ mod tests {
             !html.contains("Re-synthesize segment"),
             "the review queue is still a to-do list"
         );
-    }
-
-    /// Offered on every card, because the judge is not the only reader who can
-    /// tell. A pair it called a duplicate can still be two artifacts that say
-    /// nothing, and the person looking at it should not have to keep one to
-    /// clear it.
-    #[tokio::test]
-    async fn every_pair_can_be_discarded_whatever_the_judge_said() {
-        let (app, cookie, core) = app_session_and_core().await;
-        let ids = artifacts(&core, &["left one", "right one"]).await;
-        core.store.record_pair(&ids[0], &ids[1], 0.9).await.unwrap();
-
-        let html = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(html.contains("Discard both"), "{html}");
     }
 
     #[tokio::test]
@@ -5750,39 +5619,6 @@ mod tests {
         assert!(
             !frag.contains("badge-warning"),
             "the warning is carried by colour on the number, not by a badge: {frag}"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_pending_pair_leads_with_the_titles_not_with_the_verdict() {
-        let (app, cookie, core) = app_session_and_core().await;
-        let ids = artifacts(
-            &core,
-            &["Speicherorte der MS Mail App", "MS Mail App File Locations"],
-        )
-        .await;
-        core.store
-            .record_pair(&ids[0], &ids[1], 0.94)
-            .await
-            .unwrap();
-
-        let page = get_body(&app, &cookie, "/ui/insights").await;
-        let title = page
-            .find("Speicherorte der MS Mail App")
-            .expect("a title is on the card");
-        // Not "these two cover the same ground": nothing has judged this pair,
-        // and that sentence is a finding. The sweep put it here on a cosine
-        // score, so the score is all the card may claim.
-        assert!(
-            !page.contains("cover the same ground"),
-            "an unjudged pair was given a verdict nobody reached: {page}"
-        );
-        let said = page
-            .find("nothing has read these two yet")
-            .expect("the card still says where the pair came from");
-        assert!(
-            title < said,
-            "the titles are the content and lead the sentence: {page}"
         );
     }
 
@@ -6085,11 +5921,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_insights_page_lists_a_gap_group_as_one_row_and_forgets_it_whole() {
+    async fn an_unanswered_question_is_put_to_nobody_on_insights() {
         let (app, cookie, core) = app_session_and_core_with_feedback().await;
         // Two, because one gap is not a group: the sweep leaves a lone question
         // ungrouped rather than buying a name that restates it.
-        let mut ids = Vec::new();
         for q in ["how do I mount an E01", "mounting E01 images read only"] {
             let id = core
                 .store
@@ -6108,102 +5943,19 @@ mod tests {
                 .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
                 .await
                 .unwrap();
-            ids.push(id);
         }
-        // Before the sweep: each under itself, with a box to fill it.
-        let page = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(page.contains("Knowledge gaps"), "{page}");
-        assert!(page.contains("mount an E01"), "{page}");
-        assert!(page.contains(r#"hx-post="/ui/capture""#), "{page}");
-
-        // After: one row under the sweep's name, and forget names both.
-        crate::jobs::gaps::sweep(&core).await.unwrap();
-        let page = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(page.contains("Fake topic"), "{page}");
-        assert!(
-            !page.contains("mount an E01"),
-            "a group is its name: {page}"
-        );
-        let members = format!("ask:{},ask:{}", ids[1], ids[0]);
-        assert!(
-            page.contains(&members) || page.contains(&format!("ask:{},ask:{}", ids[0], ids[1])),
-            "{page}"
-        );
-
-        let res = app
-            .clone()
-            .oneshot(form(
-                "/ui/gaps/forget",
-                &cookie,
-                &format!("members={members}"),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let page = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(
-            !page.contains("Knowledge gaps"),
-            "a forgotten group must leave the page: {page}"
-        );
-    }
-
-    /// The members of a group are resolved when the page is rendered, and
-    /// retention expires the very rows they name. A member that has since gone
-    /// is already forgotten; stopping on it dismissed the earlier members,
-    /// left the later ones, and answered 404 — so htmx swapped nothing and the
-    /// row came back on reload under the same label, half forgotten.
-    #[tokio::test]
-    async fn forgetting_a_group_whose_member_has_since_gone_still_forgets_the_rest() {
-        let (app, cookie, core) = app_session_and_core_with_feedback().await;
-        let mut ids = Vec::new();
-        for q in ["how do I mount an E01", "mounting E01 images read only"] {
-            let id = core
-                .store
-                .record_ask(crate::store::asks::NewAsk {
-                    question: q.into(),
-                    filters: "{}".into(),
-                    query_vec: vec![1.0; 8],
-                    embed_model: core.embedder.model().to_string(),
-                    answer: "Not in the knowledge base.".into(),
-                    abstained: true,
-                    ..Default::default()
-                })
-                .await
-                .unwrap();
-            core.store
-                .judge_ask(&id, crate::store::asks::AskVerdict::NothingHere)
-                .await
-                .unwrap();
-            ids.push(id);
+        // Neither before the sweep groups them nor after: a hole closes on
+        // its own when a capture covers it, and the list that offered a box
+        // and a Forget beside each one asked a person for what the base does.
+        for when in ["before", "after"] {
+            if when == "after" {
+                crate::jobs::gaps::sweep(&core).await.unwrap();
+            }
+            let page = get_body(&app, &cookie, "/ui/insights").await;
+            assert!(!page.contains("Knowledge gaps"), "{when}: {page}");
+            assert!(!page.contains("mount an E01"), "{when}: {page}");
+            assert!(!page.contains("/ui/gaps/"), "{when}: {page}");
         }
-        crate::jobs::gaps::sweep(&core).await.unwrap();
-
-        // A member named by the rendered row, gone before the press.
-        let res = app
-            .clone()
-            .oneshot(form(
-                "/ui/gaps/forget",
-                &cookie,
-                &format!("members=ask:no-such-ask,ask:{},ask:{}", ids[0], ids[1]),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        let page = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(
-            !page.contains("Knowledge gaps"),
-            "the members that were still there are forgotten: {page}"
-        );
-    }
-
-    #[tokio::test]
-    async fn forgetting_a_malformed_member_is_refused_rather_than_skipped() {
-        let (app, cookie) = app_with_session().await;
-        let res = app
-            .oneshot(form("/ui/gaps/forget", &cookie, "members=ask:g1,nonsense"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -6304,100 +6056,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn every_kind_of_gap_says_which_kind_it_is() {
-        // Four ways of saying the base did not answer, on one list. They are
-        // not the same claim, and an operator reading the list can tell them
-        // apart.
-        let mut c = crate::core::test_support::test_core().await;
-        c.learn.enabled = true;
-        // The fake embedder's vectors are not a semantic space, so the shipped
-        // threshold would call everything weak. A line above what the
-        // candidate below scores and below nothing else.
-        c.set_weak_below(0.5);
-        let core = c.clone();
-        let (app, cookie) = app_with_cookie(c).await;
-        // Judged a gap.
-        let judged = core
-            .store
-            .record_search(
-                crate::store::feedback::NewEvent {
-                    fold_onto: None,
-                    query: "judged one".into(),
-                    door: crate::store::feedback::Door::Api,
-                    scope: None,
-                    filters: "{}".into(),
-                    query_vec: vec![1.0; crate::core::test_support::TEST_DIM],
-                    embed_model: core.embedder.model().to_string(),
-                    candidates: vec![],
-                    answered: false,
-                    context: None,
-                },
-                0,
-            )
-            .await
-            .unwrap();
-        core.store
-            .judge(
-                &judged,
-                crate::store::feedback::Verdict::Gap,
-                crate::store::feedback::Labeller::Deck,
-            )
-            .await
-            .unwrap();
-        // Nothing came close.
-        core.store
-            .record_search(
-                crate::store::feedback::NewEvent {
-                    fold_onto: None,
-                    query: "nothing near one".into(),
-                    door: crate::store::feedback::Door::Api,
-                    scope: None,
-                    filters: "{}".into(),
-                    query_vec: vec![1.0; crate::core::test_support::TEST_DIM],
-                    embed_model: core.embedder.model().to_string(),
-                    candidates: vec![crate::store::feedback::NewCandidate {
-                        artifact_id: "a-1".into(),
-                        score: 0.01,
-                        similarity: Some(0.01),
-                        shown: true,
-                        ..Default::default()
-                    }],
-                    answered: false,
-                    context: None,
-                },
-                0,
-            )
-            .await
-            .unwrap();
-        // A run of searches that ended unanswered.
-        let p = core
-            .store
-            .insert_pursuit(
-                1,
-                &["pursued one".into()],
-                &[],
-                Some((
-                    &[1.0; crate::core::test_support::TEST_DIM],
-                    core.embedder.model(),
-                )),
-            )
-            .await
-            .unwrap();
-        core.store
-            .close_pursuit(&p, "unsatisfied", "nothing strong was engaged", 2)
-            .await
-            .unwrap();
-
-        let html = get_body(&app, &cookie, "/ui/insights").await;
-        for badge in ["judged", "nothing near", "pursued"] {
-            assert!(
-                html.contains(badge),
-                "no `{badge}` badge on the list: {html}"
-            );
-        }
-    }
-
-    #[tokio::test]
     async fn housekeeping_counts_only_the_pursuits_the_gap_list_still_holds() {
         // `unsatisfied` is how the run ended, and a capture answering it later
         // leaves that word alone on purpose. The gap list drops it all the
@@ -6463,11 +6121,10 @@ mod tests {
             .unwrap();
 
         let one = get_body(&app, &cookie, "/ui/insights").await;
-        assert!(one.contains("1 went unanswered"), "{one}");
-        // Singular, and no anchor: the sentence sits directly under the list it
-        // used to link to, so "on the list above" is a direction rather than a
-        // jump to somewhere else on the page.
-        assert!(one.contains("is on the list above"), "{one}");
+        assert!(one.contains("1 went unanswered."), "{one}");
+        // No list to point at: the holes are the base's to close, and the
+        // sentence ends where its count does.
+        assert!(!one.contains("on the list above"), "{one}");
     }
 
     #[tokio::test]
@@ -7294,6 +6951,56 @@ mod tests {
             "{}",
             rail(true)
         );
+    }
+
+    fn hit_disagreeing() -> crate::core::search::SearchResult {
+        crate::core::search::SearchResult {
+            artifact_id: "a1".into(),
+            text: "Retention is 30 days.".into(),
+            disagrees_with: vec![crate::store::pairs::Disagreement {
+                artifact_id: "a1".into(),
+                created_at: 1_767_139_200,
+                other_id: "b2".into(),
+                other_title: Some("Backup policy".into()),
+                other_created_at: 1_767_225_600,
+                detail: Some("30 days there, 14 here".into()),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// A disagreement is a line under the row naming the other note and what
+    /// differs, a link of its own outside the row's link.
+    #[test]
+    fn a_row_names_the_note_that_disagrees_with_it() {
+        let hit = hit_disagreeing();
+        let row = render_hit(0, hit, &Default::default(), false);
+        let html = askama::Template::render(&ResultsTemplate {
+            results: vec![row],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(html.contains("Disagrees with"), "{html}");
+        assert!(html.contains(r#"href="/ui/artifacts/b2""#), "{html}");
+        assert!(html.contains("Backup policy"), "{html}");
+        assert!(html.contains("(2026-01-01)"), "{html}");
+        assert!(html.contains("30 days there, 14 here"), "{html}");
+
+        // A recalled row says it too: being under the rule changes why the
+        // row is there, not what is known about the note.
+        let mut recalled = hit_disagreeing();
+        recalled.via = Some("x".into());
+        let html = askama::Template::render(&ResultsTemplate {
+            associated: vec![render_hit(0, recalled, &Default::default(), false)],
+            ..Default::default()
+        })
+        .unwrap();
+        let below = html
+            .split("Recalled by association")
+            .nth(1)
+            .expect("the associated block was not drawn");
+        assert!(below.contains("Disagrees with"), "{html}");
+        assert!(below.contains(r#"href="/ui/artifacts/b2""#), "{html}");
     }
 
     /// The chips under the box fire a search on a base that holds nothing, and

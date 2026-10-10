@@ -116,26 +116,6 @@ struct LineRange {
     to: Option<i64>,
 }
 
-/// Whether a capture's coverage is final — whether what no artifact carried is
-/// a loss rather than a window nobody has read yet.
-///
-/// `synthesize::plan` writes every window up front in state `pending`, so a
-/// capture still being read has segment rows and no artifacts for most of them.
-/// Measured then, every unread line looks uncovered, and the page said so: it
-/// named lines that were about to arrive as never reached, and offered to pay
-/// for reading them a second time.
-///
-/// These are the states synthesis sets once every window has resolved. `partial`
-/// and `failed` are in the list on purpose — they are where a real loss lives,
-/// and gating on `ready` alone would hide the section from exactly the captures
-/// that have something to show it.
-pub(crate) fn coverage_final(status: &CorpusStatus) -> bool {
-    matches!(
-        status,
-        CorpusStatus::Ready | CorpusStatus::Partial | CorpusStatus::Failed
-    )
-}
-
 #[derive(serde::Deserialize)]
 struct RereadForm {
     /// The band the button sits in. Both ends, because a passage nothing was
@@ -146,89 +126,12 @@ struct RereadForm {
     to: i64,
 }
 
-/// Read one passage again.
-///
-/// The window holding that line, not the line itself: a window is wider than
-/// the passage, and that is what lets the model read it in its surroundings
-/// rather than stripped of them. One model call.
-///
-/// Nothing already written from this capture is replaced. What comes back is
-/// added, and anything it repeats is folded by the dedupe sweep like any other
-/// near duplicate.
-///
-/// True where a read was queued. False for every reason there was nothing to
-/// re-read — a capture still being read, a restored placeholder, artifacts
-/// with no spans, or a band that is not a loss — so the phone can say so.
-pub(crate) async fn reread(
-    tenant: &Tenant,
-    cid: &str,
-    from: i64,
-    to: i64,
-) -> crate::error::Result<bool> {
-    // A page left open while the capture was still being read would otherwise
-    // offer to re-read lines that are merely not written yet.
-    let s = tenant.core.store.get_corpus(cid).await?;
-    if !coverage_final(&s.status) {
-        return Ok(false);
-    }
-    // The same cut the page renders, from the same inputs — and the same two
-    // reasons it renders nothing red: a restored placeholder's text is its own
-    // artifacts, and an artifact with no span may have come from anywhere.
-    let chunks = tenant.core.store.artifacts_for_corpus(cid).await?;
-    if s.restored_at.is_some() || chunks.iter().any(|c| c.corpus_span.is_none()) {
-        return Ok(false);
-    }
-    let spans: Vec<(String, crate::store::artifacts::CorpusSpan)> = chunks
-        .iter()
-        .filter_map(|c| c.corpus_span.clone().map(|sp| (c.id.clone(), sp)))
-        .collect();
-    let lost: Vec<(i64, i64)> = crate::web::corpus_view::bands(&s.raw_text, &spans, None)
-        .into_iter()
-        .filter(|b| b.gap() && b.from <= to && from <= b.to)
-        .map(|b| (b.from, b.to))
-        .collect();
-    if lost.is_empty() {
-        return Ok(false);
-    }
-
-    let segments = tenant.core.store.segments_for_corpus(cid).await?;
-    let mut queued = false;
-    for w in segments.iter().filter(|w| {
-        lost.iter()
-            .any(|(a, z)| w.start_line <= *z && *a <= w.end_line)
-    }) {
-        if tenant
-            .core
-            .store
-            .live_job(
-                crate::store::jobs::Stage::SegmentWindow,
-                &crate::jobs::window::unit_target(cid, w.idx),
-            )
-            .await?
-        {
-            continue;
-        }
-        tenant.core.store.reset_segment(cid, w.idx, true).await?;
-        tenant
-            .core
-            .store
-            .enqueue(
-                crate::store::jobs::Stage::SegmentWindow,
-                "segment",
-                &crate::jobs::window::unit_target(cid, w.idx),
-            )
-            .await?;
-        queued = true;
-    }
-    Ok(queued)
-}
-
 async fn reread_uncovered_ui(
     tenant: Tenant,
     Path(cid): Path<String>,
     Form(f): Form<RereadForm>,
 ) -> UiResult<Response> {
-    reread(&tenant, &cid, f.from, f.to).await?;
+    tenant.core.reread_uncovered(&cid, f.from, f.to).await?;
     // Back to the band the button was in. On a nine-hundred-line document,
     // returning to the top after pressing something two thirds of the way down
     // loses the reader's place for no reason.
@@ -298,7 +201,9 @@ async fn corpus_detail(
     // it may well have been written from exactly the lines about to be painted
     // red, and the page would be offering to pay to read them again on the
     // strength of a claim it cannot make. `unplaced` says so in words instead.
-    let losses_are_final = coverage_final(&s.status) && !segments.is_empty() && unplaced.is_empty();
+    let losses_are_final = crate::core::ingest::coverage_final(&s.status)
+        && !segments.is_empty()
+        && unplaced.is_empty();
 
     // Every row still carries its `L<n>` anchor, inside its band: an artifact's
     // "open at these lines" and the `?from=&to=` highlight both address lines

@@ -48,6 +48,27 @@ data class Hit(
     @SerialName("why_ranked") val whyRanked: String? = null,
     /** The next passage of the same document, where this one's goes on. */
     @SerialName("continues_to") val continuesTo: String? = null,
+    /**
+     * Notes the base found saying otherwise about the same thing. It never
+     * picks a side, so both stay in results and each says the other exists.
+     * Absent on the wire where there are none.
+     */
+    @SerialName("disagrees_with") val disagreesWith: List<Disagreement> = emptyList(),
+)
+
+/**
+ * One note that says otherwise than [artifactId] does. [otherTitle] is null
+ * where the other has no title of its own; [otherCreatedAt] is unix seconds,
+ * which is how somebody tells the older reading from the newer one. [detail]
+ * is what the judge said they disagree about, where it said.
+ */
+@Serializable
+data class Disagreement(
+    @SerialName("artifact_id") val artifactId: String,
+    @SerialName("other_id") val otherId: String,
+    @SerialName("other_title") val otherTitle: String? = null,
+    @SerialName("other_created_at") val otherCreatedAt: Long = 0,
+    val detail: String? = null,
 )
 
 /**
@@ -356,7 +377,6 @@ data class Report(
     val evolve: Evolve? = null,
     /** `[recent, unsatisfied]`, or null while `[learn]` is off. */
     val pursuits: List<Long>? = null,
-    @SerialName("more_pairs") val morePairs: Long = 0,
 )
 
 /** What the web's `_ask_kept.html` says became of a kept answer. */
@@ -513,87 +533,11 @@ data class AskAnswer(
     @SerialName("retired_only") val retiredOnly: Boolean = false,
     /** The question as recorded, where it was: what a verdict, a carried excerpt and a keep name. */
     @SerialName("event_id") val eventId: String? = null,
-)
-
-// ── Judging ──────────────────────────────────────────────────────────────────
-
-/** One side of a duplicate pair, with enough of it to decide by. */
-@Serializable
-data class PairSide(
-    val id: String,
-    val label: String = "",
-    val named: Boolean = false,
-    val excerpt: String = "",
-)
-
-/**
- * One open pair, carrying only what somebody actually established about it.
- *
- * Three of these fields are there to stop a card claiming more than was found.
- * [unjudged] means the sweep filed this on a cosine score and nothing has read
- * it since, so "these two cover the same ground" is a finding nobody made —
- * the measurement is what there is to draw. [viaLink] means no cosine was ever
- * computed, so [percent] is not a similarity and must not be shown as one.
- * [mergeable] is whether the merge path would take a synthesis at all.
- *
- * Its default is false, and deliberately: a server that does not send the
- * field leaves the button out, rather than offering a press that can only come
- * back a validation error.
- */
-@Serializable
-data class Pair(
-    val id: Long,
-    val percent: Long = 0,
-    @SerialName("via_link") val viaLink: Boolean = false,
-    val a: PairSide,
-    val b: PairSide,
-    /** The judge's line, where one was written. */
-    val finding: String? = null,
-    val contradiction: Boolean = false,
-    val vacuous: Boolean = false,
-    val unjudged: Boolean = false,
-    val unmergeable: Boolean = false,
-    val mergeable: Boolean = false,
-    @SerialName("synthesis_asked") val synthesisAsked: Boolean = false,
-    /** The artifact the judge's proposal amounts to keeping, where it made one. */
-    val keeps: String? = null,
-)
-
-/** One decision, however many pairs it takes to state it. */
-@Serializable
-data class PairCluster(val members: Int = 1, val pairs: List<Pair> = emptyList())
-
-/**
- * The pair queue, and how many are waiting beyond it.
- *
- * Its own type rather than [Page], for the reason [SetAside] has one: the
- * queue is bounded rather than paged — `next` is always null — so the cap is
- * the only thing that can say there is more, and a cap that goes unreported
- * reads as the whole queue. [more] is the number, which is what the web page
- * says out loud; zero where nothing is waiting, and where a server too old to
- * send it said nothing.
- */
-@Serializable
-data class PairQueue(
-    val items: List<PairCluster> = emptyList(),
-    val next: String? = null,
-    val more: Int = 0,
-)
-
-/** One question nothing covered. [kind] and [id] are what dismissing it names. */
-@Serializable
-data class GapMember(val kind: String = "", val id: String = "", val text: String = "")
-
-/**
- * Questions the sweep found to be about one subject. [labelledBy] is `model`
- * or `terms` — whether a model named this group or its shared wording did,
- * which is the difference between a reading and a description.
- */
-@Serializable
-data class GapCluster(
-    val label: String = "",
-    @SerialName("labelled_by") val labelledBy: String = "",
-    val members: List<GapMember> = emptyList(),
+    /**
+     * Where the answer was drawn from notes that disagree: the answer gives
+     * both readings, and these say which notes they came from.
+     */
+    val disagreements: List<Disagreement> = emptyList(),
 )
 
 @Serializable
@@ -629,17 +573,20 @@ data class Beside(
 )
 
 /**
- * One thing the base did on its own, or is waiting to be told about.
+ * One thing the base did on its own, with the answer that takes it back.
  *
  * [kind] is the whole of what says which answers the row admits — see
- * [actionsFor]. [subjectId] is what those answers name, and which thing that
- * is depends on the kind: a corpus for `parked`, the artifact for the rest.
+ * [actionsFor]. [subjectId] is what those answers name: the artifact, for
+ * every kind the server sends now.
  */
 @Serializable
 data class SetAsideRow(
     val kind: String = "",
     @SerialName("subject_id") val subjectId: String = "",
-    /** The artifact to open. Null for a parked capture, which is a corpus. */
+    /**
+     * The artifact to open. Null only from a server old enough to list parked
+     * captures, which were corpora; the row then opens the corpus instead.
+     */
     @SerialName("artifact_id") val artifactId: String? = null,
     val label: String = "",
     val named: Boolean = false,
@@ -660,13 +607,15 @@ data class SetAside(
 )
 
 /** An answer a set-aside row admits. Each is a route; none of them is a rendering. */
-enum class SetAsideAction { Verify, Deprecate, Reactivate, UndoMerge, ResolveReplace, ResolveKeepBoth, ResolveDiscard }
+enum class SetAsideAction { Deprecate, Reactivate, UndoMerge }
 
 /**
  * Which answers a row admits, from its `kind` and nothing else — no reading of
  * its wording, no guess from what is beside it. A kind this build has never
- * heard of admits none, which is what lets the server grow a seventh without
- * breaking an older app.
+ * heard of admits none, which is what lets the server grow another without
+ * breaking an older app — and what lets an older server's questions, a parked
+ * capture or an artifact nobody had confirmed, still be shown without a button
+ * whose route the base no longer has.
  *
  * `hidden` arrives from two places — an artifact superseded by a near-duplicate
  * and one deprecated by hand — and the kind does not say which. It does not
@@ -675,11 +624,9 @@ enum class SetAsideAction { Verify, Deprecate, Reactivate, UndoMerge, ResolveRep
  * comes back refused.
  */
 fun actionsFor(kind: String): List<SetAsideAction> = when (kind) {
-    "unverified" -> listOf(SetAsideAction.Verify, SetAsideAction.Deprecate)
     "merged" -> listOf(SetAsideAction.UndoMerge)
     "generated" -> listOf(SetAsideAction.Deprecate)
     "hidden", "buried" -> listOf(SetAsideAction.Reactivate)
-    "parked" -> listOf(SetAsideAction.ResolveReplace, SetAsideAction.ResolveKeepBoth, SetAsideAction.ResolveDiscard)
     else -> emptyList()
 }
 
@@ -721,8 +668,6 @@ object Decode {
     val related: (String) -> Related = { ApiJson.decodeFromString(Related.serializer(), it) }
     val source: (String) -> SourceSlice = { ApiJson.decodeFromString(SourceSlice.serializer(), it) }
     val status: (String) -> Status = { ApiJson.decodeFromString(Status.serializer(), it) }
-    val pairs: (String) -> PairQueue = { ApiJson.decodeFromString(PairQueue.serializer(), it) }
-    val gaps = page(GapCluster.serializer())
     val insights: (String) -> Insights = { ApiJson.decodeFromString(Insights.serializer(), it) }
     val setAside: (String) -> SetAside = { ApiJson.decodeFromString(SetAside.serializer(), it) }
 }
@@ -768,8 +713,6 @@ object Api {
     fun source(id: String) = Request("/api/v1/artifacts/$id/source")
     fun status() = Request("/api/v1/status")
     fun day(date: String, tz: String) = Request("/api/v1/days/$date", mapOf("tz" to tz))
-    fun pairs() = Request("/api/v1/pairs")
-    fun gaps() = Request("/api/v1/gaps")
     fun insights() = Request("/api/v1/insights")
     fun setAside() = Request("/api/v1/insights/set-aside")
 
@@ -796,7 +739,6 @@ object Api {
     fun momentUndone(id: String) = "/api/v1/moments/$id/undone"
     fun momentUnsnooze(id: String) = "/api/v1/moments/$id/unsnooze"
     fun isAReminder(artifactId: String) = "/api/v1/artifacts/$artifactId/is-a-reminder"
-    fun reviewed(id: String) = "/api/v1/artifacts/$id/reviewed"
     fun dismissLink(id: String, other: String) = "/api/v1/artifacts/$id/links/$other/dismiss"
     fun condensationUndo(action: String) = "/api/v1/condensations/$action/undo"
     fun corpusDelete(id: String) = "/api/v1/corpora/$id"

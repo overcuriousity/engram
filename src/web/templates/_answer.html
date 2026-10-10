@@ -20,6 +20,11 @@
         title="Nothing live matched. Every excerpt this answer was written from has been retired — a completed reminder, a superseded note — and is no longer part of what the base offers.">
         written only from retired notes</span></span>
     {% endif %}
+    {# Both sides were cited and the answer was told to give both readings;
+       the badge says so where the reader looks first. Neither side is picked. #}
+    {% for d in disagreements %}
+      <span class="card-meta"><span class="badge badge-warning" title="{{ d.detail.as_deref().unwrap_or("") }}">your notes disagree: {{ d.other_title.as_deref().unwrap_or("another note") }}</span></span>
+    {% endfor %}
     {% if dropped > 0 %}
       {# In words a reader uses. "excerpt(s) omitted for context budget" is
          the accounting behind it, which belongs where an operator can still

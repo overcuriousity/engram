@@ -79,6 +79,13 @@ pub struct AskResponse {
     /// told which they are looking at, rather than being handed a confident
     /// answer drawn entirely from what the base has put away.
     pub retired_only: bool,
+    /// Disagreements the answer was written across: contradiction pairs with
+    /// both sides among `citations`, one row per pair, read from the side
+    /// cited first. The base never picks a side of a contradiction, so where
+    /// an answer draws on one the reader is told both readings were in front
+    /// of the model, and the page badges each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disagreements: Vec<crate::store::pairs::Disagreement>,
     /// The recorded question, when this door records — the UI, with feedback
     /// on. The page shows a verdict bar only when this is set.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +179,7 @@ impl Core {
                     // Nothing was shown and nothing was claimed.
                     unsupported: vec![],
                     retired_only: false,
+                    disagreements: vec![],
                     event_id: None,
                 };
                 // Emitted even though it is empty: a reader that waits for the
@@ -186,12 +194,10 @@ impl Core {
                 return;
             }
 
-            let mut blocks = core.excerpts(&hits).await;
-
             let budget = core.excerpt_budget(&req.q);
 
             // Highest score first, so what gets cut is what mattered least.
-            let mut kept = pack_by_budget(&blocks, &core.counter, budget);
+            let (mut blocks, mut kept) = core.packed_excerpts(&hits, budget).await;
             core.stitch_passages(&hits[..kept], &mut blocks[..kept]).await;
             let mut ranked = first.ranked;
             let mut dropped = retrieve::dropped_count(&retrieved, &hits[..kept], ranked);
@@ -214,6 +220,7 @@ impl Core {
                     abstained: false,
                     unsupported: vec![],
                     retired_only: false,
+                    disagreements: vec![],
                     event_id: None,
                 };
                 yield AskEvent::Retrieved {
@@ -299,8 +306,8 @@ impl Core {
                     // appended to what round one packed: the fanned-out
                     // excerpts have to fit the same window as the first, and
                     // the only honest way to know what fits is to pack it.
-                    let mut merged_blocks = core.excerpts(&merged.hits).await;
-                    let merged_kept = pack_by_budget(&merged_blocks, &core.counter, budget);
+                    let (mut merged_blocks, merged_kept) =
+                        core.packed_excerpts(&merged.hits, budget).await;
                     core.stitch_passages(
                         &merged.hits[..merged_kept],
                         &mut merged_blocks[..merged_kept],
@@ -437,6 +444,22 @@ impl Core {
             if retired_only {
                 tracing::info!("ask: every excerpt the answer was written from is retired");
             }
+            // Read off the citations for the same reason: a disagreement the
+            // answer was written across is one whose both sides the model was
+            // shown. One row per pair, from the side cited first.
+            let cited: std::collections::HashSet<&str> =
+                citations.iter().map(|c| c.artifact_id.as_str()).collect();
+            let mut disagreements: Vec<crate::store::pairs::Disagreement> = Vec::new();
+            for c in &citations {
+                for d in &c.disagrees_with {
+                    let seen = disagreements
+                        .iter()
+                        .any(|x| x.artifact_id == d.other_id && x.other_id == d.artifact_id);
+                    if cited.contains(d.other_id.as_str()) && !seen {
+                        disagreements.push(d.clone());
+                    }
+                }
+            }
             let response = AskResponse {
                 abstained,
                 answer: answer.text,
@@ -445,6 +468,7 @@ impl Core {
                 truncated: answer.truncated,
                 unsupported,
                 retired_only,
+                disagreements,
                 event_id: None,
             };
             // Recorded here rather than by either door, so one ask is one row
@@ -588,10 +612,16 @@ impl Core {
         // ranked hit, and must never enter the scores it is computed from.
         // `scores` is consumed above and never recomputed, so nothing appended
         // from here on can reach `cliff` at all.
+        //
+        // The ranked hits are finished first: what each disagrees with is
+        // what the reach brings in beside it, so it has to be known before
+        // the reach runs.
+        self.finish_hits(&mut hits).await;
         self.reach_sideways(&mut hits, cliff_at).await;
         // The neighbours just appended came off the store, not the ranking,
-        // and so never passed the titling the ranked hits got.
-        self.fill_titles(&mut hits).await;
+        // and so never passed the titling — or the disagreement read — the
+        // ranked hits got.
+        self.finish_hits(&mut hits[ranked..]).await;
 
         Ok(Round {
             query: q.to_string(),
@@ -600,6 +630,25 @@ impl Core {
             retrieved,
             cliff_at,
         })
+    }
+
+    /// The excerpts a set of hits becomes, and how many of them fit `budget`.
+    ///
+    /// Packing is a greedy prefix, so which partners the prompt carries is known
+    /// only once it is done. Rendered first as though no partner were shown —
+    /// the long form of a disagreement caveat, which names the other note in
+    /// full — and packed; the kept prefix is then rendered again with its
+    /// partners numbered. A numbered caveat is shorter than the long form, so
+    /// what was packed still fits, and no caveat names an excerpt the packing
+    /// cut.
+    async fn packed_excerpts(&self, hits: &[SearchResult], budget: usize) -> (Vec<String>, usize) {
+        let mut blocks = self.excerpts(hits, 0).await;
+        let kept = pack_by_budget(&blocks, &self.counter, budget);
+        if hits[..kept].iter().any(|h| !h.disagrees_with.is_empty()) {
+            let numbered = self.excerpts(&hits[..kept], kept).await;
+            blocks.splice(..kept, numbered);
+        }
+        (blocks, kept)
     }
 
     /// The numbered excerpts a set of hits becomes, caveats and all.
@@ -615,7 +664,13 @@ impl Core {
     /// One query for the lot rather than one per hit: this runs once per round,
     /// over the whole list — round two's call covers round one's hits again —
     /// so per-hit round trips would sit in front of every model call twice.
-    async fn excerpts(&self, hits: &[SearchResult]) -> Vec<String> {
+    ///
+    /// `shown` is how many of `hits`, from the front, the prompt will carry. A
+    /// disagreement names its partner by excerpt number only when the partner
+    /// is among those; otherwise it says the other note is not among these
+    /// excerpts and gives its title, date and what differs. Use
+    /// `packed_excerpts`, which knows `shown` only after packing.
+    async fn excerpts(&self, hits: &[SearchResult], shown: usize) -> Vec<String> {
         let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
         let caveats = match self.store.caveats_for(&ids).await {
             Ok(m) => m,
@@ -630,14 +685,44 @@ impl Core {
         hits.iter()
             .enumerate()
             .map(|(i, h)| {
+                let mut lines: Vec<String> =
+                    caveats.get(&h.artifact_id).cloned().unwrap_or_default();
+                // A disagreement is a caveat on both notes: neither applies
+                // without the other being said beside it. Passages are never
+                // one side of a pair, so `stitch_passages`, which re-reads
+                // caveats from the rows, has no disagreement to lose.
+                for d in &h.disagrees_with {
+                    let detail = d
+                        .detail
+                        .as_deref()
+                        .map(|x| format!(": {x}"))
+                        .unwrap_or_default();
+                    let partner = hits[..shown.min(hits.len())]
+                        .iter()
+                        .position(|o| o.artifact_id == d.other_id);
+                    lines.push(match partner {
+                        Some(j) => format!("excerpt [{}] states this differently{detail}", j + 1),
+                        None => format!(
+                            "another note, \"{}\" ({}), not among these excerpts, states this \
+                             differently{detail}",
+                            d.other_title.as_deref().unwrap_or("untitled"),
+                            crate::fmt::fmt_day(d.other_created_at),
+                        ),
+                    });
+                }
+                // Dated in its own header where it takes part in a
+                // disagreement: the answer gives both readings with their
+                // dates, and the other side's caveat dates only the other side.
+                let dated = h
+                    .disagrees_with
+                    .first()
+                    .map(|d| crate::fmt::fmt_day(d.created_at));
                 ask_excerpt(
                     i + 1,
                     h.title.as_deref().unwrap_or_default(),
+                    dated.as_deref(),
                     &h.text,
-                    caveats
-                        .get(&h.artifact_id)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default(),
+                    &lines,
                 )
             })
             .collect()
@@ -746,8 +831,13 @@ impl Core {
                     }
                 }
             }
-            blocks[head_pos] =
-                crate::infer::prompt::ask_excerpt(head_pos + 1, head, &text.join("\n"), &caveats);
+            blocks[head_pos] = crate::infer::prompt::ask_excerpt(
+                head_pos + 1,
+                head,
+                None,
+                &text.join("\n"),
+                &caveats,
+            );
             // Every other member keeps its slot and points at the block its
             // text went into. Cheap — one line each — and it is what lets the
             // model cite the passage it drew on rather than the one that
@@ -792,6 +882,18 @@ impl Core {
         }
 
         let mut reached: Vec<(String, String, Option<String>)> = Vec::new();
+        // What a hit disagrees with goes first: an answer drawn from one side
+        // of a disagreement, with the other side left out, is the one wrong
+        // answer the base already knows how to avoid.
+        for h in hits.iter().take(anchors) {
+            for d in &h.disagrees_with {
+                reached.push((
+                    d.other_id.clone(),
+                    h.artifact_id.clone(),
+                    Some("states this differently".into()),
+                ));
+            }
+        }
         for h in hits.iter().take(anchors) {
             // Read for the ordinal, which the vector payload does not carry.
             // The same row is read again below for its caveats; both are cheap
@@ -953,6 +1055,7 @@ impl Core {
                 // one, by a reader and by a test alike: a ranked hit has no
                 // `via`, and this one names the hit it was reached from.
                 // Reached beside a ranked hit, never ranked itself.
+                disagrees_with: Vec::new(),
                 explanation: Some(crate::core::explain::HitExplanation::recalled(&via)),
                 via: Some(via),
                 reason,
@@ -2903,8 +3006,8 @@ mod tests {
             };
         let hits = vec![hit(&made[1], 0.9), hit(&made[0], 0.5)];
         let mut blocks = vec![
-            crate::infer::prompt::ask_excerpt(1, "Backups", &made[1].text, &[]),
-            crate::infer::prompt::ask_excerpt(2, "Recovery", &made[0].text, &[]),
+            crate::infer::prompt::ask_excerpt(1, "Backups", None, &made[1].text, &[]),
+            crate::infer::prompt::ask_excerpt(2, "Recovery", None, &made[0].text, &[]),
         ];
         core.stitch_passages(&hits, &mut blocks).await;
 
@@ -2927,5 +3030,277 @@ mod tests {
             "every constituent keeps a citable number: {}",
             blocks[0]
         );
+    }
+
+    /// File `a` and `b` as a contradiction the base has not settled, the way
+    /// consolidation leaves one: both live, neither picked.
+    async fn disagree(core: &Core, a: &str, b: &str, detail: &str) {
+        use crate::store::pairs::{DecidedBy, PairState};
+        core.store.record_pair(a, b, 0.9).await.unwrap();
+        let id = core.store.pair_between(a, b).await.unwrap().unwrap().id;
+        core.store
+            .set_pair_state(id, PairState::Contradiction, Some(detail), DecidedBy::Model)
+            .await
+            .unwrap();
+    }
+
+    /// One note in a corpus of its own, never embedded. Without a vector,
+    /// retrieval provably cannot return it, and alone in its corpus nothing is
+    /// adjacent to it — so if it reaches the prompt, the disagreement is what
+    /// brought it.
+    async fn unreachable_note(core: &Core, doc: &str, title: &str, text: &str) -> String {
+        let src = core.store.insert_corpus(doc, "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    text: text.into(),
+                    title: Some(title.into()),
+                    category: Some("reference".into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        made[0].id.clone()
+    }
+
+    #[tokio::test]
+    async fn a_disagreeing_note_is_brought_in_and_marked() {
+        let mut core = test_core().await;
+        let src = core
+            .store
+            .insert_corpus("the backup policy as first written", "web", None)
+            .await
+            .unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[NewArtifact {
+                    text: "backup retention is 30 days".into(),
+                    title: Some("Retention policy".into()),
+                    category: Some("reference".into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        crate::jobs::embed::run(&core, &a).await.unwrap();
+        let b = unreachable_note(
+            &core,
+            "the backup policy as later revised",
+            "Retention, revised",
+            "backup retention is 14 days",
+        )
+        .await;
+        let probe = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            "See [1].".into(),
+            "See [1] and [2].".into(),
+        ]));
+        core.completer = Some(probe.clone());
+        let q = req("how long is backup retention");
+        let ask = || core.ask(&q, Door::Api);
+
+        // Before the pair is filed, the question reaches A and only A.
+        let before = ask().await.unwrap();
+        assert!(
+            before.citations.iter().all(|c| c.artifact_id != b),
+            "the far note was reachable without the disagreement"
+        );
+        assert!(before.disagreements.is_empty());
+
+        disagree(&core, &a, &b, "30 days there, 14 here").await;
+        let out = ask().await.unwrap();
+
+        let partner = out
+            .citations
+            .iter()
+            .find(|c| c.artifact_id == b)
+            .expect("the other side of the disagreement never reached the prompt");
+        assert_eq!(partner.via.as_deref(), Some(a.as_str()));
+        assert_eq!(partner.reason.as_deref(), Some("states this differently"));
+
+        // Each side names the other by the number it carries in this prompt,
+        // and each header carries the day its note was written.
+        let prompt = probe.prompts().pop().expect("the model was called");
+        assert!(
+            prompt.contains("Caveat: excerpt [2] states this differently: 30 days there, 14 here"),
+            "{prompt}"
+        );
+        assert!(
+            prompt.contains("Caveat: excerpt [1] states this differently: 30 days there, 14 here"),
+            "{prompt}"
+        );
+        assert!(!prompt.contains("not among these excerpts"), "{prompt}");
+        for (n, id, title) in [(1, &a, "Retention policy"), (2, &b, "Retention, revised")] {
+            let day = crate::fmt::fmt_day(core.store.get_artifact(id).await.unwrap().created_at);
+            assert!(
+                prompt.contains(&format!("[{n}] {title} ({day})")),
+                "{prompt}"
+            );
+        }
+
+        assert_eq!(out.disagreements.len(), 1, "{:?}", out.disagreements);
+        assert_eq!(
+            out.disagreements[0].artifact_id, a,
+            "read from the side cited first"
+        );
+        assert_eq!(out.disagreements[0].other_id, b);
+    }
+
+    /// Two hits that disagree with each other, built by hand: the numbering is
+    /// a fact about the prompt, not the store.
+    fn disagreeing_hits() -> Vec<SearchResult> {
+        let side =
+            |id: &str, other: &str, title: &str, other_title: &str, text: &str| SearchResult {
+                artifact_id: id.into(),
+                title: Some(title.into()),
+                text: text.into(),
+                disagrees_with: vec![crate::store::pairs::Disagreement {
+                    artifact_id: id.into(),
+                    created_at: 1_767_225_600,
+                    other_id: other.into(),
+                    other_title: Some(other_title.into()),
+                    other_created_at: 1_772_366_400,
+                    detail: Some("30 days there, 14 here".into()),
+                }],
+                ..Default::default()
+            };
+        vec![
+            side(
+                "a",
+                "b",
+                "Retention policy",
+                "Retention, revised",
+                "retention is 30 days",
+            ),
+            side(
+                "b",
+                "a",
+                "Retention, revised",
+                "Retention policy",
+                &"retention is 14 days, as revised. ".repeat(40),
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_partner_the_packing_cut_is_not_named_by_a_number() {
+        let core = test_core().await;
+        let hits = disagreeing_hits();
+
+        let (blocks, kept) = core.packed_excerpts(&hits, usize::MAX).await;
+        assert_eq!(kept, 2);
+        assert!(
+            blocks[0].contains("excerpt [2] states this differently"),
+            "{}",
+            blocks[0]
+        );
+
+        // Room for the first excerpt and not the second: the caveat must not
+        // point at a number the prompt does not carry.
+        let first = core.excerpts(&hits[..1], 0).await;
+        let budget = core.counter.count(&first[0]);
+        let (blocks, kept) = core.packed_excerpts(&hits, budget).await;
+        assert_eq!(kept, 1);
+        assert!(!blocks[0].contains("excerpt [2]"), "{}", blocks[0]);
+        assert!(
+            blocks[0].contains(&format!(
+                "another note, \"Retention, revised\" ({}), not among these excerpts, \
+                 states this differently: 30 days there, 14 here",
+                crate::fmt::fmt_day(1_772_366_400)
+            )),
+            "{}",
+            blocks[0]
+        );
+        assert!(
+            blocks[0].starts_with(&format!(
+                "[1] Retention policy ({})",
+                crate::fmt::fmt_day(1_767_225_600)
+            )),
+            "{}",
+            blocks[0]
+        );
+    }
+
+    /// Ties every hit, so no cliff is drawn and the anchors are exactly the
+    /// first three ranked hits.
+    struct Flat;
+
+    #[async_trait::async_trait]
+    impl crate::infer::Reranker for Flat {
+        async fn rerank(
+            &self,
+            _query: &str,
+            docs: &[String],
+            top_n: usize,
+        ) -> Result<Vec<(usize, f32)>> {
+            Ok((0..docs.len().min(top_n))
+                .map(|i| (i, 0.9 - i as f32 * 0.001))
+                .collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn partners_never_displace_a_ranked_hit() {
+        let mut core = test_core().await;
+        core.reranker = Some(std::sync::Arc::new(Flat));
+        seed(&core, 5, 4).await;
+        let three = AskRequest {
+            q: "chunk".into(),
+            limit: Some(3),
+            tags: vec![],
+            category: None,
+        };
+        let ids = |out: &AskResponse| -> Vec<String> {
+            out.citations
+                .iter()
+                .map(|c| c.artifact_id.clone())
+                .collect()
+        };
+
+        let before = core.ask(&three, Door::Api).await.unwrap();
+        assert_eq!(ranked(&before), 3, "{:?}", ids(&before));
+        let hits: Vec<String> = ids(&before)[..3].to_vec();
+
+        let mut partners = Vec::new();
+        for (i, h) in hits.iter().enumerate() {
+            let far = unreachable_note(
+                &core,
+                &format!("a far document number {i}"),
+                &format!("far {i}"),
+                &format!("far note {i} says otherwise"),
+            )
+            .await;
+            disagree(&core, h, &far, "differs").await;
+            partners.push(far);
+        }
+
+        let out = core.ask(&three, Door::Api).await.unwrap();
+        let got = ids(&out);
+        assert_eq!(ranked(&out), 3, "{got:?}");
+        assert_eq!(
+            got[..3],
+            hits[..],
+            "the ranked hits keep their places and order"
+        );
+        assert_eq!(
+            got[3..6],
+            partners[..],
+            "partners take the reach's first places, in anchor order"
+        );
+        for (c, h) in out.citations[3..6].iter().zip(&hits) {
+            assert_eq!(c.via.as_deref(), Some(h.as_str()));
+        }
+        assert!(
+            got.len() <= 3 + retrieve::NEIGHBOUR_MAX,
+            "{} citations is past the reach's cap",
+            got.len()
+        );
+        assert_eq!(out.disagreements.len(), 3, "{:?}", out.disagreements);
     }
 }

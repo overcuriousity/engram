@@ -356,8 +356,9 @@ async fn post(
                 .unwrap_or("the server refused it without saying why");
             return Err(Error::Validation(format!("{target}: {said}")));
         }
-        // Said, because a person may want to replace or discard one of the
-        // two. Not a wait: a flagged capture is read and searchable as usual.
+        // Said, because the base will settle what the two repeat on its own
+        // and a person may want to know where the undo is. Not a wait: a
+        // flagged capture is read and searchable as usual.
         // A link that could not be read is stored as the link and tried
         // again; said, so nobody wonders why the page's words do not match.
         if let Some(why) = body.get("link_unread").and_then(|v| v.as_str()) {
@@ -369,7 +370,7 @@ async fn post(
         if let Some(n) = body.get("near_duplicate").filter(|v| !v.is_null()) {
             eprintln!(
                 "{target}: stored, and {:.0}% similar to {} — \
-                 replace or discard one on Insights if they are the same.",
+                 the base merges or hides what repeats on its own, with an undo on Insights.",
                 n["similarity"].as_f64().unwrap_or(0.0) * 100.0,
                 n["corpus_id"]
                     .as_str()

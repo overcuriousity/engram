@@ -1,6 +1,7 @@
 pub mod ask;
 pub mod background;
 pub mod context;
+pub mod coverage;
 pub mod explain;
 pub mod extract;
 pub mod fetch;
@@ -300,14 +301,15 @@ pub struct Core {
     pub ranking: Arc<std::sync::RwLock<crate::core::ranking::RankingParams>>,
 }
 
-/// What the idle pass has written to the corpus on its own in the last seven
-/// days, against the week's cap. A bound on the blast radius, not a rate limit
+/// What a job has written to the corpus on its own in the last twenty-four
+/// hours, against its daily pace. A bound on the blast radius, not a rate limit
 /// on finding.
 ///
-/// The pass's own writes and no others — see `sleep_actions_since`. Dedupe,
-/// reap and promotion were autonomous before this budget existed and keep
-/// their own gates; charging them here meant condense, which runs last in the
-/// pass, found the week already spent in every week the base had been used.
+/// One per job, not one for the base: dedupe, reap, promotion and the idle
+/// pass each call `Core::may_act` with their own name and spend only their own
+/// day — see `Store::actions_since`. A shared count meant condense, which runs
+/// last in the pass, found the day already spent on every day the base had
+/// been used.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     pub used: u32,
@@ -321,28 +323,29 @@ impl Budget {
 }
 
 impl Core {
-    /// One job's week: what it has written, and what it may.
+    /// One job's day: what it has written, and what it may.
     pub async fn budget(&self, job: crate::store::actions::Job) -> crate::error::Result<Budget> {
         let used = self
             .store
-            .actions_since(job, crate::store::now() - 7 * 86_400)
+            .actions_since(job, crate::store::now() - 86_400)
             .await?;
         Ok(Budget {
             used: used.clamp(0, u32::MAX as i64) as u32,
-            cap: self.evolve.max_actions_per_week,
+            cap: self.evolve.max_actions_per_day,
         })
     }
 
     /// Whether `job` may write to the corpus now: it is permitted to act at
-    /// all, and it has not spent its own week.
+    /// all, and it has not spent its own day.
     ///
     /// Per job, because a shared count meant four independent units spent one
     /// another's allowance and the one that ran last never had any — see
     /// `Store::actions_since`. Each caller names itself, so nothing here has
     /// to guess which budget a write belongs to.
     ///
-    /// Only under `"full"`: below it the sweeps that were autonomous before
-    /// these stages existed are held by their own switches, as they were.
+    /// The base always runs as `"full"`, so the answer is whether the job has
+    /// spent its own day; the `acts_on_corpus` guard stays for a test that
+    /// builds a core below it.
     pub async fn may_act(&self, job: crate::store::actions::Job) -> crate::error::Result<bool> {
         if !self.evolve.autonomous.acts_on_corpus() {
             return Ok(true);
@@ -698,6 +701,20 @@ impl Core {
     /// name says which question it is.
     pub fn associating(&self) -> bool {
         self.learn.enabled
+    }
+
+    /// May the idle pass move ranking — adopt a generation, take one back, step
+    /// a ladder?
+    ///
+    /// Only under `[learn] mode = "full"`. `learning` is the mode the harness is
+    /// run in before anything learned is allowed to move a rank: a pass that
+    /// adopted a generation while the sweep measured would be measuring a
+    /// ranking its own inputs had already moved. `off` learns nothing, and a
+    /// generation adopted on probes is learning. The corpus half of the pass is
+    /// not this question — dedupe, reap, condense and the retraction of corpus
+    /// actions curate under every mode.
+    pub fn moves_ranking(&self) -> bool {
+        self.evolve.autonomous.moves_ranking() && self.learn.mode == crate::config::LearnMode::Full
     }
 
     /// Is there an ask model to call? `false` means no `[infer.ask]`: no ask

@@ -49,9 +49,9 @@
      Dropping the container costs nothing at this width. Every `@container
      shell (width <= 60rem)` block is unconditionally true on a screen this
      narrow, so all of them are restated below as plain rules — `.regions` from
-     20-layout.css, `.decide-sides` from 43-insights.css, and `.back` at the top
-     of this file. The wide-side blocks, `width > 60rem` and `width >= 60rem`
-     and `>= 90rem`, never applied here in the first place. Above 40rem the
+     20-layout.css and `.back` at the top of this file. The wide-side blocks,
+     `width > 60rem` and `width >= 60rem` and `>= 90rem`, never applied here in
+     the first place. Above 40rem the
      shell is a container again and the queries do the work.
 
      Listed by name rather than counted, because a count is what went wrong:
@@ -69,7 +69,6 @@
   .regions > * { grid-column: 1 / -1; }
   .regions.has-selection .region-rail { display: none; }
   .regions.answering .region-rail { order: 1; }
-  .decide-sides { grid-template-columns: 1fr; }
   .back {
     display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
     margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);

@@ -1217,58 +1217,36 @@ async fn reprocess(
     Ok(StatusCode::ACCEPTED)
 }
 
-#[derive(serde::Deserialize)]
-struct ResolveBody {
-    action: crate::core::ingest::NearDupeAction,
-}
-
-/// Act on a capture parked as a near-duplicate. The decision is an operator's:
-/// nothing here compares the two documents again, it only carries out what was
-/// chosen.
-async fn resolve_near_dupe(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-    Json(body): Json<ResolveBody>,
-) -> Result<Json<serde_json::Value>> {
-    tenant
-        .core
-        .resolve_near_duplicate(&cid, body.action)
-        .await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-/// What consolidation has decided and what it is still asking about.
+/// What consolidation has decided, and the pairs it has not settled yet.
 async fn consolidation(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     use crate::store::pairs::PairState;
     Ok(Json(serde_json::json!({
         "superseded": tenant.core.store.superseded_artifacts(100).await?,
-        // What the judge actually ruled on, listed first for the same reason
-        // Ops puts it at the top: it is the one output here that cost a model
-        // call, and an operator reading only `pairs` would conclude there was
-        // nothing to look at.
-        // Awaiting review, like the queue on Capture: a client acting on this
-        // report presses the same endpoints an operator does, and those refuse
-        // an artifact that is no longer active. A pair naming one is work that
-        // can only come back `cannot supersede: loser … is superseded`.
+        // The disagreements the judge found, which stay open: the base keeps
+        // both sides and never picks one. Listed first because it is the one
+        // output here that cost a model call, and a reader looking only at
+        // `pairs` would conclude there was nothing to see. Only pairs whose
+        // sides are both still in results, the rule search and Ask read them
+        // by — a pair naming a hidden artifact disagrees with nothing a
+        // reader can reach.
         "contradictions": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Contradiction, 100)
             .await?,
-        // Judge-proposed supersedes awaiting an operator's confirmation. Listed
-        // for the same reason Ops renders them: without this a pair the judge
-        // ruled on simply disappears from `pairs`, and an API consumer never
-        // sees the proposal it left behind.
+        // Judge-proposed supersedes no sweep has carried out yet. Only ever
+        // rows an older base filed: the judge now acts on its own verdict, and
+        // the sweep drains what it finds waiting. Emitted regardless — a
+        // client indexing this key breaks on a response that drops it.
         "supersede_proposals": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Superseded, 100)
             .await?,
-        // Discards awaiting confirmation, listed for the same reason. Only ever
+        // Discards waiting on the sweep, listed for the same reason. Only ever
         // rows an older base filed: a vacuous verdict is now carried out where
         // it is found, so nothing new lands here. Emitted regardless — a client
-        // indexing this key breaks on a response that drops it, and the pairs
-        // already in that state are still waiting on the press.
+        // indexing this key breaks on a response that drops it.
         "discard_proposals": tenant
             .core
             .store
@@ -2326,7 +2304,6 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/corpora/{id}/image", get(get_image))
         .route("/corpora/{id}/file", get(get_file))
         .route("/corpora/{id}/reprocess", post(reprocess))
-        .route("/corpora/{id}/resolve", post(resolve_near_dupe))
         .route("/search", get(search))
         .route("/search/stream", get(search_stream))
         .route("/ask", post(ask))
@@ -4319,51 +4296,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn a_parked_capture_is_resolved_over_the_api() {
-        let (app, token, core) = app_token_and_core().await;
-        let body: String = (0..200)
-            .map(|i| format!("step {i}: run the mount command and read its output"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        core.ingest(&body, "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(&body.replacen("step 7:", "step seven:", 1), "web", None)
-            .await
-            .unwrap();
-        assert!(second.near_duplicate.is_some());
-
-        let res = app
-            .oneshot(post_json(
-                &format!("/api/v1/corpora/{}/resolve", second.id),
-                &token,
-                serde_json::json!({ "action": "keep_both" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(
-            core.store.get_corpus(&second.id).await.unwrap().status,
-            crate::store::corpora::CorpusStatus::Raw
-        );
-    }
-
-    #[tokio::test]
-    async fn resolving_a_corpus_that_is_not_parked_is_a_bad_request() {
-        let (app, token, core) = app_token_and_core().await;
-        let out = core.ingest("plain text", "web", None).await.unwrap();
-        let res = app
-            .oneshot(post_json(
-                &format!("/api/v1/corpora/{}/resolve", out.id),
-                &token,
-                serde_json::json!({ "action": "discard" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

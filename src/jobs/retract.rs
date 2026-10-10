@@ -36,9 +36,9 @@ const ACTION_LIMIT: usize = 200;
 /// superseded near-duplicate sits within a hundredth of its survivor on half
 /// the queries near them. "Any amount more similar" therefore restores on a
 /// coin toss. Getting that wrong is not free and not reversible by the base:
-/// `dedupe` routes any repeat verdict on a taken-back action to a person, so
-/// one noise-triggered restore permanently converts an automatic decision into
-/// human queue work.
+/// `dedupe` leaves both sides of any repeat verdict on a taken-back action as
+/// they are, so one noise-triggered restore permanently ends an automatic
+/// decision.
 const RESTORE_MARGIN: f32 = 0.05;
 
 /// What the corpus half of one pass did. Flat counts, so `jobs::did_work`
@@ -1112,6 +1112,38 @@ mod tests {
                 .unwrap()
                 .superseded_by
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn learning_curates_the_corpus_and_holds_ranking_still() {
+        // A generation under watch whose evidence would take it back under
+        // `full`: sixteen give-ups against two positives.
+        let (mut core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        crate::jobs::tune::test_support::observe_badly_under_live(&core, 16).await;
+        let before = core.store.live_generation().await.unwrap().unwrap().id;
+        core.learn.mode = crate::config::LearnMode::Learning;
+        let loser = superseded_after_use_on(&core).await;
+
+        let p = crate::jobs::tune::pass(&core).await.unwrap();
+
+        assert_eq!(p.undone, 1, "the corpus half did not curate: {p:?}");
+        assert!(
+            core.store
+                .get_artifact(&loser)
+                .await
+                .unwrap()
+                .superseded_by
+                .is_none()
+        );
+        assert!(
+            p.adopted.is_none() && p.reverted.is_none(),
+            "learning moved ranking: {p:?}"
+        );
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            before,
+            "ranking moved under learning"
         );
     }
 

@@ -1,0 +1,10 @@
+{# Under the row and not in it: the row is one link, and these are others.
+   Said on both notes, and neither is picked — see `Store::open_contradictions`.
+   One partial for ranked and recalled rows alike, so the two cannot come to
+   say it differently. #}
+{% for d in r.disagrees %}
+<div class="muted row-sub disagrees">
+  Disagrees with <a href="/ui/artifacts/{{ d.other_id }}">{{ d.other_title }}</a>
+  ({{ d.day }}){% if let Some(x) = d.detail %}: {{ x }}{% endif %}
+</div>
+{% endfor %}

@@ -473,14 +473,16 @@ async fn follow_supersessions(core: &Core) -> Result<crate::store::pairs::Follow
 /// unit the queue cannot get through does not stop every other pair from
 /// being judged. `live_job` arms a pair at most once.
 pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
-    // Zero is the off switch for the model: no read, no log line.
+    // Zero is the off switch for the model: no read, no log line. What an
+    // older base left waiting on a person is drained by `reconcile`, which
+    // runs whether or not this does.
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
-    // Dedupe's own week, before anything is armed. `dedupe::run` reads the
+    // Dedupe's own day, before anything is armed. `dedupe::run` reads the
     // same budget and returns with the pair still `Pending` — correct for the
     // unit, but it meant this pass re-armed the same pairs every interval for
-    // the rest of the week and reported `armed = n` each time, so the
+    // the rest of the day and reported `armed = n` each time, so the
     // empty-run backoff that exists to stop exactly this treadmill never
     // engaged. Arming nothing is what lets it engage.
     if !core.may_act(crate::store::actions::Job::Dedupe).await? {
@@ -496,7 +498,7 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     // They lead because the press is somebody waiting. `ask_pair_synthesis_ui`
     // arms the unit once itself, so this is not what makes the writing happen
     // the first time; it is what keeps the promise the card makes when that
-    // run comes back having written nothing — the week's budget was spent,
+    // run comes back having written nothing — the day's budget was spent,
     // `[infer.pair_synthesizer]` had not arrived yet. The unit closes, and
     // without this nothing would ever arm it again while the card went on
     // saying "it is written on the next pass" for ever.
@@ -659,6 +661,180 @@ pub(crate) mod tests {
             crate::jobs::relate::run(core, id).await.unwrap();
         }
         ids
+    }
+
+    /// File a pair between `ids[a]` and `ids[b]` the way an older base left it.
+    async fn leave_pair(
+        core: &crate::core::Core,
+        ids: &[String],
+        (a, b): (usize, usize),
+        state: PairState,
+        detail: Option<&str>,
+    ) -> i64 {
+        use crate::store::pairs::DecidedBy;
+        core.store
+            .record_pair(&ids[a], &ids[b], 0.91)
+            .await
+            .unwrap();
+        let id = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|p| p.a_id == ids[a] || p.b_id == ids[a])
+            .unwrap()
+            .id;
+        core.store
+            .set_pair_state(id, state, detail, DecidedBy::Model)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn an_old_base_has_nothing_waiting_after_two_sweeps() {
+        let core = test_core().await;
+        let ids = seed_titled(
+            &core,
+            &[
+                ("A", "alpha", [1.0, 0.0]),
+                ("B", "beta", [0.99, 0.1]),
+                ("C", "gamma", [0.0, 1.0]),
+                ("D", "delta", [0.1, 0.99]),
+                ("E", "eps", [0.7, 0.7]),
+                ("F", "zeta", [0.71, 0.69]),
+                ("G", "eta", [0.5, 0.86]),
+                ("H", "theta", [0.52, 0.85]),
+                ("I", "iota", [-1.0, 0.0]),
+                ("J", "kappa", [-0.99, 0.1]),
+                ("K", "lambda", [0.0, -1.0]),
+                ("L", "mu", [0.1, -0.99]),
+            ],
+        )
+        .await;
+        // A vacuous recommendation an older base left for a person to press.
+        let vacuous = leave_pair(&core, &ids, (8, 9), PairState::Vacuous, Some("empty")).await;
+        // The loss check's refusal, as an older build filed it: a disagreement
+        // the notes never had.
+        let refused = leave_pair(
+            &core,
+            &ids,
+            (10, 11),
+            PairState::Contradiction,
+            Some(
+                "These two state a value differently, and merging them would have dropped \
+                 one of them. Which is current is the judgement this hands over.",
+            ),
+        )
+        .await;
+        let dup = leave_pair(
+            &core,
+            &ids,
+            (0, 1),
+            PairState::Duplicate,
+            Some("same thing"),
+        )
+        .await;
+        let unmergeable = leave_pair(&core, &ids, (2, 3), PairState::Unmergeable, Some("x")).await;
+        let taken_back = leave_pair(
+            &core,
+            &ids,
+            (4, 5),
+            PairState::Contradiction,
+            Some(crate::jobs::dedupe::TAKEN_BACK_OLD),
+        )
+        .await;
+        let asked = leave_pair(
+            &core,
+            &ids,
+            (6, 7),
+            PairState::Duplicate,
+            Some("same thing"),
+        )
+        .await;
+        assert!(core.store.ask_pair_synthesis(asked).await.unwrap());
+
+        let first = core.store.drain_waiting_pairs().await.unwrap();
+        let second = core.store.drain_waiting_pairs().await.unwrap();
+
+        assert_eq!(first.rejudged, 2);
+        assert_eq!(first.closed, 3);
+        assert_eq!((second.closed, second.rejudged), (0, 0), "idempotent");
+        let d = core.store.get_pair(dup).await.unwrap();
+        assert_eq!(d.state, PairState::Pending, "the judge reads it again");
+        assert!(!d.synthesis_asked);
+        assert_eq!(
+            core.store.get_pair(vacuous).await.unwrap().state,
+            PairState::Pending,
+            "a vacuous recommendation is judged again, not left for a press"
+        );
+        for id in [unmergeable, taken_back, refused] {
+            assert_eq!(
+                core.store.get_pair(id).await.unwrap().state,
+                PairState::NoConflict
+            );
+        }
+        let a = core.store.get_pair(asked).await.unwrap();
+        assert_eq!(a.state, PairState::Duplicate, "an operator's ask stands");
+        assert!(a.synthesis_asked);
+    }
+
+    /// The drain does not wait on the dedupe model: a base with it off, and
+    /// with the sweep off, still has nothing left waiting on a person once
+    /// the repair ticker's reconcile pass has run.
+    #[tokio::test]
+    async fn the_drain_runs_with_the_dedupe_model_off() {
+        let mut core = test_core().await;
+        core.consolidate.max_dedupe_per_tick = 0;
+        core.consolidate.enabled = false;
+        let ids = seed_titled(
+            &core,
+            &[("A", "alpha", [1.0, 0.0]), ("B", "beta", [0.99, 0.1])],
+        )
+        .await;
+        let id = leave_pair(&core, &ids, (0, 1), PairState::Vacuous, Some("empty")).await;
+
+        // Neither the arming pass nor the sweep drains with these settings.
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0);
+        run(&core).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Vacuous
+        );
+
+        crate::jobs::reconcile::run(&core).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn a_real_disagreement_is_left_for_search_to_show() {
+        let core = test_core().await;
+        let ids = seed_titled(
+            &core,
+            &[("A", "alpha", [1.0, 0.0]), ("B", "beta", [0.99, 0.1])],
+        )
+        .await;
+        let id = leave_pair(
+            &core,
+            &ids,
+            (0, 1),
+            PairState::Contradiction,
+            Some("A says port 80, B says port 8080."),
+        )
+        .await;
+
+        let drained = core.store.drain_waiting_pairs().await.unwrap();
+
+        assert_eq!((drained.closed, drained.rejudged), (0, 0));
+        assert_eq!(
+            core.store.get_pair(id).await.unwrap().state,
+            PairState::Contradiction
+        );
     }
 
     pub(crate) async fn seed_titled(
@@ -2220,15 +2396,15 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_spent_week_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
+    async fn a_spent_day_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
         // `dedupe::run` reads the budget too and returns with the pair still
         // `Pending` — correct for the unit, but this pass then re-armed the
-        // same pairs every interval for the rest of the week and reported
+        // same pairs every interval for the rest of the day and reported
         // `armed = n` each time, so the empty-run backoff that exists to stop
         // exactly this treadmill never engaged.
         let mut core = test_core().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         disagreeing(&core).await;
         assert_eq!(arm_dedupe(&core).await.unwrap(), 0, "nothing is armed");
         assert_eq!(
@@ -2323,7 +2499,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_reopened() {
+    async fn a_merge_that_can_never_embed_is_reaped_and_its_pairs_left_with_both_sides() {
         // The pairs are settled the moment the merge is written. If the embed
         // then fails permanently the merge is stranded active-but-unindexed,
         // the roots are never superseded, and the settled pairs mean the
@@ -2385,8 +2561,8 @@ pub(crate) mod tests {
         let p = core.store.get_pair(pid).await.unwrap();
         assert_eq!(
             p.state,
-            PairState::Contradiction,
-            "the pair goes back to a person"
+            PairState::NoConflict,
+            "the reaped merge's pair leaves both sides as they are"
         );
         for id in &ids {
             assert_eq!(

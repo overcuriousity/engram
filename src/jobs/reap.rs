@@ -45,10 +45,10 @@ pub async fn run(core: &Core) -> Result<Report> {
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
     for c in &cands {
-        // Reap's own week, before the judge call: a burial is the one action
+        // Reap's own day, before the judge call: a burial is the one action
         // here that destroys text, and the cap is on taking it. Its own,
-        // because a shared count meant a week of condensations could quietly
-        // remove the ceiling's meaning here — and, the other way round, a week
+        // because a shared count meant a day of condensations could quietly
+        // remove the ceiling's meaning here — and, the other way round, a day
         // of burials could stop the idle pass shortening anything.
         if !core.may_act(crate::store::actions::Job::Reap).await? {
             tracing::info!("budget spent; the rest of the nominees wait for the window to move");
@@ -873,7 +873,7 @@ mod tests {
         ]));
         core.reaper = Some(scripted.clone());
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        core.evolve.max_actions_per_week = 0;
+        core.evolve.max_actions_per_day = 0;
         let ids = seed(&core, &["stale duplicate fact"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         deprecate_long_ago(&core, &ids[0]).await;

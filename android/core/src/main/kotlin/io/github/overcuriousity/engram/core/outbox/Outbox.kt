@@ -5,16 +5,13 @@ import io.github.overcuriousity.engram.core.db.Kind
 import io.github.overcuriousity.engram.core.db.OutboxFile
 import io.github.overcuriousity.engram.core.db.OutboxRow
 import io.github.overcuriousity.engram.core.db.State
-import io.github.overcuriousity.engram.core.read.GapMember
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonArray
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -22,11 +19,8 @@ import java.util.UUID
 
 class Incoming(val name: String, val mime: String, val open: () -> InputStream)
 
-/** The four answers a set-aside artifact admits. Each is a route of its own. */
-enum class ArtifactOp { verify, deprecate, reactivate, unsupersede }
-
-/** The three-way answer to a parked capture, in the server's own words. */
-enum class Resolution { replace, keep_both, discard }
+/** The three answers an artifact admits that have an undo. Each is a route of its own. */
+enum class ArtifactOp { deprecate, reactivate, unsupersede }
 
 /**
  * The load-bearing idea. A share is copied out of the sender's URI into our
@@ -65,44 +59,18 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
         return id
     }
 
-    // ── Judging ──────────────────────────────────────────────────────────────
-    // Every decision a person makes about the base is a row here rather than a
-    // call from the screen. A decision made on a train is a decision; the queue
-    // is the one place that knows what is owed, and the one place an answer can
-    // be taken back out of before it goes.
-
-    /** `keep` is left out entirely where nobody named a side: absent means the judge's proposal. */
-    suspend fun enqueuePairSupersede(pairId: Long, keep: String?) =
-        insert(Kind.pair_supersede, buildJsonObject { put("pair", pairId); if (keep != null) put("keep", keep) })
-
-    suspend fun enqueuePairSynthesize(pairId: Long) =
-        insert(Kind.pair_synthesize, buildJsonObject { put("pair", pairId) })
-
-    suspend fun enqueuePairDiscard(pairId: Long) =
-        insert(Kind.pair_discard, buildJsonObject { put("pair", pairId) })
-
-    suspend fun enqueuePairDismiss(pairId: Long) =
-        insert(Kind.pair_dismiss, buildJsonObject { put("pair", pairId) })
-
-    suspend fun enqueueGapDismiss(kind: String, id: String) =
-        insert(Kind.gap_dismiss, buildJsonObject { put("kind", kind); put("id", id) })
-
-    /** A whole cluster, carrying the members the person was shown. */
-    suspend fun enqueueGapForget(members: List<GapMember>) =
-        insert(
-            Kind.gap_forget,
-            buildJsonObject {
-                putJsonArray("members") {
-                    members.forEach { m -> addJsonObject { put("kind", m.kind); put("id", m.id) } }
-                }
-            },
-        )
+    // ── Decisions ────────────────────────────────────────────────────────────
+    // What a person still decides about the base — hiding a note, bringing one
+    // back, taking back something the base did — is a row here rather than a
+    // call from the screen. A decision made on a train is a decision; the
+    // queue is the one place that knows what is owed, and the one place an
+    // answer can be taken back out of before it goes.
 
     suspend fun enqueueArtifactOp(artifactId: String, op: ArtifactOp) =
         insert(Kind.artifact_op, buildJsonObject { put("artifact", artifactId); put("op", op.name) })
 
     /**
-     * Delete for good. Not an [ArtifactOp]: those four are answers with an
+     * Delete for good. Not an [ArtifactOp]: those three are answers with an
      * undo, and this is the one that has none — which is why the screen asks
      * before it is enqueued, and why the queue is the last place it can be
      * taken back from.
@@ -119,9 +87,6 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
 
     suspend fun enqueueMergeUndo(mergeId: String) =
         insert(Kind.merge_undo, buildJsonObject { put("merge", mergeId) })
-
-    suspend fun enqueueCorpusResolve(corpusId: String, action: Resolution) =
-        insert(Kind.corpus_resolve, buildJsonObject { put("corpus", corpusId); put("action", action.name) })
 
     /**
      * Take an answer back. Only while it is still queued: what the server

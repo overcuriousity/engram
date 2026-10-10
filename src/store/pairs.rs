@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 /// close-out in `run_one` hands the pair to the next sweep — which without this
 /// ceiling would arm it for five more, every sweep, forever.
 ///
-/// The pair stays `pending`, so nothing is lost: it is still on the review
-/// queue, and an operator settles it by hand.
+/// The pair stays `pending`, so nothing is lost: an operator can still
+/// settle it from the pair's own page.
 pub const MAX_UNREADABLE_JUDGEMENTS: i64 = super::jobs::MAX_ATTEMPTS;
 
 /// How many pending pairs `open_component` may follow outward from its seed.
@@ -36,28 +36,30 @@ const COMPONENT_WINDOW: i64 = 5_000;
 #[cfg(test)]
 const COMPONENT_WINDOW: i64 = 3;
 
-/// The states a review card is drawn for, in the order the queue lists them —
-/// and so the only states a press on a card can still be answering.
-/// `web::ops` renders these; `ask_pair_synthesis` and `jobs::dedupe::run`
-/// refuse a Synthese press on anything else.
+/// The states a pair can still be open in, in the order `/consolidation`
+/// reports them — and so the only states a synthesis ask can still be
+/// answering. No page draws a card for them any more; `ask_pair_synthesis`
+/// and `jobs::dedupe::run` refuse an ask on anything else.
+///
+/// Besides `Pending`, which is a pair nobody has asked about yet, nothing new
+/// is settled into these except `Contradiction`, a real disagreement.
+/// `jobs::dedupe` closes every other pair itself. The rest are rows an older base filed
+/// while the judge still handed pairs to a person, and the drain that follows
+/// this change clears them.
 pub const AWAITING_REVIEW: [PairState; 6] = [
     PairState::Contradiction,
+    // Only rows an older base filed: nothing settles a pair here now.
     PairState::Superseded,
-    // The judge read both and found one artifact should hold what both say. A
-    // proposal rather than a merge already applied: see `PairState::Duplicate`
-    // for the measurements that took the action off this verdict. The card
-    // renders it through the same branch a pending pair uses — "these two cover
-    // the same ground" — and the Synthese button is the press that acts on it.
+    // Only rows an older base filed as proposals: a duplicate verdict now
+    // writes its merge where it is found. The drain clears them.
     PairState::Duplicate,
     // Only ever rows an older base filed: a vacuous verdict is now carried
     // out where it is found (`jobs::dedupe::discard_both`) and its pair
-    // settles `Dismissed`. Still listed, because those rows are a
-    // recommendation nobody has pressed yet, and without this key they are on
-    // no queue at all.
+    // settles `Dismissed`. The drain puts what an older base left here back
+    // to `Pending` for the judge; listed until it has run.
     PairState::Vacuous,
-    // An operator asked for one artifact and the writing was refused. Their
-    // reading is not overturned by that; what is left is the same decision
-    // they were making before they pressed, minus the one answer that failed.
+    // Only rows an older base filed: a refused writing now leaves both as they
+    // are and closes the pair `NoConflict`.
     PairState::Unmergeable,
     PairState::Pending,
 ];
@@ -69,24 +71,30 @@ pub enum PairState {
     Pending,
     /// The fact-token prefilter or the judge found nothing to disagree about.
     NoConflict,
-    /// An operator pressed the synthesis button and the writing was refused —
-    /// a member's lineage names stored source text a merge may not rewrite, or
-    /// the draft would have dropped a value one of them states.
+    /// A synthesis was asked for and the writing was refused — a member's
+    /// lineage names stored source text a merge may not rewrite, or the draft
+    /// would have dropped a value one of them states.
     ///
-    /// Its own state because `Contradiction` was carrying it, and the card
-    /// draws that as "these two disagree". So the operator read both, said
-    /// they cover the same ground, pressed, and the card came back telling
-    /// them they disagree — the exact overload of `Contradiction` the decide
-    /// queue's own design set out to remove, re-created by the button that
-    /// design added. The judgement stands; only the automatic writing of it
-    /// was refused, and the detail says which of the two reasons it was.
+    /// Nothing settles a pair here any more. `jobs::dedupe` now leaves both as
+    /// they are and closes such a pair `NoConflict` with the reason on it,
+    /// because there is nobody left to hand the decision to. The variant stays
+    /// for the rows an older base filed, which the drain that follows this
+    /// change clears.
     Unmergeable,
     /// The judge found a detail the two artifacts state differently, with no
     /// clear direction — both readings could still be current.
+    ///
+    /// The one state the judge still leaves open on purpose. The base never
+    /// picks a side of it: both artifacts stay in results, and search and Ask
+    /// show the two together. Nothing about it waits on a person.
     Contradiction,
-    /// The judge named which artifact is obsolete (`obsolete_id`) with enough
-    /// confidence to propose a supersede, but it is not applied automatically:
-    /// an operator confirms via the pair's "apply supersede" action.
+    /// The judge named which artifact is obsolete (`obsolete_id`) as a
+    /// proposal for an operator to confirm.
+    ///
+    /// Nothing settles a pair here any more: a replacement is applied where it
+    /// is found and the pair settles `Dismissed`. The variant stays for the
+    /// rows an older base filed, which the drain that follows this change
+    /// clears.
     Superseded,
     /// An operator looked and decided there is nothing here.
     Dismissed,
@@ -121,20 +129,24 @@ pub enum PairState {
     /// replacement does. Deprecation is reversible, so the undo is the review.
     ///
     /// The variant and everything that renders it stay for the rows an older
-    /// base filed, which are still waiting on that press.
+    /// base filed; the drain puts those back to `Pending`, and the judge's
+    /// verdict on them is carried out like any other.
     Vacuous,
     /// The judge read both and found they cover the same ground: one artifact
     /// should hold what both say.
     ///
-    /// A proposal, not an action. It used to merge on the spot, and the label
-    /// is not steady enough to carry that: asked twelve times about two
-    /// artifacts describing one veterinary practice — one the contact details,
-    /// the other the services — the live judge wrote the same reasoning every
-    /// time and split nine to three between `distinct` and `duplicate`. The
-    /// prompt's own categories both fit that shape. A coin flip is a poor thing
-    /// to hide two artifacts behind a third on, so the reading is the model's
-    /// and the press is the operator's — `synthesis_asked`, and the writing
-    /// follows.
+    /// A duplicate verdict writes its merge where it is found, and the pair
+    /// settles `NoConflict` with `merged_into` set. The label is not steady on
+    /// every pair — asked twelve times about two artifacts describing one
+    /// veterinary practice, one the contact details and the other the
+    /// services, the live judge wrote the same reasoning every time and split
+    /// nine to three between `distinct` and `duplicate` — and what makes
+    /// acting on it safe is the loss check, the journal and the undo that
+    /// `jobs::retract` applies against later searches.
+    ///
+    /// So nothing settles a pair here any more. The variant stays for the rows
+    /// an older base filed as proposals for a person to press, which the drain
+    /// that follows this change clears.
     Duplicate,
     /// A lifecycle event took one of the two artifacts out of results, so the
     /// question cannot be acted on — not because anyone answered it.
@@ -249,6 +261,26 @@ impl DecidedBy {
     }
 }
 
+/// One side's view of an open contradiction: which other note says something
+/// different, and what the judge found differing. Read onto search results, so
+/// the base never picks a side — it shows both and says they disagree.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Disagreement {
+    /// The artifact this row is attached to.
+    pub artifact_id: String,
+    /// When that artifact was written — the same clock as `other_created_at`,
+    /// so a prompt can date both readings. Defaulted for a row serialized
+    /// before it was carried.
+    #[serde(default)]
+    pub created_at: i64,
+    /// The artifact it disagrees with.
+    pub other_id: String,
+    pub other_title: Option<String>,
+    pub other_created_at: i64,
+    /// The judge's sentence on what differs.
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ArtifactPair {
     pub id: i64,
@@ -303,6 +335,16 @@ pub struct Followed {
     /// Pairs taken off the queue because the question the supersession left
     /// cannot be moved anywhere — see the four cases above.
     pub staled: u64,
+}
+
+/// What `drain_waiting_pairs` moved.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DrainCounts {
+    /// Refusals an older base filed as waiting on a person, now `NoConflict`.
+    pub closed: u64,
+    /// Proposals and replacements an older base left for a person, put back
+    /// to `Pending` so the judge reads them again.
+    pub rejudged: u64,
 }
 
 impl Followed {
@@ -541,15 +583,16 @@ impl Store {
         })
     }
 
-    /// The pairs in a state that a person can still act on: both artifacts are
-    /// in results.
+    /// The pairs in a state that can still be acted on: both artifacts are in
+    /// results. What `/api` counts as open; nothing here waits on a person.
     ///
-    /// The review queue's buttons all end in `Core::supersede`, `deprecate` or
-    /// a merge, and every one of those refuses a side that is not active. A row
+    /// Every way a pair is settled ends in `Core::supersede`, `deprecate` or a
+    /// merge, and every one of those refuses a side that is not active. A row
     /// naming an artifact that has since been hidden or deprecated is therefore
-    /// a question with no answer available — offering it produced
-    /// `cannot supersede: loser … is superseded` on the press, which is a
-    /// correct guard reporting a queue that should never have listed the row.
+    /// a question with no answer available — the review queue an older build
+    /// drew from these rows answered a press on one with `cannot supersede:
+    /// loser … is superseded`, a correct guard reporting a row that should
+    /// never have been listed.
     ///
     /// Read-side and not the whole story, because both ways out of results are
     /// reversible: an operator restores the artifact and the pair is a real
@@ -557,9 +600,9 @@ impl Store {
     /// elsewhere — `follow_supersession` moves a supersession's rows onto the
     /// winner, and `stale_unreachable_pairs` settles what is left `Stale`,
     /// reversibly, so that a verdict nobody can act on is not merely invisible.
-    /// This filter is what keeps the queue honest in between: the row is off it
-    /// from the moment the artifact leaves results, without waiting for a
-    /// sweep.
+    /// This filter is what keeps the count honest in between: the row is out
+    /// of it from the moment the artifact leaves results, without waiting for
+    /// a sweep.
     pub async fn pairs_awaiting_review(
         &self,
         state: PairState,
@@ -579,25 +622,6 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows.iter().map(row_to_pair).collect())
-    }
-
-    /// How many pairs `pairs_awaiting_review` would return without a limit.
-    ///
-    /// Counted under the same rule as the listing, so the "N more waiting" line
-    /// under a queue that shows the first few cannot promise rows the queue
-    /// will never render.
-    pub async fn count_pairs_awaiting_review(&self, state: PairState) -> Result<i64> {
-        Ok(sqlx::query_scalar(
-            "SELECT COUNT(*) FROM artifact_pairs p
-               JOIN artifacts a ON a.id = p.a_id
-               JOIN artifacts b ON b.id = p.b_id
-              WHERE p.state = ?
-                AND a.status = 'active' AND a.superseded_by IS NULL
-                AND b.status = 'active' AND b.superseded_by IS NULL",
-        )
-        .bind(state.as_str())
-        .fetch_one(&self.pool)
-        .await?)
     }
 
     /// Move a pair to any state other than `Superseded`, clearing the judge's
@@ -676,6 +700,11 @@ impl Store {
 
     /// Record that a person asked for this pair to be synthesized.
     ///
+    /// Only an operator's press, and only one from before autonomous curation:
+    /// the judge writes its own merges now and never sets this. What an older
+    /// base holds is still answered by `jobs::dedupe::synthesize_asked_pair`,
+    /// and recorded as the operator's.
+    ///
     /// The press is the judgement: an operator has read both sides and decided
     /// they cover the same ground. The dedupe unit reads this and takes the
     /// write-only prompt instead of the verdict prompt, because asking the
@@ -700,6 +729,52 @@ impl Store {
         Ok(q.execute(&self.pool).await?.rows_affected() == 1)
     }
 
+    /// What a base from before autonomous curation left waiting on a person,
+    /// moved into states the base answers itself. Run at the head of every
+    /// reconcile sweep, which runs whether or not the dedupe model is on; a
+    /// second run finds nothing, which is what makes it safe to leave there
+    /// for good.
+    ///
+    /// - `Duplicate` with no merge and no ask, `Superseded` and `Vacuous`: put
+    ///   back to `Pending`, so the judge reads them again and acts through the
+    ///   one path that checks newest-wins, liveness, the loss check and
+    ///   taken-back, recording the result as the model's own. A vacuous
+    ///   verdict found again is carried out where it is found.
+    /// - `Unmergeable`, and `Contradiction` carrying a refusal rather than a
+    ///   finding — "resolve by hand", or the loss check's refusal of a draft,
+    ///   which an older build filed as a disagreement and which is a refused
+    ///   writing, not two readings: `NoConflict`, both sides left as they are.
+    ///
+    /// `Oversized` is not touched: `reopen_oversized` already puts those back
+    /// to `Pending` for the judge on every consolidate pass.
+    ///
+    /// A `Duplicate` an operator already pressed Synthese on keeps its ask;
+    /// the sweep writes it as the operator's.
+    pub async fn drain_waiting_pairs(&self) -> Result<DrainCounts> {
+        let mut tx = self.pool.begin().await?;
+        let rejudged = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL
+              WHERE (state = 'duplicate' AND merged_into IS NULL AND synthesis_asked = 0)
+                 OR state = 'superseded'
+                 OR state = 'vacuous'",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let closed = sqlx::query(
+            "UPDATE artifact_pairs SET state = 'no_conflict', synthesis_asked = 0
+              WHERE state = 'unmergeable'
+                 OR (state = 'contradiction' AND detail LIKE '%esolve by hand%')
+                 OR (state = 'contradiction'
+                     AND detail LIKE '%merging them would have dropped one of them%')",
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(DrainCounts { closed, rejudged })
+    }
+
     /// Clear it. Called when the merge path refuses the draft, so the card
     /// stops promising a synthesis that will not arrive.
     pub async fn clear_pair_synthesis(&self, id: i64) -> Result<()> {
@@ -710,15 +785,16 @@ impl Store {
         Ok(())
     }
 
-    /// Pairs an operator pressed Synthese on and nothing has written yet.
+    /// Pairs an operator pressed Synthese on, before autonomous curation, and
+    /// nothing has written yet. Nothing sets the ask now; these are what an
+    /// older base still holds.
     ///
     /// Not `state = 'pending'`, which is the one thing that separates this from
-    /// `pairs_to_judge`: the press is offered on every card the queue renders,
-    /// and by the time it is pressed the pair is far more often `Duplicate` —
-    /// the judge read both sides, said they cover the same ground, and left the
-    /// action to a person. So the state says nothing about whether the writing
-    /// is owed; `synthesis_asked` does, and `merged_into` says whether it has
-    /// happened.
+    /// `pairs_to_judge`: by the time a synthesis is asked for the pair is far
+    /// more often `Duplicate`, the judge having read both sides and said they
+    /// cover the same ground. So the state says nothing about whether the
+    /// writing is owed; `synthesis_asked` does, and `merged_into` says whether
+    /// it has happened.
     ///
     /// This exists because the press alone cannot keep the promise the card
     /// makes. `ask_pair_synthesis_ui` arms the unit once, and the unit is
@@ -780,19 +856,20 @@ impl Store {
         Ok(())
     }
 
-    /// Reopen every pair a now-dead merge had settled, handing them to a
-    /// person. Contradiction rather than Pending on purpose: re-arming the
+    /// Release every pair a now-dead merge had settled, leaving both sides as
+    /// they are. `NoConflict` rather than Pending on purpose: re-arming the
     /// model would regenerate the same unembeddable draft, at full price,
-    /// forever.
+    /// forever. The roots are only superseded once the embed lands, so they are
+    /// still in results when this runs.
     ///
     /// `decided_by` is rewritten and not left standing: the row is being moved
-    /// to a state nobody has answered yet by a rule the sweep applied on its
-    /// own, so the name on it is the model's — the same attribution
+    /// to a new state by a rule the sweep applied on its own, so the name on
+    /// it is the model's — the same attribution
     /// `follow_supersession` writes when it settles a row the same way.
     pub async fn reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifact_pairs
-                SET state = 'contradiction', detail = ?, decided_by = 'model',
+                SET state = 'no_conflict', detail = ?, decided_by = 'model',
                     merged_into = NULL
               WHERE merged_into = ?",
         )
@@ -951,6 +1028,64 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
         Ok(row.as_ref().map(row_to_pair))
+    }
+
+    /// What each of `ids` is known to disagree with: one row per side asked
+    /// about, for every `Contradiction` pair whose two sides are both still in
+    /// results — the condition `artifact_in_results` answers. A side that has
+    /// left results is not something to disagree with, so the row goes with it
+    /// and comes back if the side does.
+    pub async fn open_contradictions(&self, ids: &[String]) -> Result<Vec<Disagreement>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let holes = vec!["?"; ids.len()].join(", ");
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT p.a_id, p.b_id, p.detail,
+                    a.title AS a_title, a.created_at AS a_created,
+                    b.title AS b_title, b.created_at AS b_created
+               FROM artifact_pairs p
+               JOIN artifacts a ON a.id = p.a_id
+               JOIN artifacts b ON b.id = p.b_id
+              WHERE p.state = 'contradiction'
+                AND a.status = 'active' AND a.superseded_by IS NULL
+                AND b.status = 'active' AND b.superseded_by IS NULL
+                AND (p.a_id IN ({holes}) OR p.b_id IN ({holes}))
+              ORDER BY p.id"
+        )));
+        for _ in 0..2 {
+            for id in ids {
+                q = q.bind(id);
+            }
+        }
+        let wanted: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let mut out = Vec::new();
+        for r in q.fetch_all(&self.pool).await? {
+            let a_id: String = r.get("a_id");
+            let b_id: String = r.get("b_id");
+            let detail: Option<String> = r.get("detail");
+            if wanted.contains(a_id.as_str()) {
+                out.push(Disagreement {
+                    artifact_id: a_id.clone(),
+                    created_at: r.get("a_created"),
+                    other_id: b_id.clone(),
+                    other_title: r.get("b_title"),
+                    other_created_at: r.get("b_created"),
+                    detail: detail.clone(),
+                });
+            }
+            if wanted.contains(b_id.as_str()) {
+                out.push(Disagreement {
+                    artifact_id: b_id,
+                    created_at: r.get("b_created"),
+                    other_id: a_id,
+                    other_title: r.get("a_title"),
+                    other_created_at: r.get("a_created"),
+                    detail,
+                });
+            }
+        }
+        Ok(out)
     }
 
     /// Put a pair back in the judge queue, whatever it was carrying.
@@ -1778,6 +1913,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_contradiction_is_read_from_both_sides_while_both_are_live() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.9).await.unwrap();
+        let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+        s.set_pair_state(
+            id,
+            PairState::Contradiction,
+            Some("30 days there, 14 here"),
+            DecidedBy::Model,
+        )
+        .await
+        .unwrap();
+
+        let got = s
+            .open_contradictions(&[a.clone(), b.clone()])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 2, "one row per side asked about");
+        let from_a = got.iter().find(|d| d.artifact_id == a).unwrap();
+        assert_eq!(from_a.other_id, b);
+        assert_eq!(from_a.detail.as_deref(), Some("30 days there, 14 here"));
+        let from_b = got.iter().find(|d| d.artifact_id == b).unwrap();
+        assert_eq!(from_b.other_id, a);
+
+        assert_eq!(
+            s.open_contradictions(std::slice::from_ref(&a))
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "only the side asked about gets a row"
+        );
+
+        s.set_artifact_status(&b, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert!(
+            s.open_contradictions(&[a]).await.unwrap().is_empty(),
+            "a side out of results is not something to disagree with"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_artifact_disagreeing_with_two_lists_both() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 3).await;
+        for other in &ids[1..] {
+            s.record_pair(&ids[0], other, 0.9).await.unwrap();
+            let id = s.pair_between(&ids[0], other).await.unwrap().unwrap().id;
+            s.set_pair_state(
+                id,
+                PairState::Contradiction,
+                Some("differs"),
+                DecidedBy::Model,
+            )
+            .await
+            .unwrap();
+        }
+        let got = s.open_contradictions(&[ids[0].clone()]).await.unwrap();
+        let mut others: Vec<&str> = got.iter().map(|d| d.other_id.as_str()).collect();
+        others.sort();
+        let mut want: Vec<&str> = ids[1..].iter().map(String::as_str).collect();
+        want.sort();
+        assert_eq!(others, want);
+    }
+
+    #[tokio::test]
     async fn a_pair_the_judge_can_never_read_stops_costing_calls() {
         // The unit closes itself at `MAX_ATTEMPTS` so a later sweep can decide
         // again whether the pair is worth asking about. Nothing implemented that
@@ -2545,7 +2748,7 @@ mod tests {
             1
         );
         let p = s.get_pair(id).await.unwrap();
-        assert_eq!(p.state, PairState::Contradiction);
+        assert_eq!(p.state, PairState::NoConflict);
         assert_eq!(p.merged_into, None);
         assert_eq!(
             p.decided_by,
@@ -3297,10 +3500,10 @@ mod tests {
         assert!(kept.a_id == *loser || kept.b_id == *loser);
     }
 
-    /// The review queue offers a button that supersedes one side of the pair,
-    /// and `Core::supersede` refuses a side that is not active. A pair naming
-    /// an artifact that has left results is therefore a question nobody can
-    /// answer — it must not be listed, and it must not be counted.
+    /// `Core::supersede` refuses a side that is not active, and search and Ask
+    /// read a disagreement only between two notes still in results. A pair
+    /// naming an artifact that has left results is therefore something
+    /// nothing can act on or show — it must not be listed.
     #[tokio::test]
     async fn a_pair_whose_member_left_results_is_not_awaiting_review() {
         let s = Store::memory().await.unwrap();
@@ -3317,12 +3520,6 @@ mod tests {
             .unwrap();
         assert_eq!(open.len(), 1, "a pair nobody can act on is still listed");
         assert_eq!(open[0].a_id, ids[2]);
-        assert_eq!(
-            s.count_pairs_awaiting_review(PairState::Pending)
-                .await
-                .unwrap(),
-            1
-        );
     }
 
     /// Superseded, not deprecated: the other half of `in_results`, and the one
@@ -3348,12 +3545,6 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
-        );
-        assert_eq!(
-            s.count_pairs_awaiting_review(PairState::Contradiction)
-                .await
-                .unwrap(),
-            0
         );
     }
 }

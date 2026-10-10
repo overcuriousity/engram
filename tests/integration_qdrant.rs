@@ -2319,9 +2319,9 @@ async fn integration_tags_a_two_corpus_fixture_the_way_the_rule_says() {
     assert_eq!(core.store.rehearsals_of(&a1).await.unwrap().len(), 1);
     assert_eq!(core.store.rehearsals_of(&a2).await.unwrap().len(), 1);
     assert!(core.store.rehearsals_of(&b).await.unwrap().is_empty());
-    // And nothing is put in front of a person. The pair queue's cards make
-    // claims about meaning — `_decide.html` renders a pair as "these two
-    // disagree" — and two documents sharing a template are not disagreeing.
+    // And no pair is filed. A pair is a claim about meaning — search and Ask
+    // say of a disagreement that "these two disagree" — and two documents
+    // sharing a template are not disagreeing.
     assert!(
         core.store.pair_between(&a1, &b).await.unwrap().is_none()
             && core.store.pair_between(&a2, &b).await.unwrap().is_none(),

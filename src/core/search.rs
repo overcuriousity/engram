@@ -248,6 +248,12 @@ pub struct SearchResult {
     /// row. A `Default` there would claim a retrieved rank of zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<crate::core::explain::HitExplanation>,
+    /// Which other notes the dedupe judge found saying something different
+    /// from this one. The base picks no side: both stay in results and each
+    /// says so about the other. Read once on the way out, by `finish_hits`;
+    /// the ranking never sees it, so it cannot move a hit.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disagrees_with: Vec<crate::store::pairs::Disagreement>,
 }
 
 /// Test-only, for the reason `NewArtifact`'s is: in production every field
@@ -282,6 +288,7 @@ impl Default for SearchResult {
             via: None,
             reason: None,
             explanation: None,
+            disagrees_with: Vec::new(),
         }
     }
 }
@@ -344,6 +351,7 @@ impl From<SearchHit> for SearchResult {
             similarity: h.similarity,
             via: None,
             reason: None,
+            disagrees_with: Vec::new(),
             explanation: None,
         }
     }
@@ -924,6 +932,27 @@ impl Core {
         }
     }
 
+    /// Everything a hit carries that the ranking did not put there: a name
+    /// borrowed from its note, and what it is known to disagree with. Once,
+    /// on the way out, so every door inherits both. Best-effort like
+    /// `fill_titles`: a failed read costs the lines, never the results.
+    pub(crate) async fn finish_hits(&self, results: &mut [SearchResult]) {
+        self.fill_titles(results).await;
+        let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
+        match self.store.open_contradictions(&ids).await {
+            Ok(rows) => {
+                for r in results.iter_mut() {
+                    r.disagrees_with = rows
+                        .iter()
+                        .filter(|d| d.artifact_id == r.artifact_id)
+                        .cloned()
+                        .collect();
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not read disagreements; hits carry none"),
+        }
+    }
+
     /// Opening a chunk is the deliberate act that counts as remembering it,
     /// which is why the detail pane records it and an incremental search does
     /// not.
@@ -1268,6 +1297,7 @@ impl Core {
                 // Set here, where `via` is known. Never ranked, so every other
                 // stage stays absent rather than defaulting to values that
                 // would read as facts about a competition that never happened.
+                disagrees_with: Vec::new(),
                 explanation: Some(crate::core::explain::HitExplanation::recalled(&l.via)),
                 via: Some(l.via),
                 reason: l.reason,
@@ -1340,6 +1370,7 @@ impl Core {
                 retired: false,
                 similarity: None,
                 borrowed_name: !c.provenance.names_its_own_text(),
+                disagrees_with: Vec::new(),
                 explanation: Some(crate::core::explain::HitExplanation {
                     keyword: true,
                     ..Default::default()
@@ -1681,7 +1712,7 @@ impl Core {
                         if results.is_empty() {
                             return Err(e);
                         }
-                        self.fill_titles(&mut results).await;
+                        self.finish_hits(&mut results).await;
                         // Every stage promised above is entered, so a client
                         // following them is not left waiting on one.
                         say(SearchEvent::Stage(SearchStage::Retrieve));
@@ -1917,7 +1948,7 @@ impl Core {
             }
         }
 
-        self.fill_titles(&mut results).await;
+        self.finish_hits(&mut results).await;
 
         let mut reranked = false;
         // Said on the same condition the stage list was built from, and before
@@ -2235,7 +2266,7 @@ impl Core {
             // beside ranked siblings from the same note that show its name —
             // `retrieve_round` already re-runs it after `reach_sideways` for
             // the same reason.
-            self.fill_titles(&mut results[from..]).await;
+            self.finish_hits(&mut results[from..]).await;
         }
         tracing::info!(
             q = %query.q,
@@ -5333,6 +5364,54 @@ mod tests {
         let mut query = q("t0\nalpha text");
         query.limit = 1;
         assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
+    }
+
+    /// A contradiction is shown, not settled: both notes stay where the
+    /// ranking put them, and each names the other.
+    #[tokio::test]
+    async fn a_hit_says_which_note_disagrees_with_it_and_keeps_its_rank() {
+        use crate::store::pairs::{DecidedBy, PairState};
+        let core = test_core().await;
+        seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
+        seed_from(&core, "two", &[("alpha text again", "note", &[])]).await;
+        reembed_all(&core).await;
+        let a = id_of(&core, "alpha text").await;
+        let b = id_of(&core, "alpha text again").await;
+
+        let ranked = |hits: &[SearchResult]| -> Vec<String> {
+            hits.iter().map(|h| h.artifact_id.clone()).collect()
+        };
+        let before = core.search(&q("t0\nalpha text"), Door::Ui).await.unwrap();
+        assert_eq!(before.len(), 2);
+        assert!(before.iter().all(|h| h.disagrees_with.is_empty()));
+
+        core.store.record_pair(&a, &b, 0.9).await.unwrap();
+        let id = core.store.pair_between(&a, &b).await.unwrap().unwrap().id;
+        core.store
+            .set_pair_state(
+                id,
+                PairState::Contradiction,
+                Some("port 80 here, 8080 there"),
+                DecidedBy::Model,
+            )
+            .await
+            .unwrap();
+
+        let after = core.search(&q("t0\nalpha text"), Door::Ui).await.unwrap();
+        assert_eq!(
+            ranked(&after),
+            ranked(&before),
+            "a disagreement moves nothing"
+        );
+        for h in &after {
+            let other = if h.artifact_id == a { &b } else { &a };
+            assert_eq!(h.disagrees_with.len(), 1, "{:?}", h.artifact_id);
+            assert_eq!(&h.disagrees_with[0].other_id, other);
+            assert_eq!(
+                h.disagrees_with[0].detail.as_deref(),
+                Some("port 80 here, 8080 there")
+            );
+        }
     }
 
     /// A passage recalled by association shows no name, exactly as a ranked

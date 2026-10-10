@@ -79,7 +79,7 @@ class TransportTest {
         server.enqueue(MockResponse(code = 204))
         assertEquals(204, t.call("DELETE", "/api/v1/feedback", null).status)
         assertEquals("""{"chosen":"de"}""", t.call("PUT", "/api/v1/settings/lang", """{"lang":"de"}""").body)
-        t.call("POST", "/api/v1/artifacts/a/reviewed", null)
+        t.call("POST", "/api/v1/corpora/c/reread", null)
         val d = server.takeRequest(); val p = server.takeRequest(); val q = server.takeRequest()
         assertEquals("DELETE", d.method); assertEquals(0L, d.body?.size ?: 0L)
         assertEquals("PUT", p.method); assertEquals("""{"lang":"de"}""", p.body?.utf8())

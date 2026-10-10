@@ -21,10 +21,22 @@ import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import io.github.overcuriousity.engram.core.read.Disagreement
 
-/** One result. Past the rule it is drawn back: it placed, and it is not claimed as an answer. */
+/**
+ * One result. Past the rule it is drawn back: it placed, and it is not claimed as an answer.
+ *
+ * [onOpenOther] opens the note a disagreement line names. It is not [onOpen]: that one is an open
+ * of this hit under the search that ranked it, and the other note was not what the search put here.
+ * Left out, it falls back to [onOpen] for a list with no search behind it.
+ */
 @Composable
-fun HitRow(row: RailItem.Row, onOpen: (String) -> Unit, items: List<RailItem> = emptyList()) {
+fun HitRow(
+    row: RailItem.Row,
+    onOpen: (String) -> Unit,
+    items: List<RailItem> = emptyList(),
+    onOpenOther: (String) -> Unit = onOpen,
+) {
     val h = row.hit
     val (name, named) = nameOf(h)
     Column(
@@ -57,8 +69,23 @@ fun HitRow(row: RailItem.Row, onOpen: (String) -> Unit, items: List<RailItem> = 
         // Its own line, under the ones that say why this row is here: what
         // the document does next is something else.
         continuesWords(h, items)?.let { Text(it, Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+        // A note that says otherwise. The base does not pick a side, so both
+        // stay in results and each says the other is there; the line opens
+        // the other one rather than this, and not as an open of this search.
+        h.disagreesWith.forEach { d ->
+            Text(
+                disagreementWords(d),
+                Modifier.padding(top = 2.dp).clickable { onOpenOther(d.otherId) },
+                style = MaterialTheme.typography.labelSmall,
+                color = muted(),
+            )
+        }
     }
 }
+
+/** What a hit says about a note that disagrees with it. */
+fun disagreementWords(d: Disagreement): String =
+    "Disagrees with ${d.otherTitle ?: "another note"}" + (d.detail?.let { ": $it" } ?: "")
 
 @Composable
 fun Badge(text: String, color: androidx.compose.ui.graphics.Color) {
@@ -86,13 +113,18 @@ fun NothingClose() {
     }
 }
 
-/** A whole list of hits: the rows, the rule, and the notice, as `railOf` lays them out. */
+/**
+ * A whole list of hits: the rows, the rule, and the notice, as `railOf` lays them out.
+ *
+ * [onOpenOther] is [HitRow]'s: the note a disagreement line names, opened without the search that
+ * ranked the row. Before [onOpen] so a trailing lambda still means [onOpen]; `null` falls back to it.
+ */
 @Composable
-fun Rail(items: List<RailItem>, onOpen: (String) -> Unit) {
+fun Rail(items: List<RailItem>, onOpenOther: ((String) -> Unit)? = null, onOpen: (String) -> Unit) {
     Column {
         items.forEach { item ->
             when (item) {
-                is RailItem.Row -> HitRow(item, onOpen, items)
+                is RailItem.Row -> HitRow(item, onOpen, items, onOpenOther ?: onOpen)
                 RailItem.Cliff -> CliffRule()
                 RailItem.NothingClose -> NothingClose()
             }

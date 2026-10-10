@@ -5,11 +5,8 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.mutableStateOf
+import io.github.overcuriousity.engram.core.read.Disagreement
 import io.github.overcuriousity.engram.core.read.Hit
-import io.github.overcuriousity.engram.core.read.Pair
-import io.github.overcuriousity.engram.core.read.PairSide
 import io.github.overcuriousity.engram.core.read.SetAsideAction
 import io.github.overcuriousity.engram.core.read.SetAsideRow
 import io.github.overcuriousity.engram.core.read.Reach
@@ -82,161 +79,40 @@ class DrawnTest {
         compose.onNodeWithText("fresh").assertExists()
     }
 
-    private fun pair(
-        id: Long = 1,
-        percent: Long = 91,
-        viaLink: Boolean = false,
-        finding: String? = null,
-        unjudged: Boolean = false,
-        mergeable: Boolean = true,
-    ) = Pair(
-        id = id,
-        percent = percent,
-        viaLink = viaLink,
-        a = PairSide("art-a", "Timeout 0", named = true, excerpt = "the timeout is 30 seconds"),
-        b = PairSide("art-b", "Timeout 1", named = true, excerpt = "the timeout is 90 seconds"),
-        finding = finding,
-        unjudged = unjudged,
-        mergeable = mergeable,
-    )
+    @Test fun aHitSaysWhichNoteDisagreesWithItAndOpensThatOne() {
+        val hits = listOf(
+            Hit(
+                "a", title = "Backups", text = "kept for 14 days",
+                disagreesWith = listOf(Disagreement("a", "b", otherTitle = "NAS", otherCreatedAt = 1_726_099_200, detail = "30 days there, 14 here")),
+            ),
+            Hit("c", title = "Untroubled", text = "nothing disagrees with this"),
+        )
+        var opened = ""
+        var other = ""
+        compose.setContent { EngramTheme { Rail(railOf(hits), onOpenOther = { other = it }) { opened = it } } }
 
-    @Composable
-    private fun review(cards: List<PairCard>, onAnswer: (Pair, PairAnswer) -> Unit = { _, _ -> }, undone: () -> Unit = {}) {
-        EngramTheme {
-            PairReview(
-                cards = cards,
-                onAnswer = { p, a -> onAnswer(p, a); "row-1" },
-                onUndo = { undone(); true },
-                onArtifact = {},
-            )
-        }
+        compose.onNodeWithText("Disagrees with NAS: 30 days there, 14 here").assertExists()
+        compose.onAllNodesWithText("Disagrees with", substring = true).assertCountEquals(1)
+        compose.onNodeWithText("Disagrees with NAS: 30 days there, 14 here").performClick()
+        assertEquals("the line opens the other note, not this one", "b", other)
+        assertEquals("and not as an open of the hit under its search", "", opened)
     }
 
-    @Test fun whereAMergeWouldBeRefusedNoWriteOneIsDrawn() {
-        compose.setContent { review(listOf(PairCard(pair(mergeable = false), 1))) }
-        compose.onNodeWithText("Write one").assertDoesNotExist()
-        compose.onNodeWithText("""Keep "Timeout 0"""").assertExists()
-        compose.onNodeWithText("Discard both").assertExists()
-        compose.onNodeWithText("Dismiss").assertExists()
+    @Test fun aDisagreementWithNoTitleOrDetailStillSaysThereIsOne() {
+        assertEquals("Disagrees with another note", disagreementWords(Disagreement("a", "b")))
+        assertEquals("Disagrees with NAS", disagreementWords(Disagreement("a", "b", otherTitle = "NAS")))
     }
 
     /**
-     * A read emits twice — the held answer, then the server's — and the second
-     * is a different object holding the same pair. An answer given while the
-     * progress bar was still up used to be thrown away with it: the pair came
-     * back into the deck, could be answered again into a second and possibly
-     * contrary write, and the Undo bar for the first answer was gone.
+     * One artifact can be under two kinds of the journal at once — one the
+     * base wrote and later hid is a `generated` row and a `hidden` one — and
+     * they take different answers. Keyed by the subject alone, answering
+     * either made both rows disappear, the second having been enqueued for
+     * nothing.
      */
-    @Test fun anAnswerGivenBeforeTheServersReadArrivesIsNotAskedAgain() {
-        val cards = mutableStateOf(listOf(PairCard(pair(), 1)))
-        compose.setContent {
-            EngramTheme {
-                PairReview(
-                    cards = cards.value,
-                    onAnswer = { _, _ -> "row-1" },
-                    onUndo = { true },
-                    onArtifact = {},
-                )
-            }
-        }
-        compose.onNodeWithText("Dismiss").performClick()
-        compose.waitForIdle()
-        // The server's read, landing on the answer: the same pair, a new list.
-        cards.value = listOf(PairCard(pair(), 1))
-        compose.waitForIdle()
-
-        // The card is gone — asserted on its own words, because "Dismiss" is
-        // also what the Undo bar for that answer says.
-        compose.onNodeWithText("the timeout is 30 seconds").assertDoesNotExist()
-        compose.onNodeWithText("Answered").assertExists()
-        // And the way to take it back outlived the read that landed on it.
-        compose.onNodeWithText("Undo").assertExists()
-    }
-
-    /**
-     * The way out of the confirmation is a cancel word and never an answer's
-     * name. It read "Keep both", which is what dismissing the pair does, so
-     * the button that makes no decision looked like the one that makes that
-     * one.
-     */
-    @Test fun theConfirmationIsCancelledByAWordThatNamesNoAnswer() {
-        compose.setContent { review(listOf(PairCard(pair(), 1))) }
-        compose.onNodeWithText("Discard both").performClick()
-        compose.waitForIdle()
-
-        compose.onNodeWithText("Retires both.").assertExists()
-        compose.onNodeWithText("Keep both").assertDoesNotExist()
-        compose.onNodeWithText("Cancel").performClick()
-        compose.waitForIdle()
-        // Nothing was answered: the card is still the one on screen.
-        compose.onNodeWithText("Discard both").assertExists()
-    }
-
-    @Test fun anUnjudgedPairDrawsTheMeasurementAndNotAFindingNobodyMade() {
-        compose.setContent {
-            review(listOf(PairCard(pair(unjudged = true, finding = "these two cover the same ground"), 1)))
-        }
-        compose.onNodeWithText("91% alike", substring = true).assertExists()
-        compose.onNodeWithText("these two cover the same ground").assertDoesNotExist()
-    }
-
-    @Test fun aPairFromCoRetrievalDrawsNoPercentage() {
-        compose.setContent { review(listOf(PairCard(pair(viaLink = true), 1))) }
-        compose.onNodeWithText("recalled together", substring = true).assertExists()
-        compose.onNodeWithText("91%", substring = true).assertDoesNotExist()
-    }
-
-    @Test fun theReviewAdvancesAfterAnAnswerAndTheUndoIsOnScreen() {
-        val answers = mutableListOf<kotlin.Pair<Long, PairAnswer>>()
-        compose.setContent {
-            review(
-                listOf(PairCard(pair(id = 1), 1), PairCard(pair(id = 2), 1)),
-                onAnswer = { p, a -> answers += p.id to a },
-            )
-        }
-        compose.onNodeWithText("1 of 2").assertExists()
-        // Dismiss hides nothing, so it is the one answer with no confirmation.
-        compose.onNodeWithText("Dismiss").performClick()
-        compose.waitForIdle()
-
-        assertEquals(listOf(1L to PairAnswer.Dismiss), answers)
-        compose.onNodeWithText("2 of 2").assertExists()
-        compose.onNodeWithText("Undo").assertExists()
-    }
-
-    @Test fun anAnswerThatHidesSomethingNamesWhatItHidesFirst() {
-        val answers = mutableListOf<PairAnswer>()
-        compose.setContent { review(listOf(PairCard(pair(), 1)), onAnswer = { _, a -> answers += a }) }
-        compose.onNodeWithText("""Keep "Timeout 0"""").performClick()
-        compose.waitForIdle()
-        // Nothing has been enqueued yet: the confirmation names the cost.
-        assertEquals(emptyList<PairAnswer>(), answers)
-        compose.onNodeWithText("""Hides "Timeout 1".""").assertExists()
-        compose.onNodeWithText("Do it").performClick()
-        compose.waitForIdle()
-        assertEquals(listOf(PairAnswer.KeepA), answers)
-    }
-
-    @Test fun anUndoTakesTheAnswerBackAndTheCardReturns() {
-        var undone = 0
-        compose.setContent { review(listOf(PairCard(pair(id = 1), 1), PairCard(pair(id = 2), 1)), undone = { undone++ }) }
-        compose.onNodeWithText("Dismiss").performClick()
-        compose.waitForIdle()
-        compose.onNodeWithText("Undo").performClick()
-        compose.waitForIdle()
-        assertEquals(1, undone)
-        compose.onNodeWithText("1 of 2").assertExists()
-    }
-
-    /**
-     * Two of the seven questions the set-aside list folds together can be true
-     * of one artifact at once, and they ask for different answers. Keyed by
-     * the subject alone, answering either made both rows disappear — the
-     * second having been enqueued for nothing.
-     */
-    @Test fun oneArtifactUnderTwoKindsIsTwoQuestionsAndAnsweringOneLeavesTheOther() {
+    @Test fun oneArtifactUnderTwoKindsIsTwoRowsAndAnsweringOneLeavesTheOther() {
         val rows = listOf(
-            SetAsideRow(kind = "unverified", subjectId = "a1", artifactId = "a1", label = "Clinic hours", named = true, why = "last confirmed in May, and rarely reached since"),
+            SetAsideRow(kind = "hidden", subjectId = "a1", artifactId = "a1", label = "Clinic hours", named = true, why = "near-identical to the one beside it, so it is kept out of results"),
             SetAsideRow(kind = "generated", subjectId = "a1", artifactId = "a1", label = "Clinic hours", named = true, why = "written after a run of searches the base could not answer"),
         )
         val enqueued = mutableListOf<SetAsideAction>()
@@ -246,12 +122,12 @@ class DrawnTest {
             }
         }
 
-        compose.onNodeWithText("Still accurate").performClick()
+        compose.onNodeWithText("Return to results").performClick()
         compose.waitForIdle()
 
-        assertEquals(listOf(SetAsideAction.Verify), enqueued)
+        assertEquals(listOf(SetAsideAction.Reactivate), enqueued)
         compose.onNodeWithText("written after a run of searches the base could not answer").assertExists()
-        compose.onAllNodesWithText("last confirmed in May, and rarely reached since").assertCountEquals(0)
+        compose.onAllNodesWithText("near-identical to the one beside it, so it is kept out of results").assertCountEquals(0)
     }
 
     @Test fun aSetAsideKindThisBuildHasNeverHeardOfDrawsNoButtons() {

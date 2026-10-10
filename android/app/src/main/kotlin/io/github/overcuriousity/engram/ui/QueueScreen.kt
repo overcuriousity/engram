@@ -78,8 +78,11 @@ private fun firstLine(kind: Kind, payload: String): String {
         Kind.capture_files -> p["title"]?.jsonPrimitive?.contentOrNull ?: "Files"
         Kind.done -> "Done · ${p["moment"]?.jsonPrimitive?.contentOrNull}"
         Kind.snooze -> "Snoozed · ${p["moment"]?.jsonPrimitive?.contentOrNull}"
-        // A judging answer names the decision, not the row it was made on: a
-        // pair's number means nothing to the person who answered it.
+        // A decision names itself, not the row it was made on: a pair's
+        // number means nothing to the person who answered it. The pair, gap,
+        // still-accurate and near-duplicate words are for rows an older build
+        // queued; the drainer retires those unsent, and until it has they are
+        // still drawn as what they were.
         Kind.pair_supersede -> "Duplicate pair · keep one"
         Kind.pair_synthesize -> "Duplicate pair · write one"
         Kind.pair_discard -> "Duplicate pair · discard both"

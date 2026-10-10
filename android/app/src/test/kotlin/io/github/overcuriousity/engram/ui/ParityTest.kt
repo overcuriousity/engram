@@ -8,6 +8,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import io.github.overcuriousity.engram.core.read.AskAnswer
+import io.github.overcuriousity.engram.core.read.Disagreement
 import io.github.overcuriousity.engram.core.read.Hit
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -71,6 +72,21 @@ class ParityTest {
         assertEquals(
             listOf("nothing here", "cut off at the answer length limit", "2 literals no excerpt supports", "written only from retired notes", "1 more excerpt did not fit"),
             answerBadges(AskAnswer(answer = "a", abstained = true, truncated = true, unsupported = listOf("x", "y"), retiredOnly = true, dropped = 1)),
+        )
+    }
+
+    @Test fun anAnswerDrawnFromADisagreementSaysSoOncePerNote() {
+        val a = AskAnswer(
+            answer = "30 days on the NAS, 14 in the cloud",
+            unsupported = listOf("x"),
+            disagreements = listOf(
+                Disagreement("a", "b", otherTitle = "NAS", detail = "30 days there, 14 here"),
+                Disagreement("a", "c"),
+            ),
+        )
+        assertEquals(
+            listOf("1 literal no excerpt supports", "your notes disagree: NAS", "your notes disagree: another note"),
+            answerBadges(a),
         )
     }
 

@@ -25,7 +25,6 @@ pub fn routes() -> Router<AppState> {
         .route("/moments/{id}/date", post(moment_date))
         .route("/moments/{id}/not-a-reminder", post(not_a_reminder))
         .route("/artifacts/{id}/is-a-reminder", post(is_a_reminder))
-        .route("/artifacts/{id}/reviewed", post(artifact_reviewed))
         .route("/artifacts/{id}/links/{other}/dismiss", post(dismiss_link))
         .route("/artifacts/{id}/dwell", post(artifact_dwell))
         .route("/artifacts/{id}/about", get(artifact_about))
@@ -133,7 +132,7 @@ async fn ask_verdict(
         v => {
             let verdict = crate::store::asks::AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
-            tenant.core.store.judge_ask(&id, verdict).await?;
+            tenant.core.judge_ask(&id, verdict).await?;
         }
     }
     let ev = tenant
@@ -301,17 +300,6 @@ async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>) -> Result<StatusC
 
 // ── Artifacts ────────────────────────────────────────────────────────────
 
-/// `POST /artifacts/{id}/reviewed`: clear the verification flags. A
-/// judgement, not a fix — `artifact::mark_artifact_reviewed`'s rule.
-async fn artifact_reviewed(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
-    let c = tenant.core.store.get_artifact(&id).await?;
-    if c.flags.iter().any(|f| f == "orphaned_source") {
-        tenant.core.store.accept_source_loss(&id).await?;
-    }
-    tenant.core.store.clear_artifact_flags(&id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// `POST /artifacts/{id}/links/{other}/dismiss`: *not related*. Final for
 /// that pair.
 async fn dismiss_link(
@@ -436,7 +424,7 @@ async fn corpus_bands(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<Co
         .map(|c| c.id.clone())
         .collect();
     let segments = tenant.core.store.segments_for_corpus(&cid).await?;
-    let losses_are_final = crate::web::corpus::coverage_final(&s.status)
+    let losses_are_final = crate::core::ingest::coverage_final(&s.status)
         && !segments.is_empty()
         && unplaced.is_empty();
     let mut carded: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -547,7 +535,7 @@ async fn corpus_reread(
     Json(b): Json<RereadBody>,
 ) -> Result<StatusCode> {
     Ok(
-        match crate::web::corpus::reread(&tenant, &cid, b.from, b.to).await? {
+        match tenant.core.reread_uncovered(&cid, b.from, b.to).await? {
             true => StatusCode::ACCEPTED,
             false => StatusCode::NO_CONTENT,
         },
@@ -1163,19 +1151,12 @@ mod tests {
             "{v}"
         );
 
+        // A flag is a fact about the text, not a question: there is no door
+        // that clears one, and a client pressing the old one finds nothing.
         core.store
             .set_artifact_flags(&aid, &["stale".to_string()], Some("a detail"))
             .await
             .unwrap();
-        assert!(
-            !core
-                .store
-                .get_artifact(&aid)
-                .await
-                .unwrap()
-                .flags
-                .is_empty()
-        );
         let res = app
             .clone()
             .oneshot(bare(
@@ -1185,9 +1166,10 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
         assert!(
-            core.store
+            !core
+                .store
                 .get_artifact(&aid)
                 .await
                 .unwrap()
@@ -1563,7 +1545,8 @@ mod tests {
             v["pursuits"].is_array(),
             "learning is on, so the line is there: {v}"
         );
-        assert!(v["more_pairs"].is_number());
+        // No pair waits on anyone, so there is nothing to count.
+        assert!(v.get("more_pairs").is_none(), "{v}");
 
         let v = json_of(
             app.oneshot(

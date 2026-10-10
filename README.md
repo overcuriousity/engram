@@ -35,19 +35,21 @@ really gave. Not a proxy score.
 - **Ask** — one question across the base, streamed. It abstains out loud when
   the base has nothing, and badges any command or path the model wrote that no
   excerpt supports. That badge is the best part.
-- **Judge** — a result you read, or answer *Was this what you were looking for?*
-  under, is a labelled pair. Insights reads recall@10 and MRR off those
-  verdicts, and the idle pass replays them, beside what use left behind, to move
-  the ranking on its own. It stays on your machine; one button forgets it.
-- **Duplicates** — near-duplicates parked at capture, close pairs queued for a
-  person. Nothing deleted, no merge drops a number or a path, undo on everything.
+- **Judge** — answer *Was this what you were looking for?* under a search or an
+  Ask. That is the only thing the base asks of you: Insights reads recall@10
+  and MRR off those verdicts, a good answer confirms the notes it drew on, and
+  the idle pass replays them to move the ranking and take back its own
+  mistakes. One button forgets it.
+- **Duplicates** — read at capture, judged in the background, merged or
+  replaced where the judge is sure. Nothing deleted, no merge drops a number
+  or a path, every action has an undo on Insights.
+- **Disagreements** — two notes that state a value differently are both kept,
+  and search and Ask say so, with dates, wherever either one comes up.
 - **Memory that learns** — links from co-retrieval and accessibility that
   decays, so what you use stays reachable. While you are away it sleeps: files
   the day's captures against what it held, rehearses that against your later
   wording, takes back what the evidence says it got wrong, and says so on
   Insights. Everything it writes is a version beside the original, never over it.
-- **Gaps** — questions the base could not answer, grouped and named until you
-  cover them.
 - **Reap** — what has been retired for 90 days gets one more look from a model:
   whatever it still states that the live base does not is rewritten live, and
   the rest leaves search and index for a graveyard table nothing reads back. Off

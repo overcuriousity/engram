@@ -288,6 +288,18 @@ impl Store {
         }))
     }
 
+    /// The artifacts an answer actually referenced, in citation order. What
+    /// the model was shown but did not use is not here: only use is
+    /// engagement.
+    pub async fn used_citations(&self, event_id: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT artifact_id FROM ask_citations WHERE event_id = ? AND used = 1 ORDER BY n",
+        )
+        .bind(event_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn judge_ask(&self, id: &str, verdict: AskVerdict) -> Result<()> {
         one_row(
             sqlx::query("UPDATE ask_events SET judged_at = ?, verdict = ? WHERE id = ?")

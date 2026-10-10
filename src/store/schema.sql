@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS corpora (
   -- competitor in the ranked half of a result list. NULL is the ordinary
   -- state, and `undone` writes NULL back.
   retired_at      INTEGER,
+  -- When the reconcile sweep read this capture's uncovered lines again without
+  -- being asked. NULL until it has; it does so once.
+  auto_reread_at  INTEGER,
   -- What a door knew about the capture beyond the text: a note, file facts,
   -- EXIF. Namespaced JSON, '{}' when nothing was recorded.
   metadata        TEXT NOT NULL DEFAULT '{}'

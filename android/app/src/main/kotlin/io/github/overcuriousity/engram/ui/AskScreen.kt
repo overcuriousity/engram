@@ -152,6 +152,10 @@ fun answerBadges(a: AskAnswer): List<String> = buildList {
     if (a.abstained) add("nothing here")
     if (a.truncated) add("cut off at the answer length limit")
     if (a.unsupported.isNotEmpty()) add("${a.unsupported.size} literal${if (a.unsupported.size != 1) "s" else ""} no excerpt supports")
+    // One per disagreement the answer was drawn from. The answer gives both
+    // readings; the badge says the notes themselves do not agree, which is
+    // a fact about the base rather than about the model.
+    a.disagreements.forEach { d -> add("your notes disagree: ${d.otherTitle ?: "another note"}") }
     if (a.retiredOnly) add("written only from retired notes")
     if (a.dropped > 0) add("${a.dropped} more excerpt${if (a.dropped != 1) "s" else ""} did not fit")
 }

@@ -5,15 +5,14 @@
 <h1>Insights</h1>
 {# A base with nothing in it has nothing to measure, and three panels of
    zeros make a healthy empty base read as a broken full one. Only the
-   measures: a gap is a question the base could not answer, which is exactly
-   what an empty base produces, and the sweeps and the capture queue run whether or not
-   anything has been captured — hiding the page would hide all of that. What is
-   noisy rather than absent lives behind the disclosure at the foot. #}
+   measures: what is due, and the sweeps and the capture queue, run whether or
+   not anything has been captured — hiding the page would hide all of that.
+   What is noisy rather than absent lives behind the disclosure at the foot. #}
 {% if held.corpora == 0 %}
 <div class="empty">
   <h2>Nothing is held yet</h2>
-  <p class="muted">This page measures what the base holds and lists what needs
-    you. The measures wait on there being something in it.</p>
+  <p class="muted">This page measures what the base holds and says what it did
+    on its own. The measures wait on there being something in it.</p>
   <p><a class="btn btn-ghost btn-sm" href="/ui">Back to the box</a></p>
 </div>
 {% else %}
@@ -82,19 +81,6 @@
 {% include "_evolve.html" %}
 {% endif %}
 
-{# Work waiting on a person: dedupe and contradiction pairs, and what is due.
-   Everything below this is reference. #}
-{% if !pairs.is_empty() %}
-<h2>Needs you</h2>
-{% include "_decide.html" %}
-{# A capped list, said once underneath rather than as a link somewhere else:
-   there is no other page these live on. Clearing one of the five above brings
-   the next one up, so the number falls as the work gets done. #}
-{% if more_pairs > 0 %}
-<p class="muted">{{ more_pairs }} more waiting — the next comes up as you clear these.</p>
-{% endif %}
-{% endif %}
-
 {# Due reminders, the same band the workspace column shows — same fragment,
    same route, same actions, so there is exactly one way this list behaves
    rather than two that can drift apart. A page opened to check on the base
@@ -111,22 +97,21 @@
 <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
      hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "", head: "1"}' hx-swap="outerHTML"></div>
 
-{% include "_gaps.html" %}
-
 {# Pursuits had a heading and a section of its own, below seven tables, to say
-   one sentence that points back up at the gap list. It says it beside the list
-   it points at instead. No table: a run that ended unsatisfied is a hole and
-   is already on that list, one that ended satisfied needs nobody, and one that
-   was written up is in the set-aside list below under `generated`. #}
+   one sentence. No table: a run that ended unsatisfied is a hole the base
+   keeps working on by itself, one that ended satisfied needs nobody, and one
+   that was written up is on the journal below under `generated`.
+
+   There was a list of those holes here, with a box to write an answer beside
+   each and a button to forget it. Neither was the base's to ask for: a hole
+   closes on its own when a capture covers it, and the sweep that names them
+   goes on without anyone pressing anything. #}
 {# Only when there is something to say. "No run of searches has gone quiet
-   yet" is a sentence about a thing that has not happened, and with no gap list
-   above it to belong to it stood alone between two sections under no heading
-   at all. #}
+   yet" is a sentence about a thing that has not happened. #}
 {% if pursuit_enabled && pursuit_recent > 0 %}
 <p class="muted">
   {{ pursuit_recent }} run{% if pursuit_recent != 1 %}s{% endif %} of searches went quiet
-  {%- if pursuit_unsatisfied > 0 %}, of which {{ pursuit_unsatisfied }} went unanswered and
-  {% if pursuit_unsatisfied == 1 %}is{% else %}are{% endif %} on the list above{% endif %}.
+  {%- if pursuit_unsatisfied > 0 %}, of which {{ pursuit_unsatisfied }} went unanswered{% endif %}.
 </p>
 {% endif %}
 
@@ -160,11 +145,16 @@
    differs.
 
    The reads are untouched, each with its own cap. `web::insights::SetAsideRow`
-   is the fold. #}
+   is the fold.
+
+   It was "Set aside for you", and two of its kinds were questions: a capture
+   that resembled another, and an artifact nobody had confirmed in a while.
+   The base answers both itself now, so what is left is a journal — what it
+   did, why, and the button that takes it back. #}
 {% if !set_aside.is_empty() %}
-<h2>Set aside for you</h2>
-<p class="muted">What the base did on its own and left an undo for, and what it
-  is waiting to be told. Nothing here is urgent.</p>
+<h2>What the base did</h2>
+<p class="muted">What it merged, wrote, hid and buried, and anything hidden by
+  hand. Nothing is deleted, and every row can be taken back.</p>
 <table class="grid set-aside">
   <thead><tr><th>What</th><th>Why it is here</th><th>Beside it</th><th></th></tr></thead>
   <tbody>
@@ -196,14 +186,13 @@
       </td>
       {# Labelled, not icons. Two icons under a column heading that explained
          them worked while every row in the table meant the same thing; in a
-         list where the row above is a merge and the row below is a parked
-         capture, a bare check mark means nothing. The long form stays in
-         `title` and `aria-label`. #}
+         list where the row above is a merge and the row below is a burial, a
+         bare arrow means nothing. The long form stays in `title` and
+         `aria-label`. #}
       <td>
         <div class="set-aside-actions">
           {% for a in r.actions %}
           <form method="post" action="{{ a.action }}">
-            {% if let Some(f) = a.field %}<input type="hidden" name="{{ f.0 }}" value="{{ f.1 }}">{% endif %}
             <button class="btn btn-sm" type="submit" title="{{ a.hint }}" aria-label="{{ a.hint }}">{{ a.label }}</button>
           </form>
           {% endfor %}
@@ -340,6 +329,6 @@
 {# One sentence for everything that is empty. Five headings each answered
    "None." made a base with nothing wrong with it look like a backlog. #}
 {% if set_aside.is_empty() && retrying.is_empty() %}
-<p class="muted">Nothing set aside, and nothing retrying.</p>
+<p class="muted">Nothing done on its own yet, and nothing retrying.</p>
 {% endif %}
 {% endblock %}

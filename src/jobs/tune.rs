@@ -276,6 +276,15 @@ pub async fn pass(core: &Core) -> Result<Pass> {
         ..Default::default()
     };
 
+    // The ranking half, from here down, moves only under `[learn] mode =
+    // "full"`. Under `learning` the corpus has been curated above and the
+    // rehearsal has been recorded; the generation stays where it is — no
+    // adoption, no revert, no ladder step — because that mode exists so the
+    // harness can measure a ranking nothing learned has moved.
+    if !core.moves_ranking() {
+        return Ok(out);
+    }
+
     // A live generation with a parent and a prediction is under watch, and
     // the watch comes before any new proposal. One change at a time is what
     // keeps the journal readable and the revert exact, and what stops a base
@@ -935,6 +944,11 @@ pub(crate) mod test_support {
     /// A base that has just adopted a generation, with the one it replaced.
     pub(crate) async fn adopted_and_watching() -> (Core, String) {
         watching().await
+    }
+
+    /// `n` give-ups under the live generation: enough of them reverts it.
+    pub(crate) async fn observe_badly_under_live(core: &Core, n: usize) {
+        super::tests::observe_badly_under_live(core, n).await
     }
 
     /// A base whose evidence has stopped agreeing with its verdicts, with the
@@ -2027,6 +2041,31 @@ mod tests {
                 .unwrap()
                 .state,
             "reverted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_learning_base_neither_adopts_nor_reverts() {
+        let (mut core, before) = seeded_with_observations().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.learn.mode = crate::config::LearnMode::Learning;
+        assert!(run(&core).await.unwrap().is_none(), "learning adopted");
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            before
+        );
+
+        // And a generation adopted before the mode changed is not taken back
+        // on evidence that would revert it under `full`.
+        let (mut core, _) = adopted_and_watching().await;
+        observe_badly_under_live(&core, 16).await;
+        let adopted = core.store.live_generation().await.unwrap().unwrap().id;
+        core.learn.mode = crate::config::LearnMode::Learning;
+        let p = pass(&core).await.unwrap();
+        assert!(p.reverted.is_none(), "learning reverted: {p:?}");
+        assert_eq!(
+            core.store.live_generation().await.unwrap().unwrap().id,
+            adopted
         );
     }
 

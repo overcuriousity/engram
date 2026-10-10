@@ -94,20 +94,6 @@ impl IngestOutcome {
     }
 }
 
-/// What an operator decided about a capture flagged as a near-duplicate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NearDupeAction {
-    /// The new capture is the better copy: delete the old corpus and its
-    /// artifacts, and keep this one.
-    Replace,
-    /// They are genuinely different despite the score. Clear the flag and
-    /// leave both alone.
-    KeepBoth,
-    /// The new capture adds nothing. Delete it.
-    Discard,
-}
-
 /// One PDF, whichever door it arrived through.
 #[derive(Debug, Clone)]
 pub struct PdfCapture {
@@ -682,7 +668,7 @@ impl Core {
         // notes and a journal line repeated on another day scored as
         // near-duplicates of what they were not, and went the same way. The
         // pair judging downstream is what reconciles competing artifacts; the
-        // flag is left for a person to replace or discard later if they want.
+        // flag is left as a note on the capture, and asks nobody anything.
         let followup = match &near {
             // A forced reminder is not flagged. "Remind me" has already said
             // what it is, and a reminder repeated is a reminder, not a copy.
@@ -1154,63 +1140,6 @@ impl Core {
         })
     }
 
-    /// Act on a capture flagged as a near-duplicate. Every branch ends with
-    /// the flag gone: the capture kept and in the pipeline, or deleted.
-    pub async fn resolve_near_duplicate(
-        &self,
-        corpus_id: &str,
-        action: NearDupeAction,
-    ) -> Result<()> {
-        let src = self.store.get_corpus(corpus_id).await?;
-        let Some(other) = src.near_dupe_of.clone() else {
-            return Err(Error::Validation(
-                "this corpus is not flagged as a near-duplicate".into(),
-            ));
-        };
-
-        match action {
-            NearDupeAction::Discard => {
-                self.delete_corpus(&src.id).await?;
-                tracing::info!(corpus_id = %src.id, "discarded a near-duplicate capture");
-            }
-            NearDupeAction::Replace | NearDupeAction::KeepBoth => {
-                if action == NearDupeAction::Replace {
-                    // The older corpus goes first. If this fails the new one is
-                    // still flagged, which is a state an operator can retry
-                    // from.
-                    //
-                    // Unless it is already gone: `near_dupe_of` can name a
-                    // corpus that has since been deleted — including another
-                    // flagged capture that was discarded. Failing there would
-                    // leave the only way out of the list behind a 404, with
-                    // nothing on the page to say that "keep both" is now the
-                    // same decision.
-                    match self.delete_corpus(&other).await {
-                        Ok(()) => {
-                            tracing::info!(corpus_id = %src.id, replaced = %other, "replaced an older corpus");
-                        }
-                        Err(Error::NotFound) => {
-                            tracing::info!(
-                                corpus_id = %src.id,
-                                replaced = %other,
-                                "the corpus this capture replaces was already deleted"
-                            );
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                self.store.set_near_dupe(&src.id, None, None).await?;
-                // A capture parked by a build before flags were read like any
-                // other is still at `needs_review` with no job, and this is
-                // its way into the pipeline. A flagged one is there already.
-                if src.status == CorpusStatus::NeedsReview {
-                    self.release_parked(&src.id).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Put a capture parked by an older build into the pipeline: `raw` and a
     /// `Synthesize` job, the flag left where it is. The one way out of
     /// `needs_review`, which nothing writes any more.
@@ -1660,6 +1589,48 @@ impl Core {
             tracing::warn!(artifact_id = id, error = %e, "could not re-arm Remind after a reactivation");
         }
         tracing::info!(artifact_id = id, "reactivated an artifact");
+        Ok(())
+    }
+
+    /// A judged answer is the confirmation "Still accurate" used to ask a
+    /// person for. Best-effort: the verdict is the person's and is already
+    /// recorded; a stamp that cannot be written costs the stamp, not the
+    /// verdict. Out-of-results artifacts are skipped — confirming something
+    /// search will not return changes nothing it ranks.
+    pub async fn confirm_cited(&self, ids: &[String]) {
+        for id in ids {
+            match self.store.get_artifact(id).await {
+                Ok(c) if c.in_results() => {
+                    if let Err(e) = self.verify(id).await {
+                        tracing::warn!(artifact_id = %id, error = %e, "could not stamp a confirmed artifact");
+                    }
+                }
+                Ok(_) | Err(Error::NotFound) => {}
+                Err(e) => {
+                    tracing::warn!(artifact_id = %id, error = %e, "could not read a confirmed artifact")
+                }
+            }
+        }
+    }
+
+    /// Record a verdict on an answer. A right answer also confirms the notes
+    /// it drew on; wrong or empty ones say nothing about their sources, which
+    /// may have been fine and merely not the ones needed.
+    pub async fn judge_ask(&self, id: &str, verdict: crate::store::asks::AskVerdict) -> Result<()> {
+        self.store.judge_ask(id, verdict).await?;
+        if verdict == crate::store::asks::AskVerdict::Right {
+            // Best-effort past this point, as `confirm_cited` is: the verdict
+            // is written, and failing the press over the stamps would tell the
+            // person it did not take when it did.
+            match self.store.used_citations(id).await {
+                Ok(cited) => self.confirm_cited(&cited).await,
+                Err(e) => tracing::warn!(
+                    ask_id = id,
+                    error = %e,
+                    "could not read what a right answer cited; its notes are not confirmed"
+                ),
+            }
+        }
         Ok(())
     }
 
@@ -2368,13 +2339,103 @@ impl Core {
     }
 }
 
+/// Whether a capture's coverage is final — whether what no artifact carried is
+/// a loss rather than a window nobody has read yet.
+///
+/// `synthesize::plan` writes every window up front in state `pending`, so a
+/// capture still being read has segment rows and no artifacts for most of them.
+/// Measured then, every unread line looks uncovered, and the page said so: it
+/// named lines that were about to arrive as never reached, and offered to pay
+/// for reading them a second time.
+///
+/// These are the states synthesis sets once every window has resolved. `partial`
+/// and `failed` are in the list on purpose — they are where a real loss lives,
+/// and gating on `ready` alone would hide the section from exactly the captures
+/// that have something to show it.
+pub(crate) fn coverage_final(status: &CorpusStatus) -> bool {
+    matches!(
+        status,
+        CorpusStatus::Ready | CorpusStatus::Partial | CorpusStatus::Failed
+    )
+}
+
+impl Core {
+    /// Read one passage again.
+    ///
+    /// The window holding that line, not the line itself: a window is wider than
+    /// the passage, and that is what lets the model read it in its surroundings
+    /// rather than stripped of them. One model call.
+    ///
+    /// Nothing already written from this capture is replaced. What comes back is
+    /// added, and anything it repeats is folded by the dedupe sweep like any other
+    /// near duplicate.
+    ///
+    /// True where a read was queued. False for every reason there was nothing to
+    /// re-read — a capture still being read, a restored placeholder, artifacts
+    /// with no spans, or a band that is not a loss — so the phone can say so.
+    pub async fn reread_uncovered(&self, cid: &str, from: i64, to: i64) -> Result<bool> {
+        // A page left open while the capture was still being read would otherwise
+        // offer to re-read lines that are merely not written yet.
+        let s = self.store.get_corpus(cid).await?;
+        if !coverage_final(&s.status) {
+            return Ok(false);
+        }
+        // The same cut the page renders, from the same inputs — and the same two
+        // reasons it renders nothing red: a restored placeholder's text is its own
+        // artifacts, and an artifact with no span may have come from anywhere.
+        let chunks = self.store.artifacts_for_corpus(cid).await?;
+        if s.restored_at.is_some() || chunks.iter().any(|c| c.corpus_span.is_none()) {
+            return Ok(false);
+        }
+        let spans: Vec<(String, crate::store::artifacts::CorpusSpan)> = chunks
+            .iter()
+            .filter_map(|c| c.corpus_span.clone().map(|sp| (c.id.clone(), sp)))
+            .collect();
+        let lost: Vec<(i64, i64)> = crate::core::coverage::bands(&s.raw_text, &spans, None)
+            .into_iter()
+            .filter(|b| b.gap() && b.from <= to && from <= b.to)
+            .map(|b| (b.from, b.to))
+            .collect();
+        if lost.is_empty() {
+            return Ok(false);
+        }
+
+        let segments = self.store.segments_for_corpus(cid).await?;
+        let mut queued = false;
+        for w in segments.iter().filter(|w| {
+            lost.iter()
+                .any(|(a, z)| w.start_line <= *z && *a <= w.end_line)
+        }) {
+            if self
+                .store
+                .live_job(
+                    crate::store::jobs::Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(cid, w.idx),
+                )
+                .await?
+            {
+                continue;
+            }
+            self.store.reset_segment(cid, w.idx, true).await?;
+            self.store
+                .enqueue(
+                    crate::store::jobs::Stage::SegmentWindow,
+                    "segment",
+                    &crate::jobs::window::unit_target(cid, w.idx),
+                )
+                .await?;
+            queued = true;
+        }
+        Ok(queued)
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     use crate::core::ingest::MAX_TEXT_BYTES;
     use crate::core::ingest::{
-        Capture, ImageCapture, MAX_NOTE_CHARS, NearDupeAction, ORIGIN_FETCH, ORIGIN_IMAGE,
-        ORIGIN_PDF, PdfCapture,
+        Capture, ImageCapture, MAX_NOTE_CHARS, ORIGIN_FETCH, ORIGIN_IMAGE, ORIGIN_PDF, PdfCapture,
     };
     use crate::core::test_support::test_core;
     use crate::error::Error;
@@ -2906,6 +2967,88 @@ mod tests {
         );
     }
 
+    async fn stamped_at(core: &crate::core::Core, id: &str) -> Option<i64> {
+        core.store.get_artifact(id).await.unwrap().last_verified_at
+    }
+
+    fn an_ask_citing(ids: &[(&str, bool)]) -> crate::store::asks::NewAsk {
+        crate::store::asks::NewAsk {
+            question: "how do I mount it".into(),
+            scope: Some("me".into()),
+            filters: "{}".into(),
+            query_vec: vec![0.1, 0.2],
+            embed_model: "fake".into(),
+            answer: "an answer".into(),
+            citations: ids
+                .iter()
+                .map(|(id, used)| crate::store::asks::NewAskCitation {
+                    artifact_id: (*id).to_string(),
+                    score: 1.0,
+                    used: *used,
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_right_answer_confirms_what_it_cited_and_a_wrong_one_does_not() {
+        use crate::store::asks::AskVerdict;
+        let core = test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("used", [1.0, 0.0]), ("shown only", [0.0, 1.0])],
+        )
+        .await;
+        for id in &ids {
+            core.store.set_last_verified_at(id, 1).await.unwrap();
+        }
+
+        let right = core
+            .store
+            .record_ask(an_ask_citing(&[(&ids[0], true), (&ids[1], false)]))
+            .await
+            .unwrap();
+        core.judge_ask(&right, AskVerdict::Right).await.unwrap();
+        assert!(
+            stamped_at(&core, &ids[0]).await.unwrap() > 1,
+            "the note the answer used was not confirmed"
+        );
+        assert_eq!(
+            stamped_at(&core, &ids[1]).await,
+            Some(1),
+            "a note that was only shown was confirmed"
+        );
+
+        core.store.set_last_verified_at(&ids[0], 1).await.unwrap();
+        let wrong = core
+            .store
+            .record_ask(an_ask_citing(&[(&ids[0], true)]))
+            .await
+            .unwrap();
+        core.judge_ask(&wrong, AskVerdict::Wrong).await.unwrap();
+        assert_eq!(
+            stamped_at(&core, &ids[0]).await,
+            Some(1),
+            "a wrong answer confirmed its source"
+        );
+        let ev = core.store.ask_event(&wrong).await.unwrap().unwrap();
+        assert!(matches!(ev.verdict, Some(AskVerdict::Wrong)));
+    }
+
+    #[tokio::test]
+    async fn confirming_an_artifact_out_of_results_is_skipped_not_an_error() {
+        let core = test_core().await;
+        let ids = crate::jobs::consolidate::tests::seed(&core, &[("retired", [1.0, 0.0])]).await;
+        core.store.set_last_verified_at(&ids[0], 1).await.unwrap();
+        core.deprecate(&ids[0]).await.unwrap();
+
+        core.confirm_cited(&[ids[0].clone(), "no-such-artifact".to_string()])
+            .await;
+
+        assert_eq!(stamped_at(&core, &ids[0]).await, Some(1));
+    }
+
     #[tokio::test]
     async fn a_capture_remembers_where_it_came_from() {
         let core = test_core().await;
@@ -3072,7 +3215,6 @@ mod tests {
         assert!(near.similarity > 0.90);
         let row = core.store.get_corpus(&second.id).await.unwrap();
         assert_eq!(row.near_dupe_of.as_deref(), Some(first.id.as_str()));
-        assert_eq!(core.store.parked_corpora(10).await.unwrap().len(), 1);
 
         crate::jobs::test_support::drain(&core).await;
         assert_eq!(
@@ -3087,7 +3229,7 @@ mod tests {
                 .unwrap()
                 .near_dupe_of
                 .is_some(),
-            "and stays flagged for a person to look at"
+            "and stays flagged, which is a note on it rather than a question"
         );
     }
 
@@ -3148,146 +3290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keeping_both_clears_the_flag_and_leaves_the_capture_in_the_pipeline() {
-        let core = test_core().await;
-        core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::KeepBoth)
-            .await
-            .unwrap();
-
-        let got = core.store.get_corpus(&second.id).await.unwrap();
-        assert_eq!(got.status, CorpusStatus::Raw);
-        assert!(got.near_dupe_of.is_none(), "the flag must be cleared");
-        assert!(
-            core.store.claim_job().await.unwrap().is_some(),
-            "the synthesis the capture armed is still there"
-        );
-    }
-
-    #[tokio::test]
-    async fn keeping_both_releases_a_capture_an_older_build_parked() {
-        let core = test_core().await;
-        core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-        // What an older build wrote: parked, and no job.
-        while core.store.claim_job().await.unwrap().is_some() {}
-        core.store
-            .set_corpus_status(&second.id, CorpusStatus::NeedsReview)
-            .await
-            .unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::KeepBoth)
-            .await
-            .unwrap();
-
-        let got = core.store.get_corpus(&second.id).await.unwrap();
-        assert_eq!(got.status, CorpusStatus::Raw);
-        assert!(core.store.claim_job().await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn replacing_deletes_the_older_corpus_and_its_vectors() {
-        let core = test_core().await;
-        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while crate::jobs::run_one(&core).await.unwrap() {}
-        assert!(core.vectors.count().await.unwrap() > 0);
-
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-        core.resolve_near_duplicate(&second.id, NearDupeAction::Replace)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            core.store.get_corpus(&first.id).await,
-            Err(crate::error::Error::NotFound)
-        ));
-        assert_eq!(
-            core.store.get_corpus(&second.id).await.unwrap().status,
-            CorpusStatus::Raw
-        );
-        assert!(core.store.claim_job().await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn discarding_removes_the_new_capture_only() {
-        let core = test_core().await;
-        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::Discard)
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            core.store.get_corpus(&second.id).await,
-            Err(crate::error::Error::NotFound)
-        ));
-        assert!(core.store.get_corpus(&first.id).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn replacing_a_corpus_that_is_already_gone_still_releases_the_capture() {
-        // `near_dupe_of` can name a corpus that has since been deleted —
-        // including another flagged capture that was discarded. Failing here
-        // put the only way off the list behind a 404.
-        let core = test_core().await;
-        let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
-        while core.store.claim_job().await.unwrap().is_some() {}
-        let second = core
-            .ingest(
-                &manual("mount").replacen("step 7:", "step seven:", 1),
-                "web",
-                None,
-            )
-            .await
-            .unwrap();
-        core.delete_corpus(&first.id).await.unwrap();
-
-        core.resolve_near_duplicate(&second.id, NearDupeAction::Replace)
-            .await
-            .unwrap();
-
-        let got = core.store.get_corpus(&second.id).await.unwrap();
-        assert_eq!(got.status, CorpusStatus::Raw);
-        assert!(got.near_dupe_of.is_none());
-        assert!(core.store.claim_job().await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn reprocessing_a_flagged_capture_takes_it_off_the_list() {
+    async fn reprocessing_a_flagged_capture_clears_its_flag() {
         // Reprocessing is a decision about the capture, and the flag goes
         // with it.
         let core = test_core().await;
@@ -3318,17 +3321,6 @@ mod tests {
             "the capture was reprocessed and is still flagged"
         );
         assert_eq!(got.status, CorpusStatus::Raw);
-    }
-
-    #[tokio::test]
-    async fn resolving_a_corpus_that_is_not_parked_is_rejected() {
-        let core = test_core().await;
-        let out = core.ingest("ordinary text", "web", None).await.unwrap();
-        assert!(matches!(
-            core.resolve_near_duplicate(&out.id, NearDupeAction::Replace)
-                .await,
-            Err(crate::error::Error::Validation(_))
-        ));
     }
 
     #[tokio::test]

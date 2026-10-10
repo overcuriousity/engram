@@ -91,7 +91,7 @@ fn check(name: &str, fresh: &Value) {
 #[tokio::test]
 async fn the_android_fixtures_are_shapes_this_server_sends() {
     let mut core = crate::core::test_support::test_core().await;
-    // Gaps and the retrieval figures are only recorded where searches are.
+    // The retrieval figures are only recorded where searches are.
     core.learn.enabled = true;
     let s = core.store.clone();
 
@@ -195,30 +195,8 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
     .await
     .unwrap();
 
-    // The three shapes the judging screens read, each in its own corpus so
-    // nothing here is entangled with the merge above: a pair waiting on an
-    // answer, an artifact the base hid (the undo list's plainest row), and a
-    // question nothing covered.
-    let pair_doc = s
-        .insert_corpus("timeouts", "web", Some("Timeouts"))
-        .await
-        .unwrap();
-    let pair_sides = s
-        .insert_artifacts(
-            &pair_doc.id,
-            &[0, 1].map(|i| NewArtifact {
-                ordinal: i,
-                text: format!("the timeout is {} seconds", 30 + i * 60),
-                title: Some(format!("Timeout {i}")),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-    s.record_pair(&pair_sides[0].id, &pair_sides[1].id, 0.91)
-        .await
-        .unwrap();
-
+    // An artifact the base hid, in its own corpus so nothing here is
+    // entangled with the merge above: the journal's plainest row.
     let old_doc = s
         .insert_corpus("an older way", "web", Some("Older"))
         .await
@@ -236,24 +214,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         .await
         .unwrap();
     s.set_superseded_by(&hidden[0].id, Some(&merged.id))
-        .await
-        .unwrap();
-
-    // The embed model is the one the gap reader filters on, so it is asked
-    // for rather than spelled.
-    let ask = s
-        .record_ask(crate::store::asks::NewAsk {
-            question: "how do ticks work".into(),
-            filters: "{}".into(),
-            query_vec: vec![1.0, 0.0],
-            embed_model: core.embedder.model().into(),
-            answer: "Not in the knowledge base.".into(),
-            abstained: true,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    s.judge_ask(&ask, crate::store::asks::AskVerdict::NothingHere)
         .await
         .unwrap();
 
@@ -335,8 +295,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         "moments.json",
         &get("/api/v1/moments?kind=due".into()).await,
     );
-    check("pairs.json", &get("/api/v1/pairs".into()).await);
-    check("gaps.json", &get("/api/v1/gaps".into()).await);
     check("insights.json", &get("/api/v1/insights".into()).await);
     check(
         "set_aside.json",
@@ -381,6 +339,7 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
             abstained: false,
             unsupported: vec!["qdrant-cli index create".into()],
             retired_only: false,
+            disagreements: vec![],
             event_id: None,
         })
         .unwrap(),

@@ -303,8 +303,8 @@ impl Undone {
     }
 }
 
-/// Retire a merge whose embedding can never arrive, and hand its pairs back
-/// to a person.
+/// Retire a merge whose embedding can never arrive, and leave its pairs with
+/// both sides as they are.
 ///
 /// Safe by the write path's own ordering: the roots are superseded only after
 /// the embed lands, so a stranded merge has hidden nothing — the base is
@@ -312,9 +312,9 @@ impl Undone {
 /// Deprecated rather than deleted for the same reason `undo` deprecates: the
 /// lineage is the record of what was attempted.
 ///
-/// The reopened pairs go to `Contradiction`, not back to `Pending`: re-arming
-/// the model would regenerate the same unembeddable draft, at full price,
-/// forever.
+/// The released pairs go to `NoConflict` with both sides left as they are, not
+/// back to `Pending`: re-arming the model would regenerate the same
+/// unembeddable draft, at full price, forever.
 pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
     let m = core.store.get_artifact(merged_id).await?;
     if m.provenance != Provenance::Merged
@@ -339,7 +339,7 @@ pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
         .store
         .reopen_pairs_merged_into(
             &m.id,
-            "the merged text could not be indexed; resolve by hand",
+            "the merged text could not be indexed; both stay as they are",
         )
         .await?;
     // The forever-retrying job was this state's only signal; with the merge
@@ -349,31 +349,32 @@ pub async fn reap_stranded(core: &Core, merged_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Flag merged artifacts that have lost a source to a delete.
+/// Accept merged artifacts that have lost a source to a delete.
 ///
-/// The text still carries what the deleted source said, so this is not data
-/// loss — it is a claim of provenance the artifact can no longer support. The
-/// detail pane says so rather than quietly showing one fewer source, which
-/// would make a merge of three look like a merge of two.
+/// The text still carries what the deleted source said, so nothing is lost; the
+/// merge simply stands as a merge of what remains, and its recorded source
+/// count is brought down to match. Nothing waits on a person: the detail pane
+/// still lists the sources it has. Rows an older base flagged `orphaned_source`
+/// are accepted the same way and their flag cleared.
 ///
-/// Returns how many it flagged, which is worth asserting on for the same reason
-/// the repairs are: a pass that fires on a base with nothing wrong is a bug
-/// hiding behind a correct end state.
+/// Returns how many it accepted, which is worth asserting on for the same
+/// reason the repairs are: a pass that fires on a base with nothing wrong is a
+/// bug hiding behind a correct end state.
 pub async fn flag_orphans(core: &Core) -> Result<usize> {
     let mut n = 0;
-    // The scan already excludes flagged rows, so every id here is new work.
+    for id in core.store.artifacts_flagged("orphaned_source", 500).await? {
+        core.store.accept_source_loss(&id).await?;
+        core.store.clear_artifact_flags(&id).await?;
+        n += 1;
+    }
+    // Accepting brings the count down, so an accepted row leaves the scan and
+    // every id here is new work.
     for id in core.store.merged_missing_a_source(500).await? {
-        core.store
-            .set_artifact_flags(
-                &id,
-                &["orphaned_source".to_string()],
-                Some("one of the artifacts this was written from has been deleted"),
-            )
-            .await?;
+        core.store.accept_source_loss(&id).await?;
         n += 1;
     }
     if n > 0 {
-        tracing::info!(flagged = n, "merged artifacts have lost a source");
+        tracing::info!(accepted = n, "merged artifacts have lost a source");
     }
     Ok(n)
 }
@@ -1197,7 +1198,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_already_flagged_merge_does_not_occupy_the_orphan_scan() {
+    async fn an_accepted_merge_does_not_occupy_the_orphan_scan() {
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(
             &core,
@@ -1209,7 +1210,7 @@ mod tests {
             .unwrap();
         core.store.delete_artifact(&ids[0]).await.unwrap();
         assert_eq!(flag_orphans(&core).await.unwrap(), 1);
-        // Flagged rows leave the scan entirely — not fetched and skipped in
+        // Accepted rows leave the scan entirely — not fetched and skipped in
         // Rust, which is what let 500 of them starve every newer orphan out
         // of the LIMIT.
         assert!(
@@ -1218,12 +1219,12 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty(),
-            "a flagged merge still occupies a scan slot"
+            "an accepted merge still occupies a scan slot"
         );
     }
 
     #[tokio::test]
-    async fn reviewing_an_orphaned_merge_is_not_undone_by_the_next_sweep() {
+    async fn a_merge_an_older_base_flagged_is_accepted_and_unflagged() {
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(
             &core,
@@ -1234,25 +1235,35 @@ mod tests {
             .await
             .unwrap();
         core.store.delete_artifact(&ids[0]).await.unwrap();
+        // What the sweep used to leave behind.
+        core.store
+            .set_artifact_flags(
+                &m.id,
+                &["orphaned_source".to_string()],
+                Some("one of the artifacts this was written from has been deleted"),
+            )
+            .await
+            .unwrap();
+
         assert_eq!(flag_orphans(&core).await.unwrap(), 1);
 
-        // What mark_artifact_reviewed does for an orphaned merge.
-        core.store.accept_source_loss(&m.id).await.unwrap();
-        core.store.clear_artifact_flags(&m.id).await.unwrap();
-
-        assert_eq!(
-            flag_orphans(&core).await.unwrap(),
-            0,
-            "the sweep re-flagged a merge the operator had reviewed"
-        );
         assert!(
             core.store
                 .get_artifact(&m.id)
                 .await
                 .unwrap()
                 .flags
+                .is_empty(),
+            "the old flag still waits on a person"
+        );
+        assert!(
+            core.store
+                .merged_missing_a_source(500)
+                .await
+                .unwrap()
                 .is_empty()
         );
+        assert_eq!(flag_orphans(&core).await.unwrap(), 0);
     }
 
     #[tokio::test]
@@ -1314,7 +1325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_a_source_flags_the_merge_rather_than_hiding_the_loss() {
+    async fn deleting_a_source_accepts_the_merge_as_what_remains() {
         // The cascade removes the lineage row while the merged text still
         // carries that source's content, so the artifact claims less provenance
         // than it has. Not data loss, but a silent untruth: a merge of three
@@ -1338,12 +1349,9 @@ mod tests {
         core.store.delete_artifact(&ids[0]).await.unwrap();
         assert_eq!(flag_orphans(&core).await.unwrap(), 1);
 
-        let flagged = core.store.get_artifact(&m.id).await.unwrap();
-        assert!(
-            flagged.flags.iter().any(|f| f == "orphaned_source"),
-            "{flagged:?}"
-        );
-        // And it does not keep re-flagging the same artifact every sweep.
+        let accepted = core.store.get_artifact(&m.id).await.unwrap();
+        assert!(accepted.flags.is_empty(), "{accepted:?}");
+        // And it does not keep re-accepting the same artifact every sweep.
         assert_eq!(flag_orphans(&core).await.unwrap(), 0);
     }
 

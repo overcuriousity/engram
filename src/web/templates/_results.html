@@ -194,6 +194,7 @@
       <p class="rail-continues"><span class="arrow" aria-hidden="true">↳</span> continues in the next passage</p>
       {% endif %}
     </a>
+    {% include "_disagrees.html" %}
     {# No delete control here. It was the only irreversible act in the app that
        could be fired on something nobody had opened — a title, a snippet and a
        confirm dialog were the whole of what stood behind it — and it was the
@@ -230,6 +231,7 @@
       {% endif %}
       <div class="rail-snippet">{{ r.snippet }}</div>
     </a>
+    {% include "_disagrees.html" %}
   </div>
   {% endfor %}
   {% endif %}

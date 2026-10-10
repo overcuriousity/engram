@@ -135,14 +135,35 @@ pub fn format_search_results(
                 (true, Some(e)) => why_line(e),
                 _ => String::new(),
             };
+            // The rail's disagreement line, in words: an agent that reads one
+            // side of a contradiction as settled repeats it as fact.
+            let disagrees = r
+                .disagrees_with
+                .iter()
+                .map(|d| format!("\n{}", disagreement_line(d)))
+                .collect::<String>();
             format!(
-                "{heading}\n_{how}{facts}{tags} · corpus: {}_{why}\n\n{}",
+                "{heading}\n_{how}{facts}{tags} · corpus: {}_{why}{disagrees}\n\n{}",
                 r.corpus_id, r.text
             )
         })
         .collect::<Vec<_>>()
         .join("\n\n---\n\n");
     format!("{head}{body}")
+}
+
+/// One disagreement under a hit: which note, when it was written, and the
+/// judge's sentence on what differs. Neither side is called right.
+fn disagreement_line(d: &crate::store::pairs::Disagreement) -> String {
+    format!(
+        "Disagrees with \"{}\" ({}){}",
+        d.other_title.as_deref().unwrap_or("another note"),
+        crate::fmt::fmt_day(d.other_created_at),
+        d.detail
+            .as_deref()
+            .map(|x| format!(": {x}"))
+            .unwrap_or_default(),
+    )
 }
 
 /// How far ahead the `due` tool looks, from a number that came off the wire.
@@ -542,7 +563,8 @@ impl PkdbTools {
                 let n = o.near_duplicate.expect("just checked");
                 format!(
                     "Stored as `{}` and being indexed. It is {:.0}% similar to `{}`; \
-                     the person can replace or discard one of them on Insights.",
+                     the base merges or hides what the two repeat on its own, with an \
+                     undo on Insights.",
                     o.id,
                     n.similarity * 100.0,
                     n.corpus_id
@@ -733,6 +755,25 @@ fn format_answer(a: &crate::core::ask::AskResponse) -> String {
         out.push_str(&format!(
             "\n\n_Not from the knowledge base — these appear in no cited excerpt, \
              and the model wrote them: {named}._"
+        ));
+    }
+    // Beside the unsupported literals, for the same reason: what an agent
+    // must not repeat as settled. Both sides were cited; neither is picked.
+    for d in &a.disagreements {
+        let this = a
+            .citations
+            .iter()
+            .find(|c| c.artifact_id == d.artifact_id)
+            .and_then(|c| c.title.as_deref())
+            .unwrap_or("a note");
+        out.push_str(&format!(
+            "\n\n_Your notes disagree: \"{this}\" and \"{}\" ({}){}._",
+            d.other_title.as_deref().unwrap_or("another note"),
+            crate::fmt::fmt_day(d.other_created_at),
+            d.detail
+                .as_deref()
+                .map(|x| format!(": {x}"))
+                .unwrap_or_default(),
         ));
     }
     if !a.citations.is_empty() {
@@ -1008,6 +1049,7 @@ mod tests {
             abstained: false,
             unsupported: unsupported.iter().map(|s| s.to_string()).collect(),
             retired_only: false,
+            disagreements: vec![],
             event_id: None,
         }
     }
@@ -1028,6 +1070,65 @@ mod tests {
     fn an_answer_drawn_from_its_excerpts_carries_no_warning() {
         let out = format_answer(&answer(&[]));
         assert!(!out.contains("no cited excerpt"), "{out}");
+    }
+
+    fn disagreement(on: &str, other: &str) -> crate::store::pairs::Disagreement {
+        crate::store::pairs::Disagreement {
+            artifact_id: on.into(),
+            created_at: 1_772_280_000,
+            other_id: other.into(),
+            other_title: Some("Backup schedule (2025)".into()),
+            // 2026-03-01, midday UTC, so the day reads the same in any zone
+            // the test machine is in.
+            other_created_at: 1_772_366_400,
+            detail: Some("one says nightly, the other weekly".into()),
+        }
+    }
+
+    /// An agent has no rail to see a badge on: the disagreement is said in the
+    /// hit's own lines, with the other note's name, day and what differs.
+    #[test]
+    fn a_hit_says_in_words_which_note_disagrees_with_it() {
+        let mut h = search_hit(Some("Backup schedule"), "Backups run nightly.");
+        h.disagrees_with = vec![disagreement("a", "b")];
+        let out = format_search_results(&[h], None);
+        let day = crate::fmt::fmt_day(1_772_366_400);
+        assert!(
+            out.contains(&format!(
+                "Disagrees with \"Backup schedule (2025)\" ({day}): one says nightly, the other weekly"
+            )),
+            "{out}"
+        );
+
+        // Untitled, and with no sentence from the judge: still said, with
+        // nothing invented in place of what is missing.
+        let mut h = search_hit(Some("Backup schedule"), "Backups run nightly.");
+        let mut d = disagreement("a", "b");
+        d.other_title = None;
+        d.detail = None;
+        h.disagrees_with = vec![d];
+        let out = format_search_results(&[h], None);
+        assert!(
+            out.contains(&format!("Disagrees with \"another note\" ({day})\n")),
+            "{out}"
+        );
+
+        let out = format_search_results(&[search_hit(Some("t"), "x")], None);
+        assert!(!out.contains("Disagrees with"), "{out}");
+    }
+
+    #[test]
+    fn an_answer_drawn_from_a_disagreement_says_both_notes_disagree() {
+        let mut a = answer(&[]);
+        a.citations = vec![search_hit(Some("Backup schedule"), "Backups run nightly.")];
+        a.disagreements = vec![disagreement("a", "b")];
+        let out = format_answer(&a);
+        assert!(
+            out.contains("Your notes disagree: \"Backup schedule\" and \"Backup schedule (2025)\""),
+            "{out}"
+        );
+        assert!(out.contains("one says nightly, the other weekly"), "{out}");
+        assert!(!format_answer(&answer(&[])).contains("disagree"));
     }
 
     /// A modern client opens with a bare `tools/list` and no handshake, so the

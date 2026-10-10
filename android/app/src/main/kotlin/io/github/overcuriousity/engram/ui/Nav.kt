@@ -68,13 +68,13 @@ sealed class Screen(val route: String, val label: String) {
     object Queue : Screen("queue", "Queue")
     object Settings : Screen("settings", "Settings")
 
-    // Reached from Settings and from nowhere else. Never in `bar`, never in
-    // the top bar: judging is a mechanic to work towards removing, and a place
-    // for it on the screen the app opens on would build a habit around it.
-    object Pairs : Screen("judge/pairs", "Duplicate pairs")
-    object Gaps : Screen("judge/gaps", "Gaps")
-    object Journal : Screen("judge/journal", "While you were away")
-    /** What this memory is like, and what the base did on its own. Reached from Settings, like judging. */
+    /**
+     * What the base did on its own, each with its undo. Reached from Settings
+     * and Insights and from nowhere else: nothing in it waits on anybody, so
+     * it has no place on the screen the app opens on.
+     */
+    object Journal : Screen("journal", "What the base did")
+    /** What this memory is like, and what the base did on its own. Reached from Settings, like the journal. */
     object Insights : Screen("insights", "Insights")
 }
 
@@ -251,13 +251,11 @@ fun EngramApp(
                 composable(Screen.Library.route) { LibraryScreen(engram, onCorpus) }
                 composable(Screen.Queue.route) { QueueScreen(engram) }
                 composable(Screen.Settings.route) {
-                    SettingsScreen(engram, onJudging = { go(it.route) }, onQueue = { go(Screen.Queue.route) }, onUnpair = onUnpair)
+                    SettingsScreen(engram, onScreen = { go(it.route) }, onQueue = { go(Screen.Queue.route) }, onUnpair = onUnpair)
                 }
                 composable(Screen.Insights.route) {
-                    InsightsScreen(engram, onJudging = { go(it.route) }, onArtifact, onCorpus, onLibrary = { go(Screen.Library.route) })
+                    InsightsScreen(engram, onJournal = { go(Screen.Journal.route) }, onArtifact, onCorpus, onLibrary = { go(Screen.Library.route) })
                 }
-                composable(Screen.Pairs.route) { PairReviewScreen(engram, onArtifact) }
-                composable(Screen.Gaps.route) { GapsScreen(engram) }
                 composable(Screen.Journal.route) { JournalScreen(engram, onArtifact, onCorpus) }
                 composable(Screen.Pair.route) { PairScreen(engram, initialText = pairText, knownOrigin = connection?.origin) }
                 composable(Routes.ASK) {

@@ -1072,7 +1072,8 @@ pub enum Relation {
     /// Different subjects. Both stay exactly where they are.
     Distinct,
     /// The same subject with a different value for one detail, and no way to
-    /// tell which is current. Escalated to a person; never merged.
+    /// tell which is current. Kept as a disagreement both sides of which search
+    /// and Ask show; never merged, and no side picked.
     Conflict,
     /// One artifact plainly replaces another. Superseded, with no synthetic
     /// text written at all.
@@ -1084,9 +1085,9 @@ pub enum Relation {
     /// alike because they say the same thing or alike because neither says
     /// anything, and the second is not answered by keeping one of them.
     ///
-    /// Filed for a person like `Conflict` is, never applied here: this is the
-    /// one verdict that would retire *both* sides, which is the least a model
-    /// should be trusted to do unaided.
+    /// Carried out where it is found (`jobs::dedupe::discard_both`): both sides
+    /// are deprecated, which is reversible, and the undo on Insights is the
+    /// review.
     Vacuous,
 }
 
@@ -1549,7 +1550,8 @@ A subject the excerpts carry in part is answered in part and never abstained on.
 `(continues [n])` marks an excerpt whose text is printed under excerpt n; cite whichever of the two \
 numbers holds the words you used. \
 Lines beginning `Caveat:` give the conditions under which an excerpt does not apply — repeat any \
-that bears on your answer.";
+that bears on your answer. \
+Where a caveat says another note states something differently and your answer rests on it, give both readings with their dates and cite each one that is excerpted; do not choose between them.";
 
 /// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace, markdown
 /// emphasis, heading and list marks, and opening quotes are skipped, because
@@ -1614,8 +1616,22 @@ pub fn abstained(answer: &str) -> bool {
 /// The caveats are appended here rather than left to the caller because their
 /// `Caveat:` prefix is the exact string `ASK_SYSTEM` tells the model to look
 /// for. Splitting the two apart is how that agreement quietly breaks.
-pub fn ask_excerpt(number: usize, title: &str, text: &str, caveats: &[String]) -> String {
-    let mut block = format!("[{number}] {title}\n{text}");
+///
+/// `dated` is the day the note was written, given only for an excerpt that
+/// takes part in a disagreement: the model is told to give both readings with
+/// their dates, and the date of this side is the one thing the other side's
+/// caveat cannot carry.
+pub fn ask_excerpt(
+    number: usize,
+    title: &str,
+    dated: Option<&str>,
+    text: &str,
+    caveats: &[String],
+) -> String {
+    let mut block = match dated {
+        Some(day) => format!("[{number}] {title} ({day})\n{text}"),
+        None => format!("[{number}] {title}\n{text}"),
+    };
     for c in caveats {
         block.push_str("\nCaveat: ");
         block.push_str(c);

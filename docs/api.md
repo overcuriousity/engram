@@ -50,8 +50,8 @@ server broke. There are no error codes; the status is the vocabulary.
 
 | Route | Answers |
 |---|---|
-| `GET /search?q=&limit=&tags=&category=&explain=&door=` | List of hits. Each may carry `weak` (a loose match) and `past_cliff` (it sits below the point where relevance falls off). Absent means false. A client that draws a result list draws both: the divider goes above the first `past_cliff` row. `door=app` says a person is typing in the phone app: the search is recorded under them like the web's, waits for its id, and answers `event` beside `items` — what an open, a verdict and a gap name. With `explain`, `reranked` and a per-row `why_ranked` sentence come too. A row whose document goes on carries `continues_to`, the next passage's id. |
-| `GET /search/stream`, `POST /ask/stream` | Server-sent events. `POST /ask` is the same answer in one piece. |
+| `GET /search?q=&limit=&tags=&category=&explain=&door=` | List of hits. Each may carry `weak` (a loose match) and `past_cliff` (it sits below the point where relevance falls off). Absent means false. A client that draws a result list draws both: the divider goes above the first `past_cliff` row. `door=app` says a person is typing in the phone app: the search is recorded under them like the web's, waits for its id, and answers `event` beside `items` — what an open, a verdict and a gap name. With `explain`, `reranked` and a per-row `why_ranked` sentence come too. A row whose document goes on carries `continues_to`, the next passage's id. A row the judge found disagreeing with another note carries `disagrees_with`, a list of `Disagreement` (below); absent means none. |
+| `GET /search/stream`, `POST /ask/stream` | Server-sent events. `POST /ask` is the same answer in one piece. An answer written across a disagreement carries `disagreements`, a list of `Disagreement`, one per pair with both sides among the citations; absent means none. |
 | `GET /resurface?limit=` | List of hits worth seeing again. |
 | `GET /corpora?limit=&after=` | Paged list of corpus summaries, newest first. |
 | `GET /corpora/{id}` | One corpus with its text and its artifacts. |
@@ -66,41 +66,41 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /moments?kind=due\|event&from=&to=` | List of reminders, or of dates that refer to the window. |
 | `POST /context` | Body: the situation bundle. Answers `{ "offer": {…} \| null }`. Records the situation either way. |
 | `POST /context/seen` | Body `{ artifact_id, rung, slot }`, sent when the card is actually on screen. Always `204`. |
-| `GET /status`, `GET /consolidation` | The state of the base and of the review queue. `status` also says which doors are open — `transcribe`, `asks`, `vision`, `learn`, `recommend` — and carries the idle line's facts: `held`, `last_kept`, the box hint's `examples` (in the `Accept-Language` asked for), and `teach`. |
+| `GET /status`, `GET /consolidation` | The state of the base, and the pairs the judge has not settled yet. `status` also says which doors are open — `transcribe`, `asks`, `vision`, `learn`, `recommend` — and carries the idle line's facts: `held`, `last_kept`, the box hint's `examples` (in the `Accept-Language` asked for), and `teach`. |
 | `GET /corpora/{id}/bands` | The corpus page as data: `image`, `pdf`, `unread`, `restored`, `note`, `coverage`, `meta`, `exif`, `promoted`, `unplaced`, `written_from`, and `bands` — each `{ from, to, gap, reread, lines, artifact_ids, echoes }`. |
 | `GET /facets` | `{ categories: [{ value, count }] }`: what the box's chips narrow by. |
 | `GET /echo?q=` | `{ kind, detail }`: what capture will do with that text, said before it is pressed — the line under the web's box. Empty `kind` for an empty box. No model call. |
 | `GET /feedback` | What is being recorded: `{ searches: { captured, pending, judged }, asks: { asked, judged } }`, both null while `[learn]` is off. `DELETE` forgets it all and answers `{ dropped }`. |
 | `GET /settings/lang`, `PUT` | `{ chosen, langs }`; `PUT { lang }` with a tag from `langs`, or empty for automatic. |
 | `GET /settings/notify`, `PUT`, `POST …/test` | The channels: `{ gotify_url, gotify_token_set, up_endpoint, up_device, up_legacy }`. `PUT { gotify_url, gotify_token, up_endpoint }`; an empty field switches that channel off. `POST /settings/notify/test { channel }` answers `{ sent, error }`. |
-| `GET /insights/machine`, `GET /insights/report` | What the machine is doing, and what the base did on its own — last night, the ranking, the pursuits line — in the sentences Insights says. Disclosure, not control. |
+| `GET /insights/machine`, `GET /insights/report` | What the machine is doing, and what the base did on its own — last night, the ranking, the pursuits line — in the sentences Insights says. Disclosure, not control. The report no longer carries `more_pairs`: no pair waits on anyone. |
 | `POST /transcribe` | Multipart, one part named `audio`: the recording. Answers the words in it as `text/plain`. Nothing is stored — dictation is typing, not capture. `404` where no speech model is configured. |
 | `POST /ask?door=app`, `POST /ask/stream?door=app` | As above, and the question is recorded under the person: the answer's `event_id` is what the three routes below name. |
 | `POST /capture?from_ask=` | As the capture door, and what is stored records the question and the artifacts its answer was written from — the web's *edit first*. |
 | `POST /days/{date}/entry` | Body `{ text, tz }`: an entry into that day. Answers `{ id }`. |
 
-## Judging
+## Judging and undoing
 
-Where a person decides rather than reads. Every one of these has an undo, and
-the undo is on this list too.
+The base decides everything about its own contents: duplicate pairs, captures
+that resemble each other, notes nobody has confirmed, questions nothing
+answered. What a person does is answer the verdict bar under a search or an
+Ask, and take back anything the base did. Every action the base takes has an
+undo, and the undo is on this list.
+
+The routes that used to ask for a decision are gone and answer `404`:
+`GET /pairs`, `POST /pairs/{id}/supersede` · `/synthesize` · `/discard` ·
+`/dismiss`, `GET /gaps`, `POST /gaps/{kind}/{id}/dismiss`, `POST /gaps/forget`,
+`POST /artifacts/{id}/verify`, `POST /artifacts/{id}/reviewed` and
+`POST /corpora/{id}/resolve`.
 
 | Route | Answers |
 |---|---|
-| `GET /pairs` | Open duplicate pairs, clustered: `{ members, pairs: [...] }`. One artifact against two others is one question, not two cards. Bounded, so `next` is null; `more` beside `items` is how many are waiting beyond the ones listed. |
-| `POST /pairs/{id}/supersede` | Body `{"keep": "<artifact id>"}`, or none for the side the judge proposed. Keeps that one and hides the other behind it. `204`. |
-| `POST /pairs/{id}/synthesize` | Ask for one artifact written from both. Queued, not written here: the writing is a model call. `204`. |
-| `POST /pairs/{id}/discard` | Retire both. `204`. |
-| `POST /pairs/{id}/dismiss` | Not a question worth answering. Nothing is hidden. `204`. |
-| `GET /gaps` | Questions nothing covered, clustered under the name the sweep gave them, with `labelled_by` of `model` or `terms`. |
-| `POST /gaps/{kind}/{id}/dismiss` | This one needs no answer. `204`. |
-| `POST /gaps/forget` | Body `{"members": [{"kind", "id"}]}` — a whole cluster. `204`. |
 | `GET /insights` | `{ held, used, retrieval }`. Read-only. |
-| `GET /insights/set-aside` | What the base did on its own and left an undo for, and what it is waiting to be told. |
-| `POST /artifacts/{id}/verify` · `/deprecate` · `/reactivate` · `/unsupersede` | The four answers a set-aside row admits. `204`. |
+| `GET /insights/set-aside` | The journal: what the base merged, wrote, hid and buried on its own, each with its undo. |
+| `POST /artifacts/{id}/deprecate` · `/reactivate` · `/unsupersede` | Hide by hand, and the undos a journal row admits. `204`. |
 | `DELETE /artifacts/{id}` | Gone from both stores; anything written from it loses it as a source. The one decision here with no undo — `deprecate` is the one that hides and can be taken back. |
 | `POST /merges/{id}/undo` | Take a merge back: its sources return, the merge is retired. `204`. |
 | `POST /condensations/{id}/undo` | Put the version a condensation retired back. Answers `{ "artifact_id" }`, which the path does not carry. |
-| `POST /corpora/{id}/resolve` | The three-way answer to a parked capture. Already existed. |
 | `POST /search/{id}/verdict` | Body `{ verdict, artifact_id }` — `hit`, `no`, `skip`, or `none` to take it back. Answers `{ state, already }`; `already` is another door having judged the search first, which is a sentence and not an error. |
 | `POST /search/{id}/gap` | Body `{ q }`: *nothing here has it*. Answers `{ recorded }`. |
 | `POST /asks/{id}/verdict` | Body `{ verdict }` — `right`, `wrong`, `nothing_here`, or `none`. Answers `{ verdict }` as the bar words it. |
@@ -108,34 +108,32 @@ the undo is on this list too.
 | `POST /asks/{id}/keep` | Store the answer as a source. Answers `{ id, duplicate, parked, near_dupe_percent }`. |
 | `POST /moments/{id}/date` | Body `{ at, tz }`: move a reminder, or date an undated one. `204`. |
 | `POST /moments/{id}/not-a-reminder` · `POST /artifacts/{id}/is-a-reminder` | Retract the stage's reading, and put it back. The first answers `{ undo }`: the artifact the second would restore it on, or null. |
-| `POST /artifacts/{id}/reviewed` | Clear the verification flags. `204`. |
 | `POST /artifacts/{id}/links/{other}/dismiss` | *Not related.* Final for that pair. `204`. |
 | `POST /artifacts/{id}/dwell` | Body `{ secs }`. `204`. |
 | `POST /corpora/{id}/reread` · `/entry` · `/segments/{idx}/unpromote` | Read a lost passage again (`{ from, to }`; `202` queued, `204` nothing to re-read); file a capture as the day's entry or not (`{ on }`); put a promoted window's verbatim text back. |
 
 Three things these shapes say that are easy to miss:
 
-**A pair says who has looked at it.** `unjudged` means the sweep filed it on a
-cosine score and nothing has read it since, so *these two cover the same
-ground* is a finding nobody made — print the measurement instead.
-`via_link` means no cosine was ever computed (the pair came from repeated
-co-retrieval), so `percent` is not a similarity and must not be shown as one.
-`mergeable` says whether the merge path would take a synthesis at all; where it
-is false, leave the button out rather than offer a press that can only come
-back a validation error.
+**A disagreement names both sides and picks neither.** `Disagreement` is
+`{ artifact_id, created_at, other_id, other_title, other_created_at, detail }`:
+`artifact_id` is the hit or citation the row hangs on and `created_at` when it
+was written, `other_id` the note it disagrees with, `other_title` that note's
+title or `null`, `other_created_at` when it was written (unix seconds both, so
+a client can say which reading is newer),
+and `detail` the judge's sentence on what differs, or `null`. The base keeps
+both notes in results and never settles the pair; draw both, with their dates.
 
-**A set-aside row carries its `kind`, not its buttons.** `kind` is one of
-`merged`, `generated`, `hidden`, `buried`, `parked`, `unverified`, and it is
-the whole of what says which answers the row admits — each of them is a route
-above. `subject_id` is what those routes name: a corpus for `parked`, the
-artifact for the rest. A `kind` a client has never heard of should draw no
-buttons rather than guess; that is what lets this list grow a seventh.
+**A journal row carries its `kind`, not its buttons.** `kind` is one of
+`merged`, `generated`, `hidden`, `buried`, and it is the whole of what says
+which undo the row admits — each of them is a route above. `subject_id` is
+what those routes name, and it is always the artifact; `artifact_id` is the
+same id, to open. A `kind` a client has never heard of should draw no buttons
+rather than guess; that is what lets this list grow another.
 
-One subject can appear under two kinds, because two of the seven questions can
-be true of it at once: an artifact a model wrote that is also overdue for
-verification is a `generated` row and an `unverified` one, and the two ask for
-different answers. A row's identity is `kind` and `subject_id` together, never
-`subject_id` alone. Under one `kind` a subject appears once.
+One subject can appear under two kinds — an artifact the base wrote and later
+hid is a `generated` row and a `hidden` one. A row's identity is `kind` and
+`subject_id` together, never `subject_id` alone. Under one `kind` a subject
+appears once.
 
 **`GET /insights` is disclosure, not control.** The base tunes itself; the
 page says what it did. `retrieval` is `null` where no searches are recorded —
