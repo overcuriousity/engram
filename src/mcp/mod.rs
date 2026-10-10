@@ -776,7 +776,18 @@ fn service_config(
     if let Some(host) = public_host {
         hosts.push(host);
     }
-    StreamableHttpServerConfig::default().with_allowed_hosts(hosts)
+    // Serve statelessly. `default()` leaves `legacy_session_mode = true`, which
+    // routes any request rmcp classifies as legacy — i.e. one carrying no modern
+    // per-request protocol-version signal — through the session path. A modern
+    // stateless client whose connector probe is a bare `tools/list`/`ping` (no
+    // `Mcp-Session-Id`, no `initialize` handshake first), as Paperclip's "check
+    // link" does, is then answered 422 "Unexpected message, expect initialize
+    // request". Turning it off sends every request down the stateless path,
+    // which serves such a probe directly (each tool call is self-contained, so
+    // engram needs no per-connection session state).
+    StreamableHttpServerConfig::default()
+        .with_legacy_session_mode(false)
+        .with_allowed_hosts(hosts)
 }
 
 /// One MCP service per tenant, built on first use and kept — up to the same
@@ -1017,6 +1028,15 @@ mod tests {
     fn an_answer_drawn_from_its_excerpts_carries_no_warning() {
         let out = format_answer(&answer(&[]));
         assert!(!out.contains("no cited excerpt"), "{out}");
+    }
+
+    /// A modern client opens with a bare `tools/list` and no handshake, so the
+    /// door has to be stateless: with `legacy_session_mode` on, rmcp routes that
+    /// first message through the session path and answers it 422, asking for an
+    /// `initialize` the client never sends.
+    #[test]
+    fn the_mcp_door_is_stateless_so_a_handshakeless_probe_is_served() {
+        assert!(!service_config(None).legacy_session_mode);
     }
 
     #[tokio::test]
