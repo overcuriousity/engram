@@ -221,14 +221,23 @@ async fn live_ranking(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// A command that works on the data and exits, beside a running server.
+/// The one list both `server_lock` and the client/server split read, so a new
+/// data command cannot be added to one and missed by the other.
+fn data_command(args: &Args) -> bool {
+    args.reindex
+        || args.recompute_coverage
+        || args.merge_orphans
+        || args.list_users
+        || args.delete_user.is_some()
+}
+
 /// The server lock, when this run is going to be the server.
 ///
 /// The data commands (`--reindex` and the rest) run beside a live server today
 /// and do not take it; adopting it there is a follow-up, not this change.
 fn server_lock(args: &Args, cfg: &Config) -> Result<Option<engram::backup::lock::ServerLock>> {
-    let data_command =
-        args.reindex || args.recompute_coverage || args.list_users || args.delete_user.is_some();
-    if data_command {
+    if data_command(args) {
         return Ok(None);
     }
     engram::backup::lock::acquire(std::path::Path::new(&cfg.store.control_path)).map(Some)
@@ -385,11 +394,7 @@ async fn main() -> anyhow::Result<()> {
     let server_command = args.print_config
         || args.backup.is_some()
         || args.backup_check.is_some()
-        || args.reindex
-        || args.recompute_coverage
-        || args.merge_orphans
-        || args.list_users
-        || args.delete_user.is_some()
+        || data_command(&args)
         || args.user.is_some();
     use std::io::IsTerminal;
     if let Some(verb) = engram::cli::args::verb(
@@ -692,6 +697,19 @@ mod startup_tests {
                 .is_none(),
             "a data command runs beside the server"
         );
+        for flags in [
+            &["engram", "--reindex"][..],
+            &["engram", "--recompute-coverage"],
+            &["engram", "--merge-orphans"],
+            &["engram", "--delete-user", "sub@idp"],
+        ] {
+            assert!(
+                server_lock(&Args::parse_from(flags), &cfg)
+                    .unwrap()
+                    .is_none(),
+                "{flags:?} runs beside the server"
+            );
+        }
         drop(server);
         assert!(engram::backup::lock::acquire(control).is_ok());
     }
