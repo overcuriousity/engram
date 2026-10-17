@@ -247,11 +247,79 @@ ranking tunes itself under `[evolve]`, and the file is your starting point.
 
 ### Backup
 
-A backup is the control database **plus** every file under `store.dir`, taken
-together — the queue names subjects, the subjects name files. Restoring one side
-from a different moment than the other shows up as store drift, which
-`heal_store_drift` repairs per tenant on that tenant's next open and the Ops
-page reports in the meantime.
+```bash
+engram --backup /srv/backup/engram-2026-10-17            # online: the server may keep running
+engram --backup /srv/backup/engram-2026-10-17 --offline  # point-in-time: refuses while it runs
+engram --backup-check  /srv/backup/engram-2026-10-17     # every file present and intact, exit 0/1
+engram --verify-stores [--user SLUG]                     # do the live stores agree? writes nothing
+engram --restore /srv/backup/engram-2026-10-17 [--user SLUG] [--reembed] [--force-version]
+```
+
+A backup is the whole instance, taken as one unit, because the halves name
+each other: the control database names the subjects, the subjects name tenant
+files, the tenant files name the points in Qdrant. `--backup DIR` writes into a
+directory that must not exist or be empty:
+
+- `control.db`: users, the queue, sessions, API token hashes, pair grants and
+  the VAPID private key;
+- `tenants/<slug>.db`: every artifact and attachment, one file per tenant;
+- `vectors/<alias>.snapshot`: a Qdrant snapshot of the generation each alias
+  serves, fetched over the configured URL and deleted from Qdrant afterwards;
+- `manifest.json`, written last: format, version, mode, the embedding recipe's
+  fingerprint, and per file its SHA-256, size and counts. No URL, API key,
+  subject, email, token or key material — slugs, hashes and counts only. A
+  directory without one is an aborted backup and nothing will restore it.
+
+The databases are copied with `VACUUM INTO` from a read-only connection, so a
+backup under a running server is safe. What it promises depends on the mode.
+**Online** is *reconcilable*: Qdrant is captured before SQLite, so whatever
+lands during the window is a row without a point, which restore re-embeds, and
+a point whose row was deleted during the window is pruned at restore. Nothing
+captured before the backup started is lost. **`--offline`** holds the server's
+lock (`<control_path>.lock`) and refuses while a server holds it; the archive
+is then *point-in-time* and verification is expected to find no gaps.
+
+`--restore DIR` refuses, before it changes anything, when:
+
+- the manifest does not parse, a file it names is missing or fails its size or
+  hash, or a slug or alias is not a plain name (paths are rebuilt from those,
+  never read from the manifest);
+- a server is running (the lock is held);
+- the archive was written by a newer engram (`--force-version` accepts it);
+- the archive's embedding recipe or width is not the configured one
+  (`--reembed` restores the databases into empty generations and re-embeds
+  every artifact; nothing overrides a width mismatch otherwise);
+- the archive's vector backend is not this build's (Qdrant against contained,
+  or the reverse — there is no conversion);
+- `--user` names a tenant missing from the archive or the live control
+  database. Per-tenant restore never touches `control.db`.
+
+Each tenant's snapshot is uploaded into the next generation, checked for its
+point count, and only then is the alias moved; the databases are swapped in
+by rename afterwards, tenants first and control last. An interrupted restore
+is finished by running the same command again. It ends with the
+`--verify-stores` table and one word: **PASS** (exit 0); **REPAIR** (exit 2):
+everything is back and N artifacts were queued for embedding again, which costs
+N embedding calls; **FAIL** (exit 1): the table says which tenant and why.
+
+**The previous generation is left in Qdrant**, as `--reindex` leaves it: it is
+the rollback. The report names each one with the `DELETE /collections/<name>`
+to run once you are satisfied; until then it holds its share of Qdrant's disk.
+
+Outside a restore, the two stores of a tenant can still drift — a crash
+between the two writes, or one restored without the other. `heal_store_drift`
+re-arms an embedded row without a point on that tenant's next open, and only
+warns about a point without a row; the Ops page reports both. A restore runs
+the same comparison at once and prunes those points, because the database is
+the authority.
+
+**The archive is the instance.** It holds every artifact and, in `control.db`,
+what it takes to be any of your users. The directory is created `0700` and
+every file `0600`; keep it that way and keep it outside `store.dir`. The
+manifest's hashes catch corruption and path tricks, not a malicious archive:
+restore only archives you made yourself and kept `0700`. Shipping it off the
+host, scheduling it, and encrypting it are yours to do — `age` over the
+directory (or over a `tar` of it) is the answer until engram has one.
 
 ## Clients
 
