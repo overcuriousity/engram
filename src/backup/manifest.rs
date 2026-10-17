@@ -175,6 +175,7 @@ impl Manifest {
     /// length and SHA-256, and every name is the one rebuilt from its slug or
     /// alias. Nothing is opened as a database here.
     pub fn verify(&self, dir: &Path) -> Result<()> {
+        self.validate_names()?;
         check(
             dir,
             CONTROL_FILE,
@@ -182,20 +183,7 @@ impl Manifest {
             &self.control.sha256,
             self.control.bytes,
         )?;
-        let mut seen = std::collections::HashSet::new();
         for t in &self.tenants {
-            if !valid_slug(&t.slug) {
-                return Err(Error::Validation(format!(
-                    "manifest names a tenant {:?}, which is not a slug",
-                    t.slug
-                )));
-            }
-            if !seen.insert(t.slug.as_str()) {
-                return Err(Error::Validation(format!(
-                    "manifest names the tenant {} twice",
-                    t.slug
-                )));
-            }
             check(
                 dir,
                 &tenant_file(&t.slug),
@@ -204,14 +192,42 @@ impl Manifest {
                 t.db.bytes,
             )?;
             if let Some(v) = &t.vector {
-                if !valid_alias(&v.alias) {
-                    return Err(Error::Validation(format!(
-                        "manifest names an alias {:?}, which is not a collection name",
-                        v.alias
-                    )));
-                }
                 check(dir, &vector_file(&v.alias), &v.file, &v.sha256, v.bytes)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Every slug (tenants and `skipped`), every alias, no duplicates —
+    /// checked before any file is opened, `control.db` included.
+    fn validate_names(&self) -> Result<()> {
+        let not_a_slug = |s: &str| {
+            Error::Validation(format!(
+                "manifest names a tenant {s:?}, which is not a slug"
+            ))
+        };
+        let mut seen = std::collections::HashSet::new();
+        for t in &self.tenants {
+            if !valid_slug(&t.slug) {
+                return Err(not_a_slug(&t.slug));
+            }
+            if !seen.insert(t.slug.as_str()) {
+                return Err(Error::Validation(format!(
+                    "manifest names the tenant {} twice",
+                    t.slug
+                )));
+            }
+            if let Some(v) = &t.vector
+                && !valid_alias(&v.alias)
+            {
+                return Err(Error::Validation(format!(
+                    "manifest names an alias {:?}, which is not a collection name",
+                    v.alias
+                )));
+            }
+        }
+        if let Some(s) = self.skipped.iter().find(|s| !valid_slug(s)) {
+            return Err(not_a_slug(s));
         }
         Ok(())
     }
@@ -365,5 +381,32 @@ pub(crate) mod tests {
         m.tenants[0].slug = "../x".into();
         let e = m.verify(&dir.path().join("again")).unwrap_err().to_string();
         assert!(e.contains("not a slug"), "{e}");
+    }
+
+    #[test]
+    fn verify_checks_every_slug_before_opening_any_file() {
+        let late = |dir: &Path| {
+            let mut m = on_disk(dir);
+            let mut t = m.tenants[0].clone();
+            t.slug = "../x".into();
+            t.vector = None;
+            m.tenants.push(t);
+            m
+        };
+        let skipped = |dir: &Path| {
+            let mut m = on_disk(dir);
+            m.skipped = vec!["bob".into(), "../y".into()];
+            m
+        };
+        for (name, build) in [
+            ("late", &late as &dyn Fn(&Path) -> Manifest),
+            ("skipped", &skipped),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let m = build(dir.path());
+            std::fs::remove_file(dir.path().join(CONTROL_FILE)).unwrap();
+            let e = m.verify(dir.path()).unwrap_err().to_string();
+            assert!(e.contains("not a slug"), "{name}: {e}");
+        }
     }
 }
