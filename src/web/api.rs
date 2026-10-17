@@ -543,6 +543,14 @@ pub(crate) enum Captured {
     Many(Vec<crate::core::ingest::IngestOutcome>),
 }
 
+/// A text body refused by `decode_text`, in the words of the door it came to.
+fn not_text(e: crate::core::ingest::NotText, undecodable: &str) -> Error {
+    Error::Validation(match e {
+        crate::core::ingest::NotText::Undecodable => undecodable.into(),
+        crate::core::ingest::NotText::Nul => crate::core::ingest::NotText::NUL_MESSAGE.into(),
+    })
+}
+
 /// One door for a client that has not classified what it is holding.
 ///
 /// A share sheet hands over a blob and a maybe-URL; a shell hands over a path
@@ -574,11 +582,9 @@ async fn capture(
                 "that text is over the 8 MB limit for a text capture".into(),
             ));
         }
-        // Refused rather than lossily converted, for the reason the upload
-        // door refuses it: a corpus is quoted back verbatim, so text that
-        // arrived mangled is a fidelity loss nothing downstream can detect.
-        let text = String::from_utf8(bytes.to_vec())
-            .map_err(|_| Error::Validation("that body is not valid UTF-8 text".into()))?;
+        // Refused rather than lossily converted: see `decode_text`.
+        let text = crate::core::ingest::decode_text(bytes.to_vec())
+            .map_err(|e| not_text(e, "that body is not valid UTF-8 text"))?;
         let out = match only_a_url(&text) {
             Some(u) => {
                 // The body is one link, so this is a fetch and not a capture
@@ -911,11 +917,9 @@ async fn upload(
                     "that text file is over the 8 MB limit for a text capture".into(),
                 ));
             }
-            // Refused rather than lossily converted: a corpus is quoted back
-            // verbatim, so text that arrived mangled would be a fidelity loss
-            // nothing downstream could detect.
-            let text = String::from_utf8(bytes.to_vec())
-                .map_err(|_| Error::Validation("that file is not valid UTF-8 text".into()))?;
+            // Refused rather than lossily converted: see `decode_text`.
+            let text = crate::core::ingest::decode_text(bytes.to_vec())
+                .map_err(|e| not_text(e, "that file is not valid UTF-8 text"))?;
             let size = bytes.len();
 
             let out = tenant
@@ -4060,11 +4064,43 @@ pub(crate) mod tests {
                 &token,
                 "notes.txt",
                 Some("text/plain"),
-                &[0xff, 0xfe, 0x00, 0x41],
+                // No byte-order mark, and invalid UTF-8. `ff fe` used to stand
+                // in here, but that is UTF-16's mark and is read now.
+                &[0xc3, 0x28, 0x41],
             ))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
+    }
+
+    /// UTF-16LE with no byte-order mark is valid UTF-8 — every other byte a
+    /// NUL — and was stored that way (engram#60). It is refused with the fix.
+    #[tokio::test]
+    async fn an_upload_of_utf16_without_a_byte_order_mark_is_refused() {
+        let (app, token, core) = app_token_and_core().await;
+        let body: Vec<u8> = "Du hast eine Datei an Ronny gesendet"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let res = app
+            .oneshot(post_file(
+                "/api/v1/corpora/upload",
+                &token,
+                "chat.txt",
+                Some("text/plain"),
+                &body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&body).contains("UTF-16"),
+            "the refusal does not name the cause: {body:?}"
+        );
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 

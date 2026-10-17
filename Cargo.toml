@@ -184,3 +184,18 @@ contained = [
     "dep:rubato",
     "dep:cc",
 ]
+
+# docling 1.53.0 drops a ToUnicode `bfrange` whose destination is more than one
+# UTF-16 unit, so a subset font's `fl` ligature vanishes from the text layer
+# (engram#60). The fix is one commit on top of the 1.53.0 release, on branch
+# fix/tounicode-bfrange-multi-unit of overcuriousity/docling.rs; the same
+# commit on upstream master is fix/tounicode-bfrange-multi-unit-master, to be
+# offered to docling-project/docling.rs. All four are patched because the
+# workspace wires them by path: patching docling-pdf alone would pull a second
+# docling-core whose types the converter does not accept. Drop this block for
+# the first crates.io release that carries the fix.
+[patch.crates-io]
+docling = { git = "https://github.com/overcuriousity/docling.rs", rev = "73d773b49266314bff3bd089641bd579c3e6d6de" }
+docling-core = { git = "https://github.com/overcuriousity/docling.rs", rev = "73d773b49266314bff3bd089641bd579c3e6d6de" }
+docling-onnx = { git = "https://github.com/overcuriousity/docling.rs", rev = "73d773b49266314bff3bd089641bd579c3e6d6de" }
+docling-pdf = { git = "https://github.com/overcuriousity/docling.rs", rev = "73d773b49266314bff3bd089641bd579c3e6d6de" }
