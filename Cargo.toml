@@ -168,7 +168,7 @@ reqwest = { version = "0.13.4", default-features = false, features = ["json", "r
 # Packs the Chrome extension at compile time. A build dependency, not a
 # runtime one: the zip is a build artifact, not something the server assembles
 # per request.
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
 # Compiles the vendored whisper.cpp. Only with `contained`.
 cc = { version = "1.2", features = ["parallel"], optional = true }
 

@@ -24,7 +24,7 @@ really gave. Not a proxy score.
 ## What it does
 
 - **Capture anything** — paste, a URL, a PDF, a photo, the browser extension,
-  the phone share sheet, a shell pipe. One endpoint reads what it is handed
+  the Android app's share sheet, a shell pipe. One endpoint reads what it is handed
   instead of asking you to classify it; originals are stored untouched. PDFs are
   read locally with no model; images need `[infer.vision]`. Small pastes are
   structured on the spot, big ones stored verbatim and rewritten once you have
@@ -192,6 +192,17 @@ alias onto it. `--recompute-coverage` re-measures corpus coverage from stored
 artifacts. Each exits when done and requires `--user <SUBJECT>`; omitting it is
 an error listing the known subjects, because defaulting to an arbitrary tenant
 is how the wrong collection gets reindexed.
+
+`--merge-orphans` repairs a base captured before passages had a minimum size
+(engram#61): a budget cut could leave the tail of a sentence, `is needed.`, as a
+passage of its own, and a near-empty embedding ranks near the top for any query.
+It finds every live passage under `MIN_PASSAGE_CHARS` (40 non-whitespace
+characters), joins its text to the neighbouring passage of the same window (the
+one before it, else the one after; never across a heading), widens that
+passage's span, queues its re-embed and deletes the orphan's row and vector.
+Add `--dry-run` to list what it would merge without writing anything. It is
+idempotent, and the re-embeds run when the server's job worker next picks them
+up.
 
 ## Multiple users
 

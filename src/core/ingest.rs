@@ -989,7 +989,7 @@ impl Core {
         // Every route that reaches this is layered at `max(pdf_max_bytes,
         // image_max_bytes)` because one route serves both kinds, and a
         // multipart part carries no ceiling of its own — so a 49 MB file part
-        // to `/capture` or `/ui/share` used to arrive unchecked no matter what
+        // to `/capture` used to arrive unchecked no matter what
         // `image_max_bytes` said. Those doors' comments already promised the
         // ingest path re-imposed it; now it does.
         if bytes.len() > self.capture.pdf_max_bytes {
@@ -2501,7 +2501,7 @@ mod tests {
     ///
     /// The doors are layered at `max(pdf_max_bytes, image_max_bytes)` because
     /// one route serves both kinds, and a multipart part carries no ceiling of
-    /// its own — so `/capture` and `/ui/share` both used to walk a 49 MB photo
+    /// its own — so `/capture` used to walk a 49 MB photo
     /// through a full decode however small `image_max_bytes` was set.
     #[tokio::test]
     async fn a_file_over_its_kind_s_ceiling_is_refused() {

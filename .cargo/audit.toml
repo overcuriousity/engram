@@ -67,6 +67,36 @@ ignore = [
   #     both advisories become live and must be fixed.
   "RUSTSEC-2026-0194",
   "RUSTSEC-2026-0195",
+
+  # RUSTSEC-2026-0367 — SUID/SGID bits preserved by `zip` extraction.
+  # RUSTSEC-2026-0368 — `ZipArchive::extract` creates symlinks pointing outside
+  # the destination.
+  # RUSTSEC-2026-0369 — `extract()` applies permissions through symlinks.
+  # All three reached via: engram -> docling 1.53.0 -> zip 2.4.2, and
+  # docling -> calamine 0.26.1 -> zip 2.4.2. All three need extraction to disk.
+  #
+  # Not reachable in this codebase. engram's own `zip` (a build dependency
+  # that packs the Chrome extension in build.rs) is 9.0.4, which is patched.
+  # The 2.4.2 copy is only opened in memory: docling and calamine build a
+  # `ZipArchive` over a `Cursor` and read entries. Neither crate calls
+  # `ZipArchive::extract` or `ZipStreamReader` anywhere, so nothing is written
+  # to disk. On top of that, docling's zip-based backends (OOXML, ODF, Pages,
+  # DCLX, spreadsheets) are dead for engram for the reason given for
+  # RUSTSEC-2026-0194 above: we only ever pass `InputFormat::Pdf`.
+  #
+  # No fix is available. Even the newest docling (2.35.0 at the time of
+  # writing) requires `zip = "^8.6"`, and the fix is only in 9.0.0.
+  #
+  # Re-review if any of the following becomes true:
+  #   * docling ships a release whose `zip` requirement admits >= 9.0.0, at
+  #     which point all three entries should be deleted rather than carried
+  #     forward.
+  #   * engram extracts a zip archive itself, or the build-dependency `zip`
+  #     drops below 9.0.0 — these ids are ignored for every copy, so that
+  #     regression would not fail this check.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
 ]
 
 # Informational advisories still surface in the log. `paste` (via tokenizers) is

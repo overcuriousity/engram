@@ -21,7 +21,6 @@ pub mod page;
 pub mod pair;
 pub mod push;
 pub mod settings;
-pub mod share;
 pub mod state;
 pub mod tenant;
 #[cfg(test)]
@@ -61,20 +60,9 @@ pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// rewrites a plain page load: a GET outside `/api` and `/mcp`, and not an
 /// htmx fetch, which always carries `HX-Request` and expects a fragment or a
 /// real error, never a full-page redirect.
-///
-/// `POST /ui/share` is the one exception to the GET rule, and it is here
-/// rather than in the handler because this is where the rewrite lives. A
-/// share is dispatched by the platform, not by a page of ours, so it is the
-/// one POST that can arrive without the `SameSite=Lax` session cookie ever
-/// having been sent — and the reader is a person staring at a share sheet's
-/// webview, for whom `{"error":"unauthorized"}` is the end of the road and
-/// the shared content is gone. `303` rather than `307`, so the browser
-/// follows it as a GET onto the login page; the share itself is not replayed
-/// afterwards, which is the honest outcome — it was never stored.
 async fn redirect_unauthenticated_browsers(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
-    let is_share = req.method() == Method::POST && path == "/ui/share";
-    let is_page_load = (req.method() == Method::GET || is_share)
+    let is_page_load = req.method() == Method::GET
         && !req.headers().contains_key("hx-request")
         && !path.starts_with("/api/")
         && path != "/mcp";
@@ -156,10 +144,6 @@ pub fn router(state: AppState) -> Router {
         .merge(pair::pair_router())
         .merge(extension::extension_router())
         .merge(app::app_router())
-        .merge(share::share_router(
-            state.config.capture.image_max_bytes,
-            state.config.capture.pdf_max_bytes,
-        ))
         .merge(insights::routes())
         .merge(due::routes())
         .merge(day::routes())
@@ -507,5 +491,37 @@ mod tests {
             let run = crate::web::test_support::measure(&pages, width);
             crate::web::test_support::nothing_is_broken(&run, width);
         }
+    }
+
+    /// The Web Share Target door is gone (engram#97): its POST could never
+    /// carry the `SameSite=Lax` session cookie, so every share was lost. The
+    /// Android app is the phone's door now, and even a signed-in POST here
+    /// must find nothing to store into.
+    #[tokio::test]
+    async fn the_retired_share_door_answers_nothing() {
+        let core = crate::core::test_support::test_core().await;
+        let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/ui/share")
+                    .method("POST")
+                    .header("cookie", &cookie)
+                    .header("content-type", "multipart/form-data; boundary=b")
+                    .body(Body::from(
+                        "--b\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nx\r\n--b--\r\n",
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                res.status(),
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+            ),
+            "POST /ui/share answered {}",
+            res.status()
+        );
     }
 }
