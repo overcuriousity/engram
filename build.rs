@@ -38,6 +38,7 @@ fn main() {
     }
 
     stamp_assets();
+    stamp_build();
 
     let out = Path::new("assets/extension");
     std::fs::create_dir_all(out).expect("assets/extension");
@@ -135,6 +136,64 @@ fn stamp_assets() {
         }
     }
     println!("cargo:rustc-env=ASSET_STAMP={h:x}");
+}
+
+/// The commit this binary was built from, so two builds of the same
+/// `CARGO_PKG_VERSION` can be told apart: a backup manifest records it and
+/// restore reports a mismatch, and the pairing response carries it.
+///
+/// `ENGRAM_GIT_SHA` is the 12-character short sha, or `unknown`, or whatever
+/// the environment set it to (a build from a tree without `.git`, such as a
+/// crate tarball, can pass the sha in). `ENGRAM_VERSION` is `<semver>+<sha>`,
+/// or the bare semver when the sha is unknown — semver build metadata, which
+/// the version comparison of an older binary already ignores.
+///
+/// Only a `.git` in this directory counts: a tarball unpacked inside some
+/// other repository must not take that repository's commit for its own.
+fn stamp_build() {
+    println!("cargo:rerun-if-env-changed=ENGRAM_GIT_SHA");
+    let sha = std::env::var("ENGRAM_GIT_SHA")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(git_sha)
+        .unwrap_or_else(|| "unknown".into());
+    let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let version = if sha == "unknown" {
+        pkg
+    } else {
+        format!("{pkg}+{sha}")
+    };
+    println!("cargo:rustc-env=ENGRAM_GIT_SHA={sha}");
+    println!("cargo:rustc-env=ENGRAM_VERSION={version}");
+}
+
+/// `git rev-parse --short=12 HEAD`, watching `HEAD` and the ref it names.
+fn git_sha() -> Option<String> {
+    if !Path::new(".git").exists() {
+        return None;
+    }
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git").args(args).output().ok()?;
+        out.status.success().then_some(())?;
+        let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    };
+    // Through `--git-path`, because in a worktree `.git` is a file and the
+    // branch refs live in the common directory, not beside `HEAD`. Watched
+    // only where they exist, for the reason given for `SIGNED` above; a ref
+    // that is only packed is covered by `packed-refs`.
+    let mut watch = vec!["HEAD".to_string(), "packed-refs".to_string()];
+    if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]) {
+        watch.push(r);
+    }
+    for w in watch {
+        if let Some(p) = git(&["rev-parse", "--git-path", &w])
+            && Path::new(&p).exists()
+        {
+            println!("cargo:rerun-if-changed={p}");
+        }
+    }
+    git(&["rev-parse", "--short=12", "HEAD"])
 }
 
 /// Zip one browser's manifest together with the shared sources.
