@@ -230,6 +230,18 @@ mod tests {
         assert_eq!(res.headers()["cache-control"], "public, max-age=3600");
     }
 
+    #[test]
+    fn the_manifest_declares_no_share_target() {
+        // The Web Share Target door was retired (engram#97): a platform share
+        // never carried the session cookie, so the system share sheet offered
+        // a door that always dropped what it was handed. The Android app is
+        // the phone's share sheet entry now.
+        let m = Assets::get("manifest.webmanifest").expect("manifest");
+        let v: serde_json::Value = serde_json::from_slice(&m.data).expect("valid json");
+        assert!(v.get("share_target").is_none(), "share_target is back");
+        assert_eq!(v["start_url"], "/ui");
+    }
+
     #[tokio::test]
     async fn the_service_worker_is_served_from_the_root_and_is_not_cached() {
         // Under /assets it could not control /ui, and with the year-long
