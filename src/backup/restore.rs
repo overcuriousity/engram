@@ -12,7 +12,9 @@
 //! rollback, and the report names it with the request that deletes it.
 
 use super::generations::{AliasState, Generations, QdrantGenerations};
-use super::manifest::{self, Backend, Manifest, TenantEntry, tenant_file, valid_alias, valid_slug};
+use super::manifest::{
+    self, Backend, Manifest, Mode, TenantEntry, tenant_file, valid_alias, valid_slug,
+};
 use super::verify::{self, Verdict, VerifyReport};
 use super::{lock, sqlite};
 use crate::config::Config;
@@ -292,6 +294,9 @@ pub struct Moved {
     pub previous: Option<String>,
     /// What it serves now, or why it still serves `previous`.
     pub current: std::result::Result<String, String>,
+    /// Points uploaded minus the manifest's count, when an online archive
+    /// counted after its snapshot and the two differ; the reconcile settles it.
+    pub drift: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -323,7 +328,15 @@ impl std::fmt::Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for m in &self.moved {
             match &m.current {
-                Ok(g) => writeln!(f, "{}  {} now serves {g}", m.slug, m.alias)?,
+                Ok(g) => match m.drift {
+                    Some(d) => writeln!(
+                        f,
+                        "{}  {} now serves {g} ({d:+} points against the manifest, \
+                         which counted after its online snapshot)",
+                        m.slug, m.alias
+                    )?,
+                    None => writeln!(f, "{}  {} now serves {g}", m.slug, m.alias)?,
+                },
                 Err(e) => writeln!(
                     f,
                     "{}  FAILED  {e}; {} still serves {}, and its database was not replaced",
@@ -481,14 +494,16 @@ async fn move_vectors(cfg: &Config, plan: &Plan, gens: &dyn Generations) -> Vec<
             Ok(AliasState::Live { generation, .. }) => Some(generation),
             _ => None,
         };
-        let current = one_tenant(cfg, plan, t, &alias, gens)
-            .await
-            .map_err(|e| e.to_string());
+        let (current, drift) = match one_tenant(cfg, plan, t, &alias, gens).await {
+            Ok((g, drift)) => (Ok(g), drift),
+            Err(e) => (Err(e.to_string()), None),
+        };
         out.push(Moved {
             slug: t.slug.clone(),
             alias,
             previous,
             current,
+            drift,
         });
     }
     out
@@ -500,16 +515,21 @@ async fn one_tenant(
     t: &TenantEntry,
     alias: &str,
     gens: &dyn Generations,
-) -> Result<String> {
+) -> Result<(String, Option<i64>)> {
     let dim = cfg.infer.embed.dim;
     let target = gens.next(alias).await?;
+    let mut drift = None;
     match (&t.vector, plan.reembed) {
         (_, true) => gens.create_empty(alias, &target, dim).await?,
         (Some(v), false) => {
             let file = plan.dir.join(manifest::vector_file(&v.alias));
             gens.import(alias, &file, &target, dim).await?;
             let got = gens.count(alias, &target).await?;
-            if got != v.points {
+            // An online archive counts after its snapshot, so concurrent
+            // upserts can make the two differ; the reconcile settles that.
+            if got != v.points && plan.manifest.mode == Mode::Online {
+                drift = Some(got as i64 - v.points as i64);
+            } else if got != v.points {
                 let _ = gens.discard(alias, &target).await;
                 return Err(Error::Vector(format!(
                     "{target} holds {got} points after the upload, the manifest says {}; \
@@ -519,10 +539,10 @@ async fn one_tenant(
             }
         }
         // The vectors are in the database itself; nothing to move.
-        (None, false) => return Ok(String::new()),
+        (None, false) => return Ok((String::new(), None)),
     }
     gens.adopt(alias, &target).await?;
-    Ok(target)
+    Ok((target, drift))
 }
 
 #[cfg(test)]
@@ -903,6 +923,36 @@ pub(crate) mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_online_point_count_off_by_one_is_adopted_and_reported() {
+        let base = backed_up().await;
+        edit_manifest(&base, |v| v["tenants"][0]["vector"]["points"] = 2.into());
+        let out = run(&base, &RestoreOpts::default()).await;
+        assert_ne!(out.verdict(), Verdict::Fail, "{out}");
+        let a = base.alias(0);
+        assert_eq!(base.gens.served(&a), Some(format!("{a}_v2")));
+        assert_eq!(out.moved[0].drift, Some(-1));
+        assert!(
+            out.to_string().contains("(-1 points against the manifest"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_offline_point_count_mismatch_drops_the_generation_and_fails() {
+        let base = backed_up().await;
+        edit_manifest(&base, |v| {
+            v["mode"] = "offline".into();
+            v["tenants"][0]["vector"]["points"] = 2.into();
+        });
+        let out = run(&base, &RestoreOpts::default()).await;
+        assert_eq!(out.verdict(), Verdict::Fail, "{out}");
+        let a = base.alias(0);
+        assert_eq!(base.gens.served(&a), Some(format!("{a}_v1")));
+        assert!(!base.gens.names().contains(&format!("{a}_v2")), "dropped");
+        assert!(out.to_string().contains("it was dropped"), "{out}");
     }
 
     #[tokio::test]
