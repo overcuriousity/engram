@@ -2195,6 +2195,83 @@ impl VectorStore for QdrantVectors {
             bytes,
         })
     }
+
+    /// Upload a snapshot `export_snapshot` wrote into the new collection
+    /// `target`, streamed from disk, and make it fit to serve. The alias is
+    /// not touched: `adopt_generation` is the caller's, once it has checked
+    /// the count.
+    ///
+    /// The file is opaque here and Qdrant validates it. A snapshot of another
+    /// width is dropped again before anything points at it.
+    async fn import_snapshot(&self, from: &Path, target: &str, dim: usize) -> Result<()> {
+        if self.collection_exists(target).await? {
+            return Err(Error::Vector(format!(
+                "`{target}` already exists; a previous restore did not finish. \
+                 Delete it and run this again."
+            )));
+        }
+        let path = format!("/collections/{target}/snapshots/upload?wait=true&priority=snapshot");
+        let io = |e: std::io::Error| Error::Vector(format!("{}: {e}", from.display()));
+        let mut file = tokio::fs::File::open(from).await.map_err(io)?;
+        let len = file.metadata().await.map_err(io)?.len();
+        // One buffer in flight, whatever the size of the collection.
+        let body = reqwest::Body::wrap_stream(async_stream::stream! {
+            use tokio::io::AsyncReadExt;
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                match file.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => yield Ok::<Vec<u8>, std::io::Error>(buf[..n].to_vec()),
+                    Err(e) => {
+                        yield Err(e);
+                        break;
+                    }
+                }
+            }
+        });
+        let form = reqwest::multipart::Form::new().part(
+            "snapshot",
+            reqwest::multipart::Part::stream_with_length(body, len).file_name("snapshot"),
+        );
+        let res = self
+            .long_request(Method::POST, &path)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| Error::Vector(format!("{path}: {e}")))?;
+        let status = res.status();
+        if !status.is_success() {
+            let text = res.text().await.unwrap_or_default();
+            return Err(Error::Vector(format!(
+                "{path}: {}",
+                describe_failure(status, &text)
+            )));
+        }
+        let made = async {
+            let existing = self.await_readable(target).await?;
+            if existing as usize != dim {
+                return Err(dimension_mismatch(target, dim, existing as usize));
+            }
+            self.ensure_payload_indexes(target).await
+        }
+        .await;
+        if made.is_err() {
+            let _ = self.drop_generation(target).await;
+        }
+        made
+    }
+}
+
+/// What an alias serves, as a restore and its verification need to know it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AliasState {
+    Absent,
+    /// The alias names a generation that does not exist.
+    Dangling(String),
+    Live {
+        generation: String,
+        dim: usize,
+    },
 }
 
 /// What Qdrant says about a snapshot it has just made.
@@ -2210,6 +2287,77 @@ struct SnapshotDescription {
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 impl QdrantVectors {
+    /// The generation a restore uploads into: one past the newest that exists
+    /// or that the alias names, so it never lands on a collection already
+    /// there. A rerun after an interrupted restore therefore goes one further
+    /// rather than refusing, and leaves one more generation to delete.
+    pub async fn next_generation_name(&self) -> Result<String> {
+        let mut n = match self.newest_generation().await? {
+            Some(g) => generation_of(&self.alias, &g),
+            None => 0,
+        };
+        if let Some(current) = self.resolve_alias().await? {
+            n = n.max(generation_of(&self.alias, &current));
+        }
+        Ok(generation_name(&self.alias, n + 1))
+    }
+
+    /// The generation the alias serves and its width, or why there is none.
+    pub async fn alias_state(&self) -> Result<AliasState> {
+        Ok(match self.resolve_alias().await? {
+            None => AliasState::Absent,
+            Some(g) if !self.collection_exists(&g).await? => AliasState::Dangling(g),
+            Some(g) => AliasState::Live {
+                dim: self.vector_dim(&g).await? as usize,
+                generation: g,
+            },
+        })
+    }
+
+    /// An empty generation at `dim`, not yet served.
+    pub async fn create_empty_generation(&self, name: &str, dim: usize) -> Result<()> {
+        if self.collection_exists(name).await? {
+            return Err(Error::Vector(format!(
+                "`{name}` already exists; a previous restore did not finish. \
+                 Delete it and run this again."
+            )));
+        }
+        self.create_generation(name, dim).await
+    }
+
+    /// Exact point count of one generation, served or not.
+    pub async fn generation_count(&self, name: &str) -> Result<u64> {
+        self.exact_count(name).await
+    }
+
+    /// Delete one generation that nothing serves yet. Refuses the served one
+    /// and anything that is not a generation of this alias.
+    pub async fn drop_generation(&self, name: &str) -> Result<()> {
+        if generation_number(&self.alias, name).is_none() {
+            return Err(Error::Vector(format!(
+                "`{name}` is not a generation of `{}`",
+                self.alias
+            )));
+        }
+        if self.resolve_alias().await?.as_deref() == Some(name) {
+            return Err(Error::Vector(format!(
+                "`{name}` is what `{}` serves; it is not dropped",
+                self.alias
+            )));
+        }
+        let _: Value = self
+            .call(Method::DELETE, &format!("/collections/{name}"), None)
+            .await?;
+        Ok(())
+    }
+
+    /// Point the alias at `name`, replacing whatever it pointed at. The
+    /// previous generation is left in place: it is the rollback.
+    pub async fn adopt_generation(&self, name: &str) -> Result<()> {
+        let replacing = self.resolve_alias().await?.is_some();
+        self.point_alias_at(name, replacing).await
+    }
+
     /// A request with the snapshot timeout and the same `api-key` header every
     /// other request carries.
     fn long_request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {

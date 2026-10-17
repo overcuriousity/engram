@@ -83,6 +83,76 @@ pub async fn users_in(control: &Path) -> Result<Vec<String>> {
     Ok(rows.iter().map(|r| r.get::<String, _>("slug")).collect())
 }
 
+/// `<path>.restoring`: where a restore stages a file beside its target.
+pub fn restoring(path: &Path) -> std::path::PathBuf {
+    with_suffix(path, ".restoring")
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> std::path::PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(suffix);
+    p.into()
+}
+
+fn remove_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(Error::Store(format!("{}: {e}", path.display()))),
+    }
+}
+
+/// Copy an archived database to `dst` (`0600`), sync it, and check it hashes
+/// to `sha256`. The source is an archive copy with no WAL, not a live file,
+/// so a byte copy is whole. A `dst` left by an interrupted restore is
+/// replaced: staging is the step a rerun repeats.
+pub fn stage(src: &Path, dst: &Path, sha256: &str) -> Result<()> {
+    let io = |p: &Path, e: std::io::Error| Error::Store(format!("{}: {e}", p.display()));
+    remove_if_present(dst)?;
+    let staged = (|| {
+        let mut from = std::fs::File::open(src).map_err(|e| io(src, e))?;
+        let mut to = create_private(dst)?;
+        std::io::copy(&mut from, &mut to).map_err(|e| io(dst, e))?;
+        to.sync_all().map_err(|e| io(dst, e))?;
+        let (got, _) = super::manifest::sha256_file(dst)?;
+        if got != sha256 {
+            return Err(Error::Store(format!(
+                "{}: staged copy hashes to {got}, the manifest says {sha256}",
+                dst.display()
+            )));
+        }
+        Ok(())
+    })();
+    if staged.is_err() {
+        let _ = std::fs::remove_file(dst);
+    }
+    staged
+}
+
+/// Put a staged database in place of `target`.
+///
+/// The target's `-wal` and `-shm` go first: they describe the file being
+/// replaced, and SQLite would replay a stale `-wal` into the new one on its
+/// next open. The rename is atomic, and the directory is synced so it holds.
+pub fn swap(staged: &Path, target: &Path) -> Result<()> {
+    for ext in ["-wal", "-shm"] {
+        remove_if_present(&with_suffix(target, ext))?;
+    }
+    std::fs::rename(staged, target).map_err(|e| {
+        Error::Store(format!(
+            "rename {} to {}: {e}",
+            staged.display(),
+            target.display()
+        ))
+    })?;
+    if let Some(parent) = target.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::File::open(parent)
+            .and_then(|d| d.sync_all())
+            .map_err(|e| Error::Store(format!("{}: {e}", parent.display())))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -212,6 +282,66 @@ pub(crate) mod tests {
         std::fs::write(&copy, b"keep").unwrap();
         assert!(vacuum_into(&live, &copy).await.is_err());
         assert_eq!(std::fs::read(&copy).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn a_swap_removes_the_stale_sidecars_before_the_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let archived = dir.path().join("archived.db");
+        let live = dir.path().join("alice.db");
+        // The archive copy: one artifact fewer than the base it replaces.
+        {
+            let src = dir.path().join("src.db");
+            let s = tenant_with_three(&src).await;
+            sqlx::query("DELETE FROM artifacts WHERE ordinal = 2")
+                .execute(&s.pool)
+                .await
+                .unwrap();
+            vacuum_into(&src, &archived).await.unwrap();
+        }
+        let (sha, _) = super::super::manifest::sha256_file(&archived).unwrap();
+        // The base being replaced, still holding frames in its WAL.
+        let store = tenant_with_three(&live).await;
+        assert!(sidecar(&live, "-wal").exists());
+        let wal = std::fs::read(sidecar(&live, "-wal")).unwrap();
+        store.pool.close().await;
+
+        let staged = restoring(&live);
+        stage(&archived, &staged, &sha).unwrap();
+        // A stale `-wal` and `-shm` beside the target, as a crashed server leaves.
+        std::fs::write(sidecar(&live, "-wal"), &wal).unwrap();
+        std::fs::write(sidecar(&live, "-shm"), b"stale").unwrap();
+        swap(&staged, &live).unwrap();
+
+        assert!(!staged.exists());
+        assert!(!sidecar(&live, "-wal").exists(), "stale -wal removed");
+        assert!(!sidecar(&live, "-shm").exists(), "stale -shm removed");
+        assert_eq!(
+            super::super::manifest::sha256_file(&live).unwrap().0,
+            sha,
+            "the target is the staged file byte for byte"
+        );
+        assert_eq!(
+            counts(&live).await.unwrap(),
+            (2, 1),
+            "no old frame replayed"
+        );
+    }
+
+    #[test]
+    fn staging_refuses_a_copy_that_does_not_hash_to_the_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.db");
+        std::fs::write(&src, b"bytes").unwrap();
+        let dst = dir.path().join("a.db.restoring");
+        std::fs::write(&dst, b"left by an interrupted restore").unwrap();
+        assert!(stage(&src, &dst, "00").is_err());
+        assert!(!dst.exists(), "nothing half-staged is left");
+        let (sha, _) = super::super::manifest::sha256_file(&src).unwrap();
+        stage(&src, &dst, &sha).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"bytes");
+        let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
     }
 
     #[tokio::test]
