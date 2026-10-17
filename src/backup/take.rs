@@ -146,7 +146,7 @@ pub async fn take_with(
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64),
-        engram_version: env!("CARGO_PKG_VERSION").to_string(),
+        engram_version: env!("ENGRAM_VERSION").to_string(),
         mode,
         embed: EmbedRecipe {
             model: cfg.infer.embed.model.clone(),

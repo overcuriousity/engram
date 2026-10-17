@@ -128,6 +128,44 @@ pub struct Plan {
     /// Whether `control.db` is restored too (not under `--user`).
     pub control: bool,
     pub reembed: bool,
+    /// Said, not refused: an archive from another build of the same version.
+    pub warnings: Vec<String>,
+}
+
+/// How an archive's `engram_version` stands against this binary's.
+#[derive(Debug, PartialEq)]
+enum Skew {
+    /// Same version, and the same build or one of the two builds unknown.
+    Same,
+    /// Older: the schema files migrate forward.
+    Older,
+    /// Newer, or not comparable: refused unless `--force-version`.
+    Newer,
+    /// Same semver, two different known commits: reported, not refused.
+    OtherBuild(String),
+}
+
+/// Both sides are `<semver>[+<sha>]`; the `+<sha>` is what `build.rs` adds.
+fn version_skew(archive: &str, binary: &str) -> Skew {
+    let (a, b) = match (semver(archive), semver(binary)) {
+        (Some(a), Some(b)) => (a, b),
+        _ if archive == binary => return Skew::Same,
+        _ => return Skew::Newer,
+    };
+    if a > b {
+        return Skew::Newer;
+    }
+    if a < b {
+        return Skew::Older;
+    }
+    let build = |v: &str| v.split_once('+').map(|(_, s)| s.to_string());
+    match (build(archive), build(binary)) {
+        (Some(x), Some(y)) if x != y => Skew::OtherBuild(format!(
+            "the archive was taken by engram {archive}, a different build of the same \
+             version as this one ({binary}); restoring anyway"
+        )),
+        _ => Skew::Same,
+    }
 }
 
 /// `x.y.z`, anything after a `-` or `+` ignored.
@@ -174,18 +212,16 @@ pub async fn preflight(
     let control_path = Path::new(&cfg.store.control_path);
     lock::probe(control_path).map_err(|e| Refusal::ServerRunning(e.to_string()))?;
 
-    let binary = env!("CARGO_PKG_VERSION");
-    if !opts.force_version {
-        let newer = match (semver(&m.engram_version), semver(binary)) {
-            (Some(a), Some(b)) => a > b,
-            _ => m.engram_version != binary,
-        };
-        if newer {
+    let mut warnings = vec![];
+    match version_skew(&m.engram_version, env!("ENGRAM_VERSION")) {
+        Skew::Newer if !opts.force_version => {
             return Err(Refusal::VersionSkew {
                 archive: m.engram_version.clone(),
-                binary: binary.into(),
+                binary: env!("ENGRAM_VERSION").into(),
             });
         }
+        Skew::OtherBuild(w) => warnings.push(w),
+        _ => {}
     }
 
     if m.vector_backend != backend {
@@ -254,6 +290,7 @@ pub async fn preflight(
         tenants,
         control,
         reembed: opts.reembed,
+        warnings,
     })
 }
 
@@ -301,6 +338,8 @@ pub struct Moved {
 
 #[derive(Debug)]
 pub struct Outcome {
+    /// What preflight said but did not refuse.
+    pub warnings: Vec<String>,
     pub moved: Vec<Moved>,
     /// Tenants whose database was swapped in.
     pub swapped: Vec<String>,
@@ -326,6 +365,9 @@ impl Outcome {
 
 impl std::fmt::Display for Outcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for w in &self.warnings {
+            writeln!(f, "warning: {w}")?;
+        }
         for m in &self.moved {
             match &m.current {
                 Ok(g) => match m.drift {
@@ -447,6 +489,7 @@ pub async fn apply(cfg: &Config, plan: &Plan, gens: &dyn Generations) -> Result<
     let scope = (!plan.control).then(|| plan.tenants[0].slug.as_str());
     let verify = verify::verify(cfg, scope, true, plan.reembed, gens).await?;
     Ok(Outcome {
+        warnings: plan.warnings.clone(),
         moved,
         swapped,
         control_swapped,
@@ -731,6 +774,50 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn version_skew_refuses_newer_and_reports_another_build_of_the_same() {
+        assert_eq!(version_skew("0.2.0", "0.1.0+aaaaaaaaaaaa"), Skew::Newer);
+        assert_eq!(version_skew("0.2.0+bbb", "0.1.0"), Skew::Newer);
+        assert_eq!(version_skew("garbage", "0.1.0"), Skew::Newer);
+        assert_eq!(version_skew("0.0.1+bbb", "0.1.0+aaa"), Skew::Older);
+        assert_eq!(version_skew("0.1.0", "0.1.0"), Skew::Same);
+        assert_eq!(version_skew("0.1.0+aaa", "0.1.0+aaa"), Skew::Same);
+        // An archive from before builds were recorded, or a binary built
+        // without `.git`, says nothing either way.
+        assert_eq!(version_skew("0.1.0", "0.1.0+aaa"), Skew::Same);
+        assert_eq!(version_skew("0.1.0+aaa", "0.1.0"), Skew::Same);
+        let Skew::OtherBuild(w) = version_skew("0.1.0+bbb", "0.1.0+aaa") else {
+            panic!("not reported");
+        };
+        assert!(w.contains("0.1.0+bbb") && w.contains("0.1.0+aaa"), "{w}");
+    }
+
+    #[tokio::test]
+    async fn an_archive_from_another_build_of_this_version_is_restored_with_a_warning() {
+        let base = backed_up().await;
+        // A manifest takes the binary's own version, build and all.
+        let taken = Manifest::load(&base.archive).unwrap().engram_version;
+        assert_eq!(taken, env!("ENGRAM_VERSION"));
+
+        let other = format!("{}+000000000000", env!("CARGO_PKG_VERSION"));
+        edit_manifest(&base, |v| v["engram_version"] = other.clone().into());
+        let plan = preflight(
+            &base.cfg,
+            &base.archive,
+            &RestoreOpts::default(),
+            Backend::Qdrant,
+        )
+        .await
+        .unwrap();
+        // Only a binary that knows its own commit can tell the two apart.
+        if env!("ENGRAM_GIT_SHA") == "unknown" {
+            assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        } else {
+            assert_eq!(plan.warnings.len(), 1, "{:?}", plan.warnings);
+            assert!(plan.warnings[0].contains(&other), "{:?}", plan.warnings);
+        }
     }
 
     #[tokio::test]

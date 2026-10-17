@@ -130,6 +130,7 @@ async fn claim(
         axum::Json(serde_json::json!({
             "token": token,
             "version": env!("CARGO_PKG_VERSION"),
+            "build": env!("ENGRAM_GIT_SHA"),
         })),
     ))
 }
@@ -290,6 +291,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
         let body = crate::web::test_support::json_of(res).await;
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["build"], env!("ENGRAM_GIT_SHA"));
         let token = body["token"].as_str().expect("a token").to_string();
         assert!(token.starts_with("engram_"));
 
