@@ -40,6 +40,58 @@ pub const ORIGIN_ASK: &str = "ask";
 /// sheet, `/mcp` or a shell.
 pub const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
+/// Why bytes offered as text were not taken as text.
+#[derive(Debug, PartialEq, Eq)]
+pub enum NotText {
+    /// Not UTF-8, and no byte-order mark saying it is anything else.
+    Undecodable,
+    /// Decodes, but holds a NUL — which no text does on purpose.
+    Nul,
+}
+
+impl NotText {
+    /// The refusal for `Nul`, said once: the doors word `Undecodable`
+    /// themselves, but this one has a single cause and a single remedy.
+    pub const NUL_MESSAGE: &str = "that text holds NUL bytes — it is probably UTF-16 saved \
+         without a byte-order mark. Save it as UTF-8 and send it again.";
+}
+
+/// Bytes a door received as text, as the text they hold.
+///
+/// UTF-16 with a byte-order mark is decoded: Windows tools write it, and the
+/// mark says exactly how to read it. Anything else has to be UTF-8, and is
+/// refused rather than lossily converted — a corpus is quoted back verbatim,
+/// so text that arrived mangled is a fidelity loss nothing downstream can
+/// detect.
+///
+/// The NUL check is the case that refusal used to miss (engram#60). UTF-16LE
+/// *without* a mark is valid UTF-8 whenever the text is mostly ASCII — every
+/// other byte is a NUL, and NUL is a legal UTF-8 character — so it was stored
+/// as `D\0u\0 \0h\0a\0s\0t\0`, unsearchable and embedded that way. Guessing the
+/// byte order back from the NUL pattern would be a guess; refusing names the
+/// fix.
+pub fn decode_text(bytes: Vec<u8>) -> std::result::Result<String, NotText> {
+    let text = match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] => utf16(encoding_rs::UTF_16LE, rest)?,
+        [0xFE, 0xFF, rest @ ..] => utf16(encoding_rs::UTF_16BE, rest)?,
+        _ => String::from_utf8(bytes).map_err(|_| NotText::Undecodable)?,
+    };
+    if text.contains('\0') {
+        return Err(NotText::Nul);
+    }
+    Ok(text)
+}
+
+fn utf16(
+    encoding: &'static encoding_rs::Encoding,
+    bytes: &[u8],
+) -> std::result::Result<String, NotText> {
+    encoding
+        .decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|t| t.into_owned())
+        .ok_or(NotText::Undecodable)
+}
+
 /// Longest note spent on a vision call. Context, not a document: the note is
 /// the lead line of the describe prompt, and an unbounded one swamps the
 /// description or overruns the request.
@@ -895,11 +947,14 @@ impl Core {
                 MAX_TEXT_BYTES / (1024 * 1024)
             )));
         }
-        let text = String::from_utf8(bytes).map_err(|_| {
-            Error::Validation(
-                "that file is neither a PDF, an image nor UTF-8 text — nothing here reads it"
-                    .into(),
-            )
+        let text = decode_text(bytes).map_err(|e| {
+            Error::Validation(match e {
+                NotText::Undecodable => {
+                    "that file is neither a PDF, an image nor UTF-8 text — nothing here reads it"
+                }
+                NotText::Nul => NotText::NUL_MESSAGE,
+            }
+            .into())
         })?;
         self.ingest_capture(
             Capture::new(text, origin)
@@ -4638,6 +4693,60 @@ mod tests {
         assert_eq!(
             core.store.get_corpus(&out.id).await.unwrap().metadata["tz"],
             "Europe/Berlin"
+        );
+    }
+}
+
+#[cfg(test)]
+mod decode_text_tests {
+    use super::{NotText, decode_text};
+
+    const LINE: &str = "Du hast eine Datei an Ronny gesendet — schön";
+
+    fn utf16(le: bool, bom: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if bom {
+            out.extend(if le { [0xFF, 0xFE] } else { [0xFE, 0xFF] });
+        }
+        for u in LINE.encode_utf16() {
+            out.extend(if le { u.to_le_bytes() } else { u.to_be_bytes() });
+        }
+        out
+    }
+
+    #[test]
+    fn utf8_is_taken_as_it_is() {
+        assert_eq!(decode_text(LINE.as_bytes().to_vec()).as_deref(), Ok(LINE));
+    }
+
+    #[test]
+    fn utf16_with_a_byte_order_mark_is_decoded_either_way_round() {
+        assert_eq!(decode_text(utf16(true, true)).as_deref(), Ok(LINE));
+        assert_eq!(decode_text(utf16(false, true)).as_deref(), Ok(LINE));
+    }
+
+    /// The live artifact: `D.u...h.a.s.t...` — UTF-16LE with no mark, which is
+    /// valid UTF-8 and used to be stored that way.
+    #[test]
+    fn utf16_without_a_byte_order_mark_is_refused_not_stored() {
+        let ascii: Vec<u8> = "Du hast"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(
+            std::str::from_utf8(&ascii).is_ok(),
+            "the premise: it passes as UTF-8"
+        );
+        assert_eq!(decode_text(ascii), Err(NotText::Nul));
+    }
+
+    #[test]
+    fn bytes_that_are_no_text_at_all_are_still_refused() {
+        assert_eq!(decode_text(vec![0xC3, 0x28]), Err(NotText::Undecodable));
+        // A byte-order mark followed by an unpaired surrogate.
+        assert_eq!(
+            decode_text(vec![0xFF, 0xFE, 0x00, 0xD8]),
+            Err(NotText::Undecodable)
         );
     }
 }

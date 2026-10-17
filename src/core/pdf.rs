@@ -315,10 +315,14 @@ mod tests {
     fn a_ligature_comes_out_as_its_letters() {
         let md = to_markdown(LIGATURE).unwrap();
         for word in ["Begrifflichkeiten", "Definition", "Begriff"] {
-            assert!(md.contains(word), "`{word}` did not come out verbatim: {md:?}");
+            assert!(
+                md.contains(word),
+                "`{word}` did not come out verbatim: {md:?}"
+            );
         }
         assert!(
-            !md.chars().any(|c| c == '\u{0600}' || ('\u{FB00}'..='\u{FB06}').contains(&c)),
+            !md.chars()
+                .any(|c| c == '\u{0600}' || ('\u{FB00}'..='\u{FB06}').contains(&c)),
             "a ligature survived as a codepoint of its own: {md:?}"
         );
     }
