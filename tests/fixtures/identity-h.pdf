@@ -1,0 +1,93 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>
+endobj
+4 0 obj
+<< /Length 607 >>
+stream
+BT /F1 12 Tf 1 0 0 1 72 740 Tm <01040119010001100109011701180100010D01110113010D0100010401090118010D011101000109011301000107011401130113011C0100010F010D0117010D0113010C010D01180102> Tj ET
+BT /F1 12 Tf 1 0 0 1 72 716 Tm <010501140116010D0113011701110112010001190113010C0100010C010D0116010D011301000103010D010F01160111010E03000111010B01100112010D01110118010D0113> Tj ET
+BT /F1 12 Tf 1 0 0 1 72 692 Tm <0106010D010C010D010001080115011901160100011B01110116010C0100010F010D01170111010B0110010D0116011801010100010A010D011A01140116010001170111010D0100010F010D010C010D01190118010D01180100011B01110116010C0102> Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type0 /BaseFont /ABCDEF+Calibri /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>
+endobj
+6 0 obj
+<< /Type /Font /Subtype /CIDFontType2 /BaseFont /ABCDEF+Calibri /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /DW 500 /CIDToGIDMap /Identity >>
+endobj
+7 0 obj
+<< /Length 782 >>
+stream
+/CIDInit /ProcSet findresource begin
+12 dict begin
+begincmap
+/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def
+/CMapName /Adobe-Identity-UCS def
+/CMapType 2 def
+1 begincodespacerange
+<0000> <FFFF>
+endcodespacerange
+29 beginbfchar
+<0100> <0020>
+<0101> <002C>
+<0102> <002E>
+<0103> <0042>
+<0104> <0044>
+<0105> <0046>
+<0106> <004A>
+<0107> <0052>
+<0108> <0053>
+<0109> <0061>
+<010A> <0062>
+<010B> <0063>
+<010C> <0064>
+<010D> <0065>
+<010E> <0066>
+<010F> <0067>
+<0110> <0068>
+<0111> <0069>
+<0112> <006B>
+<0113> <006E>
+<0114> <006F>
+<0115> <0070>
+<0116> <0072>
+<0117> <0073>
+<0118> <0074>
+<0119> <0075>
+<011A> <0076>
+<011B> <0077>
+<011C> <0079>
+endbfchar
+1 beginbfrange
+<0300> <0300> <0066006C>
+endbfrange
+endcmap
+CMapName currentdict /CMap defineresource pop
+end
+end
+
+endstream
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000015 00000 n 
+0000000064 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000905 00000 n 
+0000001044 00000 n 
+0000001231 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2064
+%%EOF

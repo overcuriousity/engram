@@ -264,6 +264,15 @@ mod tests {
     /// what the reading side cannot render. Built by
     /// `tests/fixtures/bullet-list.py`; regenerate it with that, not by hand.
     const BULLET_LIST: &[u8] = include_bytes!("../../tests/fixtures/bullet-list.pdf");
+    /// A subset font drawing `fl` and `fi` as single ligature glyphs, mapped
+    /// back to their letters by a ToUnicode `bfrange` — the shape that lost
+    /// the `fl` of `Begrifflichkeiten` in a live base (engram#60). Built by
+    /// `tests/fixtures/ligature.py`.
+    const LIGATURE: &[u8] = include_bytes!("../../tests/fixtures/ligature.pdf");
+    /// Every string two bytes per glyph: a Type0 font with `Identity-H`, how
+    /// Word, LibreOffice and browsers embed a TrueType subset. Built by
+    /// `tests/fixtures/identity-h.py`.
+    const IDENTITY_H: &[u8] = include_bytes!("../../tests/fixtures/identity-h.pdf");
 
     #[test]
     fn a_pdf_becomes_markdown_carrying_its_words() {
@@ -296,6 +305,37 @@ mod tests {
             !md.lines().any(|l| l.trim_start().starts_with('#')),
             "structure is being recovered now — see this test's doc comment: {md}"
         );
+    }
+
+    /// A ligature is stored as the letters it stands for. Anything else — the
+    /// glyph dropped, a presentation form like U+FB02, or an unrelated
+    /// codepoint such as U+0600 — makes the word unsearchable and is what
+    /// the vector gets built from.
+    #[test]
+    fn a_ligature_comes_out_as_its_letters() {
+        let md = to_markdown(LIGATURE).unwrap();
+        for word in ["Begrifflichkeiten", "Definition", "Begriff"] {
+            assert!(md.contains(word), "`{word}` did not come out verbatim: {md:?}");
+        }
+        assert!(
+            !md.chars().any(|c| c == '\u{0600}' || ('\u{FB00}'..='\u{FB06}').contains(&c)),
+            "a ligature survived as a codepoint of its own: {md:?}"
+        );
+    }
+
+    /// Two-byte codes are read two bytes at a time: the words come out whole,
+    /// with no NULs and no letters spaced apart.
+    #[test]
+    fn two_byte_text_comes_out_as_whole_words() {
+        let md = to_markdown(IDENTITY_H).unwrap();
+        for line in [
+            "Du hast eine Datei an Ronny gesendet.",
+            "Forensik und deren Begrifflichkeiten",
+            "Jede Spur wird gesichert, bevor sie gedeutet wird.",
+        ] {
+            assert!(md.contains(line), "`{line}` did not come out whole: {md:?}");
+        }
+        assert!(!md.contains('\0'), "a NUL reached the text: {md:?}");
     }
 
     /// The fixture's raw export carries `\u{f0b7}` on lines of its own and

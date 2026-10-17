@@ -584,7 +584,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.12.1",
+ "itertools 0.10.5",
  "log",
  "prettyplease",
  "proc-macro2",
@@ -851,7 +851,7 @@ checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
 dependencies = [
  "glob",
  "libc",
- "libloading 0.8.9",
+ "libloading",
 ]
 
 [[package]]
@@ -1627,8 +1627,7 @@ dependencies = [
 [[package]]
 name = "docling"
 version = "1.53.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f621b641169ca9305864b88e58f4edd453cb3d73293908a9566874446d81f28"
+source = "git+https://github.com/overcuriousity/docling.rs?rev=73d773b49266314bff3bd089641bd579c3e6d6de#73d773b49266314bff3bd089641bd579c3e6d6de"
 dependencies = [
  "calamine",
  "csv",
@@ -1654,8 +1653,7 @@ dependencies = [
 [[package]]
 name = "docling-core"
 version = "1.53.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b89d76612cdb95c0000f154e671e09ef90f796c7191f101b132f9e5b456b485"
+source = "git+https://github.com/overcuriousity/docling.rs?rev=73d773b49266314bff3bd089641bd579c3e6d6de#73d773b49266314bff3bd089641bd579c3e6d6de"
 dependencies = [
  "serde_json",
  "sha2 0.10.9",
@@ -1664,8 +1662,7 @@ dependencies = [
 [[package]]
 name = "docling-onnx"
 version = "1.53.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a572d95b2674f9df1e0ff845c85f0ed785f06175bd80a5a235a14f00b272542"
+source = "git+https://github.com/overcuriousity/docling.rs?rev=73d773b49266314bff3bd089641bd579c3e6d6de#73d773b49266314bff3bd089641bd579c3e6d6de"
 dependencies = [
  "docling-core",
  "ort",
@@ -1674,8 +1671,7 @@ dependencies = [
 [[package]]
 name = "docling-pdf"
 version = "1.53.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39ff4b8e1af726bec2a52bf8e8dc04de3df9b79aeae8de6ed71101b2cc941980"
+source = "git+https://github.com/overcuriousity/docling.rs?rev=73d773b49266314bff3bd089641bd579c3e6d6de#73d773b49266314bff3bd089641bd579c3e6d6de"
 dependencies = [
  "docling-core",
  "docling-onnx",
@@ -3246,16 +3242,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3814,7 +3800,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.21.7",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -4049,9 +4035,9 @@ dependencies = [
  "console_error_panic_hook",
  "console_log",
  "image",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "js-sys",
- "libloading 0.9.0",
+ "libloading",
  "log",
  "maybe-owned",
  "once_cell",
