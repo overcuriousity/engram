@@ -187,10 +187,10 @@ fn git_sha() -> Option<String> {
         watch.push(r);
     }
     for w in watch {
-        if let Some(p) = git(&["rev-parse", "--git-path", &w]) {
-            if Path::new(&p).exists() {
-                println!("cargo:rerun-if-changed={p}");
-            }
+        if let Some(p) = git(&["rev-parse", "--git-path", &w])
+            && Path::new(&p).exists()
+        {
+            println!("cargo:rerun-if-changed={p}");
         }
     }
     git(&["rev-parse", "--short=12", "HEAD"])
