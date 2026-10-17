@@ -1754,19 +1754,12 @@ impl Core {
     /// captured while this runs is either absent from the scroll or present in
     /// the newer row list — never mistaken for an orphan.
     pub async fn heal_store_drift(&self) -> Result<()> {
-        use std::collections::HashSet;
-
         let points = self.vectors.all_artifact_ids().await?;
         let rows = self.store.list_all_artifact_ids().await?;
         let embedded = self.store.list_embedded_artifact_ids().await?;
+        let drift = store_drift(&rows, &embedded, &points);
 
-        let has_row: HashSet<&str> = rows.iter().map(String::as_str).collect();
-        let has_point: HashSet<&str> = points.iter().map(String::as_str).collect();
-
-        let orphan_points = points
-            .iter()
-            .filter(|id| !has_row.contains(id.as_str()))
-            .count();
+        let orphan_points = drift.orphan_points.len();
         if orphan_points > 0 {
             tracing::warn!(
                 orphan_points,
@@ -1775,10 +1768,7 @@ impl Core {
         }
 
         let mut requeued = 0usize;
-        for id in embedded
-            .iter()
-            .filter(|id| !has_point.contains(id.as_str()))
-        {
+        for id in &drift.missing_points {
             // Idle-only. This runs on every sweep, so `enqueue` — which re-arms
             // whatever state it finds — would wind a unit that is failing
             // against a dead endpoint back to zero attempts every tick. Its
@@ -2505,17 +2495,73 @@ impl Core {
     }
 }
 
+/// Where the two stores disagree about which artifacts exist.
+///
+/// One truth for "what disagrees", read by the sweep (`heal_store_drift`) and
+/// by `--restore` / `--verify-stores`, so the report a restore prints is the
+/// same set the next sweep would act on.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Drift {
+    /// Points no row names: unreachable content, only ever reported or pruned.
+    pub orphan_points: Vec<String>,
+    /// Rows SQLite calls embedded with no point: re-armed for embedding.
+    pub missing_points: Vec<String>,
+}
+
+pub(crate) fn store_drift(rows: &[String], embedded: &[String], points: &[String]) -> Drift {
+    use std::collections::HashSet;
+    let has_row: HashSet<&str> = rows.iter().map(String::as_str).collect();
+    let has_point: HashSet<&str> = points.iter().map(String::as_str).collect();
+    Drift {
+        orphan_points: points
+            .iter()
+            .filter(|id| !has_row.contains(id.as_str()))
+            .cloned()
+            .collect(),
+        missing_points: embedded
+            .iter()
+            .filter(|id| !has_point.contains(id.as_str()))
+            .cloned()
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-
     use crate::core::ingest::MAX_TEXT_BYTES;
     use crate::core::ingest::{
         Capture, ImageCapture, MAX_NOTE_CHARS, ORIGIN_FETCH, ORIGIN_IMAGE, ORIGIN_PDF, PdfCapture,
     };
+    use crate::core::ingest::{Drift, store_drift};
     use crate::core::test_support::test_core;
     use crate::error::Error;
     use crate::store::corpora::CorpusStatus;
     use crate::store::jobs::Stage;
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn store_drift_of_agreeing_stores_is_empty() {
+        let d = store_drift(&ids(&["a", "b"]), &ids(&["a"]), &ids(&["a"]));
+        assert_eq!(d, Drift::default());
+    }
+
+    #[test]
+    fn store_drift_names_a_point_without_a_row() {
+        let d = store_drift(&ids(&["a"]), &ids(&["a"]), &ids(&["a", "gone"]));
+        assert_eq!(d.orphan_points, ids(&["gone"]));
+        assert!(d.missing_points.is_empty());
+    }
+
+    #[test]
+    fn store_drift_names_an_embedded_row_without_a_point() {
+        // `b` is a row that is not embedded: no point is owed, so it is not missing.
+        let d = store_drift(&ids(&["a", "b", "c"]), &ids(&["a", "c"]), &ids(&["a"]));
+        assert_eq!(d.missing_points, ids(&["c"]));
+        assert!(d.orphan_points.is_empty());
+    }
 
     /// The per-kind ceilings, imposed on the path rather than at each door.
     ///
