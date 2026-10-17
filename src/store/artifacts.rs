@@ -3,6 +3,15 @@ use crate::error::{Error, Result};
 use sqlx::Row;
 use std::collections::HashMap;
 
+/// Every artifact id: what the store-drift heal compares against the vectors,
+/// and what a backup counts as `artifacts`. One string for both, so the two
+/// cannot disagree about what an artifact is.
+pub(crate) const ALL_ARTIFACT_IDS: &str = "SELECT id FROM artifacts";
+/// Artifacts whose row claims a vector — see `list_embedded_artifact_ids`.
+/// A backup's `embedded` count is this query, for the reason above.
+pub(crate) const EMBEDDED_ARTIFACT_IDS: &str =
+    "SELECT id FROM artifacts WHERE embed_state = 'embedded' AND reaped_at IS NULL";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmbedState {
@@ -1438,9 +1447,7 @@ impl Store {
 
     /// Every artifact id. What the store-drift heal compares against Qdrant.
     pub async fn list_all_artifact_ids(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT id FROM artifacts")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(ALL_ARTIFACT_IDS).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
@@ -1464,11 +1471,9 @@ impl Store {
     /// at one embedding call per reaped artifact for ever. `exhume` is what
     /// puts a point back, and it sets `embed_state` itself.
     pub async fn list_embedded_artifact_ids(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT id FROM artifacts WHERE embed_state = 'embedded' AND reaped_at IS NULL",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(EMBEDDED_ARTIFACT_IDS)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 

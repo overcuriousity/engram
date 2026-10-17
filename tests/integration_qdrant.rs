@@ -2483,3 +2483,70 @@ async fn interference_is_counted_and_filed_nowhere_for_a_fixture_built_to_produc
         "interference is counted, not filed"
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn qdrant_export_streams_hashes_and_cleans_up() {
+    let v = fresh("engram_it_export", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &["linux"], "procedure"),
+        point("b", "s1", vec![0.0, 1.0, 0.0, 0.0], &[], "concept"),
+        point("c", "s2", vec![0.0, 0.0, 1.0, 0.0], &[], "concept"),
+    ])
+    .await
+    .unwrap();
+    let generation = v.resolve_alias().await.unwrap().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("engram_it_export.snapshot");
+    let engram::vector::VectorExport::File {
+        generation: got,
+        sha256,
+        bytes,
+        points,
+        dim,
+    } = v.export_snapshot(&file).await.unwrap()
+    else {
+        panic!("a Qdrant store exports a file");
+    };
+    assert_eq!(got, generation);
+    assert_eq!(points, v.count().await.unwrap());
+    assert_eq!(points, 3);
+    assert_eq!(dim, 4);
+    assert_eq!(
+        engram::backup::manifest::sha256_file(&file).unwrap(),
+        (sha256, bytes),
+        "the hash taken while streaming is the hash of what landed"
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:o}");
+    }
+    let left = raw(
+        reqwest::Method::GET,
+        &format!("/collections/{generation}/snapshots"),
+        None,
+    )
+    .await;
+    let left: serde_json::Value = serde_json::from_str(&left).unwrap();
+    assert_eq!(
+        left["result"].as_array().map(Vec::len),
+        Some(0),
+        "Qdrant kept a copy of the snapshot: {left}"
+    );
+    v.drop_collection().await.unwrap();
+
+    // An alias that does not exist is an error, not an empty snapshot.
+    let absent = QdrantVectors::connect(&cfg("engram_it_export_absent"))
+        .await
+        .unwrap();
+    absent.drop_collection().await.unwrap();
+    let e = absent
+        .export_snapshot(&dir.path().join("absent.snapshot"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("does not exist"), "{e}");
+    assert!(!dir.path().join("absent.snapshot").exists());
+}

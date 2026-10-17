@@ -465,6 +465,43 @@ pub trait VectorStore: Send + Sync {
     async fn revision(&self) -> Result<Option<String>> {
         Ok(None)
     }
+    /// Write this store's vectors to `into`, a new file, for a backup.
+    ///
+    /// `Embedded` from a store whose vectors live inside the tenant database,
+    /// which the backup copies anyway; nothing is written then.
+    async fn export_snapshot(&self, _into: &std::path::Path) -> Result<VectorExport> {
+        Err(crate::error::Error::Vector(
+            "this vector store cannot export a snapshot".into(),
+        ))
+    }
+    /// Load a snapshot `export_snapshot` wrote into the collection `target`,
+    /// whose vectors must be `dim` wide. Never touches what the store serves
+    /// until the caller adopts `target`.
+    async fn import_snapshot(
+        &self,
+        _from: &std::path::Path,
+        _target: &str,
+        _dim: usize,
+    ) -> Result<()> {
+        Err(crate::error::Error::Vector(
+            "this vector store cannot import a snapshot".into(),
+        ))
+    }
+}
+
+/// What `export_snapshot` produced.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VectorExport {
+    /// The vectors are in the tenant database; there is no separate file.
+    Embedded,
+    File {
+        /// The physical collection the snapshot was taken of.
+        generation: String,
+        sha256: String,
+        bytes: u64,
+        points: u64,
+        dim: usize,
+    },
 }
 
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {

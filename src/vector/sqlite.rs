@@ -844,6 +844,12 @@ impl VectorStore for SqliteVectors {
         Ok(b.map(|b| unblob(&b)))
     }
 
+    /// The vectors are rows in the tenant database, which the backup copies
+    /// whole; there is nothing separate to write.
+    async fn export_snapshot(&self, _into: &std::path::Path) -> Result<super::VectorExport> {
+        Ok(super::VectorExport::Embedded)
+    }
+
     async fn count(&self) -> Result<u64> {
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vec_points")
             .fetch_one(&self.pool)

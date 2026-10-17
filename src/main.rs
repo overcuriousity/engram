@@ -56,6 +56,20 @@ struct Args {
     /// account straight back.
     #[arg(long, value_name = "SUBJECT")]
     delete_user: Option<String>,
+    /// Write the control database, every tenant database and every tenant's
+    /// Qdrant snapshot into DIR (new or empty) with a checksummed manifest,
+    /// then exit. Runs beside a live server: the archive is reconcilable, not
+    /// point-in-time. The directory is the whole instance — keep it private.
+    #[arg(long, value_name = "DIR")]
+    backup: Option<PathBuf>,
+    /// With --backup: refuse unless the server is stopped, so the archive is
+    /// one point in time.
+    #[arg(long, requires = "backup")]
+    offline: bool,
+    /// Check that every file a backup's manifest names is present and intact,
+    /// then exit 0, or 1 naming the first that is not.
+    #[arg(long, value_name = "DIR")]
+    backup_check: Option<PathBuf>,
     /// The client half — `-c`, `-s`, `-a`. One parser for both, so `--help`
     /// lists the server's flags and the client's together and there is one
     /// binary to build, ship and version.
@@ -214,6 +228,28 @@ async fn live_ranking(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// A command that works on the data and exits, beside a running server.
+/// The one list both `server_lock` and the client/server split read, so a new
+/// data command cannot be added to one and missed by the other.
+fn data_command(args: &Args) -> bool {
+    args.reindex
+        || args.recompute_coverage
+        || args.merge_orphans
+        || args.list_users
+        || args.delete_user.is_some()
+}
+
+/// The server lock, when this run is going to be the server.
+///
+/// The data commands (`--reindex` and the rest) run beside a live server today
+/// and do not take it; adopting it there is a follow-up, not this change.
+fn server_lock(args: &Args, cfg: &Config) -> Result<Option<engram::backup::lock::ServerLock>> {
+    if data_command(args) {
+        return Ok(None);
+    }
+    engram::backup::lock::acquire(std::path::Path::new(&cfg.store.control_path)).map(Some)
+}
+
 /// Resolve `--user`, or refuse with the list rather than picking one.
 ///
 /// A default here is how the wrong collection gets reindexed: the operator
@@ -363,11 +399,9 @@ async fn main() -> anyhow::Result<()> {
     // capture only when nothing else was asked for, and `echo yes | engram
     // --delete-user sub@idp` is a scripted answer to a prompt, not a note.
     let server_command = args.print_config
-        || args.reindex
-        || args.recompute_coverage
-        || args.merge_orphans
-        || args.list_users
-        || args.delete_user.is_some()
+        || args.backup.is_some()
+        || args.backup_check.is_some()
+        || data_command(&args)
         || args.user.is_some();
     use std::io::IsTerminal;
     if let Some(verb) = engram::cli::args::verb(
@@ -385,12 +419,47 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(code);
     }
 
+    // Reads only the archive, so it needs no config and opens nothing live.
+    if let Some(dir) = &args.backup_check {
+        match engram::backup::take::check(dir) {
+            Ok(m) => {
+                println!(
+                    "{} intact: control database and {} tenants{}",
+                    dir.display(),
+                    m.tenants.len(),
+                    if m.skipped.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" (partial: {} not archived)", m.skipped.join(", "))
+                    }
+                );
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("{}: {e}", dir.display());
+                std::process::exit(1);
+            }
+        }
+    }
+
     let cfg = Config::load(args.config.as_deref())?;
     if args.print_config {
         println!("{}", cfg.redacted());
         print_live_ranking(&cfg).await;
         return Ok(());
     }
+
+    // Before `Control::connect`, which migrates: a backup copies the live
+    // files read-only and must not write to them.
+    if let Some(dir) = &args.backup {
+        let report = engram::backup::take::take(&cfg, dir, args.offline).await?;
+        println!("{report}");
+        std::process::exit(report.exit_code());
+    }
+
+    // Held until `main` returns, so `--backup --offline` (and a restore) can
+    // tell that a server is up. Taken before the control database is opened.
+    let _server_lock = server_lock(&args, &cfg)?;
 
     // Every command below reaches the control database, and none of them can
     // say which base they mean without it.
@@ -610,6 +679,52 @@ mod startup_tests {
             require_user(&control, Some("nobody")).await.is_err(),
             "an unknown subject is not a silent default"
         );
+    }
+
+    #[test]
+    fn the_server_holds_the_lock_and_data_commands_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::test_default();
+        cfg.store.control_path = dir.path().join("control.db").to_string_lossy().into();
+        let control = std::path::Path::new(&cfg.store.control_path);
+
+        let server = server_lock(&Args::parse_from(["engram"]), &cfg).unwrap();
+        assert!(server.is_some());
+        let e = engram::backup::lock::acquire(control)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is running"), "{e}");
+        let e = server_lock(&Args::parse_from(["engram"]), &cfg)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("is running"), "a second server is refused: {e}");
+        assert!(
+            server_lock(&Args::parse_from(["engram", "--list-users"]), &cfg)
+                .unwrap()
+                .is_none(),
+            "a data command runs beside the server"
+        );
+        for flags in [
+            &["engram", "--reindex"][..],
+            &["engram", "--recompute-coverage"],
+            &["engram", "--merge-orphans"],
+            &["engram", "--delete-user", "sub@idp"],
+        ] {
+            assert!(
+                server_lock(&Args::parse_from(flags), &cfg)
+                    .unwrap()
+                    .is_none(),
+                "{flags:?} runs beside the server"
+            );
+        }
+        drop(server);
+        assert!(engram::backup::lock::acquire(control).is_ok());
+    }
+
+    #[test]
+    fn offline_means_nothing_without_backup() {
+        assert!(Args::try_parse_from(["engram", "--offline"]).is_err());
+        assert!(Args::try_parse_from(["engram", "--backup", "/x", "--offline"]).is_ok());
     }
 
     #[test]

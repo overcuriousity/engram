@@ -4,6 +4,7 @@
 //! binary runs.
 
 pub mod auth;
+pub mod backup;
 pub mod cli;
 pub mod config;
 #[cfg(feature = "contained")]
