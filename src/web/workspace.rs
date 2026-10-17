@@ -236,7 +236,7 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResul
     if corpora == 0 {
         return Err(crate::error::Error::NotFound.into());
     }
-    let (example_remind, example_journal, example_lang) = examples(&headers);
+    let (example_remind, example_journal, example_lang) = examples(&tenant.core, &headers);
     Ok(HtmlTemplate(HeldTemplate {
         ask_enabled: crate::web::state::ask_enabled(&tenant),
         example_remind,
@@ -278,9 +278,18 @@ async fn idle_line(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<R
 /// The reader's language, off the request. A header that is absent, empty or
 /// unreadable is a reader we know nothing about, and English is what the page
 /// says then.
+///
+/// Empty phrasings on the embed-only floor: nothing reads a reminder or a
+/// journal entry out of the box without `[infer.synthesize]`, so offering
+/// either would teach a phrasing that does nothing. `_box_hint.html` says
+/// so in their place.
 pub(crate) fn examples(
+    core: &crate::core::Core,
     headers: &axum::http::HeaderMap,
 ) -> (&'static str, &'static str, &'static str) {
+    if !core.synthesizes() {
+        return ("", "", "");
+    }
     let raw = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok())
@@ -336,7 +345,7 @@ async fn base_template(
     // still has to know: a search URL against an empty base is a page that
     // must not offer Ask either.
     let (corpora, _) = tenant.core.store.held_brief().await?;
-    let (example_remind, example_journal, example_lang) = examples(headers);
+    let (example_remind, example_journal, example_lang) = examples(&tenant.core, headers);
     Ok(WorkspaceTemplate {
         ask_enabled: crate::web::state::ask_enabled(tenant),
         q,

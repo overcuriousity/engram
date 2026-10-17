@@ -186,6 +186,10 @@ pub struct StatusResponse {
     /// (an ask model), the image door (a vision model), the verdict bars and
     /// gaps (`[learn]`), and the offer card (`[recommend]`).
     pub asks: bool,
+    /// A synthesizer (`[infer.synthesize]`): without one every capture stays
+    /// verbatim, nothing is read for a reminder or a journal entry, nothing is
+    /// promoted, and `examples` carries empty phrasings.
+    pub synthesizes: bool,
     pub vision: bool,
     pub learn: bool,
     pub recommend: bool,
@@ -2004,7 +2008,8 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
             id,
             at: created_at,
         });
-    let (example_remind, example_journal, example_lang) = crate::web::workspace::examples(&headers);
+    let (example_remind, example_journal, example_lang) =
+        crate::web::workspace::examples(&tenant.core, &headers);
     let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
         .fetch_all(&tenant.core.store.pool)
         .await?;
@@ -2068,6 +2073,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
         reap,
         transcribe: tenant.core.transcriber.is_some(),
         asks: tenant.core.asks(),
+        synthesizes: tenant.core.synthesizes(),
         vision: tenant.core.describer.is_some(),
         learn: tenant.core.learn.enabled,
         recommend: tenant.core.recommends(),
