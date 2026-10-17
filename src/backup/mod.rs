@@ -2,16 +2,20 @@
 //! tenant's vectors, in one directory with a checksummed manifest.
 //!
 //! Design: `docs/superpowers/specs/2026-10-17-backup-restore-design.md`. This
-//! module takes and checks an archive; restoring one is a later slice.
+//! module takes, checks and restores an archive, and verifies that the stores
+//! agree.
 //!
 //! The archive is as sensitive as the instance — `control.db` carries sessions,
 //! token hashes and the VAPID private key — so every directory here is created
 //! `0700` and every file `0600` before its first byte is written.
 
+pub mod generations;
 pub mod lock;
 pub mod manifest;
+pub mod restore;
 pub mod sqlite;
 pub mod take;
+pub mod verify;
 
 use crate::error::{Error, Result};
 use std::fs::{DirBuilder, File, OpenOptions};

@@ -44,7 +44,8 @@ struct Args {
     dry_run: bool,
     /// Which tenant a data command acts on. Required by --reindex,
     /// --recompute-coverage and --merge-orphans: there is no longer one base
-    /// for them to mean.
+    /// for them to mean. Narrows --restore and --verify-stores to one tenant
+    /// (a slug is accepted there too).
     #[arg(long, value_name = "SUBJECT")]
     user: Option<String>,
     /// List the users this instance knows, with their slug and email.
@@ -70,6 +71,27 @@ struct Args {
     /// then exit 0, or 1 naming the first that is not.
     #[arg(long, value_name = "DIR")]
     backup_check: Option<PathBuf>,
+    /// Put back an archive --backup wrote, then exit: the control database
+    /// and every tenant database (or, with --user, that tenant's alone), each
+    /// tenant's vectors uploaded into a fresh generation the alias is moved
+    /// to. Refuses while the server runs, and before it changes anything.
+    /// Ends with the --verify-stores table; exits 0 PASS, 2 REPAIR, 1 FAIL.
+    /// The previous generations are left in Qdrant as the rollback.
+    #[arg(long, value_name = "DIR")]
+    restore: Option<PathBuf>,
+    /// With --restore: restore the databases but not the vectors, into an
+    /// empty generation at the configured width, and queue every embedded
+    /// artifact again. For an archive taken under another embedding recipe.
+    #[arg(long, requires = "restore")]
+    reembed: bool,
+    /// With --restore: accept an archive written by a newer engram.
+    #[arg(long, requires = "restore")]
+    force_version: bool,
+    /// Check that the control database, the tenant databases and the vector
+    /// store agree, then exit 0 PASS, 2 REPAIR (embeds owed) or 1 FAIL.
+    /// Writes nothing; --user narrows it to one tenant.
+    #[arg(long)]
+    verify_stores: bool,
     /// The client half — `-c`, `-s`, `-a`. One parser for both, so `--help`
     /// lists the server's flags and the client's together and there is one
     /// binary to build, ship and version.
@@ -237,6 +259,8 @@ fn data_command(args: &Args) -> bool {
         || args.merge_orphans
         || args.list_users
         || args.delete_user.is_some()
+        || args.restore.is_some()
+        || args.verify_stores
 }
 
 /// The server lock, when this run is going to be the server.
@@ -455,6 +479,35 @@ async fn main() -> anyhow::Result<()> {
         let report = engram::backup::take::take(&cfg, dir, args.offline).await?;
         println!("{report}");
         std::process::exit(report.exit_code());
+    }
+
+    // Before the server lock and `Control::connect`: a restore takes the lock
+    // itself, and only after every refusal has passed without a write.
+    if let Some(dir) = &args.restore {
+        let opts = engram::backup::restore::RestoreOpts {
+            user: args.user.clone(),
+            reembed: args.reembed,
+            force_version: args.force_version,
+        };
+        match engram::backup::restore::restore(&cfg, dir, &opts).await {
+            Ok(out) => {
+                println!("{out}");
+                std::process::exit(out.exit_code());
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    if args.verify_stores {
+        let gens = engram::backup::generations::QdrantGenerations {
+            cfg: cfg.vector.clone(),
+        };
+        let report =
+            engram::backup::verify::verify(&cfg, args.user.as_deref(), false, false, &gens).await?;
+        println!("{report}");
+        std::process::exit(report.verdict().exit_code());
     }
 
     // Held until `main` returns, so `--backup --offline` (and a restore) can
@@ -709,6 +762,8 @@ mod startup_tests {
             &["engram", "--recompute-coverage"],
             &["engram", "--merge-orphans"],
             &["engram", "--delete-user", "sub@idp"],
+            &["engram", "--restore", "/x"],
+            &["engram", "--verify-stores"],
         ] {
             assert!(
                 server_lock(&Args::parse_from(flags), &cfg)
@@ -719,6 +774,14 @@ mod startup_tests {
         }
         drop(server);
         assert!(engram::backup::lock::acquire(control).is_ok());
+    }
+
+    #[test]
+    fn reembed_and_force_version_mean_nothing_without_restore() {
+        for f in ["--reembed", "--force-version"] {
+            assert!(Args::try_parse_from(["engram", f]).is_err(), "{f}");
+            assert!(Args::try_parse_from(["engram", "--restore", "/x", f]).is_ok());
+        }
     }
 
     #[test]
