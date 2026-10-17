@@ -193,6 +193,17 @@ artifacts. Each exits when done and requires `--user <SUBJECT>`; omitting it is
 an error listing the known subjects, because defaulting to an arbitrary tenant
 is how the wrong collection gets reindexed.
 
+`--merge-orphans` repairs a base captured before passages had a minimum size
+(engram#61): a budget cut could leave the tail of a sentence, `is needed.`, as a
+passage of its own, and a near-empty embedding ranks near the top for any query.
+It finds every live passage under `MIN_PASSAGE_CHARS` (40 non-whitespace
+characters), joins its text to the neighbouring passage of the same window (the
+one before it, else the one after; never across a heading), widens that
+passage's span, queues its re-embed and deletes the orphan's row and vector.
+Add `--dry-run` to list what it would merge without writing anything. It is
+idempotent, and the re-embeds run when the server's job worker next picks them
+up.
+
 ## Multiple users
 
 Every user gets their own SQLite database and Qdrant collection. Nothing is

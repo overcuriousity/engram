@@ -1132,6 +1132,26 @@ impl Store {
         )
     }
 
+    /// A passage that has taken in its neighbour's text: new text and the span
+    /// that now covers both, with the vector invalidated as any text edit does.
+    /// The caller queues the embed, as with `update_artifact_text`.
+    pub async fn absorb_passage(&self, id: &str, text: &str, span: &CorpusSpan) -> Result<()> {
+        self.expect_updated(
+            sqlx::query(
+                "UPDATE artifacts
+                 SET text = ?, corpus_span = ?, embed_state = 'pending', embed_model = NULL,
+                     embed_rev = embed_rev + 1, updated_at = ?
+                 WHERE id = ?",
+            )
+            .bind(text)
+            .bind(serde_json::to_string(span).unwrap())
+            .bind(super::now())
+            .bind(id)
+            .execute(&self.pool)
+            .await?,
+        )
+    }
+
     fn expect_updated(&self, res: sqlx::sqlite::SqliteQueryResult) -> Result<()> {
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
