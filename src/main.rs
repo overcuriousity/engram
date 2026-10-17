@@ -33,8 +33,18 @@ struct Args {
     /// coverage is measured, since the figure is otherwise written once.
     #[arg(long)]
     recompute_coverage: bool,
-    /// Which tenant a data command acts on. Required by --reindex and
-    /// --recompute-coverage: there is no longer one base for them to mean.
+    /// Fold stored passages too short to carry a claim into their neighbour,
+    /// re-queue the merged passage's embed and delete the orphan's row and
+    /// vector, then exit. For bases captured before the splitter did this
+    /// itself (engram#61). Idempotent.
+    #[arg(long)]
+    merge_orphans: bool,
+    /// With --merge-orphans: list what would change and write nothing.
+    #[arg(long, requires = "merge_orphans")]
+    dry_run: bool,
+    /// Which tenant a data command acts on. Required by --reindex,
+    /// --recompute-coverage and --merge-orphans: there is no longer one base
+    /// for them to mean.
     #[arg(long, value_name = "SUBJECT")]
     user: Option<String>,
     /// List the users this instance knows, with their slug and email.
@@ -377,6 +387,7 @@ async fn main() -> anyhow::Result<()> {
         || args.backup_check.is_some()
         || args.reindex
         || args.recompute_coverage
+        || args.merge_orphans
         || args.list_users
         || args.delete_user.is_some()
         || args.user.is_some();
@@ -488,6 +499,51 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+        return Ok(());
+    }
+
+    if args.merge_orphans {
+        let user = require_user(&control, args.user.as_deref()).await?;
+        let store = tenant_store(&cfg, &control, &user).await?;
+        // A dry run reads SQLite only; a real one deletes the orphans' points,
+        // so it needs the tenant's collection. The re-embed is queued, and
+        // the server's embed worker makes it.
+        let vectors: Arc<dyn engram::vector::VectorStore> = if args.dry_run {
+            Arc::new(engram::vector::memory::MemoryVectors::new())
+        } else {
+            Arc::new(
+                engram::vector::qdrant::QdrantVectors::connect(&engram::config::VectorConfig {
+                    collection: format!("{}_{}", cfg.vector.collection, user.slug),
+                    ..cfg.vector.clone()
+                })
+                .await?,
+            )
+        };
+        let core = Core::from_config(&cfg, vectors, store);
+        let mut cursor: Option<(i64, String)> = None;
+        let mut total = 0usize;
+        loop {
+            let page = core.store.list_corpora_after(cursor.as_ref(), 100).await?;
+            let Some(last) = page.last() else { break };
+            cursor = Some((last.created_at, last.id.clone()));
+            for c in &page {
+                for m in engram::jobs::passages::merge_orphan_passages(&core, &c.id, args.dry_run)
+                    .await?
+                {
+                    println!(
+                        "{}  {} -> {}  {:?}",
+                        c.id, m.orphan_id, m.into_id, m.orphan_text
+                    );
+                    total += 1;
+                }
+            }
+        }
+        let verb = if args.dry_run {
+            "would merge"
+        } else {
+            "merged"
+        };
+        println!("{verb} {total} orphan passage(s)");
         return Ok(());
     }
 
