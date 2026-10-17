@@ -12,8 +12,8 @@
 
 use super::sparse::SparseVector;
 use super::{
-    FacetCount, Facets, LifecycleRow, Recency, SearchFilter, SearchHit, Touch, VectorPayload,
-    VectorPoint, VectorStore,
+    FacetCount, Facets, LifecycleRow, Recency, SearchFilter, SearchHit, Touch, VectorExport,
+    VectorPayload, VectorPoint, VectorStore,
 };
 use crate::config::VectorConfig;
 use crate::error::{Error, Result};
@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 /// Generous enough for a cold HNSW segment load, short enough that a wedged
@@ -2133,6 +2134,134 @@ impl VectorStore for QdrantVectors {
     /// that has just been replaced.
     async fn revision(&self) -> Result<Option<String>> {
         self.resolve_alias().await
+    }
+
+    /// A snapshot of the generation the alias serves, streamed into `into`.
+    ///
+    /// Over the HTTP API, because the operator cannot read Qdrant's disk: the
+    /// snapshot is created server-side, downloaded while it is hashed, and then
+    /// deleted, so Qdrant is not left holding a copy of every backup. The
+    /// count and width are read from the same generation afterwards.
+    async fn export_snapshot(&self, into: &Path) -> Result<VectorExport> {
+        let generation = match self.resolve_alias().await? {
+            Some(g) if self.collection_exists(&g).await? => g,
+            Some(g) => {
+                return Err(Error::Vector(format!(
+                    "alias `{}` points at `{g}`, which does not exist",
+                    self.alias
+                )));
+            }
+            None => {
+                return Err(Error::Vector(format!(
+                    "alias `{}` does not exist",
+                    self.alias
+                )));
+            }
+        };
+        let base = format!("/collections/{generation}/snapshots");
+        let res = self
+            .long_request(Method::POST, &format!("{base}?wait=true"))
+            .send()
+            .await
+            .map_err(|e| Error::Vector(format!("{base}: {e}")))?;
+        let status = res.status();
+        let text = res.text().await.map_err(|e| Error::Vector(e.to_string()))?;
+        if !status.is_success() {
+            return Err(Error::Vector(format!(
+                "{base}: {}",
+                describe_failure(status, &text)
+            )));
+        }
+        let snap: SnapshotDescription = decode(&base, &text)?;
+        let one = format!("{base}/{}", snap.name);
+
+        let downloaded = self.download(&one, into).await;
+        // Deleted whatever the download did: a failed backup must not leave
+        // a full copy of the collection on Qdrant's disk either.
+        let deleted = self.call::<Value>(Method::DELETE, &one, None).await;
+        let (sha256, bytes) = match downloaded {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = std::fs::remove_file(into);
+                return Err(e);
+            }
+        };
+        deleted?;
+        if let Some(theirs) = snap.checksum.filter(|c| *c != sha256) {
+            let _ = std::fs::remove_file(into);
+            return Err(Error::Vector(format!(
+                "{one}: downloaded SHA-256 {sha256} does not match Qdrant's {theirs}"
+            )));
+        }
+        Ok(VectorExport::File {
+            points: self.exact_count(&generation).await?,
+            dim: self.vector_dim(&generation).await? as usize,
+            generation,
+            sha256,
+            bytes,
+        })
+    }
+}
+
+/// What Qdrant says about a snapshot it has just made.
+#[derive(Deserialize)]
+struct SnapshotDescription {
+    name: String,
+    #[serde(default)]
+    checksum: Option<String>,
+}
+
+/// A snapshot is the whole collection; the ordinary request timeout is sized
+/// for one search.
+const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
+impl QdrantVectors {
+    /// A request with the snapshot timeout and the same `api-key` header every
+    /// other request carries.
+    fn long_request(&self, method: Method, path: &str) -> reqwest::RequestBuilder {
+        let mut req = self
+            .http
+            .request(method, format!("{}{path}", self.base))
+            .timeout(SNAPSHOT_TIMEOUT);
+        if let Some(k) = &self.api_key {
+            req = req.header("api-key", k);
+        }
+        req
+    }
+
+    /// Stream `path` into the new private file `into`, hashing as it lands.
+    /// One chunk in memory at a time, whatever the size.
+    async fn download(&self, path: &str, into: &Path) -> Result<(String, u64)> {
+        use sha2::Digest;
+        use tokio::io::AsyncWriteExt;
+        let mut res = self
+            .long_request(Method::GET, path)
+            .send()
+            .await
+            .map_err(|e| Error::Vector(format!("{path}: {e}")))?;
+        let status = res.status();
+        if !status.is_success() {
+            let text = res.text().await.unwrap_or_default();
+            return Err(Error::Vector(format!(
+                "{path}: {}",
+                describe_failure(status, &text)
+            )));
+        }
+        let mut file = tokio::fs::File::from_std(crate::backup::create_private(into)?);
+        let mut hasher = sha2::Sha256::new();
+        let mut bytes = 0u64;
+        let io = |e: std::io::Error| Error::Store(format!("{}: {e}", into.display()));
+        while let Some(chunk) = res
+            .chunk()
+            .await
+            .map_err(|e| Error::Vector(format!("{path}: {e}")))?
+        {
+            hasher.update(&chunk);
+            bytes += chunk.len() as u64;
+            file.write_all(&chunk).await.map_err(io)?;
+        }
+        file.sync_all().await.map_err(io)?;
+        Ok((hex::encode(hasher.finalize()), bytes))
     }
 }
 

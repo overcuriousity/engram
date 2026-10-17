@@ -1,7 +1,7 @@
 use super::{
     FacetCount, Facets, SearchFilter, SearchHit, VectorPayload, VectorPoint, VectorStore, cosine,
 };
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -508,6 +508,85 @@ impl VectorStore for MemoryVectors {
     async fn count(&self) -> Result<u64> {
         Ok(self.points.read().unwrap().len() as u64)
     }
+
+    /// JSON of every point, a fixture format: it lets the whole backup run
+    /// without a Qdrant.
+    async fn export_snapshot(&self, into: &std::path::Path) -> Result<super::VectorExport> {
+        let mut points: Vec<SnapshotPoint> = {
+            let r = self.points.read().unwrap();
+            let ctx = self.ctx.read().unwrap();
+            r.values()
+                .map(|p| SnapshotPoint {
+                    vector: p.vector.clone(),
+                    sparse: (p.sparse.indices.clone(), p.sparse.values.clone()),
+                    payload: p.payload.clone(),
+                    ctx: ctx.get(&p.payload.artifact_id).cloned().unwrap_or_default(),
+                })
+                .collect()
+        };
+        points.sort_by(|a, b| a.payload.artifact_id.cmp(&b.payload.artifact_id));
+        let dim = points.first().map_or(0, |p| p.vector.len());
+        let file = crate::backup::create_private(into)?;
+        serde_json::to_writer(std::io::BufWriter::new(file), &points)
+            .map_err(|e| Error::Vector(format!("{}: {e}", into.display())))?;
+        let (sha256, bytes) = crate::backup::manifest::sha256_file(into)?;
+        Ok(super::VectorExport::File {
+            generation: "memory".into(),
+            sha256,
+            bytes,
+            points: points.len() as u64,
+            dim,
+        })
+    }
+
+    async fn import_snapshot(
+        &self,
+        from: &std::path::Path,
+        _target: &str,
+        dim: usize,
+    ) -> Result<()> {
+        let file = std::fs::File::open(from)
+            .map_err(|e| Error::Vector(format!("{}: {e}", from.display())))?;
+        let points: Vec<SnapshotPoint> = serde_json::from_reader(std::io::BufReader::new(file))
+            .map_err(|e| Error::Vector(format!("{}: {e}", from.display())))?;
+        if let Some(p) = points.iter().find(|p| p.vector.len() != dim) {
+            return Err(super::qdrant::dimension_mismatch(
+                "memory",
+                dim,
+                p.vector.len(),
+            ));
+        }
+        let mut w = self.points.write().unwrap();
+        let mut ctx = self.ctx.write().unwrap();
+        for p in points {
+            let id = p.payload.artifact_id.clone();
+            if !p.ctx.is_empty() {
+                ctx.insert(id.clone(), p.ctx);
+            }
+            w.insert(
+                id,
+                VectorPoint {
+                    vector: p.vector,
+                    sparse: super::sparse::SparseVector {
+                        indices: p.sparse.0,
+                        values: p.sparse.1,
+                    },
+                    payload: p.payload,
+                },
+            );
+        }
+        Ok(())
+    }
+}
+
+/// One point as `export_snapshot` writes it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotPoint {
+    vector: Vec<f32>,
+    sparse: (Vec<u32>, Vec<f32>),
+    payload: VectorPayload,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ctx: Vec<Vec<f32>>,
 }
 
 #[cfg(test)]
@@ -539,6 +618,48 @@ mod tests {
             include_deprecated: true,
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_imports_into_a_fresh_store_with_the_same_ids() {
+        let m = MemoryVectors::new();
+        m.upsert(vec![
+            point("b", "s", vec![0.0, 1.0], &["t"], "c"),
+            point("a", "s", vec![1.0, 0.0], &[], "c"),
+        ])
+        .await
+        .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("m.snapshot");
+        let crate::vector::VectorExport::File {
+            sha256,
+            bytes,
+            points,
+            dim,
+            ..
+        } = m.export_snapshot(&file).await.unwrap()
+        else {
+            panic!("a memory store exports a file");
+        };
+        assert_eq!((points, dim), (2, 2));
+        assert_eq!(
+            crate::backup::manifest::sha256_file(&file).unwrap(),
+            (sha256, bytes)
+        );
+
+        let fresh = MemoryVectors::new();
+        fresh.import_snapshot(&file, "next", 2).await.unwrap();
+        assert_eq!(
+            fresh.all_artifact_ids().await.unwrap(),
+            m.all_artifact_ids().await.unwrap()
+        );
+        assert!(
+            MemoryVectors::new()
+                .import_snapshot(&file, "next", 3)
+                .await
+                .is_err(),
+            "a snapshot of another width is refused"
+        );
     }
 
     #[tokio::test]
