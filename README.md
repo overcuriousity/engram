@@ -191,7 +191,9 @@ reachable from another machine wants `oidc`, or a proxy authenticating in front.
 alias onto it. `--recompute-coverage` re-measures corpus coverage from stored
 artifacts. Each exits when done and requires `--user <SUBJECT>`; omitting it is
 an error listing the known subjects, because defaulting to an arbitrary tenant
-is how the wrong collection gets reindexed.
+is how the wrong collection gets reindexed. `--reindex` needs the server
+stopped: it takes the server lock and refuses while engram is running, since a
+write landing during the alias swap would be lost.
 
 `--merge-orphans` repairs a base captured before passages had a minimum size
 (engram#61): a budget cut could leave the tail of a sentence, `is needed.`, as a
@@ -241,6 +243,8 @@ them. The alias name is derived from the subject, so a collection left behind is
 worse than orphaned: the next time that person signs in, the surviving alias is
 adopted and the deleted account returns with every vector it had. Nothing is
 deleted when it stops that way — bring Qdrant back and run it again.
+It also needs the server stopped: it takes the server lock and refuses while
+engram is running, so a job or login cannot write for the user mid-deletion.
 
 There is no admin role, and nothing in the tree writes `config.toml`: the
 ranking tunes itself under `[evolve]`, and the file is your starting point.
