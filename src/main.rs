@@ -263,12 +263,18 @@ fn data_command(args: &Args) -> bool {
         || args.verify_stores
 }
 
-/// The server lock, when this run is going to be the server.
-///
-/// The data commands (`--reindex` and the rest) run beside a live server today
-/// and do not take it; adopting it there is a follow-up, not this change.
+/// The data commands that must not run beside a server: a write the server
+/// makes during the alias swap or the row deletion is lost or orphaned.
+/// A subset of `data_command`, read only by `server_lock`.
+fn exclusive_data_command(args: &Args) -> bool {
+    args.reindex || args.delete_user.is_some()
+}
+
+/// The server lock, when this run is the server or a data command that needs
+/// it stopped (`exclusive_data_command`). The other data commands run beside
+/// a live server and do not take it.
 fn server_lock(args: &Args, cfg: &Config) -> Result<Option<engram::backup::lock::ServerLock>> {
-    if data_command(args) {
+    if data_command(args) && !exclusive_data_command(args) {
         return Ok(None);
     }
     engram::backup::lock::acquire(std::path::Path::new(&cfg.store.control_path)).map(Some)
@@ -735,7 +741,7 @@ mod startup_tests {
     }
 
     #[test]
-    fn the_server_holds_the_lock_and_data_commands_do_not() {
+    fn the_server_holds_the_lock_and_so_do_reindex_and_delete_user() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::test_default();
         cfg.store.control_path = dir.path().join("control.db").to_string_lossy().into();
@@ -759,9 +765,16 @@ mod startup_tests {
         );
         for flags in [
             &["engram", "--reindex"][..],
-            &["engram", "--recompute-coverage"],
-            &["engram", "--merge-orphans"],
             &["engram", "--delete-user", "sub@idp"],
+        ] {
+            let e = server_lock(&Args::parse_from(flags), &cfg)
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("stop it first"), "{flags:?} is refused: {e}");
+        }
+        for flags in [
+            &["engram", "--recompute-coverage"][..],
+            &["engram", "--merge-orphans"],
             &["engram", "--restore", "/x"],
             &["engram", "--verify-stores"],
         ] {
@@ -773,6 +786,12 @@ mod startup_tests {
             );
         }
         drop(server);
+        let held = server_lock(&Args::parse_from(["engram", "--reindex"]), &cfg).unwrap();
+        assert!(
+            held.is_some(),
+            "--reindex holds the lock once the server is gone"
+        );
+        drop(held);
         assert!(engram::backup::lock::acquire(control).is_ok());
     }
 
