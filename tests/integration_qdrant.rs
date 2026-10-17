@@ -2667,3 +2667,116 @@ async fn qdrant_import_of_another_width_is_refused_before_the_alias_moves() {
     );
     v.drop_collection().await.unwrap();
 }
+
+/// Plan slice 3: the whole instance through `--backup`, a wipe of both
+/// stores, and `--restore`, against a real Qdrant.
+#[tokio::test]
+#[ignore]
+async fn backup_wipe_restore_round_trip() {
+    use engram::backup::{restore, take, verify::Verdict};
+    use engram::store::control::Control;
+    use engram::tenants::{QdrantFactory, Tenants, embed_recipe_check};
+    use std::sync::Arc;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let store_dir = tmp.path().join("store");
+    std::fs::create_dir(&store_dir).unwrap();
+    let mut config = engram::config::Config::test_default();
+    config.infer.embed.dim = 4;
+    config.vector = cfg("engram_it_rt");
+    config.store.dir = store_dir.to_string_lossy().into();
+    config.store.control_path = store_dir.join("control.db").to_string_lossy().into();
+    let config = Arc::new(config);
+
+    // Two tenants, each with one artifact captured into both stores.
+    let control = Control::connect(&config.store.control_path).await.unwrap();
+    let tenants = Tenants::new(
+        config.clone(),
+        control.clone(),
+        Arc::new(QdrantFactory {
+            cfg: config.vector.clone(),
+        }),
+    );
+    let mut captured = vec![];
+    for (i, sub) in ["sub-rt-a", "sub-rt-b"].into_iter().enumerate() {
+        let user = control.provision(sub, None).await.unwrap();
+        let mut alias = config.vector.clone();
+        alias.collection = tenants.alias(&user);
+        // A rerun starts from nothing, not from the last run's generations.
+        QdrantVectors::connect(&alias)
+            .await
+            .unwrap()
+            .drop_collection()
+            .await
+            .unwrap();
+        let t = tenants.get(sub).await.unwrap();
+        let core = &t.core;
+        embed_recipe_check(core, &config).await.unwrap();
+        let src = core.store.insert_corpus(sub, "web", None).await.unwrap();
+        let a = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[engram::store::artifacts::NewArtifact {
+                    ordinal: 0,
+                    text: format!("round trip {sub}"),
+                    corpus_span: None,
+                    title: None,
+                    category: None,
+                    tags: vec![],
+                    segment_idx: None,
+                    caveats: vec![],
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0);
+        core.store
+            .mark_embedded(&a.id, core.embedder.model(), a.embed_rev)
+            .await
+            .unwrap();
+        let mut v = vec![0.0; 4];
+        v[i] = 1.0;
+        core.vectors
+            .upsert(vec![point(&a.id, &src.id, v, &[], "concept")])
+            .await
+            .unwrap();
+        captured.push((user.slug.clone(), alias, a.id.clone()));
+        core.store.pool.close().await;
+    }
+    drop(tenants);
+    control.pool.close().await;
+
+    let archive = tmp.path().join("archive");
+    let report = take::take(&config, &archive, false).await.unwrap();
+    assert_eq!(report.exit_code(), 0, "{report}");
+
+    // The wipe: both collections, every generation, and both databases.
+    for (slug, alias, _) in &captured {
+        QdrantVectors::connect(alias)
+            .await
+            .unwrap()
+            .drop_collection()
+            .await
+            .unwrap();
+        for ext in ["db", "db-wal", "db-shm"] {
+            let _ = std::fs::remove_file(store_dir.join(format!("{slug}.{ext}")));
+        }
+    }
+
+    let outcome = restore::restore(&config, &archive, &restore::RestoreOpts::default())
+        .await
+        .unwrap();
+    assert_eq!(outcome.verdict(), Verdict::Pass, "{outcome}");
+    for (slug, alias, id) in &captured {
+        assert!(store_dir.join(format!("{slug}.db")).is_file(), "{slug}");
+        let v = QdrantVectors::connect(alias).await.unwrap();
+        assert_eq!(
+            v.all_artifact_ids().await.unwrap(),
+            vec![id.clone()],
+            "{slug}"
+        );
+        v.drop_collection().await.unwrap();
+    }
+    println!("PASS");
+}
