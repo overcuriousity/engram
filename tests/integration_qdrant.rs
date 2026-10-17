@@ -2550,3 +2550,120 @@ async fn qdrant_export_streams_hashes_and_cleans_up() {
     assert!(e.contains("does not exist"), "{e}");
     assert!(!dir.path().join("absent.snapshot").exists());
 }
+
+/// Export one alias' generation into a file, for the import tests.
+async fn exported(v: &QdrantVectors, dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let file = dir.join(format!("{name}.snapshot"));
+    v.export_snapshot(&file).await.unwrap();
+    file
+}
+
+#[tokio::test]
+#[ignore]
+async fn qdrant_import_lands_in_the_next_generation_and_keeps_the_previous() {
+    let v = fresh("engram_it_import", 4).await;
+    v.upsert(vec![
+        point("a", "s1", vec![1.0, 0.0, 0.0, 0.0], &["linux"], "procedure"),
+        point("b", "s1", vec![0.0, 1.0, 0.0, 0.0], &[], "concept"),
+        point("c", "s2", vec![0.0, 0.0, 1.0, 0.0], &[], "concept"),
+    ])
+    .await
+    .unwrap();
+    let mut before = v.all_artifact_ids().await.unwrap();
+    before.sort();
+    let previous = v.resolve_alias().await.unwrap().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = exported(&v, dir.path(), "engram_it_import").await;
+
+    let target = v.next_generation_name().await.unwrap();
+    assert_eq!(target, "engram_it_import_v2");
+    v.import_snapshot(&file, &target, 4).await.unwrap();
+    assert_eq!(
+        v.generation_count(&target).await.unwrap(),
+        3,
+        "count parity"
+    );
+    let info: serde_json::Value = serde_json::from_str(
+        &raw(
+            reqwest::Method::GET,
+            &format!("/collections/{target}"),
+            None,
+        )
+        .await,
+    )
+    .unwrap();
+    let schema = &info["result"]["payload_schema"];
+    for field in ["tags", "status", "corpus_id", "created_at"] {
+        assert!(!schema[field].is_null(), "index on {field}: {schema}");
+    }
+    assert_eq!(
+        v.resolve_alias().await.unwrap().as_deref(),
+        Some(previous.as_str()),
+        "importing does not move the alias"
+    );
+
+    v.adopt_generation(&target).await.unwrap();
+    assert_eq!(v.resolve_alias().await.unwrap(), Some(target.clone()));
+    let mut after = v.all_artifact_ids().await.unwrap();
+    after.sort();
+    assert_eq!(after, before, "the alias serves the same artifacts");
+    let exists: serde_json::Value = serde_json::from_str(
+        &raw(
+            reqwest::Method::GET,
+            &format!("/collections/{previous}/exists"),
+            None,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(
+        exists["result"]["exists"], true,
+        "the previous generation is the rollback and stays"
+    );
+
+    let e = v
+        .import_snapshot(&file, &target, 4)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("already exists"), "{e}");
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn qdrant_import_of_another_width_is_refused_before_the_alias_moves() {
+    let narrow = fresh("engram_it_import_narrow", 2).await;
+    narrow
+        .upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "concept")])
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = exported(&narrow, dir.path(), "engram_it_import_narrow").await;
+    narrow.drop_collection().await.unwrap();
+
+    let v = fresh("engram_it_import_wide", 4).await;
+    let serving = v.resolve_alias().await.unwrap();
+    let target = v.next_generation_name().await.unwrap();
+    let e = v
+        .import_snapshot(&file, &target, 4)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("dimension 2"), "{e}");
+    assert_eq!(v.resolve_alias().await.unwrap(), serving, "alias unchanged");
+    let exists: serde_json::Value = serde_json::from_str(
+        &raw(
+            reqwest::Method::GET,
+            &format!("/collections/{target}/exists"),
+            None,
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(
+        exists["result"]["exists"], false,
+        "the refused upload is dropped"
+    );
+    v.drop_collection().await.unwrap();
+}
