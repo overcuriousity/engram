@@ -23,6 +23,11 @@ pub fn window_key(corpus_id: &str, idx: i64) -> String {
 }
 
 pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize> {
+    // The embed-only floor: there is no synthesizer to promote a window to,
+    // and a window job armed anyway would only close itself unread.
+    if core.synthesizer.is_none() {
+        return Ok(0);
+    }
     // The day's budget, asked before anything is armed — as dedupe, reap,
     // consolidate and sleep all ask it.
     //

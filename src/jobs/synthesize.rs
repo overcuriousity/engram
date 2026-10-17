@@ -38,14 +38,27 @@ pub async fn plan(core: &Core, corpus_id: &str) -> Result<()> {
 /// and why it is not a number. Every caller here has an honest answer for it,
 /// and none of them is "carry on with 256".
 pub fn segment_budget(core: &Core, lang: crate::infer::lang::Lang) -> Option<usize> {
-    segment_tokens(core.synthesizer.budget(), prompt_overhead(core, lang))
+    match &core.synthesizer {
+        Some(s) => segment_tokens(s.budget(), prompt_overhead(core, lang)),
+        // The embed-only floor: no call to fit, so the window is only the unit
+        // coverage is measured against. Sized as a modest local model would
+        // read one, so a synthesizer configured later finds windows it can
+        // promote rather than one window the size of the document.
+        None => Some(UNSYNTHESIZED_WINDOW_TOKENS),
+    }
 }
+
+/// The window size of a base with no `[infer.synthesize]`. See
+/// [`segment_budget`].
+pub const UNSYNTHESIZED_WINDOW_TOKENS: usize = 8192;
 
 /// What to tell somebody when there is no budget at all. One sentence, written
 /// once, because three call sites report it and they should not disagree about
 /// whose fault it is.
 pub fn no_budget_reason(core: &Core, lang: crate::infer::lang::Lang) -> String {
-    let b = core.synthesizer.budget();
+    let Some(b) = core.synthesizer.as_ref().map(|s| s.budget()) else {
+        return "there is no [infer.synthesize] to size a window against".to_string();
+    };
     format!(
         "the synthesizer's context of {} tokens does not leave room for a prompt \
          ({} tokens of instructions and context here) and a segment of at least {} \
@@ -187,7 +200,10 @@ pub async fn run_title(core: &Core, corpus_id: &str) -> Result<()> {
         .filter_map(|c| c.title.clone())
         .collect();
 
-    let synth = &core.synthesizer;
+    // No synthesizer, no name: the corpus keeps the title capture derived.
+    let Some(synth) = &core.synthesizer else {
+        return Ok(());
+    };
     let permit = core.gate.background().await;
     let named = synth
         .title(
@@ -528,9 +544,9 @@ mod tests {
         use crate::infer::fake::GreedySynthesizer;
 
         let mut core = crate::core::test_support::test_core().await;
-        core.synthesizer = std::sync::Arc::new(GreedySynthesizer {
+        core.synthesizer = Some(std::sync::Arc::new(GreedySynthesizer {
             budget: context_budget(30, 20),
-        });
+        }));
 
         let lines: Vec<String> = (0..400)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -568,7 +584,7 @@ mod tests {
 
         let mut core = crate::core::test_support::test_core().await;
         let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
-        core.synthesizer = rec.clone();
+        core.synthesizer = Some(rec.clone());
 
         let mut lines = vec!["# Backup Guide".to_string(), "PBS 3.x on Debian 12.".into()];
         for i in 0..400 {
@@ -614,7 +630,7 @@ mod tests {
 
         let mut core = crate::core::test_support::test_core().await;
         let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
-        core.synthesizer = rec.clone();
+        core.synthesizer = Some(rec.clone());
 
         let lines: Vec<String> = (0..400)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -707,7 +723,7 @@ mod tests {
             output_ratio: 1.0,
             context: crate::infer::context::ContextBudget::default(),
         }));
-        core.synthesizer = rec.clone();
+        core.synthesizer = Some(rec.clone());
         assert_eq!(
             segment_budget(&core, crate::infer::lang::Lang::En),
             None,
@@ -805,8 +821,9 @@ mod tests {
             .enqueue(Stage::Title, "corpus", &out.id)
             .await
             .unwrap();
-        core.synthesizer =
-            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing("no title"));
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::failing("no title"),
+        ));
         for _ in 0..crate::store::jobs::MAX_ATTEMPTS + 3 {
             sqlx::query("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
@@ -911,7 +928,7 @@ mod tests {
         use crate::infer::fake::RecordingSynthesizer;
         let mut core = test_core().await;
         let rec = std::sync::Arc::new(RecordingSynthesizer::new(context_budget(30, 20)));
-        core.synthesizer = rec.clone();
+        core.synthesizer = Some(rec.clone());
         let body = multi_segment_body();
         let out = core.ingest(&body, "web", None).await.unwrap();
 
@@ -953,8 +970,8 @@ mod tests {
             .ingest("bravo one\n\nbravo two", "web", None)
             .await
             .unwrap();
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
-            "STOPHERE",
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::unparsable_on("STOPHERE"),
         ));
 
         plan(&core, &a.id).await.unwrap();
@@ -1004,8 +1021,8 @@ mod tests {
         let mut core = test_core().await;
         let body = format!("STOPHERE poison\n\n{}", multi_segment_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
-            "STOPHERE",
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::unparsable_on("STOPHERE"),
         ));
 
         segment_all(&core, &out.id).await;
@@ -1040,8 +1057,8 @@ mod tests {
         let mut core = test_core().await;
         let body = format!("STOPHERE poison\n\n{}", multi_segment_body());
         let out = core.ingest(&body, "web", None).await.unwrap();
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on(
-            "STOPHERE",
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::unparsable_on("STOPHERE"),
         ));
         segment_all(&core, &out.id).await;
         assert_eq!(
@@ -1051,7 +1068,9 @@ mod tests {
 
         // The endpoint comes back to its senses. Settling has to run again, or
         // the document would stay `partial` with a window that is now fine.
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::default());
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::default(),
+        ));
         segment_all(&core, &out.id).await;
 
         let windows = core.store.segments_for_corpus(&out.id).await.unwrap();
@@ -1171,7 +1190,7 @@ Then run sync.";
             "oflag=sync ",
             false,
         ));
-        core.synthesizer = synthesizer.clone();
+        core.synthesizer = Some(synthesizer.clone());
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
         segment_all(&core, &out.id).await;
@@ -1204,7 +1223,7 @@ Then run sync.";
                 links: vec![],
             },
         ));
-        core.synthesizer = synthesizer.clone();
+        core.synthesizer = Some(synthesizer.clone());
         let out = core
             .ingest(
                 "erinnere mich Freitag, /mnt/backup/nightly.sh prüfen",
@@ -1258,7 +1277,7 @@ Then run sync.";
             )
             .answering_an_empty_judgement_on_retry(),
         );
-        core.synthesizer = synthesizer.clone();
+        core.synthesizer = Some(synthesizer.clone());
         let out = core
             .ingest(
                 "erinnere mich Freitag, /mnt/backup/nightly.sh prüfen",
@@ -1290,9 +1309,8 @@ Then run sync.";
     #[tokio::test]
     async fn a_literal_the_retry_also_drops_is_stored_flagged() {
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::ParaphrasingSynthesizer::new(
-            "oflag=sync ",
-            true,
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::ParaphrasingSynthesizer::new("oflag=sync ", true),
         ));
         let out = core.ingest(COMMAND_BODY, "web", None).await.unwrap();
 
@@ -1325,8 +1343,9 @@ Then run sync.";
         // Where the chunk still reproduces its source, the real span can be
         // found — better than flagging a chunk whose lines we can work out.
         let mut core = test_core().await;
-        core.synthesizer =
-            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: true });
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::MisreportingSynthesizer { echo_text: true },
+        ));
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await
@@ -1353,8 +1372,9 @@ Then run sync.";
         // model call on a whole segment. The span falls back to the window and
         // the reader is none the wiser.
         let mut core = test_core().await;
-        core.synthesizer =
-            std::sync::Arc::new(crate::infer::fake::MisreportingSynthesizer { echo_text: false });
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::MisreportingSynthesizer { echo_text: false },
+        ));
         let out = core
             .ingest("first paragraph here\n\nsecond paragraph here", "web", None)
             .await

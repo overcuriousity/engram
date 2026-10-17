@@ -1175,9 +1175,11 @@ pub struct InferConfig {
     /// once and cached beside the store. Unset: the bundled default (Qwen
     /// family). See `TokenCounter::load` — never a startup failure.
     pub tokenizer: Option<String>,
-    /// Required: capture synthesizes, and a base without a chat model is not
-    /// a state this product has since the 2026-09 capture reshape.
-    pub synthesize: SynthesizeRole,
+    /// `None` is the embed-only floor: every capture is stored as verbatim
+    /// passages, and every surface that needs a chat model — ask, the judged
+    /// capture, reminders, the journal, promotion, the day page — says it is
+    /// not configured rather than failing.
+    pub synthesize: Option<SynthesizeRole>,
     pub embed: EmbedRole,
     /// `None` closes the ask door: no page, no nav entry, no tool.
     pub ask: Option<AskRole>,
@@ -1417,15 +1419,24 @@ impl TryFrom<RawInferConfig> for InferConfig {
             }
         };
 
+        // The one place vision's borrowing can fail: with no synthesize role
+        // there is nothing to borrow, and a vision role with no address of its
+        // own would call "" on the first image.
+        if let Some(v) = &vision
+            && v.base_url.is_none()
+            && synthesize.is_none()
+        {
+            return Err(
+                "[infer.vision] has no `base_url` or `tier` of its own and there is no \
+                 [infer.synthesize] for it to borrow one from. Give it an address, or \
+                 configure a synthesize role."
+                    .to_string(),
+            );
+        }
+
         Ok(InferConfig {
             tokenizer: raw.tokenizer,
-            synthesize: synthesize.ok_or_else(|| {
-                "[infer.synthesize] is required: capture synthesizes, and engram has run \
-                 nothing without a chat model since the 2026-09 capture reshape — the \
-                 embed-only mode `synthesis = \"off\"` named went with it. Point it at a \
-                 tier, or give it its own `base_url` and `model` — see config.example.toml."
-                    .to_string()
-            })?,
+            synthesize,
             embed: raw.embed,
             ask,
             rerank: raw.rerank,
@@ -2187,8 +2198,8 @@ impl Config {
         // `[learn]` is the replacement for all three: recording, the links
         // learned from it, and the pursuits that read both.
         // The 2026-09 capture reshape: there are no synthesis modes. Capture
-        // is verbatim-first and decides per paste; [infer.synthesize] is
-        // required; the window budget is always derived from its context.
+        // is verbatim-first and decides per paste; the window budget is derived
+        // from [infer.synthesize]'s context where there is one.
         // `promote.resynthesize_after_unconfirmed` retired with `eager` too,
         // and is merely ignored: it shipped disabled, so the common file says
         // `= 0` and loses nothing by the key going quiet.
@@ -2201,12 +2212,11 @@ impl Config {
         if !found.is_empty() {
             return Err(ConfigError::Invalid(format!(
                 "this config sets keys removed in the 2026-09 capture reshape:\n{}\nThere are \
-                 no synthesis modes any more: [infer.synthesize] is required, capture stores \
-                 verbatim passages first and synthesizes what fits one call, and larger \
-                 corpora earn synthesis through use. Delete the keys.\n\nA base that ran \
-                 `synthesis = \"off\"` had no chat endpoint at all, and now needs one: point \
-                 [infer.synthesize] at a tier or give it its own `base_url` and `model`. \
-                 config.example.toml has both shapes.",
+                 no synthesis modes any more: capture stores verbatim passages first and, \
+                 with [infer.synthesize] configured, synthesizes what fits one call while \
+                 larger corpora earn synthesis through use. Delete the keys.\n\nA base that \
+                 ran `synthesis = \"off\"` leaves [infer.synthesize] out instead: every \
+                 capture then stays verbatim. config.example.toml has both shapes.",
                 found.join("\n")
             )));
         }
@@ -2620,13 +2630,15 @@ impl Config {
     /// The roles whose output-ceiling name is a guess: `reasoning_effort` set,
     /// `ceiling_param` not. Each with the effort the guess is made from.
     fn inferred_ceiling_params(&self) -> Vec<(&'static str, &str)> {
-        let s = &self.infer.synthesize;
+        let s = self.infer.synthesize.as_ref();
         let mut roles: Vec<(&str, Option<&str>, Option<CeilingParam>)> = Vec::new();
-        roles.push((
-            "infer.synthesize",
-            s.reasoning_effort.as_deref(),
-            s.ceiling_param,
-        ));
+        if let Some(s) = s {
+            roles.push((
+                "infer.synthesize",
+                s.reasoning_effort.as_deref(),
+                s.ceiling_param,
+            ));
+        }
         if let Some(a) = &self.infer.ask {
             roles.push(("infer.ask", a.reasoning_effort.as_deref(), a.ceiling_param));
         }
@@ -2636,8 +2648,8 @@ impl Config {
         if let Some(v) = &self.infer.vision {
             roles.push((
                 "infer.vision",
-                v.inherited_reasoning_effort(Some(s)),
-                v.ceiling_param(Some(s)),
+                v.inherited_reasoning_effort(s),
+                v.ceiling_param(s),
             ));
         }
         // The planning call infers its name the same way (`for_plan`), off a
@@ -2716,7 +2728,9 @@ impl Config {
         let mut c = self.clone();
         const R: &str = "REDACTED";
         c.vector.api_key = c.vector.api_key.map(|_| R.into());
-        c.infer.synthesize.api_key = c.infer.synthesize.api_key.as_ref().map(|_| R.into());
+        if let Some(s) = c.infer.synthesize.as_mut() {
+            s.api_key = s.api_key.as_ref().map(|_| R.into());
+        }
         c.infer.embed.api_key = c.infer.embed.api_key.map(|_| R.into());
         if let Some(a) = c.infer.ask.as_mut() {
             a.api_key = a.api_key.as_ref().map(|_| R.into());
@@ -2791,7 +2805,7 @@ impl Config {
             },
             infer: InferConfig {
                 tokenizer: None,
-                synthesize: SynthesizeRole {
+                synthesize: Some(SynthesizeRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "m".into(),
                     api_key: None,
@@ -2805,7 +2819,7 @@ impl Config {
                     context_opening_tokens: 200,
                     context_overlap_tokens: 150,
                     context_neighbor_tokens: 1024,
-                },
+                }),
                 embed: EmbedRole {
                     base_url: "http://localhost:8000/v1".into(),
                     model: "e".into(),
@@ -3162,7 +3176,13 @@ mod tests {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert!(
             cfg.infer.ask.as_ref().unwrap().ceiling_param.is_none()
-                && cfg.infer.synthesize.ceiling_param.is_none(),
+                && cfg
+                    .infer
+                    .synthesize
+                    .as_ref()
+                    .unwrap()
+                    .ceiling_param
+                    .is_none(),
             "the example config pins a ceiling name it should be leaving to the guess"
         );
     }
@@ -3186,13 +3206,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = write(&dir, MINIMAL);
         let cfg = Config::load(Some(&p)).unwrap();
-        assert_eq!(cfg.infer.synthesize.timeout_secs, DEFAULT_TIMEOUT_SECS);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().timeout_secs,
+            DEFAULT_TIMEOUT_SECS
+        );
         assert_eq!(cfg.infer.embed.timeout_secs, DEFAULT_TIMEOUT_SECS);
         assert_eq!(
             cfg.infer.ask.as_ref().unwrap().timeout_secs,
             DEFAULT_TIMEOUT_SECS
         );
-        assert_eq!(cfg.infer.synthesize.reasoning_effort, None);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().reasoning_effort,
+            None
+        );
     }
 
     #[test]
@@ -3810,9 +3836,9 @@ mode = "off"
         assert_eq!(v.timeout_secs, 120);
         // Its own ceiling, sent on every call like every other role's.
         assert_eq!(v.max_output_tokens, 4096);
-        let (url, key) = v.resolve(Some(&cfg.infer.synthesize));
-        assert_eq!(url, cfg.infer.synthesize.base_url);
-        assert_eq!(key, cfg.infer.synthesize.api_key);
+        let (url, key) = v.resolve(cfg.infer.synthesize.as_ref());
+        assert_eq!(url, cfg.infer.synthesize.as_ref().unwrap().base_url);
+        assert_eq!(key, cfg.infer.synthesize.as_ref().unwrap().api_key);
     }
 
     /// How a request is read is a property of the server reading it, so the
@@ -3826,8 +3852,8 @@ mode = "off"
             &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
         );
         let mut cfg = Config::load(Some(&p)).unwrap();
-        cfg.infer.synthesize.ceiling_param = Some(CeilingParam::MaxTokens);
-        let synth = cfg.infer.synthesize.clone();
+        cfg.infer.synthesize.as_mut().unwrap().ceiling_param = Some(CeilingParam::MaxTokens);
+        let synth = cfg.infer.synthesize.clone().unwrap();
         let v = cfg.infer.vision.as_mut().expect("configured");
 
         assert_eq!(v.ceiling_param(Some(&synth)), Some(CeilingParam::MaxTokens));
@@ -3858,8 +3884,8 @@ mode = "off"
             &format!("{MINIMAL}\n[infer.vision]\nmodel = \"qwen-vl\"\n"),
         );
         let mut cfg = Config::load(Some(&p)).unwrap();
-        cfg.infer.synthesize.reasoning_effort = Some("high".into());
-        let synth = cfg.infer.synthesize.clone();
+        cfg.infer.synthesize.as_mut().unwrap().reasoning_effort = Some("high".into());
+        let synth = cfg.infer.synthesize.clone().unwrap();
         let v = cfg.infer.vision.as_mut().expect("configured");
 
         assert_eq!(
@@ -3916,7 +3942,7 @@ mode = "off"
             .vision
             .as_ref()
             .unwrap()
-            .resolve(Some(&cfg.infer.synthesize));
+            .resolve(cfg.infer.synthesize.as_ref());
         assert_eq!(url, "http://vision:9000/v1");
         assert_eq!(key.as_deref(), Some("vk"));
         assert!(!cfg.redacted().contains("\"vk\""), "vision key leaked");
@@ -4012,12 +4038,18 @@ mode = "off"
         .expect("tiered config parses");
 
         // A minimal block: the one field that had no default has one now.
-        assert_eq!(cfg.infer.synthesize.output_ratio, 8.0);
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().output_ratio, 8.0);
 
-        assert_eq!(cfg.infer.synthesize.base_url, "http://localhost:8000/v1");
-        assert_eq!(cfg.infer.synthesize.model, "qwen");
-        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
-        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().base_url,
+            "http://localhost:8000/v1"
+        );
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().model, "qwen");
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().context_tokens, 32768);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
+            16384
+        );
         assert_eq!(
             cfg.infer.ask.as_ref().unwrap().base_url,
             "http://localhost:8000/v1"
@@ -4068,7 +4100,10 @@ mode = "off"
             131072,
             "unset fields come from the tier"
         );
-        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
+            16384
+        );
     }
 
     /// A typo in a tier name must be a startup failure naming the typo, never a
@@ -4121,8 +4156,11 @@ mode = "off"
             "the example must show a tier"
         );
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
-        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
-        assert_eq!(cfg.infer.synthesize.max_output_tokens, 16384);
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().context_tokens, 32768);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().max_output_tokens,
+            16384
+        );
         assert_eq!(cfg.infer.ask.as_ref().unwrap().context_tokens, 32768);
         assert_eq!(cfg.infer.ask.as_ref().unwrap().max_output_tokens, 4096);
     }
@@ -4209,8 +4247,8 @@ mode = "off"
             "with no tier to take one from, the role keeps its own two minutes"
         );
         assert_eq!(
-            v.resolve(Some(&cfg.infer.synthesize)).0,
-            cfg.infer.synthesize.base_url
+            v.resolve(cfg.infer.synthesize.as_ref()).0,
+            cfg.infer.synthesize.as_ref().unwrap().base_url
         );
     }
 
@@ -4226,7 +4264,7 @@ mode = "off"
         // And the endpoint it named is still the one it calls.
         let v = cfg.infer.vision.as_ref().expect("configured");
         assert_eq!(
-            v.resolve(Some(&cfg.infer.synthesize)).0,
+            v.resolve(cfg.infer.synthesize.as_ref()).0,
             "http://vision:9000/v1"
         );
     }
@@ -4526,18 +4564,28 @@ mode = "off"
     "#;
 
     #[test]
-    fn a_config_without_a_synthesizer_is_refused_as_required() {
+    fn a_config_without_a_synthesizer_is_the_embed_only_floor() {
+        let _guard = env_guard();
+        // Nothing but the embedder: no tier is borrowed, no chat model named.
+        let cfg = load_infer(BARE_PREAMBLE).unwrap();
+        assert!(cfg.infer.synthesize.is_none());
+        assert!(cfg.infer.ask.is_none());
+        // And the redacted dump, which every boot logs, survives the absence.
+        assert!(cfg.redacted().contains("synthesize: None"));
+    }
+
+    #[test]
+    fn vision_with_no_address_and_nothing_to_borrow_is_refused() {
         let _guard = env_guard();
         let err = load_infer(&format!(
             "{BARE_PREAMBLE}
-            [infer.ask]
-            tier = \"efficient\"
+            [infer.vision]
+            model = \"llava\"
             "
         ))
         .unwrap_err()
         .to_string();
-        assert!(err.contains("[infer.synthesize] is required"), "{err}");
-        assert!(err.contains("2026-09 capture reshape"), "{err}");
+        assert!(err.contains("nothing") || err.contains("borrow"), "{err}");
     }
 
     #[test]

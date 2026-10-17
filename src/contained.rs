@@ -342,9 +342,15 @@ mod tests {
             api_key: Some("k".into()),
         };
         let cfg = parsed(Some(&e));
-        assert_eq!(cfg.infer.synthesize.base_url, "https://llm.example/v1");
-        assert_eq!(cfg.infer.synthesize.api_key.as_deref(), Some("k"));
-        assert_eq!(cfg.infer.synthesize.context_tokens, 32768);
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().base_url,
+            "https://llm.example/v1"
+        );
+        assert_eq!(
+            cfg.infer.synthesize.as_ref().unwrap().api_key.as_deref(),
+            Some("k")
+        );
+        assert_eq!(cfg.infer.synthesize.as_ref().unwrap().context_tokens, 32768);
     }
 
     async fn status_json(started: &Started) -> serde_json::Value {

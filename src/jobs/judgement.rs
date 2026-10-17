@@ -735,13 +735,13 @@ mod tests {
         // floor for having no artifacts, retry the same call to exhaustion,
         // and leave the corpus `partial` with no reminder anywhere.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(JudgementOnly(Judgement {
+        core.synthesizer = Some(std::sync::Arc::new(JudgementOnly(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T13:45".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        }));
+        })));
         let out = core
             .ingest(
                 "erinnere mich an den Gastroentereologentermin, Freitag 13:45 uhr.",
@@ -776,13 +776,13 @@ mod tests {
         // the single date it already gave in `when`. Stored, it makes the
         // band offer to repeat a note that says nothing about repeating.
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T13:45".into()),
             rule: Some("FREQ=WEEKLY;BYDAY=FR;COUNT=1;INTERVAL=1".into()),
             events: vec![],
             links: vec![],
-        });
+        }));
         core.ingest("den Termin am Freitag 13:45", "web", None)
             .await
             .unwrap();
@@ -801,13 +801,13 @@ mod tests {
         // repetition threw away the only date the answer carried, and the
         // reminder was filed away as an ordinary capture.
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: None,
             rule: Some("FREQ=WEEKLY;BYDAY=FR;COUNT=1".into()),
             events: vec![],
             links: vec![],
-        });
+        }));
         core.ingest("den Termin am Freitag", "web", None)
             .await
             .unwrap();
@@ -829,13 +829,13 @@ mod tests {
         // it moved every date the note states onto the same weekday, and a
         // date already past was rewritten into the future.
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T09:00".into()),
             rule: None,
             events: vec!["2099-09-12T20:00".into()],
             links: vec![],
-        });
+        }));
         core.ingest(
             "friday i pick up the car; the concert is on 2099-09-12",
             "web",
@@ -873,13 +873,13 @@ mod tests {
         // the exact-instant guard misses both times and a second open row
         // appeared beside the correction, with both of them pushing.
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let out = core
             .ingest("den wagen abholen, freitag", "web", None)
             .await
@@ -924,13 +924,13 @@ mod tests {
     #[tokio::test]
     async fn a_vaguer_re_reading_does_not_take_away_the_reminder_it_cannot_replace() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let out = core
             .ingest("erinnere mich freitag, /mnt/backup prüfen", "web", None)
             .await
@@ -984,13 +984,13 @@ mod tests {
     #[tokio::test]
     async fn a_remind_judgement_becomes_a_due_moment() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T09:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         core.ingest("remind me to send the invoice on friday", "web", None)
             .await
             .unwrap();
@@ -1028,13 +1028,13 @@ mod tests {
     #[tokio::test]
     async fn a_judged_reminder_already_in_the_past_is_not_a_date() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2020-01-01T09:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         core.ingest(
             "erinnere mich, dass ich um 18 Uhr einkaufen gehen muss.",
             "web",
@@ -1073,13 +1073,13 @@ mod tests {
         ] {
             let mut core = test_core().await;
             core.clock = crate::core::context::Clock::Fixed(AFTERNOON);
-            core.synthesizer = judged_core_reply(Judgement {
+            core.synthesizer = Some(judged_core_reply(Judgement {
                 intent: Some("remind".into()),
                 when: Some(when.into()),
                 rule: None,
                 events: vec![],
                 links: vec![],
-            });
+            }));
             let mut c = Capture::new("erinnere mich heute an die Anmeldung", "web");
             c.metadata["tz"] = serde_json::Value::String("UTC".into());
             core.ingest_capture(c).await.unwrap();
@@ -1115,13 +1115,13 @@ mod tests {
         // Ten years past the capture this reading is made of.
         let late = crate::store::now() + 10 * 365 * 24 * 3600;
         core.clock = crate::core::context::Clock::Fixed(late);
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: None,
             rule: Some("FREQ=WEEKLY;BYDAY=FR".into()),
             events: vec![],
             links: vec![],
-        });
+        }));
         let mut c = Capture::new("freitags den müll rausstellen", "web");
         c.metadata["tz"] = serde_json::Value::String("UTC".into());
         core.ingest_capture(c).await.unwrap();
@@ -1156,13 +1156,13 @@ mod tests {
     #[tokio::test]
     async fn a_judged_reminder_with_no_date_stays_a_plain_capture() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: None,
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let out = core
             .ingest("the gutters need clearing at some point", "web", None)
             .await
@@ -1177,13 +1177,13 @@ mod tests {
     #[tokio::test]
     async fn a_forced_remind_stands_undated_and_a_refusal_outlives_a_re_read() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: None,
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let mut c = Capture::new("remind me about the gutters", "web");
         c.metadata["intent"] = serde_json::Value::String("remind".into());
         let out = core.ingest_capture(c).await.unwrap();
@@ -1219,13 +1219,13 @@ mod tests {
     async fn a_door_that_says_remind_me_outranks_a_model_that_says_otherwise() {
         for answered in ["none", "journal"] {
             let mut core = test_core().await;
-            core.synthesizer = judged_core_reply(Judgement {
+            core.synthesizer = Some(judged_core_reply(Judgement {
                 intent: Some(answered.into()),
                 when: Some("2099-01-01T09:00".into()),
                 rule: None,
                 events: vec![],
                 links: vec![],
-            });
+            }));
             let mut c = Capture::new("remind me about the gutters on the first", "web");
             c.metadata["intent"] = serde_json::Value::String("remind".into());
             core.ingest_capture(c).await.unwrap();
@@ -1248,13 +1248,13 @@ mod tests {
     #[tokio::test]
     async fn metadata_that_is_not_an_object_does_not_take_the_worker_down() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-01-01T09:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let out = core
             .ingest_capture(Capture::new("water the gutters on the first", "web"))
             .await
@@ -1296,13 +1296,13 @@ mod tests {
     #[tokio::test]
     async fn a_note_read_as_a_reminder_again_comes_back_out_of_retirement() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-01-01T09:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let out = core
             .ingest_capture(Capture::new("clear the gutters before the frost", "web"))
             .await
@@ -1352,13 +1352,13 @@ mod tests {
     #[tokio::test]
     async fn a_re_read_adds_nothing_beside_a_reminder_that_already_pushed() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let out = core
             .ingest("die rechnung schicken", "web", None)
             .await
@@ -1401,13 +1401,13 @@ mod tests {
     #[tokio::test]
     async fn a_forced_remind_with_no_date_leaves_a_standing_date_alone() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let mut c = Capture::new("die reifen wechseln, freitag", "web");
         c.metadata["intent"] = serde_json::Value::String("remind".into());
         let out = core.ingest_capture(c).await.unwrap();
@@ -1445,13 +1445,13 @@ mod tests {
     #[tokio::test]
     async fn a_re_read_that_recognises_the_recurrence_keeps_it() {
         let mut core = test_core().await;
-        core.synthesizer = judged_core_reply(Judgement {
+        core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
             links: vec![],
-        });
+        }));
         let out = core
             .ingest("freitags den müll rausstellen", "web", None)
             .await

@@ -886,9 +886,9 @@ mod tests {
     #[tokio::test]
     async fn a_refused_window_backs_off_further_every_time_it_is_refused() {
         let mut core = test_core().await;
-        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
+        core.synthesizer = Some(Arc::new(crate::infer::fake::FakeSynthesizer::rejecting(
             "HTTP 400: context length exceeded",
-        ));
+        )));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         let delay = |core: &Core| {
@@ -1359,9 +1359,9 @@ mod tests {
     #[tokio::test]
     async fn a_failing_stage_is_retried_then_gives_up_with_a_reason() {
         let mut core = test_core().await;
-        core.synthesizer = Arc::new(crate::infer::fake::FakeSynthesizer::failing(
+        core.synthesizer = Some(Arc::new(crate::infer::fake::FakeSynthesizer::failing(
             "endpoint down",
-        ));
+        )));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
         // Each attempt fails and pushes run_after forward; wind it back to

@@ -140,8 +140,9 @@ pub type CorpusLocks =
 pub struct Core {
     pub store: Store,
     pub vectors: Arc<dyn VectorStore>,
-    /// Always present: `[infer.synthesize]` is required — capture synthesizes.
-    pub synthesizer: Arc<dyn Synthesizer>,
+    /// `None` without `[infer.synthesize]`: the embed-only floor, where every
+    /// capture stays verbatim passages and no window is ever synthesized.
+    pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
     /// Where the configured reranker is consulted — `[infer.rerank].apply`.
@@ -545,7 +546,7 @@ impl Core {
         // token-count estimation error.
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
-        let synth = &cfg.infer.synthesize;
+        let synth = cfg.infer.synthesize.as_ref();
         // Built before the roles, not inside the struct literal, because the
         // request side has to budget with the same counter the windowing side
         // sizes with. Two counters that disagree is a prompt sized to N real
@@ -559,11 +560,13 @@ impl Core {
             evolve: cfg.evolve.clone(),
             store,
             vectors,
-            synthesizer: Arc::new(
-                HttpSynthesizer::new(synth)
-                    .with_max_artifact_tokens(max_artifact_tokens)
-                    .with_counter(counter.clone()),
-            ),
+            synthesizer: synth.map(|s| {
+                Arc::new(
+                    HttpSynthesizer::new(s)
+                        .with_max_artifact_tokens(max_artifact_tokens)
+                        .with_counter(counter.clone()),
+                ) as Arc<dyn Synthesizer>
+            }),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
             reranker: cfg
                 .infer
@@ -579,24 +582,30 @@ impl Core {
             completer: cfg.infer.ask.as_ref().map(|a| {
                 Arc::new(HttpCompleter::new(a).with_counter(counter.clone())) as Arc<dyn Completer>
             }),
-            judge: Some(Arc::new(
-                HttpCompleter::for_judging(synth).with_counter(counter.clone()),
-            )),
-            link_judge: Some(Arc::new(
-                HttpCompleter::for_link_judging(synth).with_counter(counter.clone()),
-            )),
-            gap_namer: Some(Arc::new(
-                HttpCompleter::for_gap_naming(synth).with_counter(counter.clone()),
-            )),
-            reaper: Some(Arc::new(
-                HttpCompleter::for_reaping(synth).with_counter(counter.clone()),
-            )),
-            generator: Some(Arc::new(
-                HttpCompleter::for_generating(synth).with_counter(counter.clone()),
-            )),
-            pair_synthesizer: Some(Arc::new(
-                HttpCompleter::for_pair_synthesis(synth).with_counter(counter.clone()),
-            )),
+            judge: synth.map(|s| {
+                Arc::new(HttpCompleter::for_judging(s).with_counter(counter.clone()))
+                    as Arc<dyn Completer>
+            }),
+            link_judge: synth.map(|s| {
+                Arc::new(HttpCompleter::for_link_judging(s).with_counter(counter.clone()))
+                    as Arc<dyn Completer>
+            }),
+            gap_namer: synth.map(|s| {
+                Arc::new(HttpCompleter::for_gap_naming(s).with_counter(counter.clone()))
+                    as Arc<dyn Completer>
+            }),
+            reaper: synth.map(|s| {
+                Arc::new(HttpCompleter::for_reaping(s).with_counter(counter.clone()))
+                    as Arc<dyn Completer>
+            }),
+            generator: synth.map(|s| {
+                Arc::new(HttpCompleter::for_generating(s).with_counter(counter.clone()))
+                    as Arc<dyn Completer>
+            }),
+            pair_synthesizer: synth.map(|s| {
+                Arc::new(HttpCompleter::for_pair_synthesis(s).with_counter(counter.clone()))
+                    as Arc<dyn Completer>
+            }),
             planner: cfg.infer.ask.as_ref().and_then(|a| {
                 a.plan.then(|| {
                     Arc::new(HttpCompleter::for_plan(&a.plan_on()).with_counter(counter.clone()))
@@ -607,7 +616,7 @@ impl Core {
                 .infer
                 .vision
                 .as_ref()
-                .map(|v| Arc::new(HttpDescriber::new(v, Some(synth))) as Arc<dyn Describer>),
+                .map(|v| Arc::new(HttpDescriber::new(v, synth)) as Arc<dyn Describer>),
             transcriber: cfg
                 .infer
                 .transcribe
@@ -721,6 +730,15 @@ impl Core {
     /// page, no nav entry, no MCP tool, no `/api/ask`.
     pub fn asks(&self) -> bool {
         self.completer.is_some()
+    }
+
+    /// Is there a synthesizer? `false` means no `[infer.synthesize]` — the
+    /// embed-only floor: capture stays verbatim, and the judged read and what
+    /// hangs off it (reminders, the journal's moments, promotion, the day
+    /// page's reading) are not configured. Every surface that would have shown
+    /// one says so through this.
+    pub fn synthesizes(&self) -> bool {
+        self.synthesizer.is_some()
     }
 
     /// Does a reranker serve `place` at all? One is configured and the scope
@@ -905,13 +923,27 @@ pub mod test_support {
         core
     }
 
+    /// The embed-only floor: no `[infer.synthesize]`, so no synthesizer and
+    /// none of the judges, writers and namers that share its endpoint.
+    pub async fn test_core_without_synthesizer() -> Core {
+        let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
+        core.synthesizer = None;
+        core.judge = None;
+        core.link_judge = None;
+        core.gap_namer = None;
+        core.reaper = None;
+        core.generator = None;
+        core.pair_synthesizer = None;
+        core
+    }
+
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
             evolve: crate::config::EvolveConfig::default(),
             store,
             vectors: Arc::new(MemoryVectors::new()),
-            synthesizer,
+            synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
             // The shipped default: a configured reranker serves both places.

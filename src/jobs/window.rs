@@ -42,7 +42,20 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     if w.state == SegmentState::Done {
         return Ok(());
     }
-    let synth = core.synthesizer.clone();
+    // The embed-only floor. A window job reaches a base with no synthesizer
+    // only from before the role was removed — nothing arms one now — and the
+    // window stays the verbatim passages it already is. Closed as done rather
+    // than failed: retrying would find the same absence on every attempt.
+    //
+    // Marked `verbatim`, the decided state of a window nothing will read:
+    // left `pending`, reconcile would re-arm it on every sweep.
+    let Some(synth) = core.synthesizer.clone() else {
+        tracing::info!(target, "no [infer.synthesize]: window left verbatim");
+        core.store
+            .set_segment_state(corpus_id, idx, SegmentState::Verbatim, None)
+            .await?;
+        return Ok(());
+    };
 
     let all_texts: Vec<&str> = all.iter().map(|s| s.text.as_str()).collect();
     let ctx = crate::infer::context::WindowContext::build(
@@ -535,7 +548,10 @@ pub(crate) fn worth_showing(similarity: Option<f32>, weak_below: f32) -> bool {
 }
 
 async fn neighbor_context(core: &Core, corpus_id: &str, idx: i64) -> Vec<crate::infer::Neighbor> {
-    let budget = core.synthesizer.budget().context.neighbors;
+    let Some(synth) = &core.synthesizer else {
+        return Vec::new();
+    };
+    let budget = synth.budget().context.neighbors;
     if budget == 0 {
         return Vec::new();
     }
@@ -929,6 +945,30 @@ pub(crate) fn proposed_to_new(
 #[cfg(test)]
 mod tests {
 
+    /// A window unit left queued from before `[infer.synthesize]` was removed
+    /// closes without a call and leaves its window `verbatim`, so reconcile
+    /// does not re-arm it on every sweep.
+    #[tokio::test]
+    async fn a_leftover_window_unit_on_the_embed_only_floor_settles_verbatim() {
+        let core = crate::core::test_support::test_core_without_synthesizer().await;
+        let out = core.ingest("One short note.", "web", None).await.unwrap();
+        assert!(crate::jobs::run_one(&core).await.unwrap());
+        core.store.reset_segment(&out.id, 0, true).await.unwrap();
+        assert_ne!(
+            core.store.segment_state(&out.id, 0).await.unwrap(),
+            Some(crate::store::segments::SegmentState::Verbatim),
+            "the fixture has to start from a window something would read"
+        );
+
+        super::run(&core, &super::unit_target(&out.id, 0))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.segment_state(&out.id, 0).await.unwrap(),
+            Some(crate::store::segments::SegmentState::Verbatim)
+        );
+    }
+
     /// A neighbour under the weak line is not shown. The capture that made
     /// this necessary: one sentence about working hours, whose five nearest
     /// artifacts were five unrelated ones, one of which the model restated —
@@ -1223,8 +1263,9 @@ mod tests {
         let mut core = test_core().await;
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        core.synthesizer =
-            std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"));
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::unparsable_on("alpha"),
+        ));
 
         let err = run(&core, &unit_target(&out.id, 0)).await.unwrap_err();
         assert!(err.retryable(), "the window is still owed a call");
