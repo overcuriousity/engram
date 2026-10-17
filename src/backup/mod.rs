@@ -11,6 +11,7 @@
 pub mod lock;
 pub mod manifest;
 pub mod sqlite;
+pub mod take;
 
 use crate::error::{Error, Result};
 use std::fs::{DirBuilder, File, OpenOptions};
