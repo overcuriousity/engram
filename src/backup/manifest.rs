@@ -122,7 +122,7 @@ pub fn valid_slug(s: &str) -> bool {
 
 /// An alias is `{vector.collection}_{slug}`, and `vector.collection` is the
 /// operator's, so case is allowed; separators and dots are not.
-fn valid_alias(s: &str) -> bool {
+pub(crate) fn valid_alias(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
