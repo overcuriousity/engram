@@ -2179,13 +2179,7 @@ impl VectorStore for QdrantVectors {
         // Deleted whatever the download did: a failed backup must not leave
         // a full copy of the collection on Qdrant's disk either.
         let deleted = self.call::<Value>(Method::DELETE, &one, None).await;
-        let (sha256, bytes) = match downloaded {
-            Ok(v) => v,
-            Err(e) => {
-                let _ = std::fs::remove_file(into);
-                return Err(e);
-            }
-        };
+        let (sha256, bytes) = downloaded?;
         deleted?;
         if let Some(theirs) = snap.checksum.filter(|c| *c != sha256) {
             let _ = std::fs::remove_file(into);
@@ -2247,21 +2241,30 @@ impl QdrantVectors {
                 describe_failure(status, &text)
             )));
         }
+        // `create_private` refuses a file that is already there, so only a
+        // file this call made is removed on failure.
         let mut file = tokio::fs::File::from_std(crate::backup::create_private(into)?);
-        let mut hasher = sha2::Sha256::new();
-        let mut bytes = 0u64;
-        let io = |e: std::io::Error| Error::Store(format!("{}: {e}", into.display()));
-        while let Some(chunk) = res
-            .chunk()
-            .await
-            .map_err(|e| Error::Vector(format!("{path}: {e}")))?
-        {
-            hasher.update(&chunk);
-            bytes += chunk.len() as u64;
-            file.write_all(&chunk).await.map_err(io)?;
+        let streamed = async {
+            let mut hasher = sha2::Sha256::new();
+            let mut bytes = 0u64;
+            let io = |e: std::io::Error| Error::Store(format!("{}: {e}", into.display()));
+            while let Some(chunk) = res
+                .chunk()
+                .await
+                .map_err(|e| Error::Vector(format!("{path}: {e}")))?
+            {
+                hasher.update(&chunk);
+                bytes += chunk.len() as u64;
+                file.write_all(&chunk).await.map_err(io)?;
+            }
+            file.sync_all().await.map_err(io)?;
+            Ok((hex::encode(hasher.finalize()), bytes))
         }
-        file.sync_all().await.map_err(io)?;
-        Ok((hex::encode(hasher.finalize()), bytes))
+        .await;
+        if streamed.is_err() {
+            let _ = std::fs::remove_file(into);
+        }
+        streamed
     }
 }
 
