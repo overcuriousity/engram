@@ -24,7 +24,7 @@ really gave. Not a proxy score.
 ## What it does
 
 - **Capture anything** — paste, a URL, a PDF, a photo, the browser extension,
-  the phone share sheet, a shell pipe. One endpoint reads what it is handed
+  the Android app's share sheet, a shell pipe. One endpoint reads what it is handed
   instead of asking you to classify it; originals are stored untouched. PDFs are
   read locally with no model; images need `[infer.vision]`. Small pastes are
   structured on the spot, big ones stored verbatim and rewritten once you have
