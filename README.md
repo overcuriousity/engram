@@ -282,8 +282,9 @@ is then *point-in-time* and verification is expected to find no gaps.
 `--restore DIR` refuses, before it changes anything, when:
 
 - the manifest does not parse, a file it names is missing or fails its size or
-  hash, or a slug or alias is not a plain name (paths are rebuilt from those,
-  never read from the manifest);
+  hash, a Qdrant archive has no snapshot for one of its tenants, or a slug or
+  alias is not a plain name (paths are rebuilt from those, never read from the
+  manifest);
 - a server is running (the lock is held);
 - the archive was written by a newer engram (`--force-version` accepts it);
 - the archive's embedding recipe or width is not the configured one
