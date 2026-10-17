@@ -29,6 +29,7 @@
   },
   "transcribe": false,
   "asks": true,
+  "synthesizes": true,
   "vision": true,
   "learn": true,
   "recommend": false,

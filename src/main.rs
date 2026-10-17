@@ -125,8 +125,15 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
 /// mean. Reclaiming stuck work and expiring sessions moved to the repair tick,
 /// which now owns the control database's own housekeeping.
 async fn startup_checks(cfg: &Config) -> Result<()> {
-    let s = &cfg.infer.synthesize;
-    engram::infer::openai::probe("chunk", &s.base_url, s.api_key.as_deref()).await;
+    match &cfg.infer.synthesize {
+        Some(s) => {
+            engram::infer::openai::probe("chunk", &s.base_url, s.api_key.as_deref()).await;
+        }
+        None => tracing::info!(
+            "synthesize not configured; captures stay verbatim, and reminders, the journal's \
+             moments and promotion are off"
+        ),
+    }
     engram::infer::openai::probe(
         "embed",
         &cfg.infer.embed.base_url,
@@ -148,7 +155,7 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
         tracing::info!("rerank not configured; search returns vector order");
     }
     if let Some(v) = &cfg.infer.vision {
-        let (base_url, api_key) = v.resolve(Some(&cfg.infer.synthesize));
+        let (base_url, api_key) = v.resolve(cfg.infer.synthesize.as_ref());
         engram::infer::openai::probe("vision", &base_url, api_key.as_deref()).await;
     } else {
         tracing::info!("vision not configured; the image door is closed");

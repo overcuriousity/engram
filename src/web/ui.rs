@@ -310,6 +310,15 @@ pub(crate) fn fate_echo(
             detail: String::new(),
         };
     }
+    // The embed-only floor: there is no fork, every capture is passages.
+    if !core.synthesizes() {
+        return IntentEchoTemplate {
+            kind: "stored as written",
+            detail: "no synthesizer is configured on this base; what you capture is kept \
+                     verbatim and found by meaning"
+                .into(),
+        };
+    }
     // No budget at all is a configuration this base cannot synthesize under,
     // and the echo's whole job is to say what capture will do before it is
     // pressed. It will store the text and rewrite nothing.
@@ -624,7 +633,8 @@ pub(crate) async fn idle_foot(
             },
         )
         .collect();
-    let (example_remind, example_journal, example_lang) = crate::web::workspace::examples(headers);
+    let (example_remind, example_journal, example_lang) =
+        crate::web::workspace::examples(&tenant.core, headers);
     // Said once. `reading` used to restate it four lines below `held`, and a
     // guard that is a copy of another guard is a guard that comes to disagree.
     //
@@ -2570,6 +2580,16 @@ mod tests {
         assert!(html.contains(r#"id="intent-echo""#), "{html}");
         assert!(html.contains("large paste"), "{html}");
         assert!(html.contains("verbatim"), "{html}");
+    }
+
+    /// The embed-only floor has no fork to describe: every capture is kept as
+    /// written, and the echo says that rather than promising a synthesis.
+    #[tokio::test]
+    async fn with_no_synthesizer_the_echo_promises_nothing_but_verbatim() {
+        let core = crate::core::test_support::test_core_without_synthesizer().await;
+        let echo = fate_echo(&core, "a short note", crate::infer::lang::Lang::En);
+        assert_eq!(echo.kind, "stored as written");
+        assert!(echo.detail.contains("no synthesizer"), "{}", echo.detail);
     }
 
     #[tokio::test]

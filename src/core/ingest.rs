@@ -368,6 +368,11 @@ fn url_filename(url: &url::Url) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What a door that asked for a reminder is told on the embed-only floor.
+pub const NO_SYNTHESIZER_REMINDER: &str = "reminders are not configured: a reminder is read by the model [infer.synthesize] \
+     names, and this base has none. Capture the text with `engram -c`, or configure \
+     [infer.synthesize].";
+
 impl Core {
     /// Store the text and queue processing. Deliberately makes no inference
     /// call: capture must stay instant and must survive a dead endpoint.
@@ -621,6 +626,12 @@ impl Core {
         let remind = crate::core::moments::Intent::Remind;
         if c.metadata["intent"].as_str() != Some(remind.as_str()) {
             return Ok(());
+        }
+        // The embed-only floor: a reminder is the judged read's, and there is
+        // no model to read it. Turned away here, before anything is stored, so
+        // the door says so instead of keeping a note that is never reminded.
+        if !self.synthesizes() {
+            return Err(Error::Validation(NO_SYNTHESIZER_REMINDER.into()));
         }
         let lang = crate::infer::lang::of_corpus(&c.metadata);
         // No budget at all: nothing can be judged in one pass, so a reminder
@@ -2093,6 +2104,11 @@ impl Core {
     /// Reads only: a caller that merely asks changes no metadata and arms no
     /// unit.
     async fn reminder_reread(&self, artifact_id: &str) -> Result<Option<i64>> {
+        // Nothing to hand it back to: with no `[infer.synthesize]` there is no
+        // judged read, so the band offers no undo it could not honour.
+        if !self.synthesizes() {
+            return Ok(None);
+        }
         let art = self.store.get_artifact(artifact_id).await?;
         // A merge belongs to no corpus, so there is no note to read again.
         let Some(cid) = art.corpus_id.as_deref() else {
@@ -2429,6 +2445,10 @@ impl Core {
     /// re-read — a capture still being read, a restored placeholder, artifacts
     /// with no spans, or a band that is not a loss — so the phone can say so.
     pub async fn reread_uncovered(&self, cid: &str, from: i64, to: i64) -> Result<bool> {
+        // A re-read is a model call, and the embed-only floor has no model.
+        if !self.synthesizes() {
+            return Ok(false);
+        }
         // A page left open while the capture was still being read would otherwise
         // offer to re-read lines that are merely not written yet.
         let s = self.store.get_corpus(cid).await?;
@@ -3401,8 +3421,8 @@ mod tests {
         // The whole point of deferred processing: a broken inference endpoint
         // must not turn into a failed capture.
         let mut core = test_core().await;
-        core.synthesizer = std::sync::Arc::new(crate::infer::fake::FakeSynthesizer::failing(
-            "endpoint down",
+        core.synthesizer = Some(std::sync::Arc::new(
+            crate::infer::fake::FakeSynthesizer::failing("endpoint down"),
         ));
         let out = core.ingest("still accepted", "web", None).await.unwrap();
         assert_eq!(out.status, CorpusStatus::Raw);
@@ -4584,6 +4604,30 @@ mod tests {
         core.ingest_capture(Capture::new(&long, "ui"))
             .await
             .unwrap();
+    }
+
+    /// The embed-only floor turns a reminder away at the door and says why,
+    /// rather than storing a note nothing will ever remind.
+    #[tokio::test]
+    async fn a_reminder_with_no_synthesizer_is_refused_as_not_configured() {
+        let core = crate::core::test_support::test_core_without_synthesizer().await;
+        let text = "Call the plumber on Friday.";
+        let err = core
+            .ingest_capture(
+                Capture::new(text, "ui").with_intent(Some(crate::core::moments::Intent::Remind)),
+            )
+            .await
+            .expect_err("nothing can read a reminder");
+        assert!(err.to_string().contains("not configured"), "{err}");
+        assert!(
+            core.store
+                .find_by_hash(&crate::store::corpora::content_hash(text))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Without the door it is an ordinary capture, and goes.
+        core.ingest_capture(Capture::new(text, "ui")).await.unwrap();
     }
 
     #[tokio::test]

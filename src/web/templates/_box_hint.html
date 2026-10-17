@@ -39,12 +39,18 @@
      and these come back in German — correctly, since they are the words that
      base would be written in — and without the attribute a screen reader read
      them aloud in the page's voice. See `moments::examples_lang_for`. #}
+  {% if example_remind.is_empty() -%}
+  {# The embed-only floor: no synthesizer reads a reminder or an entry out of
+     the box, so no phrasing is offered that would do nothing. #}
+  Reminders and journal entries are not configured on this base.
+  {%- else %}
   Try
   <button type="button" class="chip-example" lang="{{ example_lang }}"
           data-example="{{ example_remind }}">&ldquo;{{ example_remind }}&rdquo;</button>
   or
   <button type="button" class="chip-example" lang="{{ example_lang }}"
           data-example="{{ example_journal }}">&ldquo;{{ example_journal }}&rdquo;</button>.
+  {%- endif %}
 </p>
 {# The slot the echo swaps into. Present from first paint and swapped on every
    answer, even an empty one: that is how an echo for text no longer in the box

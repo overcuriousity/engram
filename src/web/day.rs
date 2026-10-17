@@ -90,6 +90,9 @@ pub(crate) struct DayTemplate {
     pub was_due: Vec<Line>,
     pub refers: Vec<Line>,
     pub sittings: Vec<Sitting>,
+    /// `false` on the embed-only floor: nothing is read for a date, so "Was
+    /// due" and "Refers to this day" can never fill, and the page says why.
+    pub synthesizes: bool,
 }
 
 impl DayTemplate {
@@ -418,6 +421,7 @@ async fn page(
         was_due,
         refers,
         sittings,
+        synthesizes: tenant.core.synthesizes(),
     };
     Ok(HtmlTemplate(t).into_response())
 }
@@ -546,6 +550,33 @@ mod tests {
         assert!(html.contains("Nothing on this day"));
         assert!(html.contains(r#"action="/ui/day/2026-08-30/entry""#));
         assert!(html.contains("/ui/day/2026-08-29") && html.contains("/ui/day/2026-08-31"));
+    }
+
+    #[tokio::test]
+    async fn a_day_with_no_synthesizer_says_what_it_cannot_show() {
+        let core = crate::core::test_support::test_core_without_synthesizer().await;
+        let (app, cookie) = app_with_cookie(core).await;
+        let html = body_of(
+            app.oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("not configured on this base"), "{html}");
+        // And the box still keeps an entry: that needs no model.
+        assert!(html.contains(r#"action="/ui/day/2026-08-30/entry""#));
+    }
+
+    #[tokio::test]
+    async fn a_day_with_a_synthesizer_does_not_say_it() {
+        let (app, cookie) = app_with_cookie(test_core().await).await;
+        let html = body_of(
+            app.oneshot(get("/ui/day/2026-08-30?tz=Europe/Berlin", &cookie))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!html.contains("not configured on this base"));
     }
 
     #[test]

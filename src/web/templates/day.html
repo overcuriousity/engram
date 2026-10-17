@@ -44,6 +44,12 @@
 <h2 class="label">Was due</h2>
 {% for m in was_due %}<p class="day-line"><span class="mono muted">{{ m.when }}</span> <a href="{{ m.href }}">{{ m.label }}</a> <span class="muted">{{ m.detail }}</span></p>{% endfor %}
 {% endif %}
+{% if !synthesizes %}
+{# The embed-only floor: these two sections are what the judged read finds in
+   a capture, and there is no model to read one. Said where they would stand,
+   not left as a day that merely looks quiet. #}
+<p class="muted">Reminders and dates read from captures are not configured on this base: there is no synthesizer.</p>
+{% endif %}
 {% if !refers.is_empty() %}
 <h2 class="label">Refers to this day</h2>
 {% for m in refers %}<p class="day-line"><span class="mono muted">{{ m.when }}</span> <a href="{{ m.href }}">{{ m.label }}</a> <span class="muted">“{{ m.detail }}”</span></p>{% endfor %}

@@ -50,9 +50,17 @@
 <dl id="teach" class="teach" hx-swap-oob="true">
 {%- if self.teach() %}
   <dt>note</dt><dd>anything you keep</dd>
+  {%- if example_remind.is_empty() %}
+  {# The embed-only floor: `workspace::examples` is empty without a
+     synthesizer, and these three are what the judged read finds. #}
+  <dt>reminder</dt><dd>not configured &mdash; no synthesizer</dd>
+  <dt>entry</dt><dd>not configured &mdash; no synthesizer</dd>
+  <dt>event</dt><dd>not configured &mdash; no synthesizer</dd>
+  {%- else %}
   <dt>reminder</dt><dd lang="{{ example_lang }}">&ldquo;{{ example_remind }}&rdquo;</dd>
   <dt>entry</dt><dd lang="{{ example_lang }}">&ldquo;{{ example_journal }}&rdquo;</dd>
   <dt>event</dt><dd>a date, nothing asked</dd>
+  {%- endif %}
   <dt>link</dt><dd>made on its own</dd>
   <dt>source</dt><dd>what you pasted, unchanged</dd>
   <dt>artifact</dt><dd>a passage search returns</dd>

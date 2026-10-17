@@ -326,7 +326,10 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     // document that does not, and window 0 was promoted alone with its
     // passages superseded under it. Half a document promoted, nobody asking.
     let stored_windows = core.store.segment_progress(corpus_id).await?.1;
-    if stored_windows == 1
+    // Never on the embed-only floor: with no `[infer.synthesize]` there is no
+    // call to arm, and every capture stays verbatim.
+    if core.synthesizer.is_some()
+        && stored_windows == 1
         && core.store.segment_state(corpus_id, 0).await? == Some(SegmentState::Verbatim)
         && !core.store.segment_no_promote(corpus_id, 0).await?
     {
@@ -698,6 +701,43 @@ mod tests {
         assert_eq!(
             heading_title("## See [![icon](i.png)](https://x.test/a) for more"),
             "See icon for more"
+        );
+    }
+
+    /// The embed-only floor. A capture small enough for one call is the one
+    /// that would arm synthesis at capture; with no synthesizer it stays the
+    /// passages it was written as, and no model unit is queued for it.
+    #[tokio::test]
+    async fn a_small_capture_with_no_synthesizer_stays_verbatim() {
+        let core = crate::core::test_support::test_core_without_synthesizer().await;
+        let out = core
+            .ingest("The boiler pressure should sit at 1.5 bar.", "web", None)
+            .await
+            .unwrap();
+        assert!(crate::jobs::run_one(&core).await.unwrap());
+
+        let segs = core.store.segments_for_corpus(&out.id).await.unwrap();
+        assert_eq!(segs.len(), 1, "small enough to be one window");
+        assert_eq!(
+            segs[0].state,
+            crate::store::segments::SegmentState::Verbatim
+        );
+        assert!(
+            !core
+                .store
+                .live_job(
+                    crate::store::jobs::Stage::SegmentWindow,
+                    &crate::jobs::window::unit_target(&out.id, 0)
+                )
+                .await
+                .unwrap(),
+            "nothing armed: there is no call to make"
+        );
+        let rows = core.store.artifacts_for_corpus(&out.id).await.unwrap();
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|c| c.provenance == crate::store::artifacts::Provenance::Passage)
         );
     }
 

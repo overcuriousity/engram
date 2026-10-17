@@ -903,7 +903,10 @@ pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
     let chat_model = format!(
         "ask={};synth={}",
         cfg.infer.ask.as_ref().map_or("none", |a| a.model.as_str()),
-        cfg.infer.synthesize.model,
+        cfg.infer
+            .synthesize
+            .as_ref()
+            .map_or("none", |s| s.model.as_str()),
     );
     let live = crate::store::generations::boot_generation(
         &core.store,
