@@ -30,6 +30,9 @@ Three steps, in order. Each is worth shipping alone.
 
 ### 1. An embed-only floor
 
+**Shipped.** `[infer.synthesize]` is optional: without it every capture takes
+the verbatim path, and the surfaces below say "not configured".
+
 `src/jobs/passages.rs` is already headed *"Capture without synthesis: a window
 becomes verbatim passages sized to the embedder"*, and it calls no completer.
 It is what every large capture does now. Two things make a chat model

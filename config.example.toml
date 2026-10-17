@@ -131,8 +131,9 @@ candidate_multiplier = 3
 # rather than per role: two roles on one tier share a model by saying so, and a
 # role moves to another model by changing one word.
 #
-# `tier` is required on [infer.synthesize] and [infer.ask]: an endpoint is
-# defined once, under [infer.tiers.<name>], and the roles point at it.
+# A role that is configured names a `tier` (or a `base_url` and `model` of its
+# own): an endpoint is defined once, under [infer.tiers.<name>], and the roles
+# point at it. Only [infer.embed] is required.
 
 # Defaults here assume the case engram is built for: a small model on one
 # consumer GPU, answering in minutes rather than seconds. Against a hosted API
@@ -144,14 +145,19 @@ candidate_multiplier = 3
 # fits one synthesis call is then rewritten immediately — structured
 # artifacts that supersede the passages they cover, with the originals kept
 # reachable — and anything larger earns its rewrites through use, window by
-# window (see [promote]). [infer.synthesize] is required: capture
-# synthesizes, and there is no mode key any more.
+# window (see [promote]). There is no mode key: the rewriting is what
+# [infer.synthesize] is for.
+#
+# Leave [infer.synthesize] out and engram runs on the embed-only floor: Qdrant
+# and an embedding endpoint, nothing else. Every capture stays verbatim
+# passages, searchable by meaning; reminders, the journal's judged entries,
+# promotion and the day page's dates are off, and each says "not configured"
+# where it would have appeared. Add the role later and new captures are
+# rewritten from then on.
 #
 # Upgrading from before the 2026-09 reshape: `infer.synthesis` and
 # `infer.segment_tokens` are refused at startup rather than ignored, so delete
-# them. There is no embed-only mode any more either — a base that ran
-# `synthesis = "off"` had no chat endpoint and now needs one, either a `tier`
-# below or a `base_url` and `model` of its own.
+# them. A base that ran `synthesis = "off"` leaves [infer.synthesize] out.
 # How tokens are counted for every budget: threshold, windows, prompts. A
 # HF-format tokenizer.json, as a path or an http(s) link. A link is fetched
 # once and cached beside the store; a changed link re-fetches. Unset, the
@@ -246,6 +252,7 @@ max_output_tokens = 4096
 # reasoning_effort = "none"
 # ceiling_param = "max_tokens"
 
+# Optional — see the embed-only floor above.
 [infer.synthesize]
 tier = "efficient"
 # Synthesis rewrites rather than splits, so its output can exceed its input.
