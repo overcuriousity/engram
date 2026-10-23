@@ -1,11 +1,51 @@
-use pulldown_cmark::{Event, Options, Parser, html};
+use std::sync::LazyLock;
+
+use math_core::{LatexToMathML, MathCoreConfig, MathDisplay};
+use pulldown_cmark::{CowStr, Event, Options, Parser, html};
 
 fn options() -> Options {
     let mut o = Options::empty();
     o.insert(Options::ENABLE_TABLES);
     o.insert(Options::ENABLE_STRIKETHROUGH);
     o.insert(Options::ENABLE_FOOTNOTES);
+    // `$…$` and `$$…$$`. A price written `5$ und 10$` is not math: an opening
+    // `$` followed by a space never opens one.
+    o.insert(Options::ENABLE_MATH);
     o
+}
+
+/// One converter for the process. Building it compiles the command table, and
+/// converting with local state keeps one formula's `\def` out of the next.
+static LATEX: LazyLock<LatexToMathML> = LazyLock::new(|| {
+    LatexToMathML::new(MathCoreConfig::default()).expect("the default config has no macros to fail")
+});
+
+/// MathML Core, the subset every current browser draws without a script.
+///
+/// Exactly what `math-core` emits, minus `style` and `id`: `style` would hand
+/// model-written raw HTML a way to position things over the page, and costs
+/// only `\color`.
+const MATHML_TAGS: &[&str] = &[
+    "math", "semantics", "annotation", "mrow", "mi", "mn", "mo", "mtext", "mspace", "msub",
+    "msup", "msubsup", "munder", "mover", "munderover", "mmultiscripts", "mprescripts", "mfrac",
+    "msqrt", "mroot", "mtable", "mtr", "mtd", "mpadded", "mphantom", "menclose", "merror",
+];
+const MATHML_ATTRIBUTES: &[&str] = &[
+    "display", "mathvariant", "accent", "accentunder", "displaystyle", "scriptlevel", "form",
+    "stretchy", "symmetric", "largeop", "movablelimits", "lspace", "rspace", "minsize", "maxsize",
+    "linethickness", "width", "height", "notation", "encoding",
+];
+
+/// A formula as MathML, or its source in a code span when it does not parse.
+///
+/// The source rather than nothing: a command `math-core` does not know is still
+/// what the answer said, and shown as written it is readable to anyone who
+/// reads LaTeX.
+fn math(latex: &str, display: MathDisplay) -> Event<'static> {
+    match LATEX.convert_with_local_state(latex, display) {
+        Ok(out) => Event::Html(CowStr::from(out.mathml)),
+        Err(_) => Event::Code(CowStr::from(latex.to_string())),
+    }
 }
 
 /// Render chunk markdown to HTML, then sanitize.
@@ -13,15 +53,22 @@ fn options() -> Options {
 /// Chunk text is written by a language model and displayed inside the
 /// operator's authenticated session, so it is untrusted input by definition.
 /// Sanitizing after rendering catches both raw HTML passed through by the
-/// markdown parser and anything the parser itself emits.
+/// markdown parser and anything the parser itself emits — the MathML included.
 pub fn render(markdown: &str) -> String {
-    let parser = Parser::new_ext(markdown, options());
+    let parser = Parser::new_ext(markdown, options()).map(|event| match event {
+        Event::InlineMath(latex) => math(&latex, MathDisplay::Inline),
+        Event::DisplayMath(latex) => math(&latex, MathDisplay::Block),
+        other => other,
+    });
     let mut unsafe_html = String::new();
     html::push_html(&mut unsafe_html, parser);
 
     ammonia::Builder::default()
         .link_rel(Some("noopener noreferrer nofollow"))
+        .add_tags(MATHML_TAGS)
+        .add_tag_attributes("math", ["display"])
         .add_generic_attributes(["class"])
+        .add_generic_attributes(MATHML_ATTRIBUTES)
         .url_schemes(["http", "https", "mailto"].into_iter().collect())
         .clean(&unsafe_html)
         .to_string()
@@ -53,7 +100,9 @@ pub fn snippet(markdown: &str, max_chars: usize) -> String {
     let mut text = String::new();
     for event in Parser::new_ext(markdown, options()) {
         match event {
-            Event::Text(t) | Event::Code(t) => text.push_str(&t),
+            Event::Text(t) | Event::Code(t) | Event::InlineMath(t) | Event::DisplayMath(t) => {
+                text.push_str(&t)
+            }
             Event::SoftBreak | Event::HardBreak | Event::End(_) => text.push(' '),
             _ => {}
         }
@@ -227,6 +276,55 @@ mod tests {
     }
 
     #[test]
+    fn renders_inline_and_display_math_as_mathml() {
+        // The answer that asked for this: a learning rule written the way a
+        // model writes one, inline and displayed.
+        let html = render(
+            "Mit $\\eta$ als Lernrate:\n\n$$w_i \\leftarrow w_i + \\eta \\cdot c \\cdot [h(x) - c(x)]$$",
+        );
+        assert!(html.contains("<math><mi>η</mi></math>"), "{html}");
+        assert!(html.contains(r#"<math display="block">"#), "{html}");
+        assert!(html.contains("<msub><mi>w</mi><mi>i</mi></msub>"), "{html}");
+        assert!(!html.contains('$'), "{html}");
+    }
+
+    #[test]
+    fn a_dollar_amount_is_not_math() {
+        let html = render("Kostet 5$ und 10$.");
+        assert!(html.contains("5$ und 10$"), "{html}");
+        assert!(!html.contains("<math"), "{html}");
+    }
+
+    #[test]
+    fn a_formula_that_does_not_parse_is_shown_as_its_source() {
+        let html = render("Befehl: $\\nosuchcommand x$");
+        assert!(html.contains("<code>\\nosuchcommand x</code>"), "{html}");
+    }
+
+    #[test]
+    fn text_inside_a_formula_is_escaped() {
+        let html = render("$\\text{<script>alert(1)</script>}$");
+        assert!(!html.contains("<script"), "{html}");
+        assert!(html.contains("<mtext>"), "{html}");
+    }
+
+    #[test]
+    fn raw_mathml_from_the_model_loses_style_and_handlers() {
+        let html = render(
+            r#"<math><mrow style="position:fixed" onclick="alert(1)" id="x"><mi>x</mi></mrow></math>"#,
+        );
+        assert!(!html.contains("style"), "{html}");
+        assert!(!html.contains("onclick"), "{html}");
+        assert!(!html.contains("id="), "{html}");
+        assert!(html.contains("<mi>x</mi>"), "{html}");
+    }
+
+    #[test]
+    fn a_snippet_keeps_a_formula_as_its_source() {
+        assert_eq!(snippet("Rate $\\eta$ klein", 60), "Rate \\eta klein");
+    }
+
+    #[test]
     fn a_stand_in_title_stops_at_a_word() {
         // The sitting rendered "…zusätzlich darin vo" — a name cut mid-word
         // reads as a truncated name, not as the opening of a passage.
@@ -316,3 +414,4 @@ mod tests {
         assert!(s.chars().count() <= 6);
     }
 }
+

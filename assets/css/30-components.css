@@ -132,6 +132,9 @@
   font-family: inherit; font-size: inherit;
   white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
 }
+/* A displayed formula wider than a phone scrolls on its own rather than
+   widening the card. */
+.md math[display="block"] { margin: 0.5rem 0; overflow-x: auto; overflow-y: hidden; }
 .md table { border-collapse: collapse; width: 100%; font-size: var(--text-base); }
 .md th, .md td { border: 1px solid var(--color-border); padding: 0.375rem 0.5rem; text-align: left; }
 .md blockquote { margin: 0.5rem 0; padding-left: 0.75rem;
