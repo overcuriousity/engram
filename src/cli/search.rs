@@ -554,8 +554,21 @@ mod tests {
             .expect("a port");
         let addr = listener.local_addr().expect("the port it got");
         tokio::spawn(async move {
-            use tokio::io::AsyncWriteExt as _;
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
             let (mut sock, _) = listener.accept().await.expect("a client");
+            // Read the request before answering. Closed with it unread, the
+            // socket sends a reset rather than a FIN, and a reset may discard
+            // the frames below before the client reads them. Under a loaded
+            // full run, that turned the dying stream into one that never
+            // started, which falls back.
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
             // Enough of a chunked response to carry two frames, and then the
             // socket goes away without its terminating chunk: a proxy timing
             // out mid-search, seen from here.
