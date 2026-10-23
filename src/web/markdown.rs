@@ -107,7 +107,6 @@ pub fn render(markdown: &str) -> String {
     ammonia::Builder::default()
         .link_rel(Some("noopener noreferrer nofollow"))
         .add_tags(MATHML_TAGS)
-        .add_tag_attributes("math", ["display"])
         .add_generic_attributes(["class"])
         .add_generic_attributes(MATHML_ATTRIBUTES)
         .url_schemes(["http", "https", "mailto"].into_iter().collect())
