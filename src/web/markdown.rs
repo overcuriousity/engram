@@ -26,14 +26,55 @@ static LATEX: LazyLock<LatexToMathML> = LazyLock::new(|| {
 /// model-written raw HTML a way to position things over the page, and costs
 /// only `\color`.
 const MATHML_TAGS: &[&str] = &[
-    "math", "semantics", "annotation", "mrow", "mi", "mn", "mo", "mtext", "mspace", "msub",
-    "msup", "msubsup", "munder", "mover", "munderover", "mmultiscripts", "mprescripts", "mfrac",
-    "msqrt", "mroot", "mtable", "mtr", "mtd", "mpadded", "mphantom", "menclose", "merror",
+    "math",
+    "semantics",
+    "annotation",
+    "mrow",
+    "mi",
+    "mn",
+    "mo",
+    "mtext",
+    "mspace",
+    "msub",
+    "msup",
+    "msubsup",
+    "munder",
+    "mover",
+    "munderover",
+    "mmultiscripts",
+    "mprescripts",
+    "mfrac",
+    "msqrt",
+    "mroot",
+    "mtable",
+    "mtr",
+    "mtd",
+    "mpadded",
+    "mphantom",
+    "menclose",
+    "merror",
 ];
 const MATHML_ATTRIBUTES: &[&str] = &[
-    "display", "mathvariant", "accent", "accentunder", "displaystyle", "scriptlevel", "form",
-    "stretchy", "symmetric", "largeop", "movablelimits", "lspace", "rspace", "minsize", "maxsize",
-    "linethickness", "width", "height", "notation", "encoding",
+    "display",
+    "mathvariant",
+    "accent",
+    "accentunder",
+    "displaystyle",
+    "scriptlevel",
+    "form",
+    "stretchy",
+    "symmetric",
+    "largeop",
+    "movablelimits",
+    "lspace",
+    "rspace",
+    "minsize",
+    "maxsize",
+    "linethickness",
+    "width",
+    "height",
+    "notation",
+    "encoding",
 ];
 
 /// A formula as MathML, or its source in a code span when it does not parse.
@@ -414,4 +455,3 @@ mod tests {
         assert!(s.chars().count() <= 6);
     }
 }
-
