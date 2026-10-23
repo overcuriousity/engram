@@ -53,6 +53,9 @@ tokio-stream = "0.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream", "blocking", "multipart"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"
+# LaTeX → MathML Core, rendered on the server so formulas need no script on
+# the page. 0.7 is the newest that builds on this crate's rust-version.
+math-core = "0.7.0"
 argon2 = { version = "0.5.3", features = ["std", "password-hash"] }
 base64 = "0.23"
 openidconnect = "4.0.1"
