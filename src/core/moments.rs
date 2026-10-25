@@ -932,7 +932,7 @@ impl crate::core::Core {
                 // occurrence is exactly what an operator does with a recurring
                 // row, and it made completion decline to arm the successor it
                 // had just stepped over — the recurrence ended there, with
-                // `has_moved_moment` refusing every re-read that might have
+                // `has_operator_moment` refusing every re-read that might have
                 // put it back. What arming needs to know is whether a row is
                 // parked on the instant, and nothing else.
                 && !self
@@ -1062,11 +1062,238 @@ impl crate::core::Core {
         self.store.rearm_remind().await?;
         Ok(())
     }
+
+    /// The artifact page's reminder editor: the open reminder on this
+    /// artifact restated as the operator typed it, or one made where there was
+    /// none. Answers the moment's id.
+    ///
+    /// The rule is restated on every save, unchanged or not, because a save is
+    /// a person saying what this reminder is — see `Store::restate_rule`. That
+    /// is what takes an invented recurrence off a one-off for good: the row
+    /// stops being the model's to re-read.
+    pub async fn edit_reminder(
+        &self,
+        artifact_id: &str,
+        at: i64,
+        tz: &str,
+        rule: Option<&str>,
+    ) -> crate::error::Result<String> {
+        if let Some(r) = rule {
+            validate_rule(r).map_err(crate::error::Error::Validation)?;
+        }
+        let art = self.store.get_artifact(artifact_id).await?;
+        let id = match self.store.open_due_for_artifact(artifact_id).await? {
+            Some(m) => {
+                if m.at != Some(at) || m.tz != tz {
+                    self.store.move_moment(&m.id, at, tz).await?;
+                }
+                self.store.restate_rule(&m.id, rule).await?;
+                m.id
+            }
+            None => {
+                // A note the operator once said was no reminder is one now,
+                // by their own hand. The refusal would only go on deleting
+                // readings the `set` row already outranks, so it is withdrawn
+                // rather than left contradicting the row.
+                if let Some(cid) = art.corpus_id.as_deref() {
+                    let mut meta = self.store.get_corpus(cid).await?.metadata;
+                    if meta.is_object() && intent_refused(&meta, Intent::Remind) {
+                        allow_intent(&mut meta, Intent::Remind);
+                        self.store.set_corpus_metadata(cid, &meta).await?;
+                    }
+                }
+                let id = self
+                    .store
+                    .insert_moment(&crate::store::moments::NewMoment {
+                        artifact_id: artifact_id.to_string(),
+                        kind: crate::store::moments::Kind::Due,
+                        at: Some(at),
+                        tz: tz.to_string(),
+                        rule: rule.map(str::to_string),
+                        source: crate::store::moments::Source::Set,
+                        span: None,
+                        series_id: None,
+                    })
+                    .await?;
+                // A finished reminder retired its note; a new one on the same
+                // note brings it back, as the judged read's arming does.
+                if let Some(cid) = self.store.corpus_of_moment(&id).await?
+                    && self.store.is_retired(&cid).await?
+                {
+                    self.store.unretire_corpus(&cid).await?;
+                }
+                id
+            }
+        };
+        self.store.rearm_remind().await?;
+        Ok(id)
+    }
+
+    /// "Remove reminder" on the artifact page: the note stays an ordinary
+    /// entry. Every open row goes, the operator's own included, and the
+    /// refusal is recorded where there is a note to record it on, so a
+    /// re-read does not file the reminder again. Answers whether anything went.
+    pub async fn clear_reminder(&self, artifact_id: &str) -> crate::error::Result<bool> {
+        let refused = self.set_reminder(artifact_id, false).await?;
+        let rest = self.store.delete_open_due(artifact_id).await?;
+        self.store.rearm_remind().await?;
+        Ok(refused || rest > 0)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn an_artifact(core: &crate::core::Core, text: &str) -> String {
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new(text, "ui"))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(core).await;
+        core.store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .expect("a live artifact")
+            .id
+    }
+
+    /// The live base's failure: "heute Abend" read as
+    /// `FREQ=DAILY;INTERVAL=1;BYDAY=TU`, and every "done" armed next Tuesday.
+    /// Restated as a one-off in the editor, done is done — and the re-read's
+    /// upgrade at the same instant cannot put the rule back.
+    #[tokio::test]
+    async fn an_invented_rule_taken_off_by_hand_stays_off_and_done_retires() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let core = crate::core::test_support::test_core().await;
+        let aid = an_artifact(&core, "Reisenthel Rucksack kaufen").await;
+        let at = berlin()
+            .with_ymd_and_hms(2026, 10, 27, 19, 0, 0)
+            .unwrap()
+            .timestamp();
+        let invented = "FREQ=DAILY;INTERVAL=1;BYDAY=TU";
+        core.store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(at),
+                tz: "Europe/Berlin".into(),
+                rule: Some(invented.into()),
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+
+        let id = core
+            .edit_reminder(&aid, at, "Europe/Berlin", None)
+            .await
+            .unwrap();
+        assert!(
+            !core
+                .store
+                .set_rule_of_open_due(&aid, Some(at), invented)
+                .await
+                .unwrap(),
+            "a re-read at the same instant leaves the operator's answer alone"
+        );
+        assert!(
+            core.store
+                .has_operator_moment(&aid, Kind::Due)
+                .await
+                .unwrap()
+        );
+        let m = core.store.moment(&id).await.unwrap().unwrap();
+        assert_eq!(m.rule, None);
+        assert_eq!(m.series_id, None);
+        assert_eq!(
+            m.source,
+            Source::Classified,
+            "how the date got here is unchanged"
+        );
+
+        assert!(core.complete_moment(&id).await.unwrap());
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "nothing armed"
+        );
+    }
+
+    /// An ordinary entry made a reminder, restated, and made an entry again —
+    /// the operator's own row included, which the band's "not a reminder"
+    /// never removes.
+    #[tokio::test]
+    async fn an_entry_becomes_a_reminder_and_back() {
+        use crate::store::moments::Source;
+        let core = crate::core::test_support::test_core().await;
+        let aid = an_artifact(&core, "Signal-Gruppe bereinigen").await;
+        let at = berlin()
+            .with_ymd_and_hms(2026, 10, 30, 11, 0, 0)
+            .unwrap()
+            .timestamp();
+
+        let id = core
+            .edit_reminder(&aid, at, "Europe/Berlin", Some("FREQ=WEEKLY"))
+            .await
+            .unwrap();
+        let m = core.store.moment(&id).await.unwrap().unwrap();
+        assert_eq!(m.source, Source::Set);
+        assert_eq!(m.rule.as_deref(), Some("FREQ=WEEKLY"));
+        assert_eq!(m.series_id.as_deref(), Some(id.as_str()));
+
+        let later = at + 3_600;
+        let again = core
+            .edit_reminder(&aid, later, "Europe/Berlin", Some("FREQ=MONTHLY"))
+            .await
+            .unwrap();
+        assert_eq!(again, id, "restated in place, not a second row");
+        let m = core.store.moment(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (m.at, m.rule.as_deref()),
+            (Some(later), Some("FREQ=MONTHLY"))
+        );
+
+        assert!(
+            core.edit_reminder(&aid, at, "Europe/Berlin", Some("FREQ=HOURLY"))
+                .await
+                .is_err(),
+            "a rule outside the subset is refused, not stored"
+        );
+
+        assert!(core.clear_reminder(&aid).await.unwrap());
+        assert!(
+            core.store
+                .open_due_for_artifact(&aid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let cid = core
+            .store
+            .get_artifact(&aid)
+            .await
+            .unwrap()
+            .corpus_id
+            .unwrap();
+        let meta = core.store.get_corpus(&cid).await.unwrap().metadata;
+        assert!(
+            intent_refused(&meta, Intent::Remind),
+            "a re-read does not file it again"
+        );
+
+        core.edit_reminder(&aid, at, "Europe/Berlin", None)
+            .await
+            .unwrap();
+        let meta = core.store.get_corpus(&cid).await.unwrap().metadata;
+        assert!(
+            !intent_refused(&meta, Intent::Remind),
+            "made a reminder by hand, the refusal is withdrawn"
+        );
+    }
 
     #[tokio::test]
     async fn a_counted_recurrence_stops_at_its_count() {
@@ -1268,7 +1495,7 @@ mod tests {
     /// `has_moment_at` answers "yes" to by design: it is the re-read's
     /// question, and a re-read must not put a row back on a corrected-away-from
     /// date. Used as the gate for arming, it declined to arm the successor —
-    /// and `has_moved_moment` then refused every re-read that might have put
+    /// and `has_operator_moment` then refused every re-read that might have put
     /// one back, so the recurrence was over, silently and for good.
     #[tokio::test]
     async fn a_recurrence_moved_off_its_next_occurrence_still_arms_one() {

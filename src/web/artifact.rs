@@ -138,6 +138,55 @@ pub struct ArtifactDetail {
     /// next week still deserves to be seen immediately, not only once it
     /// enters the band a list shows.
     pub due_in: Option<String>,
+    /// The open reminder on this artifact, as the editor under the text
+    /// shows it — or a blank one, which the same editor offers to make.
+    pub reminder: ReminderView,
+}
+
+/// The open reminder, in the shape the editor's fields take: the instant as
+/// `datetime-local` wants it, read in the row's own zone and posted back in
+/// it, so a save that changes nothing moves nothing.
+pub struct ReminderView {
+    /// Whether there is a reminder here at all. A blank view is an ordinary
+    /// entry, and saving it makes one.
+    pub exists: bool,
+    pub when: String,
+    pub tz: String,
+    /// One of `REPEATS`' names, or `custom` with the rule in `rule`.
+    pub repeat: &'static str,
+    pub rule: String,
+}
+
+/// The repetitions the editor names, and the rule each one stores. Weekly,
+/// monthly and yearly carry no `BYDAY`/`BYMONTHDAY`: `next_after` takes the
+/// day from the occurrence itself, so moving the date moves the repetition
+/// with it. Anything else is `custom`, the RRULE as typed.
+pub(crate) const REPEATS: &[(&str, Option<&str>)] = &[
+    ("once", None),
+    ("daily", Some("FREQ=DAILY")),
+    ("weekly", Some("FREQ=WEEKLY")),
+    ("monthly", Some("FREQ=MONTHLY")),
+    ("yearly", Some("FREQ=YEARLY")),
+];
+
+fn reminder_view(m: &crate::store::moments::Moment) -> ReminderView {
+    use chrono::TimeZone;
+    let tz = crate::core::moments::zone(Some(&m.tz));
+    let when =
+        m.at.and_then(|a| tz.timestamp_opt(a, 0).single())
+            .map(|d| d.format("%Y-%m-%dT%H:%M").to_string())
+            .unwrap_or_default();
+    let repeat = REPEATS
+        .iter()
+        .find(|(_, r)| *r == m.rule.as_deref())
+        .map_or("custom", |(n, _)| n);
+    ReminderView {
+        exists: true,
+        when,
+        tz: tz.name().to_string(),
+        repeat,
+        rule: m.rule.clone().unwrap_or_default(),
+    }
 }
 
 /// A neighbour, as one line in the pane.
@@ -539,7 +588,22 @@ pub(crate) async fn build_artifact_detail(
         condensed,
         due_in,
     } = about(core, &c).await?;
+    let reminder = core
+        .store
+        .open_due_for_artifact(artifact_id)
+        .await?
+        .map_or_else(
+            || ReminderView {
+                exists: false,
+                when: String::new(),
+                tz: String::new(),
+                repeat: "once",
+                rule: String::new(),
+            },
+            |m| reminder_view(&m),
+        );
     Ok(ArtifactDetail {
+        reminder,
         tag,
         probes,
         versions,
@@ -693,6 +757,58 @@ async fn put_artifact(
     .into_response())
 }
 
+#[derive(serde::Deserialize)]
+struct ReminderForm {
+    #[serde(default)]
+    when: String,
+    #[serde(default)]
+    tz: String,
+    #[serde(default)]
+    repeat: String,
+    /// The RRULE, read only when `repeat` is `custom`.
+    #[serde(default)]
+    rule: String,
+    #[serde(default)]
+    terms: String,
+}
+
+/// Make, or restate, the reminder on this artifact — any artifact, so an
+/// ordinary entry becomes a reminder here. Answers the pane, as an edit of
+/// the text does.
+async fn save_reminder(
+    tenant: Tenant,
+    Path(aid): Path<String>,
+    Form(f): Form<ReminderForm>,
+) -> UiResult<Response> {
+    let tz = crate::core::moments::zone(Some(&f.tz));
+    let at = chrono::NaiveDateTime::parse_from_str(&f.when, "%Y-%m-%dT%H:%M")
+        .ok()
+        .and_then(|dt| crate::core::moments::resolve_local(dt, tz))
+        .ok_or_else(|| Error::Validation(format!("when={}: a date and a time", f.when)))?;
+    let rule = match REPEATS.iter().find(|(n, _)| *n == f.repeat) {
+        Some((_, r)) => r.map(str::to_string),
+        None if f.repeat == "custom" => Some(f.rule.trim().to_string()).filter(|r| !r.is_empty()),
+        None => return Err(Error::Validation(format!("repeat={}", f.repeat)).into()),
+    };
+    tenant
+        .core
+        .edit_reminder(&aid, at, tz.name(), rule.as_deref())
+        .await?;
+    let d = build_artifact_detail(&tenant.core, &aid, &f.terms).await?;
+    Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response())
+}
+
+/// The reminder taken off; the artifact stays an ordinary entry.
+async fn remove_reminder(
+    tenant: Tenant,
+    Path(aid): Path<String>,
+    Form(f): Form<ReminderForm>,
+) -> UiResult<Response> {
+    tenant.core.clear_reminder(&aid).await?;
+    let d = build_artifact_detail(&tenant.core, &aid, &f.terms).await?;
+    Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response())
+}
+
 /// Remove an artifact from both stores, from the page that shows it.
 ///
 /// The deliberate counterpart to what `Core::heal_store_drift` stopped doing on
@@ -834,6 +950,8 @@ pub(crate) fn routes() -> Router<AppState> {
             post(dismiss_link),
         )
         .route("/ui/artifacts/{id}/delete", post(delete_artifact_ui))
+        .route("/ui/artifacts/{id}/reminder", post(save_reminder))
+        .route("/ui/artifacts/{id}/reminder/remove", post(remove_reminder))
         .route("/ui/artifacts/{id}/dwell", post(artifact_dwell))
 }
 
@@ -1992,6 +2110,94 @@ mod tests {
             .await
             .unwrap();
         assert!(d.html.contains("<pre"), "{}", d.html);
+    }
+
+    /// The editor under the text, end to end: an entry made a weekly
+    /// reminder, shown as one, made custom, and taken off again.
+    #[tokio::test]
+    async fn the_pane_edits_the_reminder_and_turns_it_back_into_an_entry() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest_capture(crate::core::ingest::Capture::new(
+                "Signal-Gruppe bereinigen",
+                "ui",
+            ))
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let aid = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .unwrap()
+            .id;
+        let page = get_body(&app, &cookie, &format!("/ui/artifacts/{aid}")).await;
+        assert!(page.contains("+ reminder"), "{page}");
+
+        let uri = format!("/ui/artifacts/{aid}/reminder");
+        let html = body_of(
+            app.clone()
+                .oneshot(form(
+                    &uri,
+                    &cookie,
+                    "when=2026-10-30T11%3A00&tz=Europe%2FBerlin&repeat=weekly&rule=",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("reminder · weekly"), "{html}");
+        assert!(html.contains(r#"value="2026-10-30T11:00""#), "{html}");
+        let m = core
+            .store
+            .open_due_for_artifact(&aid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(m.rule.as_deref(), Some("FREQ=WEEKLY"));
+
+        let html = body_of(
+            app.clone()
+                .oneshot(form(
+                    &uri,
+                    &cookie,
+                    "when=2026-10-30T11%3A00&tz=Europe%2FBerlin&repeat=custom&rule=FREQ%3DWEEKLY%3BBYDAY%3DMO%2CFR",
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("reminder · custom"), "{html}");
+        assert!(html.contains("FREQ=WEEKLY;BYDAY=MO,FR"), "{html}");
+
+        let bad = app
+            .clone()
+            .oneshot(form(
+                &uri,
+                &cookie,
+                "when=2026-10-30T11%3A00&tz=Europe%2FBerlin&repeat=custom&rule=FREQ%3DHOURLY",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        let html = body_of(
+            app.oneshot(form(&format!("{uri}/remove"), &cookie, "terms="))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(html.contains("+ reminder"), "{html}");
+        assert!(
+            core.store
+                .open_due_for_artifact(&aid)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
