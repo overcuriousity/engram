@@ -371,10 +371,10 @@ pub async fn apply(
             // only catches a re-read landing back on the instant they moved
             // away from; a third reading put a second open row beside the
             // correction, and both of them pushed.
-            if core.store.has_moved_moment(anchor_id, Kind::Due).await? {
+            if core.store.has_operator_moment(anchor_id, Kind::Due).await? {
                 tracing::debug!(
                     corpus_id,
-                    "the reminder on this artifact was moved by hand; the re-read adds nothing"
+                    "the reminder on this artifact was moved or set by hand; the re-read adds nothing"
                 );
                 return Ok(());
             }

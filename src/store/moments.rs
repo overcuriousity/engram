@@ -493,7 +493,7 @@ impl Store {
     /// the wrong one for arming a recurrence: `complete_moment` asks "does this
     /// artifact already carry the successor", and a daily reminder moved by
     /// hand from Wednesday to Tuesday answers its own next Wednesday with the
-    /// instant it was moved off. Nothing was armed, and `has_moved_moment` then
+    /// instant it was moved off. Nothing was armed, and `has_operator_moment` then
     /// refused every re-read — so the recurrence died on its first completion,
     /// silently and for good.
     ///
@@ -528,7 +528,7 @@ impl Store {
     /// 48 h rung had fired came out carrying two open rows for one reading of
     /// one piece of prose, both climbing the ladder and both pushing.
     ///
-    /// So the same stance `has_moved_moment` takes for a row a person moved: a
+    /// So the same stance `has_operator_moment` takes for a row a person moved: a
     /// row the base has already spoken about is not this re-read's to replace.
     pub async fn has_acted_on_due(&self, artifact_id: &str) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
@@ -560,10 +560,15 @@ impl Store {
         at: Option<i64>,
         rule: &str,
     ) -> Result<bool> {
+        // Not on a row a person has touched. The re-read reaches this only
+        // when its instant matches, and an operator who took a rule off a
+        // reminder left that instant where it was: the next re-embed read the
+        // invented rule back and the reminder repeated again.
         Ok(sqlx::query(
             "UPDATE moments SET rule = ?, series_id = COALESCE(series_id, id)
               WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL AND at IS ?
-                AND (rule IS NULL OR rule <> ?)",
+                AND (rule IS NULL OR rule <> ?)
+                AND moved_at IS NULL AND source <> 'set'",
         )
         .bind(rule)
         .bind(artifact_id)
@@ -588,10 +593,14 @@ impl Store {
     /// A person's date outranks a re-reading of the prose it was corrected
     /// from. Only the read is refused: completion still arms the recurrence's
     /// next occurrence, and a door that sets a moment still sets one.
-    pub async fn has_moved_moment(&self, artifact_id: &str, kind: Kind) -> Result<bool> {
+    ///
+    /// A reminder somebody made by hand outranks it the same way. `set` rows
+    /// survive `delete_read_due`, so a re-read landing on another instant put
+    /// the model's reading beside the operator's: two open rows, both pushing.
+    pub async fn has_operator_moment(&self, artifact_id: &str, kind: Kind) -> Result<bool> {
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM moments
-              WHERE artifact_id = ? AND kind = ? AND moved_at IS NOT NULL",
+              WHERE artifact_id = ? AND kind = ? AND (moved_at IS NOT NULL OR source = 'set')",
         )
         .bind(artifact_id)
         .bind(kind.as_str())
@@ -988,6 +997,47 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// A person restating a reminder's repetition, from the editor.
+    ///
+    /// The row becomes the head of a series of its own, or of none where the
+    /// rule is cleared. Whatever it continued was a reading the operator has
+    /// just replaced: a `COUNT` they type counts from here, and
+    /// `series_anchor` takes the time of day from this row rather than from
+    /// the head of a recurrence that no longer applies.
+    ///
+    /// `moved_at` is the mark every re-read guard already honours —
+    /// `delete_read_due`, `has_operator_moment`, `set_rule_of_open_due` — so a
+    /// rule taken off here is not read back on the next re-embed.
+    pub async fn restate_rule(&self, id: &str, rule: Option<&str>) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE moments
+                SET rule = ?1, series_id = CASE WHEN ?1 IS NULL THEN NULL ELSE id END,
+                    moved_at = ?2
+              WHERE id = ?3 AND kind = 'due' AND done_at IS NULL",
+        )
+        .bind(rule)
+        .bind(crate::store::now())
+        .bind(id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
+    }
+
+    /// Every open reminder on this artifact, whoever put it there — what
+    /// "remove reminder" on the artifact page answers. `delete_refused_due`
+    /// spares `set` rows because the band's button is a claim about a
+    /// misreading; the editor's is the operator taking back their own.
+    pub async fn delete_open_due(&self, artifact_id: &str) -> Result<u64> {
+        Ok(sqlx::query(
+            "DELETE FROM moments WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL",
+        )
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Delete the occurrence `complete_moment` armed, so that undoing the

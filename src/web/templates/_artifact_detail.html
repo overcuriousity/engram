@@ -269,6 +269,32 @@
             </button>
           </div>
         </form>
+        {# The reminder, by hand: when, how it repeats, and the way back to an
+           ordinary entry. The same form makes one on an artifact that has
+           none. An existing row posts its own zone back, so a save that
+           changes nothing moves nothing; a new one takes the browser's. #}
+        {% let r = d.reminder %}
+        <details class="remind-edit">
+          <summary>{% if r.exists %}reminder{% if r.repeat != "once" %} · {{ r.repeat }}{% endif %}{% else %}+ reminder{% endif %}</summary>
+          <form class="row" hx-post="/ui/artifacts/{{ d.id }}/reminder"
+                hx-target="closest [data-terms]" hx-swap="outerHTML"
+                {%~ if !r.exists %} hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}'{% endif %}>
+            <input type="hidden" name="terms" value="{{ d.terms }}">
+            {% if r.exists %}<input type="hidden" name="tz" value="{{ r.tz }}">{% endif %}
+            <input type="datetime-local" name="when" class="input" value="{{ r.when }}" required>
+            <select name="repeat" class="input" onchange="this.form.rule.hidden = this.value !== 'custom'">
+              {% for n in ["once", "daily", "weekly", "monthly", "yearly", "custom"] %}
+              <option value="{{ n }}"{% if r.repeat == *n %} selected{% endif %}>{{ n }}</option>
+              {% endfor %}
+            </select>
+            <input name="rule" class="input mono" value="{{ r.rule }}" placeholder="FREQ=WEEKLY;BYDAY=MO"{% if r.repeat != "custom" %} hidden{% endif %}>
+            <button class="btn btn-accent btn-sm" type="submit">Save</button>
+            {% if r.exists %}
+            <button class="btn btn-ghost btn-sm" type="button" hx-post="/ui/artifacts/{{ d.id }}/reminder/remove"
+                    hx-include="closest form" hx-target="closest [data-terms]" hx-swap="outerHTML">Remove</button>
+            {% endif %}
+          </form>
+        </details>
       </div>
 
       {% if !d.related.is_empty() %}

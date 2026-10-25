@@ -1027,6 +1027,18 @@ body { overflow-x: hidden; }
 .due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 .due-date .input { flex: 1 1 9rem; min-width: 0; }
 .due-coming { margin: 0.25rem 0 0; }
+/* The artifact's reminder, by hand. Closed it is one quiet word under the
+   text, like the band's fold. */
+.remind-edit { margin-top: 0.5rem; }
+.remind-edit > summary {
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+}
+.remind-edit > summary:hover { color: var(--color-fg-secondary); }
+.remind-edit form { flex-wrap: wrap; gap: 0.25rem; margin-top: 0.35rem; }
+.remind-edit .input { flex: 1 1 9rem; min-width: 0; }
+.remind-edit select.input { flex: 0 1 7rem; }
 /* The fold, under the last row it kept: a count, and the way back to the rest.
    Quiet on purpose — it is the least urgent thing on the band. */
 .due-fold { margin: 0.15rem 0 0; font-size: var(--text-xs); }

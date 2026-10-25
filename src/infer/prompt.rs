@@ -83,8 +83,10 @@ time:
   move to the next date when the arithmetic actually passes midnight. A time
   of day that is not stated is 09:00, but an offset states one. "rule" is an
   iCalendar RRULE using only FREQ, INTERVAL, BYDAY (weekday codes),
-  BYMONTHDAY, UNTIL, COUNT when the note says it repeats, else null. Never
-  invent a date.
+  BYMONTHDAY, UNTIL, COUNT when the note says it repeats, else null.
+  A day the note names once — today, tonight, tomorrow, a weekday, a date — is
+  "when" and never a rule: "on Friday" is null, "every Friday" is
+  FREQ=WEEKLY;BYDAY=FR. Never invent a date.
 - events: dates the note states that are not the reminder itself, as local
   ISO-8601 datetimes ("the release is on the 12th" → its date). Empty when it
   states none.
@@ -172,7 +174,10 @@ INPUT als Notiz in der Zeit:
   tatsächlich über Mitternacht führt. Eine nicht genannte Tageszeit ist 09:00,
   ein Versatz nennt jedoch eine. "rule" ist eine iCalendar-RRULE, die nur FREQ,
   INTERVAL, BYDAY (Wochentagscodes), BYMONTHDAY, UNTIL, COUNT verwendet, wenn
-  die Notiz eine Wiederholung nennt, sonst null. Erfinde nie ein Datum.
+  die Notiz eine Wiederholung nennt, sonst null.
+  Ein einmal genannter Tag — heute, heute Abend, morgen, ein Wochentag, ein
+  Datum — gehört in "when" und ist nie eine Regel: "am Freitag" ist null,
+  "jeden Freitag" ist FREQ=WEEKLY;BYDAY=FR. Erfinde nie ein Datum.
 - events: Daten, die die Notiz nennt und die nicht die Erinnerung selbst sind,
   als lokale ISO-8601-Zeitpunkte ("das Release ist am 12." → dessen Datum).
   Leer, wenn sie keine nennt.
@@ -261,7 +266,10 @@ el tiempo:
   cruce realmente la medianoche. Una hora del día no indicada son las 09:00,
   pero un desplazamiento sí indica una. "rule" es una RRULE de iCalendar que usa
   solo FREQ, INTERVAL, BYDAY (códigos de día de la semana), BYMONTHDAY, UNTIL,
-  COUNT cuando la nota dice que se repite; si no, null. Nunca inventes una fecha.
+  COUNT cuando la nota dice que se repite; si no, null.
+  Un día que la nota nombra una vez — hoy, esta noche, mañana, un día de la
+  semana, una fecha — va en "when" y nunca es una regla: "el viernes" es null,
+  "cada viernes" es FREQ=WEEKLY;BYDAY=FR. Nunca inventes una fecha.
 - events: fechas que la nota indica y que no son el propio recordatorio, como
   fechas y horas locales ISO-8601 ("el lanzamiento es el día 12" → su fecha).
   Vacío cuando no indica ninguna.
@@ -350,6 +358,9 @@ note dans le temps :
   non indiquée vaut 09:00, mais un décalage en indique une. "rule" est une RRULE
   iCalendar n'utilisant que FREQ, INTERVAL, BYDAY (codes de jour de semaine),
   BYMONTHDAY, UNTIL, COUNT quand la note dit qu'elle se répète, sinon null.
+  Un jour que la note nomme une seule fois — aujourd'hui, ce soir, demain, un
+  jour de semaine, une date — va dans "when" et n'est jamais une règle :
+  « vendredi » donne null, « chaque vendredi » donne FREQ=WEEKLY;BYDAY=FR.
   N'invente jamais de date.
 - events : les dates que la note énonce et qui ne sont pas le rappel lui-même,
   comme dates-heures locales ISO-8601 (« la sortie est le 12 » → sa date). Vide
@@ -438,8 +449,10 @@ una nota nel tempo:
   l'aritmetica supera davvero la mezzanotte. Un'ora del giorno non indicata è
   09:00, ma uno scarto ne indica una. "rule" è una RRULE iCalendar che usa solo
   FREQ, INTERVAL, BYDAY (codici dei giorni della settimana), BYMONTHDAY, UNTIL,
-  COUNT quando la nota dice che si ripete, altrimenti null. Non inventare mai
-  una data.
+  COUNT quando la nota dice che si ripete, altrimenti null.
+  Un giorno che la nota nomina una volta — oggi, stasera, domani, un giorno
+  della settimana, una data — va in "when" e non è mai una regola: "venerdì" è
+  null, "ogni venerdì" è FREQ=WEEKLY;BYDAY=FR. Non inventare mai una data.
 - events: date che la nota indica e che non sono il promemoria stesso, come
   date-ora locali ISO-8601 ("il rilascio è il 12" → la sua data). Vuoto quando
   non ne indica nessuna.
@@ -528,7 +541,10 @@ notitie in de tijd:
   middernacht passeert. Een niet genoemd tijdstip is 09:00, maar een verschil
   noemt er wel een. "rule" is een iCalendar-RRULE die alleen FREQ, INTERVAL,
   BYDAY (weekdagcodes), BYMONTHDAY, UNTIL, COUNT gebruikt als de notitie zegt
-  dat het zich herhaalt, anders null. Verzin nooit een datum.
+  dat het zich herhaalt, anders null.
+  Een dag die de notitie één keer noemt — vandaag, vanavond, morgen, een
+  weekdag, een datum — hoort in "when" en is nooit een regel: "op vrijdag" is
+  null, "elke vrijdag" is FREQ=WEEKLY;BYDAY=FR. Verzin nooit een datum.
 - events: data die de notitie noemt en die niet de herinnering zelf zijn, als
   lokale ISO-8601-datumtijden ("de release is op de 12e" → die datum). Leeg als
   ze er geen noemt.
@@ -613,7 +629,10 @@ poziomu — „moment", „events", „links" — oceniając INPUT jako notatkę
   Niepodana pora dnia to 09:00, ale przesunięcie ją podaje. „rule" to RRULE
   iCalendar używająca wyłącznie FREQ, INTERVAL, BYDAY (kody dni tygodnia),
   BYMONTHDAY, UNTIL, COUNT, gdy notatka mówi o powtarzaniu; w przeciwnym razie
-  null. Nigdy nie wymyślaj daty.
+  null.
+  Dzień nazwany w notatce raz — dziś, dziś wieczorem, jutro, dzień tygodnia,
+  data — trafia do "when" i nigdy nie jest regułą: „w piątek" to null,
+  „w każdy piątek" to FREQ=WEEKLY;BYDAY=FR. Nigdy nie wymyślaj daty.
 - events: daty podane w notatce, które nie są samym przypomnieniem, jako lokalne
   daty i godziny ISO-8601 („wydanie jest 12." → jego data). Puste, gdy notatka
   żadnej nie podaje.
@@ -700,7 +719,10 @@ tempo:
   meia-noite. Uma hora do dia não indicada são 09:00, mas um desvio indica uma.
   "rule" é uma RRULE de iCalendar usando apenas FREQ, INTERVAL, BYDAY (códigos
   de dia da semana), BYMONTHDAY, UNTIL, COUNT quando a nota diz que se repete;
-  caso contrário null. Nunca inventes uma data.
+  caso contrário null.
+  Um dia que a nota nomeia uma vez — hoje, esta noite, amanhã, um dia da
+  semana, uma data — vai em "when" e nunca é uma regra: "na sexta" é null,
+  "todas as sextas" é FREQ=WEEKLY;BYDAY=FR. Nunca inventes uma data.
 - events: datas que a nota indica e que não são o próprio lembrete, como
   datas-horas locais ISO-8601 ("o lançamento é no dia 12" → a sua data). Vazio
   quando não indica nenhuma.
@@ -787,7 +809,10 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
   арифметика действительно перешагивает полночь. Не названное время суток —
   09:00, но сдвиг его называет. "rule" — это iCalendar RRULE, использующая
   только FREQ, INTERVAL, BYDAY (коды дней недели), BYMONTHDAY, UNTIL, COUNT,
-  когда заметка говорит о повторении, иначе null. Никогда не выдумывай дату.
+  когда заметка говорит о повторении, иначе null.
+  День, названный в заметке один раз, — сегодня, сегодня вечером, завтра, день
+  недели, дата — идёт в "when" и никогда не бывает правилом: «в пятницу» —
+  null, «каждую пятницу» — FREQ=WEEKLY;BYDAY=FR. Никогда не выдумывай дату.
 - events: даты, названные в заметке и не являющиеся самим напоминанием, как
   местные ISO-8601 дата-время («релиз 12-го» → его дата). Пусто, когда она не
   называет ни одной.
@@ -870,7 +895,10 @@ değerlendir:
   Söylenmemiş bir günün saati 09:00'dur, ama bir kayma saati söyler. "rule",
   not yinelendiğini söylüyorsa yalnızca FREQ, INTERVAL, BYDAY (hafta günü
   kodları), BYMONTHDAY, UNTIL, COUNT kullanan bir iCalendar RRULE'üdür; aksi
-  hâlde null. Asla bir tarih uydurma.
+  hâlde null.
+  Notun bir kez andığı bir gün — bugün, bu akşam, yarın, bir hafta günü, bir
+  tarih — "when" alanına girer ve asla bir kural değildir: "cuma günü"
+  null'dur, "her cuma" FREQ=WEEKLY;BYDAY=FR'dir. Asla bir tarih uydurma.
 - events: notun belirttiği ve anımsatıcının kendisi olmayan tarihler, yerel
   ISO-8601 tarih-saat olarak ("sürüm ayın 12'sinde" → o tarih). Hiçbirini
   belirtmiyorsa boş.
