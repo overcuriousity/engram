@@ -42,6 +42,36 @@ impl Endpoint {
     pub fn api(&self, path: &str) -> String {
         format!("{}/api/v1{path}", self.url)
     }
+
+    /// A request that got no answer, said as the address and what stood in the
+    /// way. reqwest's own `error sending request for url (…)` names the full
+    /// API path and hides the cause in its source chain, which is the one part
+    /// a person can act on: nothing listening, a name that does not resolve.
+    pub(crate) fn unreachable(&self, err: reqwest::Error) -> Error {
+        if !(err.is_connect() || err.is_timeout()) {
+            return Error::Validation(err.to_string());
+        }
+        let mut cause: &dyn std::error::Error = &err;
+        while let Some(next) = cause.source() {
+            cause = next;
+        }
+        let cause = if err.is_timeout() {
+            "timed out".to_string()
+        } else {
+            let text = cause.to_string();
+            // `Connection refused (os error 111)`: the number is for nobody.
+            let text = match text.rfind(" (os error ") {
+                Some(at) => text[..at].to_string(),
+                None => text,
+            };
+            let mut chars = text.chars();
+            match chars.next() {
+                Some(first) => first.to_lowercase().chain(chars).collect(),
+                None => text,
+            }
+        };
+        Error::Validation(format!("could not reach {}: {cause}", self.url))
+    }
 }
 
 /// The default location of the client's config, `~/.config/engram/cli.toml`.
@@ -149,6 +179,33 @@ fn scaffold(path: &std::path::Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nothing_listening_is_said_as_the_address_and_the_refusal() {
+        // Bound and dropped, so the port is free and nothing answers on it.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let e = Endpoint {
+            url: format!("http://127.0.0.1:{port}"),
+            token: "engram_x".into(),
+        };
+        let err = client()
+            .unwrap()
+            .get(e.api("/status"))
+            .send()
+            .await
+            .unwrap_err();
+        let Error::Validation(msg) = e.unreachable(err) else {
+            panic!("a validation error")
+        };
+        assert_eq!(
+            msg,
+            format!("could not reach http://127.0.0.1:{port}: connection refused")
+        );
+    }
 
     fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |k| {

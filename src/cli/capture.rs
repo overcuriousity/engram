@@ -347,7 +347,10 @@ async fn post(
             .body(tracked_body(bytes, face))
             .send()
             .await
-            .map_err(|err| Error::Validation(format!("{target}: {err}")))?;
+            .map_err(|err| match e.unreachable(err) {
+                Error::Validation(m) => Error::Validation(format!("{target}: {m}")),
+                other => other,
+            })?;
         let status = res.status();
         let body: serde_json::Value = res.json().await.unwrap_or(serde_json::Value::Null);
         if !status.is_success() {
@@ -443,7 +446,7 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
             .bearer_auth(&e.token)
             .send()
             .await
-            .map_err(|err| Error::Validation(format!("{err}")))?;
+            .map_err(|err| e.unreachable(err))?;
         // Looked at before the body is read. Without this the loop polls a
         // 401, a 404 or a deleted id six hundred times: `res.json()` falls
         // back to `Null`, the status fails to parse, and five minutes later

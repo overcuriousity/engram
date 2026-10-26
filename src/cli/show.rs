@@ -103,7 +103,7 @@ pub async fn fetch(e: &Endpoint, id: &str) -> Result<Option<Detail>> {
         .bearer_auth(&e.token)
         .send()
         .await
-        .map_err(|err| crate::error::Error::Validation(format!("{err}")))?;
+        .map_err(|err| e.unreachable(err))?;
     if res.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }

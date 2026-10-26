@@ -243,7 +243,7 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
         .json(&serde_json::json!({ "q": question }))
         .send()
         .await
-        .map_err(|err| Error::Validation(format!("{err}")))?;
+        .map_err(|err| e.unreachable(err))?;
     if !res.status().is_success() {
         return Err(Error::Validation(format!(
             "the question was refused: {}",

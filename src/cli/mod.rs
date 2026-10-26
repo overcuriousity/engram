@@ -32,6 +32,18 @@ pub(crate) fn encode(raw: &str) -> String {
         .collect()
 }
 
+/// An error as a sentence for the terminal.
+///
+/// `Validation` is how the client carries a sentence it wrote for a person —
+/// "no token…", "could not reach…" — and its `validation: ` prefix is the
+/// error's kind, which means something to a log and nothing to the reader.
+fn say(e: &crate::error::Error) -> String {
+    match e {
+        crate::error::Error::Validation(msg) => msg.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// Run a verb and answer with the process's exit code: `0` results, `1` none,
 /// `2` a failure.
 ///
@@ -44,7 +56,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
     ) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("{e}");
+            eprintln!("{}", say(&e));
             return 2;
         }
     };
@@ -93,7 +105,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                     if cli.watch {
                         for id in &ids {
                             if let Err(e) = capture::watch(&endpoint, id, &face).await {
-                                eprintln!("{e}");
+                                eprintln!("{}", say(&e));
                                 return 2;
                             }
                         }
@@ -101,7 +113,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                     0
                 }
                 Err(e) => {
-                    eprintln!("{e}");
+                    eprintln!("{}", say(&e));
                     2
                 }
             }
@@ -110,7 +122,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             match search::run(&endpoint, limit, &query, cli).await {
                 Ok(code) => code,
                 Err(e) => {
-                    eprintln!("{e}");
+                    eprintln!("{}", say(&e));
                     2
                 }
             }
@@ -118,21 +130,21 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
         args::Verb::Show(which) => match show::run(&endpoint, &which, last::load()).await {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("{}", say(&e));
                 2
             }
         },
         args::Verb::Status => match status::run(&endpoint, &face, cli.json).await {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("{}", say(&e));
                 2
             }
         },
         args::Verb::Ask(question) => match ask::run(&endpoint, &question, cli).await {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("{}", say(&e));
                 2
             }
         },
@@ -158,7 +170,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                     0
                 }
                 Err(e) => {
-                    eprintln!("{e}");
+                    eprintln!("{}", say(&e));
                     2
                 }
             }
