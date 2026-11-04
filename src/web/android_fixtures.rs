@@ -262,9 +262,11 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         &get(format!("/api/v1/artifacts/{}/source", ids[0])).await,
     );
     check("status.json", &get("/api/v1/status".into()).await);
+    // The merged artifact, because it carries the open reminder `about`
+    // reads back for the editor.
     check(
         "about.json",
-        &get(format!("/api/v1/artifacts/{}/about", ids[0])).await,
+        &get(format!("/api/v1/artifacts/{}/about", merged.id)).await,
     );
     check(
         "bands.json",

@@ -233,6 +233,19 @@ data class About(
     /** The open condensation's action id, where the live text is a condensed one. */
     val condensed: String? = null,
     @SerialName("due_in") val dueIn: String? = null,
+    /** The open reminder, as the editor under the text shows it; null on an ordinary entry. */
+    val reminder: Reminder? = null,
+)
+
+/** The open reminder on an artifact: what `POST /artifacts/{id}/reminder` takes, read back. */
+@Serializable
+data class Reminder(
+    val id: String,
+    /** Unix seconds; null for a reminder that has no date yet. */
+    val at: Long? = null,
+    val tz: String,
+    /** The RRULE, null for a one-off. */
+    val rule: String? = null,
 )
 
 /** One band of a source: a stretch of lines beside what was written from them, or a red one saying nothing was. */
@@ -739,6 +752,8 @@ object Api {
     fun momentUndone(id: String) = "/api/v1/moments/$id/undone"
     fun momentUnsnooze(id: String) = "/api/v1/moments/$id/unsnooze"
     fun isAReminder(artifactId: String) = "/api/v1/artifacts/$artifactId/is-a-reminder"
+    fun reminder(artifactId: String) = "/api/v1/artifacts/$artifactId/reminder"
+    fun reminderRemove(artifactId: String) = "/api/v1/artifacts/$artifactId/reminder/remove"
     fun dismissLink(id: String, other: String) = "/api/v1/artifacts/$id/links/$other/dismiss"
     fun condensationUndo(action: String) = "/api/v1/condensations/$action/undo"
     fun corpusDelete(id: String) = "/api/v1/corpora/$id"

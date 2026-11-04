@@ -31,8 +31,14 @@ class ModelsTest {
     }
 
     @Test fun theAboutLinesAndTheCorpusPage() {
+        // The merged artifact of the fixture base: condensed, with the open
+        // reminder the editor reads back.
         val a = Decode.about(fixture("about.json"))
-        assertTrue(a.probes.isEmpty()); assertNull(a.condensed)
+        assertTrue(a.probes.isEmpty()); assertNotNull(a.condensed)
+        val r = a.reminder!!
+        assertTrue(r.id.isNotEmpty()); assertNotNull(r.at)
+        assertEquals("UTC", r.tz); assertNull("a one-off", r.rule)
+        assertNull(Decode.about("""{"probes":[],"reminder":null}""").reminder)
         val p = Decode.bands(fixture("bands.json"))
         assertFalse(p.image); assertFalse(p.restored)
         val first = p.bands.first()

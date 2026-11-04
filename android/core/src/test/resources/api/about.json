@@ -1,6 +1,12 @@
 {
   "tag": null,
   "probes": [],
-  "condensed": null,
-  "due_in": null
+  "condensed": "01a1a820-9f82-7085-bbcd-1cb2ffd4110f",
+  "due_in": "in under an hour",
+  "reminder": {
+    "id": "01a1a820-9f82-7085-bbcd-1cb325e09571",
+    "at": 1793822072,
+    "tz": "UTC",
+    "rule": null
+  }
 }

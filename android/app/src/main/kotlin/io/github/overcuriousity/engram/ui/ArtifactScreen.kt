@@ -40,6 +40,7 @@ import io.github.overcuriousity.engram.core.read.Chunk
 import io.github.overcuriousity.engram.core.read.Decode
 import io.github.overcuriousity.engram.core.read.Node
 import io.github.overcuriousity.engram.core.read.RelatedRow
+import io.github.overcuriousity.engram.core.read.Reminder
 import io.github.overcuriousity.engram.core.read.SourceSlice
 import io.github.overcuriousity.engram.core.read.Version
 import io.github.overcuriousity.engram.core.sync.Sync
@@ -171,6 +172,10 @@ fun ArtifactScreen(
             // and the way back to the last wording where the live one is
             // condensed. Its own read: none of it is the artifact.
             val about = rememberRead(engram, Api.about(id), Decode.about)
+            // A save or a removal owed to the server, shown as done until the
+            // screen is read again: the read above will not have it before the
+            // row is delivered.
+            var held by remember { mutableStateOf<HeldReminder?>(null) }
             about.read.value?.let { ab ->
                 Column(Modifier.padding(16.dp, 4.dp)) {
                     ab.tag?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = muted()) }
@@ -182,6 +187,29 @@ fun ArtifactScreen(
                     if (ab.probes.isNotEmpty()) Fold("what has asked for this (${ab.probes.size})") {
                         ab.probes.forEach { Text(it, style = MaterialTheme.typography.labelMedium, color = muted()) }
                     }
+                    // A removal held here is a null that must not fall back to the read.
+                    val h = held
+                    val shown = if (h != null) h.reminder else ab.reminder
+                    ReminderEditor(
+                        reminder = shown,
+                        onSave = { at, tz, rule ->
+                            scope.launch {
+                                val row = engram.outbox.enqueueCall(
+                                    "Reminder · saved", "POST", Api.reminder(c.id), Api.json("at" to at, "tz" to tz, "rule" to rule),
+                                )
+                                held = HeldReminder(Reminder(shown?.id ?: "", at, tz, rule), row)
+                                Sync.kick(engram.app)
+                            }
+                        },
+                        onRemove = {
+                            scope.launch {
+                                val row = engram.outbox.enqueueCall("Reminder · removed", "POST", Api.reminderRemove(c.id))
+                                held = HeldReminder(null, row)
+                                Sync.kick(engram.app)
+                            }
+                        },
+                        undo = h?.let { owed -> { scope.launch { if (engram.outbox.undo(owed.row)) held = null } } },
+                    )
                     ab.condensed?.let { action ->
                         TextButton(onClick = {
                             scope.launch { engram.outbox.enqueueCall("Condensation · undone", "POST", Api.condensationUndo(action)); Sync.kick(engram.app); state.retry() }
@@ -450,3 +478,6 @@ private fun VersionLine(v: Version, zone: ZoneId) {
         }
     }
 }
+
+/** A reminder written here and owed to the server: what it now is (null for removed), and the outbox row that carries it. */
+private data class HeldReminder(val reminder: Reminder?, val row: String)

@@ -17,6 +17,11 @@ import io.github.overcuriousity.engram.core.read.Hit
 import io.github.overcuriousity.engram.core.read.SetAsideRow
 import io.github.overcuriousity.engram.core.read.Reach
 import io.github.overcuriousity.engram.core.read.Read
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -77,6 +82,29 @@ class PicturesTest {
             }
         }
         save("artifact")
+    }
+
+    /** The answer from #129 whose formulas the phone used to show as source, in both themes. */
+    @Test fun anAnswerWithFormulasLight() = formulas(ThemeMode.Light, "math-light")
+
+    @Test fun anAnswerWithFormulasDark() = formulas(ThemeMode.Dark, "math-dark")
+
+    private fun formulas(mode: ThemeMode, name: String) {
+        val answer = "Die Lernregel des Perzeptrons:\n\n" +
+            "\$\$w_i \\leftarrow w_i + \\eta \\cdot c \\cdot [h(x) - c(x)]\$\$\n\n" +
+            "- **Lernrate \$\\eta\$:** bestimmt die Schrittweite, mit \$0 < \\eta \\le 1\$.\n" +
+            "- Für \$h(x) = c(x)\$ bleibt \$w_i\$ gleich; sonst wandert es um \$\\frac{\\eta}{2}\$ und mehr.\n\n" +
+            "Ein Preis von 5$ und 10$ bleibt Text, und \$\\undefinedthing\$ zeigt seine Quelle."
+        compose.setContent {
+            EngramTheme(mode) {
+                // A surface, as every screen has, so the text takes the
+                // theme's colour and the formulas are seen to follow it.
+                androidx.compose.material3.Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.background) {
+                    Markdown(answer, Modifier.padding(16.dp, 8.dp))
+                }
+            }
+        }
+        save(name)
     }
 
     @Test fun aResultList() {
@@ -160,5 +188,25 @@ class PicturesTest {
             }
         }
         save("models-and-ask-offer")
+    }
+
+    /** The reminder editor under an artifact, open on #133's misread one-off, in light and dark. */
+    @Test fun theReminderEditor() {
+        var dark by mutableStateOf(false)
+        compose.setContent {
+            EngramTheme(if (dark) ThemeMode.Dark else ThemeMode.Light) {
+                Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background).padding(8.dp)) {
+                    ReminderEditor(
+                        io.github.overcuriousity.engram.core.read.Reminder("m", 1_793_822_400, "Europe/Berlin", "FREQ=DAILY;INTERVAL=1;BYDAY=TU"),
+                        onSave = { _, _, _ -> }, onRemove = {},
+                    )
+                }
+            }
+        }
+        compose.onNodeWithText("reminder · custom").performClick()
+        save("reminder-editor")
+        dark = true
+        compose.waitForIdle()
+        save("reminder-editor-dark")
     }
 }
