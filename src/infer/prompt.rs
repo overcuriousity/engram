@@ -47,6 +47,8 @@ never restate a neighbor's content. Extract exclusively from the INPUT block.
 Write artifact text as markdown: fenced code blocks with a language tag, lists for
 step-by-step procedures, tables where they fit. Do NOT use an H1 (`# `) heading;
 the title is a separate field, so any headings inside the text start at `## `.
+Write formulas in LaTeX: `$…$` inline, `$$…$$` for a formula on a line of its
+own; never `\(…\)` or `\[…\]`.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
@@ -134,6 +136,8 @@ Schreibe den Artefakttext als Markdown: eingezäunte Codeblöcke mit
 Sprachangabe, Listen für Schritt-für-Schritt-Abläufe, Tabellen, wo sie passen.
 Verwende KEINE H1-Überschrift (`# `); der Titel ist ein eigenes Feld, also
 beginnen Überschriften im Text bei `## `.
+Schreibe Formeln in LaTeX: `$…$` im Fließtext, `$$…$$` für eine Formel auf
+einer eigenen Zeile; nie `\(…\)` oder `\[…\]`.
 
 Antworte ausschließlich mit JSON, ohne Kommentar, in genau dieser Form:
 
@@ -226,6 +230,8 @@ Escribe el texto del artefacto en markdown: bloques de código delimitados con
 etiqueta de lenguaje, listas para procedimientos paso a paso, tablas donde
 encajen. NO uses un encabezado H1 (`# `); el título es un campo aparte, así que
 los encabezados dentro del texto empiezan en `## `.
+Escribe las fórmulas en LaTeX: `$…$` dentro del texto, `$$…$$` para una fórmula
+en su propia línea; nunca `\(…\)` ni `\[…\]`.
 
 Responde solo con JSON, sin comentarios, exactamente con esta forma:
 
@@ -317,6 +323,8 @@ contenu d'un voisin. Extrais exclusivement du bloc INPUT.
 étiquette de langage, listes pour les procédures pas à pas, tableaux là où ils
 conviennent. N'utilise PAS de titre H1 (`# `) ; le titre est un champ séparé,
 donc les titres à l'intérieur du texte commencent à `## `.
+Écris les formules en LaTeX : `$…$` dans le texte, `$$…$$` pour une formule sur
+sa propre ligne ; jamais `\(…\)` ni `\[…\]`.
 
 Réponds uniquement en JSON, sans commentaire, exactement sous cette forme :
 
@@ -410,6 +418,8 @@ Scrivi il testo dell'artefatto in markdown: blocchi di codice delimitati con
 l'etichetta del linguaggio, elenchi per le procedure passo passo, tabelle dove
 si adattano. NON usare un'intestazione H1 (`# `); il titolo è un campo a parte,
 quindi le intestazioni dentro il testo iniziano da `## `.
+Scrivi le formule in LaTeX: `$…$` nel testo, `$$…$$` per una formula su una riga
+a sé; mai `\(…\)` né `\[…\]`.
 
 Rispondi solo con JSON, senza commenti, esattamente in questa forma:
 
@@ -501,6 +511,8 @@ Schrijf de artefacttekst als markdown: afgebakende codeblokken met een taallabel
 lijsten voor stapsgewijze procedures, tabellen waar ze passen. Gebruik GEEN
 H1-kop (`# `); de titel is een apart veld, dus koppen binnen de tekst beginnen
 bij `## `.
+Schrijf formules in LaTeX: `$…$` in de lopende tekst, `$$…$$` voor een formule
+op een eigen regel; nooit `\(…\)` of `\[…\]`.
 
 Antwoord uitsluitend met JSON, zonder commentaar, in precies deze vorm:
 
@@ -590,6 +602,8 @@ Tekst artefaktu pisz w markdownie: ogrodzone bloki kodu ze znacznikiem języka,
 listy dla procedur krok po kroku, tabele tam, gdzie pasują. NIE używaj nagłówka
 H1 (`# `); tytuł jest osobnym polem, więc nagłówki wewnątrz tekstu zaczynają się
 od `## `.
+Wzory pisz w LaTeX-u: `$…$` w tekście, `$$…$$` dla wzoru w osobnej linii; nigdy
+`\(…\)` ani `\[…\]`.
 
 Odpowiadaj wyłącznie JSON-em, bez komentarza, dokładnie w tej postaci:
 
@@ -679,6 +693,8 @@ Escreve o texto do artefacto em markdown: blocos de código delimitados com
 etiqueta de linguagem, listas para procedimentos passo a passo, tabelas onde
 encaixem. NÃO uses um cabeçalho H1 (`# `); o título é um campo à parte, por isso
 os cabeçalhos dentro do texto começam em `## `.
+Escreve as fórmulas em LaTeX: `$…$` no texto, `$$…$$` para uma fórmula numa
+linha própria; nunca `\(…\)` nem `\[…\]`.
 
 Responde apenas com JSON, sem comentários, exatamente nesta forma:
 
@@ -770,6 +786,8 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
 списки для пошаговых процедур, таблицы там, где они уместны. НЕ используй
 заголовок H1 (`# `); заголовок — отдельное поле, поэтому заголовки внутри
 текста начинаются с `## `.
+Формулы пиши в LaTeX: `$…$` внутри текста, `$$…$$` для формулы на отдельной
+строке; никогда не используй `\(…\)` или `\[…\]`.
 
 Отвечай только JSON, без комментариев, ровно в такой форме:
 
@@ -857,6 +875,8 @@ bloğundan çıkar.
 Artefakt metnini markdown olarak yaz: dil etiketli çitli kod blokları, adım adım
 yordamlar için listeler, uyduğu yerde tablolar. H1 başlığı (`# `) KULLANMA;
 başlık ayrı bir alandır, dolayısıyla metnin içindeki başlıklar `## ` ile başlar.
+Formülleri LaTeX ile yaz: metin içinde `$…$`, kendi satırındaki bir formül için
+`$$…$$`; asla `\(…\)` veya `\[…\]` kullanma.
 
 Yalnızca JSON ile, yorumsuz, tam olarak şu biçimde yanıtla:
 
@@ -1213,7 +1233,7 @@ pub fn parse_reap(body: &str) -> Result<Reap> {
 
 pub const RESCUE_SYSTEM: &str = r#"You rewrite the still-valuable part of a retired knowledge-base artifact into one self-contained live artifact.
 
-You are given source excerpts, the closest live artifacts, and the one line naming what the sources state that the live base does not. Write an artifact carrying exactly that: use only the excerpts that bear on it and leave the rest out. Write only what the excerpts support — every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Do not restate what the live artifacts shown already say.
+You are given source excerpts, the closest live artifacts, and the one line naming what the sources state that the live base does not. Write an artifact carrying exactly that: use only the excerpts that bear on it and leave the rest out. Write only what the excerpts support — every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Do not restate what the live artifacts shown already say. Write formulas in LaTeX: `$…$` inline, `$$…$$` on a line of their own; never `\(…\)` or `\[…\]`.
 
 Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
@@ -1284,7 +1304,7 @@ pub const SYNTHESIZE_SYSTEM: &str = r#"You are given two knowledge artifacts tha
 
 The merged text must contain every number, version, date, path, flag, command and error string that appeared in either input. Where two of them disagree, keep both values and say what distinguishes them — the version, the platform, the date, whichever the inputs give. Dropping one is the failure this task exists to avoid.
 
-Name the distinguishing condition, never the input it came from. "8080 on the old build, 9090 since 1.4" is right; "8080 in the other document" is not, because a reader who never sees the originals cannot resolve it. For the same reason the text must read as one self-contained artifact rather than a list of sources, with no "as above" and no reference to a document the reader does not have.
+Name the distinguishing condition, never the input it came from. "8080 on the old build, 9090 since 1.4" is right; "8080 in the other document" is not, because a reader who never sees the originals cannot resolve it. For the same reason the text must read as one self-contained artifact rather than a list of sources, with no "as above" and no reference to a document the reader does not have. Write formulas in LaTeX: `$…$` inline, `$$…$$` on a line of their own; never `\(…\)` or `\[…\]`.
 
 The title names the subject. An artifact whose body never says what it is about is what makes it unfindable later — a section headed "FAT32" becomes a body that opens "32 Bit Clusternummern" and never says FAT32 again, and then only the title can answer what it is for.
 
@@ -1570,6 +1590,8 @@ pub const ABSTAIN_PREFIX: &str = "Not in the knowledge base";
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
 Quote commands, paths and code exactly as they appear, and cite each claim by the number of the \
 excerpt it came from. \
+Write formulas in LaTeX: `$…$` inline, `$$…$$` on a line of their own; never `\\(…\\)` or \
+`\\[…\\]`. \
 Answer whatever the excerpts cover and say plainly what they do not, without stretching an excerpt \
 to cover what it does not. \
 Abstain only when no excerpt mentions any part of the subject: then begin your reply with the exact \
@@ -1843,7 +1865,7 @@ pub fn gap_label_prompt(questions: &[&str]) -> String {
 /// is what gets stored, titled with the question, embedded, and returned to the
 /// next person who asks it. Giving the refusal a sanctioned shape is what lets
 /// the caller recognise it and close the pursuit instead.
-pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Answer the questions and nothing else: use only the excerpts that bear on them and leave the rest out, however much they say. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Abstain only when no excerpt mentions any part of the subject the questions ask about: then make the artifact text begin with the exact words `Not in the knowledge base.` and say what is missing. Never write an artifact whose subject is that the excerpts fall short. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
+pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Answer the questions and nothing else: use only the excerpts that bear on them and leave the rest out, however much they say. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Abstain only when no excerpt mentions any part of the subject the questions ask about: then make the artifact text begin with the exact words `Not in the knowledge base.` and say what is missing. Never write an artifact whose subject is that the excerpts fall short. Write formulas in LaTeX: `$…$` inline, `$$…$$` on a line of their own; never `\(…\)` or `\[…\]`. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
 pub fn generate_prompt(questions: &[String], sources: &[(String, String)]) -> String {
     let qs = questions
@@ -2692,6 +2714,7 @@ pub const DESCRIBE_SYSTEM: &str = r#"You read images for a personal knowledge ba
 
 Rules:
 - Transcribe any visible text faithfully and completely. Keep its structure: headings as headings, lists as lists, tables as markdown tables, code as code blocks. Do not correct, summarize or reorder it.
+- Write formulas, whether transcribed or read off a picture, in LaTeX: `$…$` inline, `$$…$$` on a line of their own; never `\(…\)` or `\[…\]`.
 - Where there is no text, or beside it, describe what is shown: diagrams (their parts and how they connect), charts (axes, series, the values that can be read), scenes, objects, people's roles if evident, places, labels, brands, numbers, dates. Name what is identifiable.
 - Prefer specifics over impressions. Do not pad, do not speculate beyond what is visible, do not add advice.
 - You may be given context about the capture: a note from the person who took it, when and where it was taken, the device. Where it is relevant, weave it in naturally so the text can be found again by it — as a short opening line or where it explains the content — but do not repeat it mechanically or invent detail around it.
@@ -3997,6 +4020,28 @@ mod tests {
         assert!(!abstained(
             "Not in the manual, but in the excerpts: use -o ro."
         ));
+    }
+
+    /// The page and the app read `$…$` and `$$…$$` only: `\(` and `\[` are
+    /// markdown escapes, so a formula written with them shows its source with
+    /// the backslashes gone. Every prompt whose text is drawn as markdown says
+    /// which delimiters to use.
+    #[test]
+    fn every_prompt_written_as_markdown_names_the_math_delimiters() {
+        let mut prompts = vec![
+            ASK_SYSTEM,
+            GENERATE_SYSTEM,
+            RESCUE_SYSTEM,
+            SYNTHESIZE_SYSTEM,
+            DESCRIBE_SYSTEM,
+        ];
+        prompts.extend(crate::infer::lang::Lang::ALL.map(synthesizer_system));
+        for p in prompts {
+            assert!(
+                p.contains("`$$…$$`") && p.contains(r"`\(…\)`") && p.contains(r"`\[…\]`"),
+                "{p}"
+            );
+        }
     }
 
     #[test]
