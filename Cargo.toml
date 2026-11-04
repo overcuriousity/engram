@@ -66,7 +66,7 @@ rmcp = { version = "3.1.2", features = ["server", "transport-streamable-http-ser
 # Readability: strips navigation, headers, footers and asides, leaving the
 # article. Hand-rolling these heuristics would be worse code than importing an
 # implementation of them.
-dom_smoothie = "0.18.0"
+dom_smoothie = "0.19.0"
 # HTML → markdown. A turndown.js port, and it replaced `html2md` for a measured
 # reason rather than a fashionable one: on identical readability output
 # `html2md` recovered no ATX headings at all from several ordinary sites — none
@@ -79,6 +79,8 @@ dom_smoothie = "0.18.0"
 htmd = "0.5.5"
 # What htmd builds its DOM from, named here for the one handler that reads
 # an anchor's parent and siblings. No new build: htmd already pulls it in.
+# The version is htmd's, not ours to bump: a second copy's `NodeData` is a
+# different type from the one htmd's nodes carry.
 markup5ever_rcdom = "0.38"
 # Decoding fetched pages that are not UTF-8. Already in the tree by way of
 # the HTML crates; named here because this uses it directly.
