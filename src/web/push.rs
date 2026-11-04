@@ -115,12 +115,12 @@ mod tests {
 
     fn a_registration(endpoint: &str) -> serde_json::Value {
         use base64::Engine;
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let secret = p256::SecretKey::generate();
         serde_json::json!({
             "endpoint": endpoint,
-            "p256dh": b64.encode(secret.public_key().to_encoded_point(false).as_bytes()),
+            "p256dh": b64.encode(secret.public_key().to_sec1_point(false).as_bytes()),
             "auth": b64.encode([1u8; 16]),
         })
     }

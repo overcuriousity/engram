@@ -1021,14 +1021,14 @@ mod tests {
     }
 
     /// The receiver's half of a registration, made in the test.
-    fn a_receiver() -> (p256::SecretKey, web_push_native::Auth, serde_json::Value) {
+    fn a_receiver() -> (p256::SecretKey, [u8; 16], serde_json::Value) {
         use base64::Engine;
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-        let auth = web_push_native::Auth::from([9u8; 16]);
+        let secret = p256::SecretKey::generate();
+        let auth = [9u8; 16];
         let keys = serde_json::json!({
-            "p256dh": b64.encode(secret.public_key().to_encoded_point(false).as_bytes()),
+            "p256dh": b64.encode(secret.public_key().to_sec1_point(false).as_bytes()),
             "auth": b64.encode(auth),
         });
         (secret, auth, keys)
@@ -1074,7 +1074,7 @@ mod tests {
             !req.body.windows(7).any(|w| w == b"invoice"),
             "the push service reads nothing"
         );
-        let plain = web_push_native::decrypt(req.body.clone(), &secret, &auth).unwrap();
+        let plain = crate::jobs::webpush::decrypt(&req.body, &secret, &auth).unwrap();
         let payload: serde_json::Value = serde_json::from_slice(&plain).unwrap();
         assert_eq!(payload["v"], 1);
         assert_eq!(payload["kind"], "due");

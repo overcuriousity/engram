@@ -7,7 +7,7 @@
 [advisories]
 ignore = [
   # RUSTSEC-2023-0071 — "Marvin Attack" timing sidechannel in `rsa` 0.9.x.
-  # Reached via: engram -> openidconnect 4.0.1 -> rsa 0.9.10.
+  # Reached via: engram -> openidconnect 4.1.0 -> rsa 0.9.10.
   # No patched release exists upstream.
   #
   # Not reachable in this codebase. The attack recovers an RSA *private* key by
@@ -68,12 +68,35 @@ ignore = [
   "RUSTSEC-2026-0194",
   "RUSTSEC-2026-0195",
 
+  # RUSTSEC-2026-0436 — panic and unbounded allocation in `calamine`'s CFB/OLE2
+  # parser on a malformed `.xls`/`.xlsb`, or on VBA extraction from `.xlsx`.
+  # Reached via: engram -> docling 1.53.0 -> calamine 0.26.1. Denial of service
+  # on a crafted spreadsheet.
+  #
+  # Not reachable in this codebase, for the reason given for RUSTSEC-2026-0194
+  # above: docling names `calamine` only in its `.xls`, `.xlsx` and `.xlsb`
+  # backends, and engram only ever passes `InputFormat::Pdf`
+  # (`docling_is_only_ever_asked_for_a_pdf` in `src/core/pdf.rs` holds that).
+  #
+  # No fix is available. The fix is calamine 0.38.0; docling 1.53 requires
+  # `^0.26`, and even the newest docling (2.65.1 at the time of writing)
+  # requires `^0.37`.
+  #
+  # Re-review if any of the following becomes true:
+  #   * docling ships a release whose `calamine` requirement admits >= 0.38.0
+  #     and engram moves to it; then delete this entry.
+  #   * engram passes docling any `InputFormat` other than `Pdf`, or uses
+  #     `SourceDocument::from_path`. Then the advisory is live.
+  "RUSTSEC-2026-0436",
+
   # RUSTSEC-2026-0367 — SUID/SGID bits preserved by `zip` extraction.
   # RUSTSEC-2026-0368 — `ZipArchive::extract` creates symlinks pointing outside
   # the destination.
   # RUSTSEC-2026-0369 — `extract()` applies permissions through symlinks.
-  # All three reached via: engram -> docling 1.53.0 -> zip 2.4.2, and
-  # docling -> calamine 0.26.1 -> zip 2.4.2. All three need extraction to disk.
+  # RUSTSEC-2026-0429 — `ZipArchive::extract` aborts the process on a symlink
+  # entry with a large declared size.
+  # All four reached via: engram -> docling 1.53.0 -> zip 2.4.2, and
+  # docling -> calamine 0.26.1 -> zip 2.4.2. All four need extraction to disk.
   #
   # Not reachable in this codebase. engram's own `zip` (a build dependency
   # that packs the Chrome extension in build.rs) is 9.0.4, which is patched.
@@ -84,19 +107,23 @@ ignore = [
   # DCLX, spreadsheets) are dead for engram for the reason given for
   # RUSTSEC-2026-0194 above: we only ever pass `InputFormat::Pdf`.
   #
-  # No fix is available. Even the newest docling (2.35.0 at the time of
-  # writing) requires `zip = "^8.6"`, and the fix is only in 9.0.0.
+  # No fix is available on the docling line engram is on. docling 1.53
+  # requires `zip = "2.2"`, and the fix is only in 9.0.0. docling 2.x has moved
+  # to `zip = "^9"` (2.65.1 at the time of writing), but engram pins 1.53.0
+  # with the ToUnicode fix patched on top (see `[patch.crates-io]` in
+  # Cargo.toml), and calamine would still hold a 2.x `zip`.
   #
   # Re-review if any of the following becomes true:
-  #   * docling ships a release whose `zip` requirement admits >= 9.0.0, at
-  #     which point all three entries should be deleted rather than carried
-  #     forward.
+  #   * engram moves to a docling whose `zip` requirement, and calamine's,
+  #     admit >= 9.0.0, at which point all four entries should be deleted
+  #     rather than carried forward.
   #   * engram extracts a zip archive itself, or the build-dependency `zip`
   #     drops below 9.0.0 — these ids are ignored for every copy, so that
   #     regression would not fail this check.
   "RUSTSEC-2026-0367",
   "RUSTSEC-2026-0368",
   "RUSTSEC-2026-0369",
+  "RUSTSEC-2026-0429",
 ]
 
 # Informational advisories still surface in the log. `paste` (via tokenizers) is
