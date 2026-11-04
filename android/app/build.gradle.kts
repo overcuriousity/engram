@@ -107,6 +107,14 @@ dependencies {
     implementation(libs.camerax.lifecycle)
     implementation(libs.camerax.view)
     implementation(libs.zxing)
+    // LaTeX math, drawn on the phone: the web shows `$…$` as MathML, which
+    // Compose cannot draw, and contained mode has no server to ask for a
+    // picture. JLaTeXMath lays out TeX itself, offline, with its own Computer
+    // Modern fonts; this is its Android port, the one Markwon uses. GPL-2.0 or
+    // later with the classpath exception, so linking it unmodified asks
+    // nothing of this app's own licence. Its Greek and Cyrillic modules are
+    // for text in those scripts, not for math, and are left out.
+    implementation(libs.jlatexmath)
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
     // The screens, composed on the JVM: Robolectric lends the Android half and

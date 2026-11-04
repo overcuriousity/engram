@@ -114,6 +114,82 @@ class MarkdownTest {
     }
 
     @Test fun nothingThrows() {
-        for (s in listOf("", "*", "**", "[", "[a](", "```", "|", "|-|", "> ", "- ", "1. ", "\\", "`")) parseMarkdown(s)
+        for (s in listOf("", "*", "**", "[", "[a](", "```", "|", "|-|", "> ", "- ", "1. ", "\\", "`", "$", "$$", "$$$", "${'$'}a", "a$", "\\$", "{$", "$}$")) parseMarkdown(s)
+    }
+
+    // ── Math, read as pulldown-cmark reads it (the web's `markdown.rs`) ──
+
+    private fun inl(s: String) = (parseMarkdown(s).single() as Block.Paragraph).inlines
+    private fun inlineMath(tex: String) = Inline.Math(tex, display = false)
+
+    /** The answer from #129 that showed its source on the phone. */
+    @Test fun thePerceptronUpdateIsADisplayedFormulaAndEtaAnInlineOne() {
+        val rule = "w_i \\leftarrow w_i + \\eta \\cdot c \\cdot [h(x) - c(x)]"
+        val doc = parseMarkdown(
+            "Die Lernregel:\n\n\$\$$rule\$\$\n\n- **Lernrate \$\\eta\$:** klein\n- mit \$\\eta > 0\$ und *Ziel* \$c(x)\$",
+        )
+        assertEquals(Block.Paragraph(text("Die Lernregel:")), doc[0])
+        assertEquals(Block.Paragraph(listOf(Inline.Math(rule, display = true))), doc[1])
+        val list = doc[2] as Block.ListBlock
+        assertEquals(
+            Block.Paragraph(listOf(Inline.Strong(listOf(Inline.Text("Lernrate "), inlineMath("\\eta"), Inline.Text(":"))), Inline.Text(" klein"))),
+            list.items[0].single(),
+        )
+        assertEquals(
+            Block.Paragraph(listOf(Inline.Text("mit "), inlineMath("\\eta > 0"), Inline.Text(" und "), Inline.Emph(text("Ziel")), Inline.Text(" "), inlineMath("c(x)"))),
+            list.items[1].single(),
+        )
+    }
+
+    /** `$$` on lines of its own, as a model writes it, inside a paragraph that goes on. */
+    @Test fun aDisplayedFormulaMaySpanLinesInsideAParagraph() {
+        assertEquals(
+            listOf(Inline.Text("Es gilt "), Inline.Math("\na^2 + b^2 = c^2\n", display = true), Inline.Text(" für jedes Dreieck.")),
+            inl("Es gilt\n$$\na^2 + b^2 = c^2\n$$\nfür jedes Dreieck."),
+        )
+    }
+
+    @Test fun pricesAreNotMath() {
+        assertEquals(text("Es kostet 5$ und 10$."), inl("Es kostet 5$ und 10$."))
+        // Opens at `$5`, but the next `$` follows a space and cannot close: no formula at all.
+        assertEquals(text("from $5 to $10"), inl("from $5 to $10"))
+        assertEquals(text("a $ b $ c"), inl("a $ b $ c"))
+        assertEquals(text("costs $5"), inl("costs $5"))
+    }
+
+    @Test fun anEscapedDollarIsADollarAndInsideAFormulaStaysTeX() {
+        assertEquals(text("\$x\$ is literal"), inl("\\\$x\\\$ is literal"))
+        assertEquals(listOf(inlineMath("a \\$ b"), Inline.Text(" ok")), inl("\$a \\\$ b\$ ok"))
+    }
+
+    @Test fun aDollarInCodeIsCodeAndCodeInAFormulaIsTeX() {
+        assertEquals(listOf(Inline.Code("\$x\$"), Inline.Text(" and "), inlineMath("y")), inl("`\$x\$` and \$y\$"))
+        assertEquals(listOf(inlineMath("a `b` c")), inl("\$a `b` c\$"))
+    }
+
+    @Test fun aDollarInsideBracesBelongsToThemAndUnbalancedBracesAreNoFormula() {
+        assertEquals(listOf(inlineMath("\\text{\$x\$} + 1")), inl("\$\\text{\$x\$} + 1\$"))
+        assertEquals(text("\$}\$"), inl("\$}\$"))
+    }
+
+    /** A `$$` that does not close is two dollars; the second may open a formula of its own. */
+    @Test fun anUnclosedDisplayIsADollarAndAnInlineFormula() {
+        assertEquals(listOf(Inline.Text("$"), inlineMath("x")), inl("\$\$x\$"))
+    }
+
+    @Test fun headingsAndTableCellsHoldFormulasToo() {
+        assertEquals(Block.Heading(2, listOf(Inline.Text("Satz über "), inlineMath("\\pi"))), parseMarkdown("## Satz über \$\\pi\$").single())
+        val t = parseMarkdown("| a | b |\n|---|---|\n| \$x^2\$ | 2 |").single() as Block.Table
+        assertEquals(listOf(inlineMath("x^2")), t.rows[0][0])
+    }
+
+    /** The server's snippet keeps a formula's source, dollars dropped. */
+    @Test fun plainKeepsTheSource() {
+        assertEquals("Mit \\eta > 0 gilt w_i \\leftarrow w_i", plain("Mit \$\\eta > 0\$ gilt\n\n\$\$w_i \\leftarrow w_i\$\$"))
+    }
+
+    /** A soft break inside emphasis no longer ends it: the paragraph is read whole, as CommonMark reads it. */
+    @Test fun emphasisMayCrossALineEnd() {
+        assertEquals(listOf(Inline.Text("a "), Inline.Strong(text("b c")), Inline.Text(" d")), inl("a **b\nc** d"))
     }
 }

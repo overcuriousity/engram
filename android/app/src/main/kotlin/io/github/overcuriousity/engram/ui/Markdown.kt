@@ -6,8 +6,8 @@ package io.github.overcuriousity.engram.ui
  * in one place and testable without a device.
  *
  * The server renders an artifact with pulldown-cmark and ammonia — headings,
- * emphasis, code, lists, quotes, rules, tables, strikethrough, links — and
- * this reads the same dialect. Where the two disagree the web is right and
+ * emphasis, code, lists, quotes, rules, tables, strikethrough, links, and
+ * `$…$`/`$$…$$` math — and this reads the same dialect. Where the two disagree the web is right and
  * this is the bug; nothing here is a house style. What it deliberately does
  * not do is render a passage: a slice of a document is kept as it was written
  * (see `artifact_html` on the server), and the screen draws that verbatim.
@@ -30,6 +30,11 @@ sealed interface Inline {
     data class Emph(val inlines: List<Inline>) : Inline
     data class Strike(val inlines: List<Inline>) : Inline
     data class Link(val inlines: List<Inline>, val url: String) : Inline
+    /**
+     * A formula's TeX source, without its dollars. `display` is `$$…$$`,
+     * which the web draws as a block of its own even inside a paragraph.
+     */
+    data class Math(val tex: String, val display: Boolean) : Inline
     data object Break : Inline
 }
 
@@ -52,6 +57,9 @@ fun plain(markdown: String): String {
                 is Inline.Emph -> inlines(i.inlines)
                 is Inline.Strike -> inlines(i.inlines)
                 is Inline.Link -> inlines(i.inlines)
+                // The source, as the server's snippet keeps it: a row of words
+                // is no place to typeset, and `\eta` still says what it is.
+                is Inline.Math -> out.append(i.tex)
                 Inline.Break -> out.append(' ')
             }
         }
@@ -298,21 +306,26 @@ private class Blocks(private val lines: List<String>) {
     }
 }
 
-/** The lines of a paragraph, joined: two trailing spaces or a backslash make a hard break. */
+/**
+ * The lines of a paragraph, read as the one run of text they are: two
+ * trailing spaces or a backslash make a hard break, any other line end a soft
+ * one. Read whole rather than line by line because a span may cross a line
+ * end, and the one that does so as a rule is `$$`, which a model writes on
+ * lines of its own around the formula.
+ *
+ * A soft break goes in as `\n` and a hard one as `\r`, which the reader turns
+ * into a space and a break. Both are free to mean that: every `\r` was taken
+ * out at the door, and no `\n` can be inside a line.
+ */
 private fun paragraphInlines(lines: List<String>): List<Inline> {
-    val out = mutableListOf<Inline>()
+    val joined = StringBuilder()
     lines.forEachIndexed { i, raw ->
         val hard = raw.endsWith("  ") || raw.endsWith("\\")
         val text = if (raw.endsWith("\\")) raw.dropLast(1) else raw.trimEnd()
-        val parsed = parseInlines(text.trimStart())
-        if (i > 0) {
-            // A soft break is a space, as the web's flow is.
-            if (out.lastOrNull() != Inline.Break) out += Inline.Text(" ")
-        }
-        out += parsed
-        if (hard && i < lines.size - 1) out += Inline.Break
+        joined.append(text.trimStart())
+        if (i < lines.size - 1) joined.append(if (hard) '\r' else '\n')
     }
-    return merge(out)
+    return parseInlines(joined.toString())
 }
 
 // ── Inlines ──────────────────────────────────────────────────────────────
@@ -347,6 +360,10 @@ private class Inlines(private val s: String) {
             val c = s[i]
             when {
                 c == '\\' && i + 1 < s.length && s[i + 1] in PUNCT -> { text.append(s[i + 1]); i += 2 }
+                // A soft break is a space, as the web's flow is; see `paragraphInlines`.
+                c == '\n' -> { text.append(' '); i++ }
+                c == '\r' -> { flush(); out += Inline.Break; i++ }
+                c == '$' -> { val f = math(); if (f != null) { flush(); out += f } else { text.append('$'); i++ } }
                 c == '`' -> { flush(); out += code() ?: run { text.append('`'); i++; Inline.Text("") } }
                 c == '*' || c == '_' -> {
                     val double = i + 1 < s.length && s[i + 1] == c
@@ -406,6 +423,47 @@ private class Inlines(private val s: String) {
         return inner
     }
 
+    /**
+     * `$…$` or `$$…$$`, read by pulldown-cmark's rules so the phone and the
+     * web find the same formulas. A `$` opens only when what follows is not
+     * whitespace, and an inline one closes only at a `$` that does not follow
+     * whitespace — so `5$ und 10$` and `$5 and $10` are prices, not math. A
+     * formula cannot hold a `$` of its own: the first one at its brace depth
+     * either closes it or, where it cannot, means there was no formula. A `$`
+     * inside braces belongs to them (`\text{$x$}`), and `\$` is a dollar. The
+     * source comes back as written, escapes and all: it is TeX's to read.
+     *
+     * Null where there is no formula here, and `i` is then left alone. A `$$`
+     * that does not close is two dollars, and the second may still open an
+     * inline formula of its own.
+     */
+    private fun math(): Inline? {
+        val display = s.startsWith("$$", i)
+        val open = i + if (display) 2 else 1
+        if (!display && (open >= s.length || space(s[open]))) return null
+        var depth = 0
+        var j = open
+        while (j < s.length) {
+            when (s[j]) {
+                '\\' -> { j += 2; continue }
+                '{' -> depth++
+                '}' -> if (--depth < 0) return null
+                '$' -> if (depth == 0) {
+                    val closes = if (display) s.startsWith("$$", j) else !space(s[j - 1])
+                    if (!closes) return null
+                    val tex = s.substring(open, j).replace('\r', '\n')
+                    i = j + if (display) 2 else 1
+                    return Inline.Math(tex, display)
+                }
+            }
+            j++
+        }
+        return null
+    }
+
+    /** What pulldown-cmark counts as whitespace beside a `$`: ASCII only. */
+    private fun space(c: Char) = c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\u000C'
+
     private fun code(): Inline? {
         var n = 0
         while (i + n < s.length && s[i + n] == '`') n++
@@ -423,7 +481,7 @@ private class Inlines(private val s: String) {
         var body = s.substring(i + n, at)
         if (body.length >= 2 && body.startsWith(" ") && body.endsWith(" ") && body.isNotBlank()) body = body.substring(1, body.length - 1)
         i = at + n
-        return Inline.Code(body.replace('\n', ' '))
+        return Inline.Code(body.replace('\n', ' ').replace('\r', ' '))
     }
 
     private fun link(): Inline? {
@@ -471,6 +529,6 @@ private class Inlines(private val s: String) {
     }
 
     private companion object {
-        const val PUNCT = "\\`*_{}[]()#+-.!|~<>\"'"
+        const val PUNCT = "\\`*_{}[]()#+-.!|~<>\"'$"
     }
 }
