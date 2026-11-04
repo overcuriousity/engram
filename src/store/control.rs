@@ -101,11 +101,11 @@ impl Control {
     /// P-256 key costs microseconds; a read-then-write would cost a race.
     pub async fn ensure_instance(&self) -> Result<()> {
         use base64::Engine;
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
-        let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
+        let secret = p256::SecretKey::generate();
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let private = b64.encode(secret.to_bytes());
-        let public = b64.encode(secret.public_key().to_encoded_point(false).as_bytes());
+        let public = b64.encode(secret.public_key().to_sec1_point(false).as_bytes());
         sqlx::query(
             "INSERT INTO instance (id, vapid_private, vapid_public, created_at) \
              VALUES (1, ?, ?, ?) ON CONFLICT (id) DO NOTHING",

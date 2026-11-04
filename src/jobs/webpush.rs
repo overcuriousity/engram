@@ -6,10 +6,15 @@
 //! What this module does *not* do is send. It builds the request; the
 //! remind unit executes it on the client whose redirect policy
 //! `remind::http_client` argues for.
+//!
+//! The encryption is written out here rather than taken from a crate; see
+//! `Cargo.toml` for why. It is RFC 8291 §3.4 to the letter, for the one
+//! record this ever sends, and the §5 example is its test.
 
 use crate::error::{Error, Result};
 use axum::http;
 use base64::Engine;
+use p256::elliptic_curve::Generate;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
@@ -25,7 +30,7 @@ pub struct WebPushKeys {
 /// The receiver's keys decoded, or why they cannot be. Called at
 /// registration so a bad key is refused at the door, and again at push,
 /// where a stored key can no longer be bad.
-pub fn parse_keys(p256dh: &str, auth: &str) -> Result<(p256::PublicKey, web_push_native::Auth)> {
+pub fn parse_keys(p256dh: &str, auth: &str) -> Result<(p256::PublicKey, [u8; 16])> {
     let point = B64
         .decode(p256dh)
         .map_err(|e| Error::Validation(format!("p256dh: {e}")))?;
@@ -37,7 +42,7 @@ pub fn parse_keys(p256dh: &str, auth: &str) -> Result<(p256::PublicKey, web_push
     let secret: [u8; 16] = secret.try_into().map_err(|v: Vec<u8>| {
         Error::Validation(format!("auth: {} bytes, and the secret is 16", v.len()))
     })?;
-    Ok((public, web_push_native::Auth::from(secret)))
+    Ok((public, secret))
 }
 
 /// The instance's signing identity, RFC 8292.
@@ -137,17 +142,117 @@ pub fn request(
         .map_err(|e| Error::Validation(format!("endpoint: {e}")))?;
     let (public, auth) = parse_keys(&keys.p256dh, &keys.auth)?;
     let exp = crate::store::now() + VAPID_EXP.as_secs() as i64;
-    let mut req = web_push_native::WebPushBuilder::new(uri, public, auth)
-        .with_valid_duration(TTL)
-        .build(body.to_vec())
-        .map_err(|e| Error::Internal(format!("web push: {e}")))?;
-    let header = vapid.authorization(&url, sub, exp);
-    req.headers_mut().insert(
-        http::header::AUTHORIZATION,
-        http::HeaderValue::from_str(&header)
-            .map_err(|e| Error::Internal(format!("vapid header: {e}")))?,
-    );
-    Ok(req)
+    let salt = <[u8; 16]>::generate();
+    let payload = encrypt(body, &public, &auth, &p256::SecretKey::generate(), salt);
+    http::Request::post(uri)
+        .header("ttl", TTL.as_secs())
+        .header(http::header::CONTENT_ENCODING, "aes128gcm")
+        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+        .header(http::header::CONTENT_LENGTH, payload.len())
+        .header(
+            http::header::AUTHORIZATION,
+            vapid.authorization(&url, sub, exp),
+        )
+        .body(payload)
+        .map_err(|e| Error::Internal(format!("web push request: {e}")))
+}
+
+/// RFC 8291 §3.4: the `aes128gcm` body (RFC 8188) of one push, encrypted to
+/// the receiver's key under a sender key made for this message alone.
+///
+/// The ephemeral key and the salt are arguments so the RFC's own example can
+/// be run through it; `request` makes both fresh. The body is one record, so
+/// the record size is the record's own length and the sequence number that
+/// RFC 8188 XORs into the nonce is zero, which leaves the nonce as derived.
+fn encrypt(
+    body: &[u8],
+    ua_public: &p256::PublicKey,
+    auth: &[u8; 16],
+    as_secret: &p256::SecretKey,
+    salt: [u8; 16],
+) -> Vec<u8> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let as_public = as_secret.public_key();
+    let shared = p256::ecdh::diffie_hellman(as_secret.to_nonzero_scalar(), ua_public.as_affine());
+    let ikm = webpush_ikm(auth, &shared, ua_public, &as_public);
+    let (cek, nonce) = record_keys(&ikm, &salt);
+    let mut record = body.to_vec();
+    // The last-record delimiter, and no padding after it.
+    record.push(2);
+    let sealed = aes_gcm::Aes128Gcm::new(&cek.into())
+        .encrypt(&nonce.into(), record.as_slice())
+        .expect("AES-GCM seals any record under 64 GiB");
+    let keyid = point(&as_public);
+    let rs = u32::try_from(sealed.len()).expect("one record is under MAX_RECORD");
+    let mut out = Vec::with_capacity(16 + 4 + 1 + keyid.len() + sealed.len());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&rs.to_be_bytes());
+    out.push(keyid.len() as u8);
+    out.extend_from_slice(&keyid);
+    out.extend_from_slice(&sealed);
+    out
+}
+
+/// The uncompressed SEC1 point, 65 bytes, which is the form both RFC 8291's
+/// key info and the `keyid` field name.
+fn point(key: &p256::PublicKey) -> Vec<u8> {
+    use p256::elliptic_curve::sec1::ToSec1Point;
+    key.to_sec1_point(false).as_bytes().to_vec()
+}
+
+/// RFC 8291 §3.3–3.4: the input keying material, from the ECDH secret and
+/// the receiver's auth secret, bound to both public keys.
+fn webpush_ikm(
+    auth: &[u8; 16],
+    shared: &p256::ecdh::SharedSecret,
+    ua_public: &p256::PublicKey,
+    as_public: &p256::PublicKey,
+) -> [u8; 32] {
+    let mut info = b"WebPush: info\0".to_vec();
+    info.extend_from_slice(&point(ua_public));
+    info.extend_from_slice(&point(as_public));
+    let mut ikm = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(auth), shared.raw_secret_bytes().as_slice())
+        .expand(&info, &mut ikm)
+        .expect("32 bytes is within what HKDF-SHA256 expands to");
+    ikm
+}
+
+/// RFC 8188 §2.2–2.3: the content-encryption key and the nonce of record 0.
+fn record_keys(ikm: &[u8; 32], salt: &[u8; 16]) -> ([u8; 16], [u8; 12]) {
+    let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), ikm);
+    let mut cek = [0u8; 16];
+    hk.expand(b"Content-Encoding: aes128gcm\0", &mut cek)
+        .expect("16 bytes is within what HKDF-SHA256 expands to");
+    let mut nonce = [0u8; 12];
+    hk.expand(b"Content-Encoding: nonce\0", &mut nonce)
+        .expect("12 bytes is within what HKDF-SHA256 expands to");
+    (cek, nonce)
+}
+
+/// The receiver's side of `encrypt`, for the tests that play the phone: one
+/// record, its tag checked, its delimiter stripped. `None` is any failure.
+#[cfg(test)]
+pub(crate) fn decrypt(
+    body: &[u8],
+    ua_secret: &p256::SecretKey,
+    auth: &[u8; 16],
+) -> Option<Vec<u8>> {
+    use aes_gcm::aead::{Aead, KeyInit};
+    let salt: [u8; 16] = body.get(..16)?.try_into().ok()?;
+    let idlen = *body.get(20)? as usize;
+    let as_public = p256::PublicKey::from_sec1_bytes(body.get(21..21 + idlen)?).ok()?;
+    let shared = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), as_public.as_affine());
+    let ikm = webpush_ikm(auth, &shared, &ua_secret.public_key(), &as_public);
+    let (cek, nonce) = record_keys(&ikm, &salt);
+    let mut plain = aes_gcm::Aes128Gcm::new(&cek.into())
+        .decrypt(&nonce.into(), &body[21 + idlen..])
+        .ok()?;
+    let end = plain.iter().rposition(|&b| b != 0)?;
+    (plain[end] == 2).then(|| {
+        plain.truncate(end);
+        plain
+    })
 }
 
 /// One reminder as the payload names it: enough for the phone to draw a row
@@ -220,7 +325,6 @@ mod tests {
             p256::SecretKey::from_slice(&b64("q1dXpw3UpT5VOmu_cf_v6ih07Aems3njxI-JWgLcM94"))
                 .unwrap();
         let auth: [u8; 16] = b64("BTBZMqHH6r4Tts7J_aSIgg").try_into().unwrap();
-        let auth = web_push_native::Auth::from(auth);
         let ciphertext = b64(
             "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
         );
@@ -231,16 +335,40 @@ mod tests {
                 "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8"
             )[..]
         );
-        let plain = web_push_native::decrypt(ciphertext, &secret, &auth).unwrap();
+        let plain = decrypt(&ciphertext, &secret, &auth).unwrap();
         assert_eq!(plain, b"When I grow up, I want to be a watermelon");
     }
 
-    fn a_receiver() -> (p256::SecretKey, web_push_native::Auth, WebPushKeys) {
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
-        let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-        let auth = web_push_native::Auth::from([7u8; 16]);
+    /// The same example forwards: the RFC's sender key and salt, encrypted
+    /// to the RFC's receiver, give the RFC's ciphertext byte for byte. The
+    /// one field that differs is the record size, which the example sets to
+    /// 4096 and `encrypt` sets to the one record it writes.
+    #[test]
+    fn the_rfc_8291_example_encrypts_to_its_ciphertext() {
+        let ua_public = p256::PublicKey::from_sec1_bytes(&b64(
+            "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+        ))
+        .unwrap();
+        let as_secret =
+            p256::SecretKey::from_slice(&b64("yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw"))
+                .unwrap();
+        let auth: [u8; 16] = b64("BTBZMqHH6r4Tts7J_aSIgg").try_into().unwrap();
+        let salt: [u8; 16] = b64("DGv6ra1nlYgDCS1FRnbzlw").try_into().unwrap();
+        let plain = b"When I grow up, I want to be a watermelon";
+        let ours = encrypt(plain, &ua_public, &auth, &as_secret, salt);
+        let mut theirs = b64(
+            "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
+        );
+        assert_eq!(&theirs[16..20], &4096u32.to_be_bytes());
+        theirs[16..20].copy_from_slice(&((plain.len() + 17) as u32).to_be_bytes());
+        assert_eq!(B64.encode(ours), B64.encode(theirs));
+    }
+
+    fn a_receiver() -> (p256::SecretKey, [u8; 16], WebPushKeys) {
+        let secret = p256::SecretKey::generate();
+        let auth = [7u8; 16];
         let keys = WebPushKeys {
-            p256dh: B64.encode(secret.public_key().to_encoded_point(false).as_bytes()),
+            p256dh: B64.encode(point(&secret.public_key())),
             auth: B64.encode(auth),
         };
         (secret, auth, keys)
@@ -281,10 +409,7 @@ mod tests {
             !body.windows(5).any(|w| w == b"hello"),
             "nothing in the clear"
         );
-        assert_eq!(
-            web_push_native::decrypt(body, &secret, &auth).unwrap(),
-            b"hello"
-        );
+        assert_eq!(decrypt(&body, &secret, &auth).unwrap(), b"hello");
     }
 
     #[tokio::test]
