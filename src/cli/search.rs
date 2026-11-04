@@ -203,7 +203,7 @@ async fn plain(
         .bearer_auth(&e.token)
         .send()
         .await
-        .map_err(|err| Error::Validation(format!("{err}")))?;
+        .map_err(|err| e.unreachable(err))?;
     let status = res.status();
     let body = res
         .text()

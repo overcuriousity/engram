@@ -90,7 +90,12 @@ impl Store {
     /// dropped — otherwise a corpus that never started carries stale text into
     /// the model and queues surplus windows forever.
     pub async fn upsert_segments(&self, corpus_id: &str, windows: &[NewSegment<'_>]) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        // Immediate, because this reads and then writes. A deferred `BEGIN`
+        // holds only a read snapshot when the first insert asks for the write
+        // lock, and SQLite refuses that upgrade with `SQLITE_BUSY` at once
+        // rather than waiting out `busy_timeout` — which is how a burst of
+        // captures failed a `synthesize` job with "database is locked" (#86).
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let finished: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM segments WHERE corpus_id = ? AND state = 'done'",
@@ -355,6 +360,46 @@ mod tests {
             end_line,
             text,
         }
+    }
+
+    /// A capture burst: another connection holds the write lock while the
+    /// split is written. On a file, because only there do two connections
+    /// contend, and a deferred `BEGIN` that read first could not wait for it.
+    #[tokio::test]
+    async fn the_split_waits_for_a_writer_instead_of_failing_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("segments.db");
+        let s = Store::connect(
+            &path.to_string_lossy(),
+            {
+                let c = crate::store::control::Control::memory().await.unwrap();
+                c.provision(crate::store::TEST_SUBJECT, None).await.unwrap();
+                c
+            },
+            crate::store::TEST_SUBJECT,
+        )
+        .await
+        .unwrap();
+        let src = s.insert_corpus("raw", "web", None).await.unwrap();
+        let other = s.insert_corpus("other", "web", None).await.unwrap();
+
+        let mut writer = s.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE corpora SET updated_at = updated_at + 1 WHERE id = ?")
+            .bind(&other.id)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+
+        let split = {
+            let s = s.clone();
+            let id = src.id.clone();
+            tokio::spawn(async move { s.upsert_segments(&id, &[seg(1, 10, "window 0")]).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        writer.commit().await.unwrap();
+
+        split.await.unwrap().unwrap();
+        assert_eq!(s.segments_for_corpus(&src.id).await.unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -5,10 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=svc-engram
-WorkingDirectory=/home/svc-engram/engram
-EnvironmentFile=/home/svc-engram/engram/engram.env
-ExecStart=/home/svc-engram/engram/target/release/engram
+User=engram
+WorkingDirectory=/var/lib/engram
+# Secrets such as ENGRAM__AUTH__OIDC__CLIENT_SECRET, kept out of the unit file.
+# Optional: the leading `-` lets the service start without it.
+EnvironmentFile=-/var/lib/engram/engram.env
+ExecStart=/usr/local/bin/engram --config /var/lib/engram/config.toml
 Restart=on-failure
 RestartSec=5
 

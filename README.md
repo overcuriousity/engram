@@ -164,19 +164,25 @@ environment needs no file. `--print-config` shows what engram resolved, redacted
 
 ### As a service
 
-Binary at `/usr/local/bin/engram`, config and database under `/var/lib/engram`:
+Binary at `/usr/local/bin/engram`, config and database under `/var/lib/engram`.
+This is `engram.service`, shipped in the release archive:
 
 ```ini
 [Unit]
 Description=engram
 After=network-online.target
+Wants=network-online.target
 
 [Service]
+Type=simple
 User=engram
 WorkingDirectory=/var/lib/engram
+# Secrets such as ENGRAM__AUTH__OIDC__CLIENT_SECRET, kept out of the unit file.
+# Optional: the leading `-` lets the service start without it.
+EnvironmentFile=-/var/lib/engram/engram.env
 ExecStart=/usr/local/bin/engram --config /var/lib/engram/config.toml
-Environment=ENGRAM__AUTH__OIDC__CLIENT_SECRET=…
 Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
