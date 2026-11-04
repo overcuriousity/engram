@@ -25,6 +25,8 @@ pub fn routes() -> Router<AppState> {
         .route("/moments/{id}/date", post(moment_date))
         .route("/moments/{id}/not-a-reminder", post(not_a_reminder))
         .route("/artifacts/{id}/is-a-reminder", post(is_a_reminder))
+        .route("/artifacts/{id}/reminder", post(save_reminder))
+        .route("/artifacts/{id}/reminder/remove", post(remove_reminder))
         .route("/artifacts/{id}/links/{other}/dismiss", post(dismiss_link))
         .route("/artifacts/{id}/dwell", post(artifact_dwell))
         .route("/artifacts/{id}/about", get(artifact_about))
@@ -298,6 +300,44 @@ async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>) -> Result<StatusC
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(serde::Deserialize)]
+pub struct ReminderBody {
+    /// The instant, Unix seconds.
+    pub at: i64,
+    /// The zone it was chosen in, which a repetition keeps its time of day in.
+    pub tz: String,
+    /// The RRULE, in the subset `validate_rule` admits; absent or null for a
+    /// one-off.
+    #[serde(default)]
+    pub rule: Option<String>,
+}
+
+/// `POST /artifacts/{id}/reminder`: the web's reminder editor, as a call.
+/// Restates the open reminder on this artifact, or makes one by hand on an
+/// ordinary entry. A rule outside the subset is a 400.
+async fn save_reminder(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Json(b): Json<ReminderBody>,
+) -> Result<StatusCode> {
+    let tz = crate::core::moments::zone(Some(&b.tz));
+    let rule = b.rule.as_deref().map(str::trim).filter(|r| !r.is_empty());
+    tenant
+        .core
+        .edit_reminder(&id, b.at, tz.name(), rule)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /artifacts/{id}/reminder/remove`: the reminder taken off, the
+/// operator's own included; the artifact stays an ordinary entry and a
+/// re-read does not file it again.
+async fn remove_reminder(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    tenant.core.store.get_artifact(&id).await?;
+    tenant.core.clear_reminder(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ── Artifacts ────────────────────────────────────────────────────────────
 
 /// `POST /artifacts/{id}/links/{other}/dismiss`: *not related*. Final for
@@ -341,6 +381,21 @@ pub struct About {
     pub condensed: Option<String>,
     /// `in 2 h`, `3 d ago`, … when this artifact carries an open reminder.
     pub due_in: Option<String>,
+    /// That open reminder as an editor needs it, or null where there is none.
+    pub reminder: Option<Reminder>,
+}
+
+/// The open reminder on an artifact: what `POST /artifacts/{id}/reminder`
+/// takes, read back.
+#[derive(serde::Serialize)]
+pub struct Reminder {
+    /// The moment, as the band's own routes name it.
+    pub id: String,
+    /// Unix seconds; null for a reminder that has no date yet.
+    pub at: Option<i64>,
+    pub tz: String,
+    /// The RRULE, null for a one-off.
+    pub rule: Option<String>,
 }
 
 /// `GET /artifacts/{id}/about`. Its own read, like `related`: none of this is
@@ -348,11 +403,23 @@ pub struct About {
 async fn artifact_about(tenant: Tenant, Path(id): Path<String>) -> Result<Json<About>> {
     let c = tenant.core.store.get_artifact(&id).await?;
     let a = crate::web::artifact::about(&tenant.core, &c).await?;
+    let reminder = tenant
+        .core
+        .store
+        .open_due_for_artifact(&id)
+        .await?
+        .map(|m| Reminder {
+            id: m.id,
+            at: m.at,
+            tz: m.tz,
+            rule: m.rule,
+        });
     Ok(Json(About {
         tag: a.tag,
         probes: a.probes,
         condensed: a.condensed,
         due_in: a.due_in,
+        reminder,
     }))
 }
 
@@ -1133,6 +1200,140 @@ mod tests {
         .await;
         assert!(v["undo"].is_null(), "{v}");
         assert!(core.store.moment(&mid).await.unwrap().is_some());
+    }
+
+    /// The two cases #133 names, through the app's door. A reminder read as
+    /// `FREQ=DAILY;INTERVAL=1;BYDAY=TU` from "heute Abend", saved as a
+    /// one-off: done arms nothing. An entry made a weekly reminder and then
+    /// removed: no open row, and `about` says so.
+    #[tokio::test]
+    async fn the_app_edits_a_reminder_and_turns_an_entry_into_one_and_back() {
+        use crate::store::moments::{Kind, NewMoment, Source};
+        let (app, token, core, aid) = learning_base().await;
+        let at = 1_900_000_000;
+        let about = |app: axum::Router| {
+            let token = token.clone();
+            let aid = aid.clone();
+            async move {
+                json_of(
+                    app.oneshot(bare(
+                        "GET",
+                        &format!("/api/v1/artifacts/{aid}/about"),
+                        &token,
+                    ))
+                    .await
+                    .unwrap(),
+                )
+                .await
+            }
+        };
+        assert!(about(app.clone()).await["reminder"].is_null());
+
+        let invented = "FREQ=DAILY;INTERVAL=1;BYDAY=TU";
+        let mid = core
+            .store
+            .insert_moment(&NewMoment {
+                artifact_id: aid.clone(),
+                kind: Kind::Due,
+                at: Some(at),
+                tz: "Europe/Berlin".into(),
+                rule: Some(invented.into()),
+                source: Source::Classified,
+                span: None,
+                series_id: None,
+            })
+            .await
+            .unwrap();
+        let v = about(app.clone()).await;
+        assert_eq!(v["reminder"]["id"], mid.as_str());
+        assert_eq!(v["reminder"]["at"], at);
+        assert_eq!(v["reminder"]["tz"], "Europe/Berlin");
+        assert_eq!(v["reminder"]["rule"], invented);
+
+        let uri = format!("/api/v1/artifacts/{aid}/reminder");
+        let res = app
+            .clone()
+            .oneshot(with_body(
+                "POST",
+                &uri,
+                &token,
+                serde_json::json!({ "at": at, "tz": "Europe/Berlin", "rule": null }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let v = about(app.clone()).await;
+        assert_eq!(v["reminder"]["id"], mid.as_str(), "restated, not replaced");
+        assert!(v["reminder"]["rule"].is_null(), "{v}");
+        let res = app
+            .clone()
+            .oneshot(bare("POST", &format!("/api/v1/moments/{mid}/done"), &token))
+            .await
+            .unwrap();
+        assert!(res.status().is_success(), "{}", res.status());
+        assert!(
+            core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
+            "a one-off done is done: nothing armed"
+        );
+
+        // An ordinary entry made a weekly reminder by hand, then taken off.
+        let res = app
+            .clone()
+            .oneshot(with_body(
+                "POST",
+                &uri,
+                &token,
+                serde_json::json!({ "at": at, "tz": "Europe/Berlin", "rule": "FREQ=WEEKLY" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        let v = about(app.clone()).await;
+        assert_eq!(v["reminder"]["rule"], "FREQ=WEEKLY");
+        let made = core
+            .store
+            .open_due_for_artifact(&aid)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(made.source, Source::Set);
+
+        let bad = app
+            .clone()
+            .oneshot(with_body(
+                "POST",
+                &uri,
+                &token,
+                serde_json::json!({ "at": at, "tz": "UTC", "rule": "FREQ=HOURLY" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+
+        let res = app
+            .clone()
+            .oneshot(bare("POST", &format!("{uri}/remove"), &token))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+        assert!(
+            core.store
+                .open_due_for_artifact(&aid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(about(app.clone()).await["reminder"].is_null());
+
+        let missing = app
+            .oneshot(bare(
+                "POST",
+                "/api/v1/artifacts/no-such/reminder/remove",
+                &token,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

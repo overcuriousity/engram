@@ -206,13 +206,22 @@ internal fun DueLine(engram: Engram, row: DueRow, settled: Settled, onArtifact: 
     )
 }
 
-/** A day, then a time: the web's `datetime-local` in two steps. Answers Unix seconds in the phone's zone. */
+/**
+ * A day, then a time: the web's `datetime-local` in two steps. Answers Unix
+ * seconds in [zone] — the phone's, unless the reminder being edited keeps its
+ * own — starting from [time], nine o'clock where there is nothing to start from.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WhenDialog(initial: LocalDate, onDismiss: () -> Unit, onPick: (Long) -> Unit) {
-    val zone = ZoneId.systemDefault()
+fun WhenDialog(
+    initial: LocalDate,
+    onDismiss: () -> Unit,
+    onPick: (Long) -> Unit,
+    initialTime: LocalTime = LocalTime.of(9, 0),
+    zone: ZoneId = ZoneId.systemDefault(),
+) {
     val date = rememberDatePickerState(initialSelectedDateMillis = initial.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli())
-    val time = rememberTimePickerState(initialHour = 9, initialMinute = 0, is24Hour = true)
+    val time = rememberTimePickerState(initialHour = initialTime.hour, initialMinute = initialTime.minute, is24Hour = true)
     var day by remember { mutableStateOf<LocalDate?>(null) }
     if (day == null) {
         DatePickerDialog(

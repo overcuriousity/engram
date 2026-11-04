@@ -57,7 +57,7 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /corpora/{id}` | One corpus with its text and its artifacts. |
 | `GET /corpora/{id}/file`, `…/image?original=1` | The bytes as captured; the preview by default for an image. |
 | `GET /artifacts/{id}?event=` | One artifact and the document it came from. Records an open — attributed to the search named by `event` where it is the caller's own, and then `search_event` in the answer says so; the verdict bar is drawn only then. |
-| `GET /artifacts/{id}/about` | `{ tag, probes, condensed, due_in }`: what the base found when it arrived, what has asked for it, the open condensation's action id where the live text is condensed, and whether a reminder on it is due. |
+| `GET /artifacts/{id}/about` | `{ tag, probes, condensed, due_in, reminder }`: what the base found when it arrived, what has asked for it, the open condensation's action id where the live text is condensed, whether a reminder on it is due, and that open reminder as `{ id, at, tz, rule }` or null. `at` is null for an undated reminder, `rule` for a one-off. |
 | `GET /artifacts/{id}/lineage` | `{ roots, also_replaced, truncated }`: what it was written from, nested by generation; what it replaced without being written from it; and whether the walk stopped early. A node's `source` is `{ corpus_id, label, start_line, end_line }` or `null` for a merge; `missing: true` is a source deleted since. |
 | `GET /artifacts/{id}/versions` | List of earlier wordings, oldest first. |
 | `GET /artifacts/{id}/related` | `{ related, seen_together, continues_at }`: the nearest artifacts by stored vector, what this one has been reached for alongside (empty while `[learn]` is off), and the next passage of the same document where this one stops mid-sentence. Each row is `{ id, label, named, snippet }`; a `seen_together` row also carries `why` and `corpus_title`. Does not record an open. |
@@ -107,6 +107,8 @@ The routes that used to ask for a decision are gone and answer `404`:
 | `POST /asks/{id}/carried` | Body `{ n }`: this excerpt carried the answer. A toggle; answers `{ carried, verdict }`. |
 | `POST /asks/{id}/keep` | Store the answer as a source. Answers `{ id, duplicate, parked, near_dupe_percent }`. |
 | `POST /moments/{id}/date` | Body `{ at, tz }`: move a reminder, or date an undated one. `204`. |
+| `POST /artifacts/{id}/reminder` | Body `{ at, tz, rule }`: restate the open reminder, or make one by hand on an ordinary entry. `rule` is an RRULE in the subset or null for a one-off; one outside it is `400`. Making one withdraws an earlier *not a reminder*. `204`. |
+| `POST /artifacts/{id}/reminder/remove` | Take every open reminder off, the operator's own included, and record the refusal so a re-read does not file it again. `204`. |
 | `POST /moments/{id}/not-a-reminder` · `POST /artifacts/{id}/is-a-reminder` | Retract the stage's reading, and put it back. The first answers `{ undo }`: the artifact the second would restore it on, or null. |
 | `POST /artifacts/{id}/links/{other}/dismiss` | *Not related.* Final for that pair. `204`. |
 | `POST /artifacts/{id}/dwell` | Body `{ secs }`. `204`. |
