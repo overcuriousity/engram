@@ -47,28 +47,27 @@ impl Endpoint {
     /// way. reqwest's own `error sending request for url (…)` names the full
     /// API path and hides the cause in its source chain, which is the one part
     /// a person can act on: nothing listening, a name that does not resolve.
+    ///
+    /// The cause is read from the `io::Error` in that chain, not from text: an
+    /// OS error is said as its kind (`connection refused`, without the errno),
+    /// and anything else — a failed name lookup — as the error says itself.
     pub(crate) fn unreachable(&self, err: reqwest::Error) -> Error {
         if !(err.is_connect() || err.is_timeout()) {
             return Error::Validation(err.to_string());
         }
-        let mut cause: &dyn std::error::Error = &err;
-        while let Some(next) = cause.source() {
-            cause = next;
-        }
-        let cause = if err.is_timeout() {
-            "timed out".to_string()
-        } else {
-            let text = cause.to_string();
-            // `Connection refused (os error 111)`: the number is for nobody.
-            let text = match text.rfind(" (os error ") {
-                Some(at) => text[..at].to_string(),
-                None => text,
-            };
-            let mut chars = text.chars();
-            match chars.next() {
-                Some(first) => first.to_lowercase().chain(chars).collect(),
-                None => text,
+        let mut io = None;
+        let mut innermost: &dyn std::error::Error = &err;
+        while let Some(next) = innermost.source() {
+            innermost = next;
+            if let Some(e) = next.downcast_ref::<std::io::Error>() {
+                io = Some(e);
             }
+        }
+        let cause = match io {
+            _ if err.is_timeout() => "timed out".to_string(),
+            Some(e) if e.raw_os_error().is_some() => e.kind().to_string(),
+            Some(e) => e.to_string(),
+            None => innermost.to_string(),
         };
         Error::Validation(format!("could not reach {}: {cause}", self.url))
     }
