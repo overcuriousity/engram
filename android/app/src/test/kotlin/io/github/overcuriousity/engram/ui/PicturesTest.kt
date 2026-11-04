@@ -84,6 +84,29 @@ class PicturesTest {
         save("artifact")
     }
 
+    /** The answer from #129 whose formulas the phone used to show as source, in both themes. */
+    @Test fun anAnswerWithFormulasLight() = formulas(ThemeMode.Light, "math-light")
+
+    @Test fun anAnswerWithFormulasDark() = formulas(ThemeMode.Dark, "math-dark")
+
+    private fun formulas(mode: ThemeMode, name: String) {
+        val answer = "Die Lernregel des Perzeptrons:\n\n" +
+            "\$\$w_i \\leftarrow w_i + \\eta \\cdot c \\cdot [h(x) - c(x)]\$\$\n\n" +
+            "- **Lernrate \$\\eta\$:** bestimmt die Schrittweite, mit \$0 < \\eta \\le 1\$.\n" +
+            "- Für \$h(x) = c(x)\$ bleibt \$w_i\$ gleich; sonst wandert es um \$\\frac{\\eta}{2}\$ und mehr.\n\n" +
+            "Ein Preis von 5$ und 10$ bleibt Text, und \$\\undefinedthing\$ zeigt seine Quelle."
+        compose.setContent {
+            EngramTheme(mode) {
+                // A surface, as every screen has, so the text takes the
+                // theme's colour and the formulas are seen to follow it.
+                androidx.compose.material3.Surface(Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.background) {
+                    Markdown(answer, Modifier.padding(16.dp, 8.dp))
+                }
+            }
+        }
+        save(name)
+    }
+
     @Test fun aResultList() {
         val hits = listOf(
             Hit("a", title = "Qdrant payload filters", text = "Filters narrow a search before the vectors are compared, and a payload index is what makes that fast.", primed = true),
