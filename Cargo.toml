@@ -152,7 +152,7 @@ llama-cpp-2 = { version = "=0.1.156", default-features = false, optional = true 
 # `links` crate's DEP_* variables to its direct dependents only, and build.rs
 # needs DEP_LLAMA_GGML_CMAKE_DIR to compile whisper.cpp over the ggml this
 # already built. See vendor/whisper.cpp/README.md — the two pins move together.
-llama-cpp-sys-2 = { version = "=0.1.156", default-features = false, optional = true }
+llama-cpp-sys-2 = { version = "=0.1.160", default-features = false, optional = true }
 # A recording, read and brought to the rate Whisper hears at.
 hound = { version = "3.5", optional = true }
 rubato = { version = "5", optional = true }
