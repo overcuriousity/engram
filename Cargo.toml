@@ -146,12 +146,12 @@ libsqlite3-sys = { version = "0.37", optional = true }
 # llama.cpp in process, for the contained build. CPU only: no OpenMP, which
 # Android does not ship, and no GPU backend. Pinned exactly — the C++ under it
 # moves fast, and an upgrade is a decision.
-llama-cpp-2 = { version = "=0.1.156", default-features = false, optional = true }
+llama-cpp-2 = { version = "=0.1.160", default-features = false, optional = true }
 # Named beside the binding, at the same pin, for one reason: Cargo hands a
 # `links` crate's DEP_* variables to its direct dependents only, and build.rs
 # needs DEP_LLAMA_GGML_CMAKE_DIR to compile whisper.cpp over the ggml this
 # already built. See vendor/whisper.cpp/README.md — the two pins move together.
-llama-cpp-sys-2 = { version = "=0.1.160", default-features = false, optional = true }
+llama-cpp-sys-2 = { version = "=0.1.161", default-features = false, optional = true }
 # A recording, read and brought to the rate Whisper hears at.
 hound = { version = "3.5", optional = true }
 rubato = { version = "5", optional = true }
