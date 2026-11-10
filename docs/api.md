@@ -17,9 +17,8 @@ never changes the shape. A cursor this server did not issue is a `400`.
 
 **2. Lists carry summaries; details carry bodies.** A row of `GET /corpora`
 has no `raw_text`; `GET /corpora/{id}` has it. Search rows keep `text`, because
-the passage is the result. A day keeps its entries' text, because an entry is
-read on the day — and only its entries': a captured row on a day is a link,
-and the document behind it may be a book.
+the passage is the result. A captured row on a day is a link, and the document
+behind it may be a book.
 
 **3. Time is Unix seconds, identity is an id, and a label says whether it is a
 name.** No `href`, no preformatted clock time: a client builds its own links
@@ -62,7 +61,7 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /artifacts/{id}/versions` | List of earlier wordings, oldest first. |
 | `GET /artifacts/{id}/related` | `{ related, seen_together, continues_at }`: the nearest artifacts by stored vector, what this one has been reached for alongside (empty while `[learn]` is off), and the next passage of the same document where this one stops mid-sentence. Each row is `{ id, label, named, snippet }`; a `seen_together` row also carries `why` and `corpus_title`. Does not record an open. |
 | `GET /artifacts/{id}/source` | `{ corpus_id, label, lines }`: the lines the artifact was drawn from with three of context either side, each `{ number, text, in_span }`. `corpus_id` is `null` and `lines` empty for a merge, or where the document is gone. |
-| `GET /days/{date}?tz=` | `{ date, tz, from, to, entries, captured, was_due, refers, sittings }` for one day read in an IANA zone. A date that is not one is a `404`. |
+| `GET /days/{date}?tz=` | `{ date, tz, from, to, captured, was_due, refers, sittings }` for one day read in an IANA zone. A date that is not one is a `404`. |
 | `GET /moments?kind=due\|event&from=&to=` | List of reminders, or of dates that refer to the window. |
 | `POST /context` | Body: the situation bundle. Answers `{ "offer": {…} \| null }`. Records the situation either way. |
 | `POST /context/seen` | Body `{ artifact_id, rung, slot }`, sent when the card is actually on screen. Always `204`. |
@@ -77,7 +76,6 @@ server broke. There are no error codes; the status is the vocabulary.
 | `POST /transcribe` | Multipart, one part named `audio`: the recording. Answers the words in it as `text/plain`. Nothing is stored — dictation is typing, not capture. `404` where no speech model is configured. |
 | `POST /ask?door=app`, `POST /ask/stream?door=app` | As above, and the question is recorded under the person: the answer's `event_id` is what the three routes below name. |
 | `POST /capture?from_ask=` | As the capture door, and what is stored records the question and the artifacts its answer was written from — the web's *edit first*. |
-| `POST /days/{date}/entry` | Body `{ text, tz }`: an entry into that day. Answers `{ id }`. |
 
 ## Judging and undoing
 
@@ -112,7 +110,7 @@ The routes that used to ask for a decision are gone and answer `404`:
 | `POST /moments/{id}/not-a-reminder` · `POST /artifacts/{id}/is-a-reminder` | Retract the stage's reading, and put it back. The first answers `{ undo }`: the artifact the second would restore it on, or null. |
 | `POST /artifacts/{id}/links/{other}/dismiss` | *Not related.* Final for that pair. `204`. |
 | `POST /artifacts/{id}/dwell` | Body `{ secs }`. `204`. |
-| `POST /corpora/{id}/reread` · `/entry` · `/segments/{idx}/unpromote` | Read a lost passage again (`{ from, to }`; `202` queued, `204` nothing to re-read); file a capture as the day's entry or not (`{ on }`); put a promoted window's verbatim text back. |
+| `POST /corpora/{id}/reread` · `/segments/{idx}/unpromote` | Read a lost passage again (`{ from, to }`; `202` queued, `204` nothing to re-read); put a promoted window's verbatim text back. |
 
 Three things these shapes say that are easy to miss:
 

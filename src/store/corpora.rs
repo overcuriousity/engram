@@ -250,29 +250,6 @@ pub fn content_hash(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
 
-/// The hash a corpus is stored and deduplicated under.
-///
-/// The text alone for every ordinary capture, which is what this has always
-/// been. For a capture that names a day it is the day *and* the text, because
-/// a journal entry is scoped to the day it was written on — that is what
-/// `metadata.day` is and what the day page reads.
-///
-/// `content_hash` is `UNIQUE`, so this is not merely a lookup key: two entries
-/// carrying the same short line are two rows or they are one, and the column
-/// decides which. Under the text alone they were one. "Long day." written on
-/// Monday and again on Thursday returned Monday's corpus, stored nothing, and
-/// left Thursday's page reading "Nothing on this day" — the second day's
-/// writing simply discarded, with the press reporting success.
-///
-/// The day goes in front of the text with a newline between, so no day can be
-/// spelled to collide with the beginning of another entry's text.
-pub fn corpus_hash(raw_text: &str, metadata: &serde_json::Value) -> String {
-    match metadata["day"].as_str() {
-        Some(day) => content_hash(format!("{day}\n{raw_text}")),
-        None => content_hash(raw_text),
-    }
-}
-
 fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
     Corpus {
         id: r.get("id"),
@@ -361,7 +338,7 @@ impl Store {
             raw_text: raw_text.to_string(),
             origin: origin.to_string(),
             title_hint: title_hint.map(str::to_string),
-            content_hash: corpus_hash(raw_text, metadata),
+            content_hash: content_hash(raw_text),
             status,
             created_at: now(),
             updated_at: now(),
@@ -534,38 +511,6 @@ impl Store {
             .bind(id)
             .execute(&self.pool)
             .await?;
-        Ok(())
-    }
-
-    /// The channel label and the metadata in one write.
-    ///
-    /// `set_entry` depends on both landing: turning an entry off removes
-    /// `origin_was` from the metadata and restores `origin` from what it held.
-    /// As two statements, a crash or an error between them left `origin =
-    /// journal` with `origin_was` already gone, and the next press fell
-    /// through to `web` — permanently rewriting a `cli`, `share` or
-    /// `extension` capture's channel to one it never came through, which is
-    /// exactly what the guard in `set_entry` exists to prevent.
-    pub async fn set_corpus_origin_and_metadata(
-        &self,
-        id: &str,
-        origin: &str,
-        metadata: &serde_json::Value,
-    ) -> Result<()> {
-        // One statement, so there is no window to crash in — a transaction
-        // around a single UPDATE would only say the same thing at more length.
-        let n =
-            sqlx::query("UPDATE corpora SET origin = ?, metadata = ?, updated_at = ? WHERE id = ?")
-                .bind(origin)
-                .bind(metadata.to_string())
-                .bind(now())
-                .bind(id)
-                .execute(&self.pool)
-                .await?
-                .rows_affected();
-        if n == 0 {
-            return Err(Error::NotFound);
-        }
         Ok(())
     }
 
@@ -843,16 +788,6 @@ impl Store {
         let rows = sqlx::query("SELECT * FROM corpora WHERE created_at >= ? AND created_at < ? ORDER BY created_at, id")
             .bind(from)
             .bind(to)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(row_to_corpus).collect())
-    }
-
-    /// Entries that name a day in `metadata.day`: written on the day page
-    /// about a day other than the one they were written on.
-    pub async fn corpora_by_day(&self, day: &str) -> Result<Vec<Corpus>> {
-        let rows = sqlx::query("SELECT * FROM corpora WHERE json_extract(metadata, '$.day') = ? ORDER BY created_at, id")
-            .bind(day)
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(row_to_corpus).collect())

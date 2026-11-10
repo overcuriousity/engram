@@ -416,10 +416,6 @@ pub struct IngestParams {
     /// beside the text, never inside it.
     #[serde(default)]
     pub note: Option<String>,
-    /// `journal` to file `text` as today's diary entry. Nothing else is
-    /// accepted.
-    #[serde(default)]
-    pub origin: Option<String>,
     /// The IANA time zone the text was written in (e.g. `Europe/Berlin`), so
     /// a date in it is read there.
     #[serde(default)]
@@ -509,25 +505,23 @@ impl PkdbTools {
             return "Ingest failed: supply exactly one of `text`, `url` or `file_base64`."
                 .to_string();
         }
-        // Before `capture_time` takes them: `origin` and `intent` reach only
-        // the text branch, and a client told "Stored" while they were dropped
-        // has been lied to. A `tz` is let through; see `refuse_time_fields`.
+        // Before `capture_time` takes it: `intent` reaches only the text
+        // branch, and a client told "Stored" while it was dropped has been
+        // lied to. A `tz` is let through; see `refuse_time_fields`.
         if p.text.is_none()
-            && let Err(e) =
-                crate::web::api::refuse_time_fields(p.origin.as_deref(), p.intent.as_deref())
+            && let Err(e) = crate::web::api::refuse_time_fields(p.intent.as_deref())
         {
             return format!("Ingest failed: {e}");
         }
-        let time = match crate::web::api::capture_time(p.tz, p.origin, p.intent, ORIGIN_MCP) {
+        let time = match crate::web::api::capture_time(p.tz, p.intent) {
             Ok(t) => t,
             Err(e) => return format!("Ingest failed: {e}"),
         };
         let lang = self.source.lang(&core).await;
         let outcome = if let Some(text) = p.text {
             core.ingest_capture(
-                Capture::new(text, time.origin)
+                Capture::new(text, ORIGIN_MCP)
                     .with_lang(lang)
-                    .from_channel(time.channel)
                     .with_title(p.title)
                     .with_note(p.note)
                     .with_tz(time.tz)
@@ -1514,7 +1508,6 @@ mod tests {
             filename: None,
             title: None,
             note: None,
-            origin: None,
             tz: None,
             intent: None,
         }
@@ -1791,41 +1784,5 @@ mod tests {
             "{out}"
         );
         assert_eq!(format_due(&[], now), "_Nothing is due._");
-    }
-
-    #[tokio::test]
-    async fn ingest_takes_a_journal_origin_and_refuses_any_other() {
-        let core = crate::core::test_support::test_core().await;
-        let tools = PkdbTools::over(core.clone());
-        let out = tools
-            .ingest(Parameters(IngestParams {
-                text: Some("Long day.".into()),
-                url: None,
-                file_base64: None,
-                filename: None,
-                title: None,
-                note: None,
-                origin: Some("journal".into()),
-                tz: Some("Europe/Berlin".into()),
-                intent: None,
-            }))
-            .await;
-        assert!(out.starts_with("Stored") || out.contains('`'), "{out}");
-        let recent = core.store.recent_captures(1).await.unwrap();
-        assert_eq!(recent[0].2, "journal");
-        let refused = tools
-            .ingest(Parameters(IngestParams {
-                text: Some("x".into()),
-                url: None,
-                file_base64: None,
-                filename: None,
-                title: None,
-                note: None,
-                origin: Some("api".into()),
-                tz: None,
-                intent: None,
-            }))
-            .await;
-        assert!(refused.contains("only `journal`"), "{refused}");
     }
 }

@@ -2,7 +2,7 @@
   "sources": [
     [
       "raw",
-      5
+      3
     ]
   ],
   "jobs": [
@@ -13,13 +13,13 @@
   ],
   "failed": [],
   "oldest_pending_secs": 0,
-  "chunks": 6,
+  "chunks": 4,
   "vectors": 2,
   "learning": {
     "pursuits_open": 1,
     "pursuits_unsatisfied": 0,
     "from_pursuits": 0,
-    "gaps_open": 1
+    "gaps_open": 0
   },
   "reap": {
     "judged": 0,
@@ -35,19 +35,18 @@
   "recommend": false,
   "waiting_generation": 0,
   "held": {
-    "corpora": 5,
-    "artifacts": 5
+    "corpora": 3,
+    "artifacts": 3
   },
   "last_kept": {
-    "id": "01a0b6cb-4fc0-72b6-ae20-9d6ea706fc2b",
+    "id": "01a1c47b-6ccc-7176-9951-d1465d9076f4",
     "label": "Older",
     "named": true,
-    "at": 1789773172
+    "at": 1794297785
   },
   "examples": {
     "lang": "en",
-    "remind": "remind me to send the invoice on friday",
-    "journal": "today i finally got the migration working"
+    "remind": "remind me to send the invoice on friday"
   },
-  "teach": false
+  "teach": true
 }

@@ -171,10 +171,9 @@ class ModelsTest {
         assertEquals("Both, merged.", v.single().text)
     }
 
-    @Test fun aDayHasItsFiveSections() {
+    @Test fun aDayHasItsFourSections() {
         val d = Decode.day(fixture("day.json"))
         assertEquals("UTC", d.tz)
-        assertEquals("Long day.", d.entries.single().text)
         assertTrue(d.captured.any { it.label == "Qdrant notes" && it.named })
         assertTrue(d.captured.all { it.at > 0 })
         assertEquals("due", d.wasDue.single().kind)

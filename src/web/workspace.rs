@@ -172,12 +172,12 @@ struct WorkspaceTemplate {
     /// the one that can, and the rest appears when there is something for it
     /// to act on.
     held: bool,
-    /// The two example phrasings under the box, in the reader's language. See
-    /// `moments::examples_for`: they are the classifier's own prototypes, so
-    /// what the page teaches and what the base recognises cannot drift apart.
+    /// The example phrasing under the box, in the reader's language. See
+    /// `moments::examples_for`: it is one of the classifier's own prototypes,
+    /// so what the page teaches and what the base recognises cannot drift
+    /// apart.
     example_remind: &'static str,
-    example_journal: &'static str,
-    /// The language those two are in, for `lang` on the chips. The page is
+    /// The language it is in, for `lang` on the chip. The page is
     /// English and they may not be; see `moments::examples_lang_for`.
     example_lang: &'static str,
     /// Always false here: the shared partials this page renders inline —
@@ -216,9 +216,8 @@ impl WorkspaceTemplate {
 struct HeldTemplate {
     ask_enabled: bool,
     /// See `WorkspaceTemplate`: `_box_hint.html` is one of the partials this
-    /// swaps, and it reads these two.
+    /// swaps, and it reads these.
     example_remind: &'static str,
-    example_journal: &'static str,
     /// See `WorkspaceTemplate`.
     example_lang: &'static str,
     /// True by definition: this fragment exists only for the transition into
@@ -236,11 +235,10 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResul
     if corpora == 0 {
         return Err(crate::error::Error::NotFound.into());
     }
-    let (example_remind, example_journal, example_lang) = examples(&tenant.core, &headers);
+    let (example_remind, example_lang) = examples(&tenant.core, &headers);
     Ok(HtmlTemplate(HeldTemplate {
         ask_enabled: crate::web::state::ask_enabled(&tenant),
         example_remind,
-        example_journal,
         example_lang,
         held: true,
         oob: true,
@@ -279,25 +277,22 @@ async fn idle_line(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<R
 /// unreadable is a reader we know nothing about, and English is what the page
 /// says then.
 ///
-/// Empty phrasings on the embed-only floor: nothing reads a reminder or a
-/// journal entry out of the box without `[infer.synthesize]`, so offering
-/// either would teach a phrasing that does nothing. `_box_hint.html` says
-/// so in their place.
+/// An empty phrasing on the embed-only floor: nothing reads a reminder out of
+/// the box without `[infer.synthesize]`, so offering one would teach a
+/// phrasing that does nothing. `_box_hint.html` says so in its place.
 pub(crate) fn examples(
     core: &crate::core::Core,
     headers: &axum::http::HeaderMap,
-) -> (&'static str, &'static str, &'static str) {
+) -> (&'static str, &'static str) {
     if !core.synthesizes() {
-        return ("", "", "");
+        return ("", "");
     }
     let raw = headers
         .get(axum::http::header::ACCEPT_LANGUAGE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let (remind, journal) = crate::core::moments::examples_for(raw);
     (
-        remind,
-        journal,
+        crate::core::moments::examples_for(raw),
         crate::core::moments::examples_lang_for(raw),
     )
 }
@@ -345,7 +340,7 @@ async fn base_template(
     // still has to know: a search URL against an empty base is a page that
     // must not offer Ask either.
     let (corpora, _) = tenant.core.store.held_brief().await?;
-    let (example_remind, example_journal, example_lang) = examples(&tenant.core, headers);
+    let (example_remind, example_lang) = examples(&tenant.core, headers);
     Ok(WorkspaceTemplate {
         ask_enabled: crate::web::state::ask_enabled(tenant),
         q,
@@ -364,7 +359,6 @@ async fn base_template(
         idle,
         idle_state,
         example_remind,
-        example_journal,
         example_lang,
         held: corpora > 0,
         oob: false,
@@ -1414,8 +1408,8 @@ mod tests {
         assert!(html.contains("<dt>note</dt>"), "{html}");
         assert_eq!(
             html.matches(r#"class="chip-example""#).count(),
-            2,
-            "the two phrasings the reader recognises, pressable: {html}"
+            1,
+            "the phrasing the reader recognises, pressable: {html}"
         );
     }
 
@@ -1423,7 +1417,7 @@ mod tests {
     async fn the_list_of_what_a_paste_becomes_goes_at_five_sources() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        // Distinct texts, because `ingest_capture` dedupes on `corpus_hash` and
+        // Distinct texts, because `ingest_capture` dedupes on `content_hash` and
         // the same sentence five times is one source. Nothing else about them
         // matters — there is no minimum length, only "not empty".
         let text = |n: i64| format!("source number {n}");
@@ -1436,7 +1430,7 @@ mod tests {
         assert!(four.contains("<dt>note</dt>"), "four sources: {four}");
         assert_eq!(
             four.matches(r#"class="chip-example""#).count(),
-            2,
+            1,
             "the chips stand once, under the box: {four}"
         );
 
@@ -1451,7 +1445,7 @@ mod tests {
         );
         assert_eq!(
             five.matches(r#"class="chip-example""#).count(),
-            2,
+            1,
             "and the chips are where they always were: {five}"
         );
     }

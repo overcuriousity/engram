@@ -84,12 +84,11 @@ pick: the call that structures a capture also reads what it is.
 | --- | --- | --- |
 | a **note** | states something | search, Ask, the corpus view |
 | a **reminder** | asks to be reminded | the due band, then a push |
-| a **journal entry** | recounts your day | the day page |
 | an **event** | mentions a date without asking for anything | *Coming up*, the day page |
 | a **link** | restates or answers a note you kept | the rail beside both |
 
-A note is the floor: everything captured is one, and the other four are things a
-note additionally *is*. Nothing leaves search by becoming one of them.
+A note is the floor: everything captured is one, and the other three are things
+a note additionally *is*. Nothing leaves search by becoming one of them.
 
 The reader is a model, not a rule table, so this is guidance and not a syntax.
 It keys on the sentence's *stance* — what you are asking of the note.
@@ -98,7 +97,6 @@ It keys on the sentence's *stance* — what you are asking of the note.
 remind me Friday to send the invoice      → reminder, Friday 09:00
 every Monday, back up the NAS             → reminder, repeating
 the workshop is on the 14th               → event: a date, nothing owed
-long day, but it built                    → journal entry
 PUID is Microsoft's per-user identifier   → note
 ```
 
@@ -111,9 +109,8 @@ under *Coming up*, only the second wakes your phone. An unstated time of day is
 
 `engram -r` and `?intent=remind` are a hint on the prompt, not a filing: the
 model still reads the sentence, and the hint buys a dateless reminder still
-being armed for the band to ask about. `engram -j` is a filing, taken at the
-door. If a filing is wrong, say so on the row — *not a reminder* on the band,
-the toggle on the day page — and the refusal survives a re-read.
+being armed for the band to ask about. If a reminder is wrong, say so on the
+row — *not a reminder* on the band — and the refusal survives a re-read.
 
 ## Three rules
 
@@ -344,7 +341,6 @@ engram -c notes.pdf                 # capture; `pbpaste | engram` captures a pip
 engram -s 40 "loop device"          # search, as wide as you ask
 engram -a "how did I mount it?"     # stream an answer
 engram -r "call the bank tomorrow"  # a hint that this is a reminder
-engram -j "long day, but it built"  # today's journal entry
 engram --show 3                     # read the third hit of the last search in full
 ```
 

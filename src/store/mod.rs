@@ -49,6 +49,31 @@ pub struct Store {
     pub subject: String,
 }
 
+/// Journal entries are gone, and a corpus filed as one is an ordinary capture
+/// again: `origin` goes back to the channel it came through (`origin_was`,
+/// or `web` where an entry was typed on the day page and has none), and the
+/// keys only the entry filing read are dropped. Nothing else about the corpus
+/// changes — it was searchable as an entry and stays searchable as a note.
+///
+/// Idempotent, so it runs on every connect like the schema does: the first
+/// pass leaves no row it would touch again. `json_valid` guards the rows
+/// whose metadata is not JSON at all, which the rest of the base tolerates and
+/// a failed boot would not.
+const RETIRE_JOURNAL: &str = "
+UPDATE corpora
+   SET origin = COALESCE(json_extract(metadata, '$.origin_was'), 'web'),
+       metadata = json_remove(metadata, '$.origin_was', '$.day')
+ WHERE origin = 'journal' AND json_valid(metadata);
+UPDATE corpora SET origin = 'web'
+ WHERE origin = 'journal';
+UPDATE corpora
+   SET metadata = json_remove(metadata, '$.intent')
+ WHERE json_valid(metadata) AND json_extract(metadata, '$.intent') = 'journal';
+UPDATE corpora
+   SET metadata = json_remove(metadata, '$.entry_refused')
+ WHERE json_valid(metadata) AND json_extract(metadata, '$.entry_refused') IS NOT NULL;
+";
+
 impl Store {
     /// Open one tenant's file. The path is passed rather than read from
     /// [`StoreConfig`]: every base belongs to a user, and `store.dir` plus the
@@ -318,6 +343,11 @@ impl Store {
         drop_removed(&self.pool, &REMOVED).await?;
 
         sqlx::raw_sql(SCHEMA)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+
+        sqlx::raw_sql(RETIRE_JOURNAL)
             .execute(&self.pool)
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
@@ -908,5 +938,84 @@ mod tests {
         let err = store.migrate().await.unwrap_err().to_string();
         assert!(err.contains("segments.text"), "unhelpful message: {err}");
         assert!(err.contains("segments.carry_lines"), "{err}");
+    }
+
+    /// A corpus filed as a journal entry by a binary that still had them is
+    /// an ordinary capture once this one connects: the channel it came
+    /// through is back, the keys only the filing read are gone, and a second
+    /// connect finds nothing left to change.
+    #[tokio::test]
+    async fn a_journal_entry_from_before_comes_back_as_the_capture_it_was() {
+        let store = Store::memory().await.unwrap();
+        let set = |id: String, origin: &'static str, meta: serde_json::Value| {
+            let pool = store.pool.clone();
+            async move {
+                sqlx::query("UPDATE corpora SET origin = ?, metadata = ? WHERE id = ?")
+                    .bind(origin)
+                    .bind(meta.to_string())
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+        };
+        let filed = store.insert_corpus("Long day.", "web", None).await.unwrap();
+        set(
+            filed.id.clone(),
+            "journal",
+            serde_json::json!({"origin_was": "cli", "intent": "journal", "tz": "Europe/Berlin"}),
+        )
+        .await;
+        let typed = store
+            .insert_corpus("Quiet evening.", "web", None)
+            .await
+            .unwrap();
+        set(
+            typed.id.clone(),
+            "journal",
+            serde_json::json!({"day": "2026-09-01"}),
+        )
+        .await;
+        let refused = store
+            .insert_corpus("The port is 8443.", "web", None)
+            .await
+            .unwrap();
+        set(
+            refused.id.clone(),
+            "share",
+            serde_json::json!({"entry_refused": true}),
+        )
+        .await;
+        let broken = store.insert_corpus("not json", "web", None).await.unwrap();
+        sqlx::query("UPDATE corpora SET origin = 'journal', metadata = 'nope' WHERE id = ?")
+            .bind(&broken.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        store.migrate().await.unwrap();
+        store.migrate().await.unwrap();
+
+        let c = store.get_corpus(&filed.id).await.unwrap();
+        assert_eq!(c.origin, "cli");
+        assert_eq!(c.metadata, serde_json::json!({"tz": "Europe/Berlin"}));
+        let c = store.get_corpus(&typed.id).await.unwrap();
+        assert_eq!(
+            c.origin, "web",
+            "a day-page entry has no channel but the web"
+        );
+        assert_eq!(c.metadata, serde_json::json!({}));
+        let c = store.get_corpus(&refused.id).await.unwrap();
+        assert_eq!(c.origin, "share");
+        assert_eq!(c.metadata, serde_json::json!({}));
+        let origin: String = sqlx::query_scalar("SELECT origin FROM corpora WHERE id = ?")
+            .bind(&broken.id)
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            origin, "web",
+            "metadata that is not JSON still loses the filing"
+        );
     }
 }

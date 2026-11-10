@@ -67,7 +67,7 @@ pub struct ProposedLink {
 /// The judged half of a capture-time synthesis reply.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Judgement {
-    /// "remind" | "journal" | "none".
+    /// "remind" | "none".
     pub intent: Option<String>,
     /// Local ISO-8601, no zone — the reminder's instant.
     pub when: Option<String>,
@@ -84,10 +84,10 @@ impl Judgement {
     /// The one caller that matters is the judged parse: a reply with no
     /// artifacts is a failure when this is false and the whole point of the
     /// call when it is true. `intent: "none"` is an answer, not a claim —
-    /// the model saying the note is neither a reminder nor a journal entry
-    /// leaves nothing behind, so it does not count.
+    /// the model saying the note is not a reminder leaves nothing behind, so
+    /// it does not count.
     pub fn says_something(&self) -> bool {
-        matches!(self.intent.as_deref(), Some("remind") | Some("journal"))
+        self.intent.as_deref() == Some("remind")
             || !self.events.is_empty()
             || !self.links.is_empty()
     }

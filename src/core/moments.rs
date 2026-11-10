@@ -11,24 +11,22 @@
 #[serde(rename_all = "lowercase")]
 pub enum Intent {
     Remind,
-    Journal,
 }
 
 impl Intent {
     pub fn as_str(&self) -> &'static str {
         match self {
             Intent::Remind => "remind",
-            Intent::Journal => "journal",
         }
     }
 }
 
 /// Example phrasings per intent and language, ten languages. Once the
 /// classifier's prototypes; now the example table the capture box teaches
-/// from — see `examples_for`, which reads the first row of each pair.
+/// from — see `examples_for`, which reads the first row of each language.
 ///
 /// The language tag is carried in the row rather than in a parallel array: a
-/// tag is not recoverable from a sentence, and at eighty rows two lists kept
+/// tag is not recoverable from a sentence, and at forty rows two lists kept
 /// in step by counting is a defect waiting for its first careless insert.
 pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
     // ── en ──
@@ -47,26 +45,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         Intent::Remind,
         "en",
         "i need to renew my passport before the end of the month",
-    ),
-    (
-        Intent::Journal,
-        "en",
-        "today i finally got the migration working",
-    ),
-    (
-        Intent::Journal,
-        "en",
-        "long day, nothing got done, but the walk helped",
-    ),
-    (
-        Intent::Journal,
-        "en",
-        "slept badly again, the whole afternoon was a write-off",
-    ),
-    (
-        Intent::Journal,
-        "en",
-        "quiet evening, cooked properly for once and felt better for it",
     ),
     // ── de ──
     (
@@ -94,26 +72,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "de",
         "erinnerung termin foto ausweis mittwoch 0900 zimmer a323",
     ),
-    (
-        Intent::Journal,
-        "de",
-        "heute war ein langer tag und ich bin müde",
-    ),
-    (
-        Intent::Journal,
-        "de",
-        "heute morgen endlich den fehler gefunden",
-    ),
-    (
-        Intent::Journal,
-        "de",
-        "wieder schlecht geschlafen, der ganze nachmittag war für die katz",
-    ),
-    (
-        Intent::Journal,
-        "de",
-        "ruhiger abend, endlich mal richtig gekocht und es ging mir besser",
-    ),
     // ── fr ──
     (
         Intent::Remind,
@@ -134,26 +92,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         Intent::Remind,
         "fr",
         "je dois refaire mon passeport avant la fin du mois",
-    ),
-    (
-        Intent::Journal,
-        "fr",
-        "aujourd'hui j'ai enfin terminé le rapport",
-    ),
-    (
-        Intent::Journal,
-        "fr",
-        "longue journée, rien d'avancé, mais la promenade m'a fait du bien",
-    ),
-    (
-        Intent::Journal,
-        "fr",
-        "encore mal dormi, tout l'après-midi est passé à côté",
-    ),
-    (
-        Intent::Journal,
-        "fr",
-        "soirée tranquille, j'ai enfin cuisiné correctement",
     ),
     // ── es ──
     (
@@ -176,22 +114,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "es",
         "tengo que renovar el pasaporte antes de fin de mes",
     ),
-    (Intent::Journal, "es", "hoy fue un día tranquilo, leí mucho"),
-    (
-        Intent::Journal,
-        "es",
-        "día largo, no avancé nada, pero el paseo ayudó",
-    ),
-    (
-        Intent::Journal,
-        "es",
-        "otra vez dormí mal, se me fue la tarde entera",
-    ),
-    (
-        Intent::Journal,
-        "es",
-        "por fin cociné bien esta noche y me sentó bien",
-    ),
     // ── pt ──
     (
         Intent::Remind,
@@ -212,22 +134,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         Intent::Remind,
         "pt",
         "preciso pagar o aluguel até o dia primeiro",
-    ),
-    (Intent::Journal, "pt", "hoje acordei cedo e fui correr"),
-    (
-        Intent::Journal,
-        "pt",
-        "dia longo, não rendi nada, mas a caminhada ajudou",
-    ),
-    (
-        Intent::Journal,
-        "pt",
-        "dormi mal de novo, perdi a tarde inteira",
-    ),
-    (
-        Intent::Journal,
-        "pt",
-        "noite tranquila, cozinhei direito pela primeira vez em semanas",
     ),
     // ── it ──
     (
@@ -250,22 +156,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "it",
         "devo rinnovare il passaporto entro fine mese",
     ),
-    (Intent::Journal, "it", "oggi è stata una giornata pesante"),
-    (
-        Intent::Journal,
-        "it",
-        "giornata lunga, non ho concluso niente, ma la passeggiata è servita",
-    ),
-    (
-        Intent::Journal,
-        "it",
-        "ho dormito male di nuovo, pomeriggio buttato",
-    ),
-    (
-        Intent::Journal,
-        "it",
-        "serata tranquilla, finalmente ho cucinato come si deve",
-    ),
     // ── nl ──
     (
         Intent::Remind,
@@ -286,22 +176,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         Intent::Remind,
         "nl",
         "ik moet mijn paspoort verlengen voor het eind van de maand",
-    ),
-    (Intent::Journal, "nl", "vandaag eindelijk de tuin gedaan"),
-    (
-        Intent::Journal,
-        "nl",
-        "lange dag, niets afgekregen, maar die wandeling hielp",
-    ),
-    (
-        Intent::Journal,
-        "nl",
-        "weer slecht geslapen, de hele middag was verloren",
-    ),
-    (
-        Intent::Journal,
-        "nl",
-        "rustige avond, eindelijk weer eens goed gekookt",
     ),
     // ── pl ──
     (
@@ -324,26 +198,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "pl",
         "muszę wyrobić paszport do końca miesiąca",
     ),
-    (
-        Intent::Journal,
-        "pl",
-        "dzisiaj byłem u dentysty, poszło dobrze",
-    ),
-    (
-        Intent::Journal,
-        "pl",
-        "długi dzień, nic nie zrobiłem, ale spacer pomógł",
-    ),
-    (
-        Intent::Journal,
-        "pl",
-        "znowu źle spałem, całe popołudnie zmarnowane",
-    ),
-    (
-        Intent::Journal,
-        "pl",
-        "spokojny wieczór, w końcu porządnie ugotowałem",
-    ),
     // ── tr ──
     (Intent::Remind, "tr", "yarın bana faturayı ödemeyi hatırlat"),
     (
@@ -356,22 +210,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         Intent::Remind,
         "tr",
         "ay sonuna kadar pasaportu yenilemem lazım",
-    ),
-    (Intent::Journal, "tr", "bugün çok yorucu bir gündü"),
-    (
-        Intent::Journal,
-        "tr",
-        "uzun bir gündü, hiçbir şey ilerlemedi ama yürüyüş iyi geldi",
-    ),
-    (
-        Intent::Journal,
-        "tr",
-        "yine kötü uyudum, bütün öğleden sonra boşa gitti",
-    ),
-    (
-        Intent::Journal,
-        "tr",
-        "sakin bir akşam, uzun zamandır ilk kez doğru düzgün yemek yaptım",
     ),
     // ── ru ──
     (Intent::Remind, "ru", "напомни мне завтра позвонить маме"),
@@ -386,40 +224,23 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "ru",
         "нужно продлить паспорт до конца месяца",
     ),
-    (Intent::Journal, "ru", "сегодня наконец закончил проект"),
-    (
-        Intent::Journal,
-        "ru",
-        "длинный день, ничего не сделал, но прогулка помогла",
-    ),
-    (
-        Intent::Journal,
-        "ru",
-        "опять плохо спал, весь день насмарку",
-    ),
-    (
-        Intent::Journal,
-        "ru",
-        "тихий вечер, наконец нормально приготовил ужин",
-    ),
 ];
 
-/// One reminder and one journal example, in the reader's language where the
-/// example table has it and in English where it does not.
+/// One reminder example, in the reader's language where the example table has
+/// it and in English where it does not.
 ///
 /// `accept_language` is the raw header. Only the primary subtag of the first
 /// entry is read: `de-DE,de;q=0.9,en;q=0.8` is a reader who wants German, and
 /// weighing the rest to discover that is arithmetic for nothing.
-/// Which language the examples above came back in.
+/// Which language the example above came back in.
 ///
-/// The pair is the classifier's own prototypes in the reader's language, and
-/// the page around them is English — so a German browser reads an English
-/// interface with two German sentences quoted in it. That is correct, because
-/// those are the words that base would actually be written in; what was wrong
-/// is that nothing in the markup said the language had changed, which is what
-/// a screen reader needs in order not to read German aloud in an English
-/// voice. Returned separately rather than folded into `examples_for`, whose
-/// two-element shape several tests are written against.
+/// The example is one of the classifier's own prototypes in the reader's
+/// language, and the page around it is English — so a German browser reads an
+/// English interface with a German sentence quoted in it. That is correct,
+/// because those are the words that base would actually be written in; what
+/// was wrong is that nothing in the markup said the language had changed,
+/// which is what a screen reader needs in order not to read German aloud in an
+/// English voice.
 ///
 /// The answer is the language actually used, so a subtag with no prototypes
 /// reports the `en` it fell back to rather than the one that was asked for.
@@ -432,22 +253,19 @@ pub fn examples_lang_for(accept_language: &str) -> &'static str {
         .unwrap_or("en")
 }
 
-pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
+pub fn examples_for(accept_language: &str) -> &'static str {
     // The same reading `infer::lang` gives the header, and deliberately the
     // same one: the examples this table teaches and the language the
     // synthesizer is instructed in are one decision, and two parsers over one
     // header is two places for a `de-DE` to stop being German.
     let want = crate::infer::lang::primary_subtag(accept_language);
-    let pick = |intent: Intent| -> &'static str {
-        let of = |lang: &str| {
-            PROTOTYPES
-                .iter()
-                .find(|(i, l, _)| *i == intent && *l == lang)
-                .map(|(_, _, p)| *p)
-        };
-        of(&want).or_else(|| of("en")).unwrap_or("")
+    let of = |lang: &str| {
+        PROTOTYPES
+            .iter()
+            .find(|(i, l, _)| *i == Intent::Remind && *l == lang)
+            .map(|(_, _, p)| *p)
     };
-    (pick(Intent::Remind), pick(Intent::Journal))
+    of(&want).or_else(|| of("en")).unwrap_or("")
 }
 
 /// Whether the operator has already said this note is not that.
@@ -455,13 +273,8 @@ pub fn examples_for(accept_language: &str) -> (&'static str, &'static str) {
 /// `metadata.intent_refused` is a list of intent names, and it has to outlive
 /// a re-read: the judged synthesis derives the intent again every time a
 /// window is re-read, so without a record of the refusal a re-synthesis
-/// quietly files the note again over somebody who had said no. The journal
-/// side has worked this way for a while under `entry_refused`; that key is
-/// still read here, so a base written before this keeps its refusals.
+/// quietly files the note again over somebody who had said no.
 pub fn intent_refused(meta: &serde_json::Value, intent: Intent) -> bool {
-    if intent == Intent::Journal && meta["entry_refused"].as_bool().unwrap_or(false) {
-        return true;
-    }
     meta["intent_refused"]
         .as_array()
         .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(intent.as_str())))
@@ -480,8 +293,8 @@ pub fn refuse_intent(meta: &mut serde_json::Value, intent: Intent) {
     meta["intent_refused"] = serde_json::Value::Array(all);
 }
 
-/// Withdraw one, the legacy key included — turning a filing back on by hand is
-/// the operator saying the note may be read again.
+/// Withdraw one — turning a filing back on by hand is the operator saying the
+/// note may be read again.
 pub fn allow_intent(meta: &mut serde_json::Value, intent: Intent) {
     if let Some(a) = meta["intent_refused"].as_array() {
         let kept: Vec<serde_json::Value> = a
@@ -496,11 +309,6 @@ pub fn allow_intent(meta: &mut serde_json::Value, intent: Intent) {
         } else {
             meta["intent_refused"] = serde_json::Value::Array(kept);
         }
-    }
-    if intent == Intent::Journal
-        && let Some(m) = meta.as_object_mut()
-    {
-        m.remove("entry_refused");
     }
 }
 
@@ -1597,18 +1405,16 @@ mod tests {
 
     #[test]
     fn examples_come_from_the_prototypes_in_the_readers_language() {
-        let (remind, journal) = examples_for("de-DE,de;q=0.9,en;q=0.8");
+        let remind = examples_for("de-DE,de;q=0.9,en;q=0.8");
         assert!(remind.starts_with("erinnere mich"), "{remind}");
-        assert!(journal.starts_with("heute"), "{journal}");
 
-        let (remind, journal) = examples_for("");
+        let remind = examples_for("");
         assert!(
             remind.starts_with("remind me"),
             "English is the fallback: {remind}"
         );
-        assert!(journal.starts_with("today i"), "{journal}");
 
-        let (remind, _) = examples_for("xx-YY");
+        let remind = examples_for("xx-YY");
         assert!(
             remind.starts_with("remind me"),
             "an unknown language falls back too"
@@ -1616,11 +1422,11 @@ mod tests {
     }
 
     /// The table is read by index and by language, so its shape is a contract
-    /// rather than a convention: every language carries both intents, no
+    /// rather than a convention: every language carries its reminders, no
     /// sentence is written twice, and nothing is left in a language
     /// `examples_for` cannot reach.
     #[test]
-    fn every_language_carries_both_intents_and_no_sentence_twice() {
+    fn every_language_carries_reminders_and_no_sentence_twice() {
         let langs: std::collections::BTreeSet<&str> =
             PROTOTYPES.iter().map(|(_, l, _)| *l).collect();
         assert!(
@@ -1628,15 +1434,12 @@ mod tests {
             "English is the fallback and must exist"
         );
         for l in &langs {
-            for intent in [Intent::Remind, Intent::Journal] {
-                let n = PROTOTYPES
-                    .iter()
-                    .filter(|(i, x, _)| i == &intent && x == l)
-                    .count();
-                assert!(n >= 2, "{l} has {n} {} prototypes", intent.as_str());
-            }
-            let (r, j) = examples_for(l);
-            assert!(!r.is_empty() && !j.is_empty(), "{l} resolves to examples");
+            let n = PROTOTYPES
+                .iter()
+                .filter(|(i, x, _)| *i == Intent::Remind && x == l)
+                .count();
+            assert!(n >= 2, "{l} has {n} remind prototypes");
+            assert!(!examples_for(l).is_empty(), "{l} resolves to an example");
         }
         let mut seen = std::collections::BTreeSet::new();
         for (_, _, p) in PROTOTYPES {
@@ -1645,7 +1448,7 @@ mod tests {
     }
 
     #[test]
-    fn a_refusal_is_recorded_per_intent_and_reads_the_key_it_replaced() {
+    fn a_refusal_is_recorded_and_withdrawn() {
         let mut meta = serde_json::json!({});
         assert!(!intent_refused(&meta, Intent::Remind));
         refuse_intent(&mut meta, Intent::Remind);
@@ -1656,32 +1459,20 @@ mod tests {
             "idempotent"
         );
         assert!(intent_refused(&meta, Intent::Remind));
-        assert!(
-            !intent_refused(&meta, Intent::Journal),
-            "one refusal is not the other"
-        );
 
-        refuse_intent(&mut meta, Intent::Journal);
         allow_intent(&mut meta, Intent::Remind);
         assert!(!intent_refused(&meta, Intent::Remind));
-        assert!(
-            intent_refused(&meta, Intent::Journal),
-            "and the other one stands"
-        );
-        allow_intent(&mut meta, Intent::Journal);
         assert!(
             meta.get("intent_refused").is_none(),
             "the last one takes the key with it"
         );
 
-        // A base written before this keeps its refusals, and withdrawing one
-        // clears the old key too — otherwise the undo would appear to work
-        // and the judgement would go on refusing.
-        let mut old = serde_json::json!({"entry_refused": true});
-        assert!(intent_refused(&old, Intent::Journal));
+        // A refusal another binary wrote for an intent this one no longer
+        // knows is left where it is, and reads as no refusal of a reminder.
+        let mut old = serde_json::json!({"intent_refused": ["journal"]});
         assert!(!intent_refused(&old, Intent::Remind));
-        allow_intent(&mut old, Intent::Journal);
-        assert!(!intent_refused(&old, Intent::Journal));
+        allow_intent(&mut old, Intent::Remind);
+        assert_eq!(old["intent_refused"], serde_json::json!(["journal"]));
     }
 
     fn berlin() -> chrono_tz::Tz {

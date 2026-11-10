@@ -40,7 +40,7 @@ mandatory anyway: the `ok_or_else` at `src/config.rs:1194`, and the size fork
 at `passages.rs:243` that arms synthesis when a capture fits one call. Make the
 role optional and let every capture take the verbatim path when it is absent.
 
-Ask, the judged capture, reminders, the journal, promotion and the day page go
+Ask, the judged capture, reminders, promotion and the day page go
 dark without it. They must say so on the surface where they would have
 appeared, not fail — a door that is not configured is not a door that is
 broken, and `PkdbTools::routes` already draws that distinction for `ask` by
