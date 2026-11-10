@@ -74,11 +74,13 @@ class ModelsTest {
     @Test fun statusSaysWhichDoorsAreOpenAndWhatTheIdleLineNeeds() {
         val s = Decode.status(fixture("status.json"))
         assertTrue(s.asks); assertTrue(s.learn); assertFalse(s.recommend)
-        assertEquals(5L, s.held.corpora)
+        assertEquals(3L, s.held.corpora)
         assertEquals("Older", s.lastKept?.label)
         assertEquals("en", s.examples.lang)
         assertTrue(s.examples.remind.isNotEmpty())
-        assertFalse(s.teach)
+        // Three sources is below the five at which the list of what a paste
+        // becomes retires, so the fixture's base still teaches.
+        assertTrue(s.teach)
     }
 
     @Test fun anAnswerFromTheAppsDoorNamesItsEvent() {
