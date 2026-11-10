@@ -95,8 +95,8 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
     core.learn.enabled = true;
     let s = core.store.clone();
 
-    // A titled document with two artifacts cut from known lines, an untitled
-    // one, and a journal entry.
+    // A titled document with two artifacts cut from known lines, and an
+    // untitled one.
     let doc = s
         .insert_corpus(
             "Filters narrow a search.\nPayload indexes make them fast.\nThird line.",
@@ -106,9 +106,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         .await
         .unwrap();
     s.insert_corpus("no title, only an opening", "paste", None)
-        .await
-        .unwrap();
-    s.insert_corpus("Long day.", crate::core::ingest::ORIGIN_JOURNAL, None)
         .await
         .unwrap();
     let arts = s

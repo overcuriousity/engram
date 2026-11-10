@@ -61,7 +61,7 @@ citations linked and the literals no excerpt carries marked.
 
 Everything else the web client has, this has: the due band with its snoozes,
 dates and *not a reminder*; the corpus page band by band with re-read,
-re-segment and delete; a day's entry box; Insights, language, notifications
+re-segment and delete; the day page; Insights, language, notifications
 and what is being recorded behind Settings; and a theme choice. Every owed
 write is an outbox row — the newer ones under one kind, `call`, carrying their
 route — and every press whose answer is what the screen shows next goes to the

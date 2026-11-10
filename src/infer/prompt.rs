@@ -74,9 +74,9 @@ When the prompt carries a JUDGE block, add three top-level fields beside
 "artifacts" — "moment", "events", "links" — judging the INPUT as a note in
 time:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
-  "remind" only when the note asks future-self to act; "journal" only when it
-  records what the writer did or experienced; everything else is "none".
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
+  "remind" only when the note asks future-self to act; everything else is
+  "none".
   "when" is the local wall-clock date and time as ISO-8601 without a zone
   (e.g. 2026-09-04T09:00), or null if the note names no time. Relative words
   (tomorrow, next Friday, in two weeks) are resolved against the current time
@@ -166,9 +166,8 @@ Trägt der Prompt einen JUDGE-Block, füge neben "artifacts" drei weitere Felder
 auf oberster Ebene hinzu — "moment", "events", "links" — und beurteile damit den
 INPUT als Notiz in der Zeit:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
   "remind" nur, wenn die Notiz das zukünftige Ich zum Handeln auffordert;
-  "journal" nur, wenn sie festhält, was der Schreibende getan oder erlebt hat;
   alles andere ist "none". "when" ist das lokale Datum mit Uhrzeit als ISO-8601
   ohne Zone (z. B. 2026-09-04T09:00), oder null, wenn die Notiz keine Zeit
   nennt. Relative Angaben (morgen, nächsten Freitag, in zwei Wochen) werden
@@ -260,9 +259,9 @@ Cuando el prompt lleve un bloque JUDGE, añade tres campos de primer nivel junto
 a "artifacts" — "moment", "events", "links" — juzgando el INPUT como una nota en
 el tiempo:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
-  "remind" solo cuando la nota pide al yo futuro que actúe; "journal" solo
-  cuando registra lo que quien escribe hizo o vivió; todo lo demás es "none".
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
+  "remind" solo cuando la nota pide al yo futuro que actúe; todo lo demás es
+  "none".
   "when" es la fecha y hora local de pared en ISO-8601 sin zona (p. ej.
   2026-09-04T09:00), o null si la nota no nombra ninguna hora. Las palabras
   relativas (mañana, el viernes que viene, dentro de dos semanas) se resuelven
@@ -353,9 +352,8 @@ Quand le prompt porte un bloc JUDGE, ajoute trois champs de premier niveau à
 côté de "artifacts" — "moment", "events", "links" — en jugeant l'INPUT comme une
 note dans le temps :
 
-- moment : {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
-  "remind" seulement quand la note demande au futur soi d'agir ; "journal"
-  seulement quand elle consigne ce que l'auteur a fait ou vécu ; tout le reste
+- moment : {"intent":"remind"|"none","when":...,"rule":...}.
+  "remind" seulement quand la note demande au futur soi d'agir ; tout le reste
   est "none". "when" est la date et l'heure locales au format ISO-8601 sans
   fuseau (p. ex. 2026-09-04T09:00), ou null si la note ne nomme aucune heure.
   Les mots relatifs (demain, vendredi prochain, dans deux semaines) se résolvent
@@ -447,9 +445,8 @@ Quando il prompt porta un blocco JUDGE, aggiungi tre campi di primo livello
 accanto a "artifacts" — "moment", "events", "links" — giudicando l'INPUT come
 una nota nel tempo:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
-  "remind" solo quando la nota chiede al sé futuro di agire; "journal" solo
-  quando registra ciò che chi scrive ha fatto o vissuto; tutto il resto è
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
+  "remind" solo quando la nota chiede al sé futuro di agire; tutto il resto è
   "none". "when" è la data e l'ora locali da orologio in ISO-8601 senza fuso
   (per es. 2026-09-04T09:00), oppure null se la nota non nomina alcun orario. Le
   parole relative (domani, venerdì prossimo, fra due settimane) si risolvono
@@ -541,10 +538,9 @@ Draagt de prompt een JUDGE-blok, voeg dan naast "artifacts" drie velden op het
 hoogste niveau toe — "moment", "events", "links" — en beoordeel de INPUT als een
 notitie in de tijd:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
   "remind" alleen als de notitie het toekomstige zelf vraagt te handelen;
-  "journal" alleen als ze vastlegt wat de schrijver deed of meemaakte; al het
-  andere is "none". "when" is de lokale klokdatum en -tijd als ISO-8601 zonder
+  al het andere is "none". "when" is de lokale klokdatum en -tijd als ISO-8601 zonder
   zone (bijv. 2026-09-04T09:00), of null als de notitie geen tijd noemt.
   Relatieve woorden (morgen, volgende vrijdag, over twee weken) worden opgelost
   tegen de huidige tijd die je krijgt. Die tijd draagt minuten, en een verschil
@@ -631,10 +627,9 @@ Odpowiadaj wyłącznie JSON-em, bez komentarza, dokładnie w tej postaci:
 Gdy prompt niesie blok JUDGE, dodaj obok „artifacts" trzy pola najwyższego
 poziomu — „moment", „events", „links" — oceniając INPUT jako notatkę w czasie:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
-  „remind" tylko wtedy, gdy notatka prosi przyszłe ja o działanie; „journal"
-  tylko wtedy, gdy zapisuje, co piszący zrobił lub przeżył; wszystko inne to
-  „none". „when" to lokalna data i godzina zegarowa w ISO-8601 bez strefy (np.
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
+  „remind" tylko wtedy, gdy notatka prosi przyszłe ja o działanie; wszystko
+  inne to „none". „when" to lokalna data i godzina zegarowa w ISO-8601 bez strefy (np.
   2026-09-04T09:00) albo null, jeśli notatka nie podaje godziny. Słowa względne
   (jutro, w przyszły piątek, za dwa tygodnie) rozwiązuje się względem podanego
   ci bieżącego czasu. Ten czas niesie minuty, a przesunięcie krótsze niż doba
@@ -723,9 +718,9 @@ Quando o prompt trouxer um bloco JUDGE, acrescenta três campos de topo ao lado
 de "artifacts" — "moment", "events", "links" — julgando o INPUT como uma nota no
 tempo:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
-  "remind" só quando a nota pede ao eu futuro que aja; "journal" só quando
-  regista o que quem escreve fez ou viveu; tudo o resto é "none". "when" é a
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
+  "remind" só quando a nota pede ao eu futuro que aja; tudo o resto é
+  "none". "when" é a
   data e hora locais de relógio em ISO-8601 sem fuso (p. ex.
   2026-09-04T09:00), ou null se a nota não indicar hora. Palavras relativas
   (amanhã, na próxima sexta, daqui a duas semanas) resolvem-se contra a hora
@@ -815,10 +810,9 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
 Когда в промпте есть блок JUDGE, добавь рядом с "artifacts" три поля верхнего
 уровня — "moment", "events", "links" — оценивая INPUT как заметку во времени:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
-  "remind" только когда заметка просит будущего себя действовать; "journal"
-  только когда она фиксирует, что пишущий сделал или пережил; всё остальное —
-  "none". "when" — местные дата и время по часам в ISO-8601 без зоны
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
+  "remind" только когда заметка просит будущего себя действовать; всё
+  остальное — "none". "when" — местные дата и время по часам в ISO-8601 без зоны
   (например, 2026-09-04T09:00), или null, если заметка не называет времени.
   Относительные слова (завтра, в следующую пятницу, через две недели)
   раскрываются относительно данного тебе текущего времени. В этом времени есть
@@ -903,10 +897,9 @@ Prompt bir JUDGE bloğu taşıyorsa, "artifacts" yanına üç üst düzey alan e
 "moment", "events", "links" — ve INPUT'u zaman içindeki bir not olarak
 değerlendir:
 
-- moment: {"intent":"remind"|"journal"|"none","when":...,"rule":...}.
+- moment: {"intent":"remind"|"none","when":...,"rule":...}.
   "remind" yalnızca not gelecekteki benlikten eyleme geçmesini istiyorsa;
-  "journal" yalnızca yazanın yaptığını veya yaşadığını kaydediyorsa; geri kalan
-  her şey "none". "when", bölgesiz ISO-8601 biçiminde yerel duvar saati tarihi
+  geri kalan her şey "none". "when", bölgesiz ISO-8601 biçiminde yerel duvar saati tarihi
   ve saatidir (ör. 2026-09-04T09:00) ya da not bir zaman söylemiyorsa null.
   Göreli sözcükler (yarın, gelecek cuma, iki hafta sonra) sana verilen şimdiki
   zamana göre çözülür. O zaman dakikaları taşır ve bir günden kısa bir kayma
@@ -2292,7 +2285,7 @@ pub fn judged_artifacts_schema() -> serde_json::Value {
     schema["properties"]["moment"] = serde_json::json!({
         "type": ["object", "null"],
         "properties": {
-            "intent": {"type": "string", "enum": ["remind", "journal", "none"]},
+            "intent": {"type": "string", "enum": ["remind", "none"]},
             "when": {"type": ["string", "null"]},
             "rule": {"type": ["string", "null"]}
         },
@@ -3091,7 +3084,7 @@ mod tests {
             "corpus_lines",
             "caveats",
             "pinned",
-            r#"{"intent":"remind"|"journal"|"none","when":...,"rule":...}"#,
+            r#"{"intent":"remind"|"none","when":...,"rule":...}"#,
             r#"{"artifact_id":"...","reason":"..."}"#,
             "context only",
             "INPUT",

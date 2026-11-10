@@ -75,7 +75,6 @@ pub async fn run(
             title,
             note,
             tz: tz.as_deref(),
-            origin: None,
             intent: None,
         };
         ids.push(
@@ -172,7 +171,6 @@ pub async fn run_piped(
             title,
             note,
             tz: tz.as_deref(),
-            origin: None,
             intent: None,
         },
         face,
@@ -193,8 +191,6 @@ struct Meta<'a> {
     /// The process's IANA zone, so a date in the text is read where it was
     /// typed rather than where the server runs.
     tz: Option<&'a str>,
-    /// `journal` for `-j`; the server accepts nothing else.
-    origin: Option<&'a str>,
     /// `remind` for `-r`.
     intent: Option<&'a str>,
 }
@@ -206,7 +202,7 @@ struct Meta<'a> {
 /// will not take, and a host has several ways to name a zone that is not an
 /// IANA identifier: `/etc/localtime` symlinked into the leap-second tree
 /// (`right/Europe/Berlin`), a hand-written `/etc/timezone`, a `TZ` holding a
-/// POSIX rule. Sent on regardless, that failed every `-c`, `-r`, `-j` and
+/// POSIX rule. Sent on regardless, that failed every `-c`, `-r` and
 /// piped capture from that host, naming a field the operator never typed.
 ///
 /// So the same parser this end, and where it will not take the name the zone
@@ -248,7 +244,7 @@ fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
     local_zone()
 }
 
-/// One piece of text, sent as the reminder or the entry a verb said it is.
+/// One piece of text, sent as the reminder a verb said it is.
 ///
 /// A body that is nothing but a link is refused here rather than sent. The
 /// server reads such a body as a page to fetch, and a fetched page carries none
@@ -260,20 +256,15 @@ pub async fn run_text(
     text: String,
     title: Option<&str>,
     note: Option<&str>,
-    origin: Option<&str>,
     intent: Option<&str>,
     face: &crate::cli::face::Face,
 ) -> Result<String> {
     if crate::core::fetch::only_a_url(&text).is_some() {
-        let what = if intent == Some("remind") {
-            "a reminder"
-        } else {
-            "a journal entry"
-        };
-        return Err(Error::Validation(format!(
-            "a link on its own is fetched and read by the server, so it cannot be {what}. \
+        return Err(Error::Validation(
+            "a link on its own is fetched and read by the server, so it cannot be a reminder. \
              Capture it with `engram -c`, then say what you want remembered about it."
-        )));
+                .into(),
+        ));
     }
     let http = client()?;
     let tz = local_zone();
@@ -287,7 +278,6 @@ pub async fn run_text(
             title,
             note,
             tz: tz.as_deref(),
-            origin,
             intent,
         },
         face,
@@ -315,11 +305,7 @@ async fn post(
         if let Some(n) = meta.note {
             url.push_str(&format!("note={}&", encode(n)));
         }
-        for (key, value) in [
-            ("tz", meta.tz),
-            ("origin", meta.origin),
-            ("intent", meta.intent),
-        ] {
+        for (key, value) in [("tz", meta.tz), ("intent", meta.intent)] {
             if let Some(v) = value {
                 url.push_str(&format!("{key}={}&", encode(v)));
             }
@@ -843,40 +829,33 @@ mod tests {
 
     /// A body that is one link is read by the server as a page to fetch, and a
     /// fetched page carries none of the fields this path sets. The server said
-    /// so by naming `intent` or `origin` — a field the operator never typed for
-    /// a verb they did.
+    /// so by naming `intent` — a field the operator never typed for a verb
+    /// they did.
     #[tokio::test]
-    async fn a_bare_link_cannot_be_a_reminder_or_an_entry() {
+    async fn a_bare_link_cannot_be_a_reminder() {
         let (e, _core) = endpoint().await;
-        for (intent, origin, word) in [
-            (Some("remind"), None, "a reminder"),
-            (None, Some("journal"), "a journal entry"),
-        ] {
-            let err = run_text(
-                &e,
-                "https://example.com/pay-invoice".into(),
-                None,
-                None,
-                origin,
-                intent,
-                &off(),
-            )
-            .await
-            .expect_err("a link is not a sentence");
-            let msg = err.to_string();
-            assert!(msg.contains(word), "{msg}");
-            assert!(
-                msg.contains("engram -c"),
-                "it names the verb that does work: {msg}"
-            );
-            assert!(!msg.contains("tz"), "and not a field nobody typed: {msg}");
-        }
+        let err = run_text(
+            &e,
+            "https://example.com/pay-invoice".into(),
+            None,
+            None,
+            Some("remind"),
+            &off(),
+        )
+        .await
+        .expect_err("a link is not a sentence");
+        let msg = err.to_string();
+        assert!(msg.contains("a reminder"), "{msg}");
+        assert!(
+            msg.contains("engram -c"),
+            "it names the verb that does work: {msg}"
+        );
+        assert!(!msg.contains("tz"), "and not a field nobody typed: {msg}");
 
         // Prose that merely opens with a link is prose, and still goes.
         run_text(
             &e,
             "https://example.com/x is the invoice, pay it".into(),
-            None,
             None,
             None,
             Some("remind"),
@@ -949,7 +928,6 @@ mod tests {
         let id = run_text(
             &e,
             "Remind me tomorrow at 9".into(),
-            None,
             None,
             None,
             Some("remind"),

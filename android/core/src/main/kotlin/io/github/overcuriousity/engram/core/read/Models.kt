@@ -189,7 +189,7 @@ data class SourceSlice(
 data class LastKept(val id: String, val label: String = "", val named: Boolean = false, val at: Long = 0)
 
 @Serializable
-data class Examples(val lang: String = "en", val remind: String = "", val journal: String = "")
+data class Examples(val lang: String = "en", val remind: String = "")
 
 /** What the base says about itself: which doors are open, and the idle line's facts. */
 @Serializable
@@ -415,9 +415,6 @@ data class NotAReminderAnswer(val undo: String? = null)
 data class NotifyTested(val sent: Boolean = false, val error: String? = null)
 
 @Serializable
-data class DayEntryAnswer(val id: String)
-
-@Serializable
 data class NodeSource(
     @SerialName("corpus_id") val corpusId: String,
     val label: String = "",
@@ -458,7 +455,7 @@ data class Version(
 )
 
 @Serializable
-data class DayCorpus(val id: String, val label: String = "", val named: Boolean = false, val at: Long = 0, val text: String = "")
+data class DayCorpus(val id: String, val label: String = "", val named: Boolean = false, val at: Long = 0)
 
 @Serializable
 data class DayMoment(
@@ -488,13 +485,12 @@ data class DaySitting(
 data class Day(
     val date: String,
     val tz: String = "UTC",
-    val entries: List<DayCorpus> = emptyList(),
     val captured: List<DayCorpus> = emptyList(),
     @SerialName("was_due") val wasDue: List<DayMoment> = emptyList(),
     val refers: List<DayMoment> = emptyList(),
     val sittings: List<DaySitting> = emptyList(),
 ) {
-    val isEmpty: Boolean get() = entries.isEmpty() && captured.isEmpty() && wasDue.isEmpty() && refers.isEmpty() && sittings.isEmpty()
+    val isEmpty: Boolean get() = captured.isEmpty() && wasDue.isEmpty() && refers.isEmpty() && sittings.isEmpty()
 }
 
 @Serializable
@@ -666,7 +662,6 @@ object Decode {
     val carried: (String) -> CarriedAnswer = { ApiJson.decodeFromString(CarriedAnswer.serializer(), it) }
     val notAReminder: (String) -> NotAReminderAnswer = { ApiJson.decodeFromString(NotAReminderAnswer.serializer(), it) }
     val notifyTested: (String) -> NotifyTested = { ApiJson.decodeFromString(NotifyTested.serializer(), it) }
-    val dayEntry: (String) -> DayEntryAnswer = { ApiJson.decodeFromString(DayEntryAnswer.serializer(), it) }
     /** For a write that answers `204`, or whose body is not worth reading. */
     val nothing: (String) -> Unit = { }
     val moments = page(Moment.serializer())
@@ -739,7 +734,6 @@ object Api {
     fun askCarried(event: String) = "/api/v1/asks/$event/carried"
     fun askKeep(event: String) = "/api/v1/asks/$event/keep"
     fun notAReminder(momentId: String) = "/api/v1/moments/$momentId/not-a-reminder"
-    fun dayEntry(date: String) = "/api/v1/days/$date/entry"
     const val FEEDBACK = "/api/v1/feedback"
     const val LANG = "/api/v1/settings/lang"
     const val NOTIFY = "/api/v1/settings/notify"
@@ -759,7 +753,6 @@ object Api {
     fun corpusDelete(id: String) = "/api/v1/corpora/$id"
     fun corpusReprocess(id: String) = "/api/v1/corpora/$id/reprocess"
     fun corpusReread(id: String) = "/api/v1/corpora/$id/reread"
-    fun corpusEntry(id: String) = "/api/v1/corpora/$id/entry"
     fun unpromote(id: String, idx: Long) = "/api/v1/corpora/$id/segments/$idx/unpromote"
 
     fun json(vararg pairs: kotlin.Pair<String, Any?>): String = JsonObject(

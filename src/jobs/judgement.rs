@@ -1,9 +1,9 @@
-//! What a judged synthesis reply becomes: moments, a journal filing, links.
+//! What a judged synthesis reply becomes: moments and links.
 //!
 //! The one reader of time since the 2026-09 capture reshape. The synthesis
-//! call that rewrites a small capture also judges it — reminder, journal
-//! entry, or plain note, with the dates it names and the artifacts it relates
-//! to — and this module writes those judgements down. Everything here is
+//! call that rewrites a small capture also judges it — reminder or plain
+//! note, with the dates it names and the artifacts it relates to — and this
+//! module writes those judgements down. Everything here is
 //! best-effort against artifacts that already stand: a judgement that cannot
 //! be applied is a warning, never a lost capture.
 
@@ -178,7 +178,7 @@ pub async fn apply(
     let forced = meta["intent"].as_str();
     // The door outranks the model. `engram -r` is a person saying "remind
     // me", and the forcing was only ever consumed *inside* the `remind` arm —
-    // so a model answering `none` (or `journal`) for an explicit reminder fell
+    // so a model answering `none` for an explicit reminder fell
     // into the catch-all below, wrote no due row at all, and took the previous
     // reading's reminder with it. The operator's own refusal is still checked
     // inside the arm; nothing else overrules the door.
@@ -187,17 +187,6 @@ pub async fn apply(
         _ => j.intent.as_deref(),
     };
     match read_as {
-        Some("journal")
-            if JOURNALABLE.contains(&src.origin.as_str())
-                && !intent_refused(&meta, Intent::Journal) =>
-        {
-            // The reading says this is an entry and not a reminder, so the
-            // reminder the previous reading filed is withdrawn — the delete
-            // that used to happen unconditionally at the top of `apply`, moved
-            // to the one arm that is actually saying it.
-            core.store.delete_read_due(anchor_id).await?;
-            core.set_entry(corpus_id, true).await?;
-        }
         Some("remind") => {
             if intent_refused(&meta, Intent::Remind) {
                 // The operator has said this is not a reminder. Their word,
@@ -425,26 +414,15 @@ pub async fn apply(
                 tracing::warn!(error = %e, "could not push the capture-time confirmation");
             }
         }
-        // Every other reading — an intent of `none`, or a `journal` on an
-        // origin that may not be filed as one — says outright that this note
-        // is not a reminder, and the previous reading's rows go with it. The
-        // arms above are the two that had something of their own to say first.
+        // Every other reading — an intent of `none`, or anything this binary
+        // does not know — says outright that this note is not a reminder, and
+        // the previous reading's rows go with it.
         _ => {
             core.store.delete_read_due(anchor_id).await?;
         }
     }
     Ok(())
 }
-
-/// Origins the judgement may file as a journal entry. Not `api` or `mcp`:
-/// a program that wanted an entry says so with `origin`.
-pub const JOURNALABLE: &[&str] = &[
-    crate::core::ingest::ORIGIN_WEB,
-    "ui",
-    "cli",
-    crate::core::ingest::ORIGIN_SHARE,
-    "extension",
-];
 
 /// Write down what was read. Cheap, and it makes every later argument about
 /// a filing a measurement instead of an opinion.
@@ -454,8 +432,8 @@ async fn record_intent(
     intent: Option<&str>,
 ) -> Result<serde_json::Value> {
     // Read here rather than reusing `apply`'s snapshot from the top of the
-    // call: this is a read-modify-write of a column `set_reminder` and
-    // `set_entry` also write, and the further back the read is, the wider the
+    // call: this is a read-modify-write of a column `set_reminder` also
+    // writes, and the further back the read is, the wider the
     // window in which an operator's press is overwritten by a stale clone.
     let mut meta = core.store.get_corpus(corpus_id).await?.metadata;
     // Indexing a `Value` that is not an object panics, and this one comes
@@ -1217,7 +1195,7 @@ mod tests {
     /// reading's reminder with it.
     #[tokio::test]
     async fn a_door_that_says_remind_me_outranks_a_model_that_says_otherwise() {
-        for answered in ["none", "journal"] {
+        for answered in ["none", "anything else"] {
             let mut core = test_core().await;
             core.synthesizer = Some(judged_core_reply(Judgement {
                 intent: Some(answered.into()),

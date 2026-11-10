@@ -32,9 +32,7 @@ pub fn routes() -> Router<AppState> {
         .route("/artifacts/{id}/about", get(artifact_about))
         .route("/corpora/{id}/bands", get(corpus_bands))
         .route("/corpora/{id}/reread", post(corpus_reread))
-        .route("/corpora/{id}/entry", post(corpus_entry))
         .route("/corpora/{id}/segments/{idx}/unpromote", post(unpromote))
-        .route("/days/{date}/entry", post(day_entry))
         .route("/facets", get(facets))
         .route("/echo", get(echo))
         .route("/feedback", get(feedback).delete(purge_feedback))
@@ -609,22 +607,6 @@ async fn corpus_reread(
     )
 }
 
-#[derive(serde::Deserialize)]
-pub struct EntryBody {
-    pub on: bool,
-}
-
-/// `POST /corpora/{id}/entry`: file a capture as the day's entry, or take it
-/// back out.
-async fn corpus_entry(
-    tenant: Tenant,
-    Path(cid): Path<String>,
-    Json(b): Json<EntryBody>,
-) -> Result<StatusCode> {
-    tenant.core.set_entry(&cid, b.on).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 /// `POST /corpora/{id}/segments/{idx}/unpromote`: put the verbatim text back
 /// in results and retire what a promotion wrote.
 async fn unpromote(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> Result<StatusCode> {
@@ -640,44 +622,6 @@ async fn unpromote(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> Res
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(serde::Deserialize)]
-pub struct DayEntryBody {
-    pub text: String,
-    pub tz: String,
-}
-
-#[derive(serde::Serialize)]
-pub struct DayEntryAnswer {
-    pub id: String,
-}
-
-/// `POST /days/{date}/entry`: an entry *into this day*, whenever it is
-/// written. `day::entry`'s rules: the date is a date, and the zone goes
-/// through the zone table.
-async fn day_entry(
-    tenant: Tenant,
-    Path(date): Path<String>,
-    headers: axum::http::HeaderMap,
-    Json(b): Json<DayEntryBody>,
-) -> Result<Json<DayEntryAnswer>> {
-    let Ok(day) = chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d") else {
-        return Err(Error::NotFound);
-    };
-    if b.text.trim().is_empty() {
-        return Err(Error::Validation("the entry is empty".into()));
-    }
-    let date = day.format("%Y-%m-%d").to_string();
-    let tz_name = crate::core::moments::zone(Some(&b.tz)).name().to_string();
-    let lang = crate::web::state::capture_lang(&tenant, &headers).await;
-    let mut c = crate::core::ingest::Capture::new(&b.text, crate::core::ingest::ORIGIN_JOURNAL)
-        .from_channel(crate::core::ingest::ORIGIN_WEB)
-        .with_lang(lang)
-        .with_tz(Some(tz_name));
-    c.metadata["day"] = serde_json::Value::String(date);
-    let out = tenant.core.ingest_capture(c).await?;
-    Ok(Json(DayEntryAnswer { id: out.id }))
 }
 
 // ── Facets, feedback, settings ───────────────────────────────────────────
@@ -1476,7 +1420,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_corpus_page_as_data_and_the_entry_switch() {
+    async fn the_corpus_page_as_data() {
         let (app, token, core) = app_token_and_core().await;
         let out = core
             .ingest_capture(Capture::new(
@@ -1513,79 +1457,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
-
-        let res = app
-            .clone()
-            .oneshot(with_body(
-                "POST",
-                &format!("/api/v1/corpora/{id}/entry"),
-                &token,
-                serde_json::json!({ "on": true }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            core.store.get_corpus(&id).await.unwrap().origin,
-            crate::core::ingest::ORIGIN_JOURNAL
-        );
-        app.oneshot(with_body(
-            "POST",
-            &format!("/api/v1/corpora/{id}/entry"),
-            &token,
-            serde_json::json!({ "on": false }),
-        ))
-        .await
-        .unwrap();
-        assert_ne!(
-            core.store.get_corpus(&id).await.unwrap().origin,
-            crate::core::ingest::ORIGIN_JOURNAL
-        );
-    }
-
-    #[tokio::test]
-    async fn an_entry_goes_into_its_day() {
-        let (app, token, core) = app_token_and_core().await;
-        let v = json_of(
-            app.clone()
-                .oneshot(with_body(
-                    "POST",
-                    "/api/v1/days/2026-09-18/entry",
-                    &token,
-                    serde_json::json!({ "text": "Long day.", "tz": "Europe/Berlin" }),
-                ))
-                .await
-                .unwrap(),
-        )
-        .await;
-        let c = core
-            .store
-            .get_corpus(v["id"].as_str().unwrap())
-            .await
-            .unwrap();
-        assert_eq!(c.origin, crate::core::ingest::ORIGIN_JOURNAL);
-        assert_eq!(c.metadata["day"], "2026-09-18");
-        let res = app
-            .clone()
-            .oneshot(with_body(
-                "POST",
-                "/api/v1/days/garbage/entry",
-                &token,
-                serde_json::json!({ "text": "x", "tz": "UTC" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        let res = app
-            .oneshot(with_body(
-                "POST",
-                "/api/v1/days/2026-09-18/entry",
-                &token,
-                serde_json::json!({ "text": "  ", "tz": "UTC" }),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

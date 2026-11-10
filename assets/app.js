@@ -3149,8 +3149,7 @@
     // ever delivered that way: `_idle_foot.html` is swapped `hx-swap-oob`, so
     // `htmx:afterSwap` never sees it. Unvisited, the anchor keeps the UTC date
     // the server wrote into the path and carries no `?tz=` — east of Greenwich
-    // every capture after local midnight linked to the previous day, and the
-    // entries typed on that page were stamped with it.
+    // every capture after local midnight linked to the previous day.
     document.body.addEventListener('htmx:oobAfterSwap', function (e) {
       zoneDayLinks(e.target);
     });

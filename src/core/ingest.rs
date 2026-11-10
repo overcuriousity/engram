@@ -16,8 +16,6 @@ pub const ORIGIN_IMAGE: &str = "image";
 pub const ORIGIN_PDF: &str = "pdf";
 /// Text typed or pasted into the capture box.
 pub const ORIGIN_WEB: &str = "web";
-/// Written as a diary entry: the day page shows it in full, oldest first.
-pub const ORIGIN_JOURNAL: &str = "journal";
 /// A page read from a pasted link, by this server, as a stranger.
 pub const ORIGIN_FETCH: &str = "fetch";
 /// A share from a phone's share sheet — the Android share target, the iOS
@@ -259,24 +257,6 @@ impl Capture {
     /// The one thing the door does decide is size. Only a single-window corpus
     /// is judged at all, so a forced reminder over text that would split is
     /// refused outright — see `refuse_a_reminder_too_large_to_judge`.
-    /// The channel a capture arrived through, for a door that also asked for
-    /// `journal`.
-    ///
-    /// `origin` then carries the filing and not the channel, and the channel is
-    /// otherwise simply gone: `set_entry(false)` reads `origin_was` to put the
-    /// note back where it came from, finds nothing, and falls through to `web`.
-    /// A journal entry an MCP client filed came back claiming it was typed into
-    /// the web box, permanently, on the one path whose whole job is provenance.
-    /// `ingest_capture` writes the same key for the door that declares its
-    /// intent instead of its origin; this is that path for the doors that
-    /// declare the origin.
-    pub fn from_channel(mut self, channel: &str) -> Self {
-        if self.origin == ORIGIN_JOURNAL && channel != ORIGIN_JOURNAL {
-            self.metadata["origin_was"] = serde_json::Value::String(channel.to_string());
-        }
-        self
-    }
-
     pub fn with_intent(mut self, intent: Option<crate::core::moments::Intent>) -> Self {
         if let Some(i) = intent {
             self.metadata["intent"] = serde_json::Value::String(i.as_str().into());
@@ -657,17 +637,6 @@ impl Core {
 
     /// The same thing, for a door that also knows where the text was read.
     pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
-        // A door that says "this is a journal entry" is taken at its word,
-        // where a person typed it. Everything unforced waits for the judged
-        // synthesis call — the cue table retired with the classifier.
-        let mut c = c;
-        let journal = crate::core::moments::Intent::Journal;
-        let is_entry = c.metadata["intent"].as_str() == Some(journal.as_str());
-        if is_entry && crate::jobs::judgement::JOURNALABLE.contains(&c.origin.as_str()) {
-            let was = std::mem::replace(&mut c.origin, ORIGIN_JOURNAL.to_string());
-            c.metadata["origin_was"] = serde_json::Value::String(was);
-        }
-        let c = c;
         let text = c.text.as_str();
         let origin = c.origin.as_str();
         let title_hint = c.title_hint.as_deref();
@@ -679,31 +648,7 @@ impl Core {
         let forced_remind =
             c.metadata["intent"].as_str() == Some(crate::core::moments::Intent::Remind.as_str());
 
-        // The same bytes on a different day are not a duplicate — see
-        // `corpus_hash`, which is what decides it, because the column is
-        // UNIQUE and two entries are two rows or they are one.
-        //
-        // The second read is for the rows already in the base. Those were
-        // stored under the text alone, whatever day they name, so a journal
-        // entry repeated verbatim on its own day would miss the day-scoped
-        // hash and be written a second time onto the same day — which is the
-        // one duplicate this whole change is not asking for. Looked up by the
-        // old hash and accepted only where the day agrees, which is exactly
-        // the state a base upgrading into this has.
-        let existing = match self
-            .store
-            .find_by_hash(&crate::store::corpora::corpus_hash(text, &c.metadata))
-            .await?
-        {
-            Some(e) => Some(e),
-            None if c.metadata["day"].is_string() => self
-                .store
-                .find_by_hash(&content_hash(text))
-                .await?
-                .filter(|e| e.metadata["day"] == c.metadata["day"]),
-            None => None,
-        };
-        if let Some(existing) = existing {
+        if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
             // The same bytes captured twice, the second time with "remind me"
             // on them. The stored corpus is the right row and this call adds
@@ -728,8 +673,7 @@ impl Core {
         // Queued either way, and flagged where it resembles something stored.
         // It used to be parked — stored with no job until a person decided on
         // Ops — and a capture nobody decided on was never searchable. Short
-        // notes and a journal line repeated on another day scored as
-        // near-duplicates of what they were not, and went the same way. The
+        // notes scored as near-duplicates of what they were not, and went the same way. The
         // pair judging downstream is what reconciles competing artifacts; the
         // flag is left as a note on the capture, and asks nobody anything.
         let followup = match &near {
@@ -1944,57 +1888,6 @@ impl Core {
         Ok(())
     }
 
-    /// A channel label with an undo, and the one write to `corpora.origin`
-    /// outside insert. `raw_text` is untouched.
-    pub async fn set_entry(&self, corpus_id: &str, on: bool) -> Result<()> {
-        let src = self.store.get_corpus(corpus_id).await?;
-        let mut meta = src.metadata.clone();
-        let origin = if on {
-            if src.origin == ORIGIN_JOURNAL {
-                return Ok(());
-            }
-            meta["origin_was"] = serde_json::Value::String(src.origin.clone());
-            // Turning it on by hand withdraws an earlier refusal, so the stage
-            // may file this note again. Only a person reaches here with `true`
-            // while the flag stands: `jobs::moments` reads the refusal first
-            // and does not call.
-            crate::core::moments::allow_intent(&mut meta, crate::core::moments::Intent::Journal);
-            ORIGIN_JOURNAL.to_string()
-        } else {
-            // The mirror of the guard above, and it has to be here for a
-            // stronger reason than symmetry: the first undo removes
-            // `origin_was`, so a second one — a re-post of the `on=0` form on
-            // the capture receipt, a back-navigation — finds nothing to
-            // restore and falls through to `web`. That silently rewrote a
-            // `cli`, `share` or `extension` capture's channel to one it never
-            // came through. A corpus that is not a journal entry has nothing
-            // to undo.
-            if src.origin != ORIGIN_JOURNAL {
-                return Ok(());
-            }
-            let was = meta["origin_was"]
-                .as_str()
-                .unwrap_or(ORIGIN_WEB)
-                .to_string();
-            if let Some(m) = meta.as_object_mut() {
-                m.remove("origin_was");
-            }
-            // The refusal has to outlive the undo, because the reading that
-            // filed the note does not stop being true. `jobs::moments` derives
-            // the intent again on every re-embed and would file it a second
-            // time — a reindex or a switched embed model quietly overruling the
-            // operator, on a note they had already put back.
-            crate::core::moments::refuse_intent(&mut meta, crate::core::moments::Intent::Journal);
-            was
-        };
-        // One write: the undo removes `origin_was` and restores `origin` from
-        // what it held, and a failure between the two left the entry flag on
-        // with nothing left to restore from.
-        self.store
-            .set_corpus_origin_and_metadata(corpus_id, &origin, &meta)
-            .await
-    }
-
     /// Hand a corpus that already stands back to the judged read, as a door
     /// that asked for a reminder on text the base already holds.
     ///
@@ -2157,14 +2050,10 @@ impl Core {
         Ok(self.reminder_reread(artifact_id).await?.is_some())
     }
 
-    /// The reminder's half of `set_entry`: "this is not a reminder", with an
-    /// undo, and it sticks.
+    /// "This is not a reminder", with an undo, and it sticks.
     ///
-    /// The journal side has had a durable refusal for a while; the reminder
-    /// side had none, and it is the side where being wrong costs more — a
-    /// journal entry that should not be one is a changed label, while a
-    /// reminder that should not be one is a row on the band, an armed unit and
-    /// a push to somebody's phone. The only way to make one stay gone across a
+    /// Being wrong here costs: a reminder that should not be one is a row on
+    /// the band, an armed unit and a push to somebody's phone. The only way to make one stay gone across a
     /// re-embed was to mark it *done*, which is the wrong verb for a thing
     /// that was never a task and the wrong record to leave in the base.
     ///
@@ -4218,88 +4107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_journal_cue_at_capture_files_the_note_as_an_entry_and_can_be_undone() {
-        let core = test_core().await;
-        // The door said so — the cue table retired with the classifier, and
-        // an unforced note waits for the judged synthesis call.
-        let out = core
-            .ingest_capture(
-                Capture::new("Dear diary, the move is over.", "ui")
-                    .with_intent(Some(crate::core::moments::Intent::Journal)),
-            )
-            .await
-            .unwrap();
-        let c = core.store.get_corpus(&out.id).await.unwrap();
-        assert_eq!(c.origin, "journal");
-        assert_eq!(c.metadata["origin_was"], "ui");
-        core.set_entry(&out.id, false).await.unwrap();
-        let c = core.store.get_corpus(&out.id).await.unwrap();
-        assert_eq!(c.origin, "ui");
-        assert!(c.metadata.get("origin_was").is_none());
-        core.set_entry(&out.id, true).await.unwrap();
-        assert_eq!(
-            core.store.get_corpus(&out.id).await.unwrap().origin,
-            "journal"
-        );
-    }
-
-    /// The undo is idempotent, and a note that is not an entry has none.
-    ///
-    /// `origin_was` is removed by the first undo, so a second one — the `on=0`
-    /// form on the capture receipt re-posted, a back-navigation — found
-    /// nothing to restore and fell through to `web`. That rewrote the channel
-    /// a capture actually came through, on a corpus the button was never about.
-    #[tokio::test]
-    async fn undoing_an_entry_twice_leaves_the_channel_it_came_through() {
-        let core = test_core().await;
-        let out = core
-            .ingest_capture(
-                Capture::new("Dear diary, the move is over.", "cli")
-                    .with_intent(Some(crate::core::moments::Intent::Journal)),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            core.store.get_corpus(&out.id).await.unwrap().origin,
-            "journal"
-        );
-        core.set_entry(&out.id, false).await.unwrap();
-        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "cli");
-        core.set_entry(&out.id, false).await.unwrap();
-        assert_eq!(
-            core.store.get_corpus(&out.id).await.unwrap().origin,
-            "cli",
-            "a second undo invented a channel the capture never came through"
-        );
-
-        // And a note that was never an entry is untouched by the off switch.
-        let plain = core
-            .ingest_capture(Capture::new("Die Portnummer ist 8443.", "share"))
-            .await
-            .unwrap();
-        assert_eq!(
-            core.store.get_corpus(&plain.id).await.unwrap().origin,
-            "share"
-        );
-        core.set_entry(&plain.id, false).await.unwrap();
-        assert_eq!(
-            core.store.get_corpus(&plain.id).await.unwrap().origin,
-            "share"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_journal_cue_through_the_api_or_mcp_is_left_alone() {
-        let core = test_core().await;
-        let out = core
-            .ingest_capture(Capture::new("Heute war ein langer Tag.", "mcp"))
-            .await
-            .unwrap();
-        assert_eq!(core.store.get_corpus(&out.id).await.unwrap().origin, "mcp");
-    }
-
-    #[tokio::test]
-    async fn a_forced_remind_outranks_the_journal_cue() {
+    async fn a_forced_remind_is_a_reminder_and_keeps_its_origin() {
         // `engram -r "Heute den Bericht abgeben"` opens like a diary entry and
         // is a reminder anyway: the door said so.
         let core = test_core().await;
@@ -4311,8 +4119,7 @@ mod tests {
             .await
             .unwrap();
         let c = core.store.get_corpus(&out.id).await.unwrap();
-        assert_eq!(c.origin, "ui", "not filed as an entry");
-        assert!(c.metadata.get("origin_was").is_none());
+        assert_eq!(c.origin, "ui");
         crate::jobs::test_support::drain(&core).await;
         assert_eq!(
             core.store.open_due(0, i64::MAX).await.unwrap().len(),
@@ -4674,25 +4481,6 @@ mod tests {
         );
         // Without the door it is an ordinary capture, and goes.
         core.ingest_capture(Capture::new(text, "ui")).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn a_forced_journal_is_filed_on_the_doors_word_alone() {
-        // `engram -j` on a note that reads like nothing in particular. The
-        // caller said what this is; asking the cue table to agree made an
-        // explicit instruction conditional on a guess about the text.
-        let core = test_core().await;
-        let out = core
-            .ingest_capture(
-                Capture::new("The roof, and then the gutters.", "ui")
-                    .with_intent(Some(crate::core::moments::Intent::Journal)),
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            core.store.get_corpus(&out.id).await.unwrap().origin,
-            "journal"
-        );
     }
 
     /// A reminder read onto a passage, and the passage superseded under it.

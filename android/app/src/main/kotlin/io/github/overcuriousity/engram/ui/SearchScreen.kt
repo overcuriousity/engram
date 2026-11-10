@@ -352,8 +352,6 @@ fun BoxHint(doors: Status?, onExample: (String) -> Unit) {
             FlowRow(verticalArrangement = Arrangement.spacedBy(0.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Try", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.bodySmall, color = muted())
                 TextButton(onClick = { onExample(ex.remind) }) { Text("“${ex.remind}”", style = MaterialTheme.typography.bodySmall) }
-                Text("or", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.bodySmall, color = muted())
-                TextButton(onClick = { onExample(ex.journal) }) { Text("“${ex.journal}”", style = MaterialTheme.typography.bodySmall) }
             }
         }
     }
@@ -498,7 +496,6 @@ fun IdleFoot(doors: Status?, onCorpus: (String) -> Unit) {
             for ((k, v) in listOf(
                 "note" to "anything you keep",
                 "reminder" to "“${d.examples.remind}”",
-                "entry" to "“${d.examples.journal}”",
                 "event" to "a date, nothing asked",
                 "link" to "made on its own",
                 "source" to "what you pasted, unchanged",

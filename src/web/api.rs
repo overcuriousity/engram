@@ -187,8 +187,8 @@ pub struct StatusResponse {
     /// gaps (`[learn]`), and the offer card (`[recommend]`).
     pub asks: bool,
     /// A synthesizer (`[infer.synthesize]`): without one every capture stays
-    /// verbatim, nothing is read for a reminder or a journal entry, nothing is
-    /// promoted, and `examples` carries empty phrasings.
+    /// verbatim, nothing is read for a reminder, nothing is promoted, and
+    /// `examples` carries an empty phrasing.
     pub synthesizes: bool,
     pub vision: bool,
     pub learn: bool,
@@ -228,7 +228,6 @@ pub struct LastKept {
 pub struct Examples {
     pub lang: &'static str,
     pub remind: &'static str,
-    pub journal: &'static str,
 }
 
 /// The reap line: the last run's counts, and how many retired rows still
@@ -361,10 +360,6 @@ pub struct CaptureQuery {
     /// The door's IANA zone, so a date in the text is read where it was written.
     #[serde(default)]
     pub tz: Option<String>,
-    /// `journal` to file the capture as an entry. Nothing else is accepted:
-    /// every other origin is what a door *is*, not what a caller asks for.
-    #[serde(default)]
-    pub origin: Option<String>,
     /// `remind` to skip the classifier and date the note as a reminder.
     #[serde(default)]
     pub intent: Option<String>,
@@ -376,26 +371,16 @@ pub struct CaptureQuery {
     pub from_ask: Option<String>,
 }
 
-/// What the time features take from a capture request: the zone, the origin
-/// label, and a forced intent. Validated here so a typo is a 400 and not a
-/// silently ignored parameter.
+/// What the time features take from a capture request: the zone and a forced
+/// intent. Validated here so a typo is a 400 and not a silently ignored
+/// parameter.
 pub(crate) struct CaptureTime {
     pub tz: Option<String>,
-    pub origin: &'static str,
-    /// The door itself, whatever `origin` ended up saying. `origin=journal`
-    /// overwrites the channel with a filing; this keeps it, for
-    /// `Capture::from_channel`.
-    pub channel: &'static str,
     pub intent: Option<crate::core::moments::Intent>,
 }
 
-pub(crate) fn capture_time(
-    tz: Option<String>,
-    origin: Option<String>,
-    intent: Option<String>,
-    default_origin: &'static str,
-) -> Result<CaptureTime> {
-    // The zone gets the same treatment as the other two, which the doc above
+pub(crate) fn capture_time(tz: Option<String>, intent: Option<String>) -> Result<CaptureTime> {
+    // The zone gets the same treatment as the intent, which the doc above
     // has always claimed it did. An unparseable name fell through `zone` to
     // UTC, so `?tz=Europe/Berlim` was a 201 and every date in the note was
     // read, stored and rendered two hours off — the silently ignored parameter
@@ -412,15 +397,6 @@ pub(crate) fn capture_time(
             }
         },
     };
-    let origin = match origin.as_deref().map(str::trim).filter(|o| !o.is_empty()) {
-        None => default_origin,
-        Some("journal") => crate::core::ingest::ORIGIN_JOURNAL,
-        Some(other) => {
-            return Err(Error::Validation(format!(
-                "origin={other}: only `journal` can be asked for"
-            )));
-        }
-    };
     let intent = match intent.as_deref().map(str::trim).filter(|i| !i.is_empty()) {
         None => None,
         Some("remind") => Some(crate::core::moments::Intent::Remind),
@@ -430,25 +406,18 @@ pub(crate) fn capture_time(
             )));
         }
     };
-    Ok(CaptureTime {
-        tz,
-        origin,
-        channel: default_origin,
-        intent,
-    })
+    Ok(CaptureTime { tz, intent })
 }
 
-/// Refuse `origin` and `intent` on a capture that is not verbatim text, and
-/// let `tz` through unread.
+/// Refuse `intent` on a capture that is not verbatim text, and let `tz`
+/// through unread.
 ///
-/// They used to be validated and then silently dropped: only the text branch
-/// applies them, so `origin=journal` on a URL was accepted and ignored.
+/// It used to be validated and then silently dropped: only the text branch
+/// applies it, so `intent=remind` on a URL was accepted and ignored.
 ///
-/// `origin` and `intent` are refused because for a fetched page and an
-/// uploaded file they cannot mean anything, and a caller sends them on
-/// purpose: `origin` there is the *reader* — `web`, `pdf`, `image`, decided by
-/// what came back — not a claim the caller gets to make, and `intent` is a
-/// statement about a sentence somebody typed.
+/// `intent` is refused because for a fetched page and an uploaded file it
+/// cannot mean anything, and a caller sends it on purpose: it is a statement
+/// about a sentence somebody typed.
 ///
 /// `tz` is not refused. It is ambient — every client that can name its zone
 /// sends it — and whether a body is "only a link" is the server's own guess
@@ -458,20 +427,15 @@ pub(crate) fn capture_time(
 /// shared links, each held for review and absent from search. A zone that
 /// does not reach the segmentation path costs nothing; a capture that never
 /// arrives costs the capture.
-pub(crate) fn refuse_time_fields(origin: Option<&str>, intent: Option<&str>) -> Result<()> {
-    let named: Vec<&str> = [("origin", origin), ("intent", intent)]
-        .into_iter()
-        .filter(|(_, v)| v.is_some_and(|v| !v.trim().is_empty()))
-        .map(|(k, _)| k)
-        .collect();
-    if named.is_empty() {
+pub(crate) fn refuse_time_fields(intent: Option<&str>) -> Result<()> {
+    if !intent.is_some_and(|v| !v.trim().is_empty()) {
         return Ok(());
     }
-    Err(Error::Validation(format!(
-        "{} only applies to a text capture — a link or a file is read by the server, \
-         and its origin and any date in it come from what it turns out to be",
-        named.join(", ")
-    )))
+    Err(Error::Validation(
+        "intent only applies to a text capture — a link or a file is read by the server, \
+         and any date in it comes from what it turns out to be"
+            .into(),
+    ))
 }
 
 /// The code a stored capture answers with, in the one place the doors that now
@@ -575,7 +539,7 @@ async fn capture(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let time = capture_time(q.tz.clone(), q.origin.clone(), q.intent.clone(), ORIGIN_WEB)?;
+    let time = capture_time(q.tz.clone(), q.intent.clone())?;
 
     if content_type.starts_with("text/plain") {
         let bytes = axum::body::Bytes::from_request(req, &())
@@ -593,12 +557,11 @@ async fn capture(
             Some(u) => {
                 // The body is one link, so this is a fetch and not a capture
                 // of what was sent. See `refuse_time_fields`.
-                refuse_time_fields(q.origin.as_deref(), q.intent.as_deref())?;
+                refuse_time_fields(q.intent.as_deref())?;
                 tenant.core.ingest_url(&u, q.title, q.note, lang).await?
             }
             None => {
-                let mut c = crate::core::ingest::Capture::new(text, time.origin)
-                    .from_channel(time.channel)
+                let mut c = crate::core::ingest::Capture::new(text, ORIGIN_WEB)
                     .with_lang(lang)
                     .with_title(q.title)
                     .with_note(q.note)
@@ -627,13 +590,10 @@ async fn capture(
         // Read out before `capture_time` takes them, so the refusal below can
         // still name what the caller sent in the form as well as in the query.
         let raw_tz = fields.remove("tz");
-        let raw_origin = fields.remove("origin");
         let raw_intent = fields.remove("intent");
         let time = capture_time(
             q.tz.clone().or_else(|| raw_tz.clone()),
-            q.origin.clone().or_else(|| raw_origin.clone()),
             q.intent.clone().or_else(|| raw_intent.clone()),
-            ORIGIN_WEB,
         )?;
         let mut out: Vec<crate::core::ingest::IngestOutcome> = Vec::new();
 
@@ -647,16 +607,13 @@ async fn capture(
                 .and_then(|t| only_a_url(t).map(|u| u.to_string()))
         });
         // Nothing here will be a text capture, so nothing here can carry
-        // `origin` or `intent` (a `tz` is let through; see
+        // `intent` (a `tz` is let through; see
         // `refuse_time_fields`). Judged after `shared_url` is resolved, because a `url`
         // takes the text with it and a share that turns out to be a link is a
         // fetch. Where a text part *is* captured they apply to it, and the
         // files beside it are read on their own terms as they always were.
         if shared_url.is_some() || !fields.contains_key("text") {
-            refuse_time_fields(
-                q.origin.as_deref().or(raw_origin.as_deref()),
-                q.intent.as_deref().or(raw_intent.as_deref()),
-            )?;
+            refuse_time_fields(q.intent.as_deref().or(raw_intent.as_deref()))?;
         }
         if let Some(raw) = shared_url {
             // Kept for the one case it matters: a link that cannot be read is
@@ -680,7 +637,7 @@ async fn capture(
                 tenant
                     .core
                     .ingest_capture(
-                        crate::core::ingest::Capture::new(text, time.origin)
+                        crate::core::ingest::Capture::new(text, ORIGIN_WEB)
                             .with_lang(lang)
                             .with_title(title.clone())
                             .with_note(note.clone())
@@ -757,7 +714,7 @@ async fn capture(
             )));
         }
         // A PDF or a photo, read by the server on its own terms.
-        refuse_time_fields(q.origin.as_deref(), q.intent.as_deref())?;
+        refuse_time_fields(q.intent.as_deref())?;
         let out = tenant
             .core
             .ingest_file(bytes.to_vec(), None, q.title, q.note, ORIGIN_WEB, lang)
@@ -2012,8 +1969,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
             id,
             at: created_at,
         });
-    let (example_remind, example_journal, example_lang) =
-        crate::web::workspace::examples(&tenant.core, &headers);
+    let (example_remind, example_lang) = crate::web::workspace::examples(&tenant.core, &headers);
     let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
         .fetch_all(&tenant.core.store.pool)
         .await?;
@@ -2098,7 +2054,6 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
         examples: Examples {
             lang: example_lang,
             remind: example_remind,
-            journal: example_journal,
         },
         teach: held_corpora < crate::web::ui::TEACH_UNTIL_SOURCES,
         sources: corpus_rows
@@ -5084,11 +5039,10 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// `origin` and `intent` reach only the text branch, so a capture that is
-    /// not verbatim text has to refuse them rather than take them and drop
-    /// them: `origin=journal` on a link was accepted and had no effect at all.
+    /// `intent` reaches only the text branch, so a capture that is not
+    /// verbatim text has to refuse it rather than take it and drop it.
     #[tokio::test]
-    async fn origin_and_intent_are_refused_where_they_would_be_dropped() {
+    async fn intent_is_refused_where_it_would_be_dropped() {
         let (app, token) = app_and_token().await;
         let text = |uri: &str, body: &str| {
             Request::builder()
@@ -5100,26 +5054,24 @@ pub(crate) mod tests {
                 .unwrap()
         };
         // A body that is one link is a fetch, not a capture of what was sent.
-        for uri in [
-            "/api/v1/capture?origin=journal",
-            "/api/v1/capture?intent=remind",
-        ] {
-            let res = app
-                .clone()
-                .oneshot(text(uri, "https://example.com/a"))
-                .await
-                .unwrap();
-            assert_eq!(
-                res.status(),
-                StatusCode::BAD_REQUEST,
-                "{uri} was accepted and dropped"
-            );
-        }
+        let res = app
+            .clone()
+            .oneshot(text(
+                "/api/v1/capture?intent=remind",
+                "https://example.com/a",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "intent was accepted and dropped"
+        );
         // A PDF or an image read by the server, same answer.
         let res = app
             .clone()
             .oneshot(raw_post(
-                "/api/v1/capture?origin=journal",
+                "/api/v1/capture?intent=remind",
                 &token,
                 "image/png",
                 &a_png(),
@@ -5133,9 +5085,9 @@ pub(crate) mod tests {
                 "/api/v1/capture",
                 &token,
                 &[
-                    ("text", "Heute war ein langer Tag."),
+                    ("text", "Erinnere mich morgen an die Bank."),
                     ("tz", "Europe/Berlin"),
-                    ("origin", "journal"),
+                    ("intent", "remind"),
                 ],
                 &[],
             ))
@@ -6042,7 +5994,7 @@ mod patch_tests {
     }
 
     #[tokio::test]
-    async fn capture_accepts_tz_origin_and_intent_and_refuses_other_origins() {
+    async fn capture_accepts_tz_and_intent() {
         let (app, token, core) = app_token_and_core().await;
         let text = |uri: &str, body: &str| {
             Request::builder()
@@ -6055,16 +6007,13 @@ mod patch_tests {
         };
         let res = app
             .clone()
-            .oneshot(text(
-                "/api/v1/capture?tz=Europe/Berlin&origin=journal",
-                "Long day.",
-            ))
+            .oneshot(text("/api/v1/capture?tz=Europe/Berlin", "Long day."))
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
         let id = json_of(res).await["id"].as_str().unwrap().to_string();
         let c = core.store.get_corpus(&id).await.unwrap();
-        assert_eq!(c.origin, "journal");
+        assert_eq!(c.origin, "web");
         assert_eq!(c.metadata["tz"], "Europe/Berlin");
 
         let res = app
@@ -6081,12 +6030,6 @@ mod patch_tests {
             core.store.get_corpus(&id).await.unwrap().metadata["intent"],
             "remind"
         );
-
-        let res = app
-            .oneshot(text("/api/v1/capture?origin=mcp", "x"))
-            .await
-            .unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

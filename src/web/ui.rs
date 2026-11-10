@@ -518,13 +518,12 @@ pub(crate) struct IdleFootTemplate {
     /// two `id="intent-echo"` elements — of which htmx would only ever resolve
     /// the first.
     pub(crate) echo: String,
-    /// The two example phrasings and the language they are in, for the list of
+    /// The example phrasing and the language it is in, for the list of
     /// what a paste becomes. The list lives here rather than in the page
     /// because the page is built once: it stood until a reload after the fifth
     /// capture, and a base that reached five by another door — MCP, the CLI, a
     /// second tab — showed four chips at once. See `workspace::examples`.
     pub(crate) example_remind: &'static str,
-    pub(crate) example_journal: &'static str,
     pub(crate) example_lang: &'static str,
     /// A capture is still being read. The line says so and polls itself
     /// until it is not.
@@ -633,8 +632,7 @@ pub(crate) async fn idle_foot(
             },
         )
         .collect();
-    let (example_remind, example_journal, example_lang) =
-        crate::web::workspace::examples(&tenant.core, headers);
+    let (example_remind, example_lang) = crate::web::workspace::examples(&tenant.core, headers);
     // Said once. `reading` used to restate it four lines below `held`, and a
     // guard that is a copy of another guard is a guard that comes to disagree.
     //
@@ -648,7 +646,6 @@ pub(crate) async fn idle_foot(
         recent,
         held,
         example_remind,
-        example_journal,
         example_lang,
         reading: held && in_flight,
         oob,
