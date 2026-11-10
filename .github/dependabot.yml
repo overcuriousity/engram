@@ -23,6 +23,15 @@ updates:
       major:
         update-types:
           - major
+    ignore:
+      # Its version is htmd's: a second copy's `NodeData` is a different type
+      # from the one htmd's nodes carry, so it moves when htmd moves.
+      - dependency-name: markup5ever_rcdom
+      # Pinned exactly for the contained build; the C++ under them moves fast
+      # and an upgrade is a decision (see Cargo.toml). A bump breaks the
+      # build and takes the whole patch-and-minor group down with it.
+      - dependency-name: llama-cpp-2
+      - dependency-name: llama-cpp-sys-2
     labels:
       - dependencies
     commit-message:
