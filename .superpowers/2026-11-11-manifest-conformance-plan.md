@@ -1,6 +1,8 @@
 # engram Manifest Conformance Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** implement this plan task by task, in order, on the branch `feat/manifest-conformance`, which already exists on the remote. If the superpowers skills are available, use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans; otherwise work through the checkboxes directly. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> You have no access to the session that wrote this plan, to the owner's machine, or to the live deployment. Everything you need is in this file, in the design beside it, in the repository and in the manifest repository. Where a step needs something you do not have (a browser, a phone, a container runtime for Qdrant), do the rest, and list what was skipped in the PR description instead of guessing a result.
 
 **Goal:** Bring engram (server, browser extension, Android app) in line with the overcuriousity dev manifest v2026.11.1, profile everyday, with the deviations the owner decided.
 
@@ -10,7 +12,7 @@
 
 **Spec:** `.superpowers/2026-11-11-manifest-conformance-design.md`. Read it first; it holds the reasons and the deviation table.
 
-**Reference (read-only, never build or run it):** a clone of the manifest at tag v2026.11.1. Clone it yourself with `gh repo clone overcuriousity/overcuriousity-dev-manifest <dir> -- --branch v2026.11.1 --depth 1` into a scratch directory outside the repo. Below, `KIT/` means `<dir>/crates/oc-kit/`, `RULES/` means `<dir>/manifest/`, `TPL/` means `<dir>/templates/`, `DEMO/` means `<dir>/crates/demo/`.
+**Reference (read-only, never build or run it):** a clone of the manifest at tag v2026.11.1. Clone it yourself with `git clone --branch v2026.11.1 --depth 1 https://github.com/overcuriousity/overcuriousity-dev-manifest <dir>` into a scratch directory outside the repo. Below, `KIT/` means `<dir>/crates/oc-kit/`, `RULES/` means `<dir>/manifest/`, `TPL/` means `<dir>/templates/`, `DEMO/` means `<dir>/crates/demo/`.
 
 ## Global Constraints
 
@@ -42,7 +44,7 @@
 
 **Files:** Delete: `docs/superpowers/` (13 files).
 
-- [ ] **Step 1:** `git switch -c feat/manifest-conformance`
+- [ ] **Step 1:** `git switch feat/manifest-conformance` (it exists on the remote and already carries this plan and the design).
 - [ ] **Step 2:** `git rm -r docs/superpowers`
 - [ ] **Step 3:** Run `git ls-files docs` — expected: `docs/api.md`, `docs/evaluation.md` only.
 - [ ] **Step 4:** Commit `chore: remove committed specs and plans`.
@@ -412,8 +414,8 @@ Decision: the release workflow, after computing `YYYY.MMDD.N`, rewrites `## [Unr
 
 - [ ] **Step 1:** Walk `RULES/99-review-checklist.md` item by item against the running app (`cargo run` with a scratch config and data dir; never the live base). Record each item's result.
 - [ ] **Step 2:** Start the full suite once in the background: `cargo test --all-targets` and `cargo test --all-targets --features contained`; meanwhile run `cargo fmt --check`, both clippy invocations, `cargo deny check`, `node --test 'assets/js/*.test.mjs'`, the browser tests at 390 / 1280 / 2560 px, `./gradlew :app:testDebugUnitTest :app:assembleDebug`, `scripts/test-install.sh`. Fix what fails; report the full-suite result when it lands.
-- [ ] **Step 3:** Upgrade rehearsal: copy the repo-local `engram-control.db` and `engram.db` (development data, not production) into a scratch dir, boot the new binary against the copies, confirm the token-removal warning appears once and a second boot is silent, sign in, search, open Trash.
-- [ ] **Step 4:** Device pass (owner's hardware): pair, capture, search, ask, delete + Undo, reminders, both themes. Ask the owner to run it; list exactly what to check.
+- [ ] **Step 3:** Upgrade rehearsal: build the binary from `master` in a separate worktree, boot it once against a scratch data dir with local auth, capture a note and mint a token, stop it; then boot this branch's binary against the same data dir. Confirm the token-removal warning appears once and a second boot is silent, sign in, search for the note, open Trash.
+- [ ] **Step 4:** Device pass (owner's hardware, after the PR is open): write the checklist into the PR description — pair, capture, search, ask, delete + Undo, reminders, both themes — and mark it as not yet run.
 - [ ] **Step 5:** Push the branch and open one PR. Body: what changed per stage, the deviations table, the breaking changes (tokens, sessions, removed config keys, bookmarklet), what was verified and what was not, ending with `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
 ---
