@@ -830,10 +830,16 @@ async fn delete_artifact_ui(
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
 ) -> UiResult<Response> {
-    let corpus_id = tenant.core.store.get_artifact(&aid).await?.corpus_id;
-    tenant.core.delete_artifact(&aid).await?;
+    let a = tenant.core.store.get_artifact(&aid).await?;
+    let corpus_id = a.corpus_id.clone();
+    tenant.core.trash_artifact(&aid).await?;
     if headers.contains_key("hx-request") {
-        return Ok(axum::response::Html(String::new()).into_response());
+        let name = crate::web::notice::name_of(a.title.as_deref(), &a.text);
+        return Ok(axum::response::Html(crate::web::notice::undo(
+            &format!("Deleted '{name}'"),
+            &format!("/ui/artifacts/{aid}/restore"),
+        ))
+        .into_response());
     }
     // A merged artifact has no document to return to, so the artifact list is
     // where deleting one leaves you.
@@ -971,6 +977,51 @@ mod tests {
     /// `split_passages` copies it down, so one heading ends up over twenty
     /// passages. That is a name for the section, never for this text, and the
     /// two surfaces that print a name above the text must not print it.
+    #[tokio::test]
+    async fn deleting_answers_with_an_undo_notice_and_no_dialog() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("mount the loop image", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let first = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .remove(0);
+        let (id, before) = (first.id, first.status);
+        let mut req = form(&format!("/ui/artifacts/{id}/delete"), &cookie, "");
+        req.headers_mut()
+            .insert("hx-request", "true".parse().unwrap());
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+        assert!(body.contains("Deleted &#39;"), "{body}");
+        assert!(
+            body.contains(&format!("hx-post=\"/ui/artifacts/{id}/restore\"")),
+            "{body}"
+        );
+        assert!(!body.contains("confirm("));
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().status,
+            crate::store::artifacts::ArtifactStatus::Trashed
+        );
+        let trash = get_body(&app, &cookie, "/ui/trash").await;
+        assert!(
+            trash.contains(&format!("/ui/artifacts/{id}/restore")),
+            "{trash}"
+        );
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/artifacts/{id}/restore"), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(core.store.get_artifact(&id).await.unwrap().status, before);
+    }
+
     #[tokio::test]
     async fn a_passage_shows_no_heading_even_when_the_document_gave_it_one() {
         let core = crate::core::test_support::test_core().await;

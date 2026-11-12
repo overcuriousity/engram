@@ -1732,6 +1732,55 @@ impl Core {
         Ok(())
     }
 
+    /// Takes an artifact out of every read, keeping it restorable for 30 days.
+    pub async fn trash_artifact(&self, id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.store.trash_artifact(id, crate::store::now()).await?;
+        self.vectors
+            .set_lifecycle(id, ArtifactStatus::Trashed, None)
+            .await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
+            .await?;
+        drop(_guard);
+        // Whatever this was hiding is freed, as a delete frees it.
+        self.heal_dangling_supersessions().await?;
+        tracing::info!(artifact_id = id, "moved an artifact to trash");
+        Ok(())
+    }
+
+    /// Takes an artifact out of Trash with the status and supersession it had.
+    pub async fn restore_artifact(&self, id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let status = self.store.trashed_from(id).await?.ok_or(Error::NotFound)?;
+        let superseded_by = self.store.get_artifact(id).await?.superseded_by;
+        // Payload first, as every reveal does: a crash in between leaves it visible, not lost.
+        self.store.mark_lifecycle_dirty(id).await?;
+        self.vectors
+            .set_lifecycle(id, status, superseded_by.as_deref())
+            .await?;
+        self.store.untrash_artifact(id).await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
+            .await?;
+        tracing::info!(artifact_id = id, "restored an artifact from trash");
+        Ok(())
+    }
+
+    /// Deletes for good what has been in Trash longer than `older_than_secs`.
+    pub async fn purge_trash(&self, older_than_secs: i64) -> Result<u64> {
+        let mut n = 0;
+        for id in self
+            .store
+            .trashed_before(crate::store::now() - older_than_secs)
+            .await?
+        {
+            self.delete_artifact(&id).await?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     /// Delete an artifact from both stores, on purpose.
     ///
     /// The vector point goes first, so an interrupted delete leaves a row

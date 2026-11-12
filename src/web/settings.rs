@@ -227,7 +227,29 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Re
 /// carrying the same query text and its vector. Nothing cascades to that table
 /// — `event_id` is a bare column — so it has to be reached by name or the
 /// press empties the pages and leaves the log.
-async fn purge_feedback_ui(tenant: Tenant) -> UiResult<Response> {
+pub const PURGE_NAME: &str = "recorded searches";
+
+#[derive(serde::Deserialize)]
+pub(crate) struct TypedName {
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The typed name did not match: a 422 the dialog swaps in place.
+pub(crate) fn name_mismatch() -> Response {
+    (
+        axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+        axum::response::Html(crate::web::notice::inline_danger(
+            "That is not the name; type it exactly.",
+        )),
+    )
+        .into_response()
+}
+
+async fn purge_feedback_ui(tenant: Tenant, Form(f): Form<TypedName>) -> UiResult<Response> {
+    if f.name != PURGE_NAME {
+        return Ok(name_mismatch());
+    }
     // The index first, while the rows still say which points carry a set.
     let cleared = tenant.core.forget_situations().await;
     let n = tenant.core.store.purge_feedback().await?;
@@ -236,9 +258,11 @@ async fn purge_feedback_ui(tenant: Tenant) -> UiResult<Response> {
         points_cleared = cleared,
         "captured searches, questions and situations deleted by the operator"
     );
-    // Back to the page the button is on. The route keeps its /ui/ops prefix —
-    // the two pages split, the endpoints did not.
-    Ok(Redirect::to("/ui/settings").into_response())
+    Ok((
+        [("hx-redirect", "/ui/settings")],
+        Redirect::to("/ui/settings"),
+    )
+        .into_response())
 }
 
 #[derive(serde::Deserialize)]
@@ -524,12 +548,44 @@ async fn mint_token(
     Ok(HtmlTemplate(TokenCreatedTemplate { token: plaintext }).into_response())
 }
 
+#[derive(Template)]
+#[template(path = "_token_row.html")]
+struct TokenRowTemplate {
+    t: TokenRow,
+}
+
+async fn token_row(tenant: &Tenant, id: &str) -> Result<TokenRow> {
+    token_rows(tenant)
+        .await?
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or(crate::error::Error::NotFound)
+}
+
+fn render_row(t: TokenRow) -> Result<String> {
+    TokenRowTemplate { t }
+        .render()
+        .map_err(|e| crate::error::Error::Internal(e.to_string()))
+}
+
+/// At once, with an undo notice. Scoped to the caller: an unknown id and someone else's answer alike.
 async fn revoke_token_ui(tenant: Tenant, Path(tid): Path<String>) -> UiResult<Response> {
-    // Scoped to the caller. An id-only revoke is a button that kills anyone
-    // else's extension pairing, and an unknown id and someone else's id have to
-    // answer alike or the 404 becomes an oracle.
     crate::auth::tokens::revoke(&tenant.core.store.control, &tid, &tenant.user.subject).await?;
-    Ok(Redirect::to("/ui/settings").into_response())
+    let row = token_row(&tenant, &tid).await?;
+    let notice = crate::web::notice::undo(
+        &format!("Revoked '{}'", row.name),
+        &format!("/ui/ops/tokens/{tid}/restore"),
+    );
+    Ok(axum::response::Html(format!("{}{notice}", render_row(row)?)).into_response())
+}
+
+async fn restore_token_ui(tenant: Tenant, Path(tid): Path<String>) -> UiResult<Response> {
+    crate::auth::tokens::restore(&tenant.core.store.control, &tid, &tenant.user.subject).await?;
+    Ok((
+        [("hx-refresh", "true")],
+        axum::response::Html(String::new()),
+    )
+        .into_response())
 }
 
 pub(crate) fn routes() -> Router<AppState> {
@@ -543,6 +599,7 @@ pub(crate) fn routes() -> Router<AppState> {
         // form action is a URL somebody may have open in a tab.
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
+        .route("/ui/ops/tokens/{id}/restore", post(restore_token_ui))
         .route("/ui/ops/feedback/purge", post(purge_feedback_ui))
 }
 
@@ -581,6 +638,71 @@ mod tests {
     /// The server POSTs to whatever is stored here — once for the test button,
     /// and on a timer thereafter — from its own network position. The two-way
     /// answer over loopback is a port scan of the machine one entry at a time.
+    #[tokio::test]
+    async fn revoking_a_token_can_be_undone() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let (row, token) = crate::auth::tokens::mint(&core.store.control, "laptop", "user-1", None)
+            .await
+            .unwrap();
+        let res = app
+            .clone()
+            .oneshot(form(
+                &format!("/ui/ops/tokens/{}/revoke", row.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        let body = body_of(res).await;
+        assert!(body.contains("Revoked &#39;laptop&#39; ·"), "{body}");
+        assert!(body.contains("revoked"), "{body}");
+        assert!(
+            crate::auth::tokens::verify(&core.store.control, &token)
+                .await
+                .is_err()
+        );
+        let res = app
+            .oneshot(form(
+                &format!("/ui/ops/tokens/{}/restore", row.id),
+                &cookie,
+                "",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            crate::auth::tokens::verify(&core.store.control, &token)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn purging_needs_the_exact_typed_name() {
+        let (app, cookie, _core) = app_session_and_core().await;
+        let res = app
+            .clone()
+            .oneshot(form(
+                "/ui/ops/feedback/purge",
+                &cookie,
+                "name=recorded+search",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body_of(res).await.contains("type it exactly"));
+        let res = app
+            .oneshot(form(
+                "/ui/ops/feedback/purge",
+                &cookie,
+                "name=recorded+searches",
+            ))
+            .await
+            .unwrap();
+        assert!(res.status().is_redirection(), "{}", res.status());
+        assert_eq!(res.headers()["hx-redirect"], "/ui/settings");
+    }
+
     #[test]
     fn a_push_destination_may_not_be_the_server_talking_to_itself() {
         for inward in [

@@ -68,35 +68,12 @@
 <table class="grid">
   <thead><tr><th>Name</th><th>Created by</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
   <tbody>
-  {% for t in tokens %}
-    <tr>
-      <td>{{ t.name }}</td>
-      <td class="muted">{{ t.minted_by }}</td>
-      <td class="muted mono">{{ t.created }}</td>
-      <td class="muted mono">{{ t.last_used }}</td>
-      <td>{% if t.revoked %}<span class="badge badge-muted">revoked</span>
-          {% else %}<span class="badge badge-success">active</span>{% endif %}</td>
-      <td>
-        {% if !t.revoked %}
-        {# Confirmed, and naming what it is about to break: anything holding
-           this token stops working the moment it is pressed, and two tokens can
-           carry the same name.
-
-           The name is read back out of `data-name` rather than written into the
-           handler — escaped into an attribute it survives, escaped into a
-           string literal inside an attribute it does not, and one apostrophe
-           would make the handler a syntax error that fails open. #}
-        <form method="post" action="/ui/ops/tokens/{{ t.id }}/revoke"
-              data-name="{{ t.name }}" data-pending-task-11>
-          <button class="btn btn-sm btn-danger" type="submit">Revoke</button>
-        </form>
-        {% endif %}
-      </td>
-    </tr>
-  {% endfor %}
+  {% for t in tokens %}{% include "_token_row.html" %}{% endfor %}
   </tbody>
 </table>
 {% endif %}
+<h2>Trash</h2>
+<p><a href="/ui/trash">Open Trash</a></p>
 <h2>Notifications</h2>
 <p class="muted">Where due reminders go · empty turns a channel off</p>
 <div id="notify-result"></div>
@@ -160,9 +137,13 @@
   Searches — {{ f.captured }} captured, {{ f.pending }} waiting{% match asks %}{% when Some with (a) %};
   questions — {{ a.asked }} asked, {{ a.judged }} judged{% when None %}{% endmatch %}.
 </p>
-<form method="post" action="/ui/ops/feedback/purge" data-pending-task-11>
-  <button class="btn btn-sm btn-danger" type="submit">Delete all captured searches, questions and pursuits</button>
-</form>
+{% let tc_id = "purge-feedback" %}
+{% let tc_name = crate::web::settings::PURGE_NAME %}
+{% let tc_open = "Delete recorded searches" %}
+{% let tc_title = "Delete recorded searches" %}
+{% let tc_action = "/ui/ops/feedback/purge" %}
+{% let tc_label = "Delete all recorded searches, questions and verdicts" %}
+{% include "_typed_confirm.html" %}
 {% when None %}
 {% endmatch %}
 {% endblock %}

@@ -193,6 +193,36 @@ pub async fn hidden_statuses_stay_out_unless_asked_for(s: &dyn VectorStore) {
     assert_eq!(got["old"].superseded_by.as_deref(), Some("live"));
 }
 
+pub async fn a_trashed_artifact_is_excluded_until_restored(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(vec![
+        point("kept", "c", [1.0, 0.0, 0.0], &[], Some("note")),
+        point("binned", "c", [1.0, 0.05, 0.0], &[], Some("note")),
+    ])
+    .await
+    .unwrap();
+    s.set_lifecycle("binned", ArtifactStatus::Trashed, None)
+        .await
+        .unwrap();
+    let q = [1.0, 0.0, 0.0];
+    for f in [SearchFilter::default(), wide()] {
+        assert_eq!(ids(&s.search(&q, &none(), 10, &f).await.unwrap()), ["kept"]);
+    }
+    assert!(ids(&s.neighbours("kept", 5).await.unwrap()).is_empty());
+    assert!(!ids(&s.resurface(10, i64::MAX, i64::MAX).await.unwrap()).contains(&"binned"));
+    s.set_lifecycle("binned", ArtifactStatus::Active, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&s
+            .search(&q, &none(), 10, &SearchFilter::default())
+            .await
+            .unwrap()),
+        ["kept", "binned"]
+    );
+    assert_eq!(ids(&s.neighbours("kept", 5).await.unwrap()), ["binned"]);
+}
+
 pub async fn a_re_embed_keeps_the_stamps(s: &dyn VectorStore) {
     s.ensure_collection(DIM).await.unwrap();
     s.upsert(vec![point("a", "c", [1.0, 0.0, 0.0], &[], None)])
@@ -457,6 +487,7 @@ macro_rules! suite {
         $crate::vector::conformance::suite!(@each $make;
             search_ranks_by_cosine, limit_is_respected, zero_vectors_do_not_produce_nan,
             equal_scores_order_by_id, filters_narrow, hidden_statuses_stay_out_unless_asked_for,
+            a_trashed_artifact_is_excluded_until_restored,
             a_re_embed_keeps_the_stamps, set_payload_merges_and_leaves_the_vector,
             touch_counts_only_retrievals, stale_candidates_need_a_stamp,
             resurface_offers_the_old_and_unseen, apply_lifecycle_writes_a_batch,

@@ -17,6 +17,8 @@ use crate::error::Result;
 pub struct Report {
     /// Searches and questions dropped for being past `retain_days`.
     pub expired: u64,
+    /// Artifacts purged after 30 days in Trash.
+    pub trash_purged: u64,
     pub standing: Standing,
     pub named: usize,
     pub removed: usize,
@@ -94,6 +96,14 @@ pub async fn run(core: &Core) -> Result<Report> {
     // classifies the variant, and that decides whether the worker spends
     // another attempt.
     let mut failure: Option<crate::error::Error> = None;
+
+    match core.purge_trash(crate::core::TRASH_RETENTION_SECS).await {
+        Ok(n) => report.trash_purged = n,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not empty the trash");
+            failure.get_or_insert(e);
+        }
+    }
 
     // Before expiry, and that ordering is the point: expiring removes the very
     // rows a give-up is read from, and a chain trimmed before it is read is a

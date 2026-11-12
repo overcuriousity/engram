@@ -120,6 +120,7 @@ fn status_word(s: ArtifactStatus) -> &'static str {
         ArtifactStatus::Active => "active",
         ArtifactStatus::Deprecated => "deprecated",
         ArtifactStatus::Superseded => "superseded",
+        ArtifactStatus::Trashed => "trashed",
     }
 }
 
@@ -289,7 +290,7 @@ impl SqliteVectors {
     /// in order. Built as text because the tag count varies; every value is
     /// bound, never spliced.
     fn where_clause(filter: &SearchFilter) -> (String, Vec<String>) {
-        let mut sql = String::from("1=1");
+        let mut sql = String::from("p.status <> 'trashed'");
         let mut binds = Vec::new();
         if !filter.include_superseded {
             sql.push_str(" AND p.status <> 'superseded'");

@@ -169,9 +169,6 @@ fn generation_of(alias: &str, collection: &str) -> u32 {
 /// Qdrant answers `{"must": [...]}` with an implicit AND. An empty condition
 /// list would match nothing, so callers must skip the filter entirely instead.
 fn build_filter(filter: &SearchFilter) -> Option<Value> {
-    if filter.is_empty() {
-        return None;
-    }
     let mut must: Vec<Value> = Vec::new();
     for t in &filter.tags {
         must.push(json!({ "key": "tags", "match": { "value": t } }));
@@ -193,7 +190,8 @@ fn build_filter(filter: &SearchFilter) -> Option<Value> {
     // Excluded with `must_not` rather than by matching a value: a point whose
     // payload carries no `status` key at all — a hand-written one — reads as
     // active, and a positive clause would drop every one of them from search.
-    let mut must_not: Vec<Value> = Vec::new();
+    let mut must_not: Vec<Value> =
+        vec![json!({ "key": "status", "match": { "value": "trashed" } })];
     if !filter.include_superseded {
         must_not.push(json!({ "key": "status", "match": { "value": "superseded" } }));
     }
@@ -1530,6 +1528,7 @@ impl VectorStore for QdrantVectors {
         let filter = json!({
             "must_not": [
                 { "key": "status", "match": { "value": "deprecated" } },
+                { "key": "status", "match": { "value": "trashed" } },
                 { "key": "status", "match": { "value": "superseded" } },
             ],
             "must": [
@@ -1856,6 +1855,7 @@ impl VectorStore for QdrantVectors {
                     // artifacts an operator has just retired.
                     "filter": {
                       "must_not": [
+                        { "key": "status", "match": { "value": "trashed" } },
                         { "key": "status", "match": { "value": "superseded" } },
                         { "key": "status", "match": { "value": "deprecated" } }
                       ],
@@ -2011,6 +2011,7 @@ impl VectorStore for QdrantVectors {
             // retired, and linking to it from a live artifact presents it as
             // current.
             "filter": { "must_not": [
+                { "key": "status", "match": { "value": "trashed" } },
                 { "key": "status", "match": { "value": "superseded" } },
                 { "key": "status", "match": { "value": "deprecated" } }
             ] },
@@ -2474,7 +2475,7 @@ mod tests {
         let f = build_filter(&SearchFilter::default()).unwrap();
         assert!(f.get("must").is_none());
         let not = f["must_not"].as_array().unwrap();
-        assert_eq!(not.len(), 2);
+        assert_eq!(not.len(), 3);
     }
 
     #[tokio::test]
@@ -2734,18 +2735,18 @@ mod tests {
     }
 
     #[test]
-    fn a_filter_that_narrows_nothing_produces_no_filter_at_all() {
-        // `{"must": []}` matches nothing in Qdrant, so a search that narrows
-        // nothing must omit the key rather than send an empty condition list.
-        // Asking for superseded and deprecated points back is what "narrows
-        // nothing" means now.
-        assert!(
-            build_filter(&SearchFilter {
-                include_superseded: true,
-                include_deprecated: true,
-                ..Default::default()
-            })
-            .is_none()
+    fn the_widest_filter_still_keeps_trash_out_and_sends_no_empty_must() {
+        // `{"must": []}` matches nothing in Qdrant, so the key is omitted.
+        let f = build_filter(&SearchFilter {
+            include_superseded: true,
+            include_deprecated: true,
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(f.get("must").is_none(), "{f}");
+        assert_eq!(
+            f["must_not"],
+            json!([{ "key": "status", "match": { "value": "trashed" } }])
         );
     }
 
@@ -2761,6 +2762,7 @@ mod tests {
         assert_eq!(
             f["must_not"],
             json!([
+                { "key": "status", "match": { "value": "trashed" } },
                 { "key": "status", "match": { "value": "superseded" } },
                 { "key": "status", "match": { "value": "deprecated" } },
             ]),

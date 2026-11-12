@@ -12,10 +12,12 @@ pub mod day;
 pub mod due;
 pub mod etag;
 pub mod extension;
+pub mod icons;
 pub mod insights;
 pub mod judge;
 pub mod lineage_view;
 pub mod markdown;
+pub mod notice;
 pub mod ops;
 pub mod page;
 pub mod pair;
@@ -26,6 +28,7 @@ pub mod state;
 pub mod tenant;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod trash;
 pub mod ui;
 pub mod ui_error;
 pub mod vbg;
@@ -145,6 +148,7 @@ pub fn router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(corpus::routes())
         .merge(artifact::routes())
+        .merge(trash::routes())
         .merge(ops::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())

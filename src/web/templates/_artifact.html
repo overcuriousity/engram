@@ -13,7 +13,7 @@
     <button class="btn-icon btn-icon-danger" title="Delete artifact"
             aria-label="Delete artifact"
             hx-post="/ui/artifacts/{{ c.id }}/delete"
-            hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML" data-pending-task-11>
+            hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML">
       {% include "_icon_trash.html" %}
     </button>
   </div>

@@ -136,6 +136,9 @@ impl QueryCache {
 pub type CorpusLocks =
     Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 
+pub const TRASH_RETENTION_SECS: i64 = 30 * 24 * 3600;
+pub const UNDO_MS: u32 = 6000;
+
 #[derive(Clone)]
 pub struct Core {
     pub store: Store,

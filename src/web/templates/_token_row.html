@@ -1,0 +1,15 @@
+<tr id="token-{{ t.id }}">
+  <td>{{ t.name }}</td>
+  <td class="muted">{{ t.minted_by }}</td>
+  <td class="muted mono">{{ t.created }}</td>
+  <td class="muted mono">{{ t.last_used }}</td>
+  <td>{% if t.revoked %}<span class="badge badge-muted">revoked</span>
+      {% else %}<span class="badge badge-success">active</span>{% endif %}</td>
+  <td>
+    {% if !t.revoked %}
+    <button class="btn btn-sm btn-danger" type="button"
+            hx-post="/ui/ops/tokens/{{ t.id }}/revoke"
+            hx-target="#token-{{ t.id }}" hx-swap="outerHTML">Revoke</button>
+    {% endif %}
+  </td>
+</tr>

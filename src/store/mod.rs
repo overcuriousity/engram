@@ -157,7 +157,17 @@ impl Store {
         // additive" would make this boot path guess, and the guess would be
         // wrong the first time a column's default is not what its old rows
         // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 20] = [
+        const ADDITIVE: [(&str, &str, &str); 22] = [
+            (
+                "artifacts",
+                "trashed_at",
+                "ALTER TABLE artifacts ADD COLUMN trashed_at INTEGER",
+            ),
+            (
+                "artifacts",
+                "trashed_from",
+                "ALTER TABLE artifacts ADD COLUMN trashed_from TEXT",
+            ),
             (
                 "artifacts",
                 "updated_at",

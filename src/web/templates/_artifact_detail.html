@@ -111,9 +111,11 @@
     {# Deprecating hides an artifact and keeps it; this removes it from both
        stores and cannot be undone. Nothing else deletes an artifact — see
        `Core::heal_store_drift`. #}
-    <form method="post" action="/ui/artifacts/{{ d.id }}/delete" data-pending-task-11>
+    <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
+          hx-post="/ui/artifacts/{{ d.id }}/delete"
+          hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <button class="btn-icon btn-icon-danger" type="submit"
-              title="Delete permanently" aria-label="Delete artifact permanently">
+              title="Delete" aria-label="Delete artifact">
         {% include "_icon_trash.html" %}<span>Delete</span>
       </button>
     </form>

@@ -3919,6 +3919,114 @@ mod tests {
         );
     }
 
+    async fn two_live_artifacts() -> (crate::core::Core, String, String) {
+        let core = test_core().await;
+        seed_from(
+            &core,
+            "raw",
+            &[
+                ("mounting a loop image", "c", &[]),
+                ("mounting an iso image", "c", &[]),
+            ],
+        )
+        .await;
+        reembed_all(&core).await;
+        let ids = core.store.list_all_artifact_ids().await.unwrap();
+        (core, ids[0].clone(), ids[1].clone())
+    }
+
+    #[tokio::test]
+    async fn a_trashed_artifact_is_not_found_by_search() {
+        let (core, gone, kept) = two_live_artifacts().await;
+        core.trash_artifact(&gone).await.unwrap();
+        let hits = core
+            .search(&q("mounting an image"), Door::Judge)
+            .await
+            .unwrap();
+        let ids: Vec<_> = hits.iter().map(|h| h.artifact_id.as_str()).collect();
+        assert!(!ids.contains(&gone.as_str()), "{ids:?}");
+        assert!(ids.contains(&kept.as_str()), "{ids:?}");
+        let mut wide = q("mounting an image");
+        wide.include_deprecated = true;
+        wide.include_superseded = true;
+        let hits = core.search(&wide, Door::Judge).await.unwrap();
+        assert!(hits.iter().all(|h| h.artifact_id != gone));
+    }
+
+    #[tokio::test]
+    async fn a_trashed_artifact_is_absent_from_due_and_day() {
+        let (core, gone, _) = two_live_artifacts().await;
+        let at = crate::store::now() + 3600;
+        core.edit_reminder(&gone, at, "UTC", None).await.unwrap();
+        let horizon = crate::store::now() + 86_400;
+        assert_eq!(core.store.open_due(0, horizon).await.unwrap().len(), 1);
+        assert_eq!(
+            core.store.moments_between(0, horizon).await.unwrap().len(),
+            1
+        );
+        core.trash_artifact(&gone).await.unwrap();
+        assert!(core.store.open_due(0, horizon).await.unwrap().is_empty());
+        assert!(
+            core.store
+                .moments_between(0, horizon)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        core.restore_artifact(&gone).await.unwrap();
+        assert_eq!(core.store.open_due(0, horizon).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_restored_artifact_has_its_status_and_vectors_back() {
+        let (core, id, _) = two_live_artifacts().await;
+        core.deprecate(&id).await.unwrap();
+        core.trash_artifact(&id).await.unwrap();
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().status,
+            ArtifactStatus::Trashed
+        );
+        core.restore_artifact(&id).await.unwrap();
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().status,
+            ArtifactStatus::Deprecated
+        );
+        let payload = core
+            .vectors
+            .lifecycle_of(std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(payload[&id].status, ArtifactStatus::Deprecated);
+        assert!(matches!(
+            core.restore_artifact(&id).await,
+            Err(Error::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn trash_older_than_30_days_is_purged_and_younger_is_kept() {
+        let (core, old, young) = two_live_artifacts().await;
+        core.trash_artifact(&old).await.unwrap();
+        core.trash_artifact(&young).await.unwrap();
+        sqlx::query("UPDATE artifacts SET trashed_at = trashed_at - ? WHERE id = ?")
+            .bind(crate::core::TRASH_RETENTION_SECS + 1)
+            .bind(&old)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            core.purge_trash(crate::core::TRASH_RETENTION_SECS)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(core.store.get_artifact(&old).await.is_err());
+        assert_eq!(
+            core.store.get_artifact(&young).await.unwrap().status,
+            ArtifactStatus::Trashed
+        );
+    }
+
     #[tokio::test]
     async fn a_deprecated_artifact_is_not_offered_as_forgotten() {
         // Old and unseen is exactly what a retired artifact looks like, so the

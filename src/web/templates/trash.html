@@ -1,0 +1,22 @@
+{% extends "layout.html" %}
+{% block title %}Trash — engram{% endblock %}
+{% block content %}
+<h1>Trash</h1>
+<p class="muted">Deleted for good after 30 days.</p>
+{% if items.is_empty() %}
+<p class="muted">Trash is empty.</p>
+{% else %}
+<ul class="oc-list trash-list" role="list">
+  {% for i in items %}
+  <li class="oc-list__item" id="trash-{{ i.id }}">
+    <div class="oc-list__main">
+      <span class="oc-list__title">{{ i.name }}</span>
+      <span class="oc-list__meta">Deleted {{ i.when }}</span>
+    </div>
+    <button type="button" class="oc-btn" hx-post="/ui/artifacts/{{ i.id }}/restore"
+            hx-target="#trash-{{ i.id }}" hx-swap="outerHTML">{{ crate::web::icons::icon("undo-2", 16) }}Restore</button>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

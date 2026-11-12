@@ -97,7 +97,8 @@ The routes that used to ask for a decision are gone and answer `404`:
 | `GET /insights` | `{ held, used, retrieval }`. Read-only. |
 | `GET /insights/set-aside` | The journal: what the base merged, wrote, hid and buried on its own, each with its undo. |
 | `POST /artifacts/{id}/deprecate` · `/reactivate` · `/unsupersede` | Hide by hand, and the undos a journal row admits. `204`. |
-| `DELETE /artifacts/{id}` | Gone from both stores; anything written from it loses it as a source. The one decision here with no undo — `deprecate` is the one that hides and can be taken back. |
+| `DELETE /artifacts/{id}` | Into Trash: out of every read, deleted for good after 30 days. `204`. |
+| `POST /artifacts/{id}/restore` | Out of Trash, with the status it had. `204`; `404` when it is not in Trash. |
 | `POST /merges/{id}/undo` | Take a merge back: its sources return, the merge is retired. `204`. |
 | `POST /condensations/{id}/undo` | Put the version a condensation retired back. Answers `{ "artifact_id" }`, which the path does not carry. |
 | `POST /search/{id}/verdict` | Body `{ verdict, artifact_id }` — `hit`, `no`, `skip`, or `none` to take it back. Answers `{ state, already }`; `already` is another door having judged the search first, which is a sentence and not an error. |

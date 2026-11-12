@@ -67,9 +67,13 @@
       <button class="btn btn-sm" type="submit">Fetch again</button>
     </form>
     {% endif %}
-    <form method="post" action="/ui/corpora/{{ id }}/delete" data-pending-task-11>
-      <button class="btn btn-sm btn-danger" type="submit">Delete</button>
-    </form>
+    {% let tc_id = "delete-source" %}
+    {% let tc_name = title.as_str() %}
+    {% let tc_open = "Delete" %}
+    {% let tc_title = "Delete this source" %}
+    {% let tc_action = format!("/ui/corpora/{}/delete", self.id) %}
+    {% let tc_label = format!("Delete '{}' and {} artifacts", self.title, self.artifact_count) %}
+    {% include "_typed_confirm.html" %}
   </div>
 
 {% if let Some(u) = source_url %}

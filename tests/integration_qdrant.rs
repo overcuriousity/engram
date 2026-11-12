@@ -106,6 +106,42 @@ async fn upsert_search_and_payload_roundtrip() {
 
 #[tokio::test]
 #[ignore]
+async fn a_trashed_artifact_is_excluded_until_restored() {
+    use engram::store::artifacts::ArtifactStatus;
+    let v = fresh("engram_it_trash", 4).await;
+    v.upsert(vec![
+        point("kept", "s1", vec![1.0, 0.0, 0.0, 0.0], &[], "note"),
+        point("binned", "s1", vec![1.0, 0.05, 0.0, 0.0], &[], "note"),
+    ])
+    .await
+    .unwrap();
+    v.set_lifecycle("binned", ArtifactStatus::Trashed, None)
+        .await
+        .unwrap();
+    let q = [1.0, 0.0, 0.0, 0.0];
+    let wide = SearchFilter {
+        include_superseded: true,
+        include_deprecated: true,
+        ..Default::default()
+    };
+    for f in [SearchFilter::default(), wide] {
+        let hits = v.search(&q, &Default::default(), 10, &f).await.unwrap();
+        assert!(hits.iter().all(|h| h.payload.artifact_id != "binned"));
+    }
+    assert!(v.neighbours("kept", 5).await.unwrap().is_empty());
+    v.set_lifecycle("binned", ArtifactStatus::Active, None)
+        .await
+        .unwrap();
+    let hits = v
+        .search(&q, &Default::default(), 10, &SearchFilter::default())
+        .await
+        .unwrap();
+    assert!(hits.iter().any(|h| h.payload.artifact_id == "binned"));
+    v.drop_collection().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
 async fn a_deprecated_artifact_is_hidden_by_default_and_reachable_on_request() {
     // The two exclusions are independent opt-ins. Only a real Qdrant runs that
     // filter, so this is where it has to be proved.

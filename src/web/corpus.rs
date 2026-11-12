@@ -91,6 +91,7 @@ struct CorpusTemplate {
     /// only thing that said which capture you were looking at was the browser
     /// tab, which said "Source" for every one of them.
     title: String,
+    artifact_count: usize,
 }
 
 impl CorpusTemplate {
@@ -161,7 +162,14 @@ async fn corpus_detail(
     Query(range): Query<LineRange>,
 ) -> UiResult<Response> {
     let s = tenant.core.store.get_corpus(&cid).await?;
-    let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
+    let chunks = tenant
+        .core
+        .store
+        .artifacts_for_corpus(&cid)
+        .await?
+        .into_iter()
+        .filter(|c| c.status != crate::store::artifacts::ArtifactStatus::Trashed)
+        .collect::<Vec<_>>();
     let restored = s.restored_at.is_some();
 
     // A restored placeholder's text is its own artifacts joined back together,
@@ -337,6 +345,7 @@ async fn corpus_detail(
         raw_text: s.raw_text.clone(),
         coverage,
         title: crate::web::ui::corpus_label(s.title_hint.clone(), &s.raw_text, &s.origin),
+        artifact_count: chunks.len(),
     })
     .into_response())
 }
@@ -398,9 +407,27 @@ pub(crate) fn metadata_rows(m: &serde_json::Value) -> Vec<(String, String)> {
     rows
 }
 
-async fn delete_corpus_ui(tenant: Tenant, Path(cid): Path<String>) -> UiResult<Response> {
+async fn corpus_title(tenant: &Tenant, cid: &str) -> crate::error::Result<String> {
+    let s = tenant.core.store.get_corpus(cid).await?;
+    Ok(crate::web::ui::corpus_label(
+        s.title_hint.clone(),
+        &s.raw_text,
+        &s.origin,
+    ))
+}
+
+/// Irreversible, so the source's own name has to be typed.
+async fn delete_corpus_ui(
+    tenant: Tenant,
+    Path(cid): Path<String>,
+    Form(f): Form<crate::web::settings::TypedName>,
+) -> UiResult<Response> {
+    let title = corpus_title(&tenant, &cid).await?;
+    if f.name != title {
+        return Ok(crate::web::settings::name_mismatch());
+    }
     tenant.core.delete_corpus(&cid).await?;
-    Ok(Redirect::to("/ui/capture").into_response())
+    Ok(([("hx-redirect", "/ui")], Redirect::to("/ui")).into_response())
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -509,6 +536,35 @@ mod tests {
 
     /// A link stored because its page could not be read says so, and says
     /// whether it is still being tried.
+    #[tokio::test]
+    async fn deleting_a_source_needs_its_name_typed() {
+        let (app, cookie, core) = crate::web::test_support::app_session_and_core().await;
+        let out = core
+            .ingest("alpha bravo", "web", Some("Field notes"))
+            .await
+            .unwrap();
+        let page =
+            crate::web::test_support::get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id))
+                .await;
+        assert!(
+            page.contains("data-oc-confirm-name=\"Field notes\""),
+            "{page}"
+        );
+        let del = |name: &str| {
+            crate::web::test_support::form(
+                &format!("/ui/corpora/{}/delete", out.id),
+                &cookie,
+                &format!("name={}", name.replace(' ', "+")),
+            )
+        };
+        let res = app.clone().oneshot(del("Field")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(core.store.get_corpus(&out.id).await.is_ok());
+        let res = app.oneshot(del("Field notes")).await.unwrap();
+        assert!(res.status().is_redirection());
+        assert!(core.store.get_corpus(&out.id).await.is_err());
+    }
+
     #[test]
     fn a_held_link_names_why_its_page_is_missing() {
         let pending =

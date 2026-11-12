@@ -925,7 +925,7 @@ impl Store {
     /// states, not as the duplicate the filter was added for.
     pub async fn moments_between(&self, from: i64, to: i64) -> Result<Vec<DueRow>> {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE (a.status = 'active' OR m.done_at IS NOT NULL) \
+            "{JOINED} WHERE (a.status = 'active' OR m.done_at IS NOT NULL) AND a.status <> 'trashed' \
                AND m.at >= ? AND m.at < ? ORDER BY m.at"
         )))
         .bind(from)

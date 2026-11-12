@@ -55,6 +55,8 @@ pub enum ArtifactStatus {
     Active,
     Deprecated,
     Superseded,
+    /// Deleted by a person and restorable for 30 days; out of every read.
+    Trashed,
 }
 
 impl ArtifactStatus {
@@ -63,12 +65,14 @@ impl ArtifactStatus {
             ArtifactStatus::Active => "active",
             ArtifactStatus::Deprecated => "deprecated",
             ArtifactStatus::Superseded => "superseded",
+            ArtifactStatus::Trashed => "trashed",
         }
     }
     pub fn parse(s: &str) -> ArtifactStatus {
         match s {
             "deprecated" => ArtifactStatus::Deprecated,
             "superseded" => ArtifactStatus::Superseded,
+            "trashed" => ArtifactStatus::Trashed,
             _ => ArtifactStatus::Active,
         }
     }
@@ -1381,6 +1385,74 @@ impl Store {
         Ok(())
     }
 
+    /// Puts an artifact in Trash, remembering the status it had.
+    pub async fn trash_artifact(&self, id: &str, at: i64) -> Result<()> {
+        self.expect_updated(
+            sqlx::query(
+                "UPDATE artifacts SET trashed_from = status, status = 'trashed', trashed_at = ?,
+                        lifecycle_dirty = 1
+                 WHERE id = ? AND status <> 'trashed'",
+            )
+            .bind(at)
+            .bind(id)
+            .execute(&self.pool)
+            .await?,
+        )
+    }
+
+    /// The status a trashed artifact goes back to.
+    pub async fn trashed_from(&self, id: &str) -> Result<Option<ArtifactStatus>> {
+        let row: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT trashed_from FROM artifacts WHERE id = ? AND status = 'trashed'",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|s| ArtifactStatus::parse(s.as_deref().unwrap_or("active"))))
+    }
+
+    /// Takes an artifact out of Trash into the status it had.
+    pub async fn untrash_artifact(&self, id: &str) -> Result<()> {
+        self.expect_updated(
+            sqlx::query(
+                "UPDATE artifacts SET status = COALESCE(trashed_from, 'active'),
+                        trashed_from = NULL, trashed_at = NULL, lifecycle_dirty = 1
+                 WHERE id = ? AND status = 'trashed'",
+            )
+            .bind(id)
+            .execute(&self.pool)
+            .await?,
+        )
+    }
+
+    /// Trashed artifacts, most recent first.
+    pub async fn trash(&self) -> Result<Vec<(Chunk, i64)>> {
+        let rows = sqlx::query(
+            "SELECT * FROM artifacts WHERE status = 'trashed' ORDER BY trashed_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                (
+                    row_to_artifact(r),
+                    r.get::<Option<i64>, _>("trashed_at").unwrap_or(0),
+                )
+            })
+            .collect())
+    }
+
+    /// Ids in Trash since before `cutoff`.
+    pub async fn trashed_before(&self, cutoff: i64) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT id FROM artifacts WHERE status = 'trashed' AND trashed_at < ?",
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Artifacts whose lifecycle row has changed since the payload was last
     /// written. The drift repair's whole work list.
     ///
@@ -1594,7 +1666,8 @@ impl Store {
             "SELECT id FROM artifacts
               WHERE superseded_by IS NOT NULL
                 AND reaped_at IS NULL
-                AND superseded_by NOT IN (SELECT id FROM artifacts)",
+                AND status <> 'trashed'
+                AND superseded_by NOT IN (SELECT id FROM artifacts WHERE status <> 'trashed')",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1765,6 +1838,7 @@ impl Store {
     /// to is its captured roots' corpora, which `artifact_sources` names; a
     /// captured candidate has only its own, and the join finds nothing to add.
     const REAPABLE: &str = "(art.status != 'active' OR art.superseded_by IS NOT NULL)
+                AND art.status != 'trashed'
                 AND art.reaped_at IS NULL
                 AND art.retired_at IS NOT NULL AND art.retired_at < ?
                 AND NOT EXISTS (SELECT 1 FROM moments m
@@ -1851,7 +1925,7 @@ impl Store {
     pub async fn stamp_unaged_retired(&self) -> Result<u64> {
         let res = sqlx::query(
             "UPDATE artifacts SET retired_at = ?
-              WHERE (status != 'active' OR superseded_by IS NOT NULL)
+              WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'
                 AND retired_at IS NULL",
         )
         .bind(now())
@@ -2129,7 +2203,7 @@ impl Store {
     pub async fn retired_unreaped_count(&self) -> Result<i64> {
         Ok(sqlx::query_scalar(
             "SELECT COUNT(*) FROM artifacts
-              WHERE (status != 'active' OR superseded_by IS NOT NULL)
+              WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'
                 AND reaped_at IS NULL",
         )
         .fetch_one(&self.pool)

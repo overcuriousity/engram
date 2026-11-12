@@ -130,18 +130,7 @@ pub struct SearchFilter {
     pub corpus_id: Option<String>,
 }
 
-impl SearchFilter {
-    /// Whether this filter narrows nothing. Excluding superseded/deprecated
-    /// points is still a narrowing, so a filter that only does that is not
-    /// empty — saying otherwise would drop the clause on the way to Qdrant.
-    pub fn is_empty(&self) -> bool {
-        self.tags.is_empty()
-            && self.category.is_none()
-            && self.corpus_id.is_none()
-            && self.include_superseded
-            && self.include_deprecated
-    }
-}
+impl SearchFilter {}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SearchHit {

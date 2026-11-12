@@ -319,7 +319,8 @@ impl VectorStore for MemoryVectors {
             .values()
             .filter(|p| {
                 let status = status_of(&p.payload);
-                (filter.include_superseded || status != ArtifactStatus::Superseded)
+                status != ArtifactStatus::Trashed
+                    && (filter.include_superseded || status != ArtifactStatus::Superseded)
                     && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
                     && filter.tags.iter().all(|t| p.payload.tags.contains(t))
                     && filter
@@ -430,7 +431,8 @@ impl VectorStore for MemoryVectors {
             .filter_map(|(id, set)| points.get(id).map(|p| (p, set)))
             .filter(|(p, _)| {
                 let status = status_of(&p.payload);
-                (filter.include_superseded || status != ArtifactStatus::Superseded)
+                status != ArtifactStatus::Trashed
+                    && (filter.include_superseded || status != ArtifactStatus::Superseded)
                     && (filter.include_deprecated || status != ArtifactStatus::Deprecated)
             })
             .map(|(p, set)| SearchHit {

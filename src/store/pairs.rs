@@ -1369,7 +1369,7 @@ impl Store {
                FROM artifact_pairs p
                JOIN artifacts x ON x.id IN (p.a_id, p.b_id)
               WHERE p.state IN {}
-                AND (x.status <> 'active' OR x.superseded_by IS NOT NULL)",
+                AND (x.status <> 'active' OR x.superseded_by IS NOT NULL) AND x.status <> 'trashed'",
             Self::OPEN_STATES
         )))
         .fetch_all(&self.pool)
@@ -1462,7 +1462,7 @@ impl Store {
                 AND NOT EXISTS (
                       SELECT 1 FROM artifacts x
                        WHERE x.id IN (artifact_pairs.a_id, artifact_pairs.b_id)
-                         AND (x.status <> 'active' OR x.superseded_by IS NOT NULL))",
+                         AND (x.status <> 'active' OR x.superseded_by IS NOT NULL) AND x.status <> 'trashed')",
         )
         .bind(artifact_id)
         .execute(&self.pool)

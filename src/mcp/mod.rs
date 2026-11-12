@@ -117,6 +117,7 @@ pub fn format_search_results(
                     None => "superseded".to_string(),
                 }),
                 Some(ArtifactStatus::Deprecated) => facts.push("deprecated".to_string()),
+                Some(ArtifactStatus::Trashed) => facts.push("in trash".to_string()),
                 Some(ArtifactStatus::Active) | None => {}
             }
             if r.primed {

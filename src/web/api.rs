@@ -1162,7 +1162,14 @@ pub struct CorpusDetail {
 
 async fn get_corpus(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<CorpusDetail>> {
     let source = tenant.core.store.get_corpus(&cid).await?;
-    let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
+    let chunks = tenant
+        .core
+        .store
+        .artifacts_for_corpus(&cid)
+        .await?
+        .into_iter()
+        .filter(|c| c.status != crate::store::artifacts::ArtifactStatus::Trashed)
+        .collect::<Vec<_>>();
     Ok(Json(CorpusDetail { source, chunks }))
 }
 
@@ -1946,10 +1953,14 @@ async fn patch_artifact(
     Ok(Json(chunk))
 }
 
+/// Into Trash; `POST …/restore` takes it back for 30 days.
 async fn delete_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
-    // Both stores, in the order that survives an interruption — see
-    // `Core::delete_artifact`, which the UI button posts to as well.
-    tenant.core.delete_artifact(&cid).await?;
+    tenant.core.trash_artifact(&cid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn restore_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
+    tenant.core.restore_artifact(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2285,6 +2296,7 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
                 .patch(patch_artifact)
                 .delete(delete_artifact),
         )
+        .route("/artifacts/{id}/restore", post(restore_artifact))
         .route("/artifacts/{id}/lineage", get(artifact_lineage))
         .route("/artifacts/{id}/versions", get(artifact_versions))
         .route("/artifacts/{id}/related", get(artifact_related))
