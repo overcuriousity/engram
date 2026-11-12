@@ -1,141 +1,31 @@
 # engram for Android
 
 Built apart from the server: `cd android && ./gradlew :app:assembleDebug`.
-Needs an Android SDK (`local.properties` → `sdk.dir`) and a JDK 17 or newer.
-JVM tests: `./gradlew :core:test`. Device tests: `./gradlew :core:connectedDebugAndroidTest`
-with a phone attached or an emulator running.
+Needs an Android SDK (`local.properties` → `sdk.dir`) and JDK 17+.
 
-The specs are `docs/superpowers/specs/2026-09-16-android-app-foundation-design.md`
-(the foundation: capture, the outbox, notifications) and Parts E and F of
-`docs/superpowers/specs/2026-09-08-android-companion-design.md` (reading, and
-the decisions a person makes about the base).
+## Screens
 
-## The screens
+- **Search** (home) — the box; the offer, due and resurfaced items beneath an
+  empty one; Ask streams beside it. Dictation where the server reports
+  `status.transcribe`.
+- **Today** — one day of the base, paged by date.
+- **Library** — every capture, a page at a time.
+- **Settings** — pairing, mode, theme, language, notifications, Insights, and
+  judging (duplicates, gaps, what the base did). Judging is never badged.
+- **Queue** — shown only while the outbox holds something owed or refused.
 
-Search is home: a box, and beneath an empty one what the base has to say
-unasked — the card offered for the situation the phone is in, what is due,
-what is worth seeing again. A search runs when it is asked for rather than on
-every keystroke; from a phone each keystroke would be an embedding call across
-a VPN. Ask sits beside the box and streams, drawing the answer as it grows and
-then drawing the server's whole answer in its place, with the commands and
-paths no excerpt carries marked.
-
-The microphone is the web's: held, not pressed, and what is said is typed into
-the box — dictation, so the same verbs still decide what the words are for. It
-is drawn only where the server reports a speech model (`status.transcribe`),
-records 16 kHz mono WAV as the browser converts to, and sends it to
-`POST /api/v1/transcribe` at once; nothing about it goes through the queue.
-
-The bar holds Search, Today and Library; Settings is above. The queue is
-above too, but only while something is still owed or was refused — the web has
-no queue, a phone has one because it is sometimes offline, and a mechanism for
-the offline case has no place on the bar while everything has gone through.
-Settings keeps the way in. After a capture the line under the box says what
-became of it — kept, on its way, refused — read off the row itself.
-
-Today is one day of the base and pages by date; Library is everything
-captured, a page at a time. An artifact is the web's pane: its text drawn as
-text (markdown for what a model wrote, verbatim for a passage), the decisions
-about it — still accurate, hide from results, put it back, and delete, which
-asks first — the lines it was drawn from with the span set apart, what it
-resembles and what it has been needed alongside, where it came from, and the
-wordings it has had. Every decision is an outbox row with an Undo while it is
-still queued.
-
-The result list keeps what the web's keeps: the rule that says *relevance falls
-off here*, and the rows beneath it that hold their rank and stop claiming to be
-answers. A loose hit is badged rather than ranked. That is not decoration —
-retrieval always returns its best candidates however bad they are, and a list
-without the rule shows a typo exactly as it shows an answer. The rest of the
-rail is the web's too: the kind chips, the two passes (typing, then the
-refining one that marks the list *refined*), why a row is here in a sentence,
-where a passage sits and where its document goes on, and *nothing here has
-it* over an empty or all-loose list.
-
-Searches and questions from the app are recorded under the person, as the
-web's are (`door=app`), so the web's two verdict bars are here: *was this
-what you were looking for?* under a result opened from a search, and *was
-this right?* under an answer, with *carried the answer* on each excerpt,
-*keep this answer*, and *edit first*. An answer is drawn as markdown with its
-citations linked and the literals no excerpt carries marked.
-
-Everything else the web client has, this has: the due band with its snoozes,
-dates and *not a reminder*; the corpus page band by band with re-read,
-re-segment and delete; the day page; Insights, language, notifications
-and what is being recorded behind Settings; and a theme choice. Every owed
-write is an outbox row — the newer ones under one kind, `call`, carrying their
-route — and every press whose answer is what the screen shows next goes to the
-server at once and says so if it cannot.
-
-## Judging, and why it is quiet
-
-The decisions rather than the reads — which of two near-identical artifacts
-stays, which questions the base could not answer are worth answering, what the
-base did on its own while nobody was looking — live behind Settings. Not a tab,
-not a section on home, and with no count anywhere until somebody has opened the
-screen that fetched one.
-
-That is on purpose and it is the whole design. This is the part of the system
-meant to shrink: the human in the loop here is one to work towards removing,
-not one to build a habit around. A queue of chores on the screen the app opens
-on is an interface asking to be served, and an app that badges it teaches a
-person to serve it.
-
-A pair card offers all five answers the web offers — keep either side, write
-one from both, discard both, dismiss — and says only what somebody actually
-established about the pair. Where the sweep filed a pair on a score and nothing
-has read it since, the card prints the measurement and no finding, because
-*these two cover the same ground* is a finding nobody made. Where a pair came
-from repeated co-retrieval no similarity was ever computed, so no percentage is
-shown. Where a merge would be refused, there is no button to press.
-
-What a set-aside row admits is decided by its `kind` and nothing else — never
-by reading its wording — so a `kind` this build has never heard of draws no
-buttons and is still shown. What the base did is worth knowing even where this
-app cannot answer it.
-
-Every answer is an outbox row, like every other write the device owes: a
-decision made on a train is a decision. It is also where undo comes from. Until
-the row is delivered, taking an answer back is deleting a row — not a second
-write undoing the first, which would be a different and less honest thing.
-
-## When the server cannot be reached
-
-Nothing is fetched that nobody asked for, so what a screen can show without the
-server is what was opened on this phone before. When a read fails the screen
-says `Server unreachable`, with when the content was fetched and a retry, above
-whatever was held — or above nothing. Writes are different: a capture, a Done,
-a snooze go to the outbox and are delivered when the server can be reached
-again.
-
-Every screen asks `Reader` in `core` and never learns where the answer came
-from. That is deliberate, and it is what contained mode stands on.
+Every write is an outbox row, delivered when the server is reachable and
+undoable while queued. A failed read says `Server unreachable` with the time of
+the held copy.
 
 ## On this phone
 
-Contained mode is the server's own core, compiled with the `contained` feature
-into `libengram_android.so` and started inside the app on a loopback port that
-changes every launch. The app is its client as it would be any server's: the
-same routes, a token held in memory and never written down. Vectors are in
-SQLite, embedding and Ask run over llama.cpp, dictation over whisper.cpp, and
-the models are downloaded from the manifest in
-`core/.../contained/ModelManifest.kt`, each pinned to a revision and given its
-name only once its SHA-256 matches. Only the embedder is needed to start.
-
-The phone's ask model answers questions and reads nothing. Synthesis — what
-turns a capture into more than its text — waits until an endpoint is named
-under Settings → Mode → Ask, and then runs only while the phone is charging,
-idle and on an unmetered network. Reminders ring from local alarms; there is
-nothing to push.
-
-The two modes keep their state apart, and switching does not move anything
-across. The design is
-`docs/superpowers/specs/2026-09-18-android-contained-mode-design.md`. None of
-this has been measured on a phone yet; the runbook is
-`docs/superpowers/plans/2026-09-19-contained-7-device-pass.md`.
-
-The library is built only with `-Pengram.native=1`, so that a checkout with no
-Rust toolchain still builds the app, which then offers server mode alone:
+Contained mode runs the server's core (`contained` feature, as
+`libengram_android.so`) on a loopback port: vectors in SQLite, embedding and Ask
+over llama.cpp, dictation over whisper.cpp. Models come from
+`core/.../contained/ModelManifest.kt`, pinned and SHA-256 checked. Synthesis
+waits for a named endpoint and runs only while charging, idle and unmetered.
+Not yet measured on a phone.
 
 ```bash
 # once: rustup target add aarch64-linux-android && cargo install cargo-ndk
@@ -143,93 +33,56 @@ Rust toolchain still builds the app, which then offers server mode alone:
 ./gradlew :app:assembleRelease -Pengram.native=1
 ```
 
+Without `-Pengram.native=1` the app offers server mode only.
+
 ## Tests
 
-`./gradlew lintDebug testDebugUnitTest :app:assembleDebug` is the whole of what
-runs without a device. Beyond the plain unit tests:
+```bash
+./gradlew lintDebug testDebugUnitTest :app:assembleDebug
+./gradlew :core:connectedDebugAndroidTest   # device or emulator
+```
 
-- `-Pengram.pictures=1` makes `PicturesTest` write PNGs of the screens' parts to
-  `app/build/pictures/`, for looking at while no phone is in the loop.
-- `-Pengram.live.origin=… -Pengram.live.token=…` points `LiveServerTest` at a
-  running engram and drives the reader and Ask against it over real HTTP. It
-  skips itself when they are absent. The token is a device token: pair the way
-  a phone does, or mint one under Settings → API tokens.
-- `core/src/test/resources/api/*.json` are not written by hand. The Rust test
-  `src/web/android_fixtures.rs` produces them from the real routes and checks
-  on every server test run that they still have the shape the server answers
-  with, so a field renamed on the server fails a test that names the file.
+- `-Pengram.pictures=1` writes screen PNGs to `app/build/pictures/`.
+- `-Pengram.live.origin=… -Pengram.live.token=…` runs `LiveServerTest` against a
+  live server.
+- `core/src/test/resources/api/*.json` are generated by
+  `src/web/android_fixtures.rs`.
 
 ## Installing
 
-Every release carries a signed APK, named `engram-<version>.apk`, beside the
-server binaries: <https://github.com/overcuriousity/engram/releases>. It can be
-downloaded and installed by hand, but the point of publishing it that way is
-[Obtainium](https://github.com/ImranR98/Obtainium), which watches a GitHub
-repository's releases and offers each new one as an update. Add
-`https://github.com/overcuriousity/engram` as an app, take the defaults, and
-the phone follows the same version the server does — there is one APK, so
-nothing needs filtering. The core inside it is built for `arm64-v8a`; on
-anything else the app installs and offers server mode alone.
-
-A release is cut on nearly every push to master, and most of them change the
-server rather than the app. The APK is rebuilt for each one regardless, so
-Obtainium will offer an update most days, often with no change to the app in
-it.
+Each release carries a signed `engram-<version>.apk`
+(<https://github.com/overcuriousity/engram/releases>); add the repository to
+[Obtainium](https://github.com/ImranR98/Obtainium) to follow it. The core is
+built for `arm64-v8a`.
 
 ## Pairing
 
-On the web, Settings → Pair the app draws a code. In the app, scan it (or
-paste the `engram://pair?…` text). The token then appears under Settings →
-API tokens on the web, named for the phone.
+Web: Settings → Pair the app. App: scan the code or paste the `engram://pair?…`
+text. The token is listed under Settings → API tokens, named for the phone.
 
 ## Reminders
 
-They arrive over UnifiedPush and need a distributor on the phone: ntfy or
-NextPush, both on F-Droid. Settings → Register for reminders picks one.
+Over UnifiedPush; needs ntfy or NextPush on the phone. Settings → Register for
+reminders.
 
 ## CI
 
-`.github/workflows/android.yml` builds the debug APK and runs the JVM tests on
-every push touching `android/`, and runs the device tests on a headless
-emulator in a second job.
-
-The release itself is built by the `android` job in
-`.github/workflows/release.yml`, which runs `:app:assembleRelease` with the
-native core, refuses an APK that came out without it or unsigned, and attaches
-the APK to the release the server binaries go to. `versionName` is the release's
-CalVer and `versionCode` is that same date packed into an integer
-(`2026.917.0` → `26091700`), which is what lets a phone tell one build from the
-next.
+`.github/workflows/android.yml` builds and tests on pushes touching `android/`.
+The release APK is built by the `android` job in `release.yml`; `versionCode`
+packs the CalVer (`2026.917.0` → `26091700`).
 
 ## The signing key
 
-Android identifies an app by its signature, so every engram APK ever published
-has to be signed by the same key. A build signed by a different one will not
-install over an older build at all: the person has to uninstall first, which
-throws away the pairing. Losing the key is therefore not a thing that can be
-recovered from by making a new one — it ends that install base.
-
-The key lives in four repository secrets and nowhere else. To mint it:
+Every APK must be signed by the same key; a lost key ends the install base.
+It lives only in four repository secrets:
 
 ```sh
-# Outside the repository: a signing key in the tree is a signing key one
-# `git add -A` away from being public. `-dname` is there to skip keytool's
-# certificate questionnaire, which nothing ever reads for an app key.
 keytool -genkeypair -keystore ~/engram.jks -alias engram \
   -keyalg RSA -keysize 4096 -validity 10000 -dname "CN=engram"
 base64 -w0 ~/engram.jks   # → ANDROID_KEYSTORE_B64
 ```
 
-Then set `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`
-and `ANDROID_KEY_PASSWORD` under Settings → Secrets → Actions, and keep
-`engram.jks` somewhere a lost laptop does not take with it. A keystore made
-this way is PKCS12, where keytool holds the key password and the store password
-to the same value — so the two password secrets take the same string. The release job
-fails rather than publishing when the secrets are absent, because an unsigned
-APK is one nothing will install and a release without an installable APK is an
-update the phones cannot see.
-
-Locally, `./gradlew :app:assembleRelease` needs none of this and produces an
-unsigned APK; pointing `ENGRAM_KEYSTORE` at a keystore file, with
-`ENGRAM_KEYSTORE_PASSWORD`, `ENGRAM_KEY_ALIAS` and `ENGRAM_KEY_PASSWORD` beside
-it, signs it the way the workflow does.
+Set `ANDROID_KEYSTORE_B64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and
+`ANDROID_KEY_PASSWORD` (PKCS12: both passwords are the same). Locally,
+`ENGRAM_KEYSTORE`, `ENGRAM_KEYSTORE_PASSWORD`, `ENGRAM_KEY_ALIAS` and
+`ENGRAM_KEY_PASSWORD` sign the same way.

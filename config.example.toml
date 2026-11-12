@@ -1,332 +1,105 @@
-# engram configuration.
-#
-# Every key can be overridden by an environment variable using the ENGRAM__
-# prefix and __ as the nesting separator, e.g.
-#   ENGRAM__INFER__EMBED__DIM=768
-#
-# Secrets (client_secret, api_key) belong in the environment, NOT in this file.
-# The loader warns at startup if it finds one here.
+# engram configuration. Override any key with ENGRAM__SECTION__KEY, e.g. ENGRAM__INFER__EMBED__DIM.
+# Secrets belong in the environment or a file (ENGRAM__…__KEY_FILE), not here.
 
-# ── Learning from what happens here ─────────────────────────────────────────
-# One dial over the whole layer: recording searches, learning links from
-# co-retrieval, activation, promotion, pursuits, and the area under the search
-# box. These were three separate flags — [feedback], [associate] and [pursuit]
-# each had their own — and two of their combinations were refused at startup
-# while a third was a warning, which is how you find out they were one setting
-# written three times. The sections further down keep their thresholds; this is
-# the one line that decides which of them agree with each other.
-#
-# The three old keys are refused at startup rather than ignored. Deserialization
-# drops what it does not recognise, and `[feedback] enabled = false` is a key
-# whose whole purpose was to say "keep none of this" — ignored, it would have
-# said nothing, and an upgrade would have turned recording back on for the
-# operator who had most explicitly refused it.
-#
-# On by default. Everything downstream of it moves only while the log is being
-# written, so off is the deliberate act. Nothing here leaves the machine, Ops
-# forgets all of it on one press, and off means nothing is recorded in the
-# first place.
 [learn]
-# off      record nothing, learn nothing, prime nothing, promote nothing;
-#          consolidate only the exact and near duplicates capture finds for a
-#          hash, and hold ranking where it is. What is left is capture, hybrid
-#          search and ask, and the idle pass's curation of the corpus.
-# learning record searches and asks, write the activation and the links — and
-#          read none of it on the query path. No priming, no associative
-#          spread, no promotion, no offers under the search box, and no
-#          pursuit generation, so nothing learned is read back into a result
-#          list or grown into the corpus. Ranking holds still: the idle pass
-#          adopts no ranking generation and takes none back. The corpus is
-#          still curated — duplicates merged, retired notes reaped, clusters
-#          condensed, and its own corpus actions retracted where use shows
-#          they were wrong — as under every mode.
-# full     all of it, which is what the tuning section below describes.
+# off: record and learn nothing · learning: record, read nothing back · full: all of it.
 mode = "full"
-
-# Every key the mode stands for is still a key, and a key written in this file
-# wins over what the mode would have said. `--print-config` prints the mode
-# first and then names the keys it decided, so the two are never a guess.
-#
-# `enabled` is the recording switch itself, left commented because the mode is
-# what sets it: "full" and "learning" record, "off" does not. Uncomment it to
-# say so regardless of the mode.
+# The recording switch; set by `mode` unless written here.
 #enabled = true
 
 [server]
 bind = "127.0.0.1:8080"
-# Background worker tasks draining the job queue. One is right when every role
-# points at a single local GPU: a second worker does not double throughput,
-# because the inference server serialises the calls anyway — it only makes two
-# things slow at once. Raise it when synthesis and embedding live on
-# different machines.
+# Job-queue workers; one is right when every role shares one GPU.
 workers = 1
-# The SHA-256 of the certificate's SubjectPublicKeyInfo, base64, for the
-# certificate a phone is shown when it reaches this deployment. Leave it
-# unset and the app pins whatever it sees while pairing, which is right when
-# you are standing at the screen. Set it and the pairing code carries it, so
-# the app pins the named key from the first byte.
-#   openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
+# base64 SHA-256 of the certificate's SPKI, carried in the pairing code; unset pins on first sight.
 # tls_fingerprint = ""
 
 [store]
-# The control database: who the users are, their sessions and API tokens, and
-# the one instance-wide job queue. Everything about people and scheduling
-# rather than about knowledge. Created on first run.
+# Users, API tokens, sessions and the job queue.
 # control_path = "engram-control.db"
-
-# Where the per-user databases live, one {slug}.db each. The slug is a hash of
-# the OIDC subject, derived once at provisioning and stored, so it survives any
-# later change to how it is derived.
-#
-# A backup is this directory *and* control_path, taken together. Restoring one
-# side from a different moment shows up as store drift, which heal_store_drift
-# repairs per tenant on that tenant's next open.
+# One {slug}.db per user; back up together with control_path.
 # dir = "data/users"
-
-# How many users' bases may be open at once. An open tenant costs a SQLite pool
-# and a background queue; the rest are opened on demand, and eviction is
-# transparent — the next request or claim reopens the same file, and the
-# evicted user's live sitting is handed back to it, so what search and ask
-# carry does not depend on how many other people are reading right now.
+# Tenant bases open at once; the rest reopen on demand.
 # max_open_tenants = 32
 
 [vector]
-# Qdrant base URL. Its REST API, not the gRPC port: 6333 locally, or whatever
-# a reverse proxy serves it on (commonly plain https:// with no port).
+# Qdrant REST URL (6333, not the gRPC port).
 url = "http://localhost:6333"
-# Alias name. The vectors live in {name}_v1, {name}_v2, … behind it. An
-# instance created before the corpus/segment/artifact rename will still say
-# "chunks" here, and should keep saying it: the name is an address, not a
-# description, and changing it points engram at an empty collection.
+# Alias over {name}_v1, {name}_v2, …; an address, so keep an existing one as it is.
 collection = "artifacts"
 # api_key = "..."   # prefer ENGRAM__VECTOR__API_KEY
-
-# How much age counts against a result. Fused ranks land between roughly 0.1
-# and 1.0, so this breaks near-ties in favour of the newer note without
-# overturning a clearly better match. Set to 0.0 to turn recency off.
+# Age penalty against fused ranks (~0.1–1.0); 0 turns recency off.
 recency_weight = 0.05
 recency_half_life_days = 180
-# Extra score for an artifact tagged `pinned`, so a decision you made beats the
-# decay curve.
+# Extra score for an artifact tagged `pinned`.
 pinned_boost = 0.15
-# Chunks one document may contribute to a result list, so a long document
-# cannot fill it. 0 lets one document supply every result. This, recency_weight,
-# recency_half_life_days and candidate_multiplier are the four knobs here the
-# idle pass may move — with `associate.prime_lift`, `associate.spread_max`,
-# `sitting.prime`, `consolidate.review_min` and whether the configured reranker
-# runs, nine in all. The file is never rewritten: what is live is a generation
-# in the base, and /ui/insights names it — see [evolve].
+# Results one source may contribute; 0 is unlimited. The idle pass may move this.
 per_source_cap = 3
-# How many times the answer size a search fetches when the cap or the reranker
-# will narrow the list. Wider gives the cap more to choose from and costs a
-# bigger vector read; at 1 a capped search has nothing to refill from.
+# Over-fetch factor when the cap or the reranker narrows the list.
 candidate_multiplier = 3
 
-# ── Inference roles ─────────────────────────────────────────────────────────
-# Three independent roles. They may all point at one server, or at three
-# different ones — swapping any single role does not affect the others.
-#
-# An endpoint is named once, under [infer.tiers.<name>], and the roles point at
-# it. That is what lets "which model is this call worth" be answered per call
-# rather than per role: two roles on one tier share a model by saying so, and a
-# role moves to another model by changing one word.
-#
-# A role that is configured names a `tier` (or a `base_url` and `model` of its
-# own): an endpoint is defined once, under [infer.tiers.<name>], and the roles
-# point at it. Only [infer.embed] is required.
-
-# Defaults here assume the case engram is built for: a small model on one
-# consumer GPU, answering in minutes rather than seconds. Against a hosted API
-# you can raise output_ratio's window and lower timeout_secs considerably.
-
 [infer]
-# Capture is verbatim-first: your text goes in as you wrote it, split into
-# passages and embedded, searchable before any model answers. A paste that
-# fits one synthesis call is then rewritten immediately — structured
-# artifacts that supersede the passages they cover, with the originals kept
-# reachable — and anything larger earns its rewrites through use, window by
-# window (see [promote]). There is no mode key: the rewriting is what
-# [infer.synthesize] is for.
-#
-# Leave [infer.synthesize] out and engram runs on the embed-only floor: Qdrant
-# and an embedding endpoint, nothing else. Every capture stays verbatim
-# passages, searchable by meaning; reminders, the journal's judged entries,
-# promotion and the day page's dates are off, and each says "not configured"
-# where it would have appeared. Add the role later and new captures are
-# rewritten from then on.
-#
-# Upgrading from before the 2026-09 reshape: `infer.synthesis` and
-# `infer.segment_tokens` are refused at startup rather than ignored, so delete
-# them. A base that ran `synthesis = "off"` leaves [infer.synthesize] out.
-# How tokens are counted for every budget: threshold, windows, prompts. A
-# HF-format tokenizer.json, as a path or an http(s) link. A link is fetched
-# once and cached beside the store; a changed link re-fetches. Unset, the
-# bundled Qwen-family tokenizer counts, and if nothing loads a pessimistic
-# character estimate does — a tokenizer here is an accuracy upgrade, never a
-# startup requirement. Gated HF repos: download by hand and use a path.
+# HF tokenizer.json (path or URL) for token budgets; unset uses the bundled Qwen tokenizer.
 # tokenizer = "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json"
 
-# The working tier: everything that runs unattended, in bulk, and is paid for
-# by the corpus rather than by a person waiting.
+# Unattended bulk work.
 [infer.tiers.efficient]
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 # The model's real context window.
 context_tokens = 32768
-# Hard cap on output tokens per call. Generous on purpose: a reasoning model
-# spends part of this thinking before it writes any JSON, and whatever it
-# spends there is taken from the artifact list.
+# Output cap per call; a reasoning model spends part of it thinking.
 max_output_tokens = 16384
-# Seconds before the client gives up on one call. Defaults to 900. A timeout
-# looks exactly like a dead endpoint to the job runner: the job retries and
-# fails at the same wall, so this must exceed the model's real worst case.
+# Must exceed the model's real worst case, or jobs retry into the same wall.
 # timeout_secs = 900
-# Sent as `reasoning_effort` when set. On a reasoning model the thinking comes
-# out of max_output_tokens, so suppressing it is what stops the artifact list
-# from being cut off. Unset by default: models that do not reason reject the field.
+# Sent as `reasoning_effort`; models that do not reason reject it.
 # reasoning_effort = "none"
-
-# Which name this endpoint takes the output ceiling under: "max_tokens" or
-# "max_completion_tokens". The two mean the same thing and no endpoint takes
-# both — OpenAI's reasoning models refuse `max_tokens` with a 400 naming the
-# other, and llama.cpp/vLLM read `max_tokens` and silently ignore what they do
-# not recognise.
-#
-# Unset by default, which means: guess from `reasoning_effort`, then correct the
-# guess the first time the endpoint refuses the name. Any effort but "none"
-# implies the hosted spelling; "none" is what a local endpoint is told to
-# suppress its thinking and says nothing either way, so it is read as
-# `max_tokens` — the guess that a hosted endpoint corrects with a 400, rather
-# than the one a local endpoint drops in silence.
-#
-# Set it explicitly wherever the guess would be wrong with no 400 to correct it,
-# which is any endpoint that ignores an unrecognised ceiling rather than
-# refusing it. Startup logs a warning naming the guess whenever this is unset
-# and `reasoning_effort` is not.
-#
-# The name belongs to the server, not to the role — which is why it lives on
-# the tier. It is still keyed by (base_url, model) rather than by tier name, so
-# two tiers pointed at the same server and model — which is exactly what
-# `efficient` and `deep` are below, by default — share one learned name. Where
-# two of them are told different things, startup warns and the first one wins;
-# what an operator states beats what another role inferred.
+# "max_tokens" or "max_completion_tokens"; unset guesses and corrects on a 400.
 # ceiling_param = "max_tokens"
-
-# Send the reply's JSON Schema as an OpenAI `json_schema` response format, so
-# the endpoint constrains decoding to the shape the parser expects. On by
-# default. A 9B model asked for JSON will otherwise close an array with a brace
-# or omit a required field often enough that windows fail permanently, and the
-# parse error it produces is indistinguishable from a truncated reply. Honoured
-# by llama.cpp, vLLM and the hosted APIs; set false for an endpoint that rejects
-# the field. Governs both judges too — duplicates and associative links — which
-# run on this endpoint under a schema each.
+# Constrain decoding to the reply's JSON Schema; false for endpoints that reject it.
 # structured_output = true
 
-# The tier for calls a person is waiting on. The same server as `efficient`
-# here, because the case engram is built for has exactly one; point it at a
-# larger model wherever there is one, and only the answering changes.
+# Calls a person waits on.
 [infer.tiers.deep]
 base_url = "http://localhost:8000/v1"
 model = "qwen"
 context_tokens = 32768
-# Hard cap on output tokens per answer, sent on every call. Raise it if answers
-# are getting clipped; there is no reason to unset it, since an endpoint asked
-# for no ceiling applies its own — which is far larger, and is the only thing
-# bounding a reply the model has stopped being able to end.
-#
-# It comes out of `context_tokens`: the endpoint measures the prompt and this
-# ceiling against one window, so ask reserves this much and packs excerpts into
-# what is left. Raising it buys longer answers by showing the model fewer
-# excerpts, and `dropped` on the answer says how many.
-#
-# Never more than half the window, though, whatever it is set to: a ceiling as
-# wide as its own context would reserve everything, pack nothing, and answer
-# every question with "too large for the configured context window". The call
-# itself then asks for whatever the packed prompt actually left over, up to this
-# number — and if the answer still runs into it, the answer says so.
+# Reserved out of context_tokens for the answer; capped at half the window.
 max_output_tokens = 4096
-# See [infer.tiers.efficient] for timeout_secs, reasoning_effort,
-# ceiling_param and structured_output. Each is a property of this server, so
-# each is set here again rather than inherited from the other tier.
 # timeout_secs = 900
 # reasoning_effort = "none"
 # ceiling_param = "max_tokens"
 
-# Optional — see the embed-only floor above.
+# Optional; without it captures stay verbatim passages (embed-only floor).
 [infer.synthesize]
 tier = "efficient"
-# Synthesis rewrites rather than splits, so its output can exceed its input.
-# This is how much larger to assume it gets, and it is what sizes the segment:
-# segment = min(context / (1 + ratio), max_output / ratio). At 8.0 that is
-# ~2000 tokens of input per call. A 9B model that produces JSON which stops
-# parsing partway through wants a higher number, not a lower one: a shorter
-# segment is a shorter reply. Lower it (1.5-2.0) for a large hosted model.
-# 8.0 is the default when left out.
+# Assumed output/input growth; sizes the segment. Higher for small models, 1.5–2 for large.
 output_ratio = 8.0
-# Any tier field can be overridden here for this role alone, e.g. a shorter
-# ceiling than the tier's:
+# Any tier field may be overridden for this role alone.
 # max_output_tokens = 8192
-# Pacing lives in `[pacing]` at the bottom of this file.
-# Tokens of nearest-neighbour artifacts from the rest of the base shown to a
-# small capture's synthesis call, so it can resolve references ("the migration
-# issue" → which one), name what this capture relates to, and write what the
-# base does not already hold. Read with the capture's own just-stored vectors
-# — no extra embedding call. 0 turns the block off; promotion's window calls
-# never carry it.
+# Neighbouring artifacts shown to a small capture's synthesis; 0 turns it off.
 # context_neighbor_tokens = 1024
-# Tokens of the document's verbatim opening prepended to every window, so an
-# artifact from deep in a long document still knows what product, version and
-# platform it belongs to — which is what the caveats field asks for and what a
-# window eight hundred lines in has no other way to learn.
+# The document's opening prepended to every window.
 # context_opening_tokens = 200
-# Tokens of each neighbouring window carried on both sides, so a window that
-# opens mid-procedure can still resolve what "this command" points at. Both of
-# these come out of the window itself: at 200 and 150 that is 540 tokens of
-# prompt, so a smaller window and proportionally more calls per corpus. Set
-# either to 0 to turn that half off.
+# Neighbouring window carried on both sides; 0 turns it off.
 # context_overlap_tokens = 150
 
 [infer.embed]
 base_url = "http://localhost:8000/v1"
-# EmbeddingGemma. 308M parameters, 768 dimensions, a 2048-token window, and an
-# asymmetric interface: queries and documents are embedded through different
-# prompts, which the three templates below are. The model card's exact strings
-# are the defaults, so nothing below `max_input_tokens` needs setting for it.
+# EmbeddingGemma; the templates below default to its model card.
 model = "embeddinggemma"
-# Embedding is fast even locally; a shorter ceiling surfaces a wedged endpoint
-# instead of holding a worker for a quarter of an hour.
 timeout_secs = 120
-# MUST match the vector dimension of the Qdrant collection. Changing this
-# against an existing collection is refused at startup. The full Matryoshka
-# width: truncating to 512/256/128 buys memory at a recall cost, and recall is
-# the point.
+# Must match the Qdrant collection; a change is refused at startup.
 dim = 768
-# The server's real ceiling, not the model's nominal one. llama.cpp refuses any
-# input above its physical batch size with a 500, and no retry can fix that —
-# engram splits the artifact instead, but it splits sooner and cheaper if this
-# number is honest. 2048 is the model's window; use the server's if lower.
+# The server's real input ceiling, not the model's nominal one.
 max_input_tokens = 2048
-# Passage size for verbatim passages, and the cap each synthesized artifact
-# is asked to fit, so every artifact embeds whole: about a paragraph and a
-# half, which is about one idea. Clamped to what the embedder will take
-# (max_input_tokens * 0.8). Argued, not measured — the judge harness is what
-# is allowed to move it.
+# Passage size; clamped to max_input_tokens × 0.8.
 # chunk_tokens = 384
-# The recipe. `{text}` is the query or the body; `{title}` is the artifact's
-# title. A document with no title takes the `_untitled` template — the model
-# card substitutes the literal word `none`, so it is a second template and not
-# an empty field. Changing any of these invalidates every stored vector as
-# surely as changing `model` does: drop the collection and re-capture. engram
-# records the recipe — model, dim and the three templates — and says so at boot
-# when it no longer matches what the stored vectors were embedded under. Check
-# once that your serving stack does not prepend a prompt of its own, or the
-# prefix is sent twice and every vector carries it.
+# Changing a template invalidates every stored vector.
 # query_template             = "task: search result | query: {text}"
 # document_template          = "title: {title} | text: {text}"
 # document_template_untitled = "title: none | text: {text}"
-#
-# A symmetric embedder — bge-m3, which engram shipped with — wants the text as
-# it is. That is these three lines, with `dim = 1024` and the server's ceiling:
+# A symmetric embedder such as bge-m3:
 # model = "bge-m3"
 # dim = 1024
 # max_input_tokens = 1024
@@ -336,470 +109,155 @@ max_input_tokens = 2048
 
 [infer.ask]
 tier = "deep"
-# ask is the one interactive inference call, so someone is watching it happen.
-# Overriding any tier field for this role alone works here too:
 # max_output_tokens = 4096
 # timeout_secs = 900
 # reasoning_effort = "none"
-
-# One bounded round of planned retrieval. After the excerpts for the question
-# are packed, the model says once which subjects they do not cover; each becomes
-# a search of its own, all of them run at once, and the results are merged into
-# one set of excerpts before it answers. At most three extra searches — never a
-# second plan, and never a loop.
-#
-# On by default: a question that spans several subjects is retrieved for all of
-# them or answered from whichever one the single ranked list happened to favour.
-# It costs one model call per question, so put that call on a cheap tier below
-# rather than turning this off. Off is for a base with one slow endpoint and
-# nothing cheaper to point at.
+# One bounded round of extra searches for subjects the excerpts miss.
 # plan = false
-#
-# Which endpoint that call runs on. Naming the subjects a set of excerpts misses
-# is a cheap classification, not the answer, so it belongs on the efficient
-# model even when the answer it feeds belongs on the deep one — which is what
-# naming tiers per role is for. Unset, it runs on this role's own endpoint,
-# which means paying deep-model latency for a short list.
+# Tier for that planning call.
 # plan_tier = "efficient"
 
-# Reranking is optional and disabled by default. There is no OpenAI-standard
-# rerank endpoint, so the wire format is configured explicitly.
-# style = "tei" | "cohere" | "vllm"
+# Optional reranker; style is "tei", "cohere" or "vllm".
 # [infer.rerank]
 # base_url = "http://localhost:8001"
 # model = "bge-reranker-v2-m3"
 # style = "tei"
-#
-# Where the reranker is consulted. Both places unless narrowed. Typing in the
-# web UI never waits on it either way: keystrokes come back in vector order at
-# embedding speed, and the reranked order lands as a visible refinement once
-# the query settles. `apply = ["ask"]` is the opt-out for search entirely —
-# for a rerank endpoint slow or billed enough that only a deliberate question
-# should spend it.
+# Where it is consulted.
 # apply = ["ask", "search"]
 
-# Reading captured images. Optional and disabled by default: with this block
-# absent the image door is closed and the capture page offers text only.
-#
-# `model` is required and stays here whatever else moves: it names the vision
-# model, which is the point of the block, and it is never taken from a tier.
-# With no `tier` and no `base_url`, the role calls the synthesize endpoint —
-# the common case, one local server hosting a multimodal model too, and not a
-# shape that gets warned about. Give it a `tier` or a `base_url` when a
-# separate endpoint serves the images.
+# Optional image reading; without it the image door is closed.
 # [infer.vision]
 # model = "qwen2.5-vl-7b"
 # tier = "efficient"
 # base_url = "http://localhost:8002/v1"
 # api_key = ""
-# Seconds before one description is given up on. Defaults to 120 — about one
-# image, and short on purpose, since a person is usually waiting on a capture.
-# A role pointed at a tier takes the tier's timeout instead, because a timeout
-# describes the server; set it here to keep the shorter bound anyway.
 # timeout_secs = 120
-# Hard cap on output tokens per description, sent on every call. Defaults to
-# 4096 and is never taken from a tier, however this block gets its endpoint: a
-# tier's ceiling is sized for the role it was written for, and what comes back
-# here is stored as a corpus and segmented from there, so an endpoint left to
-# apply its own ceiling is a document nobody sized.
+# Never taken from a tier.
 # max_output_tokens = 4096
-# See [infer.tiers.efficient].ceiling_param. Taken from the tier when this
-# block names one, and from the synthesize role when it has no endpoint of its
-# own — in both cases because it is then the same server.
 # ceiling_param = "max_tokens"
 
-# Speaking instead of typing. Optional and disabled by default: with this block
-# absent there is no microphone on the search box — not a greyed-out one, no
-# control at all, the same rule the image door above follows.
-#
-# The button is held down while you talk, and what comes back is appended to
-# whatever is already in the box. Nothing is stored and nothing is recorded:
-# dictation is typing, and the search it becomes is logged where every other
-# search is.
-#
-# `base_url` and `model` are both required once this block exists. There is no
-# tier to inherit from and no other role's address to borrow — a server that
-# transcribes speech is not the server that writes chat completions, and the
-# one installation where it is has a proxy in front of both, where the address
-# is worth writing twice. The endpoint is an OpenAI-compatible
-# POST {base_url}/audio/transcriptions, which whisper.cpp's server,
-# faster-whisper-server, vLLM and the hosted APIs all answer.
-#
-# Not probed at startup, unlike the other roles: the small speech servers serve
-# only the transcription route, so a probe would warn about an endpoint that
-# works. The first press is the check.
+# Optional dictation over POST {base_url}/audio/transcriptions; without it there is no microphone.
 # [infer.transcribe]
 # base_url = "http://localhost:8090/v1"
 # model = "whisper-1"
 # api_key = ""
-# Seconds before one recording is given up on. Defaults to 60, not the fifteen
-# minutes the background roles take: what is waiting on this call is a person
-# holding a button.
 # timeout_secs = 60
-# An ISO-639-1 code sent with every recording. Unset, the model detects the
-# language from the audio — which is where it is weakest, since a search query
-# is two or three words, and a German one comes back as the English words that
-# sound like it. Worth naming where one person speaks one language.
+# ISO-639-1 code; unset detects from the audio, which is weak on short queries.
 # language = "de"
 
-# ── Authentication ──────────────────────────────────────────────────────────
-# Exactly one mode is active.
-
 [auth]
+# "local" or "oidc".
 mode = "local"
 
-# Development only. Refuses to bind to a non-loopback address unless
-# --i-know-this-is-insecure is passed. Generate the hash with:
-#   cargo run -- --hash-password 'your password'
+# Hash with: cargo run -- --hash-password 'your password'
 [auth.local]
 username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 
-# Production. Name the people this instance is for in the three allow-lists
-# below; a subject has to match at least one entry across the three. Leaving
-# all three empty is refused at startup rather than read as "everyone",
-# because a subject admitted for the first time gets a tenant provisioned for
-# it — a control row, a database file and a vector collection. If the identity
-# provider really is the only gate you want, say so with
-# `open_registration = true` and understand what it means: a provider that
-# allows self-registration then allows strangers to create databases here, and
-# nothing on the path caps how many.
+# A subject must match one allow-list; all empty is refused unless open_registration.
 # [auth.oidc]
 # issuer_url = "https://idp.example/realms/main"
 # client_id = "engram"
 # client_secret = "..."          # prefer ENGRAM__AUTH__OIDC__CLIENT_SECRET
-# redirect_url = "https://engram.example/auth/callback"
 # scopes = ["openid", "profile", "email"]
-# open_registration = false      # true only with the caveat above understood
+# Lets any subject the provider admits create a base here.
+# open_registration = false
 # allowed_subs = ["sub-abc123"]
 # allowed_emails = ["you@example.com"]
-# Membership in any of these groups also admits a subject. Requires the
-# provider to actually send a `groups` claim — on Nextcloud's OIDC provider
-# app that means turning on group provisioning for this client; a request
-# `scope` entry alone does not produce it.
+# Needs the provider to send a `groups` claim.
 # allowed_groups = ["engram-users"]
 
-# Duplicate hygiene. Nothing here ever rewrites an artifact or deletes one on a
-# similarity score: it hides, flags, or asks.
 [consolidate]
-# The background sweep. Capture-time near-duplicate detection is separate and
-# always on: it costs a hash of the text, not a query.
+# The background duplicate sweep; capture-time detection is always on.
 enabled = true
-# Estimated overlap of word shingles above which a new capture is parked as a
-# near-duplicate of an existing corpus rather than segmented. It is stored
-# either way; parking only withholds the model call, and the sweep judges the
-# pair in its turn.
-#
-# Measured, not chosen: over one base's 3916 corpus pairs the single real
-# duplicate — one article captured through two different doors — scored 0.789,
-# and the next-highest pair scored 0.036. Two readings of one document never
-# agree more closely than that, because the boilerplate each door keeps is
-# different, so a threshold up at 0.90 catches nothing that matters.
+# Shingle overlap above which a capture is parked as a near-duplicate (measured: 0.79 vs 0.04).
 near_dupe_min = 0.60
-# Cosine at or above which a pair of artifacts is put to the judge.
-#
-# A floor, not an admission. Clearing it is necessary and not sufficient: a pair
-# reaches the model only when one text is wholly inside the other, or both came
-# out of one document. A cosine cannot tell "stored twice" from "taught by
-# thirteen authors", and on a corpus of scripts covering one subject the second
-# is the ordinary case — passages from different scripts sit at 0.89 to 0.93
-# while duplicating nothing. Two sources agreeing is evidence in its own right,
-# and merging them erases that they agreed.
-#
-# Passages are outside this entirely: they are the verbatim substrate and are
-# never one side of a pair, whatever they score.
-#
-# The starting rung. The base lowers this when the pairs just above it lead to
-# a merge, a replacement or a discard as often as the pairs higher up do, and
-# raises it when the actions taken just above it are taken back more often; the
-# database holds what is live, and /ui/insights says which generation that is.
+# Cosine floor for putting a pair to the judge; the idle pass moves it.
 review_min = 0.88
-# The lane judged first. It hides nothing on its own: a pair at or above it
-# goes to the judge before one below it, and the judge decides. Well clear of
-# `review_min` on purpose: two genuinely distinct artifacts about one
-# subsystem sit around 0.88 routinely, and the pairs worth asking about first
-# are the ones that are not. Ops lists what was hidden, with an undo.
+# Pairs at or above this are judged first.
 auto_supersede = 0.95
-# Neighbours considered per artifact when it looks for duplicates.
+# Neighbours considered per artifact.
 per_point = 5
 interval_hours = 24
-# The dedupe pass acts on what it decides: superseding where one stored
-# artifact plainly replaces another, and writing one merged artifact where each
-# side carries something the other lacks. A disagreement about a value is never
-# settled this way. It is kept as a disagreement that both search and Ask show,
-# because deciding which of two facts is current is the judgement a model is
-# worst at, and nothing waits on a person. Nothing is deleted, no merge that
-# would drop a number, command or path is written, and every merge has an undo
-# on Ops.
-# How often the dedupe pass arms model calls, and how many per tick. Together
-# these are a rate — twenty an hour by default — and a rate is the right shape
-# because the fixed quantity is what the hardware gets through, not how big the
-# knowledge base has grown. The old per-sweep ceiling was a queue that only grew.
-#
-# Set max_dedupe_per_tick = 0 to switch the model off entirely. Duplicates are
-# still found, recorded and clustered, all of which costs no inference; nothing
-# is ever asked about.
+# Model calls per dedupe tick, every interval; max_dedupe_per_tick = 0 turns the model off.
 dedupe_interval_mins = 15
 max_dedupe_per_tick = 5
-# ══ Tuning the learning layer ═══════════════════════════════════════════════
-# You do not need to read this unless you are tuning.
-#
-# Every key from here to the end of [sitting] is one `learn.mode` above already
-# set to a value that agrees with the others. They are here because a dial with
-# no keys under it is a dial nobody can disagree with, and because tuning is a
-# real thing people do — but a working base needs none of them.
 
-# Recording real searches so they can be judged later, and turned into the
-# query/artifact pairs the evaluation harness scores against.
-#
-# The queries a benchmark needs cannot be written from memory. Phrased while
-# looking at an artifact, they reuse its wording, and every retrieval system
-# passes such a pair. Only a search made in earnest — before anything came back
-# — is worth scoring against, and this is the only moment it can be recorded.
-#
-# Everything is recorded, not only deliberate searches: the search where you
-# found nothing and gave up leaves no other trace, and it is the most valuable
-# one there is. Typing bursts fold into their final wording, so `daten`,
-# `datentr`, `datenträger nicht erkannt` is one event rather than three.
 [feedback]
-# No switch here: see [learn], which is the one switch over all of this.
-# Candidates stored per search. Wider than the answer on purpose — retrieval
-# over-fetches anyway, so the extra rows cost nothing, and they are what lets an
-# artifact the ranking buried still be confirmed as the right one. 0 is not a
-# setting — an empty pool leaves every card with nothing to choose — and is put
-# back to the default with a line in the log.
+# Candidates stored per recorded search.
 candidates = 20
-# Window in which another query — a longer one, a shorter one, a rewording, or
-# the same one again — replaces the previous event instead of starting its own,
-# so a burst of searches that ends in one open is one search. Opening a result
-# closes the window: the list that was read is the list the hit is scored on. 0
-# turns folding off. Applies to the search box only, and only within one
-# signed-in operator: a call through the API or MCP is a deliberate query, not a
-# keystroke, and two people typing at once are not typing the same thing.
-#
-# Keep this at the length of a typing burst. Because *any* rewording folds, the
-# window doubles as how long a finished search has left to live: search, read
-# the titles, think, search again inside the window, and the first search is
-# gone — the one case where nobody opened anything being precisely what the
-# unmatched-gap sweep is there to catch. It was 15s, which is long enough to
-# swallow a second, deliberate question.
+# Rewordings inside this window fold into one search; 0 turns folding off.
 coalesce_secs = 5
-# Days an unjudged captured search is kept. 0 keeps them forever. A judged hit
-# or gap is exempt: it is the labelled pair the whole feature exists to produce,
-# and expiring it would empty the sweep's evidence a month at a time. A `discard` is
-# not exempt — that verdict says the search was never real. The purge button on
-# Ops still takes everything.
+# Days an unjudged search is kept; 0 keeps them.
 retain_days = 0
-# How often retention is enforced. A window measured in days does not need
-# checking more often than this, and the sweep is a single DELETE.
 sweep_hours = 6
-# The share of recorded searches that explore. 0 turns it off.
-#
-# An exploring search lifts the top candidate that just missed the window into
-# the last visible row, and pushes the row it displaced out. One row of one
-# search in ten, at the bottom of the list, where a person is least likely to
-# be interrupted by it.
-#
-# It is there because the self-tuning loop has one blind spot it cannot see out
-# of on its own. Every positive observation is an open or a citation, and both
-# can only happen to an artifact the ranking already put on screen — so
-# replaying those observations under a different setting rewards reordering
-# what was shown and says nothing whatever about what was hidden. Two things
-# follow: a wider candidate pool can never be measured as an improvement,
-# because nothing outside the window is ever opened; and recency weight
-# ratchets upward, because people click among the recency-boosted rows they
-# were given and the replay reads that back as recency working.
-#
-# The lifted row is charged to the rank the ranking gave it and not to the row
-# it borrowed, so opening it is evidence the current setting could not have
-# produced and does not get the credit for. That is the whole mechanism; there
-# is no bandit and no model.
+# Share of searches that lift one just-missed candidate into the last row.
 explore = 0.1
 
-# Links learned from co-retrieval, and a decaying accessibility per artifact.
-# Both are learned from use and neither touches what is stored: the trace is
-# fixed, access is plastic. Runs behind [learn] — without recorded searches
-# there is nothing to learn from.
 [associate]
-# How often the sweep replays the search log. Pure SQLite, no model call.
+# Replay interval for the search log; no model call.
 interval_mins = 30
-# A link unused for this long has half the strength it had. One co-appearance is
-# +1 and one confirmed answer is +2, so these numbers are in "uses".
+# Half-life of an unused link, in uses.
 half_life_days = 30
-# Below this, a link nobody has ruled on is forgotten. A judged one never is: a
-# verified relation is about content, not use.
+# Unjudged links below this are forgotten.
 prune_below = 0.5
-# Strength at which a link is worth showing, and at which it is worth one call.
 show_min = 2.0
 judge_min = 4.0
-# Distinct questions a link needs before it is judged. One question asked six
-# times is one question, and this is what keeps the judge cheap.
+# Distinct questions a link needs before it is judged.
 judge_min_queries = 3
 judge_per_sweep = 10
-# How many top hits are asked what they are linked to, and how many associated
-# hits may be appended after the ranked list — outside `limit`, never instead
-# of a ranked hit. `spread_max` is the starting rung: the idle pass widens or
-# narrows the band from here on whether the band is used more or less than the
-# ranked tail beside it, and the database holds what is live.
+# Top hits asked for links, and associated hits appended after the list.
 spread_from = 3
 spread_max = 3
-# How much more accessible a hit must be than the one above it to pass it, as a
-# fraction of the most accessible hit in that list; and how many places it may
-# climb. 0 turns priming off. Accessibility here is use — opened, confirmed,
-# cited — never how often something was listed, so a hit nobody has reached
-# cannot be primed at all.
-#
-# This file ships the lowest non-zero rung: one place, never past rank 1, and
-# only for a hit that beats the one above it by more than half the top
-# engagement. It is a starting rung and not a verdict — the idle pass replays
-# what use left behind at every rung and moves from here on what it finds, the
-# probe anchor refuses a rung that loses on the base's own probes, and the
-# lived watch reverts one whose observations get worse.
-#
-# The compiled default is the same 1, so a base that never wrote this key is
-# primed too. Set it to 0 to turn priming off; `learn.mode = off` and
-# `learning` zero it on their own.
+# Margin and places for priming by use; prime_lift = 0 turns it off.
 prime_margin = 0.5
 prime_lift = 1
 
 [activation]
 half_life_days = 14
-# Opened in the pane, judged the answer. Being returned by a search is
-# exposure, not use, and weighs nothing: at 1.0 it was the strongest signal
-# there was, being the most common, and "you reach this one often" was said of
-# artifacts nobody had opened. Above zero, twenty listings fill the tank for one
-# open to fire a rewrite. Being surfaced *because* of activation — resurfaced,
-# or recalled by a link — raises nothing either: that is the loop this design
-# exists to close.
+# Being listed is exposure, not use.
 retrieved = 0.0
 opened = 1.0
 confirmed = 3.0
-# Cited by an answer /ask wrote. A model's use of an artifact, not a person's,
-# which is why it weighs what an open weighs and not what a confirmation does:
-# nothing here verified that the answer was right. Only the web door records
-# which artifacts an answer used, so only the web door raises this.
+# An answer's citation; a model's use, so weighed like an open.
 cited = 0.5
 
-# ── Promotion ────────────────────────────────────────────────────────────────
-# The large side of capture's size fork: when a passage has earned its window
-# a synthesis call. (A capture that fits one call was synthesized at capture.)
-# Read against [activation] and above the capture baseline, which decays
-# at the same rate as what use adds and is subtracted decayed before the
-# comparison: so 3.0 is one confirmation, or three openings, at any age.
-# Checked only when a passage is opened, confirmed or cited by an answer —
-# never when it merely appears in results,
-# which with retrieved = 0 also raises nothing — and the window's new
-# artifacts inherit the access the passages earned.
 [promote]
+# Activation a passage needs to earn a synthesis call.
 activation_above = 3.0
-# Cosine at or above which a rewritten artifact counts as traceable to a
-# passage it already covers by a majority of its lines, and so may supersede
-# it. Checked only when the artifact copied no line of the passage verbatim,
-# which is the normal case for prose: synthesis resolves pronouns and completes
-# fragments, so nothing matches word for word and — before this key existed —
-# the verbatim passage stayed in results beside the artifact written from it.
-#
-# Not a duplicate-detection threshold. [consolidate] auto_supersede compares two
-# independent artifacts and has a judge behind it, because a cosine cannot tell
-# "runs on ext4" from "does not run on ext4". Here the relation is known: this
-# artifact came out of synthesizing this window, and the only question is which
-# passage of that window. Set it to separate passages of one document from each
-# other, not to assert that two texts agree.
-#
-# Read only where the artifact's span placed it in the window — the splitter
-# found its words at those lines, or the model named them. Where nothing placed
-# it and the span fell back to the whole window, no similarity supersedes
-# anything at any setting: that span covers every passage in the window at once,
-# so the cosine would no longer be asking which passage the artifact is, only
-# whether two passages of one document are about the same subject — which they
-# are.
-#
-# Above 1.0 switches the check off: only a verbatim line then supersedes
-# anything, which is how it behaved before.
+# Cosine at which a rewrite supersedes the passage it came from; above 1.0 turns it off.
 traceable_min = 0.75
 
-# ── Pursuits ─────────────────────────────────────────────────────────────────
-# A coherent run of searches, what was opened and pivoted through, and — when
-# the base did not answer or the answer was assembled by hand — one generated
-# artifact written from exactly that, carrying the questions it was written
-# for. Runs behind [learn]: the events it reads are the ones recording writes,
-# and the sweep it rides on is the associative pass. Local only, nothing leaves
-# the machine, and the forget button on Settings clears all of it. The grouping
-# line is measured, not configured.
 [pursuit]
-# A pursuit is over when nothing has happened for this long.
+# A pursuit ends after this much quiet.
 idle_secs = 900
-# Fewer engaged artifacts than this is a promotion case, not generation.
+# Fewer engaged artifacts is a promotion case.
 min_sources = 2
-# Engagement weight a pursuit needs before it is worth a call: opened 1.0,
-# pivoted 1.5, returned 2.0, confirmed 3.0. This is the key `learn.mode` sets
-# to `inf` at "off" and "learning" — a total no pursuit reaches is how "never
-# generate" is said in the keys that already exist, the same way
-# promote.activation_above says it for promotion.
+# Engagement a pursuit needs before it is worth a call.
 min_engagement = 3.0
 
-# ── A recommendation under the search box ────────────────────────────────────
-# The area under the search box, filled from the situation the page was opened
-# in: the time zone and local time the browser reports, the device, the
-# viewport, the network, the battery. A sweep learns which situations recur for
-# which artifact; a page view is one vector query against what it learned. No
-# model call and no embedding on this path, ever.
-#
-# On, and behind [learn] as well: the situations it clusters are opens recorded
-# in the same log everything else here reads. Forgetting on Settings takes them
-# in both places they live — the rows and the centroids on the points — and the
-# 400-day window over them keeps ageing whether or not [learn] is on, because
-# switching a thing off is when its data most needs to leave. A weekly pattern needs weeks, so a
-# young base sees the bottom rung — a card drawn at random, claiming nothing —
-# until it has something to say.
+# The offer under the search box, learned from the situation pages are opened in.
 [recommend]
-# Not one of the keys `learn.mode = "off"` sets: the offers are already off
-# there through [learn] itself, and this key is also what arms the sweep that
-# ages the recorded situations and interactions out. Switching learning off is
-# when that data most needs to leave, so the mode leaves this alone and only
-# "learning" — which keeps recording — turns it off.
+# Also arms the sweep that ages recorded situations out.
 enabled = true
-# Cosine above which an event joins a cluster rather than opening its own.
 cluster_merge_at = 0.82
-# Situations kept per artifact, per person. More than one is the point: a thing
-# looked up on Friday afternoons and occasionally on Monday mornings is two
-# situations, and their mean is a situation that never happened.
+# Situations kept per artifact, per person.
 max_clusters = 5
-# A pattern that stops fades rather than standing for ever.
 half_life_days = 45.0
-# A cluster lighter than this is dropped. Low enough that a single recent event
-# survives: a thing done twice is worth saying so about, it is just not worth
-# calling a pattern.
+# Clusters lighter than this are dropped.
 min_weight = 0.9
-# Weight at or above which a situation is spoken of as established. Below it the
-# offer says how many times it has happened instead — "Twice before" — and
-# demands a strong match before saying anything at all, because there is less
-# behind it. At the default half-life this is the third repetition.
+# Weight at which a situation is called established.
 firm_at = 2.5
-# Score at or above which an established situation is called a pattern, and
-# above which it is called a resemblance. Below both, a card is drawn at random
-# with no reason printed beside it — something to look at while the base has
-# nothing to say about the situation. This is the same score the store ranked
-# on: the whole vector, every block of which describes the situation.
+# Scores for "pattern" and "resemblance"; below both, a random card.
 strong_at = 0.75
 weak_at = 0.45
-# What an open of something this offered counts for, back into the profile.
-# Zero: without it, the first lucky guess grows into a habit the system taught
-# itself.
+# Weight of opens of something this offered; 0 keeps it from teaching itself.
 self_weight = 0.0
 
-# What each named block of the situation is worth. Each block is normalised to
-# length 1 and then scaled by its weight, so a block contributes exactly its
-# weight however many dimensions it uses — seven one-hot slots for the weekday
-# do not outweigh two for the hour because there are seven of them.
+# Each block is normalised, then scaled by its weight.
 [recommend.weights]
-# The hour, as an angle — 23:30 and 00:30 are an hour apart, and 14:55 against a
-# 15:00 pattern costs almost nothing.
 time_of_day = 1.0
-# One-hot, because "Friday is three from Tuesday" means nothing and the pattern
-# is exactly Friday.
 weekday = 1.0
-# The part of the weekday that genuinely is gradual, kept separate and weak.
 weekend = 0.3
 device = 0.8
 viewport = 0.4
@@ -807,289 +265,66 @@ locale = 0.3
 network = 0.6
 power = 0.2
 environment = 0.2
-# Off. A monthly rhythm is real, but nothing has shown one here yet.
 month_cycle = 0.0
 
-# ── The sitting ──────────────────────────────────────────────────────────────
-# What this session has touched, carried between search, ask and capture. In
-# memory only: it dies with the process, because a working memory that survives
-# a restart is a long-term memory and engram has one of those already. The web
-# door only — an access token is not a conversation.
-#
-# Carrying is always on and changes no order: a prefilled ask box, the question
-# an answer answered, a rail of what you have been in.
 [sitting]
-# Let what this sitting has touched lift a result.
-#
-# The only part of the sitting that moves an order, and the same query ranking
-# differently in two sittings is exactly what is disorienting about it — so it
-# is off, the lift shares the one budget `associate.prime_lift` bounds, rank 0
-# never moves, and a hit it lifted says so on the row.
-#
-# On in this file, and a starting rung rather than a verdict. Every search
-# records what the sitting held whether or not this is on, so the evidence
-# accumulates from the first day; the base replays it
-# and moves this from here on what it finds. It needs `associate.prime_lift`
-# above zero to do anything at all — below that there is no budget for the
-# sitting to share — and the server says so at startup if you zero one without
-# the other.
-#
-# The compiled default is still off: the lift ships on, and whether what a
-# sitting touched may share it is a second decision, taken here.
-#
-# Worth saying plainly, because the design that argued for measuring this
-# assumed the opposite: evidence gathered while the sitting is live is not the
-# clean counterfactual that design described. It is a starting rung under
-# watch — what the loop replays is a base that was already primed — and what
-# stands behind it is the base's own probe anchor and lived watch, either of
-# which may take it back. Start from `false` if you want the clean reading.
+# Let what this sitting touched lift a result; needs associate.prime_lift above 0.
 prime = true
 
 [time]
-# A due reminder inside this many hours is shown on the front page, and may
-# lift a search hit by the same bounded step a primed hit gets.
+# Due reminders inside this window show on the front page.
 horizon_hours = 48
-# Dates a note refers to inside this many days are listed under "Coming up".
+# Dates inside this many days are listed under "Coming up".
 coming_up_days = 7
-# An open due reminder lifts a hit, bounded, and the row says so. Extracted
-# dates never lift.
+# An open due reminder lifts a hit, bounded.
 lift = true
-# IANA zone for doors that send none (the API without ?tz=, MCP without tz).
-# Empty means the server's own zone, as the host names it — and UTC where the
-# platform cannot say. Name a zone here if the server's own is not the one your
-# notes are written in.
+# IANA zone for doors that send none; empty is the server's own.
 default_tz = ""
 
-# ── Reaping ──────────────────────────────────────────────────────────────────
-# The sweep that revisits long-retired artifacts and decides, one model call
-# each, whether the live base already says what they say. A worthless one is
-# buried: its text is copied into the `graveyard` table and wiped from the
-# artifact, and its vector point is deleted. A valuable one is rewritten into a
-# fresh artifact.
-#
-# This is the only stage in the base that destroys text an operator captured,
-# so read it before leaving it on. Nothing is lost — `graveyard` is permanent
-# by design, and every burial keeps the judge's one-line reason with it — but a
-# buried artifact is out of search, out of FTS and out of the vector store, and
-# putting one back is a manual read of that table.
-#
-# It runs only where a judge model is configured. The free rules nominate; they
-# never tombstone on their own.
+# Buries retired artifacts the live base already covers; the only stage that wipes captured text.
 [reap]
-# The sweep at all. Off means retired artifacts keep their text forever, which
-# is what every base did before this stage existed.
-#
-# This whole section is the consent: a config file that does not mention [reap]
-# does not run the sweep, whatever the default below says. It is the one stage
-# that destroys captured text, so an upgrade never turns it on for you — you
-# do, by writing this block.
-#
-# Buried is not gone: the text and the vector go to the graveyard, /ui/insights
-# lists it under Reaped with a Restore button, and the base restores a buried
-# artifact itself when a search given up on would have been answered by it.
+# Runs only when this section is written.
 enabled = true
-# How often the sweep runs. Once a day: the backlog it drains accumulated over
-# months, and there is nothing to be gained by draining it faster.
 interval_mins = 1440
-# How long an artifact must have been retired before it is judged at all. The
-# clock is `artifacts.retired_at`, and a row retired before that column existed
-# is given a fresh one on the first sweep rather than a date invented for it —
-# so an upgrade waits this long again before anything is judged.
+# Days retired before an artifact is judged.
 min_age_days = 90
-# Model calls per run, and so the sweep's whole inference budget. Rows over the
-# cap stay candidates, oldest first, and come back on the next run.
+# Model calls per run.
 max_judged_per_run = 20
-# Rewrites per run, bounded separately: one bad judging batch must not be able
-# to flood the live base with model-written text.
+# Rewrites per run.
 max_rescues_per_run = 3
 
-# ── Scheduling ───────────────────────────────────────────────────────────────
-# The queue is the scheduler. Whether somebody is waiting on a unit is a
-# constant per stage rather than a setting: a priority you can set wrong
-# presents as "the capture is hanging", with nothing anywhere saying why. What
-# is left to decide is the one number that keeps priority from becoming
-# starvation.
 [schedule]
-# A background unit waiting longer than this becomes foreground. Without it,
-# one long ingest keeps night work off the workers for as long as it lasts.
-# The default is a guess; the sweep history on Ops is how you check it — a
-# sweep whose runs thin out says the guess is wrong.
-#
-# `0` does not switch ageing off, it makes every waiting unit old enough at
-# once: the two classes stop dividing anything and the queue behaves as it did
-# before priority existed. There is no way to switch ageing off, because a base
-# under constant capture with no ageing never runs its night work at all.
-#
-# At most twenty units are promoted per repair pass, so a backlog that built up
-# behind a slow endpoint cannot put itself in front of a capture all at once.
+# Background work waiting longer than this becomes foreground.
 age_after_mins = 60
-
-# The ceiling on how long a sweep that keeps finding nothing waits before
-# looking again. Each consecutive empty run doubles the wait up to this.
-#
-# A base with nothing to do wakes, queries, finds nothing and sleeps — once per
-# interval per sweep, for ever, and once per user besides. That costs no model
-# calls (a sweep with nothing to do makes none), so the answer is proportionate:
-# a wake-up, a file open and a handful of queries, spread out. Any new data
-# cancels the wait outright, because every producer already pulls a sleeping
-# unit forward, so a quiet base runs its sweeps late and never not at all.
+# Ceiling for the backoff of a sweep that keeps finding nothing.
 # backoff_max_hours = 24
 
-# ── Pacing ───────────────────────────────────────────────────────────────────
-# One gap in front of every inference call, whatever its role. The roles share
-# one GPU, so a per-role cooldown could not bound total load.
 [pacing]
-# Minimum seconds between the end of one background generation and the start of
-# the next, and only one background call runs at a time however many workers are
-# configured, so this is the gap between calls rather than per worker. Zero
-# disables pacing. A question asked through `ask` ignores it: someone is
-# waiting, and the pacer is there to protect the GPU from batch work.
-#
-# Embedding ignores it as well, for the opposite reason. It still takes its
-# turn — a batch never runs alongside a generation, which is what actually
-# bounds a shared GPU — but it serves no gap and starts none. The gap is sized
-# against a generation; an encoder answering a batch of 32 in about a second is
-# not one, and pacing it spends nearly the whole budget on the one role that
-# needs no protecting. A large capture generates nothing at capture time, so
-# what this paces is mostly promotion, the judged links, and the one synthesis
-# call a small capture arms.
+# Seconds between background generations; 0 disables. Ask and embedding ignore it.
 cooldown_secs = 0
 
-# ── What use leaves behind ───────────────────────────────────────────────────
-# Nothing here changes what a search or an ask returns. It decides only what is
-# written down about how one turned out.
-#
-# Four things are recorded, and three of them were already being computed and
-# thrown away: an excerpt an answer actually drew on, a result somebody opened,
-# and an answer carrying a command or path none of its excerpts held. The
-# fourth is below.
-#
-# What is deliberately *not* recorded is silence. A search nobody acted on may
-# have failed, or may have been answered off the rail without anything being
-# opened, and those are indistinguishable — so neither is written rather than
-# one being guessed at.
 [evolve]
-# A search nobody opened, followed by another search from the same person
-# inside this many seconds, is recorded as a weak negative: the first one did
-# not answer, and the second attempt is the evidence of it.
-#
-# Minutes, and far above `feedback.coalesce_secs` on purpose. That one is the
-# length of a typing burst; this one is a person reading a list, thinking, and
-# asking again. Too long and an unrelated question an hour later is scored as
-# the failure of a search that worked.
-#
-# Weak because the search rail shows snippets: a search read and walked away
-# from satisfied looks exactly like one given up on. A weak negative is never
-# enough to change a setting — only ever enough to take one back.
-#
-# 0 turns this one signal off and leaves the other three recording.
+# A search nobody opened, then another inside this window, counts as a weak negative; 0 turns it off.
 give_up_window_secs = 300
-
-# What a quiet base does on its own. It curates itself: it moves its own
-# ranking parameters — the recency weight, the per-source cap, the candidate
-# pool depth, the recency half-life, the prime lift, whether the sitting takes
-# part in it, whether the configured reranker runs, the width of the associated
-# band — on what use left behind, takes a move back on the same evidence, and
-# acts on the corpus: merging, replacing, discarding, burying and condensing an
-# artifact into a shorter version of itself that loses no value, command or
-# path, at the pace `max_actions_per_day` sets. Nothing is deleted, and every
-# move has an undo on /ui/insights, which is why nothing waits for you.
-#
-# This key is no longer read. An older file with "off", "ranking", true or
-# false still loads, and the base runs as it would have under "full"; a line in
-# the log says so.
-#
-# An idle pass replays the positive
-# observations under every neighbouring setting, and a candidate that clears the
-# same gate the sweep uses — two net better, no aggregate loss — becomes the
-# live generation. The base then watches what that generation earns while it is
-# actually serving, compared with what its predecessor earned, and puts the
-# predecessor back when it does not hold. A candidate taken back is not offered
-# again until the models change — or until the corpus has more than doubled
-# since, because a setting refused on the base you had is not refused on the
-# base you have.
-#
-# This file is never written by that loop. It holds your starting point; the
-# database holds what is live, and /ui/insights says which generation that is.
-# Every move it made is in the history there.
-#
-# One knob per adoption, and nothing proposed while the last one is watched.
-# Slower, and it keeps the history readable and every revert exact.
-#
-# What a quiet base spends on this: nineteen vector searches per replayed
-# observation — the running settings and every other rung of each knob's
-# ladder, one knob moved at a time — and it stops between observations the
-# moment a search or a question arrives, writing nothing. The next quiet period
-# starts it over. The pass spends inference in exactly one case: a reranker is
-# configured, the live generation runs without it, and the pass asks what one
-# call per observation would have changed. The band is not replayed at all; it
-# moves on what it earned while serving.
-#
-# The base also takes its own corpus actions back. Every merge,
-# replacement, discard, burial and condensation the corpus jobs make is
-# journaled, and the quiet pass reads the journal against the same
-# observations: a merge or a replacement whose survivor is no longer found
-# where the original was is undone, and anything hidden or buried that a
-# search given up on would have been answered by is restored. An action taken
-# back is not taken again on the same artifact. The review threshold under
-# [consolidate] moves on the same pass. Every action and every undo is on
-# /ui/insights, with what you undid told apart from what the base undid.
-
-# Corpus actions each job may take on its own in any 24 hours — merges,
-# replacements, discards, burials and condensations. A pace: a backlog drains
-# a day at a time. Undos are never counted. 0 stops the corpus jobs acting.
+# Corpus actions each job may take per 24 hours; 0 stops them.
 max_actions_per_day = 20
-
-# How long the base has to have been quiet — no search, no question — before
-# it sleeps. A sleep is four things in order: it *integrates* every new
-# artifact (one neighbour read each — was anything near it when it came? new,
-# known, or a conflict for you), *rehearses* what it holds (the wording of
-# your later captures replayed as questions for your earlier ones, the base's
-# own probes), *reorganises* on what that showed (its own
-# ranking generations and the corpus rules), and *wakes* with one row
-# on /ui/insights under "Last night" saying what it did. Its searches embed
-# nothing and take the background lane, so a person who comes back gets ahead
-# of it; this is what keeps it from starting under somebody at all. Half an
-# hour is a sitting having ended, not a pause in one.
+# Quiet seconds before the base sleeps.
 idle_secs = 1800
 
 [capture]
-# The upload, paste-a-link and extension doors.
-#
-# Seconds a server-side GET may take. This is a network fetch, not a model
-# call, so it is not measured in minutes.
+# Seconds a server-side fetch may take.
 fetch_timeout_secs = 30
-# Bytes read from a fetched URL before the transfer is abandoned. Separate
-# from the 8 MB request-body limit: that one bounds what you send engram,
-# this one bounds what engram goes and gets.
+# Bytes read from a fetched URL.
 fetch_max_bytes = 8388608
-# Characters an extraction must yield to count as a capture. A page that
-# reduces to less than this was a login wall or a cookie banner, and is
-# reported as a failure rather than stored. Fidelity outranks convenience:
-# a corpus that quietly holds the subscribe prompt instead of the article is
-# worse than no capture at all.
+# Extractions shorter than this are refused as a login wall or banner.
 min_extracted_chars = 200
-# Bytes an uploaded image may weigh. The image door has its own ceiling
-# because a phone photo is several times the 8 MB the rest of the API allows.
 image_max_bytes = 26214400
-
-# Bytes an uploaded PDF may weigh. The upload door has its own ceiling for a
-# PDF, well above the 8 MB request-body limit, because a book is tens of
-# megabytes. Nothing else bounds one: there is no page cap, and a long document
-# simply becomes a long queue.
 pdf_max_bytes = 52428800
-# Longest edge of the preview shown to the vision model and in the UI. The
-# original is stored untouched either way.
+# Longest edge of the preview; the original is stored untouched.
 image_preview_edge = 2048
 
 [ui.background]
-# The rotating point cloud behind the pages, sampled from the vector store.
-# Purely decorative; off leaves the pages plain.
+# The point cloud behind the pages; decorative.
 enabled = true
-# Vectors sampled per snapshot. Capped at 20000 on read: the number reaches a
-# Qdrant scroll limit and a projection loop at once, and this is a decoration.
+# Vectors sampled per snapshot; capped at 20000.
 sample_size = 2000
-# The client keeps the cloud it was drawn and asks once per page load whether
-# the store is still the one it is a picture of. Only a base that has changed
-# costs a fresh sample, and one that has been emptied takes the picture down on
-# the same load rather than hours later.

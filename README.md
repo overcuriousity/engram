@@ -2,129 +2,38 @@
 
 **A trace of everything worth keeping.**
 
-A self-hosted knowledge base you search by meaning. Paste anything — text, a
-link, a PDF, a photo. engram stores it verbatim, splits and embeds it, and hands
-back the passages that answer you, rewritten for retrieval only where that helps.
-
-Everybody else summarizes your notes and shows you the summary. Then the summary
-is all you have. We keep the original and we keep it in front of you.
-
-Three doors, one backend: the web UI, a REST API at `/api/v1`, and an MCP server
-at `/mcp` so an agent can read and write mid-session. Three doors is enough.
-
-**Both halves of retrieval.** A dense embedding for meaning, a local BM25 vector
-for characters. Meaning finds the paragraph you half-remember; characters find
-`E01` and `--dry-run`, which embeddings blur. Both, fused, every query.
-
-**It grades itself, honestly.** A test query written while looking at the answer
-passes on every system ever built. engram instead reads recall@10 and MRR off
-the verdicts you give under real searches, at the positions those searches
-really gave. Not a proxy score.
+A self-hosted knowledge base you search by meaning. Paste text, a link, a PDF or
+a photo; engram stores it verbatim, splits and embeds it, and returns the
+passages that answer you. Three doors, one backend: the web UI, a REST API at
+`/api/v1`, and an MCP server at `/mcp`.
 
 ## What it does
 
-- **Capture anything** — paste, a URL, a PDF, a photo, the browser extension,
-  the Android app's share sheet, a shell pipe. One endpoint reads what it is handed
-  instead of asking you to classify it; originals are stored untouched. PDFs are
-  read locally with no model; images need `[infer.vision]`. Small pastes are
-  structured on the spot, big ones stored verbatim and rewritten once you have
-  used them, and the box says which fate a paste will meet before you press it.
-- **Search** — loose matches say they are loose, and a divider marks where
-  relevance falls off; below it, hits keep their rank and stop pretending. Hold
-  the microphone and talk, where `[infer.transcribe]` names a speech endpoint.
-- **Ask** — one question across the base, streamed. It abstains out loud when
-  the base has nothing, and badges any command or path the model wrote that no
-  excerpt supports. That badge is the best part.
-- **Judge** — answer *Was this what you were looking for?* under a search or an
-  Ask. That is the only thing the base asks of you: Insights reads recall@10
-  and MRR off those verdicts, a good answer confirms the notes it drew on, and
-  the idle pass replays them to move the ranking and take back its own
-  mistakes. One button forgets it.
-- **Duplicates** — read at capture, judged in the background, merged or
-  replaced where the judge is sure. Nothing deleted, no merge drops a number
-  or a path, every action has an undo on Insights.
-- **Disagreements** — two notes that state a value differently are both kept,
-  and search and Ask say so, with dates, wherever either one comes up.
-- **Memory that learns** — links from co-retrieval and accessibility that
-  decays, so what you use stays reachable. While you are away it sleeps: files
-  the day's captures against what it held, rehearses that against your later
-  wording, takes back what the evidence says it got wrong, and says so on
-  Insights. Everything it writes is a version beside the original, never over it.
-- **Reap** — what has been retired for 90 days gets one more look from a model:
-  whatever it still states that the live base does not is rewritten live, and
-  the rest leaves search and index for a graveyard table nothing reads back. Off
-  with `reap.enabled = false`, and never touching what an open reminder names.
-- **Time** — dates are read by the same synthesis call that structures a
-  capture, so a reminder is judged rather than pattern-matched. What is due
-  shows under the box with done, snooze and push to Gotify or UnifiedPush, and a
-  finished reminder retires its note: still searchable, no longer one of the
-  last things you kept. Every *today* links to the day page.
+- **Capture** — paste, URL, PDF, photo, browser extension, Android share sheet,
+  shell pipe. Originals are stored untouched; PDFs are read locally, images need
+  `[infer.vision]`.
+- **Search** — dense embedding plus a local BM25 vector, fused on every query.
+  Dictation where `[infer.transcribe]` is set.
+- **Ask** — one streamed answer across the base; abstains when the base has
+  nothing and badges commands or paths no excerpt supports.
+- **Judge** — verdicts under a search or an answer give recall@10 and MRR on
+  Insights and drive the idle pass's ranking moves.
+- **Duplicates and disagreements** — judged in the background; merges never drop
+  a number or path, every action has an undo, conflicting values are both kept.
+- **Memory that learns** — links from co-retrieval and decaying accessibility;
+  the idle pass integrates, rehearses and takes back its own mistakes.
+- **Reap** — artifacts retired for 90 days are rewritten or buried in a graveyard
+  table (`reap.enabled`).
+- **Time** — reminders and dates read at capture; due reminders push to Gotify or
+  UnifiedPush.
 
-Everything after the paste runs on its own, and sweeps repair whatever was
-interrupted. You do not babysit it.
-
-## Corpus, segment, artifact
-
-A **corpus** is what you captured: verbatim, never edited, the provenance every
-answer traces back to. A **segment** is a slice of one sized to the model's
-context — local, mechanical, and the memory that lets an interrupted run resume.
-
-An **artifact** is a unit of retrieval: text with a title, category and tags,
-ranked on its own and sized to embed whole. Most are verbatim *passages*, split
-on the document's own structure. A *synthesized* or *captured* one was written
-by the model, badged wherever it is shown, and supersedes the passages it covers
-without deleting them.
-
-## What a capture becomes
-
-One endpoint, one box, one `-c`. There is no "new reminder" form and no kind to
-pick: the call that structures a capture also reads what it is.
-
-| It becomes | When the text | Where it shows |
-| --- | --- | --- |
-| a **note** | states something | search, Ask, the corpus view |
-| a **reminder** | asks to be reminded | the due band, then a push |
-| an **event** | mentions a date without asking for anything | *Coming up*, the day page |
-| a **link** | restates or answers a note you kept | the rail beside both |
-
-A note is the floor: everything captured is one, and the other three are things
-a note additionally *is*. Nothing leaves search by becoming one of them.
-
-The reader is a model, not a rule table, so this is guidance and not a syntax.
-It keys on the sentence's *stance* — what you are asking of the note.
-
-```text
-remind me Friday to send the invoice      → reminder, Friday 09:00
-every Monday, back up the NAS             → reminder, repeating
-the workshop is on the 14th               → event: a date, nothing owed
-PUID is Microsoft's per-user identifier   → note
-```
-
-**A date is not a reminder.** *The invoice is dated 30 September* mentions one;
-*pay the invoice by 30 September* asks for something. The first is an event
-under *Coming up*, only the second wakes your phone. An unstated time of day is
-09:00, and repetition survives as a recurring row. Reminders show for
-`time.horizon_hours` before they are due (48) and events for
-`time.coming_up_days` (7).
-
-`engram -r` and `?intent=remind` are a hint on the prompt, not a filing: the
-model still reads the sentence, and the hint buys a dateless reminder still
-being armed for the band to ask about. If a reminder is wrong, say so on the
-row — *not a reminder* on the band — and the refusal survives a re-read.
-
-## Three rules
-
-- Inference happens at write time, not read time.
-- Nothing is lost, and every step is readable and reversible.
-- Lean beats clever.
-
-Everything on the issue tracker is weighed against these.
+A capture becomes a **note**; it may also be a **reminder** (asks to be
+reminded), an **event** (mentions a date) or a **link** (restates a kept note).
 
 ## Requirements
 
-Rust 1.94+ (the floor comes from sqlx 0.9), Qdrant over its REST API (no gRPC
-port needed), and an OpenAI-compatible endpoint for chat and embeddings. One
-server can fill every role, or each role can point somewhere different.
+Rust 1.94+, Qdrant (REST API), and an OpenAI-compatible endpoint for chat and
+embeddings.
 
 ## Install
 
@@ -132,18 +41,12 @@ server can fill every role, or each role can point somewhere different.
 curl -fsSL https://raw.githubusercontent.com/overcuriousity/engram/master/install.sh | sh
 ```
 
-It takes the build for the machine it runs on, checks it against the release's
-`SHA256SUMS`, and never reaches for sudo. `ENGRAM_INSTALL_DIR` says where to put
-it, `ENGRAM_VERSION` pins a tag. Read [`install.sh`](install.sh) before piping it
-to a shell; the archives are on the [releases
-page](https://github.com/overcuriousity/engram/releases) if you would rather take
-them by hand. Versions are dates — `v2026.918.1` — marked pre-release while the
-shape of things is still moving. Or build it: `cargo build --release`.
+Checks the release's `SHA256SUMS` and never uses sudo. `ENGRAM_INSTALL_DIR` sets
+the target, `ENGRAM_VERSION` pins a tag. Or build: `cargo build --release`.
 
 ## First run
 
-Qdrant must be answering on the address in `config.toml` — `127.0.0.1:6333` by
-default — before engram starts. Only its REST port is ever spoken to.
+Qdrant must answer on the configured address (`127.0.0.1:6333`) first.
 
 ```bash
 cp config.example.toml config.toml
@@ -151,264 +54,93 @@ engram --hash-password 'your password'   # paste into config.toml
 engram
 ```
 
-Open <http://127.0.0.1:8080/auth/login>, capture something, and watch it move
-through `raw → embedding → ready` on Browse. `partial` means part of it has not
-arrived; Ops says what is retrying, and nothing there needs you.
+Open <http://127.0.0.1:8080/auth/login>. `--config` takes a path; otherwise
+`config.toml` in the working directory is read if present. `--print-config`
+prints the resolved configuration, redacted.
 
-`--config` takes an explicit path, otherwise `config.toml` in the working
-directory is read if present — a configuration supplied entirely through the
-environment needs no file. `--print-config` shows what engram resolved, redacted.
+`auth.mode = "local"` binds to loopback only; anything reachable from another
+machine wants `oidc`.
 
 ### As a service
 
-Binary at `/usr/local/bin/engram`, config and database under `/var/lib/engram`.
-This is `engram.service`, shipped in the release archive:
-
-```ini
-[Unit]
-Description=engram
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=engram
-WorkingDirectory=/var/lib/engram
-# Secrets such as ENGRAM__AUTH__OIDC__CLIENT_SECRET, kept out of the unit file.
-# Optional: the leading `-` lets the service start without it.
-EnvironmentFile=-/var/lib/engram/engram.env
-ExecStart=/usr/local/bin/engram --config /var/lib/engram/config.toml
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`auth.mode = "local"` refuses to bind to anything but loopback. Anything
-reachable from another machine wants `oidc`, or a proxy authenticating in front.
+`engram.service` is shipped in the release archive: binary at
+`/usr/local/bin/engram`, config and data under `/var/lib/engram`, secrets in
+`/var/lib/engram/engram.env`.
 
 ### One-shot commands
 
-`--reindex` copies every vector into a fresh collection generation and swaps the
-alias onto it. `--recompute-coverage` re-measures corpus coverage from stored
-artifacts. Each exits when done and requires `--user <SUBJECT>`; omitting it is
-an error listing the known subjects, because defaulting to an arbitrary tenant
-is how the wrong collection gets reindexed. `--reindex` needs the server
-stopped: it takes the server lock and refuses while engram is running, since a
-write landing during the alias swap would be lost.
+Each requires `--user <SUBJECT>` and, where it writes, a stopped server.
 
-`--merge-orphans` repairs a base captured before passages had a minimum size
-(engram#61): a budget cut could leave the tail of a sentence, `is needed.`, as a
-passage of its own, and a near-empty embedding ranks near the top for any query.
-It finds every live passage under `MIN_PASSAGE_CHARS` (40 non-whitespace
-characters), joins its text to the neighbouring passage of the same window (the
-one before it, else the one after; never across a heading), widens that
-passage's span, queues its re-embed and deletes the orphan's row and vector.
-Add `--dry-run` to list what it would merge without writing anything. It is
-idempotent, and the re-embeds run when the server's job worker next picks them
-up.
+- `--reindex` — copy every vector into a fresh collection generation and swap
+  the alias.
+- `--recompute-coverage` — re-measure corpus coverage from stored artifacts.
+- `--merge-orphans [--dry-run]` — join passages under 40 non-whitespace
+  characters into their neighbour (engram#61).
 
 ## Multiple users
 
-Every user gets their own SQLite database and Qdrant collection. Nothing is
-shared, and no query anywhere could be written without a tenant filter because
-no tenant filter exists — the isolation is structural. Every setting in
-`config.toml` stays instance-wide.
-
-What is *not* divided is compute. One embed endpoint, one synthesize endpoint,
-one reranker, most likely one GPU behind all of them, so `server.workers` stays
-one number however many people sign up: it is the admission point in front of
-that hardware. A pool per user would let ten signed-in users fire
-`10 × server.workers` concurrent requests at one endpoint, where throughput does
-not scale but collapses.
-
-Set `auth.mode = "oidc"`. The first request from an unseen subject provisions
-that user — a row, a database, a collection. There is no registration UI and no
-password management: the provider owns accounts, engram owns the mapping. Who
-may sign in is still engram's to say, in `allowed_subs`, `allowed_emails` or
-`allowed_groups`; a subject matching any one entry is admitted. An allowlist
-naming nobody is refused at startup rather than read as "everybody", because
-provisioning is what admission costs: against a provider with open
-self-registration, every stranger is a database and a vector collection created
-here, uncapped. A deployment that wants the provider to be the only gate says so
-with `open_registration = true`.
-
-### Accounts
+Every user gets their own SQLite database and Qdrant collection; settings and
+`server.workers` stay instance-wide. Set `auth.mode = "oidc"`: an unseen subject
+is provisioned on first sign-in if it matches `allowed_subs`, `allowed_emails` or
+`allowed_groups`. Empty allow-lists are refused unless `open_registration = true`.
 
 ```bash
 engram --list-users                      # subject, slug, email
-engram --delete-user  sub-abc123         # row, credentials, file and alias, behind a typed yes
+engram --delete-user  sub-abc123         # row, credentials, file and alias; needs a stopped server
 ```
-
-`--delete-user` drops the Qdrant collections first and stops if it cannot reach
-them. The alias name is derived from the subject, so a collection left behind is
-worse than orphaned: the next time that person signs in, the surviving alias is
-adopted and the deleted account returns with every vector it had. Nothing is
-deleted when it stops that way — bring Qdrant back and run it again.
-It also needs the server stopped: it takes the server lock and refuses while
-engram is running, so a job or login cannot write for the user mid-deletion.
-
-There is no admin role, and nothing in the tree writes `config.toml`: the
-ranking tunes itself under `[evolve]`, and the file is your starting point.
 
 ### Backup
 
 ```bash
-engram --backup /srv/backup/engram-2026-10-17            # online: the server may keep running
-engram --backup /srv/backup/engram-2026-10-17 --offline  # point-in-time: refuses while it runs
-engram --backup-check  /srv/backup/engram-2026-10-17     # every file present and intact, exit 0/1
-engram --verify-stores [--user SLUG]                     # do the live stores agree? writes nothing
+engram --backup /srv/backup/engram-2026-10-17            # online
+engram --backup /srv/backup/engram-2026-10-17 --offline  # point-in-time; refuses while running
+engram --backup-check  /srv/backup/engram-2026-10-17     # exit 0/1
+engram --verify-stores [--user SLUG]                     # read-only
 engram --restore /srv/backup/engram-2026-10-17 [--user SLUG] [--reembed] [--force-version]
 ```
 
-A backup is the whole instance, taken as one unit, because the halves name
-each other: the control database names the subjects, the subjects name tenant
-files, the tenant files name the points in Qdrant. `--backup DIR` writes into a
-directory that must not exist or be empty:
+A backup directory holds `control.db`, `tenants/<slug>.db`,
+`vectors/<alias>.snapshot` and `manifest.json` (written last, with hashes and
+counts). Online backups are reconcilable: rows without points are re-embedded
+at restore. Restore refuses on a bad manifest, a running server, a newer
+format, a different embedding recipe or vector backend, or an unknown `--user`,
+and ends with **PASS** (0), **REPAIR** (2) or **FAIL** (1). The previous Qdrant
+generation is kept as the rollback.
 
-- `control.db`: users, the queue, sessions, API token hashes, pair grants and
-  the VAPID private key;
-- `tenants/<slug>.db`: every artifact and attachment, one file per tenant;
-- `vectors/<alias>.snapshot`: a Qdrant snapshot of the generation each alias
-  serves, fetched over the configured URL and deleted from Qdrant afterwards;
-- `manifest.json`, written last: format, version, mode, the embedding recipe's
-  fingerprint, and per file its SHA-256, size and counts. No URL, API key,
-  subject, email, token or key material — slugs, hashes and counts only. A
-  directory without one is an aborted backup and nothing will restore it.
-
-The databases are copied with `VACUUM INTO` from a read-only connection, so a
-backup under a running server is safe. What it promises depends on the mode.
-**Online** is *reconcilable*: Qdrant is captured before SQLite, so whatever
-lands during the window is a row without a point, which restore re-embeds, and
-a point whose row was deleted during the window is pruned at restore. Nothing
-captured before the backup started is lost. **`--offline`** holds the server's
-lock (`<control_path>.lock`) and refuses while a server holds it; the archive
-is then *point-in-time* and verification is expected to find no gaps.
-
-`--restore DIR` refuses, before it changes anything, when:
-
-- the manifest does not parse, a file it names is missing or fails its size or
-  hash, a Qdrant archive has no snapshot for one of its tenants, or a slug or
-  alias is not a plain name (paths are rebuilt from those, never read from the
-  manifest);
-- a server is running (the lock is held);
-- the archive was written by a newer engram (`--force-version` accepts it);
-- the archive's embedding recipe or width is not the configured one
-  (`--reembed` restores the databases into empty generations and re-embeds
-  every artifact; nothing overrides a width mismatch otherwise);
-- the archive's vector backend is not this build's (Qdrant against contained,
-  or the reverse — there is no conversion);
-- `--user` names a tenant missing from the archive or the live control
-  database. Per-tenant restore never touches `control.db`.
-
-Each tenant's snapshot is uploaded into the next generation, checked for its
-point count, and only then is the alias moved; the databases are swapped in
-by rename afterwards, tenants first and control last. An interrupted restore
-is finished by running the same command again. It ends with the
-`--verify-stores` table and one word: **PASS** (exit 0); **REPAIR** (exit 2):
-everything is back and N artifacts were queued for embedding again, which costs
-N embedding calls; **FAIL** (exit 1): the table says which tenant and why.
-
-**The previous generation is left in Qdrant**, as `--reindex` leaves it: it is
-the rollback. The report names each one with the `DELETE /collections/<name>`
-to run once you are satisfied; until then it holds its share of Qdrant's disk.
-
-Outside a restore, the two stores of a tenant can still drift — a crash
-between the two writes, or one restored without the other. `heal_store_drift`
-re-arms an embedded row without a point on that tenant's next open, and only
-warns about a point without a row; the Ops page reports both. A restore runs
-the same comparison at once and prunes those points, because the database is
-the authority.
-
-**The archive is the instance.** It holds every artifact and, in `control.db`,
-what it takes to be any of your users. The directory is created `0700` and
-every file `0600`; keep it that way and keep it outside `store.dir`. The
-manifest's hashes catch corruption and path tricks, not a malicious archive:
-restore only archives you made yourself and kept `0700`. Shipping it off the
-host, scheduling it, and encrypting it are yours to do — `age` over the
-directory (or over a `tar` of it) is the answer until engram has one.
+The archive is the instance: it is created `0700`, files `0600`. Restore only
+archives you made; encrypting and shipping them is yours to do.
 
 ## Clients
 
-**The command line** is the other half of the same binary. It never reads the
-server's `config.toml`: it talks to a running engram over HTTP and needs an
-address and a token, from `~/.config/engram/cli.toml`. Run it before that file
-exists and it writes it for you, commented and `0600`.
+- **Command line** — the same binary, talking to a running engram over HTTP;
+  reads `~/.config/engram/cli.toml` (written on first run, `0600`).
 
-```bash
-engram -c notes.pdf                 # capture; `pbpaste | engram` captures a pipe
-engram -s 40 "loop device"          # search, as wide as you ask
-engram -a "how did I mount it?"     # stream an answer
-engram -r "call the bank tomorrow"  # a hint that this is a reminder
-engram --show 3                     # read the third hit of the last search in full
-```
+  ```bash
+  engram -c notes.pdf                 # capture; `pbpaste | engram` captures a pipe
+  engram -s 40 "loop device"          # search
+  engram -a "how did I mount it?"     # stream an answer
+  engram -r "call the bank tomorrow"  # hint: a reminder
+  engram --show 3                     # the third hit of the last search
+  ```
 
-`--show` also takes a leading piece of an id. Sources under an `-a` answer are
-numbered as the same kind of list, so the `[9]` an answer cites is
-`engram --show 9`. Exit `1` means nothing was found, so `engram -s "x" || …` is
-a usable branch.
-
-**Android** is a client of `/api/v1`, of a server or of itself. Paired, it is
-that and nothing more. It pairs by scanning a QR
-the server shows, over a two-minute window, pinning the certificate it is given;
-set `server.tls_fingerprint` and it pins from the first byte. Search is home,
-Ask beside it, the due band beneath. Capture goes through an outbox, so a
-capture on a train is a capture. The microphone is the web's — held rather than
-pressed, drawn only where the server reports a speech model. "On this phone",
-chosen at first start or under Settings → Mode, needs no server: the same core
-runs inside the app on loopback, embedding, searching, answering and hearing
-with models it downloads, and holds the work that needs a larger model until an
-endpoint is named. Built, and not yet measured on a phone. Building it and
-what each screen does: [android/README.md](android/README.md). The APK is on the
-[releases page](https://github.com/overcuriousity/engram/releases).
-
-**The browser extension** captures the page you are on, for Chrome and Firefox —
-[extension/README.md](extension/README.md).
+  Exit `1` means nothing was found.
+- **Android** — a client of `/api/v1`, or a contained server on the phone;
+  pairs by QR. [android/README.md](android/README.md); the APK is on the
+  [releases page](https://github.com/overcuriousity/engram/releases).
+- **Browser extension** — Chrome and Firefox. [extension/README.md](extension/README.md).
+- **iOS Shortcut** — a token from `/extension/install`.
+- **MCP** — `/mcp` with an API token.
 
 ## Configuration
 
-[`config.example.toml`](config.example.toml) carries every key with the reasoning
-behind each default, including embedding recipes, reranker wire formats, and the
-`[infer.tiers.<name>]` blocks that let each role point at its own endpoint. Any
-key can be set by environment variable: prefix `ENGRAM__`, `__` between levels,
-e.g. `ENGRAM__INFER__EMBED__DIM=768`. Put secrets there rather than in the file;
-the loader warns if it finds one.
-
-What that file cannot tell you from inside itself:
-
-**`learn.mode` is the line to set first** — on a base that only wants capture,
-search and ask, the only one from that half of the file.
-
-```toml
-[learn]
-mode = "full"     # "off" | "learning" | "full"
-```
-
-`off` records nothing and learns nothing; a config naming `[server]`,
-`[vector]`, `[infer.embed]`, `[auth]` and this one line starts and searches.
-`learning` records searches and writes links and activation, but reads none of
-it on the query path — the mode to gather evidence in before anything may move a
-rank, since a change cannot be measured while its own inputs are moving the
-ranking it is measured against. `full` is the defaults. Every key a mode stands
-for is still a key, and one written in the file wins; `--print-config` names the
-mode first and then the keys it decided.
-
-**Three things worth knowing before you start:**
-
-- **`infer.embed.dim` must match the collection.** If it does not, engram
-  refuses to start and names both numbers. Mismatched vectors corrupt search in
-  a way you would not notice for weeks.
-- **`infer.ask.max_output_tokens` comes out of `context_tokens`.** `ask`
-  reserves it and packs excerpts into the remainder, so raising it buys longer
-  answers by showing the model fewer of them. Never more than half the window.
-- **Asking needs JavaScript** — the answer streams over SSE. `POST /api/v1/ask`
-  and the MCP `ask` tool are the JS-free ways in.
+[`config.example.toml`](config.example.toml) lists every key. Any key can be set
+by environment variable: `ENGRAM__` prefix, `__` between levels. Set
+`learn.mode` (`off`, `learning`, `full`) first. `infer.embed.dim` must match the
+collection.
 
 ## Docs
 
-- [docs/api.md](docs/api.md) — what a client of `/api/v1` may rely on.
-- [docs/evaluation.md](docs/evaluation.md) — how the base measures its own
-  retrieval, and what the idle pass does with the result.
-- [android/README.md](android/README.md) — building the app, screen by screen.
-- [extension/README.md](extension/README.md) — the browser extension.
+- [docs/api.md](docs/api.md) — the `/api/v1` contract.
+- [docs/evaluation.md](docs/evaluation.md) — how retrieval is measured.
+- [android/README.md](android/README.md)
+- [extension/README.md](extension/README.md)
