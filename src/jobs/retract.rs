@@ -124,7 +124,10 @@ pub const LAST_RUN: &str = "evolve.retract.last";
 /// Returns (artifacts restored, stopped early).
 pub(crate) async fn rule_two(core: &Core, started: i64) -> Result<(usize, bool)> {
     use crate::store::artifacts::ArtifactStatus;
-    let current = *core.ranking.read().expect("ranking lock");
+    let current = *core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let after = core
         .store
         .meta_get(GAVE_UP_AFTER)
@@ -358,7 +361,9 @@ async fn stamp_restored(
                 .await?;
         }
         Kind::Merge => {
-            let survivor = a.survivor_id.clone().expect("a merge row names its merge");
+            let survivor = a.survivor_id.clone().ok_or_else(|| {
+                crate::error::Error::Internal("a merge row without its merge".into())
+            })?;
             // Stamped only if it happened. A merge a later one has since
             // hidden is left alone, and closing its rows on the strength of an
             // undo that did nothing would take it out of rule 1's reach for
@@ -386,7 +391,9 @@ async fn stamp_restored(
 async fn take_back(core: &Core, a: &crate::store::actions::Action, reason: &str) -> Result<usize> {
     match a.kind {
         Kind::Merge => {
-            let survivor = a.survivor_id.clone().expect("a merge row names its merge");
+            let survivor = a.survivor_id.clone().ok_or_else(|| {
+                crate::error::Error::Internal("a merge row without its merge".into())
+            })?;
             // The same rule as `stamp_restored`: no rows are closed for an
             // undo that did nothing. Zero rather than an error, because this
             // is an ordinary state for rule 1 to meet and the pass must go on
@@ -466,7 +473,10 @@ pub(crate) async fn rule_one(
     live: &Generation,
     started: i64,
 ) -> Result<(usize, usize, bool)> {
-    let current = *core.ranking.read().expect("ranking lock");
+    let current = *core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut reconsidered = 0;
     let mut undone = 0;
     let after = core
@@ -648,7 +658,10 @@ mod tests {
 
     /// Name the running configuration as the live generation, under `recipe`.
     async fn generation_under(core: &Core, recipe: &str) -> Generation {
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         core.store
             .record_generation(&NewGeneration {
                 params: params.into(),

@@ -222,7 +222,10 @@ pub async fn pass(core: &Core) -> Result<Pass> {
     // take from them. Adopting on top of it would journal a move from settings
     // that were never measured; measuring on top of it poisons the record the
     // next pass reads.
-    let current = *core.ranking.read().expect("ranking lock");
+    let current = *core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if GenerationParams::from(current) != live.params {
         tracing::warn!(
             generation = %live.id,
@@ -553,7 +556,12 @@ async fn propose(
 
     // A reopen restating the file while this ran means the baseline it
     // measured against is no longer running.
-    if *core.ranking.read().expect("ranking lock") != current {
+    if *core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        != current
+    {
         tracing::info!("ranking changed while the idle pass ran; its results were discarded");
         return Ok(Pass::default());
     }
@@ -646,7 +654,10 @@ fn swap_ranking(
     from: crate::core::ranking::RankingParams,
     to: crate::core::ranking::RankingParams,
 ) {
-    let mut running = core.ranking.write().expect("ranking lock");
+    let mut running = core
+        .ranking
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if *running == from {
         *running = to;
     } else {
@@ -969,7 +980,10 @@ mod tests {
 
     /// Name the running configuration as the live generation.
     async fn generation_for(core: &Core) -> String {
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = core
             .store
             .record_generation(&NewGeneration {
@@ -1220,7 +1234,10 @@ mod tests {
     async fn seeded_with_a_burying_reranker() -> (Core, String) {
         let (core, order, _) = crate::eval::sweep::test_support::seeded_with_reranker().await;
         assert!(
-            core.ranking.read().unwrap().rerank,
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .rerank,
             "a configured reranker starts on"
         );
         let generation = generation_for(&core).await;
@@ -1241,7 +1258,14 @@ mod tests {
         assert!(!live.params.rerank, "{:?}", live.params);
         assert_eq!(live.parent_id.as_deref(), Some(parent.as_str()));
         assert!(live.predicted.unwrap_or(0.0) > 0.0);
-        assert!(!core.ranking.read().unwrap().rerank, "serving follows");
+        assert!(
+            !core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .rerank,
+            "serving follows"
+        );
         let run = core.store.latest_eval_run().await.unwrap().unwrap();
         assert_eq!(live.run_id.as_deref(), Some(run.id.as_str()));
         assert!(!run.best_params.rerank);
@@ -1263,7 +1287,10 @@ mod tests {
             !probes.is_empty(),
             "the fixture must give this something to replay"
         );
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let before = reranker.calls();
         rehearsed_under(&core, params, &probes, None, false)
@@ -1427,7 +1454,11 @@ mod tests {
     {
         let (mut core, parent) = seeded_with_nothing_to_gain().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        let spread = core.ranking.read().unwrap().spread_max;
+        let spread = core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spread_max;
         assert_eq!(spread, 3, "the shipped rung");
         // Four opens on the band, two on the tail: two net events, the band
         // earned a wider rung. The ladder sees observations at the top of the
@@ -1448,7 +1479,10 @@ mod tests {
         assert!(live.run_id.is_none(), "a lived adoption names no run");
         assert!(live.predicted.is_some());
         assert_eq!(
-            core.ranking.read().unwrap().spread_max,
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .spread_max,
             5,
             "serving follows"
         );
@@ -1522,7 +1556,10 @@ mod tests {
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let live = generation_for(&core).await;
         assert_eq!(
-            core.ranking.read().unwrap().review_min,
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .review_min,
             0.88,
             "the shipped rung"
         );
@@ -1542,7 +1579,10 @@ mod tests {
 
         run(&core).await.unwrap().expect("the threshold steps down");
         assert_eq!(
-            core.ranking.read().unwrap().review_min,
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .review_min,
             0.84,
             "the rung below 0.88"
         );
@@ -1563,10 +1603,16 @@ mod tests {
         let (mut core, _) = seeded_with_nothing_to_gain().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         // A base sitting at the off rung, live and recorded as such.
-        core.ranking.write().unwrap().spread_max = 0;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spread_max = 0;
         // Read into a local: a guard living inside the call expression is held
         // across the await, and the future is then not `Send`.
-        let at_zero_params = *core.ranking.read().unwrap();
+        let at_zero_params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let at_zero = core
             .store
             .adopt_generation_lived(
@@ -1609,7 +1655,10 @@ mod tests {
         // The watch's verdict, applied directly: the band earned nothing.
         core.store.revert_generation(&first).await.unwrap();
         let back = core.store.live_generation().await.unwrap().unwrap();
-        *core.ranking.write().unwrap() = back.params.into();
+        *core
+            .ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = back.params.into();
         assert_eq!(
             back.params.spread_max, 0,
             "the revert put the off rung back"
@@ -1639,7 +1688,13 @@ mod tests {
             captured_and_opened(&core, &ranked[..3], &band, ranked[2]).await;
         }
         run(&core).await.unwrap().expect("spread shrinks");
-        assert_eq!(core.ranking.read().unwrap().spread_max, 2);
+        assert_eq!(
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .spread_max,
+            2
+        );
     }
 
     async fn order_of(core: &Core) -> Vec<&'static str> {
@@ -1773,7 +1828,13 @@ mod tests {
      {
         let (mut core, parent) = seeded_with_nothing_to_gain().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
-        assert_eq!(core.ranking.read().unwrap().review_min, 0.88);
+        assert_eq!(
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .review_min,
+            0.88
+        );
         band(&core, 0.88, 10, 8, 0).await;
         band(&core, 0.92, 10, 9, 0).await;
 
@@ -1784,7 +1845,10 @@ mod tests {
         assert_eq!(live.parent_id.as_deref(), Some(parent.as_str()));
         assert!(live.run_id.is_none());
         assert_eq!(
-            core.ranking.read().unwrap().review_min,
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .review_min,
             0.84,
             "relate reads it from here"
         );
@@ -1798,7 +1862,13 @@ mod tests {
         band(&core, 0.92, 10, 9, 0).await;
 
         run(&core).await.unwrap().expect("review_min steps up");
-        assert_eq!(core.ranking.read().unwrap().review_min, 0.92);
+        assert_eq!(
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .review_min,
+            0.92
+        );
     }
 
     #[tokio::test]
@@ -1832,7 +1902,12 @@ mod tests {
             "the improvement here is a cap, and the generation must carry it"
         );
         assert_eq!(
-            GenerationParams::from(*core.ranking.read().unwrap()),
+            GenerationParams::from(
+                *core
+                    .ranking
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
             live.params,
             "and serve under it"
         );
@@ -1918,7 +1993,10 @@ mod tests {
             recency_weight: was.recency_weight + 0.3,
             ..was
         };
-        *core.ranking.write().unwrap() = applied_params;
+        *core
+            .ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = applied_params;
         let applied = crate::store::generations::restate_generation(
             &core.store,
             &watched,
@@ -1954,7 +2032,10 @@ mod tests {
             core.store.live_generation().await.unwrap().unwrap().id,
             applied.id
         );
-        let running = *core.ranking.read().unwrap();
+        let running = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(
             running, applied_params,
             "the restated parameters were replaced"
@@ -1972,7 +2053,10 @@ mod tests {
         let order = crate::eval::sweep::test_support::ranks_order(&core).await;
         assert_eq!(probes_the_cap_buries(&core, &parent, &order[2]).await, 30);
         let live = core.store.generation(&parent).await.unwrap().unwrap();
-        let current = *core.ranking.read().unwrap();
+        let current = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let wider = crate::core::ranking::RankingParams {
             spread_max: crate::core::ranking::SPREADS
                 .iter()
@@ -2029,7 +2113,12 @@ mod tests {
         let live = core.store.live_generation().await.unwrap().unwrap();
         assert_eq!(live.id, parent, "the base put itself back");
         assert_eq!(
-            GenerationParams::from(*core.ranking.read().unwrap()),
+            GenerationParams::from(
+                *core
+                    .ranking
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
             live.params,
             "and serves under the predecessor again"
         );

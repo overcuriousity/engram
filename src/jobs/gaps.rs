@@ -248,7 +248,7 @@ pub async fn cover_answering(
             let permit = COVER_SLOTS
                 .acquire()
                 .await
-                .expect("the coverage budget is never closed");
+                .map_err(|_| crate::error::Error::Internal("the coverage budget closed".into()))?;
             inflight.spawn(async move {
                 let out = vectors.search(&vec, &Default::default(), 1, &filter).await;
                 // Held for exactly the query, and released before the answer is

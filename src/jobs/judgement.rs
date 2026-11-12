@@ -593,8 +593,13 @@ fn naive(s: &str) -> Option<(chrono::NaiveDateTime, bool)> {
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f"))
         .map(|n| (n, true))
         .or_else(|_| {
-            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .map(|d| (d.and_hms_opt(DEFAULT_HOUR, 0, 0).unwrap(), false))
+            chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| {
+                (
+                    d.and_time(chrono::NaiveTime::MIN)
+                        + chrono::Duration::hours(DEFAULT_HOUR as i64),
+                    false,
+                )
+            })
         })
         .ok()
 }
@@ -667,7 +672,12 @@ mod tests {
         ) -> crate::error::Result<SegmentReply> {
             Ok(SegmentReply {
                 artifacts: self.segment(input).await?,
-                judgement: Some(self.0.lock().unwrap().clone()),
+                judgement: Some(
+                    self.0
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                ),
             })
         }
         fn budget(&self) -> SynthesisBudget {

@@ -64,7 +64,11 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     // The live generation's, not the file's: a base with autonomy on moves
     // this threshold on what its lowest band earned. Read once, before any
     // await, so the lock is never held across one.
-    let review_min = core.ranking.read().expect("ranking lock").review_min;
+    let review_min = core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .review_min;
 
     for h in hits {
         // `similarity` and not `score`. `review_min` is a cosine, and `score`
@@ -446,7 +450,13 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(core.ranking.read().unwrap().review_min, 0.88);
+        assert_eq!(
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .review_min,
+            0.88
+        );
 
         run(&core, &ids[1]).await.unwrap();
         assert!(
@@ -458,7 +468,10 @@ mod tests {
             "below the threshold, nothing is asked"
         );
 
-        core.ranking.write().unwrap().review_min = 0.84;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .review_min = 0.84;
         run(&core, &ids[1]).await.unwrap();
         assert_eq!(
             core.store

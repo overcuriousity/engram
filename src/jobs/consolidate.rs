@@ -100,11 +100,8 @@ impl Clusters {
 /// not depend on clock resolution. Newer is the right default because the thing
 /// most often re-captured is a document that has since been updated — and Ops
 /// has an undo for when it is not.
-fn keeper(members: &[Chunk]) -> &Chunk {
-    members
-        .iter()
-        .max_by_key(|c| (c.created_at, c.id.as_str()))
-        .expect("a cluster has at least one member")
+fn keeper(members: &[Chunk]) -> Option<&Chunk> {
+    members.iter().max_by_key(|c| (c.created_at, c.id.as_str()))
 }
 
 /// Whether the clustering pass answered a filed near-identical pair, and with
@@ -384,7 +381,9 @@ pub async fn run(core: &Core) -> Result<Outcome> {
         if group.len() < 2 {
             continue;
         }
-        let keep = keeper(group);
+        let Some(keep) = keeper(group) else {
+            continue;
+        };
         for c in group.iter().filter(|c| c.id != keep.id) {
             // One failure does not abandon the remaining clusters, the judge
             // pass, and every pair below.

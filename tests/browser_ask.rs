@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! The ask page's stream driver, in a real browser.
 //!
 //! Ignored by default: this needs `node` and a headless Chrome, neither of

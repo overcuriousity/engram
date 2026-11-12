@@ -402,10 +402,12 @@ pub async fn merge_orphan_passages(
             } else {
                 format!("{}{}", home.text, orphan.text)
             };
-            let (a, b) = (
-                orphan.corpus_span.as_ref().unwrap(),
-                home.corpus_span.as_ref().unwrap(),
-            );
+            let (Some(a), Some(b)) = (orphan.corpus_span.as_ref(), home.corpus_span.as_ref())
+            else {
+                return Err(crate::error::Error::Internal(
+                    "a passage without a span".into(),
+                ));
+            };
             let span =
                 CorpusSpan::located(a.start_line.min(b.start_line), a.end_line.max(b.end_line));
             if !dry_run {

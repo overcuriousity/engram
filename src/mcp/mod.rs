@@ -535,7 +535,7 @@ impl PkdbTools {
                 Err(e) => Err(Error::Validation(format!("url: {e}"))),
             }
         } else {
-            let encoded = p.file_base64.expect("the one-of check");
+            let encoded = p.file_base64.unwrap_or_default();
             match base64::engine::general_purpose::STANDARD.decode(encoded.trim()) {
                 Ok(bytes) => {
                     core.ingest_file(bytes, p.filename, p.title, p.note, ORIGIN_MCP, lang)
@@ -555,14 +555,14 @@ impl PkdbTools {
                 o.link_unread.as_deref().unwrap_or("")
             ),
             Ok(o) if o.near_duplicate.is_some() => {
-                let n = o.near_duplicate.expect("just checked");
+                let n = o.near_duplicate.as_ref();
                 format!(
                     "Stored as `{}` and being indexed. It is {:.0}% similar to `{}`; \
                      the base merges or hides what the two repeat on its own, with an \
                      undo on Insights.",
                     o.id,
-                    n.similarity * 100.0,
-                    n.corpus_id
+                    n.map_or(0.0, |n| n.similarity * 100.0),
+                    n.map_or("", |n| n.corpus_id.as_str())
                 )
             }
             // What was stored is not yet what search finds; the reply says
@@ -677,7 +677,11 @@ impl PkdbTools {
         };
         // The cap `Core::search` would have applied, read the same way, so
         // asking for an explanation cannot change what the door returns.
-        let cap = core.ranking.read().expect("ranking lock").per_source_cap;
+        let cap = core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap;
         let explain = query.explain;
         match core
             .search_with(&query, cap, crate::store::feedback::Door::Mcp)
@@ -897,7 +901,9 @@ fn service_for(
     // The one thing read off the core the door was handed, and only because
     // `routes` is synchronous. It is the same answer for every tenant.
     let asks = tenant.core.asks();
-    let mut g = services.lock().expect("mcp services");
+    let mut g = services
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (map, order) = &mut *g;
     let svc = map
         .entry(subject.clone())
@@ -1028,7 +1034,9 @@ mod tests {
         service_for(&services, &tenants, &a, None, 1);
         service_for(&services, &tenants, &b, None, 1);
 
-        let g = services.lock().unwrap();
+        let g = services
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(g.0.len(), 1, "the map grew past the cap");
         assert!(
             g.0.contains_key(&b.user.subject),

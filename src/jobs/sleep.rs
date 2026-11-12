@@ -59,7 +59,11 @@ pub fn tag_for(review_min: f32, nearest: Option<f32>) -> Tag {
 /// asked that the near artifact answers.
 pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
     let mut out = Integrated::default();
-    let review_min = core.ranking.read().expect("ranking lock").review_min;
+    let review_min = core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .review_min;
     let model = core.embedder.model().to_string();
     for a in core.store.artifacts_to_integrate(OBSERVATION_LIMIT).await? {
         if core.store.activity_since(started).await? {
@@ -246,7 +250,10 @@ pub async fn rehearse(
     started: i64,
 ) -> Result<Replayed> {
     let mut out = Replayed::default();
-    let current = *core.ranking.read().expect("ranking lock");
+    let current = *core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let model = core.embedder.model().to_string();
     let half = OBSERVATION_LIMIT / 2;
 
@@ -865,7 +872,10 @@ mod tests {
         // that any neighbour counts as the same statement.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.auto_supersede = -1.0;
-        core.ranking.write().unwrap().review_min = -1.0;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .review_min = -1.0;
         let mut ids = Vec::new();
         for (raw, text) in [
             ("first", "requires 1.21.4 or later"),
@@ -951,7 +961,10 @@ mod tests {
     pub(crate) async fn live_generation(
         core: &crate::core::Core,
     ) -> crate::store::generations::Generation {
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let id = core
             .store
             .record_generation(&crate::store::generations::NewGeneration {

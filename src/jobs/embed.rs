@@ -498,7 +498,7 @@ async fn split_oversize(core: &Core, chunk: &Chunk, limit: usize, hard: bool) ->
     upsert_with_current_lifecycle(
         core,
         vec![VectorPoint {
-            vector: vectors.into_iter().next().unwrap(),
+            vector: vectors.into_iter().next().unwrap_or_default(),
             sparse: crate::vector::sparse::encode_document(&lexical_text(chunk)),
             payload: with_origins(payload_of(chunk), &origins),
         }],
@@ -575,7 +575,7 @@ async fn embed_head(core: &Core, chunk: &Chunk, limit: usize) -> Result<()> {
     upsert_with_current_lifecycle(
         core,
         vec![VectorPoint {
-            vector: vectors.into_iter().next().unwrap(),
+            vector: vectors.into_iter().next().unwrap_or_default(),
             // The whole artifact, unlike the dense side. Lexical retrieval has
             // no length limit to respect, so there is no reason to lose the
             // tail on both halves of the query at once.

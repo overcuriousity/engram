@@ -169,7 +169,7 @@ pub fn decode(pending: &mut Vec<u8>) -> Result<String> {
         }
     };
     let head: Vec<u8> = pending.drain(..whole).collect();
-    Ok(String::from_utf8(head).expect("checked just above"))
+    Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
 /// The sources under an answer, numbered the way the answer cited them and

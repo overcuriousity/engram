@@ -648,7 +648,9 @@ async fn observation_pairs_except(
     let mut pairs = Vec::with_capacity(observations.len());
     let mut skipped = 0;
     for o in observations {
-        let artifact = o.artifact_id.as_deref().expect("filtered above");
+        let Some(artifact) = o.artifact_id.as_deref() else {
+            continue;
+        };
         match core.store.get_artifact(artifact).await {
             Ok(_) => {
                 let satisfies = crate::eval::satisfied_by(core, artifact).await;
@@ -706,10 +708,9 @@ pub(crate) async fn score(
     let Some(ranks) = ranks_over_grid(core, pairs, &grid, rerank, stop_after).await? else {
         return Ok(None);
     };
-    let base_at = grid
-        .iter()
-        .position(|p| *p == current)
-        .expect("the grid carries the running configuration");
+    let base_at = grid.iter().position(|p| *p == current).ok_or_else(|| {
+        crate::error::Error::Internal("the grid lacks the running configuration".into())
+    })?;
     let base = &ranks[base_at];
 
     // The sample floor. The run is still journalled — a quiet pass is a fact
@@ -961,13 +962,19 @@ pub(crate) mod test_support {
         }
         // The baseline the replay is measured against: one source may fill the
         // whole list, so a cap is the improvement available to be found.
-        core.ranking.write().unwrap().per_source_cap = None;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap = None;
         let order = ranks_order(&core).await;
         (core, order)
     }
 
     pub(crate) async fn ranks_order(core: &crate::core::Core) -> Vec<String> {
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let q = crate::core::search::SearchQuery {
             q: QUERY.into(),
             limit: LIMIT,
@@ -1381,7 +1388,10 @@ mod tests {
         let (core, order, _) = super::test_support::seeded_with_reranker().await;
         let current = RankingParams {
             rerank: true,
-            ..*core.ranking.read().unwrap()
+            ..*core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         // Five of each: the gate wants `MIN_PAIRS` behind a candidate.
         let pairs: Vec<Pair> = (0..5)
@@ -1418,7 +1428,10 @@ mod tests {
         let (core, order, _) = super::test_support::seeded_with_reranker().await;
         let current = RankingParams {
             rerank: true,
-            ..*core.ranking.read().unwrap()
+            ..*core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         let deep = |i: usize| Pair {
             query: QUERY.into(),
@@ -1448,7 +1461,10 @@ mod tests {
         let (core, order, _) = super::test_support::seeded_with_reranker().await;
         let current = RankingParams {
             rerank: true,
-            ..*core.ranking.read().unwrap()
+            ..*core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         // Served where the vector order already puts them: a tie, read over
         // enough pairs that the tie is what holds it rather than the floor.
@@ -1469,7 +1485,10 @@ mod tests {
         let (core, order, _) = super::test_support::seeded_with_reranker().await;
         let current = RankingParams {
             rerank: true,
-            ..*core.ranking.read().unwrap()
+            ..*core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         // The same pairs that offer a flip when nothing interrupts.
         let pairs: Vec<Pair> = (0..5)
@@ -1492,7 +1511,10 @@ mod tests {
     #[tokio::test]
     async fn no_reranker_means_no_flip_is_offered() {
         let (core, order) = seeded().await;
-        let current = *core.ranking.read().unwrap();
+        let current = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pairs = vec![served_pair(&order, 0, 5), served_pair(&order, 1, 4)];
         assert!(matches!(
             rerank_flip(&core, &pairs, current, None).await.unwrap(),
@@ -1505,7 +1527,10 @@ mod tests {
         let (core, order, reranker) = super::test_support::seeded_with_reranker().await;
         let current = RankingParams {
             rerank: false,
-            ..*core.ranking.read().unwrap()
+            ..*core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         let mut pairs: Vec<Pair> = (0..MIN_PAIRS)
             .map(|i| served_pair(&order, i % 3, i % 3))
@@ -1786,7 +1811,10 @@ mod tests {
             priming: None,
             ..with.clone()
         };
-        let current = *core.ranking.read().unwrap();
+        let current = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let lifted = RankingParams {
             prime_lift: 2,
             sitting_prime: true,
@@ -1834,7 +1862,10 @@ mod tests {
         let off = RankingParams {
             prime_lift: 2,
             sitting_prime: false,
-            ..*core.ranking.read().unwrap()
+            ..*core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         let on = RankingParams {
             sitting_prime: true,
@@ -1873,7 +1904,10 @@ mod tests {
         let off = RankingParams {
             prime_lift: 0,
             sitting_prime: false,
-            ..*core.ranking.read().unwrap()
+            ..*core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         let on = RankingParams {
             sitting_prime: true,

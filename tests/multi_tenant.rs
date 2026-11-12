@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Two tenants over the real router.
 //!
 //! Everything else in the suite runs one tenant, which is what keeps it honest
@@ -370,7 +371,7 @@ async fn a_tenant_can_revoke_its_own_token() {
     )
     .await;
     assert!(
-        res.status().is_redirection(),
+        res.status().is_success(),
         "revoking one's own token answered {}",
         res.status()
     );

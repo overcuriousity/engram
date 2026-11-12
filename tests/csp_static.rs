@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -283,4 +284,22 @@ fn the_extension_panel_has_no_inline_code_or_literal_colours() {
         }
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+#[test]
+fn unsafe_is_allowed_only_in_the_contained_ffi_modules() {
+    let allowed = ["src/infer/whisper.rs", "src/vector/sqlite.rs"];
+    let mut found = Vec::new();
+    for (name, src) in files("src", "rs") {
+        if src.contains("allow(unsafe_code)") {
+            found.push(name);
+        }
+    }
+    found.sort();
+    assert_eq!(
+        found, allowed,
+        "allow(unsafe_code) outside the contained FFI"
+    );
+    let cargo = fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    assert!(cargo.contains("unsafe_code = \"deny\""));
 }

@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 //! engram: a self-hosted personal knowledge base.
 //!
 //! Exposed as a library so the integration suite can drive the same code the

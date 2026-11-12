@@ -55,8 +55,9 @@ pub fn signature(text: &str) -> Vec<u64> {
     let step = SHINGLE_WORDS.min(words.len());
     for w in words.windows(step) {
         smallest.insert(hash(&w.join(" ")));
-        if smallest.len() > SIGNATURE_SIZE {
-            let largest = *smallest.iter().next_back().expect("non-empty");
+        if smallest.len() > SIGNATURE_SIZE
+            && let Some(&largest) = smallest.iter().next_back()
+        {
             smallest.remove(&largest);
         }
     }

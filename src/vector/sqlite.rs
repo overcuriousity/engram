@@ -87,6 +87,8 @@ CREATE TABLE IF NOT EXISTS vec_ctx (
 /// sqlite-vec, made part of every connection this process opens from here on.
 /// An auto-extension rather than `load_extension`: nothing is read from
 /// storage, which is what lets a hardened Android forbid that outright.
+// FFI: sqlite-vec registers through sqlite3_auto_extension.
+#[allow(unsafe_code)]
 fn register() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {

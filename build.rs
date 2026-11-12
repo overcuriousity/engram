@@ -19,10 +19,19 @@ use std::path::Path;
 /// The signed package, when a release has been through AMO.
 const SIGNED: &str = "extension/firefox-signed.xpi";
 
-fn main() {
+type Res = Result<(), Box<dyn std::error::Error>>;
+
+/// A build failure that names the file it was about.
+fn at<E: std::fmt::Display>(
+    what: impl std::fmt::Display,
+) -> impl FnOnce(E) -> Box<dyn std::error::Error> {
+    move |e| format!("{what}: {e}").into()
+}
+
+fn main() -> Res {
     #[cfg(feature = "contained")]
-    build_whisper();
-    build_stylesheet();
+    build_whisper()?;
+    build_stylesheet()?;
 
     println!("cargo:rerun-if-changed=extension/shared");
     println!("cargo:rerun-if-changed={TOKENS}");
@@ -38,26 +47,27 @@ fn main() {
         println!("cargo:rerun-if-changed={SIGNED}");
     }
 
-    stamp_build();
+    stamp_build()?;
 
     let out = Path::new("assets/extension");
-    std::fs::create_dir_all(out).expect("assets/extension");
+    std::fs::create_dir_all(out).map_err(at("assets/extension"))?;
 
-    pack("extension/chrome/manifest.json", &out.join("chrome.zip"));
+    pack("extension/chrome/manifest.json", &out.join("chrome.zip"))?;
 
     // The marker is what the install page reads to tell the operator which of
     // the two they are downloading, since both arrive under the same name.
     let marker = out.join("firefox.signed");
     if Path::new(SIGNED).exists() {
-        std::fs::copy(SIGNED, out.join("firefox.xpi")).expect("copy the signed xpi");
-        std::fs::write(&marker, b"").expect("write the signed marker");
+        std::fs::copy(SIGNED, out.join("firefox.xpi")).map_err(at(SIGNED))?;
+        std::fs::write(&marker, b"").map_err(at("the signed marker"))?;
     } else {
-        pack("extension/firefox/manifest.json", &out.join("firefox.xpi"));
+        pack("extension/firefox/manifest.json", &out.join("firefox.xpi"))?;
         // Removed rather than left behind: a marker surviving from a build
         // that had the signed package would have the page promise one-click
         // install of an XPI Firefox refuses.
         let _ = std::fs::remove_file(&marker);
     }
+    Ok(())
 }
 
 /// One stylesheet, assembled from layers.
@@ -67,11 +77,11 @@ fn main() {
 /// it there is what puts it in the binary. Concatenated in filename order,
 /// which is what the numeric prefixes are for — the cascade depends on the
 /// tokens arriving before the rules that name them.
-fn build_stylesheet() {
+fn build_stylesheet() -> Res {
     println!("cargo:rerun-if-changed=assets/css");
     let dir = Path::new("assets/css");
     let mut names: Vec<String> = std::fs::read_dir(dir)
-        .expect("assets/css")
+        .map_err(at("assets/css"))?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -82,8 +92,8 @@ fn build_stylesheet() {
 
     let mut out = String::new();
     for name in &names {
-        let body = std::fs::read_to_string(dir.join(name))
-            .unwrap_or_else(|e| panic!("assets/css/{name}: {e}"));
+        let body =
+            std::fs::read_to_string(dir.join(name)).map_err(at(format!("assets/css/{name}")))?;
         out.push_str("/* ===== ");
         out.push_str(name);
         out.push_str(" ===== */\n");
@@ -94,8 +104,9 @@ fn build_stylesheet() {
     // Written only when the bytes differ, so an unchanged sheet keeps its mtime.
     let dest = Path::new("assets/app.css");
     if std::fs::read_to_string(dest).ok().as_deref() != Some(out.as_str()) {
-        std::fs::write(dest, &out).expect("assets/app.css");
+        std::fs::write(dest, &out).map_err(at("assets/app.css"))?;
     }
+    Ok(())
 }
 
 /// The commit this binary was built from, so two builds of the same
@@ -110,14 +121,14 @@ fn build_stylesheet() {
 ///
 /// Only a `.git` in this directory counts: a tarball unpacked inside some
 /// other repository must not take that repository's commit for its own.
-fn stamp_build() {
+fn stamp_build() -> Res {
     println!("cargo:rerun-if-env-changed=ENGRAM_GIT_SHA");
     let sha = std::env::var("ENGRAM_GIT_SHA")
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(git_sha)
         .unwrap_or_else(|| "unknown".into());
-    let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION");
+    let pkg = std::env::var("CARGO_PKG_VERSION").map_err(at("CARGO_PKG_VERSION"))?;
     let version = if sha == "unknown" {
         pkg
     } else {
@@ -125,6 +136,7 @@ fn stamp_build() {
     };
     println!("cargo:rustc-env=ENGRAM_GIT_SHA={sha}");
     println!("cargo:rustc-env=ENGRAM_VERSION={version}");
+    Ok(())
 }
 
 /// `git rev-parse --short=12 HEAD`, watching `HEAD` and the ref it names.
@@ -160,21 +172,21 @@ fn git_sha() -> Option<String> {
 const TOKENS: &str = "assets/css/00-tokens.css";
 const PANEL_FONTS: [&str; 2] = ["atkinson-next-400.woff2", "atkinson-next-500.woff2"];
 
-fn pack(manifest_path: &str, out: &Path) {
-    let file = std::fs::File::create(out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
+fn pack(manifest_path: &str, out: &Path) -> Res {
+    let file = std::fs::File::create(out).map_err(at(out.display()))?;
     let mut zip = zip::ZipWriter::new(file);
     let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
 
-    let manifest = std::fs::read(manifest_path).unwrap_or_else(|e| panic!("{manifest_path}: {e}"));
-    zip.start_file("manifest.json", opts).unwrap();
-    zip.write_all(&manifest).unwrap();
+    let manifest = std::fs::read(manifest_path).map_err(at(manifest_path))?;
+    zip.start_file("manifest.json", opts)?;
+    zip.write_all(&manifest)?;
 
     // Flat `shared/` inside the package, matching the paths the manifest names.
     // Read from `extension/shared` rather than from the copy `pack.sh` makes,
     // so a stale copy cannot end up in a release.
     let mut names: Vec<String> = std::fs::read_dir("extension/shared")
-        .expect("extension/shared")
+        .map_err(at("extension/shared"))?
         .filter_map(|e| e.ok())
         // Files only. A subdirectory added here would otherwise be read as a
         // file and fail the build with a bare `Is a directory`.
@@ -184,24 +196,26 @@ fn pack(manifest_path: &str, out: &Path) {
     // Sorted, so the same sources produce the same archive twice running.
     names.sort();
     for name in names {
-        let mut body = std::fs::read(Path::new("extension/shared").join(&name)).unwrap();
+        let mut body =
+            std::fs::read(Path::new("extension/shared").join(&name)).map_err(at(&name))?;
         // One source of truth for the palette: the app's own token file.
         if name == "panel.css" {
-            let mut css = std::fs::read(TOKENS).unwrap_or_else(|e| panic!("{TOKENS}: {e}"));
+            let mut css = std::fs::read(TOKENS).map_err(at(TOKENS))?;
             css.push(b'\n');
             css.append(&mut body);
             body = css;
         }
-        zip.start_file(format!("shared/{name}"), opts).unwrap();
-        zip.write_all(&body).unwrap();
+        zip.start_file(format!("shared/{name}"), opts)?;
+        zip.write_all(&body)?;
     }
     for font in PANEL_FONTS {
         let body = std::fs::read(Path::new("assets/fonts").join(font))
-            .unwrap_or_else(|e| panic!("assets/fonts/{font}: {e}"));
-        zip.start_file(format!("shared/{font}"), opts).unwrap();
-        zip.write_all(&body).unwrap();
+            .map_err(at(format!("assets/fonts/{font}")))?;
+        zip.start_file(format!("shared/{font}"), opts)?;
+        zip.write_all(&body)?;
     }
-    zip.finish().unwrap();
+    zip.finish()?;
+    Ok(())
 }
 
 /// whisper.cpp, compiled over the ggml llama.cpp already built.
@@ -214,23 +228,23 @@ fn pack(manifest_path: &str, out: &Path) {
 /// vendored files and a four-function shim; see `vendor/whisper.cpp/README.md`
 /// for why that release and why the two pins move together.
 #[cfg(feature = "contained")]
-fn build_whisper() {
+fn build_whisper() -> Res {
     let vendor = Path::new("vendor/whisper.cpp");
     println!("cargo:rerun-if-changed={}", vendor.display());
 
-    let cmake_dir = std::env::var("DEP_LLAMA_GGML_CMAKE_DIR").unwrap_or_else(|_| {
-        panic!(
-            "llama-cpp-sys-2 did not say where its ggml is (DEP_LLAMA_GGML_CMAKE_DIR). \
-             whisper.cpp is compiled against that ggml and no other."
-        )
-    });
+    let cmake_dir = std::env::var("DEP_LLAMA_GGML_CMAKE_DIR").map_err(|_| {
+        "llama-cpp-sys-2 did not say where its ggml is (DEP_LLAMA_GGML_CMAKE_DIR); \
+         whisper.cpp is compiled against that ggml and no other"
+    })?;
     // <out>/lib/cmake or <out>/lib64/cmake; the headers are installed beside.
     let ggml_include = Path::new(&cmake_dir).join("../../include");
-    assert!(
-        ggml_include.join("ggml.h").is_file(),
-        "no ggml.h under {}: the layout llama-cpp-sys-2 installs has changed",
-        ggml_include.display()
-    );
+    if !ggml_include.join("ggml.h").is_file() {
+        return Err(format!(
+            "no ggml.h under {}: the layout llama-cpp-sys-2 installs has changed",
+            ggml_include.display()
+        )
+        .into());
+    }
 
     let mut build = cc::Build::new();
     build
@@ -252,4 +266,5 @@ fn build_whisper() {
         build.cpp_link_stdlib(None);
     }
     build.compile("engram_whisper");
+    Ok(())
 }

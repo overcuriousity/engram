@@ -1083,7 +1083,7 @@ impl Core {
             .decodes
             .acquire()
             .await
-            .expect("the decode permit is never closed");
+            .map_err(|_| Error::Internal("the decode permit closed".into()))?;
         let decoded = tokio::task::spawn_blocking(move || {
             let prepared = super::image::prepare(&bytes, edge)?;
             Ok::<_, Error>((bytes, prepared))

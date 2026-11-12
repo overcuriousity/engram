@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::collections::BTreeMap;
 
 const TOKENS: &str = include_str!("../assets/css/00-tokens.css");

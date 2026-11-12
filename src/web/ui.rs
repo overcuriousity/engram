@@ -1193,7 +1193,7 @@ pub(crate) async fn search_results(
         .core
         .ranking
         .read()
-        .expect("ranking lock")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .per_source_cap;
     let explain = p.explain.unwrap_or(false);
     let (hits, outcome) = tenant
@@ -6719,7 +6719,10 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         assert!(
-            st.ask_handoff.lock().unwrap().is_empty(),
+            st.ask_handoff
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
             "a question nobody can answer took a slot in the map"
         );
     }
@@ -6732,11 +6735,20 @@ mod tests {
         let st = ask_state().await;
         let stale = st.ask_handoff_park(a_question(), "me");
         age_out(&st, &stale);
-        assert_eq!(st.ask_handoff.lock().unwrap().len(), 1);
+        assert_eq!(
+            st.ask_handoff
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
 
         // The next ask is what collects it.
         let fresh = st.ask_handoff_park(a_question(), "me");
-        let held = st.ask_handoff.lock().unwrap();
+        let held = st
+            .ask_handoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert_eq!(held.len(), 1, "the expired entry survived the sweep");
         assert!(held.contains_key(&fresh), "the sweep took the live entry");
     }
@@ -6753,7 +6765,10 @@ mod tests {
             "an expired id was honoured"
         );
         assert!(
-            st.ask_handoff.lock().unwrap().is_empty(),
+            st.ask_handoff
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
             "a refused id must not stay in the map"
         );
     }
@@ -6788,7 +6803,10 @@ mod tests {
     /// Backdates a parked entry past its TTL. Reaching into the map rather than
     /// sleeping a minute: the clock is the thing under test, not the wait.
     fn age_out(st: &AppState, id: &str) {
-        let mut m = st.ask_handoff.lock().unwrap();
+        let mut m = st
+            .ask_handoff
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = m.get_mut(id).expect("parked");
         p.at -= crate::web::state::ASK_HANDOFF_TTL * 2;
     }

@@ -141,7 +141,7 @@ impl Core {
             let completer = core
                 .completer
                 .clone()
-                .expect("checked just above");
+                .ok_or_else(|| Error::Internal("ask without a completer".into()))?;
 
             // Held for the whole answer rather than around the completion, because
             // a search embeds the query and that is a model call too. A gap between
@@ -854,13 +854,10 @@ impl Core {
     /// How many tokens of excerpt one answer may be built from: the rule
     /// `excerpt_budget` states, for the answer model under the ask prompt.
     fn excerpt_budget(&self, question: &str) -> usize {
-        // Only reached from `ask_events`, which returned before here without a
-        // completer; a caller that gets past that has one.
-        let completer = self
-            .completer
-            .as_deref()
-            .expect("ask_events refuses before budgeting without [infer.ask]");
-        excerpt_budget(completer, &self.counter, ASK_SYSTEM, question)
+        // Only reached from `ask_events`, which returned before here without a completer.
+        self.completer.as_deref().map_or(0, |completer| {
+            excerpt_budget(completer, &self.counter, ASK_SYSTEM, question)
+        })
     }
 
     /// One hop sideways from the hits that placed best: the artifacts adjacent

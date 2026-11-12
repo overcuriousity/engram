@@ -16,9 +16,8 @@ fn options() -> Options {
 
 /// One converter for the process. Building it compiles the command table, and
 /// converting with local state keeps one formula's `\def` out of the next.
-static LATEX: LazyLock<LatexToMathML> = LazyLock::new(|| {
-    LatexToMathML::new(MathCoreConfig::default()).expect("the default config has no macros to fail")
-});
+static LATEX: LazyLock<Option<LatexToMathML>> =
+    LazyLock::new(|| LatexToMathML::new(MathCoreConfig::default()).ok());
 
 /// MathML Core, the subset every current browser draws without a script.
 ///
@@ -83,9 +82,12 @@ const MATHML_ATTRIBUTES: &[&str] = &[
 /// what the answer said, and shown as written it is readable to anyone who
 /// reads LaTeX.
 fn math(latex: &str, display: MathDisplay) -> Event<'static> {
-    match LATEX.convert_with_local_state(latex, display) {
-        Ok(out) => Event::Html(CowStr::from(out.mathml)),
-        Err(_) => Event::Code(CowStr::from(latex.to_string())),
+    match LATEX
+        .as_ref()
+        .map(|l| l.convert_with_local_state(latex, display))
+    {
+        Some(Ok(out)) => Event::Html(CowStr::from(out.mathml)),
+        _ => Event::Code(CowStr::from(latex.to_string())),
     }
 }
 

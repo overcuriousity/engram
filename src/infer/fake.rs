@@ -457,7 +457,7 @@ impl Synthesizer for RecordingSynthesizer {
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         self.seen
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((input.core.to_string(), input.context.clone()));
         Ok(vec![ProposedArtifact {
             text: input.core.lines().next().unwrap_or("empty").to_string(),
@@ -724,7 +724,10 @@ impl ScriptedCompleter {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn prompts(&self) -> Vec<String> {
-        self.prompts.lock().unwrap().clone()
+        self.prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub fn set_context_tokens(&self, n: usize) {
         self.context_tokens
@@ -736,7 +739,10 @@ impl ScriptedCompleter {
 impl Completer for ScriptedCompleter {
     async fn complete(&self, _system: &str, user: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.prompts.lock().unwrap().push(user.to_string());
+        self.prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(user.to_string());
         if let Some(detail) = &self.rejects {
             return Err(crate::error::Error::InferenceRejected {
                 role: "ask",
@@ -745,7 +751,7 @@ impl Completer for ScriptedCompleter {
         }
         self.replies
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front()
             .ok_or_else(|| crate::error::Error::Inference {
                 role: "ask",
@@ -804,7 +810,10 @@ impl FakeDescriber {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn last_context(&self) -> String {
-        self.last_context.lock().unwrap().clone()
+        self.last_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -812,7 +821,10 @@ impl FakeDescriber {
 impl Describer for FakeDescriber {
     async fn describe(&self, _image_jpeg: &[u8], context: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.last_context.lock().unwrap() = context.to_string();
+        *self
+            .last_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context.to_string();
         match &self.fail_with {
             Some(m) if self.reject => Err(Error::InferenceRejected {
                 role: "vision",
@@ -862,7 +874,10 @@ impl FakeTranscriber {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn last_mime(&self) -> String {
-        self.last_mime.lock().unwrap().clone()
+        self.last_mime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub fn last_len(&self) -> usize {
         self.last_len.load(std::sync::atomic::Ordering::SeqCst)
@@ -873,7 +888,10 @@ impl FakeTranscriber {
 impl Transcriber for FakeTranscriber {
     async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.last_mime.lock().unwrap() = mime.to_string();
+        *self
+            .last_mime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mime.to_string();
         self.last_len
             .store(audio.len(), std::sync::atomic::Ordering::SeqCst);
         match &self.fail_with {

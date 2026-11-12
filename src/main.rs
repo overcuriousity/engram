@@ -1,3 +1,4 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 use clap::Parser;
 use engram::config::{AuthMode, Config};
 use engram::core::Core;

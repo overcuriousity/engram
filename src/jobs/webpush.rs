@@ -143,7 +143,8 @@ pub fn request(
     let (public, auth) = parse_keys(&keys.p256dh, &keys.auth)?;
     let exp = crate::store::now() + VAPID_EXP.as_secs() as i64;
     let salt = <[u8; 16]>::generate();
-    let payload = encrypt(body, &public, &auth, &p256::SecretKey::generate(), salt);
+    let payload = encrypt(body, &public, &auth, &p256::SecretKey::generate(), salt)
+        .ok_or_else(|| crate::error::Error::Internal("push encryption failed".into()))?;
     http::Request::post(uri)
         .header("ttl", TTL.as_secs())
         .header(http::header::CONTENT_ENCODING, "aes128gcm")
@@ -170,27 +171,27 @@ fn encrypt(
     auth: &[u8; 16],
     as_secret: &p256::SecretKey,
     salt: [u8; 16],
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     use aes_gcm::aead::{Aead, KeyInit};
     let as_public = as_secret.public_key();
     let shared = p256::ecdh::diffie_hellman(as_secret.to_nonzero_scalar(), ua_public.as_affine());
-    let ikm = webpush_ikm(auth, &shared, ua_public, &as_public);
-    let (cek, nonce) = record_keys(&ikm, &salt);
+    let ikm = webpush_ikm(auth, &shared, ua_public, &as_public)?;
+    let (cek, nonce) = record_keys(&ikm, &salt)?;
     let mut record = body.to_vec();
     // The last-record delimiter, and no padding after it.
     record.push(2);
     let sealed = aes_gcm::Aes128Gcm::new(&cek.into())
         .encrypt(&nonce.into(), record.as_slice())
-        .expect("AES-GCM seals any record under 64 GiB");
+        .ok()?;
     let keyid = point(&as_public);
-    let rs = u32::try_from(sealed.len()).expect("one record is under MAX_RECORD");
+    let rs = u32::try_from(sealed.len()).ok()?;
     let mut out = Vec::with_capacity(16 + 4 + 1 + keyid.len() + sealed.len());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&rs.to_be_bytes());
     out.push(keyid.len() as u8);
     out.extend_from_slice(&keyid);
     out.extend_from_slice(&sealed);
-    out
+    Some(out)
 }
 
 /// The uncompressed SEC1 point, 65 bytes, which is the form both RFC 8291's
@@ -207,27 +208,25 @@ fn webpush_ikm(
     shared: &p256::ecdh::SharedSecret,
     ua_public: &p256::PublicKey,
     as_public: &p256::PublicKey,
-) -> [u8; 32] {
+) -> Option<[u8; 32]> {
     let mut info = b"WebPush: info\0".to_vec();
     info.extend_from_slice(&point(ua_public));
     info.extend_from_slice(&point(as_public));
     let mut ikm = [0u8; 32];
     hkdf::Hkdf::<sha2::Sha256>::new(Some(auth), shared.raw_secret_bytes().as_slice())
         .expand(&info, &mut ikm)
-        .expect("32 bytes is within what HKDF-SHA256 expands to");
-    ikm
+        .ok()?;
+    Some(ikm)
 }
 
 /// RFC 8188 §2.2–2.3: the content-encryption key and the nonce of record 0.
-fn record_keys(ikm: &[u8; 32], salt: &[u8; 16]) -> ([u8; 16], [u8; 12]) {
+fn record_keys(ikm: &[u8; 32], salt: &[u8; 16]) -> Option<([u8; 16], [u8; 12])> {
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), ikm);
     let mut cek = [0u8; 16];
-    hk.expand(b"Content-Encoding: aes128gcm\0", &mut cek)
-        .expect("16 bytes is within what HKDF-SHA256 expands to");
+    hk.expand(b"Content-Encoding: aes128gcm\0", &mut cek).ok()?;
     let mut nonce = [0u8; 12];
-    hk.expand(b"Content-Encoding: nonce\0", &mut nonce)
-        .expect("12 bytes is within what HKDF-SHA256 expands to");
-    (cek, nonce)
+    hk.expand(b"Content-Encoding: nonce\0", &mut nonce).ok()?;
+    Some((cek, nonce))
 }
 
 /// The receiver's side of `encrypt`, for the tests that play the phone: one
@@ -243,8 +242,8 @@ pub(crate) fn decrypt(
     let idlen = *body.get(20)? as usize;
     let as_public = p256::PublicKey::from_sec1_bytes(body.get(21..21 + idlen)?).ok()?;
     let shared = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), as_public.as_affine());
-    let ikm = webpush_ikm(auth, &shared, &ua_secret.public_key(), &as_public);
-    let (cek, nonce) = record_keys(&ikm, &salt);
+    let ikm = webpush_ikm(auth, &shared, &ua_secret.public_key(), &as_public)?;
+    let (cek, nonce) = record_keys(&ikm, &salt)?;
     let mut plain = aes_gcm::Aes128Gcm::new(&cek.into())
         .decrypt(&nonce.into(), &body[21 + idlen..])
         .ok()?;
@@ -302,7 +301,7 @@ impl Payload {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("strings and integers always serialise")
+        serde_json::to_vec(self).unwrap_or_default()
     }
 }
 
@@ -355,7 +354,7 @@ mod tests {
         let auth: [u8; 16] = b64("BTBZMqHH6r4Tts7J_aSIgg").try_into().unwrap();
         let salt: [u8; 16] = b64("DGv6ra1nlYgDCS1FRnbzlw").try_into().unwrap();
         let plain = b"When I grow up, I want to be a watermelon";
-        let ours = encrypt(plain, &ua_public, &auth, &as_secret, salt);
+        let ours = encrypt(plain, &ua_public, &auth, &as_secret, salt).unwrap();
         let mut theirs = b64(
             "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
         );

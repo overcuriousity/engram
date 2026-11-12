@@ -4,6 +4,8 @@
 //! It runs over the ggml that llama.cpp built — see `build.rs` — so there is
 //! nothing to initialise here and nothing to keep in step at run time: the
 //! matching was done when the two were compiled together.
+// FFI to the vendored whisper.cpp; nothing else in the crate may use unsafe.
+#![allow(unsafe_code)]
 
 use crate::error::{Error, Result};
 use std::ffi::{CStr, CString, c_char, c_float, c_int};

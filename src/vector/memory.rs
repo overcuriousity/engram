@@ -61,7 +61,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()> {
-        let mut w = self.points.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for mut p in points {
             // Matching the Qdrant path: a re-embed rebuilds the payload without
             // knowing when the chunk was last shown, and clearing the stamp
@@ -100,7 +103,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn set_payload(&self, payload: &super::VectorPayload) -> Result<()> {
-        let mut w = self.points.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(p) = w.get_mut(&payload.artifact_id) {
             // A merge, matching Qdrant: an absent stamp means "unchanged", so
             // a tag edit must not erase when the chunk was last shown.
@@ -146,7 +152,10 @@ impl VectorStore for MemoryVectors {
         status: ArtifactStatus,
         superseded_by: Option<&str>,
     ) -> Result<()> {
-        let mut w = self.points.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(p) = w.get_mut(artifact_id) {
             p.payload.status = Some(status);
             p.payload.superseded_by = superseded_by.map(str::to_string);
@@ -160,7 +169,10 @@ impl VectorStore for MemoryVectors {
         at: i64,
         reset_hits: bool,
     ) -> Result<()> {
-        let mut w = self.points.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(p) = w.get_mut(artifact_id) {
             p.payload.last_verified_at = Some(at);
             if reset_hits {
@@ -171,7 +183,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn apply_lifecycle(&self, rows: &[super::LifecycleRow]) -> Result<()> {
-        let mut w = self.points.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for r in rows {
             if let Some(p) = w.get_mut(&r.artifact_id) {
                 p.payload.status = Some(r.status);
@@ -186,7 +201,10 @@ impl VectorStore for MemoryVectors {
         &self,
         artifact_ids: &[String],
     ) -> Result<HashMap<String, super::StoredLifecycle>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(artifact_ids
             .iter()
             .filter_map(|id| {
@@ -203,7 +221,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn payloads_of(&self, artifact_ids: &[String]) -> Result<HashMap<String, VectorPayload>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(artifact_ids
             .iter()
             .filter_map(|id| Some((id.clone(), r.get(id)?.payload.clone())))
@@ -211,7 +232,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn all_artifact_ids(&self) -> Result<Vec<String>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut out: Vec<String> = r.keys().cloned().collect();
         // Deterministic, so a test never depends on HashMap iteration order.
         out.sort();
@@ -224,7 +248,10 @@ impl VectorStore for MemoryVectors {
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut found: Vec<&VectorPayload> = r
             .values()
             .map(|p| &p.payload)
@@ -260,7 +287,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn touch(&self, targets: &[super::Touch], seen_at: i64) -> Result<()> {
-        let mut w = self.points.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for t in targets {
             // The count the caller passed is ignored here on purpose: this
             // store holds the authoritative value already, and reading it is
@@ -283,7 +313,10 @@ impl VectorStore for MemoryVectors {
         older_than: i64,
         unseen_since: i64,
     ) -> Result<Vec<SearchHit>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(r.values()
             .filter(|p| {
                 // Anything not active is out, matching the Qdrant backend: a
@@ -314,7 +347,10 @@ impl VectorStore for MemoryVectors {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut hits: Vec<SearchHit> = r
             .values()
             .filter(|p| {
@@ -356,7 +392,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn facets(&self, limit: usize) -> Result<Facets> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut categories: HashMap<&str, u64> = HashMap::new();
         for p in r.values() {
             if let Some(c) = &p.payload.category {
@@ -369,7 +408,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(seed) = r.get(artifact_id) else {
             return Ok(vec![]);
         };
@@ -406,7 +448,10 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn set_context_vectors(&self, artifact_id: &str, vectors: Vec<Vec<f32>>) -> Result<()> {
-        let mut w = self.ctx.write().unwrap();
+        let mut w = self
+            .ctx
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if vectors.is_empty() {
             w.remove(artifact_id);
         } else {
@@ -421,8 +466,14 @@ impl VectorStore for MemoryVectors {
         limit: usize,
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>> {
-        let points = self.points.read().unwrap();
-        let ctx = self.ctx.read().unwrap();
+        let points = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ctx = self
+            .ctx
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut hits: Vec<SearchHit> = ctx
             .iter()
             // An artifact with a set but no point cannot be offered: there is
@@ -461,10 +512,16 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
-        let mut w = self.points.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The context set goes with the point. A set outliving its payload
         // would keep answering `context_query` with an artifact that is gone.
-        let mut c = self.ctx.write().unwrap();
+        let mut c = self
+            .ctx
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for id in artifact_ids {
             w.remove(id);
             c.remove(id);
@@ -473,8 +530,14 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
-        let mut w = self.points.write().unwrap();
-        let mut c = self.ctx.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut c = self
+            .ctx
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         w.retain(|id, p| {
             let keep = p.payload.corpus_id != corpus_id;
             if !keep {
@@ -489,13 +552,16 @@ impl VectorStore for MemoryVectors {
         Ok(self
             .points
             .read()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(artifact_id)
             .map(|p| p.vector.clone()))
     }
 
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
-        let r = self.points.read().unwrap();
+        let r = self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut ids: Vec<&String> = r.keys().collect();
         // Deterministic, so a test never depends on HashMap iteration order —
         // the same rule `all_artifact_ids` obeys.
@@ -508,15 +574,25 @@ impl VectorStore for MemoryVectors {
     }
 
     async fn count(&self) -> Result<u64> {
-        Ok(self.points.read().unwrap().len() as u64)
+        Ok(self
+            .points
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len() as u64)
     }
 
     /// JSON of every point, a fixture format: it lets the whole backup run
     /// without a Qdrant.
     async fn export_snapshot(&self, into: &std::path::Path) -> Result<super::VectorExport> {
         let mut points: Vec<SnapshotPoint> = {
-            let r = self.points.read().unwrap();
-            let ctx = self.ctx.read().unwrap();
+            let r = self
+                .points
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let ctx = self
+                .ctx
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             r.values()
                 .map(|p| SnapshotPoint {
                     vector: p.vector.clone(),
@@ -558,8 +634,14 @@ impl VectorStore for MemoryVectors {
                 p.vector.len(),
             ));
         }
-        let mut w = self.points.write().unwrap();
-        let mut ctx = self.ctx.write().unwrap();
+        let mut w = self
+            .points
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ctx = self
+            .ctx
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for p in points {
             let id = p.payload.artifact_id.clone();
             if !p.ctx.is_empty() {

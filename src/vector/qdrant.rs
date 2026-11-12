@@ -1732,9 +1732,10 @@ impl VectorStore for QdrantVectors {
                 res.len()
             )));
         }
+        let missing = || Error::Vector("a batched search came back empty".into());
         let similarities: HashMap<String, f32> = res
             .pop()
-            .expect("length checked")
+            .ok_or_else(missing)?
             .points
             .into_iter()
             .filter_map(|p| {
@@ -1743,7 +1744,7 @@ impl VectorStore for QdrantVectors {
             })
             .collect();
 
-        let mut hits = hits_of(res.pop().expect("length checked"));
+        let mut hits = hits_of(res.pop().ok_or_else(missing)?);
         for h in &mut hits {
             h.similarity = similarities.get(&h.payload.artifact_id).copied();
         }

@@ -513,7 +513,9 @@ fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
             continue;
         };
         if line.starts_with(')') {
-            tables.push(open.take().expect("just borrowed"));
+            if let Some(t) = open.take() {
+                tables.push(t);
+            }
             continue;
         }
         if line.is_empty() || line.starts_with("--") {
@@ -540,8 +542,7 @@ pub const TEST_SUBJECT: &str = "user-1";
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 pub fn new_id() -> String {

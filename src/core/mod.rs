@@ -694,7 +694,10 @@ impl Core {
     /// park a worker on it.
     pub async fn corpus_lock(&self, corpus_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
-            let mut locks = self.corpus_locks.lock().expect("corpus locks");
+            let mut locks = self
+                .corpus_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // Entries nobody is holding or waiting on are dropped rather than
             // accumulating one per document for the life of the process. A
             // holder's guard owns its `Arc`, and so does a task that has cloned
@@ -1305,7 +1308,10 @@ mod tests {
         }
         let held = core.corpus_lock("doc-held").await;
         assert_eq!(
-            core.corpus_locks.lock().unwrap().len(),
+            core.corpus_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
             1,
             "released locks were kept"
         );

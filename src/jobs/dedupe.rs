@@ -729,16 +729,15 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             discard_both(core, &s.pair, s.detail.as_deref(), DecidedBy::Model).await
         }
         Relation::Replaced => {
-            let obsolete = s
-                .obsolete
-                .clone()
-                .expect("interpret sets this or downgrades to Conflict");
+            let obsolete = s.obsolete.clone().ok_or_else(|| {
+                Error::Internal("a replaced pair without its obsolete side".into())
+            })?;
             let winner = s
                 .members
                 .iter()
                 .find(|m| m.id != obsolete)
                 .map(|m| m.id.clone())
-                .expect("a pair has two members and only one of them is obsolete");
+                .ok_or_else(|| Error::Internal("a replaced pair without a winner".into()))?;
             // A fresh status, not the snapshot `interpret` saw: an operator can
             // retire either side while the unit waits out a backoff.
             let live = |id: String| async move {

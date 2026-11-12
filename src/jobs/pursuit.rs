@@ -484,7 +484,7 @@ pub async fn run(core: &Core) -> Result<usize> {
     for m in 0..evs.len() {
         let best = clusters
             .iter_mut()
-            .filter(|c| evs[m].at - evs[*c.last().unwrap()].at <= idle)
+            .filter(|c| c.last().is_some_and(|l| evs[m].at - evs[*l].at <= idle))
             .map(|c| (crate::core::gaps::cosine(&evs[c[0]].vec, &evs[m].vec), c))
             .filter(|(sim, _)| *sim >= line)
             .max_by(|a, b| a.0.total_cmp(&b.0));
@@ -630,7 +630,7 @@ fn need_of(
     use crate::store::links::normalize_query;
     let mut n = Need {
         opened_at: evs[members[0]].at,
-        last_at: evs[*members.last().unwrap()].at,
+        last_at: members.last().map_or(evs[members[0]].at, |l| evs[*l].at),
         ..Default::default()
     };
     let mut seen_q: std::collections::HashSet<String> = Default::default();

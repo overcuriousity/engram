@@ -807,16 +807,15 @@ fn prime(
     order
         .into_iter()
         .enumerate()
-        .map(|(pos, i)| {
-            let mut r = slots[i]
-                .take()
-                .expect("each original index used exactly once");
+        .filter_map(|(pos, i)| {
+            // Each original index is used exactly once.
+            let mut r = slots[i].take()?;
             // Only a climb is priming: this is exactly the row that ended up
             // at a lower index than it started at. A hit that was merely
             // displaced by another row's climb did not move up, and
             // labelling it would say something untrue about it.
             r.primed = pos < i;
-            r
+            Some(r)
         })
         .collect()
 }
@@ -1440,7 +1439,11 @@ impl Core {
         query: &SearchQuery,
         origin: impl Into<Origin>,
     ) -> Result<Vec<SearchResult>> {
-        let cap = self.ranking.read().expect("ranking lock").per_source_cap;
+        let cap = self
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap;
         Ok(self.search_with(query, cap, origin.into()).await?.0)
     }
 
@@ -1501,7 +1504,10 @@ impl Core {
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let params = crate::core::ranking::RankingParams {
             per_source_cap: cap,
-            ..*self.ranking.read().expect("ranking lock")
+            ..*self
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         self.search_inner(query, params, origin.into(), true, None)
             .await
@@ -1546,7 +1552,10 @@ impl Core {
         let core = self.clone();
         let params = crate::core::ranking::RankingParams {
             per_source_cap: cap,
-            ..*self.ranking.read().expect("ranking lock")
+            ..*self
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         async_stream::try_stream! {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2786,7 +2795,10 @@ mod tests {
         // Nothing found is the outage again, said as one.
         assert!(core.search(&q("zzzqqq"), Door::Ui).await.is_err());
         // And a sweep is not handed keyword hits to learn from.
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             core.search_with_ranking(&q("losetup"), params, Door::Judge)
                 .await
@@ -2820,7 +2832,10 @@ mod tests {
         );
         core.embedder = embedder.clone();
 
-        let params = *core.ranking.read().expect("ranking lock");
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let e = core
             .search_with_ranking(&q("mounting an image"), params, Door::Judge)
             .await
@@ -2851,7 +2866,10 @@ mod tests {
         seed(&core, &[("mounting an image", "procedure", &[])]).await;
         let mut query = q("mount");
         query.limit = 4;
-        let base = *core.ranking.read().unwrap();
+        let base = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for multiplier in [1usize, 2, 5] {
             let params = crate::core::ranking::RankingParams {
                 candidate_multiplier: multiplier,
@@ -2889,7 +2907,10 @@ mod tests {
         seed(&core, &[("mounting an image", "procedure", &[])]).await;
         let mut query = q("mount");
         query.limit = 4;
-        let base = *core.ranking.read().unwrap();
+        let base = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let mut fetched = vec![];
         for multiplier in [1usize, 2] {
@@ -3253,14 +3274,20 @@ mod tests {
             &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
         )
         .await;
-        core.ranking.write().unwrap().rerank = false;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rerank = false;
         core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
         assert_eq!(
             reranker.calls(),
             0,
             "rerank off in the generation must mean no call"
         );
-        core.ranking.write().unwrap().rerank = true;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rerank = true;
         core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
         assert_eq!(reranker.calls(), 1);
     }
@@ -4433,7 +4460,10 @@ mod tests {
             .unwrap();
         assert!(plain.len() >= 4, "this test needs a list to reorder");
         assert!(plain.iter().all(|r| !r.primed));
-        core.ranking.write().unwrap().prime_lift = 2;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prime_lift = 2;
 
         // The one at the bottom is the one people actually keep confirming.
         let bottom = plain.last().unwrap().artifact_id.clone();
@@ -4506,7 +4536,11 @@ mod tests {
         let a = id_of(&core, "alpha text about it").await;
 
         assert!(
-            !core.ranking.read().unwrap().sitting_prime,
+            !core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sitting_prime,
             "the fixture must run with the knob off, or this proves nothing"
         );
         core.sittings
@@ -4575,7 +4609,10 @@ mod tests {
         let core = test_core().await;
         assert!(!core.learn.enabled);
         // Priming on, so that `[learn]` off is the only thing holding it.
-        core.ranking.write().unwrap().prime_lift = 2;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -4624,7 +4661,10 @@ mod tests {
         // pool it labels to be the pool the ranking produced.
         let mut core = test_core().await;
         core.learn.enabled = true;
-        core.ranking.write().unwrap().prime_lift = 2;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -4830,14 +4870,20 @@ mod tests {
         let mut query = q("the image will not mount");
         query.limit = 6;
 
-        core.ranking.write().unwrap().per_source_cap = None;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap = None;
         let uncapped = core.search(&query, Door::Judge).await.unwrap();
         assert_eq!(
             uncapped[0].text, uncapped[1].text,
             "uncapped, one document supplies the head of the list"
         );
 
-        core.ranking.write().unwrap().per_source_cap = Some(1);
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap = Some(1);
         let capped = core.search(&query, Door::Judge).await.unwrap();
         assert_ne!(
             capped[0].text, capped[1].text,
@@ -5160,7 +5206,10 @@ mod tests {
         assert_eq!(out[1].via.as_deref(), Some(a.as_str()));
 
         // The width is the live generation's, not the file's.
-        core.ranking.write().unwrap().spread_max = 0;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spread_max = 0;
         let out = core.search(&query, Door::Ui).await.unwrap();
         assert_eq!(out.len(), 1, "spread zero appends nothing: {out:?}");
     }
@@ -5178,7 +5227,10 @@ mod tests {
             .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
             .await
             .unwrap();
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = core
             .store
             .record_generation(&crate::store::generations::NewGeneration {

@@ -18,6 +18,13 @@ path = "src/main.rs"
 name = "contained"
 required-features = ["contained"]
 
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
 [dependencies]
 axum = { version = "0.8.9", features = ["macros", "multipart"] }
 tokio = { version = "1.53.1", features = ["full"] }

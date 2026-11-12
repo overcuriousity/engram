@@ -226,7 +226,9 @@ fn mark_text(text: &str, needles: &[String]) -> String {
                 i += n.len();
             }
             None => {
-                let c = text[i..].chars().next().expect("i is on a char boundary");
+                let Some(c) = text[i..].chars().next() else {
+                    break;
+                };
                 out.push(c);
                 i += c.len_utf8();
             }

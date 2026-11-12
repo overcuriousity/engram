@@ -318,7 +318,9 @@ async fn ingest(
         // A link may hold a page, a PDF or an image; the core decides which,
         // the same way it does for the MCP door. 202 when what it stored is
         // still to be read, as the upload doors answer.
-        let u = parsed_url.as_ref().expect("one-of check guarantees a url");
+        let u = parsed_url
+            .as_ref()
+            .ok_or_else(|| Error::Validation("url: missing".into()))?;
         let out = tenant.core.ingest_url(u, title, None, lang).await?;
         let code = match (&out.status, out.duplicate) {
             (_, true) => StatusCode::OK,
@@ -669,7 +671,9 @@ async fn capture(
                 "nothing to capture: send `text`, `url`, or at least one file part".into(),
             )),
             1 => {
-                let one = out.pop().expect("length checked");
+                let one = out
+                    .pop()
+                    .ok_or_else(|| Error::Internal("one capture expected".into()))?;
                 Ok((code_for(&one), Json(Captured::One(one))).into_response())
             }
             _ => {
@@ -1357,7 +1361,7 @@ fn search_cap(tenant: &Tenant) -> Option<usize> {
         .core
         .ranking
         .read()
-        .expect("ranking lock")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .per_source_cap
 }
 

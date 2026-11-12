@@ -95,11 +95,7 @@ impl InferenceGate {
         // holds it re-reads the cooldown once the call ahead has finished.
         // Checking first and taking the turn afterwards would let every waiter
         // clear the same stale `last_finished` and then merely queue up.
-        let turn = self
-            .turn
-            .acquire()
-            .await
-            .expect("the gate's turn is never closed");
+        let turn = self.turn.acquire().await.ok();
         loop {
             // Built before the lock is taken and registered before it is
             // dropped. `notify_waiters` wakes only waiters that are already
@@ -114,7 +110,10 @@ impl InferenceGate {
             // The lock is never held across an await: the wait is computed, the
             // guard dropped, and only then slept on.
             let wait = {
-                let st = self.state.lock().expect("gate state");
+                let st = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if st.interactive > 0 {
                     resumed.as_mut().enable();
                     None
@@ -147,7 +146,10 @@ impl InferenceGate {
 
     /// A lease for an interactive call. Returns immediately, always.
     pub fn interactive(self: &Arc<Self>) -> InteractiveLease {
-        self.state.lock().expect("gate state").interactive += 1;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .interactive += 1;
         InteractiveLease {
             gate: Arc::clone(self),
         }
@@ -156,7 +158,10 @@ impl InferenceGate {
     /// A call ended — well, badly, or refused. It occupied the GPU either way,
     /// so it starts the cooldown.
     pub fn call_finished(&self) {
-        self.state.lock().expect("gate state").last_finished = Some(Instant::now());
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_finished = Some(Instant::now());
     }
 }
 
@@ -165,7 +170,8 @@ impl InferenceGate {
 ///
 pub struct BackgroundPermit<'a> {
     gate: &'a InferenceGate,
-    _turn: SemaphorePermit<'a>,
+    // `None` only if the semaphore were closed, which nothing does.
+    _turn: Option<SemaphorePermit<'a>>,
     /// Whether this call starts a cooldown when it ends. False for a light
     /// call, which served none going in.
     paced: bool,
@@ -189,7 +195,11 @@ pub struct InteractiveLease {
 impl Drop for InteractiveLease {
     fn drop(&mut self) {
         {
-            let mut st = self.gate.state.lock().expect("gate state");
+            let mut st = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             st.interactive = st.interactive.saturating_sub(1);
             // `last_finished` is deliberately not stamped. It was, and it made
             // the cooldown restart on every interactive call — which for search

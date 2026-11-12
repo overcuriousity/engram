@@ -33,7 +33,10 @@ impl PendingStore {
     }
 
     pub fn put(&self, p: PendingAuth) {
-        let mut m = self.inner.lock().unwrap();
+        let mut m = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let cutoff = crate::store::now() - PENDING_TTL_SECS;
         m.retain(|_, v| v.created_at > cutoff);
         m.insert(p.csrf.clone(), p);
@@ -42,7 +45,10 @@ impl PendingStore {
     /// Removes and returns the attempt. Single use: a replayed `state` value
     /// finds nothing.
     pub fn take(&self, csrf: &str) -> Option<PendingAuth> {
-        let mut m = self.inner.lock().unwrap();
+        let mut m = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = m.remove(csrf)?;
         if p.created_at < crate::store::now() - PENDING_TTL_SECS {
             return None;

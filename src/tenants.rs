@@ -705,7 +705,13 @@ mod tests {
         // One resident tenant, so opening a second evicts the first.
         let (t, _dir) = test_tenants(1).await;
         let first = t.get_or_provision("sub-1", None).await.unwrap();
-        let file = GenerationParams::from(*first.core.ranking.read().unwrap());
+        let file = GenerationParams::from(
+            *first
+                .core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         let live = first
             .core
             .store
@@ -745,7 +751,13 @@ mod tests {
 
         let back = t.get("sub-1").await.unwrap();
         assert_eq!(
-            GenerationParams::from(*back.core.ranking.read().unwrap()),
+            GenerationParams::from(
+                *back
+                    .core
+                    .ranking
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
             moved,
             "the reopened core serves what the base adopted"
         );
@@ -909,7 +921,10 @@ mod tests {
 /// column to keep in step.
 pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
     let params = crate::store::generations::GenerationParams::from(
-        *core.ranking.read().expect("ranking lock"),
+        *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
     let chat_model = format!(
         "ask={};synth={}",
@@ -930,7 +945,10 @@ pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
     // Serve under it. Shared by every clone of this core, so the requests
     // already being answered move with it — the same swap an adoption makes,
     // arrived at from the other side.
-    *core.ranking.write().expect("ranking lock") = live.params.into();
+    *core
+        .ranking
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = live.params.into();
     Ok(())
 }
 

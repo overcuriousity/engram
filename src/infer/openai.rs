@@ -20,7 +20,7 @@ fn client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .build()
-        .expect("http client")
+        .unwrap_or_else(|_| reqwest::Client::new())
 }
 
 fn url(base: &str, path: &str) -> String {

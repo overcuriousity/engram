@@ -414,7 +414,9 @@ async fn deliver(
         }
     }
     if !delivered {
-        return Err(failure.expect("targets is non-empty, so a wake with no delivery has an error"));
+        return Err(failure.unwrap_or_else(|| {
+            crate::error::Error::Internal("no target was delivered to".into())
+        }));
     }
     Ok(())
 }
