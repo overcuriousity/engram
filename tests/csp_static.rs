@@ -303,3 +303,35 @@ fn unsafe_is_allowed_only_in_the_contained_ffi_modules() {
     let cargo = fs::read_to_string(root().join("Cargo.toml")).unwrap();
     assert!(cargo.contains("unsafe_code = \"deny\""));
 }
+
+#[test]
+fn no_literal_colour_outside_the_token_file() {
+    let mut offenders = Vec::new();
+    for (name, src) in files("assets/css", "css") {
+        if name.ends_with("00-tokens.css") {
+            continue;
+        }
+        for (n, line) in src.lines().enumerate() {
+            let code = line.split("/*").next().unwrap_or("");
+            let hex = code.char_indices().any(|(i, c)| {
+                c == '#' && {
+                    let h: String = code[i + 1..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_hexdigit())
+                        .collect();
+                    matches!(h.len(), 3 | 4 | 6 | 8)
+                        && !code[i + 1 + h.len()..]
+                            .starts_with(|c: char| c.is_alphanumeric() || c == '-')
+                }
+            });
+            if hex
+                || ["rgb(", "rgba(", "hsl(", "hsla(", "oklch("]
+                    .iter()
+                    .any(|f| code.contains(f))
+            {
+                offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}

@@ -133,7 +133,7 @@ fn decode(payload: &str) -> Result<VectorPayload> {
 fn encode(p: &VectorPayload) -> String {
     // The stamps are `skip_serializing_if` for Qdrant's merge semantics; here
     // the JSON is the whole truth, so an absent key simply reads back as None.
-    serde_json::to_string(p).expect("a payload is plain data")
+    serde_json::to_string(p).unwrap_or_default()
 }
 
 /// A distance as sqlite-vec gives it, as the similarity `cosine()` would.

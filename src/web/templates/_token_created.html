@@ -2,4 +2,5 @@
   <div class="card-head"><span class="card-title">Token created</span></div>
   <p class="muted">Shown once. Copy it now.</p>
   <pre class="mono select-all flush">{{ token }}</pre>
+  {% let copy_label = "token" %}{% let copy_value = token.as_str() %}{% include "_copy.html" %}
 </div>

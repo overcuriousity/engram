@@ -34,14 +34,18 @@ const RERANK_IDLE: Duration = Duration::from_secs(60);
 const ASK_IDLE: Duration = Duration::from_secs(20);
 
 /// llama.cpp's process-wide state. It may be initialised once, ever.
-fn backend() -> &'static LlamaBackend {
-    static BACKEND: OnceLock<LlamaBackend> = OnceLock::new();
-    BACKEND.get_or_init(|| {
-        let mut b = LlamaBackend::init().expect("llama.cpp initialises once per process");
-        // It logs every tensor it loads to stderr; none of that is ours to show.
-        b.void_logs();
-        b
-    })
+fn backend(role: &'static str) -> Result<&'static LlamaBackend> {
+    static BACKEND: OnceLock<Option<LlamaBackend>> = OnceLock::new();
+    BACKEND
+        .get_or_init(|| {
+            LlamaBackend::init().ok().map(|mut b| {
+                // It logs every tensor it loads to stderr; none of that is ours to show.
+                b.void_logs();
+                b
+            })
+        })
+        .as_ref()
+        .ok_or_else(|| failed(role, "llama.cpp did not initialise"))
 }
 
 fn failed(role: &'static str, detail: impl std::fmt::Display) -> Error {
@@ -106,7 +110,10 @@ impl<J: Job> Worker<J> {
     }
 
     fn submit(&self, job: J) {
-        let mut slot = self.tx.lock().unwrap();
+        let mut slot = self
+            .tx
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let job = match slot.as_ref() {
             Some(tx) => match tx.send(job) {
                 Ok(()) => return,
@@ -116,11 +123,12 @@ impl<J: Job> Worker<J> {
             None => job,
         };
         let (tx, rx) = mpsc::channel::<J>();
-        tx.send(job).expect("the receiver is in hand");
+        // Cannot fail: the receiver is in hand.
+        let _ = tx.send(job);
         *slot = Some(tx);
         let (role, path, idle) = (self.role, self.path.clone(), self.idle);
         let (slot, serve) = (self.tx.clone(), self.serve.clone());
-        std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name(format!("engram-{role}"))
             .spawn(move || {
                 // The next job, or `None` once idle — decided under the lock,
@@ -129,7 +137,9 @@ impl<J: Job> Worker<J> {
                 let mut next = || match rx.recv_timeout(idle) {
                     Ok(job) => Some(job),
                     Err(_) => {
-                        let mut slot = slot.lock().unwrap();
+                        let mut slot = slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
                         match rx.try_recv() {
                             Ok(job) => Some(job),
                             Err(_) => {
@@ -143,8 +153,10 @@ impl<J: Job> Worker<J> {
                 // there, and a panic would tell the caller only that the
                 // thread ended — not which file it could not find.
                 let loaded = if path.is_file() {
-                    LlamaModel::load_from_file(backend(), &path, &LlamaModelParams::default())
-                        .map_err(|e| failed(role, format!("{}: {e}", path.display())))
+                    backend(role).and_then(|b| {
+                        LlamaModel::load_from_file(b, &path, &LlamaModelParams::default())
+                            .map_err(|e| failed(role, format!("{}: {e}", path.display())))
+                    })
                 } else {
                     Err(failed(
                         role,
@@ -156,15 +168,21 @@ impl<J: Job> Worker<J> {
                     // Could not load, or could not build a context: say so to
                     // everyone waiting, then stop.
                     let detail = e.to_string();
-                    let mut slot = slot.lock().unwrap();
+                    let mut slot = slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     *slot = None;
                     drop(slot);
                     while let Ok(job) = rx.try_recv() {
                         job.fail(role, &detail);
                     }
                 }
-            })
-            .expect("a thread can be started");
+            });
+        if let Err(e) = spawned {
+            // The job goes with the closure, so its caller sees its reply channel close; the
+            // next submit finds the receiver gone and starts a thread again.
+            tracing::error!(error = %e, role = self.role, "could not start the model thread");
+        }
     }
 }
 
@@ -179,7 +197,7 @@ fn context<'m>(
     params: LlamaContextParams,
 ) -> Result<LlamaContext<'m>> {
     model
-        .new_context(backend(), params)
+        .new_context(backend(role)?, params)
         .map_err(|e| failed(role, e))
 }
 

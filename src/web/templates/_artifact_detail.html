@@ -21,7 +21,7 @@
 
   {% if let Some(winner) = d.superseded_by %}
   <div class="flag" role="status">
-    <div aria-hidden="true">⚠</div>
+    <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
     <div>
       <b>Hidden from results</b>
       <div>Something near-identical and newer
@@ -54,7 +54,7 @@
   </div>
   {% else if d.status.as_str() == "deprecated" %}
   <div class="flag" role="status">
-    <div aria-hidden="true">⚠</div>
+    <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
     <div>
       <b>Hidden as stale</b>
       <div class="muted">Not in search or ask results.</div>
@@ -104,7 +104,7 @@
       <button class="btn-icon" type="submit"
               title="Hide from results — the artifact is kept, and this can be undone"
               aria-label="Hide from results: the artifact is kept, and this can be undone">
-        {% include "_icon_hide.html" %}<span>Hide from results</span>
+        {{ crate::web::icons::icon("eye-off", 16) }}<span>Hide from results</span>
       </button>
     </form>
     {% endif %}
@@ -116,14 +116,14 @@
           hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <button class="btn-icon btn-icon-danger" type="submit"
               title="Delete" aria-label="Delete artifact">
-        {% include "_icon_trash.html" %}<span>Delete</span>
+        {{ crate::web::icons::icon("trash-2", 16) }}<span>Delete</span>
       </button>
     </form>
   </div>
 
   {% if d.corpus_restored %}
   <div class="flag" role="status">
-    <div aria-hidden="true">⚠</div>
+    <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
     <div>
       <b>Source not stored</b>
       <div class="muted">Restored from the vector store; source text is a reconstruction.</div>
@@ -328,7 +328,7 @@
             <button class="btn-icon" title="Not related" aria-label="Not related"
                     hx-post="/ui/artifacts/{{ d.id }}/links/{{ r.id }}/dismiss"
                     hx-target="closest .seen-row" hx-swap="outerHTML">
-              {% include "_icon_hide.html" %}
+              {{ crate::web::icons::icon("eye-off", 16) }}
             </button>
           </div>
         </div>

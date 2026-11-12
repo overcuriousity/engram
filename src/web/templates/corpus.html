@@ -147,7 +147,7 @@
 
 {% if restored %}
 <div class="flag" role="status">
-  <div aria-hidden="true">⚠</div>
+  <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
   <div>
     <b>Placeholder source</b>
     <div class="muted">Restored from the vector store; not the original text.</div>

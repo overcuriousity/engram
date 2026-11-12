@@ -350,3 +350,4 @@ mark {
 .capture-photo { max-width: 100%; height: auto; border-radius: var(--radius-md); }
 .raw-unbounded { max-height: none; }
 .offline { max-width: 26rem; margin: 6rem auto; padding: 0 var(--space-4); text-align: center; }
+.flag-icon { color: var(--color-warning); line-height: 0; }

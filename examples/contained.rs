@@ -18,7 +18,10 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let mut args = std::env::args().skip(1);
-    let dir = std::path::PathBuf::from(args.next().expect("a data directory"));
+    let dir = std::path::PathBuf::from(
+        args.next()
+            .ok_or_else(|| anyhow::anyhow!("usage: contained <data-dir> [models-dir]"))?,
+    );
     let models = args.next().map(std::path::PathBuf::from);
     let pick = |name: &str| {
         models

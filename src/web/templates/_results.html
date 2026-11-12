@@ -37,7 +37,7 @@
      are, so without this a typo comes back looking like an answer. #}
   {% if all_weak %}
   <div class="flag" role="status">
-    <div aria-hidden="true">⚠</div>
+    <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
     <div>
       <b>Nothing matches closely</b>
       <div class="muted">Check the spelling, or describe it instead of naming it.</div>

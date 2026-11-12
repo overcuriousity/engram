@@ -9,7 +9,8 @@
 {% match code %}
 {% when Some with ((uri, svg)) %}
 <div class="qr">{{ svg|safe }}</div>
-<p class="mono muted break-all">{{ uri }}</p>
+<p class="mono muted break-all">{{ uri }}
+{% let copy_label = "pairing link" %}{% let copy_value = uri.as_str() %}{% include "_copy.html" %}</p>
 <p class="muted">Valid two minutes, for one phone.</p>
 {% when None %}
 {% endmatch %}
