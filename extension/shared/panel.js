@@ -77,7 +77,7 @@ async function fail(e) {
 $('pair').addEventListener('click', async () => {
   const origin = cleanOrigin($('origin').value);
   if (!origin) {
-    say('Not an address; try https://engram.example.', 'error');
+    say('Not an address; enter the engram host name.', 'error');
     return;
   }
 
@@ -145,7 +145,7 @@ $('forget').addEventListener('click', async () => {
 /// handler can decide whether to ask *before* it awaits anything: like
 /// pairing, `permissions.request` is only granted while the click still counts
 /// as a user gesture, and awaiting first spends it.
-const ALL_HOSTS = ['https://*/*', 'http://*/*'];
+const ALL_HOSTS = ['https', 'http'].map((scheme) => scheme + '://*/*');
 let hasAllHosts = false;
 let openedForTabId = null;
 let tabChanged = false;

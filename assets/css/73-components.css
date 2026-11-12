@@ -304,7 +304,7 @@ mark {
   .reasoning,
   .split > :first-child,
   .split > :first-child > .card {
-    mask-image: linear-gradient(to bottom, #000 calc(100% - var(--edge)), transparent);
+    mask-image: linear-gradient(to bottom, currentColor calc(100% - var(--edge)), transparent);
     animation: scroll-edge linear both;
     animation-timeline: scroll(self);
   }

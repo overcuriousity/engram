@@ -134,7 +134,7 @@ target=$(pick_target)
 tag=${ENGRAM_VERSION:-$(newest_tag)}
 [ -n "$tag" ] || die "could not find a release; check https://github.com/$REPO/releases"
 version=${tag#v}
-archive="engram-${version}-${target}.tar.gz"
+archive="engram-${version}-${target}-offline.tar.gz"
 base="https://github.com/$REPO/releases/download/$tag"
 
 tmp=$(mktemp -d)

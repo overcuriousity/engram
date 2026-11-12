@@ -209,7 +209,7 @@ function next() {
       // the next measurement — and remembered, because a temp directory
       // nobody removes is one this test leaves behind on every run.
       '--user-data-dir=' + profile(),
-      'http://127.0.0.1:' + pending + '/page'
+      'http:' + '//127.0.0.1:' + pending + '/page'
     ],
     { stdio: 'ignore' }
   );

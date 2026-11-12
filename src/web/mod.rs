@@ -51,6 +51,10 @@ use state::AppState;
 /// that a runaway upload is refused rather than buffered.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+/// `--theme-color` from 00-tokens.css, for the one place a token cannot reach: a meta tag.
+pub const THEME_LIGHT: &str = "#f8f6f1";
+pub const THEME_DARK: &str = "#0e1015";
+
 pub const API_PER_MINUTE: u32 = 600;
 pub const API_BURST: u32 = 120;
 

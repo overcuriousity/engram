@@ -38,7 +38,7 @@ jobs:
       tag: ${{ steps.pick.outputs.tag }}
       release: ${{ steps.pick.outputs.release }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           # The whole history and every tag: the counter below reads the tags
@@ -115,15 +115,15 @@ jobs:
             runner: ubuntu-24.04-arm
             packages: ""
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release-${{ matrix.target }}
 
@@ -143,7 +143,16 @@ jobs:
           # lock that disagrees with the manifest. This is the package's own
           # entry; no dependency is touched.
           sed -i '/^name = "engram"$/{n;s/^version = .*/version = "'"$v"'"/}' Cargo.lock
+          sh scripts/stamp-changelog.sh "$v" > /dev/null
           grep -m1 '^version = ' Cargo.toml
+
+      - name: Tag, Cargo version and changelog agree
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          test "${{ needs.version.outputs.tag }}" = "v$v"
+          grep -q "^version = \"$v\"" Cargo.toml
+          grep -q "^## \[$v\]" CHANGELOG.md
 
       - name: Build
         env:
@@ -156,19 +165,16 @@ jobs:
         run: |
           set -euo pipefail
           v="${{ needs.version.outputs.version }}"
-          name="engram-${v}-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/engram" "dist/$name/"
-          strip "dist/$name/engram"
-          # What an operator needs beside the binary to get from download to a
-          # running service without opening a browser.
-          cp config.example.toml cli.example.toml engram.service README.md "dist/$name/"
-          tar -czf "dist/${name}.tar.gz" -C dist "$name"
+          t="${{ matrix.target }}"
+          mkdir -p "dist/bin/bin-$t"
+          cp "target/$t/release/engram" "dist/bin/bin-$t/engram"
+          strip "dist/bin/bin-$t/engram"
+          SKIP_SOURCE=1 sh scripts/bundle.sh "$v" dist "$t"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: engram-${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: dist/out/*-offline.tar.gz
           if-no-files-found: error
 
   android:
@@ -177,11 +183,11 @@ jobs:
     if: needs.version.outputs.release == 'yes'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with: { distribution: temurin, java-version: "21" }
 
       # The same dance as the android workflow: the runner's SDK is used
@@ -190,22 +196,21 @@ jobs:
       - name: accept SDK licences
         run: yes | "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" --licenses > /dev/null || true
 
-      - uses: gradle/actions/setup-gradle@v6
-
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
       # The core, for contained mode. Without it the APK still builds and
       # still installs, and never offers "On this phone" — which is how every
       # release before this one went out. Gradle calls `cargo +stable ndk`,
       # so the toolchain has to be the one named `stable`.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: aarch64-linux-android
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release-android
           workspaces: android/native
 
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2
         with:
           tool: cargo-ndk
 
@@ -269,7 +274,7 @@ jobs:
             || { echo "::error::the APK has no native core" >&2; exit 1; }
           mkdir -p dist && cp "$apk" "dist/engram-${v}.apk"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: engram-android
           path: dist/*.apk
@@ -282,13 +287,30 @@ jobs:
     permissions:
       # Scoped to this job alone: nothing above it may write to the repository.
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v8
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - name: Release notes and the vendored source archive
+        run: |
+          set -euo pipefail
+          v="${{ needs.version.outputs.version }}"
+          sh scripts/stamp-changelog.sh "$v" > notes.md
+          mkdir -p dist
+          mkdir -p src-dist/src/.cargo
+          git archive --format=tar HEAD | tar -C src-dist/src -xf -
+          cp CHANGELOG.md src-dist/src/CHANGELOG.md
+          cargo vendor --locked --versioned-dirs src-dist/src/vendor | sed 's|^directory = .*|directory = "vendor"|' > src-dist/src/.cargo/config.toml
+          tar -C src-dist -czf "dist/engram-$v-src-vendored.tar.gz" --transform "s|^src|engram-$v|" src
+          cp install.sh dist/install.sh
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: dist
           merge-multiple: true
@@ -299,12 +321,18 @@ jobs:
           cd dist
           # Every archive, or the release is not published. A missing target is
           # a broken release rather than a smaller one.
-          test "$(ls -1 ./*.tar.gz | wc -l)" -eq 2
+          test "$(ls -1 ./*-offline.tar.gz | wc -l)" -eq 2
+          test "$(ls -1 ./*-src-vendored.tar.gz | wc -l)" -eq 1
           # And the APK, which Obtainium reads straight off the newest release:
           # a release published without it is an update the phones cannot see.
           test "$(ls -1 ./*.apk | wc -l)" -eq 1
-          sha256sum ./*.tar.gz ./*.apk > SHA256SUMS
+          sha256sum ./*.tar.gz ./*.apk ./install.sh > SHA256SUMS
           cat SHA256SUMS
+
+      - uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: 'dist/*.tar.gz, dist/*.apk, dist/install.sh'
+
 
       - name: Release
         env:
@@ -317,5 +345,5 @@ jobs:
             --target "${{ github.event.workflow_run.head_sha }}" \
             --title "${{ needs.version.outputs.tag }}" \
             --prerelease \
-            --generate-notes \
-            dist/*.tar.gz dist/*.apk dist/SHA256SUMS
+            --notes-file notes.md \
+            dist/*.tar.gz dist/*.apk dist/install.sh dist/SHA256SUMS

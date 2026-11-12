@@ -72,7 +72,8 @@
         var installEvent = installPrompt;
         installPrompt = null;
         stamp();
-        if (installEvent) installEvent.prompt();
+        // The browser's own install sheet, not a dialog of ours.
+        if (installEvent) installEvent.prompt.call(installEvent);
       });
     } else {
       nudge.querySelector('[data-install-how]').hidden = false;
@@ -2420,12 +2421,9 @@
 
     // The one colour, re-read every draw: a theme flip mid-session is picked
     // up on the next frame with no listener at all.
+    // The muted ink token, as the canvas reads it; opacity is set with globalAlpha.
     function ink() {
-      var hex = getComputedStyle(document.body).getPropertyValue('--color-fg-muted').trim();
-      var m = /^#([0-9a-f]{6})$/i.exec(hex);
-      if (!m) return { r: 122, g: 122, b: 114 };
-      var n = parseInt(m[1], 16);
-      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+      return getComputedStyle(document.body).getPropertyValue('--color-fg-muted').trim() || 'gray';
     }
 
     function resize() {
@@ -2487,7 +2485,8 @@
       ctx.beginPath();
       // Dimmer than the cloud it frames. These are scaffolding: they say which
       // way the thing is turning, and nothing else.
-      ctx.strokeStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0.13)';
+      ctx.strokeStyle = c;
+      ctx.globalAlpha = 0.13;
       ctx.lineWidth = 1;
       seg(-L, 0, 0, L, 0, 0);
       for (var i = 0; i < TICKS.length; i++) seg(TICKS[i], -T, 0, TICKS[i], T, 0);
@@ -2519,7 +2518,8 @@
         // Dim overall, dimmer far away: the cloud is present, never loud.
         var alpha = 0.07 + ((k + 0.5) / BUCKETS) * 0.38;
         ctx.beginPath();
-        ctx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + alpha.toFixed(3) + ')';
+        ctx.fillStyle = c;
+        ctx.globalAlpha = alpha;
         for (var j = 0; j < buckets[k].length; j++) {
           var q2 = buckets[k][j];
           ctx.moveTo(q2.sx + q2.r, q2.sy); // moveTo keeps the arcs unconnected

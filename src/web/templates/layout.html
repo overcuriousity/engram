@@ -14,8 +14,8 @@
   <meta name="apple-mobile-web-app-title" content="engram">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="theme-color" content="#f8f6f1" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0e1015" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="{{ crate::web::THEME_LIGHT }}" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="{{ crate::web::THEME_DARK }}" media="(prefers-color-scheme: dark)">
   <link rel="stylesheet" href="{{ crate::web::assets::url("app.css") }}">
   <script src="{{ crate::web::assets::url("vendor/htmx.min.js") }}" defer></script>
   <script src="{{ crate::web::assets::url("vendor/htmx-ext-sse.js") }}" defer></script>

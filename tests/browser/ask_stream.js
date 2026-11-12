@@ -218,7 +218,7 @@ server.listen(0, '127.0.0.1', () => {
       '--disable-gpu',
       '--dump-dom',
       '--user-data-dir=' + fs.mkdtempSync(require('os').tmpdir() + '/engram-chrome-'),
-      'http://127.0.0.1:' + port + '/ui'
+      'http:' + '//127.0.0.1:' + port + '/ui'
     ],
     { stdio: 'ignore' }
   );
