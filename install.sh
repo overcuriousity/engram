@@ -5,6 +5,8 @@
 # a one-line installer is that it runs on the box you are already logged into,
 # which may be an Alpine container with no bash and no jq.
 #
+# Offline: install.sh --archive engram-<version>-<target>-offline.tar.gz [--system] [--prefix DIR]
+#
 # Environment:
 #   ENGRAM_INSTALL_DIR   where to put the binary (default: see `pick_dir`)
 #   ENGRAM_VERSION       a specific tag, e.g. v2026.827.0 (default: the newest)
@@ -41,6 +43,7 @@ pick_target() {
 #
 # Read with sed rather than jq, which is not on a fresh server. Splitting on
 # `,` and `{` first means this does not depend on the API pretty-printing.
+# shellcheck disable=SC2020 # both separators become newlines on purpose
 newest_tag() {
   curl -fsSL -H 'Accept: application/vnd.github+json' \
     "https://api.github.com/repos/$REPO/releases?per_page=10" |
@@ -72,6 +75,57 @@ verify() {
     die "no sha256sum or shasum, so the download cannot be checked; install one or download by hand"
   fi
 }
+
+# An offline bundle: no network, checksums verified, ~/.local by default, never sudo.
+install_archive() {
+  archive=$1 system=$2 prefix=$3
+  [ -f "$archive" ] || die "archive not found: $archive"
+  if [ "$system" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
+    die "run as root for --system; this script never calls sudo"
+  fi
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT INT TERM
+  tar -C "$work" -xzf "$archive"
+  set -- "$work"/*/
+  [ $# -eq 1 ] && [ -d "$1" ] || die "the archive should contain exactly one directory"
+  cd "${1%/}"
+  if ! sha256sum -c --quiet SHA256SUMS > "$work/check.log" 2>&1; then
+    bad=$(grep -v ': OK$' "$work/check.log" | head -n 1 | cut -d: -f1)
+    die "checksum mismatch: ${bad:-SHA256SUMS}; the bundle is damaged or was altered"
+  fi
+  mkdir -p "$prefix/bin"
+  install -m 0755 engram "$prefix/bin/engram"
+  say "installed $prefix/bin/engram"
+  if [ "$system" -eq 1 ]; then
+    install -m 0644 engram.service /etc/systemd/system/engram.service
+    mkdir -p /etc/engram
+    if [ ! -f /etc/engram/config.toml ]; then
+      install -m 0644 config.example.toml /etc/engram/config.toml
+      say "wrote /etc/engram/config.toml; set server.public_url before starting"
+    fi
+    say "start it with: systemctl daemon-reload && systemctl enable --now engram"
+  fi
+  doc="$prefix/share/engram"
+  mkdir -p "$doc"
+  for f in nginx.conf AIRGAP.md THIRD-PARTY-LICENSES CHANGELOG.md config.example.toml; do
+    [ -f "$f" ] && install -m 0644 "$f" "$doc/$f"
+  done
+  say "reverse proxy template: $doc/nginx.conf"
+}
+
+archive="" system=0 prefix="${HOME:-}/.local"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --archive) [ $# -ge 2 ] || die "--archive needs a file"; archive=$2; shift 2 ;;
+    --system) system=1; prefix=/usr/local; shift ;;
+    --prefix) [ $# -ge 2 ] || die "--prefix needs a directory"; prefix=$2; shift 2 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+if [ -n "$archive" ]; then
+  install_archive "$archive" "$system" "$prefix"
+  exit 0
+fi
 
 need curl
 need tar
@@ -127,6 +181,6 @@ Next:
   engram --print-config                    # what engram resolved, secrets redacted
   engram                                   # needs Qdrant answering on its REST port
 
-config.example.toml, cli.example.toml and engram.service ship in the same
-archive, at https://github.com/$REPO/releases/tag/$tag
+config.example.toml, cli.example.toml and deploy/engram.service ship in the
+same archive, at https://github.com/$REPO/releases/tag/$tag
 EOF

@@ -8,6 +8,7 @@ use std::sync::Arc;
 #[derive(Parser)]
 #[command(
     name = "engram",
+    version = env!("ENGRAM_VERSION"),
     about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s, -a, --show or --status it is a client of one."
 )]
 struct Args {
@@ -670,7 +671,18 @@ async fn main() -> anyhow::Result<()> {
     handles.push(repair);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
-    tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
+    tracing::info!(bind = %listener.local_addr()?, mode = ?cfg.auth.mode, "engram listening");
+    // Both are no-ops without NOTIFY_SOCKET, i.e. outside a Type=notify unit.
+    let _ = sd_notify::notify(&[sd_notify::NotifyState::Ready]);
+    if let Some(every) = sd_notify::watchdog_enabled() {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(every / 2);
+            loop {
+                tick.tick().await;
+                let _ = sd_notify::notify(&[sd_notify::NotifyState::Watchdog]);
+            }
+        });
+    }
 
     axum::serve(
         listener,

@@ -64,9 +64,13 @@ only.
 
 ### As a service
 
-`engram.service` is shipped in the release archive: binary at
-`/usr/local/bin/engram`, config and data under `/var/lib/engram`, secrets in
-`/var/lib/engram/engram.env`.
+```bash
+sh install.sh --archive engram-<version>-x86_64-unknown-linux-musl-offline.tar.gz --system
+```
+
+Installs the hardened unit (`deploy/engram.service`, `Type=notify`) and
+`/etc/engram/config.toml`; `deploy/nginx.conf` is the reverse proxy in front.
+Offline installs and TLS: [AIRGAP.md](AIRGAP.md).
 
 ### One-shot commands
 
@@ -141,6 +145,10 @@ collection.
 
 ## Docs
 
+- [AGENTS.md](AGENTS.md) — manifest version and deviations.
+- [CHANGELOG.md](CHANGELOG.md)
+- [SECURITY.md](SECURITY.md)
+- [AIRGAP.md](AIRGAP.md)
 - [docs/api.md](docs/api.md) — the `/api/v1` contract.
 - [docs/evaluation.md](docs/evaluation.md) — how retrieval is measured.
 - [android/README.md](android/README.md)
