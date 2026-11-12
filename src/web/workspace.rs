@@ -1,15 +1,5 @@
-//! One text surface, and the page built around it.
-//!
-//! Capture, search and ask were three pages, and moving between them meant
-//! retyping or carrying a prefill: the same words are a query on one, a
-//! question on the second and a document on the third, and the operator
-//! navigated to say which. Here the box never changes shape and the verb is a
-//! button — typing searches, `Ask` spends the model call, `Capture` stores
-//! what is in the box.
-//!
-//! The three old doors still open. They are deep links into this page now,
-//! which is what keeps a bookmark, the extension's capture post and the
-//! *keep this answer* flow working.
+//! One text surface: the box never changes shape and the verb is a button (search, `Ask`, `Capture`).
+//! The old capture, search and ask doors are deep links into this page.
 
 use crate::tenants::Tenant;
 use askama::Template;
@@ -32,204 +22,95 @@ use crate::web::ui_error::UiResult;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        // `/` and `/ui` both land here rather than redirecting onward: there
-        // is one page, so there is nothing to redirect to.
+        // `/` and `/ui` both land here: there is one page.
         .route("/", get(page))
         .route("/ui", get(page))
         // A deep link, and what a bookmark from before this change points at.
         .route("/ui/search", get(page))
         .route("/ui/search/results", get(search_results))
-        // The capture door. GET is the workspace with the box filled; POST is
-        // what the button on it and the browser extension both send.
+        // GET fills the box; POST is what the button and the extension send.
         .route("/ui/capture", get(capture_door).post(capture_submit))
         // The held-state regions, out of band. See `held_regions`.
         .route("/ui/held", get(held_regions))
         // The line under an idle box, polling itself while a capture is read.
         .route("/ui/idle-foot", get(idle_line))
-        // The ask door, and the two-request stream behind it: the POST parks
-        // the question and hands back an id, and an `EventSource` spends it.
+        // The POST parks the question and returns an id; an `EventSource` spends it.
         .route("/ui/ask", get(ask_door).post(ask_submit))
         .route("/ui/ask/{id}/stream", get(ask_stream))
         .route("/ui/ask/{id}/verdict", post(ask_verdict))
-        // Judging at the moment of search: the bar under an opened result and
-        // the gap button on the rail. Open to whoever searched, like the ask
-        // bar — it is their own search — and unlike the deck, whose grant also
-        // covers writing `config.toml`.
+        // Open to whoever searched: it is their own search.
         .route("/ui/search/{id}/verdict", post(search_verdict))
         .route("/ui/search/{id}/gap", post(search_gap))
         .route("/ui/ask/{id}/carried", post(ask_carried))
         .route("/ui/ask/{id}/keep", post(ask_keep))
-        // The microphone. Not a door onto anything: it is the keyboard, and
-        // what it answers with goes into the box for the operator to then do
-        // something with.
+        // The microphone: the answer goes into the box, nothing is captured.
         .route("/ui/transcribe", post(transcribe))
 }
 
 #[derive(Template)]
 #[template(path = "workspace.html")]
 struct WorkspaceTemplate {
-    /// Whether the ask door is open. See `state::ask_enabled`. The `Ask`
-    /// button is absent where it is false — the door is simply not there,
-    /// rather than greyed out over a page that says so.
+    /// See `state::ask_enabled`; the button is absent rather than greyed out.
     ask_enabled: bool,
-    /// The box's contents on arrival: a deep link's `?q=`, or an answer kept
-    /// from an ask. One field, because there is one box.
+    /// A deep link's `?q=`, or an answer kept from an ask.
     q: String,
-    /// What this collection can actually be narrowed by, rendered as chips in
-    /// the verb row, so choosing a category never means knowing in advance
-    /// that it exists.
+    /// Rendered as chips, so a category need not be known in advance.
     facets: crate::vector::Facets,
-    /// The chip a deep link arrived with, so the row comes back selected
-    /// rather than reset to "all".
+    /// So the row comes back selected rather than reset to "all".
     category: String,
     /// Whether the area under the box exists at all. See `Core::recommends`.
     recommend: bool,
-    /// Whether the image door is open, i.e. `[infer.vision]` is configured.
-    /// Off, the control offers text only rather than a picker that fails.
+    /// Off, the control offers text only.
     vision_enabled: bool,
-    /// Whether `[infer.transcribe]` is configured. Off, the box has no
-    /// microphone — the same rule the image door follows, and for the same
-    /// reason: a control that cannot work is worse than no control.
+    /// Off, the box has no microphone.
     stt_enabled: bool,
-    /// Whether this page asks the rail to say why each row ranked where it
-    /// did — `/ui?explain=1`. Carried onto the form as a hidden field and
-    /// named in `hx-params`, because that allowlist strips everything it does
-    /// not name and the fragment would otherwise never see the flag.
-    ///
-    /// A link rather than a control: the line is for an operator looking into
-    /// a ranking, and a page that paints it on every keystroke for everybody
-    /// is a page with a sentence under every row.
+    /// `/ui?explain=1`, carried as a hidden field named in `hx-params`, which strips anything unnamed.
     explain: bool,
-    /// Whether a reranker serves the search path — `Core::reranks_search`.
-    /// Rendered onto the form as `data-rerank`, which is what arms app.js's
-    /// refining pass: without it no second request fires, ever, because it
-    /// could only buy the same order back.
+    /// Rendered as `data-rerank`, which arms app.js's refining pass.
     search_reranks: bool,
-    ///
-    /// At `earned` and `off` it spends none: the text is embedded as written,
-    /// and at `earned` a window is rewritten later only where reading has
-    /// earned it. The page has to say which of those is happening — promising
-    /// "16 model calls" on a base that will make none is the page lying about
-    /// what the button costs.
-    /// The ask the box was filled from, carried through the form so the
-    /// capture records where the text came from. Empty on an ordinary visit.
-    ///
-    /// The id rather than the prose: a note is a string someone can edit away,
-    /// while this is the join back to the question and the artifacts the
-    /// answer was built from, and `capture_submit` turns it into stored
-    /// provenance.
+    /// The ask the box was filled from, by id: `capture_submit` turns it into stored provenance.
     prefill_ask: String,
-    /// The question this answer answered, in the operator's own words.
-    ///
-    /// The provenance already recorded it — `with_ask` carries the question
-    /// and the citations into the corpus metadata. What was missing was saying
-    /// so on the page: the box arrived holding an answer with no sign of what
-    /// it was an answer to, and the operator deciding whether to keep it is
-    /// the person who most needs to see the question.
+    /// Shown so the operator deciding whether to keep the answer sees the question.
     prefill_question: String,
-    /// Which door this is: `""` for the workspace and its search deep link,
-    /// `"ask"` or `"capture"` for the two that arrive with the box already
-    /// filled.
-    ///
-    /// It gates the form's `load` trigger. A filled box is a search to run
-    /// only where a search filled it; the other two doors fill it with a
-    /// question or with an answer being kept, and running a search over
-    /// either was a query nobody typed — an embedding call, an activation
-    /// bump and a Judge-queue row for the capture door especially, whose box
-    /// holds a whole model answer.
-    ///
-    /// It also decides `idle`: a door that runs no search on arrival has to
-    /// render the rail's idle state, or the rail is the column of nothing
-    /// that state exists to remove.
+    /// `""`, `"ask"` or `"capture"`; gates the form's `load` trigger, since only a search-filled box should search.
+    /// It also decides `idle`.
     open_with: &'static str,
-    /// The idle rail, pre-rendered: the base introducing itself, and an empty
-    /// string only where the `load` trigger is about to fill the rail with
-    /// results — rendering an introduction under them for one round trip
-    /// would be flicker.
-    ///
-    /// Which is not the same as "the box is empty". The ask and capture doors
-    /// arrive with a filled box and run nothing, so for them there is no
-    /// round trip coming and no results to flicker under: without this they
-    /// rendered a rail with nothing in it at all.
-    ///
-    /// Rendered here rather than composed in the template because the same
-    /// fragment is what the results endpoint returns when the box is emptied
-    /// — one account of the idle state, however it is reached.
+    /// Empty only where the `load` trigger is about to fill the rail; the ask and capture doors run nothing and need it.
     idle: String,
-    /// Whether this page paints its idle state: the column under the box, and
-    /// no rail and no pane. Exactly the condition `idle` is computed from, and
-    /// deliberately not "the box is empty" — the ask and capture doors arrive
-    /// with a filled box and run nothing, so for them nothing is coming and
-    /// the idle column is what the page has to show.
+    /// The condition `idle` is computed from, not "the box is empty".
     idle_state: bool,
-    /// Whether the base holds anything at all.
-    ///
-    /// Onboarding here is a property of an empty base rather than of a new
-    /// user: no flag is stored, nothing is dismissed, and the same page serves
-    /// someone who has just arrived and someone who has just deleted
-    /// everything. Two of the three verbs cannot work with nothing held —
-    /// search returns nothing and ask can only abstain — so the page offers
-    /// the one that can, and the rest appears when there is something for it
-    /// to act on.
+    /// Onboarding is a property of an empty base, not of a new user: nothing is stored or dismissed.
     held: bool,
-    /// The example phrasing under the box, in the reader's language. See
-    /// `moments::examples_for`: it is one of the classifier's own prototypes,
-    /// so what the page teaches and what the base recognises cannot drift
-    /// apart.
+    /// One of the classifier's own prototypes; see `moments::examples_for`.
     example_remind: &'static str,
-    /// The language it is in, for `lang` on the chip. The page is
-    /// English and they may not be; see `moments::examples_lang_for`.
+    /// For `lang` on the chip; see `moments::examples_lang_for`.
     example_lang: &'static str,
-    /// Always false here: the shared partials this page renders inline —
-    /// `_ask_verb.html`, `_keyhint.html`, `_box_hint.html`, `_pane_idle.html`
-    /// — mark themselves `hx-swap-oob` for the other caller, `HeldTemplate`,
-    /// which swaps the same four regions into a page already on screen.
+    /// Always false: the shared partials mark themselves `hx-swap-oob` only for `HeldTemplate`.
     oob: bool,
 }
 
 impl WorkspaceTemplate {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
-    ///
-    /// The box is the Search destination; there is no separate page for it.
+    /// The box is the Search destination.
     fn section(&self) -> &'static str {
         "search"
     }
 }
 
-/// The four regions that read differently once the base stops being empty,
-/// rendered for an out-of-band swap into a workspace that is already open.
-///
-/// The page is built once. A capture posts to `/ui/capture` and swaps a
-/// receipt; the rail refresh swaps `#results`. Nothing else moves — so the
-/// paste that ends an empty base left the whole page still arranged for one,
-/// which is the state onboarding exists to leave. Fetched by app.js on the
-/// first capture that stores, and only that one.
-///
-/// The same partials the workspace includes, so the two accounts of what the
-/// held state says cannot drift apart.
+/// The four regions that change once the base stops being empty, swapped out of band after the first stored capture.
+/// The same partials the workspace includes, so the two cannot drift.
 #[derive(Template)]
 #[template(path = "_held.html")]
 struct HeldTemplate {
     ask_enabled: bool,
-    /// See `WorkspaceTemplate`: `_box_hint.html` is one of the partials this
-    /// swaps, and it reads these.
+    /// See `WorkspaceTemplate`; `_box_hint.html` reads these.
     example_remind: &'static str,
-    /// See `WorkspaceTemplate`.
     example_lang: &'static str,
-    /// True by definition: this fragment exists only for the transition into
-    /// it. The field is here because the partials branch on it.
+    /// True by definition; the partials branch on it.
     held: bool,
-    /// True by definition, for the same reason.
     oob: bool,
 }
 
-/// Serves `HeldTemplate`, and only where something really is held: a page that
-/// asked for this before its capture stored would swap in an Ask verb over a
-/// base that still cannot answer.
+/// Only where something is held, or an Ask verb would appear over a base that cannot answer.
 async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Response> {
     let (corpora, _) = tenant.core.store.held_brief().await?;
     if corpora == 0 {
@@ -246,15 +127,8 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResul
     .into_response())
 }
 
-/// The idle line alone, for its own poll. Not a swap of the whole idle state
-/// (`oob`): that also empties the echo and the rail heading, and a poll can
-/// land while someone types.
-///
-/// `HX-Trigger` on the way out of the read. The rail may be standing at "No
-/// matches yet · still reading", which is a dead end — nothing re-ran the
-/// search when the reading landed, so the person who pasted a note and looked
-/// for it saw that line until they edited the query. app.js runs the search
-/// again on this, and only from that state.
+/// Not the whole idle swap (`oob`), which would empty the echo while someone types.
+/// `HX-Trigger` lets app.js re-run a search stuck at "still reading".
 async fn idle_line(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Response> {
     let t = crate::web::ui::idle_foot(&tenant, false, &headers).await?;
     let reading = t.reading;
@@ -268,18 +142,7 @@ async fn idle_line(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<R
     Ok(res)
 }
 
-/// Everything every door renders, before the door says what it opened for.
-///
-/// Split out because the three deep links differ only in what is in the box
-/// and what happens on first paint; a copy of this per door is how they come
-/// to disagree about the chips.
-/// The reader's language, off the request. A header that is absent, empty or
-/// unreadable is a reader we know nothing about, and English is what the page
-/// says then.
-///
-/// An empty phrasing on the embed-only floor: nothing reads a reminder out of
-/// the box without `[infer.synthesize]`, so offering one would teach a
-/// phrasing that does nothing. `_box_hint.html` says so in its place.
+/// English where the header is absent or unreadable; an empty phrasing without `[infer.synthesize]`.
 pub(crate) fn examples(
     core: &crate::core::Core,
     headers: &axum::http::HeaderMap,
@@ -304,9 +167,7 @@ async fn base_template(
     category: String,
     open_with: &'static str,
 ) -> Result<WorkspaceTemplate> {
-    // A vector store that cannot answer must not take the page down with it:
-    // without chips the page is what it was yesterday, with them it is better,
-    // and neither is worth a 500.
+    // A vector store that cannot answer must not take the page down.
     let mut facets = tenant
         .core
         .vectors
@@ -316,29 +177,16 @@ async fn base_template(
             tracing::warn!(error = %e, "facets unavailable; rendering the workspace without chips");
             Default::default()
         });
-    // A deep link can name a value that falls outside the top `FACET_LIMIT`,
-    // or one nothing carries at all. The rail is narrowed by it either way, so
-    // the chip row has to show it: otherwise the page reads as unfiltered
-    // while the results are not, and there is no chip to click to get back
-    // out.
+    // A deep link may name a category outside the top `FACET_LIMIT`; the chip must still show.
     ensure_facet(&mut facets.categories, &category);
-    // The same condition the template's `load` trigger is written from, and
-    // its complement: whatever will not be filled by a search on arrival is
-    // filled by the idle rail here.
+    // The complement of the template's `load` trigger condition.
     let idle_state = q.is_empty() || !open_with.is_empty();
-    // Rendered whatever state the page arrived in. It is the idle column's
-    // closing line now rather than the rail's contents, so there is no list to
-    // flicker under a result set that is about to arrive — and a deep link
-    // whose box is cleared has to find the line already there, because what
-    // comes back from the results endpoint is an out-of-band swap onto it.
+    // Always rendered: a cleared deep-link box gets an out-of-band swap onto it.
     let idle = crate::web::ui::idle_foot(tenant, false, headers)
         .await?
         .render()
         .map_err(|e| crate::error::Error::Internal(e.to_string()))?;
-    // The slimmest read there is, and the same one the idle rail takes. Asked
-    // unconditionally because the deep-link path renders no idle rail and
-    // still has to know: a search URL against an empty base is a page that
-    // must not offer Ask either.
+    // Unconditional: a search URL against an empty base must not offer Ask either.
     let (corpora, _) = tenant.core.store.held_brief().await?;
     let (example_remind, example_lang) = examples(&tenant.core, headers);
     Ok(WorkspaceTemplate {
@@ -350,8 +198,7 @@ async fn base_template(
         vision_enabled: tenant.core.describer.is_some(),
         stt_enabled: tenant.core.transcriber.is_some(),
         search_reranks: tenant.core.reranks_search(),
-        // The deep-link door sets it; every other door onto this page is not
-        // an operator looking into a ranking.
+        // Only the deep-link door sets it.
         explain: false,
         prefill_ask: String::new(),
         prefill_question: String::new(),
@@ -376,44 +223,24 @@ async fn page(
     Ok(HtmlTemplate(t).into_response())
 }
 
-/// What the capture page accepts in its query string.
-///
-/// `from_ask` rather than the answer itself: an answer runs to thousands of
-/// characters and a URL does not, so passing the text would break on exactly
-/// the long answers worth keeping. The id is short, and the page reads the
-/// stored row.
+/// `from_ask` rather than the answer: an answer can exceed a URL.
 #[derive(serde::Deserialize)]
 struct CapturePrefill {
     #[serde(default)]
     from_ask: Option<String>,
 }
 
-/// Text and nothing else. The label field is gone: a name arrives from
-/// synthesis, which has read the document, rather than from someone who has
-/// just pasted it and does not yet know what it says.
+/// Text only: a name arrives from synthesis, which has read the document.
 #[derive(serde::Deserialize)]
 struct CaptureForm {
     text: String,
-    /// Set when the box was prefilled from an answer. Carries the ask through
-    /// the edit, so what is stored records that the text was model-written and
-    /// what it was written from — even if the operator rewrote every word of it.
+    /// Records the text as model-written and its sources, however much was edited.
     #[serde(default)]
     from_ask: Option<String>,
-    /// The viewer's zone, from the hidden `#box-tz` app.js fills on load — the
-    /// same field the echo under the box already reads its dates in.
-    ///
-    /// Without it the flagship path stored no zone at all: *remind me tomorrow
-    /// at 9*, echoed under the box in Berlin as 09:00, landed as a moment at
-    /// 09:00 UTC and the band underneath said 11:00.
+    /// From the hidden `#box-tz` app.js fills, so reminders land in the viewer's zone.
     #[serde(default)]
     tz: Option<String>,
-    /// The search the box was in the middle of when Capture was pressed — the
-    /// id `#fold-of` already carries so a typing burst folds into one event.
-    ///
-    /// The box searches while it is typed, so that search *is* this capture's
-    /// first draft, and it found nothing because nothing was there yet. Carried
-    /// so the hole it would otherwise become closes against the text that
-    /// answers it. Empty for a door that was not typed into.
+    /// The search the box was typing (`#fold-of`); carried so the hole it would become closes against this text.
     #[serde(default)]
     from_search: Option<String>,
 }
@@ -423,9 +250,7 @@ struct CaptureForm {
 struct CapturedTemplate {
     id: String,
     duplicate: bool,
-    /// Set when the capture was parked as a near-duplicate. Without it the page
-    /// says "processing" for a capture that nothing will ever process, and the
-    /// only hint is a queue on Ops the writer has no reason to open.
+    /// Without it the page says "processing" for a capture nothing will process.
     near_dupe_of: Option<String>,
     near_dupe_percent: i64,
 }
@@ -435,22 +260,10 @@ async fn capture_submit(
     headers: axum::http::HeaderMap,
     Form(f): Form<CaptureForm>,
 ) -> UiResult<Response> {
-    // Which of the ten the reading of this text is instructed in: the account
-    // setting, or this browser's `Accept-Language` where it is on automatic.
+    // The account setting, or `Accept-Language` on automatic.
     let lang = crate::web::state::capture_lang(&tenant, &headers).await;
-    // An answer the operator chose to keep is still a paste, and is stored as
-    // one — the same pipeline, the same synthesis, no special case downstream.
-    // What differs is only the trace: the origin says a model wrote it, and the
-    // metadata says from which question and which artifacts. That is the whole
-    // of the concession the roadmap makes here, and it is a record rather than
-    // a mechanism.
-    //
-    // The two travel together or not at all. An ask can vanish between the page
-    // load and the save — retention deletes unjudged questions — and storing
-    // `origin = "ask"` with no `ask` metadata would leave a corpus asserting
-    // model authorship while carrying none of the provenance that assertion is
-    // supposed to buy. A claim that cannot be checked is worse than no claim, so
-    // a lost row falls back to an ordinary paste, which is what it now is.
+    // A kept answer is an ordinary paste with an `ask` origin and metadata.
+    // The two travel together: if the ask row is gone, it falls back to a plain paste.
     let capture = match f.from_ask.as_deref().filter(|s| !s.is_empty()) {
         Some(ask_id) => match tenant.core.store.ask_event(ask_id).await? {
             Some(ev) => crate::core::ingest::Capture::new(&f.text, ORIGIN_ASK).with_ask(
@@ -468,12 +281,7 @@ async fn capture_submit(
         },
         None => crate::core::ingest::Capture::new(&f.text, ORIGIN_WEB),
     };
-    // The id came off the page, so it is whatever the caller sent: a search
-    // that is not this person's is not this person's first draft, and stamping
-    // the link would close a hole in somebody else's base — see
-    // `Store::event_is_mine`. Dropped rather than refused, for the reason the
-    // lost ask above is: nothing about the text depends on it, and a capture
-    // must not fail over a piece of provenance.
+    // Only the caller's own search (`Store::event_is_mine`); dropped rather than refused.
     let capture = match f.from_search.as_deref().filter(|s| !s.is_empty()) {
         Some(ev)
             if tenant
@@ -514,12 +322,7 @@ async fn capture_submit(
     .into_response())
 }
 
-/// The zone the box was typed in, as the zone table spells it.
-///
-/// A name that does not parse is dropped rather than refused: this is a hidden
-/// field the browser fills from `Intl`, nobody typed it, and a 400 here would
-/// lose the text of a capture over a zone database that disagrees with ours.
-/// Dropping it falls back to `time.default_tz`, which is the server's own zone.
+/// An unknown name is dropped, not refused: nobody typed this field, and a 400 would lose the capture.
 fn viewer_zone(tz: Option<&str>) -> Option<String> {
     let name = tz.map(str::trim).filter(|t| !t.is_empty())?;
     match name.parse::<chrono_tz::Tz>() {
@@ -531,12 +334,7 @@ fn viewer_zone(tz: Option<&str>) -> Option<String> {
     }
 }
 
-/// The capture door: the workspace with the box already filled.
-///
-/// The extension posts here and so does *keep this answer*, and neither knows
-/// anything about the three pages having folded into one. A prefill that names
-/// an ask nobody recorded is not an error worth a page for: the box is simply
-/// empty, which is what an ordinary visit looks like.
+/// An unrecorded ask leaves the box empty rather than erroring.
 async fn capture_door(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
@@ -568,25 +366,15 @@ struct AnswerTemplate {
     answer: String,
     citations: Vec<RenderedResult>,
     dropped: usize,
-    /// The answer stops where its ceiling did. Shown beside `dropped` for the
-    /// same reason: a cut-off answer is otherwise indistinguishable from a
-    /// finished one.
+    /// A cut-off answer is otherwise indistinguishable from a finished one.
     truncated: bool,
-    /// The answer said "not in the base"; badged so the operator sees what
-    /// the harness will count.
+    /// Badged so the operator sees what the harness will count.
     abstained: bool,
-    /// Literals the answer carries that no cited excerpt does. Badged, and
-    /// marked in `answer`, so a reader can tell what the base holds from what
-    /// the model wrote.
+    /// Badged and marked in `answer`, so held text and model text can be told apart.
     unsupported: Vec<String>,
-    /// Every excerpt this was written from has been retired. Badged, because
-    /// an answer drawn entirely from what the base has put away is a different
-    /// kind of answer and the reader is the one who decides what to do about
-    /// it.
+    /// Every cited excerpt has been retired.
     retired_only: bool,
-    /// Contradictions the answer was written across, both sides cited. A
-    /// badge each, naming the other note: the base picks neither, so the
-    /// reader is told there are two readings to weigh.
+    /// Both sides cited; the base picks neither.
     disagreements: Vec<crate::store::pairs::Disagreement>,
     /// Set when the question was recorded; the verdict bar exists only then.
     event_id: Option<String>,
@@ -606,22 +394,16 @@ struct AskVerdictTemplate {
     event_id: String,
     /// `right` / `wrong` / `nothing here` for display; `None` shows the buttons.
     verdict: Option<String>,
-    /// Marks the bar to swap itself out-of-band. Set when it rides along with
-    /// something else — the carrier toggle — and not when it is the response
-    /// the click already targets.
+    /// Set when the bar rides along with another response, not when it is the click's own target.
     oob: bool,
 }
 
-/// What the keep button leaves behind: the outcome of storing the answer.
 #[derive(Template)]
 #[template(path = "_ask_kept.html")]
 struct AskKeptTemplate {
-    /// The corpus the answer is now — the new one, or the one that already
-    /// held the same bytes.
     id: String,
     duplicate: bool,
-    /// Stored but not processed: it resembles something already in the base
-    /// closely enough that an operator decides on Ops first.
+    /// Resembles something already held; still read and searchable.
     parked: bool,
     near_dupe_percent: i64,
 }
@@ -641,24 +423,8 @@ struct AskForm {
     q: String,
 }
 
-/// Parks the question and hands back the id that streams it.
-///
-/// The model call belongs to the GET that follows, not here: `EventSource` is
-/// GET-only, so the alternative is a GET that runs inference and writes a row —
-/// exactly what history, prefetchers and link scanners replay. The id is the
-/// guard, and it is spent on first use.
-/// The microphone under the box: one recording in, the words in it back as
-/// plain text.
-///
-/// Nothing is recorded and nothing is stored. A dictated query is a query
-/// somebody typed with their voice — the search it becomes is logged where
-/// every other search is, by the search endpoint, and this call is no more a
-/// capture than pressing a key is. So: no artifact, no activation, no job.
-///
-/// A closed door is a 404, like the ask door, and the page never provokes one:
-/// the button is not rendered where no speech model is configured. The answer
-/// is `text/plain` rather than a fragment because the destination is a
-/// textarea's value, not the DOM.
+/// Nothing is recorded or stored: dictation is typing.
+/// A 404 where no speech model is configured; `text/plain` because it fills a textarea.
 async fn transcribe(tenant: Tenant, multipart: axum::extract::Multipart) -> UiResult<Response> {
     let text = hear(&tenant, multipart).await?;
     Ok((
@@ -671,13 +437,8 @@ async fn transcribe(tenant: Tenant, multipart: axum::extract::Multipart) -> UiRe
         .into_response())
 }
 
-/// One recording in, the words in it back. The whole of what `/ui/transcribe`
-/// and `/api/v1/transcribe` do, so the phone's microphone and the browser's
-/// are one door with two addresses rather than two doors that drift.
-///
-/// A closed door is a 404. A recording of nothing is a press and a release,
-/// which happens by accident on every touch screen: answered as the empty
-/// transcript it is, without spending a call on it.
+/// Shared by `/ui/transcribe` and `/api/v1/transcribe`.
+/// An empty recording answers the empty transcript without a model call.
 pub(crate) async fn hear(
     tenant: &Tenant,
     mut multipart: axum::extract::Multipart,
@@ -725,8 +486,7 @@ async fn ask_submit(
     if !tenant.core.asks() {
         return Err(Error::NotFound.into());
     }
-    // Refused before anything is parked, so an empty box costs no entry in the
-    // map and no second round trip to find out.
+    // Refused before anything is parked.
     if f.q.trim().is_empty() {
         return Err(Error::Validation("question is empty".into()).into());
     }
@@ -742,15 +502,8 @@ async fn ask_submit(
     Ok(axum::Json(serde_json::json!({ "id": handoff })).into_response())
 }
 
-/// One ask, as it happens.
-///
-/// Takes an `Identity` like every other `/ui` route: this one runs a model
-/// call, and an endpoint that runs inference for whoever guesses a URL is a
-/// free-inference hole rather than a page.
-///
-/// A reader who leaves before `Done` records nothing. That is not an oversight:
-/// the recorded id reaches the page only in `Done`, so an abandoned ask has no
-/// verdict bar, nothing to judge, and retention deletes an unjudged row anyway.
+/// Takes an `Identity`: an unauthenticated inference endpoint would be a free-inference hole.
+/// Leaving before `Done` records nothing: the id reaches the page only there.
 async fn ask_stream(
     State(st): State<AppState>,
     tenant: Tenant,
@@ -762,10 +515,7 @@ async fn ask_stream(
     }
     use tokio_stream::StreamExt as _;
 
-    // Unknown, already spent, expired, or somebody else's — all one answer.
-    // Never a fresh ask against an empty question, which would spend a model
-    // call on a replay; never another subject's question, which would be
-    // answered to the wrong person and recorded under their name.
+    // Unknown, spent, expired or another subject's are one answer, never a fresh ask.
     let req = st
         .ask_handoff_take(&handoff, &tenant.user.subject)
         .ok_or(Error::NotFound)?;
@@ -777,26 +527,18 @@ async fn ask_stream(
         while let Some(ev) = s.next().await {
             yield match ev {
                 Ok(e) => sse_event(e),
-                // Terminal by construction: the producer is a `try_stream!` and
-                // ends at its first error, so the page sees one `error` event
-                // and nothing after it.
+                // Terminal: the `try_stream!` producer ends at its first error.
                 Err(e) => Ok(SseEvent::default().event("error").data(e.to_string())),
             };
         }
     };
-    // Kept alive because a slow model thinks for longer than a proxy's idle
-    // timeout, and a connection closed mid-answer looks to the page exactly
-    // like an answer that ended.
+    // Kept alive: a slow model outlasts a proxy's idle timeout.
     Ok(Sse::new(events)
         .keep_alive(KeepAlive::default())
         .into_response())
 }
 
-/// One `AskEvent` as one named SSE event carrying JSON.
-///
-/// JSON rather than bare text for every payload, because SSE frames data by
-/// line: a token that ends in a newline, or an answer whose markdown carries
-/// blank lines, does not survive the wire as itself.
+/// JSON for every payload: SSE frames data by line, so newlines would not survive.
 fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
     use crate::core::ask::stream::AskEvent::*;
     let (name, data) = match ev {
@@ -816,8 +558,7 @@ fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
                 "cliff_at": cliff_at,
             }),
         ),
-        // A list rather than a string: the page joins it, so the separator is
-        // one decision made where the sentence is written rather than here.
+        // A list: the page joins it where the sentence is written.
         Needs(what) => ("needs", serde_json::json!({ "queries": what })),
         Citations(hits) => (
             "citations",
@@ -836,16 +577,8 @@ fn sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
     Ok(SseEvent::default().event(name).data(data.to_string()))
 }
 
-/// The rail, rendered here rather than in the browser.
-///
-/// One fragment rather than a list of fields, because the ids in it are the
-/// other end of the links `link_citations` writes into the answer, and both
-/// ends are then numbered by the same server-side pass. Rendering the rail in
-/// the browser would put the two halves of a citation in two languages, where
-/// only a person clicking could tell they still agree.
-///
-/// Each excerpt's markdown has already been through the sanitizing renderer, so
-/// the page inserts HTML it was handed and never renders markdown itself.
+/// Rendered server-side so the rail's ids and `link_citations`' links are numbered by one pass.
+/// Excerpts are already sanitized; the page never renders markdown.
 fn rail_fragment(hits: Vec<crate::core::search::SearchResult>) -> Result<String> {
     AskRailTemplate {
         citations: hits
@@ -858,16 +591,9 @@ fn rail_fragment(hits: Vec<crate::core::search::SearchResult>) -> Result<String>
     .map_err(|e| Error::Internal(e.to_string()))
 }
 
-/// The finished answer, as the page swaps it in.
-///
-/// The same template the blocking render used, for the same reason it existed:
-/// one account of what an answer looks like. Only its delivery moved.
+/// The same template the blocking render used: one account of an answer.
 fn answer_fragment(out: crate::core::ask::AskResponse) -> Result<String> {
-    // The answer is model output too, so it goes through the same sanitizing
-    // renderer as chunk text. Marking comes after sanitizing: it works on the
-    // escaped text a reader sees, and nothing it inserts needs cleaning.
-    // Linking comes last, so a `[1]` that marking has just wrapped is still
-    // found and neither pass has to know about the other's markup.
+    // Sanitized first, then marked (on escaped text), then linked, so neither pass knows the other's markup.
     let answer = link_citations(
         &crate::core::ask::check::mark_unsupported(
             &markdown::render(&out.answer),
@@ -966,11 +692,7 @@ struct SearchVerdictForm {
     artifact_id: String,
 }
 
-/// What the bar says when the write it was drawn for is refused. Every guard
-/// on this path — a verdict from the deck, a search that expired, a query the
-/// box has since moved on from — reaches the person as the same ordinary
-/// sentence, because from where they are sitting it is the same fact: the
-/// search they were looking at is no longer waiting for them.
+/// Every refused write reaches the person as the same sentence: the search is no longer waiting.
 fn already_judged() -> Response {
     axum::response::Html(
         r#"<span class="muted">nothing to record — that search was already judged.</span>"#,
@@ -978,14 +700,8 @@ fn already_judged() -> Response {
     .into_response()
 }
 
-/// The bar under an opened result, for both doors. `none` is the undo; `no`
-/// is "not this one", which leaves the search a question for the deck.
-///
-/// `Some(state)` is what the bar shows next — `hit`, `no`, `skip`, or empty
-/// after an undo. `None` is the one refusal that is not an error: the search
-/// was already judged, by another tab or another door, and the bar says so
-/// in words. Every guard reaches the person as that same sentence because
-/// from where they sit it is the same fact.
+/// `none` is the undo; `no` leaves the search a question.
+/// `None` means already judged, by another tab or door.
 pub(crate) async fn judge_search(
     tenant: &Tenant,
     id: &str,
@@ -997,33 +713,22 @@ pub(crate) async fn judge_search(
     }
     use crate::store::feedback::Labeller;
     let store = &tenant.core.store;
-    // The id comes off the page, so it is whatever the caller sent. One check
-    // for all four answers below — see `Store::event_is_mine`.
+    // The id comes off the page; one ownership check for all four answers (`Store::event_is_mine`).
     if !store.event_is_mine(id, &tenant.user.subject).await? {
         return Err(Error::NotFound);
     }
     let state = match verdict {
         "hit" => {
-            // A pair naming an artifact search will not return is one no
-            // replay can satisfy, so recording it here would raise the recall
-            // on Insights over a result nothing can give again. The bar is
-            // not drawn over such an artifact at all — see
-            // `ui::artifact_detail` — so this is the write refusing what the
-            // page already refuses to offer.
+            // A hit on an artifact search will not return would inflate recall; the page already withholds the bar.
             if !store.get_artifact(artifact_id).await?.in_results() {
                 return Err(Error::Validation(
                     "that one is deprecated or superseded, so the benchmark can't hold it".into(),
                 ));
             }
-            // `NotFound` here is the store's guard, not a missing route:
-            // another tab can answer this search while the one holding this
-            // bar is open, and `judge_hit` refuses to write over a verdict
-            // rather than replace it. The same line "no" gets, for the same
-            // reason.
+            // `NotFound` is the store refusing to overwrite another tab's verdict.
             match store.judge_hit(id, artifact_id, Labeller::Confirm).await {
                 Ok(()) => {
-                    // A person who said this result was the one has said the
-                    // note is still right.
+                    // Confirming the result says the note is still right.
                     tenant
                         .core
                         .confirm_cited(std::slice::from_ref(&artifact_id.to_string()))
@@ -1035,33 +740,20 @@ pub(crate) async fn judge_search(
             }
         }
         "no" => {
-            // The one answer that clears columns rather than filling them, so
-            // the one that can undo somebody else's work: another tab can
-            // judge this search while the one holding this bar is open. Refused
-            // rather than applied, and said in the same words the rail's gap
-            // button uses for the same situation.
+            // Refused rather than applied if another tab judged meanwhile.
             if !store.decline(id).await? {
                 return Ok(None);
             }
             "no"
         }
-        // Not `Verdict::Discard`, which says something else entirely: that
-        // the search was never real. A discard is dropped from the eval pairs
-        // for good, and — alone among the verdicts — not exempt from the
-        // retention purge. Somebody unsure whether the result in front of them
-        // was the one has not said any of that. Skip is what the label
-        // promises: the search stays a question.
+        // Not `Verdict::Discard`, which drops the search from eval pairs and the purge exemption.
         "skip" => match store.skip_event(id).await {
             Ok(()) => "skip",
             Err(Error::NotFound) => return Ok(None),
             Err(e) => return Err(e),
         },
         "none" => {
-            // Only back over what this bar wrote — `Labeller::Confirm`. The
-            // undo appears after "no", which leaves the search pending, so
-            // another tab can record a hit on it while this one is still open;
-            // unguarded, this button then erased a confirmed pair. The store
-            // says so by matching nothing.
+            // Only back over what this bar wrote (`Labeller::Confirm`), so a hit from another tab survives.
             match store.unjudge(id, Labeller::Confirm).await {
                 Ok(()) => "",
                 Err(Error::NotFound) => return Ok(None),
@@ -1089,26 +781,18 @@ async fn search_verdict(
     .into_response())
 }
 
-/// The rail's "nothing here has it": a gap against the search that filled the
-/// rail, named by the page the way an open is. Answers with the line that
-/// replaces the button.
-///
-/// The query travels with the id for the same reason the open path names an
-/// artifact: it is what the button was drawn over, and a trailing keystroke can
-/// fold a later wording into the row between the render and the press. See
-/// `Store::gap_event`.
+/// The query travels with the id: a trailing keystroke can fold a later wording into the row. See `Store::gap_event`.
 #[derive(serde::Deserialize)]
 struct GapParams {
     q: String,
 }
 
-/// The gap, for both doors: true where it was recorded, false where the
-/// search was already judged and there is nothing to record.
+/// False where the search was already judged.
 pub(crate) async fn gap_search(tenant: &Tenant, id: &str, q: &str) -> Result<bool> {
     if !tenant.core.learn.enabled {
         return Err(Error::NotFound);
     }
-    // Only against the caller's own search — see `Store::event_is_mine`.
+    // Only against the caller's own search; see `Store::event_is_mine`.
     if !tenant
         .core
         .store
@@ -1153,27 +837,14 @@ async fn ask_carried(
     .into_response())
 }
 
-/// Keep an answer: store it as a source, here, without a detour through the
-/// capture box.
-///
-/// The same pipeline as any paste — one corpus, segmented, embedded, searchable
-/// — and the same concession the capture door already made: `origin = "ask"`
-/// and the `ask` metadata, so what the base holds says a model wrote it, from
-/// which question, and from which artifacts. Nothing about it is special
-/// downstream: captured verbatim, ending in artifacts with vectors.
-///
-/// The answer as the model wrote it, not as the operator retyped it: an
-/// operator who wants to edit first has `edit first` beside this, which is the
-/// old path unchanged.
+/// The same pipeline as any paste, with `origin = "ask"` and the `ask` metadata.
+/// The answer as written; `edit first` is the path for editing.
 async fn ask_keep(tenant: Tenant, Path(id): Path<String>) -> UiResult<Response> {
     // No ask model, no ask door: the route is not there. See `Core::asks`.
     if !tenant.core.asks() {
         return Err(Error::NotFound.into());
     }
-    // Unlike the capture door, there is no text to fall back to here: the row
-    // is where the answer lives. A question that retention has already taken
-    // has nothing left to keep, and saying so is better than storing an empty
-    // source or an unprovenanced one.
+    // No text to fall back to: a question retention took has nothing left to keep.
     let ev = tenant
         .core
         .store
@@ -1213,19 +884,7 @@ struct CarriedForm {
     n: i64,
 }
 
-/// The ask door: the workspace with the question already in the box, and
-/// still. Anything that carries a question links here.
-///
-/// Nothing is asked on arrival. A GET that spends a model call is a bill any
-/// link, prefetch or reload can run up, and the question is one press from
-/// where the door leaves it.
-///
-/// No ask model, no ask door: the route is not there. See `Core::asks`.
-///
-/// The last-query fallback this handler used to carry is gone with the pages
-/// it bridged. It existed because a query typed on the rail and then retyped
-/// into ask was the cost of two pages with nothing carried between them —
-/// there is one box now, and the query is already in it.
+/// Nothing is asked on arrival: a GET that spends a model call is replayable by any prefetch.
 async fn ask_door(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
@@ -1234,14 +893,7 @@ async fn ask_door(
     if !tenant.core.asks() {
         return Err(crate::error::Error::NotFound.into());
     }
-    // Nothing held, no Ask button — `base_template` sets `held = false` and the
-    // template renders no `[data-verb="ask"]`, so this door used to answer 200
-    // with the question sitting in a box that has no way to send it and no
-    // word about why. Reachable: a question in a URL outlives a purge of
-    // what it was asked about.
-    //
-    // Sent to the plain page rather than 404'd, because the question survives
-    // the redirect and search is the one verb an empty base can still honour.
+    // An empty base renders no Ask button, so the question is redirected to the plain page.
     let (corpora, _) = tenant.core.store.held_brief().await?;
     if corpora == 0 {
         let q: String = url::form_urlencoded::byte_serialize(p.q.as_bytes()).collect();
@@ -1388,9 +1040,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_base_shows_what_a_paste_becomes() {
         let html = workspace("/ui").await;
-        // The list's contents, not merely its element: the `<dl>` is in every
-        // response now — an out-of-band swap can only replace what it carries —
-        // and it retires by coming back empty.
+        // The `<dl>` is in every response, since out-of-band swaps replace only what they carry.
         assert!(html.contains("<dt>note</dt>"), "{html}");
         assert_eq!(
             html.matches(r#"class="chip-example""#).count(),
@@ -1403,9 +1053,7 @@ mod tests {
     async fn the_list_of_what_a_paste_becomes_goes_at_five_sources() {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
-        // Distinct texts, because `ingest_capture` dedupes on `content_hash` and
-        // the same sentence five times is one source. Nothing else about them
-        // matters — there is no minimum length, only "not empty".
+        // `ingest_capture` dedupes on `content_hash`, so the texts must differ.
         let text = |n: i64| format!("source number {n}");
         for n in 0..4 {
             core.ingest_capture(crate::core::ingest::Capture::new(text(n), "ui"))
@@ -1485,9 +1133,6 @@ mod tests {
             "nor is the search the box is folding into: {line}"
         );
 
-        // The tick that reports the read over stops the poll and says so, so
-        // app.js can re-run a search that answered "still reading" and has had
-        // no reason to run again since.
         drain(&core).await;
         let res = app
             .oneshot(
@@ -1646,8 +1291,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Stored, because the text was never in doubt — and stored as the
-        // ordinary paste it is.
         assert_eq!(res.status(), StatusCode::OK);
         let stored = &core.store.list_corpora(10, 0).await.unwrap()[0];
         assert_eq!(crate::core::ingest::typed_from(&stored.metadata), None);
@@ -1680,7 +1323,6 @@ mod tests {
             again.contains("not processed again"),
             "the second paste of the same text is a duplicate: {again}"
         );
-        // And it still never promises reading it is not doing.
         assert!(!again.contains("searchable once it settles"));
         assert!(!again.contains(r#"hx-get="/ui/queue""#));
     }
@@ -1706,8 +1348,6 @@ mod tests {
             assert_eq!(res.status(), StatusCode::OK);
         };
 
-        // On automatic — which is every account that has never opened Settings
-        // — the browser decides, and a regional tag is still its language.
         post(
             app.clone(),
             cookie.clone(),
@@ -1721,8 +1361,6 @@ mod tests {
             crate::infer::lang::Lang::De
         );
 
-        // The account setting overrides the browser: somebody reading a German
-        // page in an English browser still wants their base in German.
         core.store
             .control
             .set_lang(
@@ -1738,7 +1376,6 @@ mod tests {
             crate::infer::lang::Lang::Fr
         );
 
-        // And a language outside the ten is English rather than a refusal.
         core.store
             .control
             .set_lang(crate::store::TEST_SUBJECT, None)
@@ -1768,8 +1405,6 @@ mod tests {
              because swapping a textarea would take the caret with it: {empty}"
         );
 
-        // Nothing held, nothing to swap: an Ask verb over a base that cannot
-        // answer is the promise this whole state exists to avoid.
         let res = app
             .clone()
             .oneshot(
@@ -1858,11 +1493,6 @@ mod tests {
             html.contains(r#"title="Type or attach something first""#),
             "the disabled verb names what it wants: {html}"
         );
-        // The types are on the label's `title` and on the input's `aria-label`,
-        // and nowhere else. The third copy — a line of prose under the verb
-        // row — was one of four muted sentences stacked under the box, and it
-        // was the one saying least: the picker a phone opens names what it
-        // accepts itself.
         assert!(
             html.contains(r#"aria-label="Attach a file"#),
             "and Attach still names its types to a screen reader: {html}"
@@ -1894,11 +1524,6 @@ mod tests {
             .await
             .unwrap();
         let html = body_of(res).await;
-        // Two examples and one clause, where four muted prose lines used to
-        // stack. The claim that typing searches is taught by a phrasing you
-        // can press rather than asserted at somebody — and the phrasings are
-        // the classifier's own prototypes, so the page cannot come to teach a
-        // wording the base has stopped recognising.
         assert!(
             html.contains("remind me"),
             "the one thing a first-time user cannot deduce from the page: {html}"
@@ -2087,8 +1712,6 @@ mod tests {
         );
         assert!(!bar.contains("/ui/ask"), "and neither is Ask: {bar}");
 
-        // The same rule in the row above it, which is the same three places
-        // seen on a wider screen.
         let top = html
             .split_once(r#"<nav class="oc-topnav""#)
             .expect("the top row is there")
@@ -2113,16 +1736,11 @@ mod tests {
             "only the 401 case is handled, so every other failure is silent: {h}"
         );
 
-        // A transport error fires no responseError at all — there is no
-        // response — and it is the case a base behind a dropped connection
-        // produces.
         assert!(
             js.contains("addEventListener('htmx:sendError'"),
             "a request that never arrived says nothing"
         );
 
-        // The server's own reason, verbatim. A generic failure line would hide
-        // what actually goes wrong here.
         let f = js
             .split_once("function failedSwap(")
             .expect("the driver has no failedSwap()")
@@ -2136,8 +1754,6 @@ mod tests {
             f.contains("textContent"),
             "an error string is the one payload here that went through no renderer"
         );
-        // Both shapes a reason arrives in: the API's JSON, and the error page
-        // a `/ui` route answers with.
         let r = js
             .split_once("function reasonOf(")
             .expect("the driver has no reasonOf()")
@@ -2219,8 +1835,6 @@ mod tests {
             refresh.contains("showIdle(true)"),
             "the capture overrules a finished answer: {refresh}"
         );
-        // But never an ask still arriving: `force` skips only the standing
-        // answer, and `paneIsAsking` is checked ahead of it.
         let body = &js[js
             .find("function showIdle(force)")
             .expect("the idle transition")..];
@@ -2272,13 +1886,7 @@ mod tests {
             .split_once(":not(.pane-open):not(.answering)")
             .expect("the idle 40rem rail is not held while an answer is being written")
             .0;
-        // Bounded to the widths that have two columns. The two chained
-        // `:not()`s outrank the single class the one-up block sets its track
-        // list with — chained rather than `:not(.pane-open, .answering)`,
-        // which would count one class and not two — and specificity does not
-        // care that the two rules answer different widths: unbounded, this
-        // two-column rule won on a narrow screen too, and left the pane beside
-        // a 40rem rail twelve pixels wide.
+        // Bounded to two-column widths: the chained `:not()`s outrank the one-up rule's single class at every width.
         assert!(
             idle.rsplit_once("@container")
                 .is_some_and(|(_, open)| open.trim_start().starts_with("shell (width > 60rem)")),
@@ -2341,9 +1949,6 @@ mod tests {
             css.contains("@container artifact (width <= 36rem) { .split { grid-template-columns: minmax(0, 1fr); } }"),
             "and below a reading width the two halves stack"
         );
-        // Two stacked halves that each scroll would be the lockstep pair with
-        // the one thing that makes it a pair removed: scrolling either would
-        // move the other off screen rather than alongside it.
         let boxes = css
             .split_once(".split > :first-child {\n    display: flex")
             .expect("the artifact half is a scroll box where the two are side by side")
@@ -2400,8 +2005,6 @@ mod tests {
              out of it while it is being answered: {busy}"
         );
 
-        // The other half: nothing else may re-enable it. A second caller is a
-        // second thing to keep in step with the three exits.
         assert_eq!(
             js.matches("setBusy(false)").count(),
             1,
@@ -2459,8 +2062,6 @@ mod tests {
 
     #[test]
     fn the_answer_says_what_was_dropped_in_words_a_person_uses() {
-        // "18 excerpt(s) omitted for context budget" is the accounting, and
-        // the "(s)" is the plural nobody wrote out.
         let html = answer_fixture(18);
         assert!(!html.contains("excerpt(s)"), "{html}");
         assert!(!html.contains("context budget"), "{html}");
@@ -2471,18 +2072,12 @@ mod tests {
 
     #[tokio::test]
     async fn an_ask_in_flight_offers_a_way_to_stop_it() {
-        // Fifty seconds signalled by a small grey "thinking…" beside the
-        // button, and nothing on the page to end it with.
         let html = workspace_held("/ui/ask").await;
         assert!(html.contains(r#"id="ask-stop""#), "{html}");
     }
 
     #[tokio::test]
     async fn an_ask_does_not_open_with_the_models_reasoning_showing() {
-        // The deployment streamed the chain of thought into the page for fifty
-        // seconds, restating the prompt's own constraints verbatim — "Answer
-        // *only* using the provided knowledge-base excerpts" — above the empty
-        // space where the answer was going to be.
         let html = workspace_held("/ui/ask").await;
         assert!(html.contains("ask-reasoning-box"), "{html}");
         assert!(
@@ -2499,8 +2094,6 @@ mod tests {
             .find("fn sse_event(")
             .expect("sse_event is in this file")..];
         let body = &body[..body.find("\n}\n").unwrap()];
-        // The first string of each arm's `(name, data)` tuple, whether the
-        // arm is one line or many.
         let names: Vec<String> = body
             .split('(')
             .filter_map(|rest| rest.trim_start().strip_prefix('"'))
@@ -2525,9 +2118,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_unforced_note_is_a_plain_capture_on_the_receipt() {
-        // The cue table retired with the classifier: the web box files
-        // nothing at the door, and an entry chip appears only once the
-        // judged synthesis call has said so.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let res = app
@@ -2555,10 +2145,6 @@ mod tests {
         let html = workspace_held("/ui").await;
         assert!(html.contains(r#"href="/ui/day/"#), "{html}");
         assert!(html.contains("data-day-link"));
-        // The instant, so app.js can rebuild the path in the viewer's zone. The
-        // date in the href is UTC and the day page builds its window locally,
-        // so east of Greenwich every capture between local midnight and the
-        // offset linked to a page reading "Nothing on this day."
         assert!(html.contains("data-day-at="), "{html}");
     }
 
@@ -2582,11 +2168,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_capture_receipt_outlives_the_page_going_idle() {
-        // A capture empties the box, and an empty box hides `#pane`. With the
-        // receipt inside the pane, "Captured — view source" and the undo beside
-        // a note filed as today's entry were swapped in and hidden in the same
-        // turn: the undo for a wrongly-cued entry was unreachable without a
-        // reload.
         let html = workspace_held("/ui").await;
         let pane = html
             .find(r#"<div id="pane""#)
@@ -2602,9 +2183,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_box_stores_the_zone_it_was_typed_in() {
-        // The flagship path. Without it *remind me tomorrow at 9* was echoed
-        // under the box as 09:00 in the viewer's zone and stored in the
-        // server's, and the band underneath then said something else.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
         let post = |app: axum::Router, cookie: String, body: &'static str| async move {
@@ -2637,8 +2215,6 @@ mod tests {
             "Europe/Berlin"
         );
 
-        // A zone the table does not know is dropped rather than stored: nobody
-        // typed this field, and a 400 would lose the text of the capture.
         post(app, cookie, "text=Another+note+entirely&tz=Europe%2FBerlim").await;
         let stored = core.store.recent_captures(1).await.unwrap();
         let cid = stored[0].0.clone();
@@ -2724,8 +2300,6 @@ mod tests {
             "the container the browser recorded in is passed through"
         );
         assert_eq!(heard.last_len(), b"fake audio".len());
-        // Dictation is typing. The search it becomes is recorded by the search
-        // endpoint like any other; this call leaves nothing behind on its own.
         assert!(core.store.recent_captures(5).await.unwrap().is_empty());
     }
 
@@ -2741,8 +2315,6 @@ mod tests {
             js.contains("var STT_RATE = 16000;"),
             "and it is resampled to what whisper reads internally anyway"
         );
-        // The one shape a minimal WAV reader takes without an argument: PCM,
-        // mono, 16-bit, every length known before a byte is written.
         for spelling in [
             "ascii(0, 'RIFF')",
             "ascii(8, 'WAVE')",
@@ -2756,7 +2328,6 @@ mod tests {
                 "the RIFF header is missing {spelling}"
             );
         }
-        // And a conversion that cannot be done is not a recording thrown away.
         assert!(
             js.contains(".catch(function () { return blob; })"),
             "a browser that cannot decode its own output still uploads what it has"

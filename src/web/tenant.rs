@@ -1,8 +1,4 @@
-//! Turning an authenticated request into the data it is allowed to see.
-//!
-//! Runs after `Identity`, so an unauthenticated request fails in exactly the
-//! place it failed before — with the same 401, which the redirect middleware in
-//! `web/mod.rs` still rewrites into a login for a browser.
+//! Turning an authenticated request into the data it may see; runs after `Identity`.
 
 use crate::auth::Identity;
 use crate::error::Error;
@@ -26,11 +22,7 @@ impl FromRequestParts<AppState> for Tenant {
     }
 }
 
-/// `Option<Tenant>` for the one page that renders without a session: the 404,
-/// which has to say "not found" to a signed-out browser rather than bounce it
-/// to a login it cannot come back from. Only "no credentials" becomes `None`;
-/// a provisioning failure is still an error, because showing the signed-out
-/// page to someone who is signed in would hide a real fault.
+/// For the 404 page, which renders signed out; only missing credentials become `None`.
 impl axum::extract::OptionalFromRequestParts<AppState> for Tenant {
     type Rejection = Error;
 

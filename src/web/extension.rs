@@ -1,9 +1,4 @@
-//! Serving the browser extension from the deployment it pairs with.
-//!
-//! The extension ships inside the binary: `assets/` is already embedded with
-//! `rust-embed`, and the Chrome package is built into it by `build.rs`. A
-//! deployment therefore always serves the build that matches it, and there is
-//! no separate artifact to publish or forget.
+//! Serving the browser extension from the deployment it pairs with; `build.rs` builds it into the embedded assets.
 
 use crate::tenants::Tenant;
 use crate::web::assets::Assets;
@@ -20,40 +15,20 @@ use axum::routing::{get, post};
 #[template(path = "extension.html")]
 struct InstallTemplate {
     origin: String,
-    /// Whether the XPI on offer has been through AMO.
-    ///
-    /// Both arrive under the same name, and the difference decides what the
-    /// operator can do with it: a signed package installs in one click and
-    /// stays, an unsigned one loads through `about:debugging` and is gone at
-    /// the next restart. Saying which is on offer is the difference between an
-    /// instruction that works and one that does not.
+    /// A signed XPI installs and stays; an unsigned one loads through `about:debugging` and is gone at restart.
     xpi_signed: bool,
-    /// A credential minted for one phone, present only on the render that
-    /// follows the press that asked for it.
-    ///
-    /// `None` on every ordinary page load, deliberately: minting on a GET
-    /// would put a live credential in the token list every time anyone opened
-    /// the download page, and a list of thirty tokens nobody remembers asking
-    /// for is a list nobody revokes from.
+    /// Present only on the render after the press; minting on a GET would fill the token list.
     device_token: Option<String>,
 }
 
 impl InstallTemplate {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
-    ///
-    /// Reached from Settings and revoked there; it is that section's page.
+    /// Reached from Settings and revoked there.
     fn section(&self) -> &'static str {
         "settings"
     }
 }
 
-/// The download page. Authenticated like everything else, and it carries this
-/// deployment's origin into the pairing link — the static, signed manifest
-/// cannot know it, so the page is where it is learned.
+/// Authenticated; it carries this deployment's origin into the pairing link, which the static manifest cannot know.
 async fn install_page(_tenant: Tenant, State(st): State<AppState>) -> Response {
     HtmlTemplate(InstallTemplate {
         origin: st.auth.deployment.base(),
@@ -63,14 +38,7 @@ async fn install_page(_tenant: Tenant, State(st): State<AppState>) -> Response {
     .into_response()
 }
 
-/// Mint a credential for one phone and render the doors that carry it.
-///
-/// A token living in a bookmark or a Shortcut is the whole difficulty of the
-/// phone doors, and the only way it is tolerable is that each is minted for the
-/// device that asked, named for what asked, and revocable on its own. The
-/// plaintext is shown on this one render and never again — the store keeps only
-/// its argon2id hash — so a second phone presses the button again rather than
-/// sharing the first one's credential.
+/// One token per device, named and revocable on its own; the plaintext shows once (the store keeps its argon2id hash).
 async fn phone_token(tenant: Tenant, State(st): State<AppState>, headers: HeaderMap) -> Response {
     let minted = crate::auth::tokens::mint(
         &tenant.core.store.control,
@@ -105,8 +73,7 @@ fn embedded(path: &str, mime: &str, filename: &str) -> Response {
                     header::CONTENT_DISPOSITION,
                     format!("attachment; filename=\"{filename}\""),
                 ),
-                // Rebuilt with the binary, so a cached copy would be a copy of
-                // the wrong build.
+                // Rebuilt with the binary, so a cached copy would be the wrong build.
                 (header::CACHE_CONTROL, "no-store".to_string()),
             ],
             f.data.into_owned(),
@@ -192,9 +159,7 @@ mod tests {
 
     #[tokio::test]
     async fn minting_a_phone_token_needs_authentication() {
-        // The one route here that creates a credential rather than serving a
-        // file, so it is worth asserting on its own rather than trusting that
-        // it sits behind the same extractor as its neighbours.
+        // The one route here that creates a credential, so it is asserted on its own.
         let (app, _token, _core) = crate::web::api::tests::app_token_and_core().await;
         let res = app
             .oneshot(
@@ -226,7 +191,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = crate::web::test_support::body_of(res).await;
-        // A credential appears when it is asked for, never from reading a page.
         assert!(
             !body.contains("engram_"),
             "the download page handed out a live token"
@@ -284,9 +248,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_chrome_package_is_built_into_the_binary() {
-        // `build.rs` zips it at compile time, so a deployment always serves the
-        // package that matches it and there is no separate artifact to publish
-        // or forget.
         let zip = crate::web::assets::Assets::get("extension/chrome.zip")
             .expect("chrome.zip must be embedded");
         assert!(zip.data.len() > 512);

@@ -1,14 +1,5 @@
-//! Detached writes that still have to finish.
-//!
-//! Some work must not sit on the request path but must not be lost either.
-//! Recording which chunks a search showed is the case that exists today: a
-//! search must not get slower, or fail, because a bookkeeping write did — and
-//! yet a stamp dropped at shutdown is a chunk that looks forgotten when it is
-//! not.
-//!
-//! `tokio::spawn` alone gives the first half and not the second: the runtime
-//! drops outstanding tasks when `main` returns. This counts them, so shutdown
-//! can wait, and so tests can await the effect instead of sleeping and hoping.
+//! Detached writes that still have to finish: counted, so shutdown and tests can wait for them.
+//! `tokio::spawn` alone drops outstanding tasks when `main` returns.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -21,9 +12,7 @@ pub struct Background {
     idle: Notify,
 }
 
-/// Decrements on drop rather than after the await, so a task that panics or is
-/// cancelled releases its slot. Decrementing at the end of the future body
-/// would wedge every later shutdown behind a task that is already gone.
+/// Decrements on drop, so a task that panics or is cancelled still releases its slot.
 struct Slot(Arc<Background>);
 
 impl Drop for Slot {
@@ -35,11 +24,8 @@ impl Drop for Slot {
 }
 
 impl Background {
-    /// Run `task` detached, counted until it finishes.
-    ///
-    /// The count is incremented here rather than inside the spawned future, so
-    /// a `wait_idle` racing a `spawn` cannot observe zero for work that has
-    /// already been handed over.
+    /// Counted here rather than inside the future, so a racing `wait_idle` never sees zero for
+    /// handed-over work.
     pub fn spawn<F>(self: &Arc<Self>, task: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -56,16 +42,11 @@ impl Background {
         self.inflight.load(Ordering::SeqCst)
     }
 
-    /// Resolve once nothing is outstanding.
-    ///
-    /// Waiting for work spawned *after* this returns is not the contract:
-    /// callers stop accepting requests first, then drain.
+    /// Work spawned after this returns is not covered: callers stop accepting requests first.
     pub async fn wait_idle(&self) {
         loop {
-            // Registered before the count is read, because `notify_waiters`
-            // wakes only what is already waiting. Checking first would lose a
-            // task that finished in between and wait for a wake-up that has
-            // already happened.
+            // Registered before the count is read: `notify_waiters` wakes only what is already
+            // waiting.
             let notified = self.idle.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -78,98 +59,39 @@ impl Background {
     }
 }
 
-/// The sweep's job target. A constant rather than a corpus id: consolidation
-/// looks at the whole collection, and the `UNIQUE(stage, target_id)` on `jobs`
-/// then guarantees at most one queued sweep however often it is armed.
+/// `UNIQUE(stage, target_id)` on `jobs` then keeps at most one queued sweep.
 pub const CONSOLIDATE_TARGET: &str = "collection";
 
-/// Every sweep that runs on a period, what switches it off, and how long it
-/// waits between runs.
-///
-/// One list, where five ticker preambles used to be. Each of those started
-/// separately, was gated separately, and knew about none of the others; what
-/// ran first on a given night was whichever interval happened to elapse first.
-/// A periodic unit re-arms itself `run_after` an interval out when it finishes,
-/// so `run_after` *is* the cursor recording when it last ran — already indexed,
-/// with no clock to hold and no meta key to keep.
-///
-/// This is also where every gate that used to be an early `return` now lives,
-/// and each one keeps its original condition exactly. Getting that wrong
-/// re-creates the bug `spawn_repair_ticker` exists to record: a pass that rides
-/// on another feature's switch stops when that feature is switched off, and
-/// nobody asked for that.
-///
-/// `Pursuit` is here despite being armed by the association sweep on completion
-/// — replay before pursue. That arming is what *orders* the two; the period it
-/// keeps here is a floor under it, and the row is what the repair pass needs to
-/// find in order to recover a pursuit that died mid-run. See `periodic_period`.
+/// Every periodic sweep that is switched on; each re-arms itself `run_after` one period out.
+/// Each gate is the sweep's own, so switching one feature off never stops another's pass.
 pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stage, &'static str)> {
     use crate::store::jobs::Stage;
     let mut out = Vec::new();
-    // Duplicate hygiene, and the judging that needs a model to do it with.
     if core.consolidate.enabled {
         out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
-        // Zero units per tick is the off switch for the calls, not for the
-        // sweep that finds the pairs.
-        //
-        // And the judge's existence, the way `Reap` below asks for it. Finding
-        // pairs needs no model and is worth doing without one — they wait on
-        // the pair queue for a person. *Arming* the judging without one is a
-        // treadmill: `dedupe::run` finds no judge, returns `Ok(())`,
-        // `run_claimed` closes the unit as done work, the pair is still
-        // `Pending`, and the next tick arms the same pairs again — for ever,
-        // reporting progress the whole time. `run_claimed` used to catch this
-        // class with a `needs_model` close-out, which went when dedupe stopped
-        // running on the synthesize role.
+        // Arming the judging without a judge is a treadmill: `dedupe::run` returns `Ok(())` and the
+        // pair stays `Pending`.
         if core.consolidate.max_dedupe_per_tick > 0 && core.judge.is_some() {
             out.push((Stage::ArmDedupe, CONSOLIDATE_TARGET));
         }
     }
-    // Expiring and grouping. Behind neither consolidation nor association: an
-    // operator who switches duplicate hygiene off is not asking to keep their
-    // query log forever. With nothing to expire and nothing to group there is
-    // no unit at all, which is what the ticker's `return` used to say.
-    // `recommend.enabled` and not `recommends()`: the second is `&& learn`,
-    // and switching learning off is precisely when the situations already
-    // written down most need to keep ageing out. Gating the ageing on the same
-    // key as the collecting means an operator who turns the feature off freezes
-    // a 400-day window at rest for ever, which is the opposite of what they
-    // asked for. The unit is armed by the key that says the feature exists on
-    // this base; whether it is currently learning does not enter into it.
+    // Not behind consolidation, and `recommend.enabled` rather than `recommends()`:
+    // switching learning off is when the recorded situations most need to keep ageing out.
     if core.feedback.retain_days > 0 || core.learn.enabled || core.recommend.enabled {
         out.push((Stage::Retention, CONSOLIDATE_TARGET));
     }
-    // Learning which situations recur for which artifact. Behind its own gate
-    // and nothing else's: it reads the interaction log, which is not something
-    // an operator switches off by switching off duplicate hygiene.
     if core.recommends() {
         out.push((Stage::Context, CONSOLIDATE_TARGET));
     }
-    // Revisiting the retired. Behind its own switch, the judge's existence,
-    // and the corpus permission: the rules alone may nominate but never
-    // tombstone, so a base with no judge model gets no sweep rather than a
-    // rules-only one.
-    //
-    // `acts_on_corpus()` and not `may_act()`, which answers `true`
-    // unconditionally below `full` and so was no gate at all here. Burial is
-    // the one action in the system that destroys text, and `jobs::retract` —
-    // the path that takes one back — is itself gated on `acts_on_corpus()`.
-    // Without this the stock config buried up to `max_judged_per_run`
-    // artifacts a day at the default `ranking`, with the weekly cap never
-    // applying and its own recovery path switched off at that same level.
+    // `acts_on_corpus()`, not `may_act()` (always true below `full`): burial destroys text,
+    // and `jobs::retract`, which undoes it, is itself gated on `acts_on_corpus()`.
     if core.reap.enabled && core.judge.is_some() && core.evolve.autonomous.acts_on_corpus() {
         out.push((Stage::Reap, CONSOLIDATE_TARGET));
     }
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
-        // Its own period as a floor. The association sweep arming it is what
-        // orders the two; this is what keeps pursuits running at the cadence
-        // they ran at before, rather than at the association sweep's. The
-        // `[learn]` half of its gate is `associating()` above; what it adds of
-        // its own is the generator, as `Reap` is behind the judge. A pursuit
-        // that reaches `Generate` with no `[infer.generate]` writes no artifact,
-        // and the branch that used to close it as unsatisfied was gone — so
-        // every one of them sat `open` for ever, accumulating on Ops.
+        // Behind the generator: a pursuit reaching `Generate` with no `[infer.generate]` would stay
+        // `open` for ever.
         if core.generator.is_some() {
             out.push((Stage::Pursuit, ASSOCIATE_TARGET));
         }
@@ -177,13 +99,8 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     out
 }
 
-/// How long this sweep waits between runs, or `None` if it is switched off.
-///
-/// The existing interval keys keep their names and their meanings and become
-/// each unit's own `run_after` step, so an operator who tuned
-/// `associate.interval_mins` finds it still doing what it did. The `max(1)` and
-/// the saturating multiply come with them: the operand is operator-typed, and a
-/// wrap here would turn a very long configured interval into a very short one.
+/// `None` when switched off. Saturating: the interval is operator-typed and a wrap would shorten
+/// it.
 pub fn periodic_period(
     core: &crate::core::Core,
     stage: crate::store::jobs::Stage,
@@ -203,25 +120,15 @@ pub fn periodic_period(
         Stage::Context => crate::jobs::context::INTERVAL_HOURS.saturating_mul(3600),
         Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
         Stage::Reap => core.reap.interval_mins.max(1).saturating_mul(60),
-        // Shorter than the idle window, so a run of searches is grouped soon
-        // after it goes quiet.
+        // Shorter than the idle window, so a run of searches is grouped soon after it goes quiet.
         Stage::Pursuit => (core.pursuit.idle_secs / 2).max(60),
         _ => return None,
     };
     Some(std::time::Duration::from_secs(secs))
 }
 
-/// Arm every periodic unit that nothing is going to run.
-///
-/// The guard against the one failure mode a ticker does not have: a unit that
-/// dies between being claimed and re-arming itself would otherwise never run
-/// again. "Missing" means *not live* rather than *no row*, because a sweep
-/// closed without re-arming is just as gone as one that was deleted — and the
-/// two are indistinguishable from here, which is the point.
-///
-/// Armed to run now, not an interval out. This is also what arms them at boot,
-/// where the repair pass's first tick fires immediately, and a restart picking
-/// the work straight up is the behaviour the tickers had.
+/// Arm every periodic unit that is not live, to run now; this also arms them at boot.
+/// A unit that died between claim and re-arm would otherwise never run again.
 pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
     use crate::jobs::remind::REMIND_TARGET;
     use crate::store::jobs::Stage;
@@ -242,27 +149,8 @@ pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
             }
         }
     }
-    // And the one unit that is *not* periodic. `Stage::Remind` sleeps until the
-    // earliest owed moment and every write that can move that minimum re-arms
-    // it, so it is not in `periodic_units` and the loop above cannot reach it —
-    // which left the whole reminder ladder resting on those writes never
-    // failing. One `SQLITE_BUSY` in the re-arm after a `Remind` run disarmed it
-    // until some unrelated write happened to arm it again, and with two
-    // reminders pending the second pushed at no rung at all in between.
-    //
-    // Only where the unit is actually missing, which is the same question the
-    // loop above asks of every periodic one. `rearm_remind` goes through
-    // `arm_at`, and `arm_at` resets `attempts` and `empty_runs` — rightly, for
-    // the writes it exists for, which carry new information about when the
-    // next moment is due. This call carries none: it is a net under a unit
-    // that fell out of the table, and running it unconditionally handed a
-    // failing Remind unit a clean slate every hour, so a channel that has been
-    // refusing pushes all night was retried on the repair pass's cadence
-    // instead of on its own backoff.
-    //
-    // A stale row is not a case this has to answer for. A unit armed at the
-    // wrong second wakes, finds nothing owed, and re-arms or disarms itself;
-    // every write that moves the earliest owed instant re-arms it directly.
+    // `Stage::Remind` is not periodic, so the loop above cannot reach it; arm it only when missing,
+    // because `arm_at` resets `attempts` and would undo a failing channel's backoff.
     match core.store.live_job(Stage::Remind, REMIND_TARGET).await {
         Ok(true) => {}
         Ok(false) => {
@@ -274,64 +162,18 @@ pub(crate) async fn arm_missing_periodic(core: &crate::core::Core) {
     }
 }
 
-/// How often the repair pass runs. A constant rather than a setting: this is
-/// what keeps a crashed capture from staying half-finished, which is not a
-/// preference, and the one knob it could plausibly borrow —
-/// `consolidate.interval_hours` — has no meaning in the configuration this pass
-/// exists to survive.
+/// A constant: it keeps a crashed capture from staying half-finished, which is not a preference.
 const REPAIR_INTERVAL_HOURS: u64 = 1;
 
-/// How often the two stores are compared. Deliberately not the repair cadence:
-/// every other pass is either marker-driven or a walk over SQLite, while this
-/// one scrolls the entire vector collection over the network and scans
-/// `artifacts` whole, twice. Nothing produces store drift on its own — it takes
-/// a crash between two writes, or a restore of one side from a backup — so
-/// looking hourly costs a full pass over both stores twenty-four times a day to
-/// find, on almost every base, nothing.
+/// Not the repair cadence: this scrolls the whole vector collection and scans `artifacts` twice.
 const STORE_DRIFT_INTERVAL_HOURS: u64 = 24;
 
-/// How many of *one tenant's* background units may be promoted on one repair
-/// tick.
-///
-/// A constant rather than a setting, and small on purpose. Ageing exists so
-/// that a unit which has waited goes ahead of a fresh capture (§4.4), and that
-/// stays true — but the queue fills on its own, and a slow judge endpoint can
-/// leave hundreds of units past the threshold at the same moment. Promoting
-/// all of them puts the whole backlog in front of something the operator just
-/// pasted, which is the head-of-line wait the class column exists to end.
-/// Twenty at a time keeps that wait bounded; the rest are still worked as
-/// background, and the next tick takes the next twenty.
-///
-/// Per tenant, because the wait it bounds is per tenant: what a person may have
-/// pasted is in front of their own promotions and nobody else's. Shared across
-/// the instance it was the same number however many people used it, so the
-/// guarantee thinned out as users were added — and, taken oldest-first over the
-/// whole table, the tenant with the deepest backlog spent all of it.
+/// Background units promoted per tenant per repair tick, so ageing never puts a whole backlog
+/// in front of something a person just pasted.
 const AGE_PER_TICK: i64 = 20;
 
-/// Finish what a crash left half-done, now and every `REPAIR_INTERVAL_HOURS`,
-/// and compare the two stores every `STORE_DRIFT_INTERVAL_HOURS`.
-///
-/// Its own ticker, and behind no setting at all. These four passes used to ride
-/// on the consolidation sweep, where `consolidate.enabled = false` stopped the
-/// ticker before its loop and so stopped them too: a corpus left `segmenting`
-/// by a crash stayed stuck, an artifact whose winner was deleted stayed hidden
-/// from search and from every page that could put it back, and a lifecycle
-/// write that reached one store and not the other stayed torn — with nothing
-/// but the sweep to notice, and the sweep switched off. None of that is
-/// duplicate hygiene, and none of it is something an operator asks to keep by
-/// turning duplicate hygiene off.
-/// One ticker for the instance, and a pass per registered user.
-///
-/// It iterates `users` rather than the open registry, because a tenant nobody
-/// has touched since boot is exactly the one whose interrupted work nothing
-/// else will find. That opens each base in turn, which is the cost of the
-/// guarantee; the passes themselves are SQLite-local and cheap.
-///
-/// The instance-wide half — reclaiming units a dead process left `running`,
-/// ageing background work, expiring sessions — runs once per tick and not once
-/// per user: those queries are over the whole control database, and repeating
-/// them per tenant would do the same work N times for the same answer.
+/// Behind no setting: these repairs must run with every sweep switched off. Iterates registered
+/// `users`, since an untouched tenant is the one whose interrupted work nothing else finds.
 pub fn spawn_repair_ticker(
     tenants: std::sync::Arc<crate::tenants::Tenants>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
@@ -339,12 +181,8 @@ pub fn spawn_repair_ticker(
     tokio::spawn(async move {
         let period = std::time::Duration::from_secs(REPAIR_INTERVAL_HOURS * 3600);
         let mut tick = tokio::time::interval(period);
-        // Not from now: a tenant reconciles its two stores the first time
-        // somebody asks for it, so an interval that fired immediately would
-        // scroll the whole collection a second time for an answer the process
-        // just computed. Opening a tenant from *here* deliberately does not
-        // reconcile it — see `Tenants::on_first_open` — which is what keeps
-        // this pass from turning the first tick into one scroll per user.
+        // Not from now: a tenant already reconciles its stores when first opened, so firing at once
+        // would scroll twice.
         let drift_period = std::time::Duration::from_secs(STORE_DRIFT_INTERVAL_HOURS * 3600);
         let mut drift_tick =
             tokio::time::interval_at(tokio::time::Instant::now() + drift_period, drift_period);
@@ -367,20 +205,12 @@ pub fn spawn_repair_ticker(
     })
 }
 
-/// The instance-wide half of a repair tick, then the per-tenant half.
-///
-/// One base is open at a time. The pass used to open every registered user up
-/// front and hold the whole set for its duration, which on an instance with any
-/// number of users is a SQLite pool and a vector client each, all live at once,
-/// every hour and again at boot — with `store.max_open_tenants` bounding the
-/// registry and nothing at all bounding this. Opening inside the loop makes the
-/// walk's cost its own rather than the instance's.
+/// One base is open at a time, so the walk's cost does not grow with the number of users.
 pub(crate) async fn repair_every_tenant(tenants: &crate::tenants::Tenants) {
     repair_control_once(tenants.control()).await;
     let older_than = age_threshold(tenants.config());
     for subject in every_subject(tenants).await {
-        // Before the open, because it does not need the base: ageing is a
-        // statement about that subject's rows in the control database.
+        // Before the open: ageing concerns that subject's rows in the control database.
         match tenants
             .control()
             .age_background(&subject, older_than, AGE_PER_TICK)
@@ -400,11 +230,8 @@ pub(crate) async fn repair_every_tenant(tenants: &crate::tenants::Tenants) {
     }
 }
 
-/// Every registered subject.
-///
-/// Registered users and not the open registry, because a base nobody has
-/// touched since boot is exactly the one whose interrupted work nothing else
-/// will find.
+/// Registered users, not the open registry: an untouched base is the one with interrupted work
+/// nobody finds.
 async fn every_subject(tenants: &crate::tenants::Tenants) -> Vec<String> {
     match tenants.control().users().await {
         Ok(u) => u.into_iter().map(|u| u.subject).collect(),
@@ -415,14 +242,8 @@ async fn every_subject(tenants: &crate::tenants::Tenants) -> Vec<String> {
     }
 }
 
-/// One base, opened for the length of one pass over it and dropped after.
-///
-/// `get_transient` and not `get`: a walk over the whole user table must not
-/// decide what the fixed-size registry holds, or the hourly tick ends with
-/// every actually-active tenant evicted in favour of whichever users the walk
-/// happened to reach last. A tenant that cannot be opened is logged and left
-/// out rather than stopping the pass for everybody else; the next tick tries
-/// again.
+/// `get_transient`, not `get`, so the walk does not evict the registry's active tenants.
+/// An open that fails is logged and skipped; the next tick tries again.
 async fn open_for_pass(
     tenants: &crate::tenants::Tenants,
     subject: &str,
@@ -436,25 +257,13 @@ async fn open_for_pass(
     }
 }
 
-/// How old a waiting background unit has to be to be promoted.
-///
-/// Saturating for the same reason `periodic_period` is: `age_after_mins` comes
-/// out of `config.toml`, and a large enough value panics in debug and wraps in
-/// release, leaving an `older_than` that ages rows which have not waited at
-/// all. `0` is not a way to switch ageing off — it means every waiting unit is
-/// old enough, so the classes stop dividing anything, which is the behaviour
-/// from before the column existed.
+/// Saturating: `age_after_mins` is operator-typed. `0` does not switch ageing off; it ages
+/// everything.
 fn age_threshold(cfg: &crate::config::Config) -> i64 {
     crate::store::now().saturating_sub(cfg.schedule.age_after_mins.max(0).saturating_mul(60))
 }
 
-/// The repairs that are about the queue rather than about anyone's knowledge.
-///
-/// One control database, so one pass — not one per tenant. `reclaim_stuck` and
-/// expired-session deletion are questions about the whole table, and running
-/// them per user would ask the same thing as many times as there are users and
-/// act on the first answer. Ageing is not one of those and no longer lives
-/// here: it is a per-tenant budget, so it runs in the per-tenant loop.
+/// Repairs over the whole control database, run once per tick rather than per tenant.
 pub(crate) async fn repair_control_once(control: &crate::store::control::Control) {
     match control.reclaim_stuck(crate::jobs::STUCK_AFTER_SECS).await {
         Ok(n) if n > 0 => tracing::info!(
@@ -473,41 +282,27 @@ pub(crate) async fn repair_control_once(control: &crate::store::control::Control
     }
 }
 
-/// One pass. Each step warns and the next still runs: they are independent, each
-/// is retried on the next tick, and each is most likely to fail on exactly the
-/// base that needs it most.
+/// Each step warns and the next still runs; each is retried on the next tick.
 pub(crate) async fn repair_once(core: &crate::core::Core) {
     if let Err(e) = crate::jobs::reconcile::run(core).await {
         tracing::warn!(error = %e, "could not finish interrupted captures; retrying on the next pass");
     }
-    // A hidden artifact pointing at nothing is invisible to search and to every
-    // page that could put it back, and nothing else would notice.
+    // A hidden artifact pointing at nothing is invisible to search and to every page that could
+    // restore it.
     if let Err(e) = core.heal_dangling_supersessions().await {
         tracing::warn!(
             error = %e,
             "could not restore every artifact whose winner was deleted; retrying on the next pass"
         );
     }
-    // The marker pass is cheap, complete for every lifecycle write this system
-    // makes, and does not grow with the base.
     if let Err(e) = crate::jobs::consolidate::repair_lifecycle_drift(core).await {
         tracing::warn!(
             error = %e,
             "could not finish interrupted lifecycle writes; retrying on the next pass"
         );
     }
-    // Duplicate detection is the per-artifact `Relate` unit, armed when an
-    // artifact is indexed. This backstops that arming: an artifact whose unit
-    // never got a row — the arm failed after the embed committed — is asked for
-    // once here, and the row that leaves is what stops it being asked again.
-    //
-    // Here rather than on the sweep, where it was, for the reason everything
-    // else in this pass is here: arming fails on its own, without the sweep's
-    // involvement, and the sweep is behind a setting. An operator who turns
-    // duplicate hygiene off is asking for no *judgements*; the artifact that
-    // lost its unit to a crash would never be asked about again even after they
-    // turned it back on, because a `Relate` row is the only record that it was
-    // ever asked.
+    // Backstops `Relate` arming that failed after the embed committed; outside the sweep, which is
+    // behind a setting.
     match core.store.list_unrelated_artifact_ids(500).await {
         Ok(ids) => {
             for id in ids {
@@ -520,32 +315,14 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
             tracing::warn!(error = %e, "could not look for artifacts that were never related")
         }
     }
-    // A sweep that died between being claimed and re-arming itself would
-    // otherwise never run again — the one failure mode a ticker does not have,
-    // and the reason this pass stays outside the schedule.
+    // The one failure mode a ticker does not have, and why this pass stays outside the schedule.
     arm_missing_periodic(core).await;
-    // Priority without ageing is starvation, but the ageing is instance-wide
-    // and lives in `repair_control_once` beside the rest of the queue's own
-    // repairs — one control database, one pass.
-    // Housekeeping about housekeeping. It rode on the retention unit, which is
-    // behind `feedback`: an operator with capture off and `retain_days` at its
-    // default has no retention unit at all, while the sweeps that do run — the
-    // dedupe arming every fifteen minutes, consolidation every day — keep
-    // writing a row apiece into a table nothing was left to trim. The same
-    // mistake this whole pass exists to record, one table further in.
-    // The line every "is this near that" reads is measured here, before the
-    // passes that read it: the base's own vectors say where unrelated stops,
-    // and a constant does not know which embedder it was configured for.
+    // Measured before the passes that read it; a constant cannot know which embedder is configured.
     match core.calibrate().await {
         Ok(line) => tracing::debug!(line, "measured where unrelated stops"),
         Err(e) => tracing::warn!(error = %e, "could not measure the weak line; the floors stand"),
     }
-    // A coverage row outlives what it covers. `gap_id` names one of three
-    // tables, so it is deliberately not a foreign key and nothing cascades onto
-    // it — while retention deletes searches and questions on a promise, and a
-    // purge takes every one of them. The rows left behind were kept for the
-    // life of the base and read back as nothing at all, `gaps_covered_by_each`
-    // skipping each one because the join found no text to show.
+    // `gap_id` names one of three tables, so it is not a foreign key and nothing cascades onto it.
     match core
         .store
         .trim_gap_coverage(crate::jobs::gaps::cover_line(core))
@@ -565,12 +342,8 @@ pub(crate) async fn repair_once(core: &crate::core::Core) {
     }
 }
 
-/// Compare what SQLite says exists against what the vector store holds.
-///
-/// Split out of `repair_once` and given a much longer period because it is the
-/// one repair whose cost is a function of the whole base rather than of what
-/// went wrong: a full scroll of the collection and two full scans of
-/// `artifacts`, every time, on a base with nothing to fix.
+/// Given a much longer period: its cost is a scroll of the whole collection, even with nothing to
+/// fix.
 pub(crate) async fn reconcile_stores_once(core: &crate::core::Core) {
     if let Err(e) = core.heal_store_drift().await {
         tracing::warn!(
@@ -580,9 +353,7 @@ pub(crate) async fn reconcile_stores_once(core: &crate::core::Core) {
     }
 }
 
-/// The association sweep's job target. A constant rather than an artifact id:
-/// the sweep replays the whole log, and `UNIQUE(stage, target_id)` then bounds
-/// the queue to one of them however often the ticker fires.
+/// `UNIQUE(stage, target_id)` then bounds the queue to one sweep.
 pub const ASSOCIATE_TARGET: &str = "collection";
 
 #[cfg(test)]
@@ -651,9 +422,8 @@ mod tests {
     #[tokio::test]
     async fn every_tenant_gets_its_own_ageing_budget() {
         let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
-        // More waiting units each than one tick may promote, and `a`'s are all
-        // older than `b`'s — which under one shared budget is exactly what let
-        // `a` spend the lot.
+        // `a`'s units are all older than `b`'s, which under one shared budget let `a` spend all of
+        // it.
         for (t, base) in [(&a, 10_000i64), (&b, 5_000)] {
             for i in 0..(AGE_PER_TICK + 5) {
                 t.core
@@ -700,10 +470,8 @@ mod tests {
         for s in ["sub-a", "sub-b", "sub-c"] {
             tenants.get_or_provision(s, None).await.unwrap();
         }
-        // `sub-a` is the one in use, and so the one the registry holds. It is
-        // also the *first* the walk reaches, which is what makes this a test:
-        // through `get`, every later user displaced it in turn and the pass
-        // ended holding whoever it happened to visit last.
+        // `sub-a` is the first user the walk reaches, so a pass that went through `get` would evict
+        // it.
         tenants.get("sub-a").await.unwrap();
         assert!(tenants.is_open("sub-a"));
 
@@ -755,12 +523,6 @@ mod tests {
             "no judge, no sweep — the rules alone may never tombstone"
         );
 
-        // And the level below `full`, which is the shipped default. `may_act`
-        // answers `true` unconditionally there, so it was no gate at all: a
-        // stock config with any `[infer.judge]` model buried up to
-        // `max_judged_per_run` artifacts a day with the weekly cap never
-        // applying, while `jobs::retract` — the path that takes a burial back
-        // — is itself behind `acts_on_corpus()` and so was switched off.
         for level in [
             crate::config::Autonomy::Off,
             crate::config::Autonomy::Ranking,
@@ -803,8 +565,6 @@ mod tests {
                 crate::jobs::context::INTERVAL_HOURS * 3600
             ))
         );
-        // And it drags the retention unit along with it: `context_events` has
-        // its own window, and the trim rides that unit.
         assert!(
             periodic_units(&core)
                 .iter()
@@ -815,9 +575,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_consolidation_sweep_never_stacks_up_in_the_queue() {
-        // `jobs` is unique on (stage, target), so an arming that lands while a
-        // sweep is still queued must collapse onto the same row rather than
-        // stacking sweeps behind a slow one.
         let core = crate::core::test_support::test_core().await;
         for _ in 0..3 {
             core.store
@@ -853,11 +610,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_crashed_capture_is_repaired_with_the_sweep_switched_off() {
-        // The coupling this ticker exists to break. These passes used to run
-        // inside the consolidation sweep, and the sweep's ticker returns before
-        // its loop when `enabled` is false — so no sweep was ever queued, the
-        // passes never ran, and a corpus left half-segmented by a crash stayed
-        // that way for as long as duplicate hygiene was switched off.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = false;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -902,12 +654,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_indexed_artifact_that_was_never_related_is_armed_with_the_sweep_off() {
-        // The backstop used to sit inside the consolidation sweep, behind its
-        // `enabled` check, while the arming it backstops is allowed to fail
-        // silently. On a base with duplicate hygiene switched off, an artifact
-        // whose `relate::arm` failed after its embed committed was therefore
-        // never related — and never would be, because a `Relate` row is the
-        // only record that it was ever asked.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = false;
         let ids = crate::jobs::consolidate::tests::seed(&core, &[("alpha", [1.0, 0.0])]).await;
@@ -922,7 +668,6 @@ mod tests {
                 .unwrap(),
             "the backstop did not arm a relate unit"
         );
-        // A second pass does not arm it again: the row now exists.
         let first = core.store.claim_job().await.unwrap().expect("the unit");
         assert_eq!(first.stage, crate::store::jobs::Stage::Relate);
         core.store.complete_job(first.id).await.unwrap();
@@ -938,15 +683,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_sweep_history_is_trimmed_with_capture_switched_off() {
-        // The trim rode on the retention unit, and that unit does not exist
-        // when `feedback` is off and nothing is being retained — while the
-        // dedupe arming and consolidation keep running, and keep writing a row
-        // apiece into a table nothing was left to trim.
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = false;
         core.feedback.retain_days = 0;
-        // The offer too: it has a retention window of its own, and a base
-        // where it exists is a base with something left to expire.
         core.recommend.enabled = false;
         assert!(
             !periodic_units(&core)
@@ -976,10 +715,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_sweeps_are_armed_to_run_now_when_the_process_starts() {
-        // The repair pass's first tick fires immediately, and this is what it
-        // does with it. Armed at `run_after = 0` and not an interval out: a
-        // restart picking the work straight up is the behaviour the tickers
-        // had, and waiting a day after every deploy is not.
         let core = crate::core::test_support::test_core().await;
 
         arm_missing_periodic(&core).await;
@@ -996,9 +731,6 @@ mod tests {
 
     #[tokio::test]
     async fn arming_what_is_missing_never_stacks_a_sweep_up() {
-        // `jobs` is unique on (stage, target), so a repair pass running while a
-        // sweep is still queued collapses onto the same row rather than
-        // stacking sweeps behind a slow one.
         let core = crate::core::test_support::test_core().await;
         for _ in 0..3 {
             arm_missing_periodic(&core).await;
@@ -1014,15 +746,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_that_died_between_claim_and_rearm_is_armed_again() {
-        // The one failure mode a ticker does not have: a unit that is claimed
-        // and never re-arms itself would otherwise never run again. "Missing"
-        // is *not live* rather than *no row*, because a sweep closed without
-        // re-arming is just as gone as one that was deleted.
         let core = crate::core::test_support::test_core().await;
         arm_missing_periodic(&core).await;
         let j = core.store.claim_job().await.unwrap().unwrap();
-        // Closed without re-arming: the sweep died between the claim and the
-        // one write that would have put it back.
         core.store.complete_job(j.id).await.unwrap();
 
         arm_missing_periodic(&core).await;
@@ -1039,9 +765,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_association_sweep_never_stacks_up_in_the_queue() {
-        // `jobs` is unique on (stage, target), so a ticker firing while a
-        // sweep is still queued must collapse onto the same row rather than
-        // stacking sweeps behind a slow one.
         let core = crate::core::test_support::test_core().await;
         for _ in 0..3 {
             core.store
@@ -1083,9 +806,6 @@ mod tests {
 
     #[tokio::test]
     async fn no_recorded_searches_means_no_association_sweep_at_all() {
-        // With `[learn]` off nothing is recorded, so there is nothing to learn
-        // from and there is no unit — which is the list's job now that there is
-        // no ticker to return from.
         let core = crate::core::test_support::test_core().await; // `[learn]` off
         assert!(
             !periodic_units(&core)
@@ -1096,9 +816,6 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_to_expire_and_nothing_to_group_is_no_retention_unit() {
-        // The ticker used to `return` here, and once lost the `return` and went
-        // on waking every `sweep_hours` for the life of the process to do
-        // nothing at all. A unit that is never armed cannot do that.
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.retain_days = 0;
         core.learn.enabled = false;
@@ -1112,11 +829,6 @@ mod tests {
 
     #[tokio::test]
     async fn switching_learning_off_does_not_freeze_the_situations_already_written() {
-        // The ageing used to ride `recommends()`, which is `recommend && learn`
-        // — so an operator who switched learning off got no retention unit at
-        // all, and the 400-day window over `context_events` and
-        // `interaction_events` stopped moving with everything collected so far
-        // still in it. Turning a thing off is when its data most needs to leave.
         let mut core = crate::core::test_support::test_core().await;
         core.feedback.retain_days = 0;
         core.learn.enabled = false;
@@ -1174,8 +886,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_panicking_task_does_not_wedge_shutdown() {
-        // A background write that panics must still release its slot, or every
-        // later shutdown hangs waiting for a task that is already gone.
         let bg = Arc::new(Background::default());
         bg.spawn(async { panic!("the write failed") });
 

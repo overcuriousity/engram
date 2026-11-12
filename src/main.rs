@@ -24,79 +24,49 @@ struct Args {
     /// Write an empty database with both schemas, for `cargo sqlx prepare`.
     #[arg(long, hide = true, value_name = "PATH")]
     dev_schema: Option<PathBuf>,
-    /// Copy every vector into a fresh collection generation and swap the alias
-    /// onto it, then exit. Costs no embedding calls and leaves the previous
-    /// generation in place.
+    /// Copy every vector into a fresh collection generation, swap the alias onto it, then exit.
     #[arg(long)]
     reindex: bool,
-    /// Re-measure every corpus's coverage from the artifacts already stored,
-    /// then exit. Local work over existing rows: no inference, no vector calls,
-    /// nothing re-synthesised. Run it after upgrading past a change to how
-    /// coverage is measured, since the figure is otherwise written once.
+    /// Re-measure every corpus's coverage from stored artifacts (no inference), then exit.
     #[arg(long)]
     recompute_coverage: bool,
-    /// Fold stored passages too short to carry a claim into their neighbour,
-    /// re-queue the merged passage's embed and delete the orphan's row and
-    /// vector, then exit. For bases captured before the splitter did this
-    /// itself (engram#61). Idempotent.
+    /// Fold too-short stored passages into their neighbour and re-embed, then exit. Idempotent.
     #[arg(long)]
     merge_orphans: bool,
     /// With --merge-orphans: list what would change and write nothing.
     #[arg(long, requires = "merge_orphans")]
     dry_run: bool,
-    /// Which tenant a data command acts on. Required by --reindex,
-    /// --recompute-coverage and --merge-orphans: there is no longer one base
-    /// for them to mean. Narrows --restore and --verify-stores to one tenant
-    /// (a slug is accepted there too).
+    /// The tenant a data command acts on; required by --reindex and the other per-base commands.
     #[arg(long, value_name = "SUBJECT")]
     user: Option<String>,
     /// List the users this instance knows, with their slug and email.
     #[arg(long)]
     list_users: bool,
-    /// Remove SUBJECT: the row, the database file, and the Qdrant alias. The
-    /// queue rows go with the row, through ON DELETE CASCADE; the sessions and
-    /// API tokens go with it too, or a token nobody revoked would provision the
-    /// account straight back.
+    /// Remove SUBJECT: its row, database file, Qdrant alias, sessions and API tokens.
     #[arg(long, value_name = "SUBJECT")]
     delete_user: Option<String>,
-    /// Write the control database, every tenant database and every tenant's
-    /// Qdrant snapshot into DIR (new or empty) with a checksummed manifest,
-    /// then exit. Runs beside a live server: the archive is reconcilable, not
-    /// point-in-time. The directory is the whole instance — keep it private.
+    /// Write the whole instance (databases, Qdrant snapshots, manifest) into DIR, then exit.
     #[arg(long, value_name = "DIR")]
     backup: Option<PathBuf>,
-    /// With --backup: refuse unless the server is stopped, so the archive is
-    /// one point in time.
+    /// With --backup: refuse unless the server is stopped, so the archive is one point in time.
     #[arg(long, requires = "backup")]
     offline: bool,
-    /// Check that every file a backup's manifest names is present and intact,
-    /// then exit 0, or 1 naming the first that is not.
+    /// Check that every file a backup's manifest names is present and intact, then exit.
     #[arg(long, value_name = "DIR")]
     backup_check: Option<PathBuf>,
-    /// Put back an archive --backup wrote, then exit: the control database
-    /// and every tenant database (or, with --user, that tenant's alone), each
-    /// tenant's vectors uploaded into a fresh generation the alias is moved
-    /// to. Refuses while the server runs, and before it changes anything.
-    /// Ends with the --verify-stores table; exits 0 PASS, 2 REPAIR, 1 FAIL.
-    /// The previous generations are left in Qdrant as the rollback.
+    /// Put back an archive --backup wrote (refused while the server runs), then verify the stores.
     #[arg(long, value_name = "DIR")]
     restore: Option<PathBuf>,
-    /// With --restore: restore the databases but not the vectors, into an
-    /// empty generation at the configured width, and queue every embedded
-    /// artifact again. For an archive taken under another embedding recipe.
+    /// With --restore: restore the databases only and queue every artifact for embedding again.
     #[arg(long, requires = "restore")]
     reembed: bool,
     /// With --restore: accept an archive written by a newer engram.
     #[arg(long, requires = "restore")]
     force_version: bool,
-    /// Check that the control database, the tenant databases and the vector
-    /// store agree, then exit 0 PASS, 2 REPAIR (embeds owed) or 1 FAIL.
-    /// Writes nothing; --user narrows it to one tenant.
+    /// Check that the control database, tenant databases and vector store agree, then exit.
     #[arg(long)]
     verify_stores: bool,
-    /// The client half — `-c`, `-s`, `-a`. One parser for both, so `--help`
-    /// lists the server's flags and the client's together and there is one
-    /// binary to build, ship and version.
+    /// The client half: `-c`, `-s`, `-a`.
     #[command(flatten)]
     cli: engram::cli::args::CliArgs,
 }
@@ -109,15 +79,8 @@ fn validate_auth(cfg: &Config) -> Result<()> {
                     "auth.mode = \"oidc\" but no [auth.oidc] block".into(),
                 ));
             };
-            // Refused at startup rather than answered either way at the first
-            // login. An empty allowlist used to mean "everyone", and everyone
-            // is not a small word here: the first request from a subject
-            // engram has never seen provisions a tenant, so against a provider
-            // with open self-registration that is a stranger creating a
-            // database and a vector collection, with no cap anywhere on the
-            // path. Silently closing it instead would lock a working
-            // deployment out of its own instance on upgrade, which is why
-            // neither reading is guessed.
+            // Refused at startup: "everyone" lets any provider account provision a tenant,
+            // and "nobody" would lock a working deployment out on upgrade; neither is guessed.
             let listed = !oidc.allowed_subs.is_empty() || !oidc.allowed_groups.is_empty();
             if !listed && !oidc.open_registration {
                 return Err(Error::Validation(
@@ -144,17 +107,8 @@ fn validate_auth(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Fail fast on anything that would otherwise surface much later as bad search
-/// results. Inference probes are warnings only: ingest is designed to work
-/// while the endpoints are down.
-///
-/// No tenant is opened here, so startup time does not scale with how many
-/// people have signed up. What used to be in this function and is not any more
-/// is everything that was about a *collection* rather than an endpoint —
-/// `ensure_collection` and the embedding-recipe check moved into provisioning
-/// and a tenant's first open, because there is no longer one collection to
-/// mean. Reclaiming stuck work and expiring sessions moved to the repair tick,
-/// which now owns the control database's own housekeeping.
+/// Fail fast on what would surface later as bad search results; inference probes only warn,
+/// since ingest works while endpoints are down. Opens no tenant.
 async fn startup_checks(cfg: &Config) -> Result<()> {
     match &cfg.infer.synthesize {
         Some(s) => {
@@ -191,11 +145,7 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
     } else {
         tracing::info!("vision not configured; the image door is closed");
     }
-    // Named but not probed. Every other role here answers `models`; the small
-    // speech servers this is aimed at — whisper.cpp's `server`, and the
-    // faster-whisper wrappers — serve only the transcription route, so a probe
-    // would print "transcribe unreachable" at every startup of an installation
-    // whose microphone works. The first press is the check.
+    // Named but not probed: whisper.cpp-style servers serve only the transcription route.
     match &cfg.infer.transcribe {
         Some(t) => tracing::info!(model = %t.model, "speech to text configured"),
         None => tracing::info!("speech to text not configured; the search box has no microphone"),
@@ -203,17 +153,8 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// What is actually running, printed under what the file says.
-///
-/// The file is the operator's starting point; the database holds what is live.
-/// At boot an unchanged file loses to the generation the idle pass adopted
-/// (see `store::generations::boot_generation`), so a file printed on its own
-/// quietly stops describing the base it configures. One line per base, because
-/// the live generation is a fact about a base and not about the file.
-///
-/// Best-effort, and never an error: `--print-config` is a thing operators paste
-/// into issues, and it has to answer on a machine whose database does not
-/// exist yet.
+/// The live ranking per base, under the file: an adopted generation overrides an unchanged file.
+/// Best-effort, since `--print-config` must answer before the database exists.
 async fn print_live_ranking(cfg: &Config) {
     println!("# ── what is actually running ──");
     println!("# The keys above are where each base starts. Where a base has a");
@@ -245,9 +186,7 @@ async fn live_ranking(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// A command that works on the data and exits, beside a running server.
-/// The one list both `server_lock` and the client/server split read, so a new
-/// data command cannot be added to one and missed by the other.
+/// A command that works on the data and exits; read by both `server_lock` and the client split.
 fn data_command(args: &Args) -> bool {
     args.reindex
         || args.recompute_coverage
@@ -258,16 +197,13 @@ fn data_command(args: &Args) -> bool {
         || args.verify_stores
 }
 
-/// The data commands that must not run beside a server: a write the server
-/// makes during the alias swap or the row deletion is lost or orphaned.
-/// A subset of `data_command`, read only by `server_lock`.
+/// The data commands that must not run beside a server: its writes during the swap or delete
+/// would be lost or orphaned.
 fn exclusive_data_command(args: &Args) -> bool {
     args.reindex || args.delete_user.is_some()
 }
 
-/// The server lock, when this run is the server or a data command that needs
-/// it stopped (`exclusive_data_command`). The other data commands run beside
-/// a live server and do not take it.
+/// The server lock, for the server and for `exclusive_data_command`s.
 fn server_lock(args: &Args, cfg: &Config) -> Result<Option<engram::backup::lock::ServerLock>> {
     if data_command(args) && !exclusive_data_command(args) {
         return Ok(None);
@@ -275,11 +211,7 @@ fn server_lock(args: &Args, cfg: &Config) -> Result<Option<engram::backup::lock:
     engram::backup::lock::acquire(std::path::Path::new(&cfg.store.control_path)).map(Some)
 }
 
-/// Resolve `--user`, or refuse with the list rather than picking one.
-///
-/// A default here is how the wrong collection gets reindexed: the operator
-/// meant one tenant and the flag silently meant another. Refusing costs one
-/// re-run; guessing costs a rebuild of somebody else's base.
+/// Resolve `--user`, or refuse with the list: a guessed default rebuilds somebody else's base.
 async fn require_user(
     control: &engram::store::control::Control,
     subject: Option<&str>,
@@ -302,11 +234,7 @@ async fn require_user(
     }
 }
 
-/// Open one tenant's store, for the commands that only read SQLite.
-///
-/// Deliberately not through `Tenants`: these need neither a vector store nor an
-/// inference endpoint to be up, and going through the registry would make them
-/// wait on both.
+/// Open one tenant's store without `Tenants`, so SQLite-only commands need no vector or inference.
 async fn tenant_store(
     cfg: &Config,
     control: &engram::store::control::Control,
@@ -316,12 +244,7 @@ async fn tenant_store(
     engram::store::Store::connect(&path.to_string_lossy(), control.clone(), &user.subject).await
 }
 
-/// The account subcommands. Returns whether one of them ran, since each is an
-/// exit rather than a step on the way to serving.
-///
-/// There is no admin role behind these: they are the operator at a shell, which
-/// is the only place account changes belong on an instance whose accounts are
-/// owned by an identity provider.
+/// The account subcommands; returns whether one ran. The operator at a shell, no admin role.
 async fn run_account_command(
     args: &Args,
     cfg: &Config,
@@ -362,11 +285,8 @@ async fn run_account_command(
             println!("left alone");
             return Ok(true);
         }
-        // The vectors first: it is the one step that can fail for a reason
-        // outside this machine, and a row deleted before it would leave a
-        // collection nothing names and nobody will ever look for. The alias
-        // and its generations go together — an alias per tenant is the whole
-        // point, so nothing else is pointing at them.
+        // The vectors first: the step that can fail outside this machine, and a row
+        // deleted before it would leave a collection nothing names.
         match engram::vector::qdrant::QdrantVectors::connect(&engram::config::VectorConfig {
             collection: alias.clone(),
             ..cfg.vector.clone()
@@ -374,13 +294,8 @@ async fn run_account_command(
         .await
         {
             Ok(v) => v.drop_collection().await?,
-            // Not a warning. The alias name is a pure function of the subject,
-            // so a collection left behind is not merely orphaned: the next time
-            // that person signs in, `ensure_collection` finds the surviving
-            // alias and adopts it, and the deleted account comes back with
-            // every vector it had behind a fresh, empty database. Leaving the
-            // user row in place is the recoverable outcome — the operator fixes
-            // Qdrant and runs the command again.
+            // Not a warning: the alias derives from the subject, so a surviving one brings
+            // the vectors back at next sign-in. Keeping the row lets the operator rerun.
             Err(e) => {
                 return Err(Error::Validation(format!(
                     "could not reach Qdrant to drop {alias}: {e}. \
@@ -418,15 +333,8 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // The client half, decided before anything is opened: it talks to a running
-    // engram over HTTP and needs neither this machine's config.toml nor its
-    // database. A terminal on stdin with no verb flag falls straight through,
-    // so `engram` alone is the server it has always been.
-    //
-    // Every flag below is one this binary honours as the server. Named here so
-    // `verb` can stand down before it reads stdin: a pipe is an instruction to
-    // capture only when nothing else was asked for, and `echo yes | engram
-    // --delete-user sub@idp` is a scripted answer to a prompt, not a note.
+    // The client half needs no config or database. Server flags are passed so `verb` stands down
+    // before it reads stdin: `echo yes | engram --delete-user x` is not a note.
     let server_command = args.print_config
         || args.backup.is_some()
         || args.backup_check.is_some()
@@ -448,7 +356,6 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(code);
     }
 
-    // Reads only the archive, so it needs no config and opens nothing live.
     if let Some(dir) = &args.backup_check {
         match engram::backup::take::check(dir) {
             Ok(m) => {
@@ -478,16 +385,14 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Before `Control::connect`, which migrates: a backup copies the live
-    // files read-only and must not write to them.
+    // Before `Control::connect`, which migrates: a backup must not write to the live files.
     if let Some(dir) = &args.backup {
         let report = engram::backup::take::take(&cfg, dir, args.offline).await?;
         println!("{report}");
         std::process::exit(report.exit_code());
     }
 
-    // Before the server lock and `Control::connect`: a restore takes the lock
-    // itself, and only after every refusal has passed without a write.
+    // Before the lock and `Control::connect`: a restore takes the lock only after every refusal.
     if let Some(dir) = &args.restore {
         let opts = engram::backup::restore::RestoreOpts {
             user: args.user.clone(),
@@ -515,12 +420,9 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(report.verdict().exit_code());
     }
 
-    // Held until `main` returns, so `--backup --offline` (and a restore) can
-    // tell that a server is up. Taken before the control database is opened.
+    // Held until `main` returns, so `--backup --offline` and a restore can tell a server is up.
     let _server_lock = server_lock(&args, &cfg)?;
 
-    // Every command below reaches the control database, and none of them can
-    // say which base they mean without it.
     let control = engram::store::control::Control::connect(&cfg.store.control_path).await?;
 
     if run_account_command(&args, &cfg, &control).await? {
@@ -542,8 +444,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if args.recompute_coverage {
-        // No vector store and no inference: this only reads artifacts and
-        // writes one number per corpus, so it must not need either to be up.
+        // Reads artifacts and writes one number per corpus: needs no vectors or inference.
         let user = require_user(&control, args.user.as_deref()).await?;
         let store = tenant_store(&cfg, &control, &user).await?;
         let core = Core::from_config(
@@ -551,8 +452,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(engram::vector::memory::MemoryVectors::new()),
             store,
         );
-        // Keyset, for the same reason the reconcile sweep uses one: a capture
-        // arriving while this runs must not push a corpus past the window.
+        // Keyset: a capture arriving meanwhile must not push a corpus past the window.
         let mut cursor: Option<(i64, String)> = None;
         loop {
             let page = core.store.list_corpora_after(cursor.as_ref(), 100).await?;
@@ -575,9 +475,7 @@ async fn main() -> anyhow::Result<()> {
     if args.merge_orphans {
         let user = require_user(&control, args.user.as_deref()).await?;
         let store = tenant_store(&cfg, &control, &user).await?;
-        // A dry run reads SQLite only; a real one deletes the orphans' points,
-        // so it needs the tenant's collection. The re-embed is queued, and
-        // the server's embed worker makes it.
+        // A dry run reads SQLite only; a real one deletes the orphans' points.
         let vectors: Arc<dyn engram::vector::VectorStore> = if args.dry_run {
             Arc::new(engram::vector::memory::MemoryVectors::new())
         } else {
@@ -630,8 +528,7 @@ async fn main() -> anyhow::Result<()> {
             cfg: cfg.vector.clone(),
         }),
     ));
-    // No tenant is opened here, so startup does not scale with how many people
-    // have signed up. The first request from each opens theirs.
+    // No tenant is opened here; each opens on its first request.
     startup_checks(&cfg).await?;
 
     let oidc = match cfg.auth.mode {
@@ -665,17 +562,11 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    // One ticker left. The five that queued the sweeps are gone: a sweep arms
-    // itself an interval out when it finishes, so the queue holds the schedule
-    // and `run_after` is the cursor. Repair stays outside it — it is what
-    // recovers an interrupted schedule, including arming a sweep that died
-    // between being claimed and re-arming itself, so it cannot be scheduled by
-    // the thing it recovers.
+    // Sweeps re-arm themselves in the queue; repair recovers that schedule, so it stays outside.
     let repair =
         engram::core::background::spawn_repair_ticker(tenants.clone(), shutdown_rx.clone());
     let mut handles = engram::jobs::Worker::spawn(tenants.clone(), cfg.server.workers, shutdown_rx);
-    // Joined with the workers so shutdown waits for it too, rather than
-    // leaving a task the runtime drops mid-enqueue.
+    // Joined with the workers, so shutdown does not drop it mid-enqueue.
     handles.push(repair);
 
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
@@ -708,11 +599,7 @@ async fn main() -> anyhow::Result<()> {
     for h in handles {
         let _ = h.await;
     }
-    // The last searches served each left a write behind, one queue per tenant.
-    // The listener is already closed, so this drains a bounded set rather than
-    // chasing new work; bounded further in case one of them is stuck on a
-    // wedged Qdrant. Only the open ones: a tenant nobody touched this run has
-    // nothing in flight by construction.
+    // Drain the deferred search writes of open tenants, bounded in case Qdrant is wedged.
     for t in tenants.open_tenants() {
         let background = t.core.background.clone();
         if background.inflight() == 0 {
@@ -840,11 +727,6 @@ mod startup_tests {
 
     #[test]
     fn oidc_mode_refuses_a_config_that_names_nobody() {
-        // Neither reading is guessed. Reading it as "everyone" hands a tenant
-        // — a control row, a database file and a vector collection — to every
-        // subject the provider authenticates; reading it as "nobody" locks a
-        // working deployment out of its own instance on upgrade. So it is a
-        // startup error until an operator says which one they meant.
         let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Oidc;
         cfg.auth.oidc = Some(oidc_cfg());

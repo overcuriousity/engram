@@ -1,17 +1,5 @@
-//! The page half of [`crate::error::Error`].
-//!
-//! One error type serves two doors. `/api/v1` answers a failure with
-//! `{"error": …}` as `application/json`, which is what a client asked for; the
-//! `/ui` routes returned the same body, and a browser navigating to
-//! `/ui/artifacts/<an id that is not there>` was shown that literal line of
-//! JSON — no nav, no session, no way back — while an unrouted `/ui/…` path got
-//! the app's own `not_found.html`. Two 404s from one surface, one of them a
-//! dead end.
-//!
-//! The split is made by the route rather than by sniffing the request: a `/ui`
-//! handler returns [`UiResult`], an `/api/v1` handler returns
-//! [`crate::error::Result`], and each says in its own signature what it
-//! serves. `?` converts, so a handler body is unchanged.
+//! The page half of [`crate::error::Error`]: `/ui` handlers return [`UiResult`], `/api/v1` handlers JSON.
+//! `?` converts, so a handler body is unchanged.
 
 use crate::error::Error;
 use askama::Template;
@@ -20,7 +8,6 @@ use axum::response::{Html, IntoResponse, Response};
 
 pub type UiResult<T> = std::result::Result<T, UiError>;
 
-/// An [`Error`] on its way to a person rather than to a program.
 #[derive(Debug)]
 pub struct UiError(pub Error);
 
@@ -50,12 +37,7 @@ impl ErrorTemplate {
 }
 
 impl UiError {
-    /// What to put on the page, per variant.
-    ///
-    /// Matched on the variant rather than read out of the formatted string:
-    /// the wire message is `"validation: …"`, `"vector store: …"`, and turning
-    /// those back into a sentence by looking for the colon would be guessing
-    /// at text this module already has the structure of.
+    /// Matched on the variant, not parsed back out of the formatted string.
     fn page(&self) -> (String, String) {
         match &self.0 {
             Error::NotFound => (
@@ -87,9 +69,7 @@ impl UiError {
                 "The vector store is not answering".into(),
                 "Check that Qdrant is running at the configured address.".into(),
             ),
-            // The detail on these carries schema fragments and prompt text —
-            // `client_message` already refuses to send it, and a page is no
-            // more entitled to it than the API is.
+            // These carry schema and prompt fragments; `client_message` withholds them and so does the page.
             Error::Store(_) | Error::MalformedLlmOutput(_) | Error::Internal(_) => (
                 "Something went wrong here".into(),
                 "The detail is in the server log.".into(),
@@ -101,16 +81,14 @@ impl UiError {
 impl IntoResponse for UiError {
     fn into_response(self) -> Response {
         let status = self.0.status();
-        // The same accounting `Error::into_response` does, because this
-        // replaces it on these routes rather than running after it.
+        // The same accounting as `Error::into_response`, which this replaces on these routes.
         if status.is_server_error() {
             tracing::error!(error = %self.0, "page failed");
         } else {
             tracing::debug!(error = %self.0, "page rejected");
         }
 
-        // A 404 from a handler and a 404 from the router fallback are the same
-        // wrong turn, so they are the same page.
+        // A handler 404 and a router-fallback 404 are the same page.
         if status == StatusCode::NOT_FOUND {
             return crate::web::ui::not_found_page(status);
         }
@@ -118,8 +96,7 @@ impl IntoResponse for UiError {
         let (heading, detail) = self.page();
         match (ErrorTemplate { heading, detail }).render() {
             Ok(html) => (status, Html(html)).into_response(),
-            // Rendering the error page is the one failure with nowhere left to
-            // go. Plain text, and the status is still the truth.
+            // Rendering the error page failed: plain text, true status.
             Err(e) => {
                 tracing::error!(error = %e, "the error page itself would not render");
                 (status, "engram could not render this error.").into_response()

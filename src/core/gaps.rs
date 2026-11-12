@@ -1,60 +1,25 @@
-//! Grouping the holes. A gap is a question the base could not answer or a
-//! search judged to have no answer; two gaps about the same thing are one hole
-//! and should be shown as one. Pure functions over stored vectors, so grouping
-//! costs no inference and can be tested without any.
+//! Grouping gaps that are about the same thing into one hole.
+//! Pure functions over stored vectors, so grouping costs no inference.
 
 use crate::store::gaps::GapKind;
 
-/// The floor under the linkage line, and the line itself on a base with too
-/// little recorded to measure one.
-///
-/// It used to be the line, on the claim that 0.55 is "well above what unrelated
-/// questions score under the embedders engram is run with". That was a guess
-/// about geometry, and the wrong kind: under bge-m3 — the default — two
-/// unrelated short queries routinely land in 0.45–0.6, and with single linkage
-/// being transitive a few dozen of them chain into one group with one name over
-/// holes that have nothing to do with each other. What replaces the guess is a
-/// measurement of the same quantity from the base's own recorded queries; see
-/// `unrelated_line`.
+/// The floor under the linkage line, and the line itself where too little is recorded to measure
+/// one. Under bge-m3 unrelated short queries score 0.45–0.6, so the measured `unrelated_line`
+/// usually wins.
 pub const GAP_LINK_AT: f32 = 0.55;
 
-/// Neither line is raised past this. A base whose queries genuinely do all sit
-/// close together — one operator, one narrow subject — would otherwise
-/// calibrate its way out of ever grouping or matching anything.
+/// A base whose queries all sit close together would otherwise calibrate out of ever grouping.
 pub const LINE_CEILING: f32 = 0.9;
 
-/// Below this many sampled pairs the sample describes the operator's week
-/// rather than the embedder, and the floors stand unmeasured. Thirty queries
-/// against each other make 435 pairs; thirty queries against thirty artifacts
-/// make 900 more.
+/// Below this many pairs the sample describes the operator's week, not the embedder.
 const MIN_PAIRS: usize = 400;
 
-/// The smallest group worth a name. A group of one is a question, and naming it
-/// is a model call spent restating it; an ungrouped gap already shows on the
-/// capture page under its own words.
+/// A group of one is a question; naming it would spend a model call restating it.
 pub const MIN_CLUSTER: usize = 2;
 
-/// Where "unrelated" stops, measured from the base's own vectors: every
-/// recorded query against every other and against a sample of what is stored.
-///
-/// Almost every pair in such a sample is a pair of unrelated things, so the
-/// bulk of the cosines is the embedder's noise band and the line is its upper
-/// edge: the median plus three robust standard deviations (1.4826 × the median
-/// absolute deviation). Robust rather than a percentile because the sample is
-/// not *all* unrelated — a question asked twice in different words, or asked
-/// of a document it is about, sits in the upper tail — and a 99th percentile
-/// of a few hundred pairs is a handful of exactly those.
-///
-/// Rounded up to a hundredth: a line that moved by 0.001 between sweeps would
-/// re-key clusters that had not changed and pay for naming each of them
-/// again, and rounding down would put it back inside the band it was measured
-/// to sit above. `None` below `MIN_PAIRS`.
-///
-/// What this still does not measure is whether the groups and matches it
-/// produces are the ones an operator would have drawn. That needs labels, and
-/// the operator's own actions — dismissing one member against dismissing all
-/// of them — are the labels to gather; scoring against them belongs with the
-/// rest of the harness, not here.
+/// Where "unrelated" stops in this base's own vectors: median + 3 × 1.4826 × MAD of the pair
+/// cosines. Robust rather than a percentile, since the upper tail holds genuinely related pairs.
+/// Rounded up to a hundredth so a jittering line does not re-key and re-name clusters each sweep.
 pub fn unrelated_line(queries: &[Vec<f32>], artifacts: &[Vec<f32>]) -> Option<f32> {
     let mut cos: Vec<f32> = Vec::new();
     for i in 0..queries.len() {
@@ -76,9 +41,7 @@ pub fn unrelated_line(queries: &[Vec<f32>], artifacts: &[Vec<f32>]) -> Option<f3
     Some(((median + 3.0 * sigma) * 100.0).ceil() / 100.0)
 }
 
-/// A line above its floor: the measured one when there is one, clamped to
-/// `[floor, LINE_CEILING]`, the floor otherwise. `measured` at or below zero is
-/// "unmeasured".
+/// The measured line clamped to `[floor, LINE_CEILING]`; `measured <= 0` means unmeasured.
 pub fn line_above(floor: f32, measured: f32) -> f32 {
     if measured <= 0.0 {
         floor
@@ -101,21 +64,9 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-/// Single-linkage over cosine: two vectors join at `link_at`, and joining is
-/// transitive. Returns groups of indices, each sorted, ordered by their first
-/// member.
-///
-/// N is bounded by `store::gaps::MAX_OPEN_GAPS` *per kind*, and there are four
-/// kinds, so the quadratic pass is up to four times as many comparisons as that
-/// constant reads like — two million of them at today's numbers, on the
-/// retention tick. That is deliberate and it is the ceiling: it runs on a timer
-/// rather than on a request, nothing waits for it, and cutting the cap to make
-/// one number match the other would cost the operator gaps on the page to buy
-/// back time nobody is holding.
-///
-/// Borrowed, not owned: the caller holds the vectors it read out of the store,
-/// and copying a thousand of them to pass them in was four million floats moved
-/// for nothing.
+/// Single-linkage over cosine: two vectors join at `link_at`, transitively; groups ordered by first
+/// member. Quadratic up to 4 × `MAX_OPEN_GAPS`; acceptable because it runs on the retention tick,
+/// not a request.
 pub fn cluster(vecs: &[&[f32]], link_at: f32) -> Vec<Vec<usize>> {
     let n = vecs.len();
     let mut parent: Vec<usize> = (0..n).collect();
@@ -167,8 +118,7 @@ const STOP: &[&str] = &[
     "at", "by", "into", "was", "we", "you", "not", "no",
 ];
 
-/// The three most frequent content words across the texts, or the first text
-/// cut short. What a cluster is called before — or without — a model naming it.
+/// A cluster's name before, or without, a model naming it.
 pub fn terms_label(texts: &[&str]) -> String {
     let mut counts: std::collections::HashMap<String, usize> = Default::default();
     for t in texts {
@@ -238,8 +188,6 @@ mod tests {
 
     #[test]
     fn too_small_a_sample_leaves_the_floor_where_it_is() {
-        // Nothing to measure from is not a licence to move the line: a base with
-        // three recorded queries would otherwise calibrate off three numbers.
         assert_eq!(unrelated_line(&[], &[]), None);
         assert_eq!(
             unrelated_line(&pseudo(10, 64, 1.0), &pseudo(10, 64, 1.0)),
@@ -250,42 +198,28 @@ mod tests {
 
     #[test]
     fn a_well_spread_embedder_measures_below_the_floor_and_keeps_it() {
-        // Unrelated directions in 64 dimensions score far below 0.55, so the
-        // measurement agrees with the floor and the floor stands.
         let m = unrelated_line(&pseudo(40, 64, 1.0), &[]).unwrap();
         assert_eq!(line_above(GAP_LINK_AT, m), GAP_LINK_AT);
     }
 
     #[test]
     fn an_embedder_that_puts_everything_close_together_raises_the_line() {
-        // The failure the constant could not see: where unrelated queries
-        // routinely score 0.9, linking at 0.55 chains all of them into one
-        // group. The line moves up to sit above what was measured, and stops at
-        // the ceiling so grouping does not become impossible.
         let m = unrelated_line(&pseudo(40, 64, 0.15), &[]).unwrap();
         let t = line_above(GAP_LINK_AT, m);
         assert!(t > GAP_LINK_AT, "{t}");
         assert!(t <= LINE_CEILING, "{t}");
-        // Rounded to a hundredth, so a line that moves at all moves visibly —
-        // a threshold wobbling by 0.001 between sweeps would re-key unchanged
-        // clusters and pay to name each of them again.
         assert_eq!((m * 100.0).fract(), 0.0, "{m}");
     }
 
     #[test]
     fn a_related_tail_does_not_drag_the_line_up() {
-        // The prod shape: unrelated pairs in a narrow band around 0.5, and a
-        // few genuinely related ones near 0.9. A percentile of this sample
-        // lands on the related pairs; the robust estimate stays on the band.
+        // Unrelated pairs in a narrow band near 0.5 plus a few related ones near 0.9.
         let mut queries = pseudo(40, 64, 0.6);
-        // Ten near-duplicates of the first query: forty-five related pairs.
         for _ in 0..10 {
             queries.push(queries[0].iter().map(|x| x + 0.01).collect());
         }
         let band = unrelated_line(&pseudo(40, 64, 0.6), &[]).unwrap();
         let tailed = unrelated_line(&queries, &[]).unwrap();
-        // Fifty-five pairs at ~1.0 out of 1225 is a 99th percentile of 1.0;
-        // the robust estimate moves by a few hundredths.
         assert!((tailed - band).abs() <= 0.1, "{band} vs {tailed}");
         assert!(tailed < 0.8, "{tailed}");
     }

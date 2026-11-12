@@ -7,14 +7,10 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-/// Brute-force cosine over a HashMap. Lets the entire ingest-to-search path be
-/// tested without running Qdrant.
+/// Brute-force cosine, so ingest-to-search is testable without Qdrant.
 pub struct MemoryVectors {
     points: RwLock<HashMap<String, VectorPoint>>,
-    /// The `ctx` multivector per artifact, held apart from the point rather
-    /// than on it. A field on `VectorPoint` would put a context set in every
-    /// signature that carries a point — the embed job's, the reindex's — for
-    /// the sake of one caller that writes it and one that reads it.
+    /// Apart from the point so `VectorPoint` signatures need not carry a context set.
     ctx: RwLock<HashMap<String, Vec<Vec<f32>>>>,
 }
 
@@ -33,14 +29,12 @@ impl Default for MemoryVectors {
     }
 }
 
-/// A payload's effective lifecycle status. An unset `status` reads as active,
-/// matching the Qdrant backend's `build_filter`.
+/// Unset reads as active, matching Qdrant's `build_filter`.
 fn status_of(payload: &super::VectorPayload) -> ArtifactStatus {
     payload.status.unwrap_or(ArtifactStatus::Active)
 }
 
-/// Counts into chips, most frequent first. Ties break on the value so a
-/// HashMap's iteration order never leaks into what the page renders.
+/// Ties break on the value so HashMap order never reaches the page.
 fn ranked(counts: HashMap<&str, u64>, limit: usize) -> Vec<FacetCount> {
     let mut out: Vec<FacetCount> = counts
         .into_iter()
@@ -66,9 +60,7 @@ impl VectorStore for MemoryVectors {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for mut p in points {
-            // Matching the Qdrant path: a re-embed rebuilds the payload without
-            // knowing when the chunk was last shown, and clearing the stamp
-            // would make a chunk read yesterday look forgotten.
+            // As in Qdrant: a re-embed must not clear the stamp, or yesterday's chunk looks forgotten.
             if p.payload.last_seen_at.is_none() {
                 p.payload.last_seen_at = w
                     .get(&p.payload.artifact_id)
@@ -79,9 +71,7 @@ impl VectorStore for MemoryVectors {
                     .get(&p.payload.artifact_id)
                     .and_then(|old| old.payload.hit_count);
             }
-            // Same rule, same reason: an unset status means "whatever is
-            // already stored", so a re-embed cannot revive an artifact the
-            // sweep hid.
+            // Unset means "keep stored", so a re-embed cannot revive an artifact the sweep hid.
             if p.payload.status.is_none() {
                 p.payload.status = w
                     .get(&p.payload.artifact_id)
@@ -108,8 +98,7 @@ impl VectorStore for MemoryVectors {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(p) = w.get_mut(&payload.artifact_id) {
-            // A merge, matching Qdrant: an absent stamp means "unchanged", so
-            // a tag edit must not erase when the chunk was last shown.
+            // A merge, matching Qdrant: an absent stamp means unchanged.
             let seen = payload.last_seen_at.or(p.payload.last_seen_at);
             let hits = payload.hit_count.or(p.payload.hit_count);
             let status = payload.status.or(p.payload.status);
@@ -118,13 +107,7 @@ impl VectorStore for MemoryVectors {
                 .superseded_by
                 .clone()
                 .or_else(|| p.payload.superseded_by.clone());
-            // Both carry `skip_serializing_if`, so Qdrant never receives them
-            // from a caller that left them empty and the stored values stand.
-            // Only `jobs::embed` knows either: every other caller — the tag and
-            // category edits above all — builds a payload with no corpora and
-            // no provenance, and copying that over the stored one would strip a
-            // synthesized artifact of the mark that earns it its badge and its
-            // stopping rule, on a tag edit, in this backend only.
+            // Only `jobs::embed` knows these; a tag edit's empty values must not strip a synthesized artifact's provenance.
             let corpora = if payload.origin_corpora.is_empty() {
                 p.payload.origin_corpora.clone()
             } else {
@@ -257,18 +240,12 @@ impl VectorStore for MemoryVectors {
             .map(|p| &p.payload)
             .filter(|p| {
                 status_of(p) == ArtifactStatus::Active
-                    // Present and old. An unstamped point is unknown, not
-                    // stale — see the trait doc. A missing `hit_count` is the
-                    // other way round: never retrieved is what it means.
+                    // An unstamped point is unknown, not stale; a missing `hit_count` means never retrieved.
                     && p.last_verified_at.is_some_and(|v| v < older_than)
                     && p.hit_count.unwrap_or(0) <= max_hits
             })
             .collect();
-        // Sorted before truncating, and sorted at all: this backs a work queue
-        // an operator returns to after every action, and `values()` iterates a
-        // HashMap in an order that is neither stable nor meaningful. Stalest
-        // first, id as the tiebreak — see the Qdrant implementation, whose order
-        // this has to match for the two to be testable against each other.
+        // A work queue needs a stable order; stalest first, id tiebreak, matching Qdrant so the two test alike.
         found.sort_by(|a, b| {
             a.last_verified_at
                 .cmp(&b.last_verified_at)
@@ -280,7 +257,6 @@ impl VectorStore for MemoryVectors {
             .map(|payload| SearchHit {
                 payload: payload.clone(),
                 score: 0.0,
-                // No query vector to be similar to; this is a listing.
                 similarity: None,
             })
             .collect())
@@ -292,10 +268,7 @@ impl VectorStore for MemoryVectors {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for t in targets {
-            // The count the caller passed is ignored here on purpose: this
-            // store holds the authoritative value already, and reading it is
-            // free. The Qdrant path uses the caller's copy to skip a round
-            // trip, which is a network optimisation, not a semantic one.
+            // The caller's count only spares Qdrant a round trip; this store reads its own for free.
             if let Some(p) = w.get_mut(&t.artifact_id) {
                 p.payload.last_seen_at = Some(seen_at);
                 // Only a search result counts as a retrieval; see `Touch`.
@@ -319,10 +292,7 @@ impl VectorStore for MemoryVectors {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(r.values()
             .filter(|p| {
-                // Anything not active is out, matching the Qdrant backend: a
-                // deprecated artifact is old and by definition unseen, which
-                // makes it a prime candidate for a list of things nobody has
-                // looked at — and it has just been retired on purpose.
+                // Anything not active is out, matching Qdrant: a deprecated artifact was retired on purpose.
                 status_of(&p.payload) == ArtifactStatus::Active
                     && p.payload.created_at < older_than
                     && p.payload.last_seen_at.is_none_or(|s| s < unseen_since)
@@ -331,15 +301,12 @@ impl VectorStore for MemoryVectors {
             .map(|p| SearchHit {
                 payload: p.payload.clone(),
                 score: 0.0,
-                // Drawn at random rather than matched; nothing to be close to.
                 similarity: None,
             })
             .collect())
     }
 
-    /// Dense only. Hybrid fusion is a Qdrant feature; reimplementing BM25
-    /// scoring here would test this file rather than the real retrieval path,
-    /// which the integration suite covers instead.
+    /// Dense only: hybrid fusion is Qdrant's, covered by the integration suite.
     async fn search(
         &self,
         vector: &[f32],
@@ -369,9 +336,7 @@ impl VectorStore for MemoryVectors {
                         .is_none_or(|c| &p.payload.corpus_id == c)
             })
             .map(|p| {
-                // Dense only here, so the ranking score *is* the similarity.
-                // The Qdrant store has to fetch it separately because fusion
-                // throws the magnitude away.
+                // Dense only, so the ranking score is the similarity.
                 let similarity = cosine(vector, &p.vector);
                 SearchHit {
                     payload: p.payload.clone(),
@@ -380,8 +345,7 @@ impl VectorStore for MemoryVectors {
                 }
             })
             .collect();
-        // Tie-break on artifact_id so equal scores produce a stable order rather
-        // than whatever the HashMap iterated this time.
+        // Tie-break on artifact_id for a stable order.
         hits.sort_by(|a, b| {
             b.score
                 .total_cmp(&a.score)
@@ -417,8 +381,6 @@ impl VectorStore for MemoryVectors {
         };
         let mut hits: Vec<SearchHit> = r
             .values()
-            // Anything out of search is out of the related pane too, matching
-            // the Qdrant backend.
             .filter(|p| {
                 p.payload.artifact_id != artifact_id
                     && status_of(&p.payload) == ArtifactStatus::Active
@@ -428,12 +390,7 @@ impl VectorStore for MemoryVectors {
                 SearchHit {
                     payload: p.payload.clone(),
                     score: cos,
-                    // Stated rather than left `None`. This is one dense lookup
-                    // with no fusion, so the score *is* a cosine — and the
-                    // relate unit compares it against `review_min`, which is a
-                    // cosine threshold. Leaving it unset would make a caller
-                    // read `score`, which everywhere else in this trait means a
-                    // fused rank that is not comparable to anything.
+                    // One dense lookup, so the score is the cosine `review_min` compares against.
                     similarity: Some(cos),
                 }
             })
@@ -476,9 +433,7 @@ impl VectorStore for MemoryVectors {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut hits: Vec<SearchHit> = ctx
             .iter()
-            // An artifact with a set but no point cannot be offered: there is
-            // no payload to render it from. That is the sweep having run
-            // against an artifact whose embedding has not, not an error.
+            // A set without a point has no payload to render; the sweep ran before the embedding did.
             .filter_map(|(id, set)| points.get(id).map(|p| (p, set)))
             .filter(|(p, _)| {
                 let status = status_of(&p.payload);
@@ -488,19 +443,16 @@ impl VectorStore for MemoryVectors {
             })
             .map(|(p, set)| SearchHit {
                 payload: p.payload.clone(),
-                // `max_sim`: the best of the artifact's situations, which is
-                // what makes a set worth more than a mean.
+                // `max_sim`: the best situation, which is why a set beats a mean.
                 score: set
                     .iter()
                     .map(|c| cosine(vector, c))
                     .fold(f32::NEG_INFINITY, f32::max),
-                // Not a query-to-document similarity, and calling it one would
-                // invite it into a ranking it has no business in.
+                // `max_sim` is not a query-to-document similarity.
                 similarity: None,
             })
             .collect();
-        // Ties break on the id, so a HashMap's iteration order never decides
-        // what is offered.
+        // Ties break on the id, never on HashMap order.
         hits.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -516,8 +468,7 @@ impl VectorStore for MemoryVectors {
             .points
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // The context set goes with the point. A set outliving its payload
-        // would keep answering `context_query` with an artifact that is gone.
+        // A set outliving its payload would keep answering `context_query` with a gone artifact.
         let mut c = self
             .ctx
             .write()
@@ -563,8 +514,7 @@ impl VectorStore for MemoryVectors {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut ids: Vec<&String> = r.keys().collect();
-        // Deterministic, so a test never depends on HashMap iteration order —
-        // the same rule `all_artifact_ids` obeys.
+        // Deterministic, as `all_artifact_ids` is.
         ids.sort();
         Ok(ids
             .into_iter()
@@ -581,8 +531,7 @@ impl VectorStore for MemoryVectors {
             .len() as u64)
     }
 
-    /// JSON of every point, a fixture format: it lets the whole backup run
-    /// without a Qdrant.
+    /// JSON of every point, a fixture format so the whole backup runs without Qdrant.
     async fn export_snapshot(&self, into: &std::path::Path) -> Result<super::VectorExport> {
         let mut points: Vec<SnapshotPoint> = {
             let r = self
@@ -663,7 +612,6 @@ impl VectorStore for MemoryVectors {
     }
 }
 
-/// One point as `export_snapshot` writes it.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SnapshotPoint {
     vector: Vec<f32>,
@@ -756,8 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_matches_on_its_nearest_situation_not_its_average() {
-        // Friday afternoon *and* Monday morning. Their mean is a situation that
-        // never happened, and a store that scored the mean would answer neither.
+        // Their mean is a situation that never happened.
         let v = MemoryVectors::new();
         v.upsert(vec![point("a", "s1", vec![1.0, 1.0], &[], "procedure")])
             .await
@@ -776,8 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_with_no_situations_is_not_a_candidate() {
-        // The candidate set is "anything ever opened", and that is expressed by
-        // the absence of a set rather than by a filter.
+        // "Anything ever opened" is the absence of a set, not a filter.
         let v = MemoryVectors::new();
         v.upsert(vec![
             point("a", "s1", vec![1.0, 0.0], &[], "procedure"),
@@ -816,7 +762,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_hidden_artifact_is_never_offered() {
-        // The same rule search obeys: superseded and deprecated are out.
         let v = MemoryVectors::new();
         v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "procedure")])
             .await
@@ -858,8 +803,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_set_on_an_artifact_with_no_point_is_not_an_error() {
-        // An artifact whose embedding never ran has nothing to attach a set to.
-        // The sweep must not fail over one.
         let v = MemoryVectors::new();
         v.set_context_vectors("nobody", vec![vec![1.0, 0.0]])
             .await
@@ -874,8 +817,6 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_an_artifact_takes_its_situations_with_it() {
-        // A set outliving its point would keep answering `context_query` with
-        // a payload that is gone.
         let v = MemoryVectors::new();
         v.upsert(vec![point("a", "s1", vec![1.0, 0.0], &[], "procedure")])
             .await
@@ -892,7 +833,6 @@ mod tests {
                 .is_empty()
         );
 
-        // And the same when a whole corpus goes.
         v.upsert(vec![point("b", "s2", vec![1.0, 0.0], &[], "procedure")])
             .await
             .unwrap();
@@ -934,9 +874,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_weighted_search_is_the_same_search_where_nothing_weighs_age() {
-        // The default implementation ignores the weight, and this store is
-        // what the idle pass's tests rank through: a replay that silently
-        // scored every candidate identically would still pass its own gate.
+        // The idle pass's tests rank through this store; ignoring the weight would pass its gate silently.
         let v = MemoryVectors::new();
         v.ensure_collection(3).await.unwrap();
         v.upsert(vec![
@@ -1021,8 +959,6 @@ mod tests {
 
     #[tokio::test]
     async fn equal_scores_return_a_stable_order() {
-        // Ranking must not depend on HashMap iteration order, or the same
-        // query would shuffle its results between calls.
         let v = MemoryVectors::new();
         v.ensure_collection(3).await.unwrap();
         v.upsert(

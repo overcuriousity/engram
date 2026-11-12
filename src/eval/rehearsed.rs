@@ -1,12 +1,5 @@
-//! What a generation scores on the base's own probes.
-//!
-//! A yardstick, not a goal. Adoption stays on observations, where use is the
-//! evidence; this may refuse a candidate and may revert a generation, and it
-//! never adopts. What it buys is that no adoption and no live generation can
-//! escape being measured — on a base nobody judges, this is the anchor.
-//!
-//! Counterfactual, on the current corpus: two parameter sets are replayed on
-//! one probe set now, so corpus drift is not a confound. Nothing is embedded.
+//! What a generation scores on the base's own probes, replayed now on one probe set.
+//! A yardstick: it may refuse a candidate or revert a generation, and never adopts.
 
 use crate::core::Core;
 use crate::core::ranking::RankingParams;
@@ -14,8 +7,8 @@ use crate::error::Result;
 use crate::eval::sweep::OBSERVATION_LIMIT;
 use crate::store::rehearsals::Rehearsal;
 
-/// Probes a side before two records can be called the same. Ten puts the
-/// noise term at a tenth of the range — the reason `tune::MIN_BAND` is ten.
+/// Probes a side before two records can be called the same: the noise is then a tenth
+/// of the range, the reason `tune::MIN_BAND` is ten.
 pub const MIN_PROBES: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -26,17 +19,14 @@ pub struct Rehearsed {
 }
 
 impl Rehearsed {
-    /// One probe's worth on either side: a single probe moving between rank
-    /// one and a miss moves MRR by `1/n`.
+    /// One probe's worth: a probe moving between rank one and a miss moves MRR by `1/n`.
     pub fn noise(&self, other: &Rehearsed) -> f64 {
         1.0 / self.probes.max(1) as f64 + 1.0 / other.probes.max(1) as f64
     }
-    /// Worse than `other` by more than the noise. False on an empty side:
-    /// nothing separates anything from nothing.
+    /// Worse than `other` by more than the noise; false on an empty side.
     pub fn loses_to(&self, other: &Rehearsed) -> bool {
         self.probes > 0 && other.probes > 0 && other.mrr - self.mrr > self.noise(other)
     }
-    /// Within the noise of each other over at least `MIN_PROBES` a side.
     pub fn indistinguishable(&self, other: &Rehearsed) -> bool {
         self.probes >= MIN_PROBES
             && other.probes >= MIN_PROBES
@@ -51,19 +41,8 @@ impl Rehearsed {
     }
 }
 
-/// Whether a probe replay can tell `a` from `b` at all.
-///
-/// A replay goes through `Door::Judge` with no priming recorded, which is what
-/// keeps a probe a measurement of the ranking rather than of whoever searched
-/// last. It also means four knobs never reach it: the appended band
-/// (`spread_max`), both halves of priming (`prime_lift`, `sitting_prime`), and
-/// the review threshold, which search does not read. Two parameter sets that
-/// differ only there replay identically, so `indistinguishable` says nothing
-/// about them and `loses_to` can never be true.
-///
-/// Stated as what is blanked rather than what is kept, so a knob added later
-/// counts as visible until somebody says otherwise — which is what every
-/// replay assumed of every knob before this.
+/// Whether a probe replay can tell `a` from `b`: it records no priming, so `spread_max`, both
+/// priming knobs and the review threshold are blanked. Listed as blanked so a new knob counts.
 pub fn probes_tell_apart(a: RankingParams, b: RankingParams) -> bool {
     let seen = |p: RankingParams| RankingParams {
         spread_max: 0,
@@ -75,8 +54,7 @@ pub fn probes_tell_apart(a: RankingParams, b: RankingParams) -> bool {
     seen(a) != seen(b)
 }
 
-/// The probes with a retained result under `live_id` — the ones the lap has
-/// reached — at most `OBSERVATION_LIMIT`.
+/// The probes with a retained result under `live_id`, at most `OBSERVATION_LIMIT`.
 pub async fn probe_set(core: &Core, live_id: &str) -> Result<Vec<Rehearsal>> {
     Ok(core
         .store
@@ -87,20 +65,8 @@ pub async fn probe_set(core: &Core, live_id: &str) -> Result<Vec<Rehearsal>> {
         .collect())
 }
 
-/// Replay `probes` under `params`, now. `None` when somebody came back.
-///
-/// `rerank` is the caller's, because it is the one axis a replay cannot infer
-/// from `params` alone. `search_inner` computes `query.rerank && params.rerank`,
-/// so this used to hard-code `false` and the field was inert in every
-/// rehearsal: the rerank-flip candidate `tune::propose` emits differs from
-/// `current` in that field and nothing else, both sides replayed identically,
-/// `loses_to` was never true, and the flip cleared the refusal gate whatever it
-/// would actually have done. `sweep::flip_offer` passes `flipped.rerank` for
-/// exactly this reason.
-///
-/// The caller passes `false` where the axis is held constant across the
-/// comparison, which is every ladder candidate: a reranker run on both sides
-/// cancels out of the verdict and costs a call per probe to do it.
+/// Replay `probes` under `params`, now; `None` when somebody came back. `rerank` is the
+/// caller's because search ANDs it with `params.rerank`; pass `false` where both sides share it.
 pub async fn rehearsed_under(
     core: &Core,
     params: RankingParams,
@@ -121,7 +87,7 @@ pub async fn rehearsed_under(
     Ok(Some(Rehearsed::from_ranks(&ranks)))
 }
 
-/// The record from stored results, no replay. What Insights shows.
+/// The record from stored results, no replay: what Insights shows.
 pub async fn rehearsed_live(core: &Core, live_id: &str) -> Result<Rehearsed> {
     let ranks: Vec<Option<usize>> = core
         .store

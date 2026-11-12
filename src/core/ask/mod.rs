@@ -24,23 +24,15 @@ pub struct AskRequest {
     pub category: Option<String>,
 }
 
-/// What one retrieval round produced.
 struct Round {
-    /// The query this round ran. Round one carries the question as it was
-    /// asked; a planned round carries the subject the model named.
-    ///
-    /// Held on the round rather than zipped alongside it, because `fan_out`
-    /// drops a round that failed — a list of queries and a list of rounds stop
-    /// lining up the moment one endpoint times out, and the thing that would
-    /// then be mislabelled is a claim about what the base does not hold.
+    /// On the round, not zipped beside it: `fan_out` drops failed rounds and a parallel list would
+    /// mislabel gaps.
     query: String,
     /// Above the cliff, with whatever was reached sideways appended.
     hits: Vec<SearchResult>,
     /// How many of `hits` are ranked. Everything after them was reached.
     ranked: usize,
-    /// Every artifact the ranking returned, cliff and all. What `dropped` is
-    /// measured against, so a citation lost to the cliff is as visible as one
-    /// lost to the window.
+    /// Everything ranked, cliff and all, so a citation lost to the cliff counts in `dropped`.
     retrieved: Vec<String>,
     cliff_at: Option<usize>,
 }
@@ -50,54 +42,28 @@ pub struct AskResponse {
     pub answer: String,
     /// Exactly the excerpts the model saw.
     pub citations: Vec<SearchResult>,
-    /// Retrieved but left out — below the relevance cliff, or past what the
-    /// context window holds. Reported so a missing citation is visible rather
-    /// than silent.
+    /// Retrieved but left out, below the cliff or past the window.
     pub dropped: usize,
-    /// The answer stops where its output ceiling did, not where the model meant
-    /// to. Reported for the same reason `dropped` is: an answer cut off
-    /// mid-sentence is otherwise indistinguishable from a complete one, and the
-    /// fix — a higher `ask.max_output_tokens` — belongs to whoever is reading
-    /// it.
+    /// The answer stopped at its output ceiling (`ask.max_output_tokens`), not where the model
+    /// meant to.
     pub truncated: bool,
-    /// The answer opened with `prompt::ABSTAIN_PREFIX`, or there was nothing
-    /// to show the model. What the harness counts as "said nothing here".
+    /// Opened with `prompt::ABSTAIN_PREFIX`, or there was nothing to show the model.
     pub abstained: bool,
-    /// Literals the answer carries that no excerpt it was shown does — the
-    /// fidelity thesis extended from synthesis to generation. `ask` is the one
-    /// place a model writes something a person reads as fact, and a command or
-    /// number here that is in no excerpt is the model's own rather than
-    /// something the base holds. Reported so the page can say which.
+    /// Literals the answer carries that no excerpt it was shown does.
     pub unsupported: Vec<String>,
-    /// Every excerpt the answer was written from has been retired.
-    ///
-    /// Retired rows sit below the cliff and are normally never read for an
-    /// answer. The exception is a question whose whole match has been retired
-    /// — a completed reminder retires the note it was read from, and that note
-    /// may be the only place the base states the thing — where answering from
-    /// nothing is the worse of the two failures. Reported so the reader is
-    /// told which they are looking at, rather than being handed a confident
-    /// answer drawn entirely from what the base has put away.
+    /// Every excerpt was retired; a completed reminder's note may be the only answer there is.
     pub retired_only: bool,
-    /// Disagreements the answer was written across: contradiction pairs with
-    /// both sides among `citations`, one row per pair, read from the side
-    /// cited first. The base never picks a side of a contradiction, so where
-    /// an answer draws on one the reader is told both readings were in front
-    /// of the model, and the page badges each.
+    /// Contradiction pairs with both sides among `citations`, one row per pair; the base never
+    /// picks a side.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disagreements: Vec<crate::store::pairs::Disagreement>,
-    /// The recorded question, when this door records — the UI, with feedback
-    /// on. The page shows a verdict bar only when this is set.
+    /// Set only where this door records; the page shows a verdict bar only then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub event_id: Option<String>,
 }
 
 impl Core {
-    /// Ask, and wait for the whole answer.
-    ///
-    /// A collector over `ask_events`, not a second implementation: `/api/v1/ask`
-    /// and the MCP tool cannot stream and are not asked to, and there must be
-    /// exactly one account of what asking means.
+    /// A collector over `ask_events`, so there is exactly one account of what asking means.
     pub async fn ask(&self, req: &AskRequest, origin: impl Into<Origin>) -> Result<AskResponse> {
         let s = self.ask_events(req, origin);
         tokio::pin!(s);
@@ -110,15 +76,8 @@ impl Core {
         done.ok_or_else(|| Error::Internal("ask produced no answer".into()))
     }
 
-    /// One ask, as it happens: what was retrieved, what the model will be
-    /// shown, and the answer as it is written.
-    ///
-    /// This is the implementation, and `ask` is a collector over it, so a
-    /// change to what asking means reaches both doors or neither.
-    ///
-    /// `'static` on purpose: an SSE response outlives the handler that built
-    /// it, so the stream owns a clone of `Core` and its own copy of the
-    /// request rather than borrowing either.
+    /// One ask as it happens. `'static`: an SSE response outlives its handler, so it owns its
+    /// inputs.
     pub fn ask_events<O: Into<Origin>>(
         &self,
         req: &AskRequest,
@@ -132,9 +91,7 @@ impl Core {
             if req.q.trim().is_empty() {
                 Err(Error::Validation("question is empty".into()))?;
             }
-            // No ask model: the door is not offered anywhere, and a caller that
-            // found the route anyway is told why rather than served an answer
-            // from nothing.
+            // No ask model: a caller that found the route anyway is told why.
             if core.completer.is_none() {
                 Err(Error::Validation("[infer.ask] is not configured".into()))?;
             }
@@ -143,22 +100,9 @@ impl Core {
                 .clone()
                 .ok_or_else(|| Error::Internal("ask without a completer".into()))?;
 
-            // Held for the whole answer rather than around the completion, because
-            // a search embeds the query and that is a model call too. A gap between
-            // them is a gap the worker would fill with a window, and a window is
-            // twenty to seventy seconds of somebody waiting.
-            //
-            // Taking the lane does not make an in-flight call stop; nothing here
-            // cancels. It keeps the worker from putting anything new in front of
-            // this one.
-            //
-            // Shared with the completion's task rather than held here alone,
-            // because the two do not end together. A reader that closes the tab
-            // drops this stream while the model call keeps running on the GPU,
-            // and a lease that ended with the stream would hand the worker a
-            // window against hardware an interactive call still occupies — the
-            // exact interleaving this exists to prevent, inverted. Whichever
-            // side finishes last drops the last handle.
+            // Held for the whole answer, since the query embedding is a model call too; shared with
+            // the completion task, which outlives the stream when the reader leaves while the GPU
+            // is still busy.
             let lane = std::sync::Arc::new(core.gate.interactive());
 
             // Asking a question is as deliberate as a search gets.
@@ -167,28 +111,21 @@ impl Core {
             let mut retrieved = first.retrieved;
 
             if hits.is_empty() {
-                // No retrieval, no completion: spending a model call to say
-                // "nothing found" is pure latency. Opens with the sentinel so the
-                // page and the harness read it as the abstention it is.
+                // No completion for no retrieval; the sentinel makes it read as an abstention.
                 let response = AskResponse {
                     answer: format!("{ABSTAIN_PREFIX}. Nothing matches that question."),
                     citations: vec![],
                     dropped: 0,
                     truncated: false,
                     abstained: true,
-                    // Nothing was shown and nothing was claimed.
                     unsupported: vec![],
                     retired_only: false,
                     disagreements: vec![],
                     event_id: None,
                 };
-                // Emitted even though it is empty: a reader that waits for the
-                // rail before the answer must not wait forever on the one
-                // question that retrieved nothing.
+                // Emitted even when empty, so a reader waiting for the rail does not wait forever.
                 yield AskEvent::Retrieved { round: 1, retrieved: 0, shown: 0, dropped: 0, cliff_at: None };
                 yield AskEvent::Citations(vec![]);
-                // Nothing was planned — this returns before the plan runs — so
-                // there are no uncovered subjects to record.
                 let response = core.record_ask(&req, &origin, response, &[]).await?;
                 yield AskEvent::Done(Box::new(response));
                 return;
@@ -231,17 +168,12 @@ impl Core {
                     cliff_at: first.cliff_at,
                 };
                 yield AskEvent::Citations(vec![]);
-                // Nothing was planned — this returns before the plan runs — so
-                // there are no uncovered subjects to record.
                 let response = core.record_ask(&req, &origin, response, &[]).await?;
                 yield AskEvent::Done(Box::new(response));
                 return;
             }
 
-            // Round one is over as far as anyone watching is concerned: what it
-            // retrieved is reported before the planner is asked anything, so a
-            // reader sees the first round land rather than a pause of unknown
-            // cause.
+            // Reported before the planner runs, so the first round lands visibly.
             yield AskEvent::Retrieved {
                 round: 1,
                 retrieved: retrieved.len(),
@@ -250,35 +182,18 @@ impl Core {
                 cliff_at: first.cliff_at,
             };
 
-            // One plan, however many rounds it names, and structurally so: one
-            // call site, no loop, and nothing downstream of here plans again. A
-            // second plan has nowhere to go — which is the point. "Let the model
-            // say once what is missing" is the bounded version of a mechanism
-            // whose unbounded version is an agent, and an agent is not what this
-            // is.
-            //
-            // `needed_queries` returns empty the moment no planning model is
-            // wired, so with the feature off this costs one `Option` check and
-            // no call at all.
-            // The subjects the plan named that nothing came back for. Empty
-            // with planning off, and empty when the plan named nothing.
+            // One plan, one call site, no loop: the bounded form of an agent, and not an agent.
             let mut uncovered: Vec<String> = Vec::new();
             let queries = plan::needed_queries(&core, &req.q, &blocks[..kept]).await;
             if !queries.is_empty() {
                 yield AskEvent::Needs(queries.clone());
 
-                // Every planned query at once. They are independent searches
-                // against the same store, so running them in sequence would
-                // charge the reader one embedding round trip per subject for no
-                // reason. `PLAN_MAX_QUERIES` caps the plan and so caps this.
+                // Concurrent; `PLAN_MAX_QUERIES` caps the plan and so caps this.
                 let extra = core.fan_out(&req, &queries).await;
-                // Read before the rounds are merged away. A subject the base
-                // held nothing near is a hole it just named itself, and after
-                // the merge there is no round left to ask.
+                // Read before the merge, after which no round is left to ask.
                 uncovered = plan::uncovered(&extra);
 
-                // Round one's hits are the first part, so round-robin starts
-                // with the question as it was actually asked.
+                // Round one first, so round-robin starts with the question as asked.
                 let mut parts = vec![retrieve::Part::of(hits.clone(), ranked, first.cliff_at)];
                 let mut fanned_retrieved: Vec<String> = Vec::new();
                 for round in extra {
@@ -286,10 +201,8 @@ impl Core {
                     parts.push(retrieve::Part::of(round.hits, round.ranked, round.cliff_at));
                 }
 
-                // Nothing came back at all: every planned round failed. Round
-                // one still stands, and the page is told how the fan-out ended
-                // rather than left with "looking further…" on screen for the
-                // rest of the answer.
+                // Every planned round failed; round one stands and the page is told the fan-out
+                // ended.
                 if parts.len() == 1 {
                     tracing::warn!("ask: every planned round failed; answering from the first");
                     yield AskEvent::Retrieved {
@@ -302,10 +215,8 @@ impl Core {
                 } else {
                     let merged = retrieve::merge(parts);
 
-                    // Packed again over the whole merged list rather than
-                    // appended to what round one packed: the fanned-out
-                    // excerpts have to fit the same window as the first, and
-                    // the only honest way to know what fits is to pack it.
+                    // Packed again over the whole merged list: the fan-out must fit the same
+                    // window.
                     let (mut merged_blocks, merged_kept) =
                         core.packed_excerpts(&merged.hits, budget).await;
                     core.stitch_passages(
@@ -315,8 +226,6 @@ impl Core {
                     .await;
 
                     // A re-pack that fits nothing leaves round one standing.
-                    // The prompt cannot be empty because the fan-out found
-                    // nothing extra to say.
                     if merged_kept > 0 {
                         for id in fanned_retrieved {
                             if !retrieved.contains(&id) {
@@ -332,25 +241,9 @@ impl Core {
                         tracing::info!("ask: the fan-out fit nothing the first round had not");
                     }
 
-                    // Reported either way, and with round one's numbers when
-                    // the re-pack changed nothing. `Needs` has already told the
-                    // page a wider search is happening; ending without a
-                    // matching `Retrieved` would leave "looking further…" on
-                    // screen describing something that finished. A fan-out that
-                    // changed nothing is an outcome, not an absence.
-                    //
-                    // `shown` here can be *lower* than round one's, and that is
-                    // the priority working rather than a regression: a hit a
-                    // planned round asked for packs ahead of round one's
-                    // neighbours, so a window that held three speculative
-                    // excerpts may hold one hit instead. Reporting the smaller
-                    // number is honest — those neighbours are no longer in the
-                    // prompt.
-                    //
-                    // No cliff. Each round cut at its own before it got here and
-                    // the merged list is several rankings interleaved, so there
-                    // is no one position in it where relevance fell off; naming
-                    // one would be inventing it.
+                    // Reported even when nothing changed, or "looking further…" stays on screen
+                    // after `Needs`. `shown` may fall below round one's as planned hits displace
+                    // neighbours; no cliff across merged rankings.
                     yield AskEvent::Retrieved {
                         round: 2,
                         retrieved: retrieved.len(),
@@ -363,14 +256,8 @@ impl Core {
 
             let user = ask_prompt(&req.q, &blocks[..kept]);
 
-            // The ceiling comes from what the prompt actually cost, not from what
-            // was reserved for it: packing is an estimate made before the excerpts
-            // were chosen, and whatever the window has left over after them is room
-            // the answer may have. Bounded by the configured ceiling, so this only
-            // ever gives back what the reserve above took away — and it keeps the
-            // one invariant the endpoint enforces, that prompt plus ceiling fits the
-            // window, with the margin `ceiling_for_prompt` leaves for the estimate
-            // being an estimate.
+            // The ceiling comes from the prompt's actual cost, bounded by the configured one, so
+            // prompt plus ceiling still fits the window with `ceiling_for_prompt`'s margin.
             let spent = core.counter.count(ASK_SYSTEM) + core.counter.count(&user);
             let ceiling = crate::infer::budget::ceiling_for_prompt(
                 completer.context_tokens(),
@@ -378,25 +265,17 @@ impl Core {
                 completer.max_output_tokens(),
             );
 
-            // The excerpts go out before the first token, so the rail beside the
-            // answer is readable while the answer is still being written. Once,
-            // after the last retrieval: the rail names what the model was shown,
-            // and there is one such list however many rounds found it.
+            // Once, after the last retrieval and before the first token.
             let citations: Vec<SearchResult> = hits.into_iter().take(kept).collect();
             yield AskEvent::Citations(citations.clone());
 
-            // The sink is bounded, so the call has to run *beside* this loop and
-            // not before it. A producer that awaited the call and drained
-            // afterwards would block the endpoint's read loop on the first answer
-            // longer than the channel — which is every answer worth reading — and
-            // would still pass any test whose fake reply fits in 64 deltas.
+            // The call runs beside this loop: the sink is bounded, and awaiting first would block
+            // on long answers.
             let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::infer::Delta>(64);
             let prompt = user.clone();
             let held = std::sync::Arc::clone(&lane);
             let call = tokio::spawn(async move {
-                // Dropped when this task ends, whether or not anyone is still
-                // reading: the GPU is busy until the call returns, and the lane
-                // says so for exactly that long.
+                // Dropped when the call returns, whether or not anyone is still reading.
                 let _lane = held;
                 completer
                     .answer_streaming(ASK_SYSTEM, &prompt, ceiling, tx)
@@ -408,9 +287,8 @@ impl Core {
                     crate::infer::Delta::Reasoning(r) => yield AskEvent::Reasoning(r),
                 }
             }
-            // The completion, and not the deltas this loop accumulated, is what
-            // gets checked and recorded: a reader that stopped reading must not
-            // be able to truncate what the base stores.
+            // The completion, not the accumulated deltas, so a reader who stopped cannot truncate
+            // what is stored.
             let answer = call
                 .await
                 .map_err(|e| Error::Internal(format!("the answer never finished: {e}")))??;
@@ -421,11 +299,7 @@ impl Core {
                 );
             }
 
-            // Checked against exactly the blocks that went into the prompt, so what
-            // the page flags is measured against what the model actually saw — not
-            // against the excerpts packing dropped, nor the raw artifact text the
-            // model was never shown. An abstention claims nothing, so there is
-            // nothing in it to check.
+            // Checked against exactly the blocks in the prompt; an abstention claims nothing.
             let abstained = abstained(&answer.text);
             let unsupported = match abstained {
                 true => vec![],
@@ -438,15 +312,12 @@ impl Core {
                 );
             }
 
-            // Read off the excerpts the model was actually shown, not off the
-            // ranking: what the answer stands on is what was sent.
+            // Off the excerpts shown, not the ranking.
             let retired_only = !citations.is_empty() && citations.iter().all(|c| c.retired);
             if retired_only {
                 tracing::info!("ask: every excerpt the answer was written from is retired");
             }
-            // Read off the citations for the same reason: a disagreement the
-            // answer was written across is one whose both sides the model was
-            // shown. One row per pair, from the side cited first.
+            // Both sides must have been shown. One row per pair, from the side cited first.
             let cited: std::collections::HashSet<&str> =
                 citations.iter().map(|c| c.artifact_id.as_str()).collect();
             let mut disagreements: Vec<crate::store::pairs::Disagreement> = Vec::new();
@@ -471,28 +342,15 @@ impl Core {
                 disagreements,
                 event_id: None,
             };
-            // Recorded here rather than by either door, so one ask is one row
-            // however it was asked. The harness reads these.
+            // Recorded here, not by a door, so one ask is one row.
             let response = core.record_ask(&req, &origin, response, &uncovered).await?;
             yield AskEvent::Done(Box::new(response));
         }
     }
 }
 
-/// The planned rounds, held so that dropping them stops them.
-///
-/// A `JoinHandle` dropped on the floor does not cancel its task, and these
-/// tasks are searches: an embedding call and a vector query each. A reader who
-/// closes the tab drops the stream, and everything the ask was doing inline
-/// stops at its next await — but three detached rounds would run to completion
-/// against the same hardware, for an answer nobody will read. Round two used to
-/// run inline in the generator and was cancelled that way; spawning is what
-/// took the property away, so spawning is what has to give it back.
-///
-/// Not the answer call, deliberately. That one keeps running on purpose — it
-/// holds the interactive lane, and killing it mid-generation would hand the
-/// worker a window against a GPU still finishing the work. A retrieval that
-/// nobody is waiting for has no such claim.
+/// Dropping these cancels the planned rounds: a dropped `JoinHandle` does not cancel its task.
+/// The answer call is deliberately not here; it holds the interactive lane until the GPU is done.
 struct Fanned(Vec<tokio::task::JoinHandle<Result<Round>>>);
 
 impl Drop for Fanned {
@@ -504,25 +362,8 @@ impl Drop for Fanned {
 }
 
 impl Core {
-    /// Every planned query at once, in plan order.
-    ///
-    /// Concurrent because the rounds are independent searches against the same
-    /// store: run in sequence, a three-subject question would charge the reader
-    /// three embedding round trips end to end for work that shares nothing.
-    ///
-    /// The width is bounded by `PLAN_MAX_QUERIES`, which is what the plan itself
-    /// is capped at — one number, so the fan-out can never run wider than the
-    /// plan can name.
-    ///
-    /// Awaited in the order they were spawned rather than as they finish,
-    /// because that order is the plan's, and the plan's order is what the merge
-    /// reads as priority. Completion order would make the packing priority a
-    /// race between endpoints.
-    ///
-    /// A round that fails is dropped with a warning and the rest stand. Failing
-    /// the ask because one of several extra searches failed would trade an
-    /// answer for a strictly better answer's absence — the operator asked a
-    /// question, not for a retrieval strategy.
+    /// Concurrent, at most `PLAN_MAX_QUERIES` wide, and awaited in plan order, which the merge
+    /// reads as priority. A failed round is dropped with a warning; the others stand.
     async fn fan_out(&self, req: &AskRequest, queries: &[String]) -> Vec<Round> {
         let mut spawned = Fanned(
             queries
@@ -549,21 +390,10 @@ impl Core {
         out
     }
 
-    /// One retrieval round: search, cut at the cliff, reach sideways.
-    ///
-    /// Every round comes through here, so a planned one is retrieved on exactly
-    /// the terms the verbatim question was. A second copy of this path would be
-    /// a second definition of what an excerpt is allowed to be, and the round
-    /// that used the stale copy would be the one nobody was watching.
-    ///
-    /// `deliberate` is false for every planned round: marking a search is a
-    /// claim that a person meant it, and a planned query is one the model
-    /// wrote. Letting it mark would have the base's activation shaped by the
-    /// model's own guesses about what it needs.
+    /// Every round comes through here, so a planned one is retrieved on the question's terms.
+    /// `deliberate` is false for planned rounds, so the model's own queries never shape activation.
     async fn retrieve_round(&self, req: &AskRequest, q: &str, deliberate: bool) -> Result<Round> {
-        // No per-source cap: an answer often lives in one document, and
-        // withholding its paragraphs to keep the citation list varied would
-        // make the answer worse, not fairer.
+        // No per-source cap: an answer often lives in one document.
         let (mut hits, _) = self
             .search_with(
                 &SearchQuery {
@@ -574,53 +404,30 @@ impl Core {
                     mark: deliberate,
                     include_deprecated: false,
                     include_superseded: false,
-                    // Whether ask reranks is the scope's decision, not this
-                    // call's: nobody is typing here.
+                    // Whether ask reranks is the scope's decision; nobody is typing here.
                     rerank: true,
                     explain: false,
                 },
                 None,
-                // Deliberately not captured: the right answer to a question is
-                // a synthesis across several artifacts, so "which one was it"
-                // has no well-defined meaning for someone judging it later.
+                // Not captured: "which one was it" has no meaning for an answer synthesised across
+                // artifacts.
                 Door::Ask,
             )
             .await?;
 
-        // Everything the ranking actually returned, kept before the cliff takes
-        // its share: `dropped` answers "what did I ask for and not get shown",
-        // and an excerpt cut here is as absent from the answer as one cut by the
-        // window.
+        // Kept before the cliff, so an excerpt it cuts counts in `dropped`.
         let retrieved: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
 
-        // Cut the ranked list where its relevance falls off, before a single row
-        // is read for it: an excerpt below the cliff makes the answer worse as
-        // well as dearer, and its caveats are a lookup spent on something that
-        // will not be sent.
-        //
-        // Read off the marks the search made rather than recomputed here over
-        // `score`: which scale the cliff may be taken on — reranker scores,
-        // or cosine similarity, never the fused rank — is the search's
-        // knowledge, and a second computation over the wrong number is how
-        // this answered from one excerpt when three were relevant.
+        // Read off the search's marks: only it knows which scale the cliff may be taken on.
         let cliff_at = hits.iter().position(|h| h.past_cliff);
         hits.truncate(retrieve::above_cliff(cliff_at, hits.len()));
         let ranked = hits.len();
 
-        // Artifacts reached sideways rather than retrieved are appended here,
-        // after the cliff has been taken — they carry no score comparable to a
-        // ranked hit, and must never enter the scores it is computed from.
-        // `scores` is consumed above and never recomputed, so nothing appended
-        // from here on can reach `cliff` at all.
-        //
-        // The ranked hits are finished first: what each disagrees with is
-        // what the reach brings in beside it, so it has to be known before
-        // the reach runs.
+        // Reached artifacts are appended after the cliff and never enter its scores; the ranked
+        // hits are finished first, since their disagreements decide what the reach brings in.
         self.finish_hits(&mut hits).await;
         self.reach_sideways(&mut hits, cliff_at).await;
-        // The neighbours just appended came off the store, not the ranking,
-        // and so never passed the titling — or the disagreement read — the
-        // ranked hits got.
+        // Neighbours came off the store and missed the titling and disagreement read.
         self.finish_hits(&mut hits[ranked..]).await;
 
         Ok(Round {
@@ -632,15 +439,8 @@ impl Core {
         })
     }
 
-    /// The excerpts a set of hits becomes, and how many of them fit `budget`.
-    ///
-    /// Packing is a greedy prefix, so which partners the prompt carries is known
-    /// only once it is done. Rendered first as though no partner were shown —
-    /// the long form of a disagreement caveat, which names the other note in
-    /// full — and packed; the kept prefix is then rendered again with its
-    /// partners numbered. A numbered caveat is shorter than the long form, so
-    /// what was packed still fits, and no caveat names an excerpt the packing
-    /// cut.
+    /// Packed with long-form caveats, then the kept prefix re-rendered with partners numbered,
+    /// which is shorter, so it still fits and no caveat names a cut excerpt.
     async fn packed_excerpts(&self, hits: &[SearchResult], budget: usize) -> (Vec<String>, usize) {
         let mut blocks = self.excerpts(hits, 0).await;
         let kept = pack_by_budget(&blocks, &self.counter, budget);
@@ -651,33 +451,14 @@ impl Core {
         (blocks, kept)
     }
 
-    /// The numbered excerpts a set of hits becomes, caveats and all.
-    ///
-    /// Caveats are the conditions under which an excerpt does not apply, and an
-    /// answer that quotes "run `mkfs` on the device" without "destroys
-    /// everything already on it" is worse than no answer. They are not in the
-    /// vector payload — what gets embedded is a separate decision — so they are
-    /// read from the store, which costs one cheap SQLite lookup per hit and no
-    /// inference. An excerpt whose row has since been deleted simply carries
-    /// none.
-    ///
-    /// One query for the lot rather than one per hit: this runs once per round,
-    /// over the whole list — round two's call covers round one's hits again —
-    /// so per-hit round trips would sit in front of every model call twice.
-    ///
-    /// `shown` is how many of `hits`, from the front, the prompt will carry. A
-    /// disagreement names its partner by excerpt number only when the partner
-    /// is among those; otherwise it says the other note is not among these
-    /// excerpts and gives its title, date and what differs. Use
-    /// `packed_excerpts`, which knows `shown` only after packing.
+    /// Caveats are read from the store in one query, since they are not in the vector payload.
+    /// A partner is named by number only when among the first `shown`; use `packed_excerpts`.
     async fn excerpts(&self, hits: &[SearchResult], shown: usize) -> Vec<String> {
         let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
         let caveats = match self.store.caveats_for(&ids).await {
             Ok(m) => m,
             Err(e) => {
-                // The caveats are the safety margin on an excerpt, not the
-                // excerpt; an answer without them beats no answer, but the
-                // store failing here is worth a line.
+                // An answer without caveats beats no answer, but the failure is worth a line.
                 tracing::warn!(error = %e, "ask: could not read caveats; excerpts carry none");
                 Default::default()
             }
@@ -687,10 +468,7 @@ impl Core {
             .map(|(i, h)| {
                 let mut lines: Vec<String> =
                     caveats.get(&h.artifact_id).cloned().unwrap_or_default();
-                // A disagreement is a caveat on both notes: neither applies
-                // without the other being said beside it. Passages are never
-                // one side of a pair, so `stitch_passages`, which re-reads
-                // caveats from the rows, has no disagreement to lose.
+                // A disagreement is a caveat on both notes; passages are never one side of a pair.
                 for d in &h.disagrees_with {
                     let detail = d
                         .detail
@@ -710,9 +488,7 @@ impl Core {
                         ),
                     });
                 }
-                // Dated in its own header where it takes part in a
-                // disagreement: the answer gives both readings with their
-                // dates, and the other side's caveat dates only the other side.
+                // Dated where it takes part in a disagreement, so both readings carry their dates.
                 let dated = h
                     .disagrees_with
                     .first()
@@ -728,36 +504,9 @@ impl Core {
             .collect()
     }
 
-    /// Put consecutive passages back together as the text they are.
-    ///
-    /// Passages are verbatim slices whose spans tile a segment; two that abut
-    /// are literally continuous text, and showing them as two excerpts repeats
-    /// the carried heading, hides the continuity from the model, and cuts the
-    /// sentence running across the boundary. Here — after packing, over the
-    /// kept prefix only — runs of abutting passages from one `(corpus,
-    /// segment)` are merged into the block of the run's *first* member, in
-    /// document order, and every other member keeps its own numbered block
-    /// carrying a pointer to it.
-    ///
-    /// The pointer, rather than an emptied block, is what keeps a citation
-    /// honest. The rail beside the answer links `[n]` to the artifact at
-    /// position `n` of `hits`, so a run rendered under one number offers the
-    /// model exactly one number for text drawn from three artifacts, and a
-    /// claim taken from the second passage of a run is then linked to a page
-    /// that does not contain it. With a block each, whichever number the model
-    /// cites resolves to a passage of the run it actually read.
-    ///
-    /// The text goes to the run's first member and not to its best-ranked one
-    /// for the same reason: the block's heading is the heading the text opens
-    /// under, the rail row for that number is the artifact where the text
-    /// begins, and the reader who follows the link lands where they were
-    /// reading. Numbering the block after the best-ranked member instead put a
-    /// heading from one artifact over a rail row naming another.
-    ///
-    /// A stitched excerpt is a presentation, not a new unit: `hits` is
-    /// untouched, every constituent stays a citation, and the literal check
-    /// reads the same text the model did. Passages only — two adjacent
-    /// *artifacts* are two rewrites, not continuous text.
+    /// Abutting passages of one `(corpus, segment)` merge into the run's first member's block, in
+    /// document order; other members keep their numbered block pointing at it, so every `[n]`
+    /// resolves to text the model read.
     async fn stitch_passages(&self, hits: &[SearchResult], blocks: &mut [String]) {
         use crate::store::artifacts::{CorpusSpan, Provenance};
         let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
@@ -772,7 +521,6 @@ impl Core {
         for (i, h) in hits.iter().enumerate() {
             pos.insert(h.artifact_id.as_str(), i);
         }
-        // (corpus, segment, span, position in hits), for passages with a span.
         let mut members: Vec<(String, i64, CorpusSpan, usize)> = rows
             .iter()
             .filter(|c| c.provenance == Provenance::Passage)
@@ -804,22 +552,14 @@ impl Core {
             if run.len() < 2 {
                 continue;
             }
-            // `run` is in document order by construction — that is what it
-            // was built by — so its first member is where the text begins, and
-            // the heading the reader is under is that member's.
+            // `run` is in document order, so its first member is where the text and heading begin.
             let head_pos = members[run[0]].3;
             let head = hits[head_pos].title.as_deref().unwrap_or_default();
             let text: Vec<&str> = run
                 .iter()
                 .map(|&m| hits[members[m].3].text.as_str())
                 .collect();
-            // The caveats of everything the block now contains, not of the
-            // anchor alone. A stitched excerpt is one presentation of several
-            // passages, and the run's other members are no longer rendered
-            // anywhere — so a warning carried by the third passage in a run
-            // would leave the prompt entirely if only the anchor's came along.
-            // The caveats are the safety margin on an excerpt: dropping them
-            // silently is the one direction this must not fail in.
+            // The caveats of every member: the others are no longer rendered anywhere.
             let mut caveats: Vec<String> = Vec::new();
             for &m in &run {
                 let id = &hits[members[m].3].artifact_id;
@@ -838,10 +578,7 @@ impl Core {
                 &text.join("\n"),
                 &caveats,
             );
-            // Every other member keeps its slot and points at the block its
-            // text went into. Cheap — one line each — and it is what lets the
-            // model cite the passage it drew on rather than the one that
-            // happened to rank highest.
+            // So the model can cite the passage it drew on.
             for &m in &run {
                 let p = members[m].3;
                 if p != head_pos {
@@ -851,8 +588,6 @@ impl Core {
         }
     }
 
-    /// How many tokens of excerpt one answer may be built from: the rule
-    /// `excerpt_budget` states, for the answer model under the ask prompt.
     fn excerpt_budget(&self, question: &str) -> usize {
         // Only reached from `ask_events`, which returned before here without a completer.
         self.completer.as_deref().map_or(0, |completer| {
@@ -860,18 +595,8 @@ impl Core {
         })
     }
 
-    /// One hop sideways from the hits that placed best: the artifacts adjacent
-    /// in their corpus, and their one-hop associations.
-    ///
-    /// The answer is often in the artifact *next to* the one that matched — the
-    /// paragraph that names the caveat, the step after the step. Retrieval
-    /// cannot find those, because they do not contain the question's terms and
-    /// do not sit near it in the embedding space; they are only reachable
-    /// through structure, which is why this is a lookup rather than a second
-    /// search and costs no inference at all.
-    ///
-    /// Everything here is best-effort. A neighbour is a bonus, and no failure
-    /// to read one may cost the answer that was already retrievable.
+    /// One hop sideways from the best hits: corpus neighbours and one-hop associations.
+    /// Structure, not search, so it costs no inference; every failure is best-effort.
     async fn reach_sideways(&self, hits: &mut Vec<SearchResult>, cliff_at: Option<usize>) {
         let anchors = retrieve::anchor_count(cliff_at, hits.len());
         if anchors == 0 {
@@ -879,9 +604,8 @@ impl Core {
         }
 
         let mut reached: Vec<(String, String, Option<String>)> = Vec::new();
-        // What a hit disagrees with goes first: an answer drawn from one side
-        // of a disagreement, with the other side left out, is the one wrong
-        // answer the base already knows how to avoid.
+        // Disagreements first: answering from one side alone is the wrong answer the base can
+        // avoid.
         for h in hits.iter().take(anchors) {
             for d in &h.disagrees_with {
                 reached.push((
@@ -892,9 +616,7 @@ impl Core {
             }
         }
         for h in hits.iter().take(anchors) {
-            // Read for the ordinal, which the vector payload does not carry.
-            // The same row is read again below for its caveats; both are cheap
-            // SQLite lookups against the primary key.
+            // For the ordinal, which the vector payload does not carry.
             if let Ok(anchor) = self.store.get_artifact(&h.artifact_id).await
                 && let Some(corpus) = anchor.corpus_id.as_deref()
             {
@@ -907,11 +629,7 @@ impl Core {
                 }
             }
 
-            // Only when the associative layer is actually live: links are
-            // learned from recorded searches, and an install that never opted
-            // into `feedback` must not have that layer read on its behalf.
-            // Same half-life and same floor as the results rail, so the reach
-            // cannot surface a link the rail would have called too faint.
+            // Only with the associative layer live; same half-life and floor as the results rail.
             if !self.associating() {
                 continue;
             }
@@ -940,16 +658,7 @@ impl Core {
         let ranked: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
         let ranked_len = ranked.len();
 
-        // Hydration comes before the cap is spent, not after. A candidate whose
-        // row has since been superseded or deleted cannot be shown, and giving
-        // it one of the six places anyway would shrink the reach below its cap
-        // while live candidates queued behind it were never looked at. So a
-        // place is only ever spent on an artifact that can actually be cited.
-        //
-        // Bounded work: at most three anchors contribute two adjacent artifacts
-        // and `NEIGHBOUR_MAX` links each, and the loop stops as soon as it has
-        // the cap, so this is a handful of primary-key lookups in the worst
-        // case and none at all when nothing was reached.
+        // Hydrated before a place is spent, so a superseded or deleted candidate never takes one.
         let mut live: Vec<(crate::store::artifacts::Chunk, String, Option<String>)> = Vec::new();
         let mut vetted: std::collections::HashSet<&str> =
             ranked.iter().map(String::as_str).collect();
@@ -969,34 +678,16 @@ impl Core {
             live.push((c, via.clone(), reason.clone()));
         }
 
-        // Still routed through `append_neighbours`, which is the one place the
-        // ordering property is stated and tested. Its dedup and cap are belt
-        // and braces here — the loop above already satisfied both — and that is
-        // the right way round: the helper stays authoritative about where a
-        // neighbour may appear, and the caller only ever hands it candidates it
-        // could genuinely show.
+        // `append_neighbours` stays authoritative about ordering; its dedup and cap are belt and
+        // braces here.
         let ids: Vec<String> = live.iter().map(|(c, _, _)| c.id.clone()).collect();
-        // A neighbour is retired or not for the same reason a ranked hit is —
-        // its note was retired — and hard-coding `false` here was not a
-        // shortcut but a wrong answer. `AskResponse::retired_only` is read
-        // over every citation the model was shown, so one reached neighbour of
-        // a retired note flipped it false, and the page gave a confident
-        // answer with the "this came entirely from retired notes" caveat
-        // withheld — the completed-reminder case the field exists for.
+        // A neighbour of a retired note is retired too, or `retired_only` turns false wrongly.
         let cids: Vec<String> = live
             .iter()
             .filter_map(|(c, _, _)| c.corpus_id.clone())
             .collect();
-        // Not defaulted to empty. An empty set does not read as "the store
-        // could not say"; it reads as "nothing is retired", and that is what
-        // `retired_only` then reports over every citation the model was shown
-        // — a confident answer with the "this came entirely from retired
-        // notes" caveat withheld, which is the same wrong answer hard-coding
-        // `false` used to give, arriving by a different road.
-        //
-        // Best-effort still, the way everything in here is: a neighbour whose
-        // retirement cannot be read is a neighbour this pass does not add, and
-        // the answer keeps every hit that was already retrievable.
+        // Not defaulted to empty, which would read as "nothing is retired"; skip the neighbours
+        // instead.
         let retired = match self.store.retired_among(&cids).await {
             Ok(r) => r,
             Err(e) => {
@@ -1020,10 +711,7 @@ impl Core {
                 text: c.text,
                 category: c.category,
                 tags: c.tags,
-                // Not a rank and not a similarity: this artifact did not
-                // compete for a place in the list, it was reached beside one.
-                // Any other number would be a claim about relevance that
-                // nothing measured, and `record_ask` stores it.
+                // Not a rank or similarity: it was reached, and `record_ask` stores this.
                 score: 0.0,
                 status: Some(c.status),
                 superseded_by: c.superseded_by,
@@ -1031,9 +719,7 @@ impl Core {
                 model_written: c.provenance.is_model_written(),
                 synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
                 origin_count: 0,
-                // Weakness is read from a similarity to the query, and there is
-                // no similarity here to read. It has to be demonstrated, never
-                // assumed — in either direction.
+                // Weakness needs a similarity to the query, and there is none here.
                 weak: false,
                 primed: false,
                 due_at: None,
@@ -1043,15 +729,9 @@ impl Core {
                 past_cliff: false,
                 retired: is_retired,
                 similarity: None,
-                // The same read `model_written` above makes, on the same row.
-                // A reached passage carries its section's heading exactly as a
-                // ranked one does, and `false` here put that heading back into
-                // the rail and into the answer's "Artifacts used" card.
+                // As `model_written` above: a reached passage carries its section's heading too.
                 borrowed_name: !c.provenance.names_its_own_text(),
-                // What makes a reached artifact tellable apart from a retrieved
-                // one, by a reader and by a test alike: a ranked hit has no
-                // `via`, and this one names the hit it was reached from.
-                // Reached beside a ranked hit, never ranked itself.
+                // A ranked hit has no `via`; this one names the hit it was reached from.
                 disagrees_with: Vec::new(),
                 explanation: Some(crate::core::explain::HitExplanation::recalled(&via)),
                 via: Some(via),
@@ -1060,13 +740,8 @@ impl Core {
         }
     }
 
-    /// Record the question when this door records. Only the UI, and only with
-    /// feedback on: a question is personal data of the same kind as a query,
-    /// and API and MCP callers asked for the smallest footprint. Recorded
-    /// synchronously — the id goes back to the page — and after the answer,
-    /// which has already taken seconds; one insert costs nothing beside it.
-    /// A failure to record must not cost the answer: it is logged and the
-    /// response goes out without an id.
+    /// Records only from the UI and with feedback on; a failure is logged and the answer still goes
+    /// out.
     async fn record_ask(
         &self,
         req: &AskRequest,
@@ -1074,16 +749,7 @@ impl Core {
         mut response: AskResponse,
         uncovered: &[String],
     ) -> Result<AskResponse> {
-        // `Ui` and `Cli`. Both are a person composing a question in a place
-        // where they will read the answer; neither is an agent on a token. A
-        // shell question was recorded nowhere at all until now, which made the
-        // strongest statement of a need engram can receive the one thing it
-        // never wrote down.
-        //
-        // A CLI ask carries no `event_id` back to the judging view, and that
-        // stays true: recorded and unjudged is a coherent state. The sweep
-        // learns what was needed; the judge still grades only answers somebody
-        // saw somewhere they could grade them.
+        // A person composing a question where they will read the answer; never an agent on a token.
         if !(self.learn.enabled && matches!(origin.door, Door::Ui | Door::Cli | Door::App)) {
             return Ok(response);
         }
@@ -1102,13 +768,10 @@ impl Core {
             abstained: response.abstained,
             dropped: response.dropped,
             truncated: response.truncated,
-            // Already computed for the badge; read here as a local rather than
-            // recomputed, so the number recorded is the number shown.
+            // The number recorded is the number shown.
             unsupported: response.unsupported.len(),
-            // What the answer referenced, not what it was shown. The sweep
-            // reads these as engagement, and every excerpt that fit the window
-            // would otherwise count as one — enough, on its own, to arm a
-            // generation off a question the model declined to answer.
+            // What the answer referenced, not what it was shown: the sweep reads these as
+            // engagement.
             citations: {
                 let used = check::referenced(&response.answer, response.citations.len());
                 response
@@ -1123,10 +786,7 @@ impl Core {
                     .collect()
             },
         };
-        // The same distinction, read the other way: what the answer used was
-        // engaged, and that is the one signal a question honestly gives about
-        // an artifact. Off the recording path's success — an insert that fails
-        // does not unmake the use.
+        // Off the recording path's success: an insert that fails does not unmake the use.
         self.mark_artifacts_cited(
             ask.citations
                 .iter()
@@ -1136,18 +796,8 @@ impl Core {
         );
         match self.store.record_ask(ask).await {
             Ok(id) => {
-                // The subjects the plan named and the base could not cover,
-                // written as gaps of their own. They hang off the question,
-                // so this runs only where the question was recorded — the
-                // same door, in the same breath, and never for an ask whose
-                // insert failed and has no row to hang from.
-                //
-                // The vector costs nothing: the fan-out embedded each subject
-                // in order to search for it, and the query cache still holds
-                // what it embedded. A subject whose vector has fallen out of
-                // the cache is stored without one and skipped by every reader
-                // here — the fact that it was named is still worth more than
-                // the row is worth refusing.
+                // Only where the question was recorded, as gaps hang off it; the vector comes from
+                // the query cache.
                 for subject in uncovered {
                     let vec = self.cached_query_vector(subject).unwrap_or_default();
                     if let Err(e) = self
@@ -1166,36 +816,9 @@ impl Core {
     }
 }
 
-/// How many tokens of excerpt one answer may be built from.
-///
-/// Reserve what the completer will ask for, not a constant. The endpoint
-/// counts the prompt and the requested ceiling against one window, so
-/// packing excerpts up to `context - 1024` while the call goes out demanding
-/// `max_output_tokens` of reply is a request the server refuses outright —
-/// and it refuses it on precisely the queries that retrieved enough to be
-/// worth answering.
-///
-/// The margin comes off the top too. `ceiling_for_prompt` holds back
-/// headroom for the estimate being an estimate, and it holds it back out of
-/// the *reply*: packing up to `max_output_tokens` exactly and then being
-/// charged that margin is how a 32k window with a 2k ceiling ends up asking
-/// for one token of answer. Reserving it here is what makes the two halves
-/// agree.
-///
-/// Never more than half the window, though. The reserve is configuration and
-/// the window is configuration, and nothing makes the two agree: a role
-/// whose ceiling is its whole context (4096 and 4096, which is an ordinary
-/// shape for a local model) reserves everything, packs nothing, and answers
-/// "too large for the context window" to every question ever asked without
-/// once calling the model. Half a window of excerpts and half a window of
-/// answer is a worse answer than the operator asked for; no answer is not an
-/// answer.
-///
-/// One rule for the answer call and the follow-up call, which packs the same
-/// excerpts against a different model under a different system prompt. The
-/// half-window clamp was itself a fix; a rule kept in two places gets tuned in
-/// one and leaves the other refusing the second round for size on exactly the
-/// questions worth it.
+/// Reserves the completer's output ceiling plus `ceiling_for_prompt`'s margin, at most half the
+/// window, so a role whose ceiling equals its context still packs something. Shared by the answer
+/// and plan calls.
 pub(super) fn excerpt_budget(
     model: &dyn crate::infer::Completer,
     counter: &crate::infer::budget::TokenCounter,
@@ -1246,9 +869,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_question_holds_the_interactive_lane_for_its_whole_answer() {
-        // Priority, not preemption: the worker must not put a new window in
-        // front of someone who is waiting. What it cannot do is stop the window
-        // already running, which is the ~73s ceiling this deliberately accepts.
+        // Priority, not preemption: the window already running (~73 s) is not stopped.
         let mut core = test_core().await;
         let probe = std::sync::Arc::new(LaneProbe {
             gate: std::sync::Arc::clone(&core.gate),
@@ -1279,8 +900,6 @@ mod tests {
 
     #[tokio::test]
     async fn asking_a_question_leaves_the_lane_free_afterwards() {
-        // The lease is RAII, so the interesting failure is one that leaks: a
-        // single question would then hold background work off forever.
         let core = test_core().await;
         seed(&core, 3, 4).await;
 
@@ -1398,9 +1017,7 @@ mod tests {
     async fn a_planned_subject_the_base_could_not_cover_becomes_a_gap() {
         let (mut core, _) = core_with_planner(Some(r#"{"need": ["mounting an E01"]}"#)).await;
         core.learn.enabled = true;
-        // A base where nothing matches closely. Cosine tops out at 1, so every
-        // candidate is under this — which is the situation the kind exists for,
-        // stated as a threshold rather than hoped for from a fake embedder.
+        // Cosine tops out at 1, so every candidate is under this.
         core.set_weak_below(1.0);
         core.ask(&req("chunk"), Door::Ui.by("me")).await.unwrap();
 
@@ -1503,8 +1120,7 @@ mod tests {
                     v[0] = t.contains("alpha") as u8 as f32;
                     v[1] = t.contains("beta") as u8 as f32;
                     v[2] = t.contains("gamma") as u8 as f32;
-                    // Never the zero vector: a cosine against nothing is not a
-                    // ranking, it is a division the store would have to guess at.
+                    // Never the zero vector: a cosine against nothing is not a ranking.
                     v[3] = (v[0] == 0.0 && v[1] == 0.0 && v[2] == 0.0) as u8 as f32;
                     v
                 })
@@ -1740,10 +1356,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_model_is_shown_the_caveats_of_every_excerpt() {
-        // A caveat is the condition under which an artifact does not apply, and
-        // an answer that quotes a destructive command without it is worse than
-        // no answer. Caveats are not in the vector payload, so this asserts the
-        // store lookup that puts them back.
         let mut core = test_core().await;
         core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: None,
@@ -1843,16 +1455,12 @@ mod tests {
             let completer = std::sync::Arc::new(Ceilinged::new(context, max_output));
             let mut core = test_core().await;
             core.completer = Some(completer.clone());
-            // Excerpts sized against the window, so packing actually fills it
-            // in every case — a prompt that leaves the window half empty tests
-            // nothing about what happens when it does not.
+            // Sized so packing actually fills the window in every case.
             seed(&core, 20, context / 20).await;
             let mut r = req("anything");
             r.limit = Some(20);
             let out = core.ask(&r, Door::Api).await.unwrap();
 
-            // The echoed prompt is what actually went to the endpoint, and the
-            // recorded ceiling is what the call asked for on top of it.
             let prompt = core.counter.count(&out.answer) + core.counter.count(ASK_SYSTEM);
             let ceiling = completer.ceiling();
             assert!(
@@ -1867,11 +1475,8 @@ mod tests {
                  which is not a ceiling the role allows"
             );
 
-            // And it is a *usable* ceiling, not merely a positive one. The
-            // reserve is what packing set aside for the answer; the answer must
-            // get it back, less the margin held for the estimate. Asserting
-            // only `> 0` let a ceiling of 1 — an empty reply, every time —
-            // through at the very ordinary 32k/2k shape.
+            // Usable, not merely positive: `> 0` let a ceiling of 1 through at the ordinary 32k/2k
+            // shape.
             let floor = max_output.min(context / 2) - MAX_HEADROOM_TOKENS;
             assert!(
                 ceiling >= floor,
@@ -1950,9 +1555,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_cliff_cuts_the_excerpts_the_window_would_have_kept() {
-        // Five small excerpts and a whole context window to put them in: the
-        // budget can cut nothing here, so anything missing from the citations
-        // was cut by the cliff and by nothing else.
+        // The budget cuts nothing here, so anything missing was cut by the cliff.
         let mut core = test_core().await;
         core.reranker = Some(std::sync::Arc::new(Cliffed));
         seed(&core, 5, 4).await;
@@ -1970,9 +1573,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Counted over the ranked citations only. Reached neighbours are in
-        // this list too and are supposed to be: they never competed, so the
-        // cliff has nothing to say about them. `via` is what tells them apart.
+        // Reached neighbours never competed; `via` tells them apart.
         assert_eq!(
             ranked(&out),
             3,
@@ -2066,10 +1667,7 @@ mod tests {
             assert!(!c.past_cliff && !c.primed && !c.weak);
         }
 
-        // The cap, asserted where it is actually spent. `the_neighbour_cap_holds`
-        // pins `append_neighbours` in isolation; nothing else pins the call
-        // site, so a wiring bug admitting fifty neighbours would pass every
-        // other test here.
+        // The only test of the call site's cap.
         assert!(
             out.citations.len() <= ranked(&out) + retrieve::NEIGHBOUR_MAX,
             "{} citations against {} ranked hits is past the cap",
@@ -2110,17 +1708,12 @@ mod tests {
     #[tokio::test]
     async fn an_artifact_linked_to_a_hit_is_reached_where_adjacency_cannot_go() {
         let mut core = test_core().await;
-        // Links are learned from recorded searches, and `test_core` records
-        // none, so the reach stays shut until the layer is switched on.
+        // `test_core` records no searches, so the reach stays shut until the layer is on.
         core.learn.enabled = true;
         seed(&core, 5, 4).await;
 
-        // A second corpus, on a subject the query does not ask about. Its raw
-        // text has to differ from `seed`'s: `insert_corpus` deduplicates on the
-        // document's shingle signature, so re-using "raw" hands back the corpus
-        // that is already there and the artifact below lands beside the seeded
-        // ones with a colliding ordinal — reachable by adjacency, which is
-        // precisely what this test must rule out.
+        // Different raw text: `insert_corpus` dedups on the shingle signature, which would make it
+        // adjacent.
         let other = core
             .store
             .insert_corpus("a different document entirely", "web", None)
@@ -2149,14 +1742,10 @@ mod tests {
             )
             .await
             .unwrap();
-        // Deliberately never embedded. It has no vector, so retrieval provably
-        // cannot return it however the fake embedder happens to score things —
-        // structure is the only route to it, which is the whole claim here.
+        // No vector, so retrieval cannot return it: structure is the only route.
         let far = made[0].id.clone();
 
-        // Linked to every artifact of the first corpus, so whichever of them
-        // place highest, the anchors have somewhere to hop. Weight well above
-        // `associate.show_min`, at the clock the reach decays to.
+        // Weight well above `associate.show_min`, at the clock the reach decays to.
         let now = crate::core::search::now_secs();
         for id in core.store.list_all_artifact_ids().await.unwrap() {
             core.store
@@ -2262,8 +1851,6 @@ mod tests {
             "the stored citations must be exactly the excerpts the model saw, in order"
         );
         assert!(!out.abstained);
-        // The vector it retrieved with travels with it, so a gap can be
-        // clustered later without re-embedding.
         let dim: i64 = sqlx::query_scalar!("SELECT vec_dim FROM ask_events WHERE id = ?", &id)
             .fetch_one(&core.store.pool)
             .await
@@ -2273,9 +1860,6 @@ mod tests {
 
     #[tokio::test]
     async fn only_the_artifacts_an_answer_cited_are_engaged_by_it() {
-        // `used` already separates shown from used, and an artifact the model
-        // cited was used. Every excerpt that merely fit the window is not — the
-        // association layer already learns from display.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
@@ -2292,8 +1876,7 @@ mod tests {
             .iter()
             .map(|c| c.artifact_id.clone())
             .collect();
-        // Every excerpt was retrieved by the same searches, so they share a
-        // baseline and the only difference left between them is the citation.
+        // Same searches, same baseline: the only difference left is the citation.
         let act = core.store.activation_of(&ids).await.unwrap();
         let of = |id: &String| act.get(id).map(|(a, _, _)| *a).unwrap_or(0.0);
         let uncited = of(&ids[1]);
@@ -2322,12 +1905,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_mcp_or_api_ask_engages_nothing_by_citing_it() {
-        // The recorded decision about what `/mcp` counts as use: nothing. Its
-        // search already bumps activation like every other door, and counting
-        // what it returned as engagement on top would only relearn what
-        // association learns from display. The citation is the one honest
-        // signal a question gives, and it is only recorded at the web door —
-        // so the bump rides with the recording rather than around it.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
@@ -2388,9 +1965,8 @@ mod tests {
     async fn an_answer_that_opens_with_the_sentinel_is_flagged_abstained() {
         let mut core = test_core().await;
         core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            // Carries a literal no excerpt does, so the abstention branch of
-            // the check is what keeps `unsupported` empty below rather than the
-            // reply happening to have nothing in it.
+            // Carries a literal no excerpt does, so the abstention branch is what keeps
+            // `unsupported` empty.
             reply: Some(
                 "Not in the knowledge base. The excerpts cover `chunk 0` only, not `wipefs --all /dev/sdX`."
                     .into(),
@@ -2427,8 +2003,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_answer_quoting_only_its_excerpts_reports_nothing_unsupported() {
-        // The common case, and the one that must not badge every answer: the
-        // seeded artifacts read "chunk 0 filler filler …".
         let mut core = test_core().await;
         core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("The excerpt says `chunk 0 filler` and nothing else.".into()),
@@ -2441,9 +2015,6 @@ mod tests {
     #[tokio::test]
     async fn the_collected_answer_equals_the_streamed_one() {
         let mut core = test_core().await;
-        // A cliff and a reach, so the two doors are compared on an ask that
-        // exercises everything between retrieval and the answer rather than on
-        // the shortest path through it.
         core.reranker = Some(std::sync::Arc::new(Cliffed));
         seed(&core, 5, 4).await;
 
@@ -2482,8 +2053,7 @@ mod tests {
     #[tokio::test]
     async fn citations_arrive_before_the_first_token_and_done_is_last() {
         let mut core = test_core().await;
-        // Several deltas rather than one, so "before the first token" is a
-        // claim about ordering and not about there being a single token.
+        // Several deltas, so "before the first token" is a claim about ordering.
         core.completer = Some(std::sync::Arc::new(Chatty { parts: 3 }));
         seed(&core, 3, 4).await;
 
@@ -2621,8 +2191,7 @@ mod tests {
         }));
         seed(&core, 3, 4).await;
 
-        // Read as far as the first token, so the call is provably in flight
-        // rather than merely spawned, and then leave.
+        // Read to the first token, so the call is in flight rather than merely spawned.
         {
             let s = core.ask_events(&req("chunk"), Door::Ui.by("me"));
             tokio::pin!(s);
@@ -2646,16 +2215,11 @@ mod tests {
              it was taken for is still running"
         );
 
-        // And it is a lease, not a block: once the call it was taken for really
-        // has ended, the worker gets its turn.
         release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(5), core.gate.background())
             .await
             .expect("the lane was never released after the call ended");
 
-        // Nothing recorded it, and nothing recorded it twice. Whether an answer
-        // nobody read should be stored at all is a decision for the door that
-        // streams, not a side effect of this one.
         assert_eq!(core.store.ask_stats().await.unwrap().asked, 0);
     }
 
@@ -2702,7 +2266,6 @@ mod tests {
     #[tokio::test]
     async fn consecutive_passages_are_stitched_into_one_excerpt_and_every_id_is_cited() {
         let mut core = test_core().await;
-        // One corpus, one segment, three abutting passages, all hits.
         let src = core
             .store
             .insert_corpus("l1\nl2\nl3", "web", None)
@@ -2736,8 +2299,6 @@ mod tests {
         for c in &made {
             crate::jobs::embed::run(&core, &c.id).await.unwrap();
         }
-        // A completer that keeps its prompts, so the test can read what the
-        // model was shown.
         let probe = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
             "See [1].".into(),
         ]));
@@ -2757,7 +2318,6 @@ mod tests {
             .unwrap();
 
         let prompt = probe.prompts().pop().expect("the model was called");
-        // One excerpt carries the stitched text in document order, once.
         assert!(
             prompt.contains("first part\nsecond part\nthird part"),
             "{prompt}"
@@ -2767,7 +2327,6 @@ mod tests {
             2,
             "heading once in the excerpt, once in the question: {prompt}"
         );
-        // Every constituent is still a citation.
         let cited: std::collections::HashSet<String> = out
             .citations
             .iter()
@@ -2780,16 +2339,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_stitched_run_is_numbered_and_headed_by_where_it_starts() {
-        // The run's text, its heading, and the number the rail resolves to an
-        // artifact all have to name the same passage: the one the text opens
-        // with. Numbering the block after whichever member ranked highest put
-        // one artifact's heading over another artifact's rail row, and linked
-        // a claim to a page that does not hold the words.
-        //
-        // `stitch_passages` directly rather than through `ask`: what this is
-        // about is a run whose best hit is not its first line, and asking the
-        // retrieval to produce that ordering is asking it for something it does
-        // not promise. Handed in, it is the case every time.
+        // Called directly: retrieval does not promise a run whose best hit is not its first line.
         let core = test_core().await;
         let src = core
             .store
@@ -2821,8 +2371,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The second passage ranked first: it is the anchor, and it keeps the
-        // block's number — but not the heading, which belongs to line 1.
         let hit =
             |c: &crate::store::artifacts::Chunk, score: f32| crate::core::search::SearchResult {
                 artifact_id: c.id.clone(),
@@ -2839,8 +2387,6 @@ mod tests {
         ];
         core.stitch_passages(&hits, &mut blocks).await;
 
-        // The text goes under the number of the passage it starts with —
-        // `made[0]`, which retrieval placed second — heading and all.
         assert!(
             blocks[1].contains("the tail of the section above\nrotate the offsite copy weekly"),
             "stitched in document order: {}",
@@ -2851,8 +2397,6 @@ mod tests {
             "the block is numbered and headed by where the text begins: {}",
             blocks[1]
         );
-        // And the other member keeps its slot, pointing at it. A claim drawn
-        // from `made[1]` can be cited as [1] and still resolve to `made[1]`.
         assert_eq!(
             blocks[0], "[1] (continues [2])",
             "every constituent keeps a citable number: {}",
@@ -2927,7 +2471,6 @@ mod tests {
         let q = req("how long is backup retention");
         let ask = || core.ask(&q, Door::Api);
 
-        // Before the pair is filed, the question reaches A and only A.
         let before = ask().await.unwrap();
         assert!(
             before.citations.iter().all(|c| c.artifact_id != b),
@@ -2946,8 +2489,6 @@ mod tests {
         assert_eq!(partner.via.as_deref(), Some(a.as_str()));
         assert_eq!(partner.reason.as_deref(), Some("states this differently"));
 
-        // Each side names the other by the number it carries in this prompt,
-        // and each header carries the day its note was written.
         let prompt = probe.prompts().pop().expect("the model was called");
         assert!(
             prompt.contains("Caveat: excerpt [2] states this differently: 30 days there, 14 here"),
@@ -3021,8 +2562,6 @@ mod tests {
             blocks[0]
         );
 
-        // Room for the first excerpt and not the second: the caveat must not
-        // point at a number the prompt does not carry.
         let first = core.excerpts(&hits[..1], 0).await;
         let budget = core.counter.count(&first[0]);
         let (blocks, kept) = core.packed_excerpts(&hits, budget).await;

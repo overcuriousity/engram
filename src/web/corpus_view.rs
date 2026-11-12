@@ -1,10 +1,5 @@
-//! How the right-hand pane gets at the text a chunk claims to come from.
-//!
-//! A text source is answered by its lines; an image source by the model's
-//! reading of the picture, labelled as such; a PDF source by docling's
-//! extraction of it, labelled as such. All three count lines. `page 42` would
-//! be a nicer label for a PDF and a second coordinate system beside every
-//! stored span, and the spec rejected it on those terms.
+//! The text a chunk claims to come from: a text source's lines, an image's reading, a PDF's extraction.
+//! All three count lines; `page 42` would be a second coordinate system beside every span.
 
 pub use crate::core::coverage::{Band, CorpusLine, bands};
 use crate::store::artifacts::CorpusSpan;
@@ -12,22 +7,15 @@ use crate::store::corpora::Corpus;
 
 /// Lines shown without a span are context, not the claim itself.
 const HEADLESS_PREVIEW_LINES: usize = 40;
-/// `Default` is the empty slice, which is what a merged artifact has: it
-/// belongs to no corpus, so there are no lines to show beside it and no range
-/// to name. The detail pane renders its sources there instead.
+/// `Default` is the empty slice a merged artifact has: no corpus, no lines.
 #[derive(Default)]
 pub struct CorpusSlice {
     pub lines: Vec<CorpusLine>,
-    /// What to call this range in the UI: `lines 118–141`, or
-    /// `extraction lines 118–141` where the lines are not the source's own.
+    /// `lines 118–141`, or `extraction lines 118–141` where the lines are not the source's own.
     pub label: String,
 }
 
-/// The lines of `source` around `span`, labelled for the pane. Without a span
-/// the opening of the source is shown as context.
-///
-/// One span through `slice_over`, which is where the work happens: there is one
-/// definition of what a slice is and this is the way into it.
+/// Without a span the opening of the source is shown as context.
 pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> CorpusSlice {
     match span {
         Some(sp) => slice_over(source, std::slice::from_ref(sp), context),
@@ -35,19 +23,9 @@ pub fn slice(source: &Corpus, span: Option<&CorpusSpan>, context: usize) -> Corp
     }
 }
 
-/// The lines of `source` covering a run of spans, labelled for the pane.
-///
-/// `in_span` is true for a line inside *any* of the spans. What falls between
-/// two of them is context, and is marked as such: claiming those lines were
-/// read would be the one dishonesty this column must not commit.
-///
-/// An empty run is the headless case — no span, so the opening of the source
-/// stands as context.
+/// `in_span` is true inside any of the spans; lines between them are context, never claimed as read.
 fn slice_over(source: &Corpus, spans: &[CorpusSpan], context: usize) -> CorpusSlice {
-    // An image corpus's lines are the model's reading of the picture, and a
-    // PDF's are docling's extraction of it. The label says so in both cases: a
-    // span into either is a claim about what was written down, not about what
-    // the source showed.
+    // An image's lines are a model's reading and a PDF's are docling's; the label says so.
     let written_down = match source.origin.as_str() {
         crate::core::ingest::ORIGIN_IMAGE => Some("transcription"),
         crate::core::ingest::ORIGIN_PDF => Some("extraction"),
@@ -89,9 +67,7 @@ fn slice_over(source: &Corpus, spans: &[CorpusSpan], context: usize) -> CorpusSl
 
     CorpusSlice {
         lines,
-        // Singular when the run covers one line. "lines 576–576" is a range with
-        // one thing in it, and a pane that says it has not checked what it is
-        // about to claim.
+        // Singular for one line: "lines 576–576" reads as unchecked.
         label: if first == last {
             format!(
                 "{}line {}",
@@ -129,8 +105,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_one_line_span_is_not_a_range() {
-        // "lines 576–576" is a range with one thing in it, which reads as a
-        // system that did not check what it was about to say.
         let src = a_corpus("l1\nl2\nl3").await;
         let slice = slice(
             &src,
@@ -187,8 +161,6 @@ mod tests {
     #[tokio::test]
     async fn a_run_of_spans_is_one_slice_with_no_line_printed_twice() {
         let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8").await;
-        // Adjacent passages: 2–3 and 4–5. With one line of context each, the
-        // two single slices would both carry line 3 and line 4.
         let slice = slice_over(&src, &[span(2, 3), span(4, 5)], 1);
 
         let numbers: Vec<i64> = slice.lines.iter().map(|l| l.number).collect();
@@ -261,9 +233,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pdf_corpus_labels_its_lines_as_an_extraction() {
-        // The lines belong to docling, not to the PDF's layout, and a span
-        // into them is a claim about what was extracted. Same move as the
-        // image arm's `transcription`, same reason.
         let s = crate::store::Store::memory().await.unwrap();
         let src = s
             .insert_attached_corpus(

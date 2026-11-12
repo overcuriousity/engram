@@ -1,9 +1,5 @@
-//! What the terminal door looks like when a person is watching.
-//!
-//! Three rules make it safe to be alive: it never survives a pipe, it never
-//! delays a result, and it never says by colour or by glyph alone what it must
-//! say in words. Everything below is written to those; a change that breaks one
-//! of them is a change to revert rather than to tune.
+//! What the terminal door looks like when a person is watching. It never survives a pipe,
+//! never delays a result, and never says by colour or glyph alone what it must say in words.
 
 use crate::cli::args::{CliArgs, Fancy};
 use crate::core::search::SearchResult;
@@ -11,64 +7,35 @@ use crate::core::search::SearchResult;
 #[derive(Clone, Copy)]
 pub struct Face {
     pub on: bool,
-    /// The SGR escapes. Separate from `on` because `NO_COLOR` is a statement
-    /// about ink and nothing else: the lamps, the upload track and the layout
-    /// are not colour, and folding the two together took the whole progress
-    /// display away from everyone who had ever set the variable.
+    /// The SGR escapes; apart from `on` because `NO_COLOR` is about ink, not lamps or layout.
     pub color: bool,
     pub unicode: bool,
     pub width: usize,
 }
 
-/// The eight rungs of a score bar, and their ASCII understudies. The same eight
-/// steps either way, so the shape of a list does not change with the locale.
+/// The eight rungs of a score bar and their ASCII understudies, so the list keeps its shape.
 const BLOCKS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// Display lines of a hit's text the ranked list spends.
-///
-/// Two was the spec's number and it was too few to recognise a passage by:
-/// ten hits of one line each is a list of ids. Four is still a list — ten hits
-/// fit a screen — and it is enough text to tell two passages of one document
-/// apart, which is the decision the list exists to support.
+/// Display lines of a hit's text: enough to tell two passages of one document apart.
 const EXCERPT_LINES: usize = 4;
 const ASCII_BLOCKS: [char; 8] = ['.', '.', ':', ':', '-', '=', '#', '#'];
 
-/// Cells in a hit's score bar. One block said "this one ranks lower than that
-/// one" only to an eye that went looking; seven say it across the list at a
-/// glance, and cost six columns.
 const BAR_CELLS: usize = 7;
 
-/// `s`, or as much of it as `room` holds with an ellipsis for the rest.
-///
-/// A `room` of one or zero is a real answer rather than a reason to give up: a
-/// narrow terminal is the case clipping exists for, and returning the whole
-/// string there put the one line nobody can widen over the edge.
-///
-/// The marker comes off the locale like every other glyph in this file. It was
-/// a hardcoded `…`, which is one character of mojibake at the end of a row on
-/// the terminal that asked for the ASCII shapes — and this is now on the two
-/// paths that clip most, a hit's title and an ask's lamp line.
+/// `s`, or as much as `room` holds plus the locale's ellipsis; a room of one or zero still clips.
 pub(crate) fn clip(s: &str, room: usize, unicode: bool) -> String {
     if s.chars().count() <= room {
         return s.to_string();
     }
     let more = if unicode { "…" } else { "..." };
     match room.checked_sub(more.chars().count()) {
-        // Narrower than the marker itself: as much of it as fits, which still
-        // says there is more and still stops at the edge.
+        // Narrower than the marker: as much of it as fits.
         None => more.chars().take(room).collect(),
         Some(keep) => s.chars().take(keep).chain(more.chars()).collect(),
     }
 }
 
-/// Bold, dim, and the four hues — the whole vocabulary, written out rather than
-/// pulled from a styling crate: seven codes used through one function do not
-/// need a dependency's opinion.
-///
-/// The ANSI 8 and nothing else. No 256-colour indices and no RGB: the terminal
-/// belongs to the person in front of it, their theme has already mapped these
-/// eight to inks that compose on their ground, and a hex value lifted from
-/// `app.css` composes on `#0e1015` and nowhere else.
+/// The ANSI 8 only: the person's theme maps these to inks that work on their ground.
 const BOLD: &str = "1";
 const DIM: &str = "2";
 const GREEN: &str = "32";
@@ -77,19 +44,8 @@ const YELLOW: &str = "33";
 const CYAN: &str = "36";
 const RESET: &str = "\u{1b}[0m";
 
-/// The locale that decides whether the glyphs are drawable, in POSIX order.
-///
-/// `LC_ALL` overrides everything; `LC_CTYPE` is the category that actually
-/// governs character handling; `LANG` is the fallback. Reading `LANG` alone
-/// was wrong in both directions: macOS commonly ships `LC_CTYPE=UTF-8` with
-/// no `LANG` at all, and those terminals were handed the ASCII understudies
-/// though they render `▇` and `┃` perfectly — while `LC_ALL=C` alongside a
-/// UTF-8 `LANG` got box-drawing it cannot show.
-///
-/// An empty value is unset, which is what the shell means by `LC_ALL=`.
-///
-/// `get` is passed rather than read, for the reason `decide` takes its facts
-/// as arguments: two tests must not race on one process's environment.
+/// The locale that decides whether glyphs are drawable, in POSIX order (`LC_ALL`, `LC_CTYPE`,
+/// `LANG`); empty is unset. `get` is passed in so tests do not race on the environment.
 pub fn locale_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
     ["LC_ALL", "LC_CTYPE", "LANG"]
         .into_iter()
@@ -97,30 +53,21 @@ pub fn locale_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
         .find(|v| !v.is_empty())
 }
 
-/// `locale_from`, against this process.
 pub fn locale() -> Option<String> {
     locale_from(|k| std::env::var(k).ok())
 }
 
-/// Where one background stage has got to.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Lamp {
-    /// Not reached yet.
     Waiting,
-    /// The stage the corpus is in right now.
     Running,
-    /// Finished, whether this client watched it happen or it was already past.
+    /// Finished, whether this client watched it happen or not.
     Done,
     /// Not finished, and not going to be.
     Stopped,
 }
 
-/// Every escape this module can emit, taken back out again.
-///
-/// Lives beside the writing of them rather than in a test module: two files
-/// assert "strip the escapes and the rendering is unchanged", and a second copy
-/// of this could fall behind the vocabulary and make both assertions weaker
-/// without either failing.
+/// Every escape this module can emit, taken back out; one copy so it cannot lag the vocabulary.
 #[cfg(test)]
 pub(crate) fn strip_sgr(s: &str) -> String {
     let mut out = String::new();
@@ -139,9 +86,7 @@ pub(crate) fn strip_sgr(s: &str) -> String {
     out
 }
 
-/// One lamp, drawn. A free function because the capture stages and the search
-/// stages are the same vocabulary seen at two doors, and two tables of glyphs
-/// would drift.
+/// One lamp, drawn; shared by the capture and search stages so the glyphs cannot drift.
 pub(crate) fn lamp_glyph(l: Lamp, unicode: bool) -> char {
     match (l, unicode) {
         (Lamp::Waiting, true) => '·',
@@ -155,13 +100,8 @@ pub(crate) fn lamp_glyph(l: Lamp, unicode: bool) -> char {
     }
 }
 
-/// Extraction, segmentation and embedding — the three stages `-c --watch`
-/// follows, drawn from the one status the server reports.
-///
-/// The mapping is a total function of the status rather than a tally this
-/// client keeps, because a client that starts watching late has missed the
-/// transitions and must still draw the truth: a corpus that is embedding was
-/// segmented, whoever saw it happen.
+/// Extraction, segmentation and embedding as `-c --watch` draws them: a function of the status,
+/// so a client that starts watching late still draws the truth.
 pub struct Lamps(pub [Lamp; 3]);
 
 impl Lamps {
@@ -175,18 +115,14 @@ impl Lamps {
             S::Segmented => [Done, Done, Waiting],
             S::Embedding => [Done, Done, Running],
             S::Ready => [Done, Done, Done],
-            // Stored on purpose without being segmented: the extraction is
-            // real and finished, and the two stages after it are not coming.
+            // Stored without segmenting: extraction finished, the next two are not coming.
             S::NeedsReview => [Done, Stopped, Stopped],
-            // Some of it embedded and some of it did not.
             S::Partial => [Done, Done, Stopped],
-            // Nothing can be claimed about a capture that failed.
             S::Failed => [Stopped, Stopped, Stopped],
         })
     }
 
-    /// One line, drawn and said. The words are the claim; the glyphs are how
-    /// you see at a glance which of the three is moving.
+    /// One line, drawn and said: the words are the claim, the glyphs a glance.
     pub fn render(&self, unicode: bool) -> String {
         ["extract", "segment", "embed"]
             .iter()
@@ -197,12 +133,7 @@ impl Lamps {
     }
 }
 
-/// A track that fills as a body is read out of this process and into the
-/// request.
-///
-/// It reports bytes handed to the transport, which is what this client can
-/// honestly know: it is not a claim about what the server has received, and
-/// the word beside it says `read` rather than `sent` for that reason.
+/// A track that fills as a body is handed to the transport (`read`, not a claim the server got it).
 pub struct Fill {
     on: bool,
     unicode: bool,
@@ -221,8 +152,7 @@ impl Fill {
         } else {
             ('#', '.')
         };
-        // A quarter of the terminal, so the track never crowds out the word
-        // beside it on a narrow window.
+        // A quarter of the terminal, so the track never crowds out its word.
         let cells = (self.width / 4).clamp(8, 40);
         let done = done.min(total);
         let lit = (cells * done) / total;
@@ -255,23 +185,14 @@ impl Fill {
     }
 }
 
-/// Taken back on drop, the way every line this file draws is.
-///
-/// The one caller draws from inside a request body, and a request that fails
-/// partway — a reset connection, a 413 mid-upload — drops that stream without
-/// ever reaching its own `clear`. The track was then left half-filled on stderr
-/// underneath the error message, describing an upload that did not happen.
+/// Taken back on drop: a request that fails mid-upload never reaches its own `clear`.
 impl Drop for Fill {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
-/// The three lamps, drawn in place while a capture is watched.
-///
-/// Holds no timer and starts no thread: it is redrawn from each poll the watch
-/// loop was already making, so nothing here can delay a result or outlive the
-/// loop that owns it.
+/// The three lamps, redrawn from each poll the watch loop makes: no timer, no thread.
 pub struct Track {
     on: bool,
     unicode: bool,
@@ -279,19 +200,12 @@ pub struct Track {
 }
 
 impl Track {
-    /// What this poll would draw, or `None` where the face is off.
-    ///
-    /// Separate from `show` because the rule worth asserting is that a pipe
-    /// receives nothing, and stderr is a poor place to assert it from.
+    /// What this poll would draw, or `None` where the face is off; testable apart from stderr.
     pub fn line(&self, status: crate::store::corpora::CorpusStatus) -> Option<String> {
         self.on.then(|| Lamps::of(status).render(self.unicode))
     }
 
-    /// Draw this poll's stage, over the last one.
-    ///
-    /// On stderr, and by rewriting the current line rather than on the
-    /// alternate screen: the ids `-c` prints on stdout have to stay in
-    /// scrollback and stay pipeable.
+    /// Draw this poll's stage over the last one, on stderr: the ids on stdout stay pipeable.
     pub fn show(&mut self, status: crate::store::corpora::CorpusStatus) {
         let Some(line) = self.line(status) else {
             return;
@@ -302,8 +216,7 @@ impl Track {
         self.drawn = true;
     }
 
-    /// Take the line back before anything else prints, or a result lands on
-    /// top of half a track.
+    /// Take the line back before anything else prints.
     pub fn clear(&mut self) {
         if self.drawn {
             use std::io::Write;
@@ -314,21 +227,8 @@ impl Track {
     }
 }
 
-/// The stages of one search, redrawn in place as the server names them.
-///
-/// Holds no timer and invents no frames: it is redrawn from events that
-/// arrived, so it cannot run ahead of the work. The stages themselves are the
-/// server's to name — whether a rerank happens is decided there — so a lamp is
-/// never drawn for work that is not going to run.
-///
-/// It held a quiet floor as well — a tenth of a second before anything was
-/// drawn, so a fast search did not flicker. Because a frame is the only thing
-/// that draws, and the floor was read at the frame's own instant, a search
-/// whose *first* stage was the slow one was suppressed at the only moment it
-/// would ever have been drawn: a cold embedder showed a blank terminal for as
-/// long as it took, which is the case the display exists for. A floor would
-/// have to be paired with a clock of its own to be safe, and the flicker it
-/// spared is worth less than the wait it hid.
+/// The stages of one search, redrawn only as the server's frames arrive. No quiet floor: it
+/// would hide the slow first stage, the case this display exists for.
 pub struct Stages {
     face: Face,
     names: Vec<crate::core::search::SearchStage>,
@@ -336,16 +236,11 @@ pub struct Stages {
 }
 
 impl Stages {
-    /// The stages this search said it will pass through.
     pub fn start(&mut self, names: &[crate::core::search::SearchStage]) {
         self.names = names.to_vec();
     }
 
     /// What this frame would draw, or `None` where the face is off.
-    ///
-    /// Separate from `show` for the reason `Track::line` is: the rule worth
-    /// asserting is what a person sees, and stderr is a poor place to assert
-    /// it from.
     pub fn at(&self, now: crate::core::search::SearchStage) -> Option<String> {
         use crate::core::search::SearchStage;
         if !self.face.on || self.names.is_empty() {
@@ -356,10 +251,7 @@ impl Stages {
             .names
             .iter()
             .map(|s| {
-                // Everything before the running stage is finished, and
-                // everything after it is not: a client that started watching
-                // late has missed the transitions and must still draw the
-                // truth, exactly as `Lamps::of` does.
+                // Before the running stage is done, after it is not, however late the watch began.
                 let lamp = match (*s == now, reached) {
                     (true, _) => {
                         reached = true;
@@ -376,9 +268,7 @@ impl Stages {
                 (lamp, name)
             })
             .collect();
-        // The room `show`'s two columns of indent leave. Counted before the ink
-        // goes on, because by then a count of characters is not a count of
-        // columns — the same reason `ask::within` clips where it does.
+        // Counted before the ink: escapes make a character count no column count.
         let room = self.face.width.saturating_sub(2);
         // Two columns for each lamp and its space, three between neighbours.
         let wide: usize = lamps
@@ -386,10 +276,7 @@ impl Stages {
             .map(|(_, n)| n.chars().count() + 2)
             .sum::<usize>()
             + 3 * lamps.len().saturating_sub(1);
-        // A terminal too narrow for the row gets the running stage alone, the
-        // way `divider` gives it the sentence without its rules. `show` erases
-        // one physical row, so a line that wrapped would leave its head above
-        // the results for good.
+        // Too narrow: the running stage alone; `show` erases one row, so a wrap would stay.
         if wide > room {
             let (lamp, name) = lamps
                 .iter()
@@ -401,17 +288,13 @@ impl Stages {
         Some(
             lamps
                 .iter()
-                // Drawn *and* said, like every other lamp in this file.
                 .map(|(lamp, name)| self.face.lamp_line(*lamp, name))
                 .collect::<Vec<_>>()
                 .join("   "),
         )
     }
 
-    /// Draw this frame's stage over the last one.
-    ///
-    /// On stderr and by rewriting the current line, for the reason `Track` is:
-    /// the results this precedes have to stay in scrollback and stay pipeable.
+    /// Draw this frame's stage over the last one, on stderr, so the results stay pipeable.
     pub fn show(&mut self, now: crate::core::search::SearchStage) {
         let Some(line) = self.at(now) else {
             return;
@@ -422,7 +305,6 @@ impl Stages {
         self.drawn = true;
     }
 
-    /// Take the line back before anything else prints.
     pub fn clear(&mut self) {
         if self.drawn {
             use std::io::Write;
@@ -433,51 +315,34 @@ impl Stages {
     }
 }
 
-/// Taken back on drop, the way `Fill` is: a search that fails partway leaves
-/// its error under a stage line describing work that stopped.
+/// Taken back on drop, as `Fill` is.
 impl Drop for Stages {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
-/// How many cells the streaming readout is wide, and how long each one covers.
-/// Ten hundred-millisecond buckets: a one-second window, which is short enough
-/// that a model pausing to think shows as the readout falling away.
+/// The streaming readout's cells and span: a one-second window, so a pause shows as a fall.
 const READOUT_CELLS: usize = 10;
 const READOUT_BUCKET_MS: u64 = 100;
 
-/// An activity readout of a thing genuinely happening: the rate at which the
-/// answer's own tokens are arriving.
-///
-/// Drawn at the cursor, immediately after the text written so far, and taken
-/// back before the next text is written. That is the only place a line can be
-/// redrawn without either disturbing what is already on the screen or moving to
-/// the alternate screen, and the answer has to stay in scrollback.
-///
-/// The amplitude is measured, never invented. A readout that animated on a
-/// timer would claim arrivals that did not happen, which is the one thing an
-/// activity display must not do.
+/// The rate the answer's own tokens arrive at, drawn at the cursor and taken back before the next
+/// text. Measured, never animated on a timer.
 pub struct Readout {
     on: bool,
     unicode: bool,
     width: usize,
-    /// When each recent token arrived. Pruned to the window on every push, so
-    /// this holds at most a second of arrivals however long the answer is.
+    /// When each recent token arrived, pruned to the window on every push.
     marks: Vec<u64>,
-    /// Column the cursor sits at, so the readout is dropped rather than wrapped
-    /// when the sentence being written has filled the line.
+    /// Cursor column, so the readout is dropped rather than wrapped on a full line.
     col: usize,
-    /// Cells drawn last time, to be walked back over before anything else.
+    /// Cells drawn last time, to be walked back over.
     tail: usize,
 }
 
 impl Readout {
-    /// The text to write for one arriving chunk: what was drawn last taken
-    /// back, the chunk itself, then the readout at the new cursor.
-    ///
-    /// `at_ms` is passed rather than read from the clock so the shape of a
-    /// stream can be tested without one.
+    /// The text for one arriving chunk: last drawing taken back, the chunk, the readout. `at_ms` is
+    /// passed so tests need no clock.
     pub fn push(&mut self, text: &str, at_ms: u64) -> String {
         if !self.on {
             return text.to_string();
@@ -489,9 +354,7 @@ impl Readout {
         let window = READOUT_CELLS as u64 * READOUT_BUCKET_MS;
         self.marks.retain(|m| at_ms.saturating_sub(*m) < window);
         let strand = self.strand(at_ms);
-        // Two spaces of gap, and only if the line has room. A readout that
-        // wrapped would push the answer's own text down a line and leave the
-        // walk-back pointing at the wrong row.
+        // Only if the line has room: a wrapped readout leaves the walk-back on the wrong row.
         if self.col + strand.chars().count() + 2 < self.width {
             out.push_str("  ");
             out.push_str(&strand);
@@ -500,8 +363,7 @@ impl Readout {
         out
     }
 
-    /// Take the readout back for good. Called before the sources are printed,
-    /// so nothing of it survives into the scrollback.
+    /// Take the readout back for good, before the sources print.
     pub fn finish(&mut self) -> String {
         self.erase()
     }
@@ -512,12 +374,10 @@ impl Readout {
         }
         let back = self.tail;
         self.tail = 0;
-        // Back over what was drawn, then erase to the end of the line: the
-        // cursor is left exactly where the answer's own text ended.
+        // Back over what was drawn, then erase to end of line.
         format!("\u{1b}[{back}D\u{1b}[K")
     }
 
-    /// Where the cursor ends up after this chunk is written.
     fn advance(&mut self, text: &str) {
         match text.rsplit_once('\n') {
             Some((_, after)) => self.col = after.chars().count(),
@@ -525,24 +385,13 @@ impl Readout {
         }
     }
 
-    /// One cell per bucket of the window, oldest on the left, each cell as tall
-    /// as that bucket was busy.
-    ///
-    /// Bucketed by each mark's age rather than by an absolute span per cell:
-    /// the same arithmetic done from the end, and it cannot go wrong at either
-    /// edge. Spans computed forwards left the newest cell covering
-    /// `[now - BUCKET, now)`, so the token that triggered this very redraw —
-    /// the one at `now` — fell outside every cell and the readout never showed
-    /// the character being printed beside it. Those spans also collapsed onto a
-    /// `saturating_sub` floor of zero for the first second of a stream, drawing
-    /// one bucket several times over.
+    /// One cell per bucket, oldest left, as tall as the bucket was busy; bucketed by age from `now`
+    /// so the token at `now` lands in the newest cell.
     fn strand(&self, now_ms: u64) -> String {
         let blocks = if self.unicode { BLOCKS } else { ASCII_BLOCKS };
         let mut counts = [0usize; READOUT_CELLS];
         for m in &self.marks {
-            // Age zero is the newest cell, so a mark landing exactly now is
-            // drawn now. A mark from ahead of `now` saturates to the same
-            // place, which is where a clock that stepped back belongs.
+            // A mark from ahead of `now` (a clock stepped back) saturates to the newest cell.
             let back = (now_ms.saturating_sub(*m) / READOUT_BUCKET_MS) as usize;
             if back < READOUT_CELLS {
                 counts[READOUT_CELLS - 1 - back] += 1;
@@ -558,11 +407,7 @@ impl Readout {
     }
 }
 
-/// The span of one ranked list, and where a score sits in it.
-///
-/// Its own type because "best full, worst empty" is only meaningful relative to
-/// a list, and because the degenerate list — one hit, or several that tied — is
-/// a division by zero that has to be answered somewhere.
+/// The span of one ranked list, and where a score sits in it; it answers the one-hit or tied case.
 struct Scale {
     low: f32,
     span: f32,
@@ -581,9 +426,7 @@ impl Scale {
         }
     }
 
-    /// Zero to seven. A list with no spread gets the top rung throughout:
-    /// nothing separates those hits, and drawing them all empty would say the
-    /// opposite of what a tie means.
+    /// Zero to seven; a list with no spread gets the top rung throughout, as a tie means.
     fn rung(&self, score: f32) -> usize {
         if !self.span.is_finite() || self.span <= f32::EPSILON {
             return 7;
@@ -593,23 +436,18 @@ impl Scale {
 }
 
 impl Face {
-    /// `is_tty`, `no_color` and `lang` are passed rather than read, so every
-    /// rule about when the face appears is testable in a process that has no
-    /// terminal and whose environment two tests would otherwise race on.
-    /// `lang` is the whole locale, resolved by `locale` — not `LANG`.
+    /// Facts passed in, not read, so every rule is testable without a terminal; `lang` is the whole
+    /// locale from `locale`, not `LANG`.
     pub fn decide(cli: &CliArgs, is_tty: bool, no_color: bool, lang: Option<&str>) -> Face {
         let on = match cli.fancy {
             Fancy::Always => true,
             Fancy::Never => false,
-            // `--json` is off as well: its reader is a machine even when a
-            // person is watching it arrive.
+            // `--json`'s reader is a machine even when a person watches.
             Fancy::Auto => is_tty && !cli.plain && !cli.json,
         };
         Face {
             on,
-            // Never ink where nothing is drawn at all, and never against
-            // `NO_COLOR` however the drawn form was asked for — `--fancy
-            // always` says draw, which is not the same as saying colour.
+            // `--fancy always` says draw, which is not saying colour.
             color: on && !no_color,
             unicode: lang.is_some_and(|l| l.to_ascii_uppercase().contains("UTF-8")),
             width: crossterm::terminal::size()
@@ -618,11 +456,7 @@ impl Face {
         }
     }
 
-    /// `s` wrapped in an SGR code, or `s` untouched.
-    ///
-    /// The one place in this file an escape is written, which is what makes
-    /// "strip every escape and the rendering is unchanged" a property the
-    /// tests can assert rather than a habit the next edit forgets.
+    /// `s` wrapped in an SGR code, or untouched: the one place an escape is written.
     pub fn ink(&self, code: &str, s: &str) -> String {
         match self.color {
             true => format!("\u{1b}[{code}m{s}{RESET}"),
@@ -640,17 +474,12 @@ impl Face {
         self.ink(RED, s)
     }
 
-    /// Something waiting on a person: a capture held for review, a partial
-    /// embedding.
+    /// Something waiting on a person: a capture held for review, a partial embedding.
     pub fn ink_caution(&self, s: &str) -> String {
         self.ink(YELLOW, s)
     }
 
     /// One lamp and the words beside it: `● retrieved 24, showing 6`.
-    ///
-    /// The glyph is how you see at a glance which of several is moving; the
-    /// words are the claim, and they are what survives a screenshot, a
-    /// redirected file and a terminal with no colour.
     pub fn lamp_line(&self, lamp: Lamp, said: &str) -> String {
         let cell = format!("{} {said}", lamp_glyph(lamp, self.unicode));
         let code = match lamp {
@@ -662,15 +491,8 @@ impl Face {
         self.ink(code, &cell)
     }
 
-    /// The ranked list, drawn.
-    ///
-    /// Falls straight through to the plain renderer when the face is off, so
-    /// there is exactly one code path a script can ever see.
-    ///
-    /// `elapsed_ms` is what the client timed for the whole round trip, and
-    /// `None` where it did not time one. Reported rather than computed here:
-    /// this function draws, and a duration it invented would be the first
-    /// invented thing in the file.
+    /// The ranked list, drawn; the plain renderer when the face is off. `elapsed_ms` is the
+    /// client's timing, `None` where it took none.
     pub fn render(&self, hits: &[SearchResult], elapsed_ms: Option<u128>) -> String {
         if !self.on {
             return crate::cli::search::render_plain(hits);
@@ -680,16 +502,11 @@ impl Face {
         } else {
             ('#', '.')
         };
-        // The list is its own scale. A score here is a fused rank rather than a
-        // probability — `search::prime` says so about the same numbers — and a
-        // whole list of them is routinely negative, so a fixed `0.0..=1.0`
-        // clamp put every hit on the bottom rung and the bar said nothing.
+        // The list is its own scale: scores are fused ranks, often all negative, not probabilities.
         let scale = Scale::over(hits);
         let mut out = String::new();
 
-        // Both halves measured: the count is the list, the time is what the
-        // client timed. The query is not echoed — a terminal already has the
-        // command that produced this two lines up, which a page does not.
+        // The query is not echoed: the terminal shows the command above.
         let mut head = format!(
             "{} hit{}",
             hits.len(),
@@ -702,32 +519,19 @@ impl Face {
 
         let mut said_cliff = false;
         for (i, h) in hits.iter().enumerate() {
-            // Said once, where the fall happens, and said in words. The `┃`
-            // trace this replaces marked it by breaking, which marks it for
-            // nobody reading a screenshot, a redirected file or a monochrome
-            // terminal — and once the sentence is on screen the trace beside it
-            // carries nothing at all.
+            // Said once, in words, where the fall happens.
             if h.past_cliff && !said_cliff {
                 said_cliff = true;
                 out.push_str(&format!("  {}\n\n", self.ink(CYAN, &self.divider())));
             }
-            // Zero to seven rungs becomes one to seven lit cells: every hit in
-            // this list was returned by the search, so no row is drawn empty —
-            // and only the bottom rung is lifted, because adding a cell to all
-            // of them pushed the top two together and lost the step between.
+            // Every hit was returned, so at least one cell; only the bottom rung is lifted.
             let lit = scale.rung(h.score).max(1);
             let bar: String = (0..BAR_CELLS)
                 .map(|c| if c < lit { full } else { empty })
                 .collect();
-            // Eight characters: what `last::resolve` already accepts as a
-            // prefix, and what a person can carry across a terminal by eye. The
-            // whole 26 crowded the title off its own line and named nothing the
-            // eight do not.
+            // Eight characters: what `last::resolve` accepts as a prefix.
             let short: String = h.artifact_id.chars().take(8).collect();
-            // 26, counted off the format below: two of indent, two of rank,
-            // two, the bar's seven, two, three, and the short id's eight. It
-            // was 25, and a title of exactly that length drew a line one column
-            // over the width, which every terminal wraps.
+            // 26 columns: indent 2, rank 2, gap 2, bar 7, gap 2, 3, short id 8. One less wraps.
             let title = clip(
                 h.title.as_deref().unwrap_or("(untitled)"),
                 self.width.saturating_sub(26),
@@ -742,18 +546,13 @@ impl Face {
                 i + 1,
                 self.ink(DIM, &short)
             ));
-            // Drawn *and* said, as the trace used to be: the words are what
-            // everyone else can still read.
             if let Some(said) = crate::cli::search::badges(h) {
                 out.push_str(&format!(
                     "      {}\n",
                     self.ink(DIM, &said.replace(", ", " · "))
                 ));
             }
-            // Four wrapped lines, not four source lines. A passage's own blank
-            // lines are structure in the document and nothing at all here, and
-            // a clip at the terminal's edge discarded the rest of a sentence
-            // rather than spending the next line on it.
+            // Four wrapped display lines, not four source lines.
             for line in
                 crate::cli::search::excerpt(&h.text, EXCERPT_LINES, self.width.saturating_sub(6))
             {
@@ -761,8 +560,7 @@ impl Face {
             }
             out.push('\n');
         }
-        // Named once, and only where it fits: a hint that wraps is worse than
-        // no hint.
+        // Only where it fits: a hint that wraps is worse than none.
         if !hits.is_empty() && self.width >= 60 {
             out.push_str(&format!(
                 "  {}\n",
@@ -772,10 +570,7 @@ impl Face {
         out
     }
 
-    /// The cliff, as a rule with the sentence in it, laid out to the width.
-    ///
-    /// A narrow terminal gets the sentence alone: the rules are what make it
-    /// read as a divider, and half a rule reads as damage.
+    /// The cliff, as a rule with the sentence in it; a narrow terminal gets the sentence alone.
     fn divider(&self) -> String {
         const SAID: &str = "relevance falls off here";
         let dash = if self.unicode { '─' } else { '-' };
@@ -789,10 +584,7 @@ impl Face {
         }
     }
 
-    /// A readout of the rate an answer's tokens are arriving at.
-    ///
-    /// Off where the face is off, and then `push` hands back the text
-    /// unchanged: `engram -a … | tee` writes the answer and nothing else.
+    /// A readout of the token rate; off with the face, so `-a … | tee` writes only the answer.
     pub fn readout(&self) -> Readout {
         Readout {
             on: self.on,
@@ -804,7 +596,6 @@ impl Face {
         }
     }
 
-    /// The stages of one search, for a client reading the streaming door.
     pub fn stages(&self) -> Stages {
         Stages {
             face: *self,
@@ -813,7 +604,6 @@ impl Face {
         }
     }
 
-    /// A track for a body being read into a request.
     pub fn fill(&self) -> Fill {
         Fill {
             on: self.on,
@@ -823,7 +613,6 @@ impl Face {
         }
     }
 
-    /// The three background stages, for a watch loop to redraw from its polls.
     pub fn track(&self) -> Track {
         Track {
             on: self.on,
@@ -942,9 +731,7 @@ mod tests {
     fn a_locale_that_does_not_say_utf8_gets_the_ascii_shapes() {
         let f = Face::decide(&always(), true, false, Some("C"));
         assert!(!f.unicode);
-        // A title long enough to be clipped. The fixture was three characters
-        // wide and never reached the clip, which is how a hardcoded `…` sat on
-        // the one path in this renderer that draws a glyph nobody chose.
+        // Long enough to be clipped, so the ellipsis glyph is exercised.
         let long = "Betriebssysteme fuer Server und die Dienste die auf ihnen laufen";
         let drawn = f.render(&[hit(long, 0.9, false, false)], None);
         assert!(
@@ -1053,9 +840,7 @@ mod tests {
             &[hit("a", 0.9, false, false), hit("b", 0.2, true, true)],
             None,
         );
-        // A mark made only of glyphs is a mark a screen reader, a screenshot
-        // and a monochrome terminal never reach. The trace that used to break
-        // here was exactly that, and the sentence says what it was for.
+        // A glyph-only mark never reaches a screen reader, a screenshot or a monochrome terminal.
         assert!(drawn.contains("relevance falls off here"), "{drawn}");
         assert!(
             !drawn.contains('┃') && !drawn.contains('╵'),
@@ -1102,7 +887,6 @@ mod tests {
         );
         assert!(drawn.contains("2 hits"), "{drawn}");
         assert!(drawn.contains("412 ms"), "{drawn}");
-        // A client that timed nothing says nothing about time.
         let untimed = f.render(&[hit("a", 0.9, false, false)], None);
         assert!(untimed.contains("1 hit"), "{untimed}");
         assert!(!untimed.contains(" ms"), "{untimed}");
@@ -1141,9 +925,7 @@ mod tests {
                 width,
             };
             for len in [width.saturating_sub(26), width, width + 20] {
-                // Wrappable words rather than one long run: the excerpt under
-                // the row is word-wrapped, and an unbreakable token would fail
-                // this on a line the title's budget does not govern.
+                // Wrappable words: an unbreakable token would fail on the excerpt, not the title.
                 let title: String = "wort ".repeat(width).chars().take(len.max(1)).collect();
                 let drawn = f.render(&[hit(&title, -4.18, false, false)], None);
                 for line in drawn.lines() {
@@ -1193,7 +975,6 @@ mod tests {
 
     #[test]
     fn a_face_that_is_off_renders_exactly_what_the_plain_renderer_does() {
-        // The boundary that keeps the plain form the only one a script sees.
         let hits = [hit("a", 0.9, false, false), hit("b", 0.2, true, true)];
         let off = Face::decide(&Default::default(), false, false, Some("en_US.UTF-8"));
         assert_eq!(
@@ -1240,7 +1021,6 @@ mod tests {
         );
         assert_eq!(super::locale_from(env(&[])), None);
 
-        // And the whole point of reading it: the glyphs follow.
         assert!(super::Face::decide(&always(), true, false, Some("UTF-8")).unicode);
         assert!(!super::Face::decide(&always(), true, false, Some("C")).unicode);
     }

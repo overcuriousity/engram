@@ -35,8 +35,7 @@ fn parse(presented: &str) -> Option<(&str, &str)> {
     (!id.is_empty() && !secret.is_empty()).then_some((id, secret))
 }
 
-/// Mint a token. The plaintext is returned exactly once; only the secret's
-/// argon2id hash is persisted. `user_agent` tells same-named tokens apart.
+/// The plaintext is returned once; only the argon2id hash is stored.
 pub async fn mint(
     control: &Control,
     name: &str,
@@ -68,14 +67,11 @@ pub async fn verify(control: &Control, presented: &str) -> Result<Identity> {
     Ok(Identity {
         subject: t.subject,
         email: None,
-        // A token is not a conversation. See `Identity::session`.
         session: None,
     })
 }
 
-/// Revoke one of `subject`'s tokens. `Error::NotFound` when that subject has
-/// no such token — the same answer a made-up id gets, so the route cannot be
-/// used to find out which ids belong to somebody else.
+/// `Error::NotFound` for another subject's id too, so the route cannot enumerate ids.
 pub async fn revoke(control: &Control, id: &str, subject: &str) -> Result<()> {
     if control.revoke_token(id, subject).await? {
         return Ok(());
@@ -83,7 +79,6 @@ pub async fn revoke(control: &Control, id: &str, subject: &str) -> Result<()> {
     Err(Error::NotFound)
 }
 
-/// Undo a revoke made in the last 30 days.
 pub async fn restore(control: &Control, id: &str, subject: &str) -> Result<()> {
     let since = crate::store::now() - RESTORE_WINDOW_SECS;
     if control.restore_token(id, subject, since).await? {
@@ -186,7 +181,6 @@ mod tests {
         let id = verify(&s, &plaintext).await.unwrap();
         assert_eq!(id.subject, "user-1");
 
-        // Only the hash is stored, and it is not the token.
         let stored = s.list_tokens("user-1").await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id, row.id);
@@ -273,7 +267,6 @@ mod tests {
         ));
         assert_eq!(verify(&s, &plaintext).await.unwrap().subject, "bob");
 
-        // And the owner still can.
         revoke(&s, &bobs.id, "bob").await.unwrap();
         assert!(matches!(
             verify(&s, &plaintext).await,
@@ -283,8 +276,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoking_an_id_that_does_not_exist_answers_like_someone_elses() {
-        // The two have to be indistinguishable, or the answer enumerates other
-        // people's token ids.
+        // Must be indistinguishable, or the answer enumerates other people's token ids.
         let s = Control::memory().await.unwrap();
         mint(&s, "one", "bob", None).await.unwrap();
         assert!(matches!(

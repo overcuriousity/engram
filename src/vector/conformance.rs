@@ -1,9 +1,5 @@
-//! What every `VectorStore` must do, whichever one it is.
-//!
-//! The stores differ in how they rank — `MemoryVectors` is dense only, Qdrant
-//! and SQLite fuse a lexical half in — so nothing here depends on the order of
-//! results where fusion could change it: each ranking case uses a query with
-//! no indexable term, which every store answers by cosine alone.
+//! What every `VectorStore` must do. Ranking cases use queries with no indexable term,
+//! which every store answers by cosine alone, since fusion differs.
 
 use super::sparse::SparseVector;
 use super::{LifecycleRow, SearchFilter, Touch, VectorPayload, VectorPoint, VectorStore};
@@ -33,7 +29,6 @@ pub fn point(
     }
 }
 
-/// A filter that hides nothing.
 pub fn wide() -> SearchFilter {
     SearchFilter {
         include_superseded: true,
@@ -479,9 +474,7 @@ pub async fn a_sample_is_capped_and_repeatable(s: &dyn VectorStore) {
     assert!(one.iter().all(|(_, v)| v.len() == DIM));
 }
 
-/// One `#[tokio::test]` per behaviour above, for the store `$make` builds.
-/// `$make` is an async expression; whatever it yields must deref to a store
-/// and is kept alive for the length of the test, so it may own a `TempDir`.
+/// `$make` is async and may own a `TempDir`; it lives for the length of the test.
 macro_rules! suite {
     ($make:expr) => {
         $crate::vector::conformance::suite!(@each $make;

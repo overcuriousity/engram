@@ -2,16 +2,10 @@
 
 use crate::error::{Error, Result};
 
-/// What this client calls itself. Version-stamped, so a server log says which
-/// build asked.
+/// Version-stamped, so a server log says which build asked.
 pub(crate) const USER_AGENT: &str = concat!("engram-cli/", env!("CARGO_PKG_VERSION"));
 
 /// The one HTTP client every verb uses.
-///
-/// It was six copies of these four lines — `capture` had it as a function and
-/// then re-inlined it in `watch`, and `ask`, `show`, `status` and both of
-/// `search`'s paths each wrote it out again. Here beside the address and the
-/// credential, which is the rest of what a request needs.
 pub(crate) fn client() -> Result<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -20,14 +14,12 @@ pub(crate) fn client() -> Result<reqwest::Client> {
 }
 
 pub struct Endpoint {
-    /// No trailing slash, so joining is concatenation and never guesswork.
+    /// No trailing slash, so joining is concatenation.
     pub url: String,
     pub token: String,
 }
 
-/// Never derived: a derived one prints the bearer token, and this struct ends
-/// up inside a `Result` that a panic message, a log line or a test failure will
-/// happily render. The address is the useful half and the credential is not.
+/// Not derived: a derived one prints the bearer token wherever a `Result` is rendered.
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Endpoint")
@@ -43,14 +35,8 @@ impl Endpoint {
         format!("{}/api/v1{path}", self.url)
     }
 
-    /// A request that got no answer, said as the address and what stood in the
-    /// way. reqwest's own `error sending request for url (…)` names the full
-    /// API path and hides the cause in its source chain, which is the one part
-    /// a person can act on: nothing listening, a name that does not resolve.
-    ///
-    /// The cause is read from the `io::Error` in that chain, not from text: an
-    /// OS error is said as its kind (`connection refused`, without the errno),
-    /// and anything else — a failed name lookup — as the error says itself.
+    /// A request that got no answer, said as the address and the `io::Error` cause from the chain;
+    /// reqwest's own message hides the cause.
     pub(crate) fn unreachable(&self, err: reqwest::Error) -> Error {
         if !(err.is_connect() || err.is_timeout()) {
             return Error::Validation(err.to_string());
@@ -73,7 +59,6 @@ impl Endpoint {
     }
 }
 
-/// The default location of the client's config, `~/.config/engram/cli.toml`.
 pub fn default_path() -> Option<std::path::PathBuf> {
     std::env::var_os("HOME").map(|h| {
         std::path::PathBuf::from(h)
@@ -83,13 +68,8 @@ pub fn default_path() -> Option<std::path::PathBuf> {
     })
 }
 
-/// Environment first, then the file.
-///
-/// `env` is a closure so the precedence is testable without mutating the
-/// process's own environment, which two tests running at once would race on.
-///
-/// Read with `toml_edit` rather than the `config` crate: a hand-edited file
-/// keeps its comments, and two keys do not justify a parser of their own.
+/// Environment first, then the file. `env` is a closure so tests need not mutate the process
+/// environment; `toml_edit` keeps a hand-edited file's comments.
 pub fn resolve(
     env: &dyn Fn(&str) -> Option<String>,
     file: Option<&std::path::Path>,
@@ -107,8 +87,7 @@ pub fn resolve(
 
     let url = env("ENGRAM_URL")
         .or(from_file.0)
-        // The address a single-operator install is reached at, which is the
-        // one this client is most often run beside.
+        // Where a single-operator install is reached.
         .unwrap_or_else(|| "http://127.0.0.1:8080".into());
     let token = env("ENGRAM_TOKEN")
         .or(from_file.1)
@@ -120,22 +99,12 @@ pub fn resolve(
     })
 }
 
-/// The client's config as it is shipped and as it is scaffolded, which are one
-/// text: the file in the release archive and the one written here cannot say
-/// different things about the same two keys.
-///
-/// `token` is left commented. A run before the user has edited it must report a
-/// missing token, not send `engram_…` to the server as though it were one.
+/// The client's config as shipped and as scaffolded, one text. `token` stays commented so an
+/// unedited file reports a missing token rather than sending the placeholder.
 const EXAMPLE: &str = include_str!("../../cli.example.toml");
 
-/// The one error a first-time user will certainly see, so it says what to do
-/// rather than what went wrong.
-///
-/// Where there is a path and nothing at it, the example is written there first
-/// and the error says so: the missing half is a token, and the rest of the file
-/// — which keys exist at all, what the URL defaults to — is not something the
-/// user should have to be told in prose. A write that fails is not reported;
-/// the reader wanted to search, and the way forward is the same either way.
+/// The error every first-time user sees, so it says what to do; scaffolds the example where
+/// nothing is at `file`, a failed write unreported.
 fn no_token(file: Option<&std::path::Path>) -> Error {
     if let Some(p) = file.filter(|p| !p.exists())
         && scaffold(p).is_ok()
@@ -156,12 +125,7 @@ fn no_token(file: Option<&std::path::Path>) -> Error {
     ))
 }
 
-/// Write the example config at `path`, creating the directory above it.
-///
-/// `0600` from the moment it exists, on the system where that means anything:
-/// the file is written empty of credentials and the next thing that happens to
-/// it is a user pasting a bearer token in, and a mode fixed after that is a
-/// mode fixed too late.
+/// Write the example config at `path`, `0600` from creation: a bearer token is pasted in next.
 fn scaffold(path: &std::path::Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -181,7 +145,7 @@ mod tests {
 
     #[tokio::test]
     async fn nothing_listening_is_said_as_the_address_and_the_refusal() {
-        // Bound and dropped, so the port is free and nothing answers on it.
+        // Bound and dropped, so nothing answers on the port.
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -303,7 +267,6 @@ mod tests {
     #[test]
     fn a_config_that_cannot_be_written_still_says_what_to_do() {
         let dir = tempfile::tempdir().unwrap();
-        // A file where the parent directory would have to be.
         let blocked = dir.path().join("wall");
         std::fs::write(&blocked, "").unwrap();
 

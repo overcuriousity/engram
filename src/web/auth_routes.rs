@@ -8,8 +8,7 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
-/// askama 0.16 no longer ships an axum integration crate, so templates get a
-/// thin wrapper of their own.
+/// askama 0.16 ships no axum integration, so templates get a thin wrapper.
 pub struct HtmlTemplate<T>(pub T);
 
 impl<T: Template> IntoResponse for HtmlTemplate<T> {
@@ -29,8 +28,7 @@ impl<T: Template> IntoResponse for HtmlTemplate<T> {
 struct LoginTemplate {
     oidc: bool,
     error: Option<String>,
-    /// The page that asked for this login, already checked by `safe_next`.
-    /// Handed back through the form so signing in returns there.
+    /// Already checked by `safe_next`; carried through the form so signing in returns there.
     next: Option<String>,
 }
 
@@ -40,18 +38,8 @@ struct LoginQuery {
     go: Option<String>,
 }
 
-/// Where to land after signing in, when the destination can be trusted.
-///
-/// The destination is user input on every path it travels — a query parameter
-/// the middleware wrote, a hidden form field, a value carried across an OIDC
-/// round trip — and a redirect that follows anything it is handed is a
-/// phishing hop off this site. Only a page of this UI is accepted, by the same
-/// rule `ui::ReturnTo` uses: inside `/ui/`, and never `/ui//host`, which a
-/// browser reads as protocol-relative and resolves somewhere else entirely.
-///
-/// `None` means the caller's default, which is the page the app starts on. The
-/// older `go=1` — a flag meaning "begin the login", not a place — lands there
-/// too, without a special case.
+/// Only a page inside `/ui/` and never `/ui//host`, which a browser reads as protocol-relative.
+/// `None` means the caller's default, which `go=1` also lands on.
 fn safe_next(raw: Option<&str>) -> Option<String> {
     match raw {
         Some(p) if p.starts_with("/ui/") && !p.starts_with("/ui//") => Some(p.to_string()),
@@ -59,7 +47,6 @@ fn safe_next(raw: Option<&str>) -> Option<String> {
     }
 }
 
-/// Where a login ends when nothing better was asked for.
 const AFTER_LOGIN: &str = "/ui/search";
 
 async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> Result<Response> {
@@ -72,9 +59,7 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
                 .ok_or_else(|| Error::Validation("oidc not configured".into()))?;
             if q.go.is_some() {
                 let (url, mut pending) = client.authorize_url()?;
-                // Held with the rest of the in-flight attempt: the provider
-                // hands back only `state`, so there is nowhere else to keep it
-                // across the round trip.
+                // The provider hands back only `state`, so the destination is kept with the pending attempt.
                 pending.next = safe_next(q.go.as_deref());
                 st.auth.pending.put(pending);
                 return Ok(Redirect::to(&url).into_response());
@@ -99,8 +84,7 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
 struct LoginForm {
     username: String,
     password: String,
-    /// The page that asked for the login. Survives a mistyped password: the
-    /// form is re-rendered with it, or one typo costs the destination.
+    /// Survives a mistyped password, since the form is re-rendered with it.
     #[serde(default)]
     next: Option<String>,
 }
@@ -170,8 +154,7 @@ async fn callback(
         .ok_or(Error::Unauthorized)?;
     let identity = client.exchange(&pending, &code, &state_param).await?;
     bind_to_issuer(&st, &identity, client.issuer()).await?;
-    // Re-checked on the way out as well as on the way in: what comes back out
-    // of the pending store is only as trustworthy as what went into it.
+    // Re-checked on the way out: the pending store is only as trustworthy as its input.
     let next = safe_next(pending.next.as_deref());
     start_session(&session, &identity, next).await
 }
@@ -273,8 +256,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        // Nobody signed out is offered Search · Insights · Settings, or an
-        // app to install, on the one page they can reach.
         let body = String::from_utf8(
             axum::body::to_bytes(res.into_body(), usize::MAX)
                 .await
@@ -310,9 +291,6 @@ mod tests {
 
     #[tokio::test]
     async fn signing_in_lands_on_the_page_that_asked_for_the_login() {
-        // A bookmarked artifact with an expired session is the whole case:
-        // bouncing through the login and then landing on Search loses the page
-        // that was actually wanted.
         let res = local_app()
             .await
             .oneshot(form(
@@ -327,8 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_login_will_not_be_talked_into_leaving_the_site() {
-        // The destination arrives as user input on every path it travels. A
-        // redirect that follows anything it is handed is a phishing hop.
+        // A redirect that follows user input is a phishing hop.
         for hostile in [
             "next=https%3A%2F%2Fevil.example%2F",
             "next=%2F%2Fevil.example%2F",
@@ -441,7 +418,6 @@ mod tests {
                 .contains("Max-Age=0")
         );
 
-        // The server-side row is gone, so the old cookie is worthless.
         let res = app
             .oneshot(
                 Request::builder()

@@ -13,85 +13,48 @@ use axum::extract::{Form, Query};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
-// ── View models ─────────────────────────────────────────────────────────────
-
 #[derive(Clone)]
 pub struct RenderedResult {
-    /// What the rail entry links to: the detail pane for this chunk.
     pub artifact_id: String,
-    /// Empty where the artifact has no title of its own. The rail then renders
-    /// no heading at all — see `render_hit`.
+    /// Empty where the artifact has no title; the rail then renders no heading (see `render_hit`).
     pub title: String,
-    /// Where in its source this text sits: the section a passage was cut from,
-    /// or the note it was typed into. A qualifier under the snippet, never a
-    /// heading over it — see `render_hit`. Empty where there is none, or where
-    /// it would only repeat the snippet.
+    /// The section or note this text sits in, as a qualifier under the snippet; empty where it would repeat it.
     pub section: String,
     /// Sanitized HTML from `markdown::render`. Rendered with `|safe`.
     pub html: String,
-    /// Markup-free preview for the rail, where rendered HTML would not fit.
     pub snippet: String,
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub corpus_id: String,
-    /// Position in the list, as `#1`, `#2`, … Empty for a weak result.
-    ///
-    /// Not the raw score. That number is a fused rank from Qdrant plus a
-    /// recency term, so it is comparable within one result list and meaningless
-    /// between two — a hybrid query and a dense-only fallback do not even score
-    /// on the same scale. Showing it invited a comparison it cannot support.
-    ///
-    /// Dropped entirely once a result is `weak`, because a rank is a claim
-    /// about standing among answers, and something the query barely matches is
-    /// not one. `#1` over a result the search itself calls loose is the exact
-    /// false confidence this labelling exists to remove.
+    /// `#1`, `#2`, …, not the raw score, which is incomparable between lists. Empty for a weak result.
     pub rank: String,
-    /// Only loosely related to the query — see `SearchResult::weak`.
+    /// See `SearchResult::weak`.
     pub weak: bool,
-    /// This hit moved up on activation. A small marker, because the claim is
-    /// small: it passed a near-tie, it did not become a better match.
+    /// Moved up on activation: it passed a near-tie, not a better match.
     pub primed: bool,
-    /// This sitting has already been in it. Said beside `primed` rather than
-    /// folded into it: "you were just reading this" and "this is reached
-    /// often" are two different reasons to be higher up a list.
+    /// Kept apart from `primed`: "just reading this" and "reached often" are different reasons.
     pub in_sitting: bool,
     /// "in 2 h" when a reminder on this artifact is due inside the horizon.
     pub due_in: Option<String>,
-    /// Past the point where this list's relevance falls off. Greyed, under a
-    /// rule; the rank stays, because it did place — the claim withdrawn is
-    /// "this is an answer", not "this is fifth". See `search::cliff`.
+    /// Past the relevance cliff: greyed, rank kept. See `search::cliff`.
     pub past_cliff: bool,
-    /// A reminder that is done. Badged, because a row that has quietly sunk
-    /// with no reason given reads as a ranking bug.
+    /// Badged, so a sunk row does not read as a ranking bug.
     pub retired: bool,
-    /// The title of the ranked hit that recalled this one. Set only on an
-    /// associated hit, and it is what the row names.
+    /// Set only on an associated hit.
     pub via_title: Option<String>,
-    /// A model wrote this — merged, or generated from a pursuit. Badged, so
-    /// it is never silently indistinguishable from captured text.
+    /// Badged, so model text is never indistinguishable from captured text.
     pub model_written: bool,
     /// How many corpora it draws from, for the badge.
     pub origin_count: usize,
     /// The judge's line, where the link was judged.
     pub reason: Option<String>,
-    /// Why this row ranked where it did, in one sentence — but only where the
-    /// request asked for it. `None` on an ordinary search, so the quiet line
-    /// stays quiet: see `why_ranked`.
+    /// Only where the request asked; see `why_ranked`.
     pub why_ranked: Option<String>,
-    /// The document goes on past this passage, and what comes next did not
-    /// place in this list. The answer to a question is often the paragraph
-    /// after the one that matched, and the row says so rather than leaving the
-    /// reader to go and find out.
-    ///
-    /// False where the continuation *did* place: it is already on the page,
-    /// and `continues_in` names where.
+    /// The next passage did not place in this list; false where it did (`continues_in` names it).
     pub continues: bool,
-    /// The rank of the next passage, where that passage is itself in this list
-    /// — `#2`, as the row beside it is labelled. Empty otherwise, including
-    /// when the next passage placed as something with no rank of its own.
+    /// The next passage's rank where it is in this list; empty otherwise.
     pub continues_in: String,
-    /// The notes this one is known to disagree with, shown under the row. The
-    /// rail names both and picks neither.
+    /// The rail names both sides and picks neither.
     pub disagrees: Vec<DisagreementRow>,
 }
 
@@ -109,43 +72,26 @@ pub struct DisagreementRow {
 pub struct QueueRow {
     pub id: String,
     pub label: String,
-    /// The capture's opening words, kept whether or not synthesis has named it.
-    /// Never rendered on its own: it is what tells two rows apart when
-    /// synthesis gave them the same name. Empty for a photo, or for a PDF whose
-    /// extraction has not landed.
+    /// Never rendered alone: tells apart two rows synthesis gave one name. Empty for a photo or unextracted PDF.
     pub opening: String,
     pub status: String,
     pub badge: &'static str,
     pub artifact_count: i64,
     pub created: String,
-    /// `3/9` while windows are still being segmented, `None` once every window
-    /// has resolved.
+    /// `3/9` while windows are being segmented, `None` once all resolved.
     pub progress: Option<String>,
-    /// Percentage of the source that ended up inside some chunk, already
-    /// formatted. `—` for a capture that has not been read yet.
+    /// Already formatted; `—` before the capture is read.
     pub coverage: String,
     pub low_coverage: bool,
-    /// Whether the loss can be placed in the source. False for a capture with
-    /// no segment rows — one read before per-segment windows existed, whose
-    /// coverage is still measured against the whole document but whose lines
-    /// cannot be attributed to anything. The warning stays; the link to
-    /// `#uncovered` does not, because that section renders nothing for it.
+    /// False for a capture with no segment rows, whose loss cannot be placed; the `#uncovered` link is dropped.
     pub locatable: bool,
-    /// The open questions this capture answered, in the operator's words. What
-    /// a capture did beyond being stored — said on the row that reported it
-    /// arriving, because that is where somebody is looking. Empty for almost
-    /// every capture, and silent when empty.
+    /// The open questions this capture answered, in the operator's words; silent when empty.
     pub covered: Vec<String>,
-    /// Still on its way through the pipeline. Only these announce themselves;
-    /// a finished capture is a title and a count.
+    /// Only these announce themselves.
     pub in_flight: bool,
-    /// Read, and read successfully. False covers both halves of "not moving
-    /// and not done" — failed, parked, partial — which are the states a count
-    /// of artifacts describes least well, because it is usually zero and looks
-    /// exactly like a finished capture that produced nothing.
+    /// False for failed, parked and partial, where a count of artifacts misleads.
     pub settled: bool,
-    /// Waiting to be named. Shown differently from a capture that simply has
-    /// no title, because this one is about to get one.
+    /// About to get a title, so shown differently from one that has none.
     pub unnamed: bool,
 }
 
@@ -198,23 +144,11 @@ pub fn status(kind: &str, text: &str) -> askama::filters::Safe<String> {
     ))
 }
 
-/// A sweep in words, for a page a person reads.
-///
-/// Housekeeping printed the queue's own identifiers — `arm_dedupe`,
-/// `link_judge`, `segment_window` — in a column headed "Sweep". They are the
-/// right names in the code and in a log, and they are the wrong ones on a page
-/// somebody opens to see whether the base is well.
-///
-/// An identifier with no wording yet returns unchanged rather than blank: a
-/// stage added later must show up as *something*. `every_stage_the_queue_can_run_has_a_word_for_it`
-/// is what makes sure that fallback stays theoretical.
+/// Wording for queue identifiers; an unknown stage returns unchanged, never blank.
 pub(crate) fn sweep_label(stage: &str) -> &str {
     match stage {
         "synthesize" => "Writing artifacts",
-        // No stage constructs this any more. The arm stays because this
-        // reads the string a row stored, and a queue written by an older
-        // binary can still hold one; `Stage::parse` runs such a row as
-        // `Synthesize`, which is where the variant always sent it.
+        // No stage constructs this; an older binary's queue can still hold one.
         "enrich" => "Enriching",
         "segment_window" => "Segmenting",
         "title" => "Naming captures",
@@ -241,30 +175,12 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
     }
 }
 
-/// What to call an artifact that has no title of its own.
-///
-/// Not the ordinal. "Chunk 56" is a position in the ingest, not a name for
-/// anything a reader went looking for — and it was the heading over every
-/// verbatim passage in the pane. The opening of the body at least says what
-/// the passage is about.
-///
-/// `title_of` itself, because the rule that strips markup off a *stored* title
-/// belongs here too: without this the corpus page and the artifact pane showed
-/// "**Was nicht abgedeckt ist:** * Es werden keine" with its asterisks while
-/// Housekeeping showed it cleaned, which is the drift `title_of` was gathered
-/// into one place to close.
+/// The opening of the body, not the ordinal; `title_of` also strips markup off stored titles.
 pub(crate) fn artifact_title(c: &crate::store::artifacts::Chunk) -> String {
     title_of(c)
 }
 
-/// How an artifact's own text is rendered.
-///
-/// A passage is a slice of the document, kept as it was written; markdown is
-/// the wrong reader for it. It eats the `#` of a section number, and it joins
-/// lines whose breaks carry the structure — a table of contents lifted out of
-/// a PDF collapses into one paragraph whose leader dots then stretch the width
-/// of the card. Everything else here *was* written as markdown by a model, and
-/// showing that as plain text would put the syntax on the page.
+/// A passage is rendered verbatim, since markdown would eat `#` and joined lines; everything else is model-written markdown.
 pub(crate) fn artifact_html(c: &crate::store::artifacts::Chunk) -> String {
     if c.provenance == crate::store::artifacts::Provenance::Passage {
         markdown::render_verbatim(&c.text)
@@ -276,9 +192,7 @@ pub(crate) fn artifact_html(c: &crate::store::artifacts::Chunk) -> String {
 pub(crate) fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView {
     ArtifactView {
         id: c.id.clone(),
-        // Empty for a passage and a note, which `title_of` answers for every
-        // surface at once. The card prints no heading over those: their first
-        // line is their body, and shown as both the card said everything twice.
+        // Empty for a passage and a note, whose first line is their body.
         title: artifact_title(c),
         html: artifact_html(c),
         text: c.text.clone(),
@@ -288,8 +202,6 @@ pub(crate) fn artifact_view(c: &crate::store::artifacts::Chunk) -> ArtifactView 
     }
 }
 
-// ── Templates ───────────────────────────────────────────────────────────────
-
 #[derive(Template)]
 #[template(path = "_intent_echo.html")]
 pub(crate) struct IntentEchoTemplate {
@@ -298,23 +210,13 @@ pub(crate) struct IntentEchoTemplate {
     pub(crate) detail: String,
 }
 
-/// A template's markup as a string, for a fragment that is composed into
-/// another rather than returned on its own. An echo that could not render is
-/// no echo, never a 500 over a rail that is otherwise correct.
+/// An echo that cannot render is no echo, never a 500.
 pub(crate) fn render_echo(t: &IntentEchoTemplate) -> String {
     t.render().unwrap_or_default()
 }
 
-/// What capture will do with the box, said before it is pressed.
-///
-/// Pure local arithmetic on the same counter and budget the size fork uses —
-/// exact, no model call — riding the search response the box already makes on
-/// every keystroke at a 120ms debounce.
-///
-/// `lang` because the budget is not one number: the window is what is left of
-/// the synthesizer's context after its system prompt, and the ten prompts do
-/// not cost the same. Told in English, the fork would promise one window for a
-/// Russian paste that will actually be cut into two.
+/// Same counter and budget as the size fork, no model call.
+/// `lang` because the ten prompts leave different budgets.
 pub(crate) fn fate_echo(
     core: &crate::core::Core,
     q: &str,
@@ -335,9 +237,7 @@ pub(crate) fn fate_echo(
                 .into(),
         };
     }
-    // No budget at all is a configuration this base cannot synthesize under,
-    // and the echo's whole job is to say what capture will do before it is
-    // pressed. It will store the text and rewrite nothing.
+    // No budget means this base stores the text and rewrites nothing.
     let Some(budget) = crate::jobs::synthesize::segment_budget(core, lang) else {
         return IntentEchoTemplate {
             kind: "stored as written",
@@ -353,28 +253,14 @@ pub(crate) fn fate_echo(
             detail: "captured verbatim, then rewritten into structured artifacts".into(),
         }
     } else if q.len() <= EXACT_SPLIT_BYTES {
-        // The splitter's own answer, not arithmetic beside it. A
-        // `MarkdownSplitter` will not cut inside a paragraph unless it has to,
-        // so ten paragraphs of six tenths of a budget each are ten windows and
-        // `tokens.div_ceil(budget)` promised six — under-reporting by up to
-        // half on ordinary prose, on the one line whose whole job is to say
-        // what capture is about to do.
+        // The splitter's own answer: it will not cut inside a paragraph, so `div_ceil` under-reports.
         let windows = crate::infer::split::split_into_segments(q, &core.counter, budget).len();
         IntentEchoTemplate {
             kind: "large paste",
             detail: format!("stored verbatim in {windows} windows; synthesis comes with use"),
         }
     } else {
-        // Past the bound, the arithmetic — and the line says it is a floor
-        // rather than pretending to a count it did not make.
-        //
-        // This branch is reached from `search_results`, which the box asks on
-        // every keystroke behind a 120 ms debounce, and a full `MarkdownSplitter`
-        // pass over a 40 KB article is not something the hottest route in the
-        // app should do per keystroke. Under the bound the exact answer is
-        // cheap and is what gets shown; over it, the difference between "9
-        // windows" and "at least 6" is not what a person pasting a book is
-        // reading the line for.
+        // Past the bound, a floor estimate: a full split per keystroke is too slow for this route.
         let windows = tokens.div_ceil(budget);
         IntentEchoTemplate {
             kind: "large paste",
@@ -385,53 +271,34 @@ pub(crate) fn fate_echo(
     }
 }
 
-/// How much text the fate echo will run the splitter over.
-///
-/// See the `else` arm of [`fate_echo`]: above this the window count is
-/// estimated instead, because the exact answer costs a whole `MarkdownSplitter`
-/// pass on a route the capture box asks on every keystroke.
+/// Above this the window count is estimated; see [`fate_echo`].
 const EXACT_SPLIT_BYTES: usize = 20_000;
 
 #[derive(Template)]
 #[template(path = "_results.html")]
 struct ResultsTemplate {
     results: Vec<RenderedResult>,
-    /// Recalled by association with a ranked hit, never ranked against the
-    /// query itself. Shown below the ranked list, under its own rule.
+    /// Recalled by association, never ranked; shown below the ranked list.
     associated: Vec<RenderedResult>,
-    /// Every result is only loosely related, so the page says so once above the
-    /// list instead of repeating it on each card.
+    /// Said once above the list instead of on each card.
     all_weak: bool,
     /// The query's indexable terms, for client-side highlighting.
     terms: String,
-    /// This fragment is the refining pass — the reranker confirmed the order.
-    /// The tick beside the count is what makes the reordering legible as a
-    /// refinement rather than a glitch.
+    /// The refining pass; the tick makes the reordering read as refinement.
     reranked: bool,
-    /// The search that filled this rail, where it was recorded. Every row
-    /// carries it onward, so an open, a verdict and the "nothing here has it"
-    /// button all name the one search they are answers about. `None` while
-    /// searches are not being recorded, and the button and the links go
-    /// without.
+    /// Carried by every row so opens, verdicts and gaps name one search; `None` while not recording.
     event_id: Option<String>,
-    /// The echo under the box, pre-rendered and shipped out of band with the
-    /// rail. See `intent_echo`.
+    /// Pre-rendered and shipped out of band; see `intent_echo`.
     echo: String,
-    /// The query this rail was drawn for, carried by the gap button alone: a
-    /// gap is a verdict about a wording, and a trailing keystroke can fold a
-    /// later one into the same row before the button is pressed. See
-    /// `Store::gap_event`.
+    /// Carried by the gap button alone: a later keystroke can fold into the same row. See `Store::gap_event`.
     q: String,
-    /// A capture is still being read, asked only where the rail would offer a
-    /// gap: the answer may be in it, so no gap is offered.
+    /// A capture still being read may hold the answer, so no gap is offered.
     reading: bool,
-    /// Whether the base holds anything, asked in the same place and for the
-    /// same button. See `gap`.
+    /// See `gap`.
     held: bool,
 }
 
-/// Test-only, for the same reason `ResultsTemplate`'s is: a row has twenty
-/// fields and a test that renders one usually cares about two of them.
+/// Test-only: a row has twenty fields and a test usually cares about two.
 #[cfg(test)]
 impl Default for RenderedResult {
     fn default() -> Self {
@@ -463,9 +330,7 @@ impl Default for RenderedResult {
     }
 }
 
-/// Test-only, for the reason `NewArtifact`'s is: a field added to a template
-/// must break every place that renders it until somebody decides what it says
-/// there. Seven tests in this file were spelling all nine out.
+/// Test-only, so a field added to the template breaks every place that renders it.
 #[cfg(test)]
 impl Default for ResultsTemplate {
     fn default() -> Self {
@@ -485,21 +350,12 @@ impl Default for ResultsTemplate {
 }
 
 impl ResultsTemplate {
-    /// How many of the ranked results are loose. Said in the heading when
-    /// the list is mixed; when every one is loose the flag above the list
-    /// already says so and this stays out of the heading. Computed rather
-    /// than carried, so it cannot disagree with the rows it counts.
+    /// Computed, so it cannot disagree with the rows.
     fn loose(&self) -> usize {
         self.results.iter().filter(|r| r.weak).count()
     }
 
-    /// The search a gap may be recorded against, where one may. Two conditions
-    /// and one answer, because the template asked them at two sites and had to
-    /// duplicate the paragraph hosting the button to do it.
-    ///
-    /// Withheld while a capture is being read — the answer may be in it —
-    /// and on a base holding nothing, where "nothing here has it" is true of
-    /// every search and says nothing about the base.
+    /// Withheld while a capture is being read and on an empty base, where it says nothing.
     fn gap(&self) -> Option<&str> {
         (!self.reading && self.held)
             .then_some(self.event_id.as_deref())
@@ -507,79 +363,44 @@ impl ResultsTemplate {
     }
 }
 
-/// The rail before anything is asked: the base introducing itself.
-///
-/// Rendered twice by design — inlined into the workspace page when it opens
-/// with an empty box, and returned by the results endpoint when the box is
-/// emptied — so the idle state is one account however it is reached, and
-/// clearing a query goes back to it rather than to a "No matches." nobody
-/// searched for.
+/// Rendered by the workspace page and by the results endpoint on an emptied box, so idle is one account.
 #[derive(Template)]
 #[template(path = "_idle_foot.html")]
 pub(crate) struct IdleFootTemplate {
     pub(crate) artifacts: i64,
     pub(crate) corpora: i64,
     pub(crate) recent: Vec<IdleRecentRow>,
-    /// Whether the base holds anything at all. With nothing held there are no
-    /// counts to print and no last capture to name, so the line says what the
-    /// program is for instead.
+    /// With nothing held, the line says what the program is for.
     pub(crate) held: bool,
-    /// The echo slot, emptied — and only where this fragment is a *swap*.
-    ///
-    /// An empty box proves no intent, and an echo left standing over one would
-    /// be describing text that is gone, so the box-clear response has to carry
-    /// this. On first paint it is empty instead: the slot already exists in
-    /// `_box_hint.html` under the box, an out-of-band attribute is inert on a
-    /// page that was never swapped, and rendering it anyway gave the document
-    /// two `id="intent-echo"` elements — of which htmx would only ever resolve
-    /// the first.
+    /// Only on a swap: on first paint the slot already exists in `_box_hint.html`, and a second `id="intent-echo"` would confuse htmx.
     pub(crate) echo: String,
-    /// The example phrasing and the language it is in, for the list of
-    /// what a paste becomes. The list lives here rather than in the page
-    /// because the page is built once: it stood until a reload after the fifth
-    /// capture, and a base that reached five by another door — MCP, the CLI, a
-    /// second tab — showed four chips at once. See `workspace::examples`.
+    /// Here rather than in the page, which is built once and would go stale; see `workspace::examples`.
     pub(crate) example_remind: &'static str,
     pub(crate) example_lang: &'static str,
-    /// A capture is still being read. The line says so and polls itself
-    /// until it is not.
+    /// The line says so and polls itself until it is not.
     pub(crate) reading: bool,
-    /// Whether this rendering is a swap rather than the first paint. The
-    /// rail-head and fold-of clears ride only on a swap: htmx reads
-    /// out-of-band attributes only on a swapped response, so they are inert on
-    /// first paint, and the line's own poll must not carry them — it can land
-    /// while someone types, and would empty the heading over their results.
+    /// The out-of-band clears ride only on a swap; the line's own poll must not empty the heading over results.
     pub(crate) oob: bool,
 }
 
 pub(crate) struct IdleRecentRow {
     pub(crate) id: String,
     pub(crate) label: String,
-    /// "today", "3 days ago" — a jog, not a timestamp. See `ago`.
+    /// A jog, not a timestamp; see `ago`.
     pub(crate) when: String,
-    /// The day, as a link target, in UTC — the no-JS fallback and nothing
-    /// more. The day page builds its window in the *viewer's* zone, so east of
-    /// Greenwich every capture between local midnight and the offset landed on
-    /// the day before and the page said "Nothing on this day". `?tz=` could not
-    /// save it: the date is already in the path by then. app.js rewrites the
-    /// whole href from `at` below, in the zone only the browser knows.
+    /// In UTC, the no-JS fallback only: app.js rewrites the href from `at` in the browser's zone.
     pub(crate) day: String,
-    /// When the capture landed, in Unix seconds, for that rewrite.
+    /// Unix seconds, for that rewrite.
     pub(crate) at: i64,
 }
 
-/// The name a capture goes by before synthesis titles it: the hint, or its
-/// opening words — with a word for the two origins that have none to open
-/// with. One rule, because the queue and the idle rail naming the same row
-/// differently would read as two captures.
+/// The hint, its opening words, or a word for origins with none; one rule so queue and rail agree.
 pub(crate) fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &str) -> String {
     title_hint.unwrap_or_else(|| {
         if raw_text.is_empty() && origin == crate::core::ingest::ORIGIN_IMAGE {
             "photo".into()
         } else if raw_text.is_empty() && origin == crate::core::ingest::ORIGIN_PDF {
-            // A PDF has no opening words until the extraction lands. Without
-            // this the row renders an empty anchor: nothing to read and
-            // nothing to click through to the corpus.
+            // A PDF has no opening words until extraction lands; without this the anchor is empty.
             "document".into()
         } else {
             markdown::snippet(raw_text, 60)
@@ -587,42 +408,23 @@ pub(crate) fn corpus_label(title_hint: Option<String>, raw_text: &str, origin: &
     })
 }
 
-/// Below this many sources the idle column lists what a paste becomes. A
-/// person's first few captures are when that is not yet known.
+/// A person's first few captures are when what a paste becomes is not yet known.
 pub(crate) const TEACH_UNTIL_SOURCES: i64 = 5;
 
 impl IdleFootTemplate {
-    /// Whether the base is young enough for the list of what a paste becomes.
-    /// Derived rather than carried: it used to be a flag computed in two
-    /// handlers and threaded through two other templates, and the page it was
-    /// rendered on is built once — so the fifth capture left the list standing
-    /// until a reload.
+    /// Derived, not carried, so the fifth capture takes the list away without a reload.
     fn teach(&self) -> bool {
         self.corpora < TEACH_UNTIL_SOURCES
     }
 }
 
-/// Is a capture still being read? Best-effort, in one place.
-///
-/// Three surfaces ask it — the idle line, the rail's gap offer and the due
-/// band's poll rate — and all three want the same answer to a store that
-/// cannot say: no. A line that cannot tell is a line that does not poll, a
-/// rail that cannot tell offers the gap, and a band that cannot tell falls
-/// back to its idle rate. Written once so the three cannot drift.
+/// Best-effort; a store that cannot say answers no. Written once so the idle line, gap offer and due band agree.
 pub(crate) async fn reading_a_capture(store: &crate::store::Store) -> bool {
     store.capture_being_read().await.unwrap_or(false)
 }
 
-/// Two counts and the last few captures, off the slimmest reads there are:
-/// the idle rail is on the most-opened screen, re-renders on every box-clear,
-/// and must cost nothing.
-/// `oob` says which of the two renderings this is: the swap that returns the
-/// page to idle carries the emptied echo and the rail clears, the inline first
-/// paint does not.
-///
-/// The three reads run together. This fragment is on a three-second poll while
-/// a capture is read, per open tab, and sequentially it was two round trips to
-/// one pool and one to another for a line of text.
+/// The slimmest reads, run together: this is on a three-second poll per tab while a capture is read.
+/// `oob` says whether this is the swap back to idle or the inline first paint.
 pub(crate) async fn idle_foot(
     tenant: &Tenant,
     oob: bool,
@@ -649,12 +451,7 @@ pub(crate) async fn idle_foot(
         )
         .collect();
     let (example_remind, example_lang) = crate::web::workspace::examples(&tenant.core, headers);
-    // Said once. `reading` used to restate it four lines below `held`, and a
-    // guard that is a copy of another guard is a guard that comes to disagree.
-    //
-    // `ingest_capture` writes the corpus row before it enqueues the first job,
-    // so on a base that holds anything this only ever agrees with the probe —
-    // it saves the query on an empty base and says nothing else.
+    // `ingest_capture` writes the corpus row before the first job, so this agrees with the probe.
     let held = corpora > 0;
     Ok(IdleFootTemplate {
         artifacts,
@@ -680,17 +477,11 @@ pub(crate) async fn idle_foot(
 #[template(path = "_queue.html")]
 struct QueueTemplate {
     rows: Vec<QueueRow>,
-    /// Whether anything is still moving. The fragment carries its own polling
-    /// trigger only while this holds, so an idle page makes no requests.
+    /// The fragment polls only while this holds, so an idle page makes no requests.
     active: bool,
 }
 
-/// What a count in a sweep's `detail` is called on the page.
-///
-/// Keyed by stage as well as by field, because two sweeps both call a count
-/// `armed` and they are not the same thing. A field with no entry here is not
-/// rendered: the summary is a sentence about what happened, not a dump of every
-/// number a sweep returned.
+/// Keyed by stage and field: two sweeps both say `armed`. A field with no entry is not rendered.
 const SWEEP_WORDS: &[(&str, &str, &str)] = &[
     ("associate", "events", "searches replayed"),
     ("associate", "verdicts", "verdicts replayed"),
@@ -704,7 +495,6 @@ const SWEEP_WORDS: &[(&str, &str, &str)] = &[
     ("pursuit", "pursuits", "pursuits opened"),
 ];
 
-/// Add up one run's `detail` into `totals`, keyed by the words it earns.
 pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i64)>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(detail) else {
         return;
@@ -730,35 +520,22 @@ pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i
 pub struct SourceRow {
     pub id: String,
     pub title: String,
-    /// See `RowLabel::named`. A row whose label is the artifact's own opening
-    /// sets it as text, not in the place a name would go.
+    /// See `RowLabel::named`.
     pub named: bool,
-    /// See `SupersededRow::subtitle`. A merge written from two sources that
-    /// shared a title listed that title twice and said nothing else.
+    /// See `SupersededRow::subtitle`.
     pub subtitle: String,
-    /// Empty when the source belongs to no corpus — a merge of merges resolves
-    /// to captured roots, so in practice this is always set.
+    /// Empty when the source belongs to no corpus, which in practice does not happen.
     pub corpus_id: String,
 }
 
-/// What a row calls an artifact, where the row's whole content is this one
-/// string: a Housekeeping table cell, a lineage node, a day's opened list.
+/// Where the row's whole content is this one string: a table cell, a lineage node, a day's list.
 pub struct RowLabel {
     pub text: String,
-    /// Whether `text` is a name somebody wrote, or the opening of the text
-    /// standing in for one. A door sets the second as text — no bolding, not
-    /// in the place a name would go — because it is not a name and must not
-    /// read as one.
+    /// Whether `text` is a given name or the text's opening; the latter is never set as a name.
     pub named: bool,
 }
 
-/// A name where a writer gave the artifact one; otherwise the opening of its
-/// own text.
-///
-/// This is the one place the old body-derived title survives, and it survives
-/// on purpose: emptying a cell whose whole content is the label leaves a link
-/// nobody can see or click. `title_of` used to fall back to the id for the
-/// same reason, and an id is a name only a database has use for.
+/// A given name, else the text's opening: an empty label would be an invisible link.
 pub(crate) fn row_label(c: &crate::store::artifacts::Chunk) -> RowLabel {
     match title_of(c) {
         name if name.is_empty() => RowLabel {
@@ -772,17 +549,11 @@ pub(crate) fn row_label(c: &crate::store::artifacts::Chunk) -> RowLabel {
     }
 }
 
-/// How an artifact's own text opens, for a row that has nothing else to show.
 pub(crate) fn opening_of(c: &crate::store::artifacts::Chunk) -> String {
     markdown::snippet(&c.text, 60)
 }
 
-/// When an artifact was written and how it opens, for a table where the name
-/// alone may not be unique.
-///
-/// Only where there *is* a name. A passage and a note are labelled by their
-/// own opening (`row_label`), and the subtitle then printed that same opening
-/// again on the line directly beneath it.
+/// Only where there is a name: otherwise the label is already the opening.
 pub(crate) fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
     let when = fmt_time(c.created_at);
     match row_label(c).named {
@@ -791,11 +562,7 @@ pub(crate) fn row_subtitle(c: &crate::store::artifacts::Chunk) -> String {
     }
 }
 
-/// The source list a merge renders: its lineage roots, fetched and titled.
-/// One shape for Ops and the detail pane — the two must stay behaviorally
-/// identical (same self-guard, same tolerance for deleted sources, same
-/// corpus fallback), and a copy in each is how they come to disagree about
-/// what a merge was made of.
+/// Shared by Ops and the detail pane so they agree on what a merge was made of.
 pub(crate) async fn source_rows(
     store: &crate::store::Store,
     merged_id: &str,
@@ -803,10 +570,7 @@ pub(crate) async fn source_rows(
 ) -> Vec<SourceRow> {
     let mut sources = Vec::new();
     for rid in roots {
-        // A source deleted since leaves no row; skipping it is what the
-        // `orphaned` flag exists to say out loud. `roots_of` answers an empty
-        // list for a merge that lost every source; the self guard stays as
-        // defense against a base written before that change.
+        // A deleted source leaves no row (the `orphaned` flag says so); the self guard covers older bases.
         if rid == merged_id {
             continue;
         }
@@ -824,48 +588,29 @@ pub(crate) async fn source_rows(
     sources
 }
 
-// ── Handlers ────────────────────────────────────────────────────────────────
-
-/// Chips per row. Long enough to cover a real vocabulary, short enough that the
-/// row stays a row.
+/// Long enough for a real vocabulary, short enough that the row stays a row.
 pub(crate) const FACET_LIMIT: usize = 12;
 
-/// One offer, flattened for the template. Every decision — which rung, which
-/// blocks, how the stamp reads — is made here, so the template holds no logic
-/// and a new block in the encoder changes no markup.
+/// Every decision is made here, so the template holds no logic.
 #[derive(Default)]
 pub struct OfferView {
     pub id: String,
     pub title: String,
-    /// The first line or so of what the artifact says.
-    ///
-    /// A title is not enough to decide whether to open something. On the two
-    /// established rungs the reason line carries the rest of the card, but the
-    /// random card claims no reason by design — and a card that is a title and
-    /// nothing else asks to be clicked on faith. This says what the thing is
-    /// without claiming why it is here, which is the one thing the random rung
-    /// must not do.
+    /// Says what the thing is without claiming why, which the random rung must not do.
     pub snippet: String,
-    /// What the line leads with. Fixed wording for the two established rungs;
-    /// for a thin one it is the count in words, because "Twice before" is the
-    /// honest thing to say about two occurrences and "Pattern" is not. Empty
-    /// on the random card, which claims nothing.
+    /// Count words on a thin rung ("Twice before"); empty on the random card, which claims nothing.
     pub rung: String,
-    /// The blocks that decided it, joined. Empty on the lower two rungs.
+    /// Empty on the lower two rungs.
     pub blocks: String,
     /// `08.08., 15:04`, or empty.
     pub when: String,
-    /// `?rec=<slot>&rung=<rung>`, or empty — what tells `artifact_detail` this
-    /// open came from an offer, and which rung it was offered on.
+    /// `?rec=<slot>&rung=<rung>`, or empty: tells `artifact_detail` this open came from an offer.
     pub rec: String,
-    /// The raw bundle and the contribution numbers, for the `<details>`.
+    /// For the `<details>`.
     pub detail: String,
-    /// The rung's machine name — `pattern`, `similar`, `tentative`, `random`.
-    /// What the impression confirmation posts back, and what `Rung::parse`
-    /// reads at the other end.
+    /// `pattern`, `similar`, `tentative`, `random`; posted back on confirmation and read by `Rung::parse`.
     pub kind: String,
-    /// The winning cluster's slot as text, or empty on the random card, which
-    /// has no cluster.
+    /// Empty on the random card, which has no cluster.
     pub slot: String,
 }
 
@@ -881,13 +626,7 @@ struct ContextForm {
     bundle: String,
 }
 
-/// The offer for this situation and the snippet its card reads, or `None`.
-///
-/// What both doors share — the fragment and `POST /api/v1/context`. One call,
-/// two jobs: it writes the situation and computes the offer. Recording happens
-/// even when nothing is recommended — a base that has learned nothing yet is
-/// exactly the one that most needs its situations written down. And it makes
-/// no offer nobody could read.
+/// Shared by the fragment and `POST /api/v1/context`; records the situation even when nothing is offered.
 pub(crate) async fn compute_offer(
     tenant: &Tenant,
     raw_bundle: &str,
@@ -900,8 +639,7 @@ pub(crate) async fn compute_offer(
         .core
         .record_context_event(raw_bundle, &bundle, Some(&tenant.user.subject));
 
-    // A recommendation that cannot be computed is not worth a 500: the area is
-    // what it was yesterday, which is empty.
+    // A recommendation that cannot be computed is not worth a 500.
     let o = tenant
         .core
         .offer(Some(&tenant.user.subject), &bundle)
@@ -911,32 +649,8 @@ pub(crate) async fn compute_offer(
             None
         });
 
-    // Nothing is recorded here. This function *computes* an offer; whether a
-    // person was ever shown one is a different fact, and only the browser
-    // knows it — the fetch races the first keystroke, so an answer that
-    // arrives after the box has been typed in is dropped client-side and was
-    // never on screen. Recording at this point counted those, and they are not
-    // a random sample: a visit that goes straight to typing is exactly a visit
-    // where nothing would have been clicked. That is a structural zero
-    // folded into the denominator of the one number the block weights are
-    // meant to be fitted against later. `/ui/context/seen` is the other half.
-    // Fetched here rather than carried on `Offer`: the recommender ranks
-    // artifacts and has no business knowing how a card reads.
-    //
-    // A card is a link with something readable on it, and it can end up with
-    // nothing on it at all. `recommend::title_of` is empty for an artifact
-    // with no name of its own, and `markdown::snippet` is empty for a body
-    // that renders to no text — a figure alone, a rule alone. Both at once is
-    // an `offer-filled` box holding a link with nothing to read and nothing
-    // to click, which is the card `_context.html`'s nameless branch exists to
-    // prevent. No offer is made instead: the area is then what it is whenever
-    // nothing is recommended, which is empty. Nothing is recorded either, and
-    // that is the point — a card nobody could read must not count as shown.
-    //
-    // A row deleted since the ranking lands here too, with an empty snippet,
-    // and is not what this guards: `context_clusters` cascades with the
-    // artifact, so a deleted one is dropped where its clusters are read and
-    // never reaches a card. See `recommend::tests`.
+    // Nothing is recorded as shown here: only the browser knows whether the card reached the screen (`/ui/context/seen`).
+    // A card with neither a title nor a snippet is not offered, so an unreadable card never counts as shown.
     let o = o?;
     let snippet = match tenant.core.store.get_artifact(&o.artifact_id).await {
         Ok(c) => markdown::snippet(&c.text, 160),
@@ -945,7 +659,6 @@ pub(crate) async fn compute_offer(
     (!o.title.is_empty() || !snippet.is_empty()).then_some((o, snippet))
 }
 
-/// The fragment door onto `compute_offer`.
 async fn context_offer(tenant: Tenant, Form(f): Form<ContextForm>) -> UiResult<Response> {
     let offer = compute_offer(&tenant, &f.bundle)
         .await
@@ -960,26 +673,14 @@ struct SeenForm {
     slot: Option<i64>,
 }
 
-/// The browser confirming an offer actually reached the screen.
-///
-/// Posted by `app.js` after the fragment is swapped in and not dismissed, and
-/// it is what writes `recommended_shown`. The pair it forms with
-/// `recommended_open` is the hit rate on Ops, so both halves have to mean what
-/// they say: shown is shown.
-///
-/// Everything in the form comes from a page and a page can be made to say
-/// anything, so nothing is trusted. The rung goes through `Rung::parse` — the
-/// same gate the open marker passes, and for the same reason: an unrecognised
-/// word would appear on Ops as a fifth rung of a four-rung ladder. The
-/// artifact must exist. Neither failure is worth a status code, because
-/// nothing is waiting on the answer.
+/// Posted by `app.js` once the card is on screen; the only writer of `recommended_shown`.
+/// Nothing in the form is trusted: the rung goes through `Rung::parse` and the artifact must exist.
 async fn context_seen(tenant: Tenant, Form(f): Form<SeenForm>) -> UiResult<Response> {
     record_seen(&tenant, &f.artifact_id, &f.rung, f.slot).await;
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
-/// The write behind both `seen` doors. Silent on every failure, for the reason
-/// above: nothing is waiting on the answer.
+/// Silent on every failure: nothing is waiting on the answer.
 pub(crate) async fn record_seen(tenant: &Tenant, artifact_id: &str, rung: &str, slot: Option<i64>) {
     use crate::core::recommend::Rung;
     let Some(rung) = Rung::parse(rung) else {
@@ -1000,20 +701,13 @@ pub(crate) async fn record_seen(tenant: &Tenant, artifact_id: &str, rung: &str, 
 fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
     use crate::core::recommend::Rung;
     OfferView {
-        // A sentence, not a rung name. "Pattern · weekday, hour, network · like
-        // 26.08., 20:36" is this code's own vocabulary read out loud to a
-        // reader who has never seen the ladder it comes from; the signals
-        // themselves moved into Details, where the rest of the arithmetic
-        // already lives.
+        // A sentence, not a rung name; the signals are in Details.
         rung: match o.rung {
             Rung::Pattern => {
                 "Offered because you tend to open things like this around now — like".to_string()
             }
             Rung::Similar => "Offered because it is like what you opened".to_string(),
-            // The count, in words a person reads. `weight` is the decayed
-            // number the ranking uses and nobody can read 1.9 and know it means
-            // twice — so the undecayed count is stored alongside it and said
-            // out loud here.
+            // The undecayed count in words: nobody reads a weight of 1.9 as twice.
             Rung::Tentative => match o.events {
                 0 | 1 => "Offered on one earlier occasion like this —".to_string(),
                 2 => "Offered on two earlier occasions like this —".to_string(),
@@ -1023,9 +717,7 @@ fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
             Rung::Random => String::new(),
         },
         blocks: o.blocks.join(", "),
-        // The device's own reading of when this happened, in the zone it
-        // happened in. One date format, and the whole of the third part of the
-        // line.
+        // In the zone it happened in.
         when: o
             .at
             .map(|at| {
@@ -1039,23 +731,12 @@ fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
                 )
             })
             .unwrap_or_default(),
-        // The rung rides on the link because that is the only place it still
-        // exists: the offer was computed on a previous request, and Ops's
-        // breakdown is a breakdown only if the click knows which rung it came
-        // from. Every rung, including the floor: the random card has no cluster
-        // and so no slot, and hanging the whole marker off `slot` left it
-        // linking like an ordinary result — its opens counted as opens, so its
-        // hit rate read zero for ever and the card it drew was fed back into
-        // the profile at full weight. `rec` is the slot when there is one;
-        // `rung` is always there.
+        // The rung rides on the link, the only place it still exists; every rung, the random one included.
         rec: match o.slot {
             Some(s) => format!("?rec={s}&rung={}", o.rung.as_str()),
             None => format!("?rung={}", o.rung.as_str()),
         },
-        // The machine name of the rung, and the slot as text. Not for reading —
-        // these are what the browser posts back to confirm the offer reached
-        // the screen, and they are the same two values the link carries on a
-        // click, so the shown and the open agree about what was offered.
+        // Posted back to confirm the offer was shown, matching what the link carries on a click.
         kind: o.rung.as_str().to_string(),
         slot: o.slot.map(|s| s.to_string()).unwrap_or_default(),
         id: o.artifact_id,
@@ -1065,10 +746,7 @@ fn offer_view(o: crate::core::recommend::Offer, snippet: String) -> OfferView {
     }
 }
 
-/// Append `value` to a facet row if the store did not report it. `count` is 0
-/// because the two reasons it is missing — nothing carries it, or it was
-/// crowded out of the top `FACET_LIMIT` — are not distinguishable from here;
-/// the template renders no number rather than a wrong one.
+/// `count` is 0: missing and crowded out are indistinguishable here, so no number is rendered.
 pub(crate) fn ensure_facet(row: &mut Vec<crate::vector::FacetCount>, value: &str) {
     if value.is_empty() || row.iter().any(|f| f.value == value) {
         return;
@@ -1087,40 +765,25 @@ pub(crate) struct UiSearchParams {
     pub(crate) tags: Option<String>,
     #[serde(default)]
     pub(crate) category: Option<String>,
-    /// The refining pass. Absent on every keystroke — typing gets vector
-    /// order at embedding speed — and `true` on the request app.js fires once
-    /// the operator stops, whose answer reorders the rail it just painted.
+    /// Absent while typing (vector order); `true` once the operator stops, reordering the rail.
     #[serde(default)]
     pub(crate) rerank: bool,
-    /// The search event this page is holding — the id the last answer handed
-    /// it, sent back so a typing burst folds into its own chain. A second tab
-    /// carries a different one, or none yet, and the two never collide. See
-    /// `Store::record_search`.
+    /// Sent back so a typing burst folds into its own chain; see `Store::record_search`.
     #[serde(default)]
     pub(crate) fold: Option<String>,
-    /// Ask the rail to say why a row is where it is. Off unless the link
-    /// carries it: the line is for an operator looking into a ranking, not
-    /// something every keystroke paints. `/ui?explain=1` puts it on the form
-    /// as a hidden field, and `hx-params` names it so the fragment request
-    /// keeps it.
-    ///
-    /// Through `query_flag` rather than a bare `bool`, which `serde_urlencoded`
-    /// reads only as `true`/`false`: `?explain=1` — the spelling the link and
-    /// every hand-written URL carry — was a 400 for the whole fragment, so
-    /// asking why a row ranked emptied the rail instead of explaining it.
+    /// Off unless the link carries it (`/ui?explain=1`); through `query_flag` so `1` parses.
     #[serde(default, deserialize_with = "crate::web::api::query_flag")]
     pub(crate) explain: Option<bool>,
 }
 
-/// Function words carry no signal and appear in every chunk, so highlighting
-/// them marks the whole card and hides the terms that actually matched.
+/// Function words match every chunk; highlighting them hides the terms that matched.
 const STOPWORDS: [&str; 40] = [
     "a", "an", "the", "and", "or", "but", "if", "of", "to", "in", "on", "at", "by", "for", "with",
     "from", "into", "is", "are", "was", "were", "be", "been", "do", "does", "did", "how", "what",
     "when", "where", "why", "which", "that", "this", "it", "its", "my", "i", "you", "can",
 ];
 
-/// Query terms worth marking in a result, space separated for the client.
+/// Space separated for the client.
 fn highlightable_terms(query: &str) -> String {
     crate::vector::sparse::tokenize(query)
         .into_iter()
@@ -1139,62 +802,33 @@ fn split_tags(t: Option<String>) -> Vec<String> {
     .unwrap_or_default()
 }
 
-/// Past this the box is holding something to be kept, not something to be
-/// searched for. Generous on purpose: it is a bound on cost, not a rule about
-/// how to phrase a query, and a query phrased as a whole situation is still
-/// only a few hundred characters.
+/// Past this the box holds something to keep, not search for; a bound on cost.
 const MAX_QUERY_CHARS: usize = 2000;
 
 pub(crate) async fn search_results(
     tenant: Tenant,
-    // Alongside the tenant, not instead of it: a `Tenant` is cached across
-    // requests and cannot carry the session this one came in on, which is the
-    // whole of what keeps the sitting at the web door.
+    // A `Tenant` is cached across requests and cannot carry this request's session.
     identity: crate::auth::Identity,
     headers: axum::http::HeaderMap,
     Query(p): Query<UiSearchParams>,
 ) -> UiResult<Response> {
-    // Resolved once, at the top: the fate echo needs it on both roads out of
-    // here, and by the time the second one renders the subject has been moved
-    // into the recall.
+    // Resolved once: both exits need it, and the subject is moved into the recall later.
     let lang = crate::web::state::capture_lang(&tenant, &headers).await;
-    // Clearing the box fires a request with an empty query. That is not an
-    // error, and it is not "No matches." either — an empty ResultsTemplate
-    // rendered exactly that, which is a claim about a base nobody searched.
-    // An empty box is the idle state, so the idle rail comes back: the base
-    // introducing itself, with its heading swapped in out of band the same
-    // way a result count is.
-    // A box holding more than a query is the idle state too. The one box is
-    // also where a chapter gets pasted to be captured, and /ui/capture?from_ask=
-    // opens it holding a whole model answer: the template suppresses the `load`
-    // search for those doors, but the first keystroke afterwards fired one
-    // anyway, and an incremental search is an embedding call, an activation
-    // bump and a coalesced Judge-queue row — for a paragraph nobody was
-    // looking for. Nothing anyone types as a question comes near this; the
-    // limit is on the door rather than in app.js because it is the embedder's
-    // bill either way, whatever the client was.
+    // An empty box, or one holding more than a query, is the idle state: searching a pasted chapter costs an embedding call.
     if p.q.trim().is_empty() || p.q.chars().count() > MAX_QUERY_CHARS {
         let mut t = idle_foot(&tenant, true, &headers).await?;
-        // A box holding a whole document is not searched, but its fate is
-        // still worth a line: this is exactly the paste the size fork will
-        // store verbatim, and the echo is what says so before Capture.
+        // An unsearched long paste still gets its fate line.
         if !p.q.trim().is_empty() {
             t.echo = render_echo(&fate_echo(&tenant.core, &p.q, lang));
         }
         return Ok(HtmlTemplate(t).into_response());
     }
 
-    // The same terms the sparse branch derives, handed to the client so
-    // highlighting never has to touch the sanitized HTML on this side.
-    // Function words are dropped: a query phrased as a situation is mostly
-    // stopwords, and highlighting every "to" marks the whole card.
+    // Handed to the client so highlighting never touches the sanitized HTML here.
     let terms = highlightable_terms(p.q.trim());
-    // The wording this rail is about to be drawn for, kept because `p.q` is
-    // about to be moved into the search. Only the gap button reads it.
+    // Kept because `p.q` is moved into the search; only the gap button reads it.
     let q = p.q.trim().to_string();
-    // What this sitting is working on. A typing burst folds into one entry
-    // here as it does in the log, so what is carried is the query that was
-    // meant rather than every prefix of it.
+    // A typing burst folds into one entry here as in the log.
     if let Some(sess) = &identity.session {
         tenant.core.sittings.queried(
             sess,
@@ -1203,8 +837,7 @@ pub(crate) async fn search_results(
             tenant.core.pursuit.idle_secs as i64,
         );
     }
-    // Read into a local: a lock guard living inside the call expression would
-    // still be held across the await, and a future holding one is not `Send`.
+    // Read into a local: a guard inside the call would be held across the await and is not `Send`.
     let cap = tenant
         .core
         .ranking
@@ -1228,24 +861,17 @@ pub(crate) async fn search_results(
                 explain,
             },
             cap,
-            // Scoped to the operator, because coalescing folds a keystroke into
-            // the query it was an early spelling of, and two people typing at
-            // once are not spelling the same thing.
+            // Scoped to the operator: two people typing at once are not spelling the same thing.
             crate::store::feedback::Door::Ui
                 .by(tenant.user.subject)
-                // The live sitting, for priming. Off unless `sitting.prime` is
-                // on, and impossible at any door with no session.
+                // Off unless `sitting.prime` is on; impossible without a session.
                 .in_sitting(identity.session.clone())
-                // The event this page is already holding, so a burst folds into
-                // its own chain and not into whatever this operator's other tab
-                // wrote last. Empty on the first search of a page.
+                // So a burst folds into this page's chain, not another tab's.
                 .folding_onto(p.fold.filter(|f| !f.is_empty())),
         )
         .await?;
 
-    // The ranked answer and what it recalled are two lists on the page, and one
-    // list here: an associated hit carries the id of the hit that recalled it,
-    // and the title is looked up among the ranked ones rather than fetched.
+    // An associated hit carries the id of its recaller, whose title is looked up among the ranked.
     let titles = ranked_titles(&hits);
     let (ranked, recalled): (Vec<_>, Vec<_>) = hits.into_iter().partition(|h| h.via.is_none());
     let mut results: Vec<RenderedResult> = ranked
@@ -1253,13 +879,7 @@ pub(crate) async fn search_results(
         .enumerate()
         .map(|(i, h)| render_hit(i, h, &titles, explain))
         .collect();
-    // What each hit's document does next, in one read for the whole list. Only
-    // over the ranked rows: an associated one is not an answer to the query,
-    // and telling the reader to read on from something the query never matched
-    // is an invitation into a document they did not ask about.
-    //
-    // Best-effort, exactly like the reach `ask` makes: a marker is a bonus, and
-    // failing to read one must not cost the results that were already found.
+    // Only over ranked rows, and best-effort: a marker must not cost the results.
     let next = match tenant
         .core
         .store
@@ -1283,24 +903,13 @@ pub(crate) async fn search_results(
         .map(|h| render_hit(0, h, &titles, explain))
         .collect();
     let echo = render_echo(&fate_echo(&tenant.core, &q, lang));
-    // Only when *every* result is loose. One weak hit at the bottom of a good
-    // list is ordinary — it is the tail of any ranking — and saying "nothing
-    // matches" over a list that plainly does would train the operator to
-    // ignore the warning. Computed from `results` only: an association is not
-    // an answer to the query and cannot make the answer look better or worse
-    // than it was.
+    // Only when every result is loose, computed from `results` alone.
     let all_weak = !results.is_empty() && results.iter().all(|r| r.weak);
-    // Read only where the rail would offer a gap, so a good search pays
-    // nothing for either.
+    // Read only where the rail would offer a gap.
     let (reading, held) = if (results.is_empty() && associated.is_empty()) || all_weak {
         (
             reading_a_capture(&tenant.core.store).await,
-            // "Nothing here has it" is true of every search against a base
-            // with nothing in it, and the example chips under the box fire one
-            // — so the button was there to collect a verdict about the base
-            // being empty. The event is still recorded: the first capture is
-            // typically the answer to it, and `gaps::cover` closes the search
-            // a capture was typed from.
+            // No gap on an empty base, but the event is still recorded: the first capture often answers it.
             tenant
                 .core
                 .store
@@ -1319,18 +928,13 @@ pub(crate) async fn search_results(
         results,
         associated,
         terms,
-        // From the search's outcome, not from the request's intent: a rerank
-        // that failed or was skipped answered in vector order, and the tick
-        // would assert a confirmation that never took place.
+        // From the outcome, not the request: a failed rerank answered in vector order.
         reranked: outcome.timing.reranked,
         event_id: outcome.event,
         echo,
         q,
     })
     .into_response();
-    // Measured as before, reported where a browser already knows to show it.
-    // On the page it was a line of debug telemetry floated beside the results
-    // — a number nobody searching has a use for, in a place the eye lands.
     if let Ok(v) = format!(
         "embed;dur={}, total;dur={}",
         outcome.timing.embed_ms, outcome.timing.total_ms
@@ -1342,16 +946,7 @@ pub(crate) async fn search_results(
     Ok(res)
 }
 
-/// The ranked hits' titles, by artifact id, for the associated rows that name
-/// the hit that recalled them.
-///
-/// Untitled hits are left out rather than named "Untitled": a row reading
-/// `seen together with "Untitled"` says nothing and looks like it does. A
-/// borrowed name is left out for the stronger version of that reason — see
-/// `SearchResult::borrowed_name`. It belongs to the section the hit was cut
-/// from, so `seen together with "Kapitel 3"` quotes a name that `render_hit`
-/// has just taken off the very row it is pointing at, and the reader is told
-/// to look for a heading that is nowhere on the page.
+/// Untitled and borrowed-name hits are left out: the reader would look for a name nowhere on the page.
 fn ranked_titles(
     hits: &[crate::core::search::SearchResult],
 ) -> std::collections::HashMap<String, String> {
@@ -1361,11 +956,7 @@ fn ranked_titles(
         .collect()
 }
 
-/// The rail's half of the explanation: the consequence, in a sentence.
-///
-/// Deliberately not the MCP form. An agent reads a list of stages; a person
-/// reads why this row is above the one below it, and a stage that changed
-/// nothing is not part of that answer.
+/// Not the MCP form: a person reads why this row is above the next, not a list of stages.
 pub(crate) fn why_ranked(e: &crate::core::explain::HitExplanation) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(s) = &e.rerank
@@ -1383,31 +974,18 @@ pub(crate) fn render_hit(
     position: usize,
     h: crate::core::search::SearchResult,
     titles: &std::collections::HashMap<String, String>,
-    // Whether the door asked for the explanation. The object is on every
-    // ranked hit either way — the flag gates rendering and nothing else.
+    // The flag gates rendering only.
     explain: bool,
 ) -> RenderedResult {
     let snippet = markdown::snippet(&h.text, 140);
     RenderedResult {
         artifact_id: h.artifact_id,
-        // Empty, never "Untitled" and never a borrowed heading: a passage has
-        // no name of its own — see `SearchResult::borrowed_name` — and a rail
-        // of names that belong to something else says nothing where a name
-        // would say something. The row shows its snippet.
+        // Empty, never "Untitled" or a borrowed heading; the row shows its snippet.
         title: match h.borrowed_name {
             true => String::new(),
             false => h.title.clone().unwrap_or_default(),
         },
-        // The same borrowed name, below the snippet and prefixed, where it is
-        // context instead of a claim about what this text is called. Emptying
-        // the name slot took the *whereabouts* with it: a passage row said
-        // nothing at all about where in its source it sits. A qualifier can
-        // repeat down a chapter's worth of passages without lying, which a
-        // heading standing as a title could not.
-        //
-        // Dropped where it would say what the snippet already says — a note
-        // named by how its text opens — which is the duplication the empty
-        // slot was fixing.
+        // The borrowed name as a prefixed qualifier under the snippet; dropped where it repeats the snippet.
         section: match h.borrowed_name {
             true => h
                 .title
@@ -1420,9 +998,7 @@ pub(crate) fn render_hit(
         category: h.category,
         tags: h.tags,
         corpus_id: h.corpus_id,
-        // No rank on an associated hit — the same reasoning that drops the
-        // rank on a weak one: a rank is a claim about standing among answers,
-        // and this did not compete for one.
+        // No rank on an associated hit: it did not compete for one.
         rank: if h.weak || h.via.is_some() {
             String::new()
         } else {
@@ -1441,9 +1017,7 @@ pub(crate) fn render_hit(
             .flatten(),
         model_written: h.model_written,
         origin_count: h.origin_count,
-        // Filled by `mark_continuations` over the finished list: whether a
-        // passage's continuation is *on the page* is a fact about the list, not
-        // about the hit, and one row cannot answer it.
+        // Filled by `mark_continuations`: whether the continuation is on the page is a fact about the list.
         continues: false,
         continues_in: String::new(),
         disagrees: h
@@ -1462,19 +1036,8 @@ pub(crate) fn render_hit(
     }
 }
 
-/// Say, on each row, what its document does next.
-///
-/// `next` maps an artifact to the passage that follows it — `Store::
-/// continuations_of`, one read for the whole list. Two outcomes, and they are
-/// deliberately exclusive: a continuation that *placed* is named by its rank,
-/// because the row is already on the page and offering to fetch it would claim
-/// two things are there when one is; a continuation that did not place is
-/// announced as such, and the pane is where it gets read.
-///
-/// A row with no rank is not a destination. Associated rows and weak ones carry
-/// no rank by design, and `setzt sich fort in` followed by nothing is worse
-/// than the marker's absence — so such a continuation falls back to the plain
-/// announcement, which is still true.
+/// A continuation that placed is named by its rank; one that did not is announced.
+/// A row with no rank is not a destination, so it falls back to the announcement.
 pub(crate) fn mark_continuations(
     results: &mut [RenderedResult],
     next: &std::collections::HashMap<String, String>,
@@ -1500,23 +1063,7 @@ pub(crate) fn mark_continuations(
     }
 }
 
-/// The ten most recent captures, under the box that made them.
-///
-/// Ten rather than everything: an index of every corpus was a page nobody read,
-/// and anything older than the last handful is found by searching for what it
-/// says rather than by scrolling a list of what it is called.
-/// Recent lists ten captures, and synthesis names a capture by lifting a
-/// heading out of it. A heading repeats across every document that carries it,
-/// so six rows read `HOCHSCHULE MITTWEIDA` and named nothing — the one column
-/// that exists to tell captures apart could not.
-///
-/// Where a label is not unique in the list, the capture's opening words are
-/// appended, because that is the one thing that differs between them. Three
-/// rows are left alone: one whose label was already unique, because the suffix
-/// is a repair rather than a decoration; one with no opening words to offer,
-/// because `document · document` tells no one anything; and one already called
-/// by its opening words, because a label repeated back to itself is worse than
-/// the collision.
+/// Where a label repeats in the list, the opening words are added; not where the label is unique, there is no opening, or the label is the opening.
 fn disambiguate_labels(rows: &mut [QueueRow]) {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for r in rows.iter() {
@@ -1528,25 +1075,14 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
         .map(|(l, _)| l.to_string())
         .collect();
     for r in rows.iter_mut() {
-        // The opening is the capture's first words and the label is a heading
-        // lifted out of those same words, so the opening usually begins by
-        // repeating it: "HOCHSCHULE MITTWEIDA" beside "HOCHSCHULE MITTWEIDA
-        // Ein Verfahren zur…". Only the part that differs is worth the room —
-        // and the doubled reading is what the deployment showed, truncated to
-        // "HOCHSCHULE MITTWEIDA · HOCHSCH…", which is how a repair that had
-        // run looked exactly like one that never had.
+        // The opening usually begins with the label it was lifted from; only the rest is worth the room.
         if let Some(rest) = r.opening.strip_prefix(r.label.as_str()) {
             let rest = rest
                 .trim_start_matches([' ', ':', '·', '—', '-', ','])
                 .trim();
             r.opening = rest.to_string();
         }
-        // Kept beside the label rather than folded into it. Appending it was
-        // the whole of this repair, and the row then truncated the appended
-        // half away — `.qtitle` is one `nowrap` line — so six captures still
-        // read `HOCHSCHULE MITTWEIDA · HOCHSCH…` and the column that exists to
-        // tell them apart still could not. A field of its own has somewhere to
-        // wrap to.
+        // A field of its own, not appended: `.qtitle` is one `nowrap` line and would truncate it.
         if !(collides.contains(&r.label) && !r.opening.is_empty() && r.opening != r.label) {
             r.opening.clear();
         }
@@ -1556,11 +1092,7 @@ fn disambiguate_labels(rows: &mut [QueueRow]) {
 async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
     let mut rows = Vec::new();
     let corpora = tenant.core.store.list_corpora(10, 0).await?;
-    // Asked once for the page rather than once per row: this fragment is polled
-    // while anything is in flight, and the coverage read is a three-way join.
-    // Failure is the empty map for the reason a missing capture is: the line is
-    // what a capture did beyond being stored, and a page that cannot say so
-    // says nothing rather than failing to render the queue.
+    // Asked once per page (a three-way join on a polled fragment); failure is the empty map.
     let covered = tenant
         .core
         .store
@@ -1570,8 +1102,7 @@ async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
     for s in corpora {
         let (resolved, total) = tenant.core.store.segment_progress(&s.id).await?;
         let progress = (total > 0 && resolved < total).then(|| format!("{resolved}/{total}"));
-        // Terminal states: nothing else will happen without someone asking.
-        // NeedsReview is terminal in this sense — it is waiting on a person.
+        // Terminal states; NeedsReview waits on a person.
         let in_flight = !matches!(
             s.status,
             CorpusStatus::Ready
@@ -1588,11 +1119,7 @@ async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
                 .map(|c| format!("{:.0}%", c * 100.0))
                 .unwrap_or_else(|| "—".into()),
             low_coverage,
-            // Until synthesis names it, a capture is called by its opening
-            // words — the only thing anything knows about it, and the only
-            // thing that tells three captures pasted in a row apart. `unnamed`
-            // is what says the name is still coming; the label itself is not
-            // the place to say it.
+            // Until synthesis names it, a capture is called by its opening words; `unnamed` says a name is coming.
             opening: markdown::snippet(&s.raw_text, 60),
             label: corpus_label(s.title_hint.clone(), &s.raw_text, &s.origin),
             unnamed: s.title_hint.is_none() && in_flight,
@@ -1614,53 +1141,26 @@ async fn queue_fragment(tenant: Tenant) -> UiResult<Response> {
     Ok(HtmlTemplate(QueueTemplate { rows, active }).into_response())
 }
 
-/// What to call an artifact in a place that must call it something.
-///
-/// A title is what makes two near-identical artifacts tellable apart at a
-/// glance; falling back to the opening of the body beats an id. Sixty
-/// characters of raw body was that fallback, and it is where the sitting's
-/// "…darin vo" and the dedupe queue's `Keep "- schneller Schreibzugriff …"`
-/// both came from. The rule lives in one place now — see
-/// `markdown::stand_in_title` — so the sitting and the pair cards
-/// cannot drift apart again.
+/// The rule lives in `markdown::stand_in_title`, so every surface names the same way.
 pub(crate) fn title_of(c: &crate::store::artifacts::Chunk) -> String {
-    // A passage and a note have no name of their own — see
-    // `Provenance::names_its_own_text`. The stored heading on a passage names
-    // the section it was cut from, and showing it here put a name over twenty
-    // slices that share nothing but a chapter.
+    // A passage and a note have no name of their own; see `Provenance::names_its_own_text`.
     if !c.provenance.names_its_own_text() {
         return String::new();
     }
-    // The stored title goes through the same rule, because synthesis writes it
-    // and nothing stopped it writing markup into one: Housekeeping listed a
-    // merged artifact as "**Was nicht abgedeckt ist:** * Es werden keine". A
-    // title is a name, and a name is never marked up.
+    // Stored titles go through the same rule: synthesis can write markup into one.
     let name = match &c.title {
         Some(t) => crate::web::markdown::stand_in_title(t, 80),
         None => crate::web::markdown::stand_in_title(&c.text, 60),
     };
-    // `stand_in_title` strips markup and leading punctuation, so a body that is
-    // only those leaves nothing at all — a rule the sitting rail cannot use,
-    // since a list entry with no text is a link nobody can see or click. The id
-    // is a poor name and a working one.
+    // A body of only markup leaves nothing; the id is a poor name and a working one.
     if name.is_empty() {
         return c.id.clone();
     }
     name
 }
 
-/// Whether a passage stops in the middle of a sentence.
-///
-/// The pane rendered "…der bereits vorgestellte Einsatz von" and stopped,
-/// while the source column beside it showed the rest — a segmentation boundary
-/// landing mid-clause, with nothing on the artifact saying it had. This cannot
-/// know whether a boundary was semantic; it can tell that a sentence did not
-/// finish, which is the only claim the link it drives makes.
-///
-/// A closing bracket or quote after the stop counts as the stop: "…(siehe
-/// unten)" ends a sentence as much as the period would. A table row or a list
-/// marker does not — that passage ended where its structure ended, not
-/// mid-thought.
+/// Only whether a sentence finished, not whether the boundary was semantic.
+/// A closing bracket or quote after the stop counts; a table row or list marker ends on its structure.
 pub(crate) fn ends_mid_sentence(text: &str) -> bool {
     let t = text.trim_end();
     let t = t.trim_end_matches([')', ']', '"', '»', '\'', '“', '”']);
@@ -1677,35 +1177,13 @@ pub(crate) fn ends_mid_sentence(text: &str) -> bool {
 struct NotFoundTemplate {}
 
 impl NotFoundTemplate {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
     fn section(&self) -> &'static str {
         ""
     }
 }
 
-/// The app's own answer to a path it does not have.
-///
-/// Only for the pages: an agent asking `/api/v1` for a route that does not
-/// exist must not be handed an HTML document to parse, which is what a router
-/// fallback would do to every door at once. `/api/` is not the only such door.
-/// This is the fallback for the whole application, so a missing static asset,
-/// an unrouted `/mcp` path and every request that is not a `GET` arrive here
-/// too — and each of them was answered with the page, which for a browser with
-/// no session meant a 401 that `redirect_unauthenticated_browsers` turned into
-/// the login screen. A stylesheet that 303s to a login is not a missing
-/// stylesheet, it is a mystery. They get the plain 404 they asked for.
-///
-/// The page is behind a session like every other page. `Identity` is asked for
-/// optionally rather than required so that the `/api` answer above stays a 404
-/// for a caller with no credentials, but a browser with no session gets the
-/// same 401 the rest of the app gives it — which
-/// `redirect_unauthenticated_browsers` turns into the login. Without that, the
-/// one path nobody routed was the one path that rendered the whole nav to a
-/// visitor with no session.
+/// Only for pages: an API, `/mcp`, asset or non-GET miss gets a plain 404, never a page or login redirect.
+/// `Identity` is optional so `/api` stays a 404 without credentials, while a browser with no session still gets the 401.
 pub async fn not_found(
     tenant: Option<Tenant>,
     method: axum::http::Method,
@@ -1725,12 +1203,7 @@ pub async fn not_found(
     not_found_page(axum::http::StatusCode::NOT_FOUND)
 }
 
-/// The page itself, so a handler that says `Error::NotFound` answers with the
-/// same document an unrouted path does.
-///
-/// Without this the app had two 404s: this one, with the nav and a link back,
-/// and `{"error":"not found"}` in `application/json` from every handler that
-/// looked up an id and did not find it. See `web::ui_error`.
+/// So a handler's `Error::NotFound` answers with the same page as an unrouted path; see `web::ui_error`.
 pub(crate) fn not_found_page(status: axum::http::StatusCode) -> Response {
     match askama::Template::render(&NotFoundTemplate {}) {
         Ok(html) => (status, axum::response::Html(html)).into_response(),
@@ -1740,28 +1213,16 @@ pub(crate) fn not_found_page(status: axum::http::StatusCode) -> Response {
 
 pub fn ui_router() -> Router<AppState> {
     Router::new()
-        // The bare domain and `/ui` are the same door, and both open on the
-        // page the app starts at. Without the first of them the router simply
-        // had no answer for `/`, and a browser typing the domain got a 404 —
-        // signed in or not, because an unmatched path never reaches the
-        // authentication that would have redirected it to a login.
+        // `/` and `/ui` both open the workspace; an unmatched path never reaches authentication.
         .route("/ui/context", post(context_offer))
         .route("/ui/context/seen", post(context_seen))
         .route("/ui/queue", get(queue_fragment))
-        // An installed PWA may still hold /ui/browse as its start URL, and a
-        // bookmark outlives the page it pointed at.
-        // Takes an `Identity` like every other page: a gone page must still send
-        // a signed-out visitor to sign in rather than bouncing them onward.
+        // Installed PWAs and bookmarks may still hold /ui/browse. Takes an `Identity`, so a signed-out visitor is sent to sign in.
         .route(
             "/ui/browse",
             get(|_: Tenant| async { Redirect::to("/ui/capture") }),
         )
-        // The page's spoken names. Housekeeping was the nav word for a while,
-        // and `/ui/ops` still answers as the old door — but this goes straight
-        // to the page rather than chaining through that shim, and it takes an
-        // `Identity` like every other `/ui` route: a redirect that answers
-        // before the session is checked tells an anonymous caller which paths
-        // exist.
+        // Straight to the page, not via the `/ui/ops` shim; takes an `Identity` so paths are not disclosed anonymously.
         .route(
             "/ui/housekeeping",
             get(|_: Tenant| async { Redirect::to("/ui/insights") }),
@@ -1869,10 +1330,6 @@ mod tests {
 
     #[test]
     fn an_opening_that_repeats_its_own_label_says_only_the_rest() {
-        // Found by walking the running app, not by a fixture: the label is a
-        // heading lifted out of the capture's first words, so the opening
-        // beside it began by repeating it — "HOCHSCHULE MITTWEIDA" over
-        // "HOCHSCHULE MITTWEIDA Ein Verfahren zur…".
         let mut rows = vec![
             queue_row_fixture(
                 "HOCHSCHULE MITTWEIDA",
@@ -1890,10 +1347,6 @@ mod tests {
 
     #[test]
     fn a_disambiguated_row_shows_the_part_that_distinguishes_it() {
-        // `disambiguate_labels` appended the opening words and `.qtitle`
-        // truncated them away, so six rows still read "HOCHSCHULE MITTWEIDA ·
-        // HOCHSCH…" and the one column that exists to tell captures apart
-        // still could not. The opening needs an element of its own.
         let mut rows = vec![
             queue_row_fixture(
                 "HOCHSCHULE MITTWEIDA",
@@ -1927,21 +1380,16 @@ mod tests {
 
     #[test]
     fn a_sweep_stage_reads_as_words_and_keeps_its_identifier() {
-        // Housekeeping listed `arm_dedupe`, `link_judge` and `segment_window`
-        // — the identifiers the queue keys on, on a page a person reads.
         assert_eq!(sweep_label("arm_dedupe"), "Arming dedupe");
         assert_eq!(sweep_label("consolidate"), "Consolidating");
         assert_eq!(sweep_label("retention"), "Retention");
         assert_eq!(sweep_label("link_judge"), "Judging links");
-        // An identifier nobody has worded yet is shown, never swallowed: a new
-        // sweep must not render as a blank cell.
         assert_eq!(sweep_label("some_new_sweep"), "some_new_sweep");
     }
 
     #[test]
     fn every_stage_the_queue_can_run_has_a_word_for_it() {
-        // The list above is a map, and a map goes stale silently. This is what
-        // notices when a stage is added and nothing on Housekeeping names it.
+        // The map goes stale silently; this notices a stage added without a word.
         for stage in crate::store::jobs::Stage::ALL {
             let id = stage.as_str();
             assert_ne!(
@@ -1954,10 +1402,6 @@ mod tests {
 
     #[test]
     fn a_stored_title_that_carries_markup_is_shown_without_it() {
-        // Housekeeping listed a merged artifact as "**Was nicht abgedeckt
-        // ist:** * Es werden keine". Synthesis writes the title, and nothing
-        // stopped it writing markup into one — a title is a name, and a name
-        // is never marked up.
         let t = title_of(&chunk_fixture(
             Some("**Was nicht abgedeckt ist:** * Es werden keine"),
             "body",
@@ -1968,7 +1412,6 @@ mod tests {
             title_of(&chunk_fixture(Some("# 3.4.2 FESTE MFT RECORDS"), "body")),
             "3.4.2 FESTE MFT RECORDS"
         );
-        // An ordinary title passes through untouched.
         assert_eq!(
             title_of(&chunk_fixture(Some("LevelDB: Funktionsweise"), "body")),
             "LevelDB: Funktionsweise"
@@ -1977,28 +1420,18 @@ mod tests {
 
     #[test]
     fn a_passage_that_stops_mid_sentence_is_known_to_have_stopped() {
-        // The pane ended "…der bereits vorgestellte Einsatz von" while the
-        // source column beside it showed the rest of the sentence. The pane
-        // cannot know whether a boundary was semantic; it can tell that a
-        // sentence did not finish.
         assert!(ends_mid_sentence(
             "Die erste Vorkehrung ist der bereits vorgestellte Einsatz von"
         ));
         assert!(!ends_mid_sentence("Das ist der ganze Satz."));
         assert!(!ends_mid_sentence("Ist das der ganze Satz?"));
         assert!(!ends_mid_sentence("Ein Listenpunkt:"));
-        // A passage ending in a fenced block or a table row has not stopped
-        // mid-sentence; it has stopped where its structure ended.
         assert!(!ends_mid_sentence("| ext4 | ja |"));
         assert!(!ends_mid_sentence(""));
     }
 
     #[test]
     fn the_copy_control_does_not_sit_on_top_of_the_passage() {
-        // A fenced code sample is short and the button over its top-right
-        // corner cost nothing. A passage kept as the document wrote it is one
-        // `<pre>` from end to end, and there the button landed on the first
-        // sentence of the artifact — at both widths.
         let css = include_str!("../../assets/css/73-components.css");
         assert!(
             css.contains(".codewrap { position: relative; padding-top:"),
@@ -2008,10 +1441,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_with_nothing_open_leaves_the_grid_free_to_widen_the_rail() {
-        // 22rem of rail beside a thousand pixels holding one line of
-        // placeholder is the whole complaint. `pane-open` is what the pane
-        // gains when something is opened into it, so its absence on first
-        // paint is what the wide-rail rule keys on — see `20-layout.css`.
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/search?q=write+blocker").await;
         assert!(page.contains("regions-rail-focus-source"), "{page}");
@@ -2023,11 +1452,6 @@ mod tests {
 
     #[test]
     fn the_artifact_pane_shows_a_stored_title_by_the_same_rule_as_the_rest() {
-        // Synthesis writes titles and nothing stopped it writing markup into
-        // one. Housekeeping showed it cleaned while the corpus page and the
-        // pane showed the asterisks — the drift `title_of` was gathered into
-        // one place to close, still open on the path that read `c.title`
-        // straight.
         assert_eq!(
             artifact_title(&chunk_fixture(
                 Some("**Was nicht abgedeckt ist:** * Es werden keine"),
@@ -2039,10 +1463,6 @@ mod tests {
 
     #[test]
     fn an_artifact_whose_opening_is_only_markup_still_has_a_name() {
-        // `stand_in_title` takes markup and leading punctuation off the front,
-        // so a body that is only those leaves nothing at all. The sitting rail
-        // rendered that as a list entry with no text — a link nobody can see
-        // or click. The id is a poor name and a working one.
         let t = title_of(&chunk_fixture(None, "---"));
         assert!(!t.is_empty(), "a rail entry with no text is not a link");
         assert_eq!(t, "a", "the fixture's id");
@@ -2050,8 +1470,6 @@ mod tests {
 
     #[test]
     fn the_artifact_pane_does_not_call_a_passage_chunk_fifty_six() {
-        // "Chunk 56" is a position in the ingest, not a name for anything a
-        // reader asked for. The fixture's ordinal is 56 for exactly that.
         let t = artifact_title(&chunk_fixture(
             None,
             "Die digitale Forensik unterscheidet sich zusätzlich",
@@ -2066,9 +1484,6 @@ mod tests {
 
     #[test]
     fn an_untitled_artifact_is_named_by_its_opening_not_by_its_first_sixty_bytes() {
-        // Both of these came off the deployment: the sitting cut a name
-        // mid-word, and "Needs you" offered a button reading
-        // `Keep "- schneller Schreibzugriff (…) -"`.
         let t = title_of(&chunk_fixture(
             None,
             "Die digitale Forensik unterscheidet sich zusätzlich darin von einem Tatort",
@@ -2099,8 +1514,6 @@ mod tests {
 
     #[test]
     fn highlighting_skips_function_words_but_keeps_short_technical_terms() {
-        // A query phrased as a situation is mostly stopwords; marking every
-        // "to" and "how" highlights the entire card and hides the real hits.
         let terms = super::highlightable_terms("how do i write an iso to a usb stick with dd");
         assert!(terms.contains("iso"));
         assert!(terms.contains("usb"));
@@ -2157,8 +1570,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_segment_is_picked_up_without_anyone_asking() {
-        // What replaced the "re-synthesize segment" button. The sweep sees a
-        // segment that is not done, queues the corpus, and the run retries it.
         let core = crate::core::test_support::test_core().await;
         let out = core
             .ingest("first para\n\nsecond para", "web", None)
@@ -2235,16 +1646,10 @@ mod tests {
             !trigger_of(&html).contains("load"),
             "and nothing is searched for on the way in: {html}"
         );
-        // Still is not blank. Nothing is coming through this door, so the page
-        // renders the state it is actually in — the idle column, with the base
-        // saying what it holds — rather than the columns of nothing that state
-        // was written to remove.
         assert!(
             html.contains(r#"id="idle-foot""#),
             "the idle column says what the base holds: {html}"
         );
-        // Every id the stream driver writes into has to survive the move; the
-        // browser suite targets each of these by name.
         for id in [
             "ask-live",
             "ask-result",
@@ -2320,10 +1725,6 @@ mod tests {
         let (app, cookie, _core, _html, id) = ask_recorded().await;
 
         let html = get(&app, &format!("/ui/capture?from_ask={id}"), &cookie).await;
-        // The box holds a whole model answer. Searching for it on arrival was
-        // an embedding call, an activation bump on whatever it retrieved and,
-        // where searches are recorded, a Judge-queue row — for a paragraph the
-        // operator is about to store, not look for.
         assert!(
             !trigger_of(&html).contains("load"),
             "and the answer in the box is not searched for: {html}"
@@ -2337,10 +1738,6 @@ mod tests {
             html.contains(&format!(r#"name="from_ask" value="{id}""#)),
             "the ask rides the form as provenance: {html}"
         );
-        // In one removable block with the line that explains it: the claim is
-        // about this text, and app.js takes the pair away when the capture
-        // lands, so the next thing pasted into the same box is not stored as
-        // the same model answer.
         assert!(
             html.contains(r#"<div id="kept-from">"#),
             "and it is retirable in one piece: {html}"
@@ -2350,7 +1747,6 @@ mod tests {
             "the question it answered is named"
         );
 
-        // The plain door is the same page with an empty box.
         let plain = get(&app, "/ui/capture", &cookie).await;
         assert!(plain.contains(r#"id="box-form""#), "still the workspace");
         assert!(
@@ -2389,8 +1785,6 @@ mod tests {
             );
         }
 
-        // A deep link restores the box and asks for its results without a
-        // keystroke, because no keystroke is coming.
         let html = get(&app, "/ui/search?q=volume+move", &cookie).await;
         assert!(html.contains("volume move"), "the box comes back filled");
         assert!(
@@ -2426,9 +1820,6 @@ mod tests {
             html.contains(r#"aria-label="Search, ask, or capture""#),
             "the box has no accessible name: {html}"
         );
-        // The long sentence names all three verbs and the phone has no room
-        // for it: one row at that width clips it, and the hint that would have
-        // carried the rest is `display: none` there.
         assert!(
             html.contains("data-placeholder-narrow="),
             "nothing says what the box is for on a phone: {html}"
@@ -2506,8 +1897,6 @@ mod tests {
             .unwrap();
         let big = "filler+words+".repeat(400);
         let html = get(&app, &format!("/ui/search/results?q={big}"), &cookie).await;
-        // The slot is swapped whatever the answer, so an echo for text that is
-        // no longer in the box cannot outlive it.
         assert!(html.contains(r#"id="intent-echo""#), "{html}");
         assert!(html.contains("large paste"), "{html}");
         assert!(html.contains("verbatim"), "{html}");
@@ -2523,19 +1912,13 @@ mod tests {
 
     #[tokio::test]
     async fn the_echo_counts_the_windows_the_splitter_will_actually_make() {
-        // `tokens.div_ceil(budget)` is arithmetic the splitter does not
-        // perform: it will not cut inside a paragraph unless forced, so
-        // paragraphs that each sit under the budget are each their own window
-        // and the promise was short by up to half.
         let core = crate::core::test_support::test_core().await;
         let lang = crate::infer::lang::Lang::En;
         let budget = crate::jobs::synthesize::segment_budget(&core, lang)
             .expect("a window")
             .max(1);
         let para = "filler words ".repeat(budget * 6 / 10);
-        // Three, not ten: the property holds from three paragraphs up — three
-        // windows against the arithmetic's two — and ten put the fixture over
-        // `EXACT_SPLIT_BYTES`, where the echo estimates on purpose.
+        // Three, not ten: ten would cross `EXACT_SPLIT_BYTES`, where the echo estimates.
         let text = std::iter::repeat_n(para.trim(), 3)
             .collect::<Vec<_>>()
             .join("\n\n");
@@ -2611,8 +1994,6 @@ mod tests {
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = app_for(core.clone()).await;
 
-        // Empty base: the one instruction that matters, said once — under the
-        // box, where the eye already is. The foot below it says nothing at all.
         let html = get(&app, "/ui", &cookie).await;
         assert!(
             html.contains("Paste a note"),
@@ -2632,18 +2013,12 @@ mod tests {
             "and the staged box holds only the file, never the way to pick one"
         );
 
-        // The column, and what it is not. Four muted prose lines, a chip row
-        // marooned at the far end of the verb row, and the same five captures
-        // rendered twice in two shapes is what this page used to be.
         let html = get(&app, "/ui", &cookie).await;
         assert!(
             html.contains(r#"id="idle""#),
             "the column exists as one element"
         );
-        // Asserted against the template source, not a render: facets come from
-        // the vector store and the fixture seeds none, so a render of this page
-        // carries no chip row to be wrong about. What is being asserted is the
-        // gate, and the gate is in the markup.
+        // Asserted on the template: the fixture seeds no facets, so a render has no chip row.
         let tpl = include_str!("templates/workspace.html");
         assert!(
             tpl.contains(
@@ -2655,14 +2030,7 @@ mod tests {
             !html.contains("or drop one anywhere on the page."),
             "the attach prose is on the button's title: {html}"
         );
-        // One of each, and both under the box.
-        //
-        // `_box_hint.html` was included twice — once in the search form and
-        // once inside `#idle` — so an idle page printed the guidance sentence
-        // and both example chips twice and carried duplicate `id="box-hint"`
-        // and `id="intent-echo"` elements. An out-of-band swap resolves the
-        // first match only, which made every copy below it dead markup, and
-        // the textarea's `aria-describedby` names the id once.
+        // `_box_hint.html` once: duplicate ids leave every copy after the first dead to out-of-band swaps.
         assert_eq!(
             html.matches(r#"id="box-hint""#).count(),
             1,
@@ -2673,15 +2041,12 @@ mod tests {
             1,
             "and so is the slot the echo swaps into: {html}"
         );
-        // Under the box, not inside the column app.js hides on the first
-        // keystroke: the echo says what is being typed *now*.
         let tpl = include_str!("templates/workspace.html");
         let hint = tpl
             .find(r#"{% include "_box_hint.html" %}"#)
             .expect("the include");
         assert!(hint < tpl.find(r#"<div id="idle""#).expect("the column"));
 
-        // A base with something in it introduces itself.
         core.ingest_capture(crate::core::ingest::Capture::new(
             "LevelDB tombstones survive compaction longer than the manual admits.",
             "ui",
@@ -2698,13 +2063,8 @@ mod tests {
             html.contains("LevelDB tombstones"),
             "in the operator's words"
         );
-        // One list, not two. The rail used to render these same rows beside a
-        // middle column already rendering them, which is what made the page
-        // read as clutter.
         assert!(!html.contains("Last captured"), "and only once: {html}");
 
-        // Clearing the box returns to idle, not to "No matches." — which
-        // would be a claim about a base nobody searched.
         let frag = get(&app, "/ui/search/results?q=", &cookie).await;
         assert!(
             frag.contains(r#"id="idle-foot""#),
@@ -2719,11 +2079,7 @@ mod tests {
         let html = get(&app, "/ui", &cookie).await;
         assert!(!html.contains("Read just now"), "the list is retired");
 
-        // The mechanism it read from stays: Ask's carried citations ride on
-        // it and `[sitting] prime` reads it. That half is covered
-        // behaviourally by `marking_a_carrier_marks_the_answer_right_and_updates_the_bar_out_of_band`
-        // — an assertion on `citations[..].carried`, which is false unless
-        // `sittings.touched()` still runs on every artifact open.
+        // Covered behaviourally by `marking_a_carrier_marks_the_answer_right_and_updates_the_bar_out_of_band`.
     }
 
     #[tokio::test]
@@ -2756,8 +2112,6 @@ mod tests {
     #[tokio::test]
     async fn a_source_is_called_a_source_everywhere_a_person_reads_it() {
         let core = crate::core::test_support::test_core().await;
-        // `ingest_capture` answers with an `IngestOutcome`; the corpus id is
-        // the field on it, not the value itself.
         let id = core
             .ingest_capture(crate::core::ingest::Capture::new(
                 "LevelDB tombstones survive compaction longer than the manual admits.",
@@ -2773,9 +2127,6 @@ mod tests {
             !corpus.contains("Corpus — engram"),
             "the page a person reads does not say corpus"
         );
-        // The tab used to read "Source — engram" for every source there is.
-        // It carries the capture's own name now — the same label Recent and
-        // the day page use — and the heading on the page says it too.
         assert!(
             corpus.contains("<title>LevelDB tombstones"),
             "the tab names this capture rather than its kind"
@@ -2836,14 +2187,11 @@ mod tests {
 
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
-        // The constants sit just above the function; the slice takes both.
         let body = js
             .split_once("var INSTALL_KEY")
             .expect("app.js has no installNudge()")
             .1;
         let body = &body[..body.find("\n  }\n").unwrap()];
-        // Not in an installed window, not on a desktop, not more than once a
-        // week, and the prompt where the browser offers one.
         for guard in [
             "display-mode: standalone",
             "navigator.standalone",
@@ -2861,8 +2209,7 @@ mod tests {
             js.contains("    installNudge();\n"),
             "installNudge() is not called on load"
         );
-        // Chrome fires the event once, early; a listener added at load time
-        // may miss it. It is captured at script scope.
+        // Chrome fires the event once, early; the listener must be at script scope.
         let before = js.split_once("function installNudge() {").unwrap().0;
         assert!(
             before.contains("addEventListener('beforeinstallprompt'"),
@@ -2902,13 +2249,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_link_derived_pair_never_claims_a_similarity_once_the_judge_has_settled_it() {
-        // The link judge files these with `detail = "link"` and a score of 0.0,
-        // because no cosine was ever measured. But `detail` is where the dedupe
-        // judge then writes its own prose — `set_pair_state` and
-        // `set_pair_superseded` both overwrite it — so provenance read out of
-        // that field survives only while the pair is pending. Once it settles,
-        // the page would go back to rendering the placeholder score, and
-        // "0% alike" reads as a measurement meaning "nothing alike".
+        // `detail` is overwritten by the dedupe judge, so provenance cannot be read from it once the pair settles.
         let core = crate::core::test_support::test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -2939,7 +2280,6 @@ mod tests {
             .fetch_one(&core.store.pool)
             .await
             .unwrap();
-        // The dedupe judge answers, and writes its line over the marker.
         core.store
             .set_pair_state(
                 id,
@@ -2961,8 +2301,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_capture_page_offers_images_whether_or_not_vision_is_configured() {
-        // A photo without a vision role is stored and read later, so the
-        // picker offers it either way.
         for core in [
             crate::core::test_support::test_core().await,
             crate::core::test_support::test_core_without_vision().await,
@@ -3060,7 +2398,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The centroid is this very situation, so the offer lands on `Pattern`.
         let at = crate::store::now();
         let bundle = crate::core::context::Bundle {
             tz: Some("Europe/Berlin".into()),
@@ -3119,9 +2456,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_page_view_is_recorded_even_when_nothing_is_offered() {
-        // The endpoint has two jobs and does the first unconditionally. A base
-        // that has learned nothing yet is exactly the base that most needs its
-        // situations written down.
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
         core.learn.enabled = true;
@@ -3147,14 +2481,11 @@ mod tests {
         assert!(rows[0].local_hour.is_some(), "denormalised for the sweep");
         assert!(rows[0].weekday.is_some());
         assert_eq!(rows[0].scope.as_deref(), Some("user-1"));
-        // Stored whole, including what the encoder does not read today.
         assert!(rows[0].bundle.contains("Europe/Berlin"));
     }
 
     #[tokio::test]
     async fn a_wide_bundle_is_stored_whole_and_read_by_no_block() {
-        // The new fields are stored, not encoded: the row carries them
-        // verbatim, and the encoder's output is the same with or without.
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
         core.learn.enabled = true;
@@ -3211,7 +2542,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_area_is_not_rendered_when_the_faculty_is_off() {
-        // One gate, in one place: no placeholder, no request, nothing recorded.
         let core = crate::core::test_support::test_core().await;
         let store = core.store.clone();
         let background = core.background.clone();
@@ -3237,7 +2567,6 @@ mod tests {
         assert!(page.contains(r#"id="context-offer""#));
         assert!(page.contains(r#"hx-post="/ui/context""#));
         assert!(page.contains("data-send-context"));
-        // The class the reserved height hangs off.
         assert!(page.contains(r#"class="offer""#));
     }
 
@@ -3258,33 +2587,20 @@ mod tests {
 
     #[tokio::test]
     async fn the_offer_is_absent_from_a_page_that_already_carries_a_query() {
-        // The area is for the state "no intent expressed yet". A deep link, a
-        // reload or a back-navigation renders the box with its query restored
-        // and results below it — and app.js only removes the area on a
-        // *keystroke*, which never comes on any of those. Left ungated, the
-        // offer sat beside real results and wrote a `recommended_shown` row per
-        // results page view, inflating the denominator of the one hit rate this
-        // feature is measured by.
+        // app.js removes the area only on a keystroke, so a restored query must not render it.
         let (app, cookie, _store, _aid) = app_recommending().await;
         let page = get(&app, "/ui/search?q=recycling", &cookie).await;
         assert!(
             !page.contains(r#"id="context-offer""#),
             "an offer beside results: {page}"
         );
-        // And it is back on the next fresh page view: dismissal is per view,
-        // not a state anything remembers.
         let page = get(&app, "/ui/search", &cookie).await;
         assert!(page.contains(r#"id="context-offer""#));
     }
 
     #[tokio::test]
     async fn a_confirmation_a_page_made_up_records_nothing() {
-        // The impression now comes from the browser, which means it comes from
-        // whatever anyone chooses to post. Both halves go into `offer_rates`'
-        // `GROUP BY rung` — a made-up rung would appear on Ops as a fifth rung
-        // of a four-rung ladder, and a made-up artifact would put a shown
-        // against something that was never offered and cannot ever be clicked,
-        // which is a zero in the denominator of the hit rate for ever.
+        // Both values come from whatever anyone posts and feed `offer_rates`' `GROUP BY rung`.
         let (app, cookie, store, aid) = app_recommending().await;
 
         for body in [
@@ -3296,8 +2612,6 @@ mod tests {
                 .oneshot(form("/ui/context/seen", &cookie, &body))
                 .await
                 .unwrap();
-            // Nothing is waiting on the answer, so neither is an error — but
-            // neither is a row.
             assert_eq!(res.status(), StatusCode::NO_CONTENT);
         }
         drain().await;
@@ -3311,10 +2625,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_reason_line_is_markup_a_browser_will_not_rearrange() {
-        // `details` and `pre` are flow content and a `p` may hold only phrasing
-        // content, so a `p` here is closed by the parser before the `details`
-        // and leaves a stray empty paragraph behind — a DOM the stylesheet is
-        // not written against, with the Details control on its own line.
+        // A `p` may hold only phrasing content; the parser would close it before `details`.
         let (app, cookie, _aid) = app_with_a_learned_situation().await;
         let body = crate::web::test_support::body_of(
             app.clone()
@@ -3340,10 +2651,6 @@ mod tests {
 
     #[tokio::test]
     async fn what_was_offered_is_written_down_with_its_rung() {
-        // Shown against clicked, broken down by rung, is a hit rate. It is the
-        // only number that can later settle whether the weights are right, and
-        // a recommender with no visible hit rate becomes `[sitting] prime`:
-        // a default nobody ever measured.
         let (app, cookie, store, aid) = app_recommending().await;
 
         let res = app
@@ -3354,27 +2661,18 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_of(res).await;
         assert!(body.contains(&aid), "{body}");
-        // Nothing about the situation produced it, so nothing is claimed: no
-        // rung name, no blocks, no reason line at all. A card with a sentence
-        // under it would be the area borrowing authority it does not have.
         assert!(
             !body.contains("offer-why"),
             "the card explains nothing: {body}"
         );
         assert!(!body.contains("Offered because"), "{body}");
-        // The fragment carries what the confirmation posts back, so the shown
-        // and the open agree about what was offered.
         assert!(
             body.contains(r#"data-rec-rung="random""#),
             "the browser cannot say what it was shown: {body}"
         );
         drain().await;
 
-        // Computing an offer is not showing one. Until the browser says it
-        // reached the screen, nothing is recorded: this fetch races the first
-        // keystroke, and the answer that loses is dropped without ever being
-        // seen. Counting those put a population that cannot click into the
-        // denominator of the one number the weights would be fitted against.
+        // Computing an offer is not showing one: nothing is recorded until the browser confirms.
         let rows = store.interactions_between(0, i64::MAX).await.unwrap();
         assert!(
             !rows.iter().any(|r| r.kind == "recommended_shown"),
@@ -3430,8 +2728,6 @@ mod tests {
         );
         let body = crate::web::test_support::json_of(res).await;
         assert_eq!(body["offer"]["artifact_id"], aid.as_str(), "{body}");
-        // The ladder's own word, not the fragment's sentence: the client owns
-        // its wording, and `seen` wants this value back verbatim.
         assert_eq!(body["offer"]["rung"], "random");
         assert!(body["offer"]["slot"].is_null());
         assert!(
@@ -3443,7 +2739,6 @@ mod tests {
         let rows = store.interactions_between(0, i64::MAX).await.unwrap();
         assert!(!rows.iter().any(|r| r.kind == "recommended_shown"));
 
-        // An unknown rung is a 204 that records nothing.
         for (rung, expect) in [("confident", 0), ("random", 1)] {
             let res = app
                 .clone()
@@ -3480,7 +2775,6 @@ mod tests {
         let body = crate::web::test_support::json_of(res).await;
         assert!(body["offer"].is_null(), "a card around nothing: {body}");
 
-        // The faculty off: the same shape, saying nothing.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
@@ -3565,8 +2859,6 @@ mod tests {
 
     #[tokio::test]
     async fn ops_says_nothing_about_offers_when_the_faculty_is_off() {
-        // A heading over no rows is a claim that something is being measured
-        // when nothing is.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let page = get(&app, "/ui/insights", &cookie).await;
@@ -3591,11 +2883,6 @@ mod tests {
                         filters: "{}".into(),
                         query_vec: vec![0.1, 0.2],
                         embed_model: "fake".into(),
-                        // A pool, because a search that returned nothing is a
-                        // hole rather than a card and the deck does not deal
-                        // one — see `dealable!`. These stand for searches
-                        // waiting to be judged, so they have something to
-                        // judge.
                         candidates: vec![crate::store::feedback::NewCandidate {
                             artifact_id: format!("a{i}"),
                             score: 0.9,
@@ -3606,16 +2893,11 @@ mod tests {
                         answered: false,
                         context: None,
                     },
-                    // No folding: these stand for separate searches, not one
-                    // being typed.
                     0,
                 )
                 .await
                 .unwrap();
         }
-        // Searches were recorded against something. Without a source the ask
-        // door redirects, and a test walking the nav across every page would
-        // be walking one that is not there.
         let handle = core.clone();
         let out = app_with_cookie(core).await;
         hold_something(&handle).await;
@@ -3638,8 +2920,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_nav_offers_no_judge_entry_even_while_searches_are_recorded() {
-        // The deck is gone: a verdict is given under the result it is about,
-        // at the moment of the search, and the nav has nothing to advertise.
         let (app, cookie) = app_recording_searches(3).await;
         for page in ["/ui/search", "/ui/insights"] {
             let html = flat(&get(&app, page, &cookie).await);
@@ -3652,10 +2932,6 @@ mod tests {
         let (app, cookie) = app_with_embedded_corpus().await;
         let html = flat(&get(&app, "/ui/search", &cookie).await);
 
-        // The fake synthesizer files everything under `reference`, so that is
-        // the value the payload index holds. There is no tag row to render:
-        // subject words have no vocabulary that can be closed, so nothing
-        // offers a list of them.
         assert!(
             html.contains(r#"name="category" value="reference""#),
             "no category chip was rendered"
@@ -3683,10 +2959,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_deep_linked_filter_the_facets_do_not_list_still_gets_a_chip() {
-        // `recipe` is a category nothing carries, so the payload index never
-        // reports it — but the rail is narrowed by it all the same. Without a
-        // chip the page would read as unfiltered over a filtered rail, with no
-        // way to click back out.
         let (app, cookie) = app_with_embedded_corpus().await;
         let html = flat(&get(&app, "/ui/search?q=alpha&category=recipe", &cookie).await);
         assert!(
@@ -3735,9 +3007,6 @@ mod tests {
 
     #[test]
     fn a_loose_result_is_labelled_and_never_ranked() {
-        // `#1` over something the search itself calls a poor match is the false
-        // confidence this exists to remove: a rank is a claim about standing
-        // among answers, and a barely-matching artifact is not one.
         let result = |weak: bool| crate::core::search::SearchResult {
             artifact_id: "a".into(),
             corpus_id: "s".into(),
@@ -3765,9 +3034,6 @@ mod tests {
         assert!(html.contains("Nothing matches closely"), "{html}");
         assert!(!html.contains("#1"), "{html}");
 
-        // A mixed list says how many of its rows are the loose ones, which is
-        // the split "3 results" alone hid. An all-loose list does not: the flag
-        // above the list already says it.
         let mixed = askama::Template::render(&ResultsTemplate {
             results: vec![
                 render_hit(0, result(false), &Default::default(), false),
@@ -3891,9 +3157,6 @@ mod tests {
 
     #[test]
     fn a_result_with_no_title_of_its_own_is_given_no_heading() {
-        // "Untitled" is a heading that says nothing and looks like one that
-        // says something. A verbatim passage has no title by design, and ten
-        // rows of "Untitled" is what the rail then reads as.
         let hit = |title: Option<&str>, via: Option<&str>| crate::core::search::SearchResult {
             artifact_id: "a".into(),
             corpus_id: "s".into(),
@@ -4009,12 +3272,10 @@ mod tests {
         );
         assert_eq!(body.matches("rail-past").count(), 2, "{body}");
         assert!(body.contains("#3") && body.contains("#4"), "{body}");
-        // The rule comes after the second row and before the third.
         let rule = body.find("Relevance falls off here").unwrap();
         assert!(body.find("#3").unwrap() > rule, "{body}");
         assert!(body.rfind("#1").unwrap() < rule, "{body}");
 
-        // No cliff, no rule.
         let flat = ResultsTemplate {
             results: vec![above.clone(), above.clone(), above],
             ..Default::default()
@@ -4052,18 +3313,12 @@ mod tests {
             "the borrowed name stands where a name goes: {body}"
         );
         assert!(body.contains("Der Vorgang setzt voraus"), "{body}");
-        // Not gone from the row, though — under the snippet and prefixed,
-        // where it says where the passage sits rather than what it is called.
-        // Dropping it entirely left a passage row with no account of where in
-        // its source it came from.
         assert!(
             body.contains(
                 r#"<p class="rail-where">in Wiederherstellung geloeschter Eintraege</p>"#
             ),
             "{body}"
         );
-        // The greyed "from" form goes with it: a class with no renderer left
-        // is a rule nobody can reach.
         let css = include_str!("../../assets/app.css");
         assert!(
             !css.contains(".rail-title-corpus"),
@@ -4073,13 +3328,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_results_name_what_recalled_an_associated_hit() {
-        // An associated hit says which hit recalled it, or it is an unexplained
-        // result in a list the reader believes is ranked. Rendered directly
-        // rather than driven through a search: the UI handler asks for the
-        // default limit, so on any base small enough to reason about, every
-        // artifact is already ranked and there is nothing left to recall. What
-        // this task changed is the split and the copy, and that is what this
-        // pins.
+        // Rendered directly: on a small base every artifact is already ranked, so nothing is left to recall.
         let template = ResultsTemplate {
             associated: vec![rendered(Some("Mounting E01 images"), None)],
             ..Default::default()
@@ -4089,7 +3338,6 @@ mod tests {
         assert!(body.contains("seen together with"), "{body}");
         assert!(body.contains("Mounting E01 images"), "{body}");
 
-        // A judged link says what the relation is instead of what was asked.
         let judged = ResultsTemplate {
             associated: vec![rendered(
                 Some("Mounting E01 images"),
@@ -4104,10 +3352,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_reranked_fragment_says_it_was_refined() {
-        // The refining pass visibly reorders the rail; the tick beside the
-        // count is what says the movement was the reranker rather than a
-        // glitch. The fast pass must not carry it: it is claiming an order
-        // the reranker never confirmed.
         let refined = ResultsTemplate {
             results: vec![rendered(Some("Mounting E01 images"), None)],
             reranked: true,
@@ -4128,10 +3372,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_unlinked_search_shows_no_association() {
-        // Nothing was linked, so there is nothing to recall. This only pins
-        // the absence of the section on a corpus with no links — the
-        // `all_weak` invariant itself is proven separately below, since this
-        // search never has an association present to prove it against.
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["alpha text"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
@@ -4142,17 +3382,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_search_fragment_takes_the_explain_flag_as_a_url_writes_it() {
-        // `serde_urlencoded` reads a bare `bool` only as `true`/`false`, so
-        // `explain=1` — the spelling `/ui?explain=1` puts on the form and the
-        // one every hand-written URL carries — was a 400 for the whole
-        // fragment: asking why a row ranked emptied the rail instead.
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["alpha text"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
 
         for spelling in ["explain=1", "explain=true", "explain=on", "explain"] {
             let uri = format!("/ui/search/results?q=alpha&{spelling}");
-            // `get_body` asserts the 200 itself.
             let body = get_body(&app, &cookie, &uri).await;
             assert!(body.contains("rail-item"), "{uri} returned no rail: {body}");
         }
@@ -4188,11 +3423,7 @@ mod tests {
 
     #[test]
     fn an_association_cannot_make_the_answer_look_worse_than_it_was() {
-        // `all_weak` is a statement about how well the *query* was answered. An
-        // associated hit did not answer the query at all, so its presence must
-        // not move this verdict either way. Proven both directions: a weak
-        // ranked answer still warns with an association beside it, and a good
-        // ranked answer stays silent with one beside it too.
+        // An association must not move `all_weak` either way; both directions are checked.
         let weak_with_association = ResultsTemplate {
             results: vec![ranked(true)],
             associated: vec![rendered(Some("Mounting E01 images"), None)],
@@ -4219,10 +3450,6 @@ mod tests {
 
     #[test]
     fn a_chosen_theme_beats_the_system_preference() {
-        // The light palette has been in the stylesheet since the port from
-        // Vestigo and nobody has ever seen it: it activated only on
-        // prefers-color-scheme. A choice has to override the system in both
-        // directions, or it is not a choice.
         let css = include_str!("../../assets/app.css");
         assert!(
             css.contains(r#":root[data-theme="dark"]"#),
@@ -4236,10 +3463,7 @@ mod tests {
 
     #[test]
     fn the_theme_is_applied_before_the_first_paint() {
-        // A deferred script runs after the first paint and a stylesheet cannot
-        // know a stored choice, so either way the wrong theme flashes on every
-        // load — on a phone, brightly. The inline script has to come before the
-        // stylesheet it is correcting.
+        // The inline script must precede the stylesheet, or the wrong theme flashes on load.
         let layout = include_str!("templates/layout.html");
         let script = layout.find("js/theme.js").expect("no pre-paint script");
         let sheet = layout.find("url(\"app.css\")").expect("no stylesheet link");
@@ -4251,10 +3475,6 @@ mod tests {
 
     #[test]
     fn headings_are_headings_and_labels_are_labels() {
-        // h3 was restyled globally into a small uppercase muted label, which is
-        // why no page had hierarchy: the element that would carry it had been
-        // spent on a style. Every <h3> in the templates was a real heading —
-        // Recent, Merged, Pursuits, API tokens — wearing a label's clothes.
         let css = include_str!("../../assets/app.css");
         assert!(
             css.contains(".label {"),
@@ -4266,8 +3486,6 @@ mod tests {
         );
         assert!(css.contains("--text-section:"), "the type scale is missing");
 
-        // The two classes that had independently reinvented the label style now
-        // defer to it, so there is one label vocabulary rather than three.
         let detail = include_str!("templates/_artifact_detail.html");
         assert!(
             detail.contains(r#"class="label pane-label""#),
@@ -4282,18 +3500,7 @@ mod tests {
 
     #[test]
     fn the_artifact_actions_carry_labels() {
-        // One screen carried three button vocabularies: unlabelled icon
-        // buttons stranded at the top of a wide row, text links inside the
-        // card, and solid buttons elsewhere. An icon alone is a guess — a
-        // check mark could as easily mean "done" as "still true".
-        //
-        // Asserted against the template source rather than a render: the
-        // fragment is `ArtifactDetailFragment { d: ArtifactDetail }` and
-        // building an ArtifactDetail by hand is thirty lines of scaffolding to
-        // check for three words. The words are the whole change.
-        //
-        // The words themselves are `the_pane_controls_name_the_question_they
-        // _answer`'s subject; this is only that each control has one.
+        // Asserted against the template source: building an `ArtifactDetail` by hand is thirty lines for three words.
         let tpl = include_str!("templates/_artifact_detail.html");
         for word in ["Hide from results", "Delete"] {
             assert!(
@@ -4301,13 +3508,6 @@ mod tests {
                 "the {word} control has no label"
             );
         }
-        // And a result row offers none of them. Deleting from the rail was the
-        // one irreversible act in the app that could be fired on something
-        // nobody had opened, and the only one-click act a result carried — so
-        // the permanent choice was the easy one, while hiding, which can be
-        // undone, meant opening the artifact first. The square icon button is
-        // still right where controls repeat down a list the operator is working
-        // through: the corpus page's own artifacts.
         let rail = include_str!("templates/_results.html");
         assert!(
             !rail.contains("/delete"),
@@ -4321,17 +3521,12 @@ mod tests {
 
     #[test]
     fn the_open_rail_card_keeps_a_line_of_itself() {
-        // The rail is the ranking as well as a list of links. A card
-        // collapsing to a bare stub when opened punched a hole in the ordering
-        // and lost the reader's place in it; the accent border and background
-        // were always what said which one was open.
         let css = include_str!("../../assets/app.css");
         assert!(
             !css.contains(r#".rail-item[aria-selected="true"] .rail-snippet { display: none; }"#),
             "the open card still erases its snippet"
         );
-        // Demoted, not unreadable: 0.55 over the dark base is very likely
-        // under AA, and a result past the cliff is still a result.
+        // 0.55 over the dark base is likely under AA; a result past the cliff is still a result.
         assert!(
             !css.contains(".rail-past { opacity: 0.55; }"),
             "past-cliff results are still dimmed below the contrast floor"
@@ -4349,8 +3544,6 @@ mod tests {
             html.contains("<span>Hide from results</span>"),
             "the hide control still says only `Hide`"
         );
-        // And the search bar it sits over is unchanged: that one is right, and
-        // the confusion was never its half.
         let bar = include_str!("templates/_search_verdict.html");
         assert!(bar.contains("Was this what you were looking for?"));
     }
@@ -4364,19 +3557,12 @@ mod tests {
             !body.contains("area.remove()"),
             "hideIdle still destroys the offer instead of hiding it: {body}"
         );
-        // And the one case that must still drop it stays.
         assert!(js.contains("function dropOffer()"));
         assert!(js.contains("if (offerDismissed) dropOffer();"));
     }
 
     #[test]
     fn every_page_anchors_to_the_same_left_edge() {
-        // Three shell widths meant the content column moved under a brand that
-        // did not, so navigating jolted — and on Search the query box lined up
-        // with nothing else on its own page. A page now declares which regions
-        // it uses and never declares a width; the grid puts `rail` and `focus`
-        // in the same columns everywhere, which is what makes the anchor
-        // single.
         let css = include_str!("../../assets/app.css");
         assert!(
             !css.contains("shell-wide"),
@@ -4390,10 +3576,6 @@ mod tests {
 
     #[test]
     fn colliding_capture_labels_get_told_apart() {
-        // Synthesis names a capture by lifting a heading out of it, and a
-        // heading repeats across every document that carries it: six rows read
-        // HOCHSCHULE MITTWEIDA and the column that exists to tell captures
-        // apart could not. The opening words are the one thing that differs.
         let mut rows = vec![
             QueueRow {
                 label: "HOCHSCHULE MITTWEIDA".into(),
@@ -4412,24 +3594,16 @@ mod tests {
             },
         ];
         disambiguate_labels(&mut rows);
-        // The label keeps its own name and the opening is kept beside it,
-        // rather than being folded into it. Appended, it was cut off by the
-        // one `nowrap` line the row gives a title — so this repair ran on the
-        // deployment and six rows still read the same six words.
         assert_eq!(rows[0].label, "HOCHSCHULE MITTWEIDA");
         assert_eq!(rows[0].opening, "Kapitel 1 Einleitung");
         assert_eq!(rows[1].label, "HOCHSCHULE MITTWEIDA");
         assert_eq!(rows[1].opening, "Kapitel 5 Malware");
-        // A label that was already unique is left alone: the opening beside it
-        // is a repair, not a decoration.
         assert_eq!(rows[2].label, "Configure auditd");
         assert!(rows[2].opening.is_empty());
     }
 
     #[test]
     fn a_collision_with_no_opening_words_is_left_alone() {
-        // A photo, or a PDF whose extraction has not landed, has no opening
-        // words — and "document · document" tells no one anything.
         let mut rows = vec![
             QueueRow {
                 label: "document".into(),
@@ -4449,8 +3623,6 @@ mod tests {
 
     #[test]
     fn a_label_is_not_repeated_back_to_itself() {
-        // An untitled capture is already called by its opening words. Appending
-        // them would render "auditctl -w /etc · auditctl -w /etc".
         let mut rows = vec![
             QueueRow {
                 label: "auditctl -w /etc".into(),
@@ -4469,10 +3641,6 @@ mod tests {
 
     #[test]
     fn a_primed_hit_says_why_it_arrived() {
-        // primed, loose and model-written already reached the rail as chips
-        // scattered across the header, each with its explanation hidden in a
-        // title attribute. The badge said what the result is; nothing said why
-        // it was here.
         let mut r = ranked(false);
         r.primed = true;
         let body = ResultsTemplate {
@@ -4517,8 +3685,6 @@ mod tests {
 
     #[test]
     fn an_ordinary_hit_explains_nothing() {
-        // A line under every result saying "this matched your query" is noise
-        // that makes the lines worth reading harder to see.
         let body = ResultsTemplate {
             results: vec![ranked(false)],
             ..Default::default()
@@ -4567,18 +3733,12 @@ mod tests {
             "/ui/ask",
             "/ui/insights",
         ] {
-            // A plain GET is a browser loading a page, so a missing session
-            // sends it to sign in rather than showing it JSON it cannot act
-            // on. `redirect_unauthenticated_browsers` (web/mod.rs) is what
-            // rewrites the 401 into this.
             let res = app
                 .clone()
                 .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
                 .await
                 .unwrap();
             assert_eq!(res.status(), StatusCode::SEE_OTHER, "{uri} was unprotected");
-            // And it names the page it bounced, so signing in comes back here
-            // rather than dropping everyone on Search.
             let go: String = url::form_urlencoded::byte_serialize(uri.as_bytes()).collect();
             assert_eq!(
                 res.headers().get("location").unwrap(),
@@ -4616,8 +3776,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_flagged_capture_says_what_it_resembles_and_that_it_is_searchable() {
-        // The confirmation is the only page the writer sees: it names what the
-        // capture resembles, and does not claim it is waiting on anyone.
         let (app, cookie, core) = app_session_and_core().await;
         let body: String = (0..200)
             .map(|i| format!("step {i} run the mount command and read its output"))
@@ -4625,8 +3783,6 @@ mod tests {
             .join("\n");
         core.ingest(&body, "web", None).await.unwrap();
 
-        // Hand-encoded rather than pulling in a dependency: the body is plain
-        // words, so spaces and newlines are all there is to escape.
         let edited = body
             .replacen("step 7 ", "step seven ", 1)
             .replace(' ', "+")
@@ -4653,16 +3809,6 @@ mod tests {
 
     #[tokio::test]
     async fn capturing_text_stores_it_and_the_idle_line_says_so() {
-        // The press answers with nothing, and that is the point: everything it
-        // used to write went into `#capture-result`, which lives inside the
-        // bar that is fixed to the bottom of a phone's screen — so the answer
-        // to a capture pushed the box out of the viewport.
-        //
-        // A box that empties itself with no acknowledgment would be
-        // indistinguishable from data loss, so the acknowledgment has to be
-        // somewhere. It is the "last kept" line of `_idle_foot.html`, which
-        // names the capture and links to it, and which the same `submit` that
-        // refreshes the rail swaps out of band.
         let (app, cookie, core) = app_session_and_core().await;
         let res = app
             .clone()
@@ -4687,8 +3833,6 @@ mod tests {
 
     #[tokio::test]
     async fn capturing_the_same_text_twice_says_so() {
-        // The one thing the queue cannot report: the second paste adds no row,
-        // so without this the page looks like nothing happened at all.
         let (app, cookie) = app_with_session().await;
         for _ in 0..1 {
             app.clone()
@@ -4708,9 +3852,6 @@ mod tests {
 
     #[tokio::test]
     async fn capture_takes_only_text() {
-        // The label field is gone from the form. A client still sending one —
-        // a cached page, a script written against the old form — must not get
-        // a 422 for a field the server stopped caring about.
         let (app, cookie) = app_with_session().await;
         let res = app
             .oneshot(form(
@@ -4725,8 +3866,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_deep_link_runs_its_query_instead_of_only_filling_the_box() {
-        // `/ui/search?q=dd` restored the text but not the results, so the page
-        // opened as a filled box over an empty rail until someone typed.
         let (app, cookie) = app_with_session().await;
         let page = |uri: &'static str| {
             let app = app.clone();
@@ -4752,10 +3891,6 @@ mod tests {
             linked.contains("load"),
             "the deep link never asks for its own results"
         );
-        // The form's own trigger, not the page's text: the idle column below
-        // the box carries `load` triggers of its own — the offer and the due
-        // band each fetch themselves — and asserting over the whole document
-        // would read one of those as a search.
         assert!(
             !trigger_of(&page("/ui/search").await).contains("load"),
             "an empty box has nothing to search for"
@@ -4848,10 +3983,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_box_with_no_search_reranker_never_claims_refinement() {
-        // The tick says "the reranker confirmed this order". With no reranker
-        // wired — or one scoped to ask alone — a `rerank=true` request still
-        // answers, but the claim must not appear: it would be asserting a
-        // confirmation that never happened.
         let (app, cookie, core) = app_session_and_core().await;
         app.clone()
             .oneshot(form("/ui/capture", &cookie, "text=mounting+an+image"))
@@ -4981,7 +4112,6 @@ mod tests {
             ))
             .await
             .unwrap();
-        // Drain the queue so the chunk is embedded and therefore searchable.
         let state_app = app.clone();
         let _ = state_app;
 
@@ -5024,11 +4154,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_box_holding_a_document_is_idle_rather_than_a_query() {
-        // The one box is also where a chapter is pasted to be captured, and
-        // /ui/capture?from_ask= opens it holding a whole model answer. The
-        // template holds the `load` search back on those doors; this is what
-        // holds back the keystroke after it, which would otherwise spend an
-        // embedding call and a Judge-queue row on a paragraph nobody asked for.
         let (app, cookie) = app_with_session().await;
         let long = "answer+".repeat(MAX_QUERY_CHARS / 4);
         let frag = get(&app, &format!("/ui/search/results?q={long}"), &cookie).await;
@@ -5047,8 +4172,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Freshly captured and still queued: the fragment has to ask to be
-        // refreshed, or the row would sit at its opening words forever.
         let body = get_body(&app, &cookie, "/ui/queue").await;
         assert!(
             body.contains("alpha line"),
@@ -5080,11 +4203,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_capture_that_stopped_without_finishing_says_which_way() {
-        // Failed, parked and partial are all "not moving and not done", and
-        // all three usually have no artifacts — so the count that describes a
-        // finished capture described these as `0 artifacts · —`, which is
-        // exactly what a capture that was read and yielded nothing looks like.
-        // The only list of captures there now is must distinguish them.
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("alpha line", "web", None).await.unwrap();
 
@@ -5122,10 +4240,6 @@ mod tests {
 
     #[tokio::test]
     async fn insights_offers_no_decision_however_many_pairs_are_open() {
-        // Five of these used to render here with two Keep buttons each and
-        // "2 more waiting" under them. The judge reads every open pair on its
-        // own now, so seven of them put nothing on the page and nothing in
-        // front of anyone.
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(
             &core,
@@ -5148,7 +4262,6 @@ mod tests {
 
     #[tokio::test]
     async fn browse_redirects_to_capture() {
-        // An installed PWA may still have /ui/browse as its start URL.
         let (app, cookie) = app_with_session().await;
         let res = app
             .oneshot(
@@ -5167,8 +4280,6 @@ mod tests {
     #[tokio::test]
     async fn ops_says_what_the_sweeps_did_and_shows_the_runs() {
         let (app, cookie, core) = app_session_and_core().await;
-        // Two runs of one sweep: the summary adds them up, the history keeps
-        // them apart. That difference is the whole reason both are there.
         for _ in 0..2 {
             core.store
                 .record_sweep_run(
@@ -5217,12 +4328,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let html = body_of(res).await;
-        // The counts read as a sentence now rather than as a row of badges.
         assert!(html.contains("artifacts,"), "the counts are still stated");
-        // The tokens moved to Settings; `the_installation_lives_on_its_own_page`
-        // is where they are asserted now.
-        // An empty base says so once, instead of answering five headings with
-        // "None."
         assert!(html.contains("Nothing done on its own yet"));
         assert!(!html.contains("<h3>Hidden as stale</h3>"));
     }
@@ -5237,10 +4343,6 @@ mod tests {
             .unwrap();
 
         let page = get_body(&app, &cookie, "/ui/insights").await;
-        // One `bump_link` call between one pair is one row in `artifact_links`
-        // — see `the_counts_say_how_many_links_there_are_and_how_many_are_named`
-        // in store::links, which needs two calls between two different pairs
-        // to reach a total of two.
         assert!(page.contains("1 links"), "{page}");
     }
 
@@ -5340,15 +4442,9 @@ mod tests {
     async fn both_pages_are_reachable_once_capture_stops_being_one() {
         let (app, cookie) = app_with_session().await;
 
-        // Insights is a destination in the top row now, so it is reachable
-        // from every page rather than from one quiet paragraph at the bottom
-        // of a page that is about to stop existing.
         let page = get_body(&app, &cookie, "/ui/capture").await;
         assert!(page.contains("/ui/insights"), "{page}");
 
-        // Settings had exactly one door, and it was that paragraph. It moved
-        // rather than went: an installation you cannot open the settings of
-        // is the regression this assertion exists to catch.
         let insights = get_body(&app, &cookie, "/ui/insights").await;
         assert!(insights.contains("/ui/settings"), "{insights}");
     }
@@ -5367,25 +4463,16 @@ mod tests {
             )
             .await
             .unwrap();
-        // Still measured, and still reported — to the place a browser already
-        // knows to show it rather than to the operator's page.
         assert!(
             res.headers().contains_key("server-timing"),
             "the measurement moved to a header, it was not dropped"
         );
         let frag = body_of(res).await;
         assert!(frag.contains("result-count"), "the count is stated: {frag}");
-        // Out of band into the rail's heading, which sits outside the swapped
-        // list: the fragment that fills the rail is also what names the act
-        // that filled it.
         assert!(
             frag.contains(r#"hx-swap-oob="innerHTML:#rail-head""#),
             "the count does not reach the rail heading: {frag}"
         );
-        // The timing fragment this test was written against is what must stay
-        // gone. It used to ride the same response as an out-of-band swap, so
-        // the assertion names the timing rather than the mechanism — the
-        // mechanism is legitimately in use above.
         assert!(
             !frag.contains("embed ") && !frag.contains("server-timing"),
             "timing is not operator-facing: {frag}"
@@ -5400,8 +4487,6 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
-        // Embedding is what settles a corpus; `finish` alone leaves it in
-        // flight, and an in-flight row states its status rather than a count.
         crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
@@ -5411,10 +4496,6 @@ mod tests {
             frag.contains("artifacts"),
             "a settled row states its count: {frag}"
         );
-        // Ten rows all reading "100% covered" is a column that says nothing,
-        // and it crowded out the one number on the row that differs. Coverage
-        // speaks when it is short — see the low-coverage test below — and stays
-        // quiet when it is whole.
         assert!(
             !frag.contains(" covered"),
             "a fully covered row announced a number that is the same on every row: {frag}"
@@ -5514,8 +4595,6 @@ mod tests {
             body.contains(&format!("/ui/corpora/{corpus_id}")),
             "the operator is not told where the answer went: {body}"
         );
-        // Queued, not merely stored: the artifacts and their vectors are what
-        // the next stage makes of it, at every synthesis setting.
         let queued: i64 =
             sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE target_id = ?", &corpus_id)
                 .fetch_one(&core.store.control.pool)
@@ -5682,9 +4761,6 @@ mod tests {
             "the verdict bar must follow the toggle: {html}"
         );
         assert!(html.contains("right"), "{html}");
-        // One `#ask-verdict` in the response, not a wrapper repeating the id of
-        // the bar inside it: two would nest after the first click, and the
-        // click after that would match both.
         assert_eq!(
             html.matches(r#"id="ask-verdict""#).count(),
             1,
@@ -5708,8 +4784,6 @@ mod tests {
     #[tokio::test]
     async fn an_unanswered_question_is_put_to_nobody_on_insights() {
         let (app, cookie, core) = app_session_and_core_with_feedback().await;
-        // Two, because one gap is not a group: the sweep leaves a lone question
-        // ungrouped rather than buying a name that restates it.
         for q in ["how do I mount an E01", "mounting E01 images read only"] {
             let id = core
                 .store
@@ -5729,9 +4803,6 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // Neither before the sweep groups them nor after: a hole closes on
-        // its own when a capture covers it, and the list that offered a box
-        // and a Forget beside each one asked a person for what the base does.
         for when in ["before", "after"] {
             if when == "after" {
                 crate::jobs::gaps::sweep(&core).await.unwrap();
@@ -5745,8 +4816,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_capture_that_answered_something_says_so_on_its_row() {
-        // Coverage is closed silently — nothing asked the operator to confirm
-        // it — so the queue row is the only place it is said.
         let mut c = crate::core::test_support::test_core().await;
         c.learn.enabled = true;
         let core = c.clone();
@@ -5805,13 +4874,11 @@ mod tests {
             .await
             .unwrap();
 
-        // The queue is its own fragment: the capture page fetches it on load.
         let queue = get_body(&app, &cookie, "/ui/queue").await;
         assert!(
             queue.contains("how do I mount an E01"),
             "the row does not say what this capture answered: {queue}"
         );
-        // And the gap itself is gone from the list it was on.
         let page = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
             !page.contains(&format!("gap-search-{gap}")),
@@ -5821,8 +4888,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_question_the_operator_arrived_with_is_never_overwritten() {
-        // A question carried in the URL is one they chose. The sitting fills
-        // an empty box and nothing else.
         let (app, cookie, core) = app_session_and_core().await;
         hold_something(&core).await;
         get_body(&app, &cookie, "/ui/search/results?q=something%20else").await;
@@ -5834,7 +4899,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_cold_sitting_renders_no_rail_at_all() {
-        // Absent, not empty: a box saying "nothing yet" is worse than no box.
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/search").await;
         assert!(!page.contains("Read just now"), "{page}");
@@ -5842,10 +4906,6 @@ mod tests {
 
     #[tokio::test]
     async fn housekeeping_counts_only_the_pursuits_the_gap_list_still_holds() {
-        // `unsatisfied` is how the run ended, and a capture answering it later
-        // leaves that word alone on purpose. The gap list drops it all the
-        // same, so counting the state pointed the operator at entries that
-        // were not there.
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let handle = core.clone();
@@ -5892,7 +4952,6 @@ mod tests {
         let both = get_body(&app, &cookie, "/ui/insights").await;
         assert!(both.contains("2 went unanswered"), "{both}");
 
-        // A later capture answers one of them.
         core.store
             .cover_gap(
                 crate::store::gaps::GapKind::Pursuit,
@@ -5907,8 +4966,6 @@ mod tests {
 
         let one = get_body(&app, &cookie, "/ui/insights").await;
         assert!(one.contains("1 went unanswered."), "{one}");
-        // No list to point at: the holes are the base's to close, and the
-        // sentence ends where its count does.
         assert!(!one.contains("on the list above"), "{one}");
     }
 
@@ -5924,9 +4981,6 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         let page = get_body(&app, &cookie, "/ui/capture").await;
 
-        // There is one field now. A staged file makes the box that file's
-        // note, which is what took the second one away: two boxes on screen
-        // and no rule saying which one the words in front of you belong to.
         assert!(
             !page.contains(r#"name="note""#),
             "the note is the box, not a field of its own: {page}"
@@ -5937,7 +4991,6 @@ mod tests {
         let staged = page
             .find(r#"id="staged""#)
             .expect("a file waits to be sent rather than going on arrival");
-        // The verb, not the nav link of the same name above it.
         let button = page
             .find(r#"data-verb="capture""#)
             .expect("the capture verb is there");
@@ -5946,19 +4999,7 @@ mod tests {
             "the button must come after everything it sends: {page}"
         );
 
-        // The box's own form is a GET that searches on every keystroke. The
-        // staged file sits inside it, so the serialisation is pinned to the
-        // fields the search actually takes — without this, every keystroke
-        // carries a filename into the query string. `rerank` is on the list
-        // for the refining pass, whose own flag rides this form's GET, and
-        // `explain` for the same reason: a name missing here is a flag the
-        // fragment is never asked with, however carefully the rest is wired.
-        //
-        // `tz` is deliberately absent. It was on this list under a comment
-        // saying the echo "reads a date out of what is being typed", but
-        // `UiSearchParams` has no `tz` field and `fate_echo` does no date
-        // parsing, so serde discarded it on every keystroke. The zone belongs
-        // to the capture path, which reads the `#box-tz` hidden input directly.
+        // Pinned to the fields the search takes, or every keystroke carries a filename; `tz` belongs to the capture path.
         assert!(
             page.contains(r#"hx-params="q,category,rerank,explain,fold""#),
             "{page}"
@@ -5984,9 +5025,6 @@ mod tests {
     async fn the_ask_page_prefills_a_question_from_the_query_string() {
         let (app, cookie) = app_holding_something().await;
         let page = get_body(&app, &cookie, "/ui/ask?q=mount+an+E01").await;
-        // A textarea carries its value as content rather than as an
-        // attribute, which is the one visible consequence of the box being a
-        // textarea from the first keystroke to the last.
         assert!(page.contains(">mount an E01</textarea>"), "{page}");
     }
 
@@ -6016,7 +5054,6 @@ mod tests {
         crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
-        // Swapped in after indexing, so only the answer comes from it.
         core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("First run `wipefs --all /dev/sdX`, then read alpha.".into()),
         }));
@@ -6164,7 +5201,6 @@ mod tests {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
 
-        // The one place the close actually happens.
         let stop = js
             .split_once("function stop() {")
             .expect("the driver has no stop()")
@@ -6174,8 +5210,7 @@ mod tests {
             "stop() no longer closes the EventSource: {stop}"
         );
 
-        // The answer arrived, so nothing more is coming: close before the
-        // payload is touched, or a malformed one leaves the stream open.
+        // Close before the payload is touched, or a malformed one leaves the stream open.
         let done = js
             .split_once("addEventListener('done'")
             .expect("the driver does not handle done")
@@ -6189,17 +5224,12 @@ mod tests {
             done.find("stop();") < done.find("JSON.parse"),
             "the stream must be closed before the payload is parsed: {done}"
         );
-        // The fragment is set through `innerHTML`, which htmx does not watch:
-        // its `hx-post` controls (the verdict bar) are inert until htmx is
-        // told about them.
+        // Set through `innerHTML`, which htmx does not watch, so it must be told.
         assert!(
             done.contains("htmx.process(result)"),
             "the done handler no longer hands the answer to htmx: {done}"
         );
 
-        // The failure path, which is also the path a stream that simply ended
-        // arrives on: the browser is already queuing its reconnect when this
-        // fires.
         let error = js
             .split_once("addEventListener('error'")
             .expect("the driver does not handle error")
@@ -6243,7 +5273,6 @@ mod tests {
             "a fix that arrives is not kept, so the next load has nothing to read: {prime}"
         );
 
-        // Consent withdrawn is a place forgotten, not a place held back.
         let switch = js
             .split_once("function placeSwitch() {")
             .expect("app.js has no placeSwitch()")
@@ -6272,8 +5301,7 @@ mod tests {
                 continue;
             }
             let html = std::fs::read_to_string(&path).unwrap();
-            // Only inside an attribute: the comments above these triggers
-            // quote the broken form on purpose.
+            // Only inside an attribute: comments above these triggers quote the broken form.
             for attr in html.split("hx-trigger=\"").skip(1) {
                 let attr = &attr[..attr.find('"').unwrap_or(attr.len())];
                 for spec in attr.split(',') {
@@ -6282,8 +5310,7 @@ mod tests {
                     };
                     checked += 1;
                     let selector = rest.1.trim();
-                    // `closest`, `find`, `next` and `previous` are the one
-                    // shape htmx does read a second word for.
+                    // The one shape htmx reads a second word for.
                     let two_word = ["closest ", "find ", "next ", "previous "]
                         .iter()
                         .any(|p| selector.starts_with(p));
@@ -6318,14 +5345,6 @@ mod tests {
                 "app.js drives #ask-{id} and the page has no such element: {page}"
             );
         }
-        // The old path is gone rather than sitting beside the new one: two
-        // submitters on one form would park the question twice and spend a
-        // model call on the copy nobody reads.
-        //
-        // Scoped to the box's own form. The page has other `hx-post`s on it
-        // now — the context offer under the box is one — and asserting over
-        // the whole document would pass or fail on things that have nothing to
-        // do with how a question is parked.
         let form = page
             .split(r#"<form id="box-form""#)
             .nth(1)
@@ -6356,16 +5375,11 @@ mod tests {
         let res = get_stream(&app, &cookie, &id).await;
         assert_eq!(res.status(), StatusCode::OK);
 
-        // Past the excerpts and into the answer: the generator is suspended
-        // inside the token loop, with the completion still to be awaited and
-        // recorded. Stopping at `citations` would leave it suspended one line
-        // earlier and prove nothing about what happens after.
+        // Into the token loop: stopping at `citations` would prove nothing about the completion.
         let seen = read_until(res, "event: token").await;
         assert!(seen.contains("event: retrieved"), "{seen}");
         assert!(seen.contains("event: citations"), "{seen}");
-        // Without this the test passes when the answer *failed*: `read_until`
-        // also stops at end of stream, and an ask that errored after its
-        // excerpts records nothing either — for the wrong reason.
+        // `read_until` also stops at end of stream, so an errored ask would pass for the wrong reason.
         assert!(
             seen.contains("event: token"),
             "the answer never started: {seen}"
@@ -6392,8 +5406,7 @@ mod tests {
                 break;
             }
         }
-        // Explicit, because this is the whole point of the test: the generator
-        // is suspended at the frame just read and is never polled again.
+        // The generator is suspended at the frame just read and never polled again.
         drop(frames);
         seen
     }
@@ -6431,7 +5444,6 @@ mod tests {
             1
         );
 
-        // The next ask is what collects it.
         let fresh = st.ask_handoff_park(a_question(), "me");
         let held = st
             .ask_handoff
@@ -6550,10 +5562,7 @@ mod tests {
     #[tokio::test]
     async fn with_an_ask_model_the_verb_is_there() {
         let (app, cookie, core) = app_session_and_core().await;
-        // Something held, because there are two conditions on the door now and
-        // this test is about the other one. An empty base hides Ask whatever
-        // the configuration says — it can only abstain — so without a capture
-        // here the assertion below would pass or fail for the wrong reason.
+        // An empty base hides Ask regardless of configuration.
         core.ingest_capture(crate::core::ingest::Capture::new(
             "LevelDB tombstones survive compaction longer than the manual admits.",
             "ui",
@@ -6561,10 +5570,6 @@ mod tests {
         .await
         .unwrap();
         let page = get_body(&app, &cookie, "/ui").await;
-        // A button on the box, not a link in the nav. Ask stopped being a
-        // place to go the moment the box learned to do it — but the rule the
-        // sibling test pins is unchanged: where there is no model there is no
-        // door, and this is the other half of it.
         assert!(page.contains(r#"data-verb="ask""#), "{page}");
     }
 
@@ -6574,8 +5579,6 @@ mod tests {
         let ops = get_body(&app, &cookie, "/ui/insights").await;
         assert!(!ops.contains("<h3>Pursuits</h3>"), "{ops}");
     }
-
-    // ── Judging at the moment of search ──────────────────────────────────────
 
     async fn newest_event(handle: &crate::core::Core) -> String {
         sqlx::query_scalar!(
@@ -6650,8 +5653,6 @@ mod tests {
         assert!(html.contains("(2026-01-01)"), "{html}");
         assert!(html.contains("30 days there, 14 here"), "{html}");
 
-        // A recalled row says it too: being under the rule changes why the
-        // row is there, not what is known about the note.
         let mut recalled = hit_disagreeing();
         recalled.via = Some("x".into());
         let html = askama::Template::render(&ResultsTemplate {
@@ -6682,12 +5683,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_rail_offers_a_gap_where_nothing_matches() {
-        // The deck's `N` key, moved to where the person is when they know.
-        //
-        // Over a base that holds something and has finished reading it. Both
-        // are conditions of the button: "nothing here has it" says nothing
-        // about a base with nothing in it, and while a capture is still being
-        // read the answer may be in it. See `ResultsTemplate::gap`.
+        // Over a held, fully read base: both are conditions of the button (`ResultsTemplate::gap`).
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
         crate::web::test_support::hold_something(&handle).await;
         while let Some(j) = handle.store.claim_job().await.unwrap() {
@@ -6696,10 +5692,7 @@ mod tests {
         let rail = get_body(&app, &cookie, "/ui/search/results?q=nothing+here").await;
         assert!(rail.contains("No matches."), "{rail}");
         assert!(rail.contains("Nothing here has it"), "{rail}");
-        // The button names the search it is a verdict on. The query never
-        // reaches the client as data, so no wording can break the request: a
-        // `"` in `hx-vals` JSON used to make htmx throw and the button do
-        // nothing at all, silently.
+        // The query never reaches the client as data, so a `"` cannot break `hx-vals`.
         let event = newest_event(&handle).await;
         assert!(
             rail.contains(&format!(
@@ -6740,10 +5733,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_rail_hands_the_box_the_search_it_should_fold_into() {
-        // The box types into one event by naming it, not by being the most
-        // recent thing this operator wrote — which is what a second window
-        // also is. The id goes back into the form out of band, and the next
-        // keystroke carries it.
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=fat32").await;
         let first = newest_event(&handle).await;
@@ -6754,7 +5743,6 @@ mod tests {
             "{rail}"
         );
 
-        // The next keystroke, naming it: one search, still.
         get_body(
             &app,
             &cookie,
@@ -6768,7 +5756,6 @@ mod tests {
             "the burst folded into the event the page was holding"
         );
 
-        // A second window, holding nothing yet, does not fold into it.
         get_body(&app, &cookie, "/ui/search/results?q=ntfs").await;
         assert_eq!(
             handle.store.feedback_stats(0.0).await.unwrap().captured,
@@ -6779,12 +5766,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_quotation_mark_in_the_query_does_not_break_the_gap_button() {
-        // The capture is on the request path at this door, so the rail comes
-        // back naming its own search whatever was typed — and the button
-        // carries an id rather than the words.
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
-        // Held and read: both are conditions of the button. See
-        // `ResultsTemplate::gap`.
         crate::web::test_support::hold_something(&handle).await;
         while let Some(j) = handle.store.claim_job().await.unwrap() {
             handle.store.complete_job(j.id).await.unwrap();
@@ -6796,8 +5778,6 @@ mod tests {
         )
         .await;
         let event = newest_event(&handle).await;
-        // The wording rides the URL, so a quote is percent-encoded rather than
-        // spliced into an HTML attribute or a JSON blob.
         let q = "say%20%22hi%22%20%5Cnow";
         assert!(
             rail.contains(&format!(r#"hx-post="/ui/search/{event}/gap?q={q}""#)),
@@ -6814,10 +5794,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_stale_bar_says_so_rather_than_writing_over_a_verdict() {
-        // The bar is drawn against an unjudged search and the tab holding it
-        // can be left open for as long as anyone likes, so both of its writing
-        // answers can arrive after another tab has answered the same search.
-        // Neither replaces what is there; both come back saying why.
         let (app, cookie, handle, a, event) = searched_app().await;
         handle
             .store
@@ -6869,12 +5845,7 @@ mod tests {
         .render()
         .expect("the rail fragment");
 
-        // The swap htmx performs, and what app.js does around it. `workspace.html`
-        // ships the rail and the pane `hidden` and the idle column open — the
-        // page has not been typed into yet — and `hideIdle` is what turns that
-        // around on the first keystroke. A hidden element has no size and
-        // measures as nothing, so without this the harness dutifully reported a
-        // perfect page and saw none of it.
+        // `workspace.html` ships the rail hidden until `hideIdle` runs, and hidden elements measure as nothing.
         let page = page
             .replace(
                 r#"<div id="results" role="listbox" aria-label="Results">"#,
@@ -6889,9 +5860,6 @@ mod tests {
                 r#"<div id="pane" class="region-focus pane""#,
             )
             .replace(r#"<div id="idle">"#, r#"<div id="idle" hidden>"#)
-            // The rail at the narrowest a drag may leave it, with something
-            // open beside it: `--rail-w` is `railHandle`'s floor and
-            // `pane-open` is what the pane gains when an artifact lands in it.
             .replace(
                 r#"class="regions regions-rail-focus-source"#,
                 r#"style="--rail-w:15rem" class="pane-open regions regions-rail-focus-source"#,

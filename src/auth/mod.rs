@@ -12,13 +12,7 @@ use axum::http::request::Parts;
 pub struct Identity {
     pub subject: String,
     pub email: Option<String>,
-    /// The web session this request came in on, where there is one.
-    ///
-    /// `None` for a bearer token, and that absence is load-bearing: it is what
-    /// keeps the live sitting at the web door. An access token is not a
-    /// conversation, and two agent sessions sharing one token would share a
-    /// sitting — worse than having none. Giving those doors a real session
-    /// identity is a change to the doors.
+    /// `None` for bearer tokens on purpose: agent sessions sharing a token must not share a live sitting.
     pub session: Option<String>,
 }
 
@@ -54,7 +48,6 @@ pub fn session_layer(
     )))
 }
 
-/// Signs `identity` in on `session`, under a fresh id.
 pub async fn sign_in(session: &tower_sessions::Session, identity: &Identity) -> Result<(), Error> {
     let fail = |e: tower_sessions::session::Error| Error::Store(format!("session: {e}"));
     session.cycle_id().await.map_err(fail)?;
@@ -76,9 +69,6 @@ pub fn bearer(header: &str) -> Option<String> {
         .then(|| value.trim().to_string())
 }
 
-/// Both authentication paths converge here. Handlers ask for an `Identity` and
-/// get 401 automatically if there isn't one; `core` never sees a cookie or a
-/// token.
 impl FromRequestParts<AppState> for Identity {
     type Rejection = Error;
 
@@ -86,16 +76,8 @@ impl FromRequestParts<AppState> for Identity {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Answered once per request, however many extractors ask.
-        //
-        // Two of them routinely do: `Tenant` resolves an `Identity` to find
-        // whose base to open, and a handler that also wants the session id
-        // names `Identity` beside it. Each ask was a full authentication — a
-        // session read and a sliding `extend_session` write per keystroke on
-        // the incremental search route, and for a bearer caller a second walk
-        // of the token table with an argon2 verify on every row. Neither
-        // repetition can produce a different answer: nothing in a request's
-        // lifetime changes the credential it arrived with.
+        // Memoised per request: `Tenant` and handlers both extract `Identity`, and each
+        // authentication costs a session write or an argon2 walk of the token table.
         if let Some(id) = parts.extensions.get::<Identity>() {
             return Ok(id.clone());
         }
@@ -106,7 +88,6 @@ impl FromRequestParts<AppState> for Identity {
 }
 
 impl Identity {
-    /// The authentication itself, with no memo in front of it.
     async fn authenticate(parts: &mut Parts, state: &AppState) -> Result<Self, Error> {
         if let Some(h) = parts
             .headers
@@ -151,11 +132,7 @@ impl Identity {
     }
 }
 
-/// `Option<Identity>` for the one page that has to render for a browser with
-/// no session rather than be bounced to a login it cannot come back from —
-/// see `src/web/pair.rs`. Only "no credentials" becomes `None`; a store
-/// failure while checking is still an error, because treating one as
-/// signed-out would silently show the signed-out page to someone who is not.
+/// Only "no credentials" becomes `None`; a store failure stays an error so nobody is shown as signed out.
 impl axum::extract::OptionalFromRequestParts<AppState> for Identity {
     type Rejection = Error;
 

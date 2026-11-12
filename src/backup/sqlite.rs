@@ -1,11 +1,5 @@
-//! Copying a live SQLite database, and reading the counts a manifest records.
-//!
-//! Every database here is in WAL mode, so a `cp` of the `.db` while the server
-//! runs misses whatever is still in the `-wal` and can tear a page mid-write.
-//! `VACUUM INTO` runs inside one read transaction and writes a whole, compact
-//! file with no WAL of its own. The source is opened read-only and with no
-//! schema setup: `Store::connect` and `Control::connect` migrate, and a backup
-//! must not write to what it copies.
+//! `VACUUM INTO` copies a WAL database whole, unlike `cp`. Sources open read-only without
+//! `connect`, which would migrate what a backup must not write.
 
 use super::create_private;
 use crate::error::{Error, Result};
@@ -30,11 +24,7 @@ async fn open_read_only(path: &Path) -> Result<SqliteConnection> {
         .map_err(|e| Error::Store(format!("{}: {e}", path.display())))
 }
 
-/// A consistent copy of `src` at `dst`, which must not exist yet.
-///
-/// `dst` is created empty and `0600` first — `VACUUM INTO` accepts an empty
-/// file — so the copy is never readable by anyone else, not even while it is
-/// being written.
+/// `dst` is created empty and `0600` first so the copy is never readable by others mid-write.
 pub async fn vacuum_into(src: &Path, dst: &Path) -> Result<()> {
     let dst_str = dst
         .to_str()
@@ -52,8 +42,7 @@ pub async fn vacuum_into(src: &Path, dst: &Path) -> Result<()> {
     copied.map(|_| ())
 }
 
-/// `(artifacts, embedded)` in a tenant database: the same queries the
-/// store-drift heal reads, counted.
+/// The same queries the store-drift heal reads, counted.
 pub async fn counts(db: &Path) -> Result<(u64, u64)> {
     let mut conn = open_read_only(db).await?;
     let artifacts = count(&mut conn, ALL_ARTIFACT_IDS).await?;
@@ -62,7 +51,7 @@ pub async fn counts(db: &Path) -> Result<(u64, u64)> {
     Ok((artifacts, embedded))
 }
 
-/// `sql` is one of the two crate constants above, never input.
+/// `sql` is a crate constant, never input.
 async fn count(conn: &mut SqliteConnection, sql: &'static str) -> Result<u64> {
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) AS n FROM ({sql})"
@@ -72,7 +61,6 @@ async fn count(conn: &mut SqliteConnection, sql: &'static str) -> Result<u64> {
     Ok(row.get::<i64, _>("n") as u64)
 }
 
-/// Every user's slug in a control database, in order.
 pub async fn users_in(control: &Path) -> Result<Vec<String>> {
     let mut conn = open_read_only(control).await?;
     let rows = sqlx::query!("SELECT slug FROM users ORDER BY slug")
@@ -82,7 +70,6 @@ pub async fn users_in(control: &Path) -> Result<Vec<String>> {
     Ok(rows.into_iter().map(|r| r.slug).collect())
 }
 
-/// `<path>.restoring`: where a restore stages a file beside its target.
 pub fn restoring(path: &Path) -> std::path::PathBuf {
     with_suffix(path, ".restoring")
 }
@@ -101,10 +88,7 @@ fn remove_if_present(path: &Path) -> Result<()> {
     }
 }
 
-/// Copy an archived database to `dst` (`0600`), sync it, and check it hashes
-/// to `sha256`. The source is an archive copy with no WAL, not a live file,
-/// so a byte copy is whole. A `dst` left by an interrupted restore is
-/// replaced: staging is the step a rerun repeats.
+/// A byte copy is whole: the source is an archive copy with no WAL. A leftover `dst` is replaced.
 pub fn stage(src: &Path, dst: &Path, sha256: &str) -> Result<()> {
     let io = |p: &Path, e: std::io::Error| Error::Store(format!("{}: {e}", p.display()));
     remove_if_present(dst)?;
@@ -128,11 +112,7 @@ pub fn stage(src: &Path, dst: &Path, sha256: &str) -> Result<()> {
     staged
 }
 
-/// Put a staged database in place of `target`.
-///
-/// The target's `-wal` and `-shm` go first: they describe the file being
-/// replaced, and SQLite would replay a stale `-wal` into the new one on its
-/// next open. The rename is atomic, and the directory is synced so it holds.
+/// The target's `-wal`/`-shm` go first, or SQLite replays a stale `-wal` into the new file.
 pub fn swap(staged: &Path, target: &Path) -> Result<()> {
     for ext in ["-wal", "-shm"] {
         remove_if_present(&with_suffix(target, ext))?;
@@ -160,7 +140,6 @@ pub(crate) mod tests {
     use crate::store::control::Control;
     use std::os::unix::fs::PermissionsExt;
 
-    /// A WAL tenant database at `path` with three artifacts, one embedded.
     pub(crate) async fn tenant_with_three(path: &Path) -> Store {
         let s = Store::connect(
             path.to_str().unwrap(),
@@ -204,12 +183,10 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("alice.db");
         let store = tenant_with_three(&live).await;
-        // The committed rows are still in the WAL: the pool is open, so nothing
-        // has checkpointed them into the `.db`. A file copy would miss them.
+        // Committed rows are still in the WAL; a file copy would miss them.
         assert!(sidecar(&live, "-wal").exists());
 
-        // A second writer, mid-transaction: it has deleted everything and not
-        // committed. The copy must show the committed state, not this.
+        // An uncommitted delete-all; the copy must show the committed state.
         let mut writer = SqliteConnectOptions::new()
             .filename(&live)
             .connect()
@@ -238,9 +215,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn copy_works_on_a_cleanly_closed_wal_database() {
-        // The `--offline` case: the server has stopped, its last connection
-        // checkpointed and removed the sidecars, and the copy is taken from a
-        // read-only connection that may not create them.
         let dir = tempfile::tempdir().unwrap();
         let live = dir.path().join("alice.db");
         tenant_with_three(&live).await.pool.close().await;
@@ -256,9 +230,7 @@ pub(crate) mod tests {
             before,
             "the source was not written"
         );
-        // SQLite opens a WAL database's sidecars even read-only, and a reader
-        // may not remove them on close. An empty `-wal` holds no frame to
-        // replay, so what is left is inert; the next opener reuses it.
+        // A read-only reader may not remove sidecars on close; an empty `-wal` is inert.
         let wal = std::fs::metadata(sidecar(&live, "-wal")).map_or(0, |m| m.len());
         assert_eq!(wal, 0, "a reader wrote frames into the source's WAL");
     }
@@ -290,7 +262,6 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let archived = dir.path().join("archived.db");
         let live = dir.path().join("alice.db");
-        // The archive copy: one artifact fewer than the base it replaces.
         {
             let src = dir.path().join("src.db");
             let s = tenant_with_three(&src).await;
@@ -301,7 +272,6 @@ pub(crate) mod tests {
             vacuum_into(&src, &archived).await.unwrap();
         }
         let (sha, _) = super::super::manifest::sha256_file(&archived).unwrap();
-        // The base being replaced, still holding frames in its WAL.
         let store = tenant_with_three(&live).await;
         assert!(sidecar(&live, "-wal").exists());
         let wal = std::fs::read(sidecar(&live, "-wal")).unwrap();
@@ -309,7 +279,6 @@ pub(crate) mod tests {
 
         let staged = restoring(&live);
         stage(&archived, &staged, &sha).unwrap();
-        // A stale `-wal` and `-shm` beside the target, as a crashed server leaves.
         std::fs::write(sidecar(&live, "-wal"), &wal).unwrap();
         std::fs::write(sidecar(&live, "-shm"), b"stale").unwrap();
         swap(&staged, &live).unwrap();

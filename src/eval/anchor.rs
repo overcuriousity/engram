@@ -1,38 +1,14 @@
-//! Whether the evidence use leaves behind still agrees with the people using
-//! the base.
-//!
-//! What the idle pass optimises is *the generator and the operator could use
-//! what retrieval gave them*, which is one step removed from *the person got
-//! their answer*. Human verdicts are the sparse, honest sample that checks the
-//! two have not come apart. The pass does replay them as pairs beside the
-//! observations — a confirmed answer is the best pair there is — but that is
-//! not what this reads. Here they are the anchor: whether the observations
-//! made on the same searches say what the people said. It is the one
-//! safeguard the rest of the loop leans on. Everything else is recoverable by
-//! a revert. This is the thing that notices the score itself has gone bad.
-//!
-//! Agreement is read over searches carrying both a verdict and an observation
-//! about the same query. A search judged a hit agrees when a positive
-//! observation names the artifact the verdict named (or what superseded it),
-//! and disagrees when the positives name something else. A search judged a
-//! gap disagrees when anything positive was observed for it, and agrees when
-//! only a negative was. Silence on either side is not in the sample.
+//! Whether the evidence use leaves behind still agrees with human verdicts on the same queries:
+//! the safeguard that notices the score itself has gone bad. Silence on either side is skipped.
 
 use crate::core::Core;
 use crate::error::Result;
 use sqlx::Row;
 
-/// How many judged searches one reading looks at. A bound on work, newest
-/// first: the question is whether agreement holds *now*.
+/// Judged searches one reading looks at, newest first.
 const VERDICT_LIMIT: i64 = 500;
 
-/// How far back a verdict still counts. Ninety days, and the reason is the
-/// same as the limit's read the other way: a bound on work says nothing about
-/// age, so on a base judged a dozen times a year every verdict ever given was
-/// in the sample forever. Two disagreements from eighteen months ago then
-/// suspended the loop for the life of the base, with no way back except more
-/// judging — and suspension is a state the base is supposed to be able to
-/// leave. What an old verdict is about is an old corpus.
+/// How far back a verdict counts: without an age bound, old disagreements suspend the loop forever.
 const VERDICT_WINDOW_SECS: i64 = 90 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,32 +17,10 @@ pub struct Agreement {
     pub disagreed: usize,
 }
 
-/// How often the self-generated evidence and the human verdicts say the same
-/// thing. `None` where no judged search has an observation to compare with.
-///
-/// Bounded three ways: one tally per distinct query, the newest verdict is the
-/// one that counts, and nothing older than `VERDICT_WINDOW_SECS` is read at
-/// all.
-///
-/// The evidence side of the comparison is looked up *by query text* — every
-/// positive observation this era recorded for that query, whichever search
-/// event produced it — so a query somebody judged thirty times contributed
-/// thirty identical comparisons to a sample of five hundred. That is not thirty
-/// pieces of evidence, it is one, weighted thirty times: a single query
-/// somebody kept re-judging could carry six percent of the anchor on its own,
-/// and one stray verdict on it then moved `trustworthy` and suspended the
-/// whole autonomous loop. Newest, because the question this asks is whether
-/// agreement holds *now*, and a query re-judged is somebody correcting
-/// themselves.
+/// How often the observations and human verdicts agree; `None` where nothing compares.
+/// One tally per distinct query, its newest verdict, so one re-judged query cannot dominate.
 pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
-    // The era, and without it the comparison is not one. A verdict is weighed
-    // against every positive observation ever recorded for its query, and the
-    // observations that answer it were produced by whatever configuration was
-    // live at the time — including ones from before an embedder change, whose
-    // ranking has nothing to do with this one's. Scoped to the models the base
-    // runs under now, which is the same line `tried_candidates` draws and for
-    // the same reason: evidence gathered under other models is not evidence
-    // about these.
+    // Scoped to the live models' era: observations made under other models say nothing about these.
     let Some(live) = core.store.live_generation().await? else {
         return Ok(None);
     };
@@ -117,14 +71,12 @@ pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
         let verdict: String = v.get("verdict");
         let agreed = match (verdict.as_str(), v.get::<Option<String>, _>("expect_id")) {
             ("hit", Some(expect)) if !positives.is_empty() => {
-                // The supersede rule, unchanged: a verdict naming an artifact
-                // that was merged away is satisfied by what replaced it.
+                // A verdict naming a merged-away artifact is satisfied by what replaced it.
                 let satisfies = crate::eval::satisfied_by(core, &expect).await;
                 positives.iter().any(|p| satisfies.contains(p))
             }
             ("gap", _) if !positives.is_empty() => false,
             ("gap", _) if negative > 0 => true,
-            // A verdict with nothing observed beside it compares with nothing.
             _ => continue,
         };
         any = true;
@@ -137,13 +89,7 @@ pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
     Ok(any.then_some(a))
 }
 
-/// Whether the self-generated evidence can be trusted to move anything.
-///
-/// Not a tuned threshold. Agreement is trusted until it is shown to be no
-/// better than chance — as many disagreements as agreements — on more
-/// disagreements than one could account for. The same shape as every other
-/// gate here: one disagreement is noise wearing a verdict, and thin evidence
-/// must not suspend a base any more than it may move one.
+/// Trusted until no better than chance on more disagreements than noise accounts for.
 pub fn trustworthy(a: &Agreement) -> bool {
     a.disagreed < 2 || a.agreed > a.disagreed
 }
@@ -351,8 +297,7 @@ mod tests {
             "this era's own observation disagrees"
         );
 
-        // The models change: a new era, and the old observation belongs to the
-        // one that ended.
+        // The models change: a new era, and the old observation belongs to the one that ended.
         core.store
             .record_generation(&NewGeneration {
                 params: GenerationParams::default(),
@@ -391,7 +336,6 @@ mod tests {
         let (core, g) = base().await;
         judged(&core, "mount the image", Verdict::Hit, Some("art-1")).await;
         assert_eq!(agreement(&core).await.unwrap(), None);
-        // And an observation about some other query does not make it one.
         observed(&core, &g, "another question", Some("art-1"), Source::Cited).await;
         assert_eq!(agreement(&core).await.unwrap(), None);
     }

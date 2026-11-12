@@ -1,25 +1,14 @@
 use crate::config::CaptureConfig;
 use crate::error::{Error, Result};
 
-/// What a URL turned out to hold, of the kinds some door here can read.
 #[derive(Debug)]
 pub enum Fetched {
-    /// A page, decoded to text. What the extractor reads.
     Html(String),
-    /// A PDF, as sent. What `Stage::Extract` reads.
     Pdf(Vec<u8>),
-    /// An image, as sent, with the type the server named it.
     Image { mime: String, bytes: Vec<u8> },
 }
 
-/// The one scheme rule, for every door that takes a URL from an operator.
-///
-/// `Url::parse` accepts `javascript:` and `data:` happily, so parsing is not a
-/// check. Three doors needed this and each had written it out: `fetch` below,
-/// which is the only one that dereferences the URL, and the two that merely
-/// *store* one — the capture endpoint's `html` plus `url` pairing, which never
-/// fetches, and the share target. A stored URL is rendered as a link on the
-/// corpus page, which is reason enough for the same rule to apply there.
+/// The scheme rule for every door that takes a URL; `Url::parse` accepts `javascript:` and `data:`.
 pub fn ensure_readable(url: &url::Url) -> Result<()> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err(Error::Validation(format!(
@@ -30,36 +19,23 @@ pub fn ensure_readable(url: &url::Url) -> Result<()> {
     Ok(())
 }
 
-/// Parse an operator-supplied URL and hold it to `ensure_readable`.
 pub fn parse_readable(raw: &str) -> Result<url::Url> {
     let url = url::Url::parse(raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
     ensure_readable(&url)?;
     Ok(url)
 }
 
-/// Whether a body is one link and nothing else.
-///
-/// The single guess the capture doors make, and it is made because every share
-/// sheet on both platforms hands a shared link over as `text/plain`. Narrow on
-/// purpose: one whitespace-separated token, parsing as a URL, over http or
-/// https. A line of prose that opens with a link is prose, and a caller who
-/// wants the other reading has `POST /corpora`, which asks in as many words.
+/// Share sheets hand links over as `text/plain`; one http(s) token only, so prose stays prose.
 pub fn only_a_url(body: &str) -> Option<url::Url> {
     let trimmed = body.trim();
     if trimmed.split_whitespace().count() != 1 {
         return None;
     }
     let u = url::Url::parse(trimmed).ok()?;
-    // The same rule `ensure_readable` states, asked as a question rather than
-    // enforced as a refusal: a lone `javascript:` word is text somebody typed,
-    // not a link they meant.
+    // A lone `javascript:` word is text somebody typed, not a link.
     ensure_readable(&u).is_ok().then_some(u)
 }
 
-/// Retrieve a page for the paste-a-link door.
-///
-/// The page-only face of `fetch`: a PDF or an image where HTML was expected
-/// is a bad request here, named by type.
 pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
     match fetch(url, cfg).await? {
         Fetched::Html(text) => Ok(text),
@@ -72,41 +48,20 @@ pub async fn fetch_html(url: &url::Url, cfg: &CaptureConfig) -> Result<String> {
     }
 }
 
-/// Who is asking, with somewhere to read about it: what a server that refuses
-/// anonymous clients wants to see.
+/// Some servers refuse anonymous clients.
 pub const USER_AGENT: &str = concat!(
     "engram/",
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/overcuriousity/engram)"
 );
 
-/// Retrieve a document — a page, a PDF or an image — for the two doors that
-/// take a link: paste-a-link and MCP.
-///
-/// This is an anonymous client: no session, no subscription, no JavaScript
-/// engine. It sees what a logged-out stranger sees, which is why it is the
-/// *second* supplier into the extractor and not the only one — the extension
-/// hands over a page the browser has already rendered and authenticated. What
-/// this path can do is bounded by that, and its limits are its own.
-///
-/// Every failure is named rather than swallowed. The URL is operator input on
-/// an authenticated endpoint, so an upstream 404 or a video where a document
-/// was expected is a bad request here, not a server fault — `Error::Validation`
-/// carries the reason back and renders as 400.
-///
-/// Each kind is held to the ceiling its upload door already applies: a page
-/// to `fetch_max_bytes`, a PDF to `pdf_max_bytes`, an image to
-/// `image_max_bytes`. A book is tens of megabytes and a page is not.
-///
-/// Out of scope, deliberately: blocking loopback and private-range addresses.
-/// The endpoint is authenticated and single-operator, so the only caller who
-/// could aim it at the local network is the person who runs the machine.
+/// Retrieve a page, PDF or image for paste-a-link and MCP, as an anonymous client.
+/// Failures are `Error::Validation` (400): the URL is operator input on an authenticated endpoint.
+/// Private addresses are not blocked: the single authenticated operator runs the machine.
 pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
     ensure_readable(url)?;
 
-    // Named, because Wikipedia — the single most likely thing to be pasted —
-    // answers the library's default `reqwest/x.y` with a 403. The `Accept`
-    // says what the extractor can take, in the order it would rather have it.
+    // Wikipedia answers the default `reqwest/x.y` agent with a 403.
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::ACCEPT,
@@ -137,8 +92,7 @@ pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
         )));
     }
 
-    // Checked before reading the body, so a 200 MB video is refused by name
-    // rather than fed to the extractor a chunk at a time.
+    // Checked before reading the body, so a 200 MB video is refused by name.
     let content_type = res
         .headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -167,8 +121,7 @@ pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
         }
     };
 
-    // Streamed rather than `.bytes()`, because `Content-Length` is a claim and
-    // the ceiling has to hold against a server that lies about it or omits it.
+    // Streamed: `Content-Length` is a claim, and the ceiling must hold when a server lies about it.
     let mut bytes: Vec<u8> = Vec::new();
     while let Some(chunk) = res
         .chunk()
@@ -193,20 +146,7 @@ pub async fn fetch(url: &url::Url, cfg: &CaptureConfig) -> Result<Fetched> {
     })
 }
 
-/// The body as text, in whatever encoding it was actually sent in.
-///
-/// Refusing everything that is not UTF-8 would refuse a real share of the
-/// pages worth pasting a link to: Windows-1252 and Latin-1 are still what an
-/// older site serves, and an older site is exactly the kind whose page is
-/// worth keeping. The charset is a parameter on `Content-Type`, and the header
-/// has already been read; `reqwest`'s own `.text()` honours it, and this path
-/// streams instead so as to hold the byte ceiling against a lying
-/// `Content-Length`.
-///
-/// Nothing here can fail. An encoding nobody names falls back to UTF-8, and
-/// `encoding_rs` substitutes the replacement character for bytes that do not
-/// decode rather than giving up on the document — a page with one bad byte in
-/// a footer is still the page.
+/// The body as text in its declared charset, falling back to UTF-8; never fails.
 fn decode(bytes: &[u8], content_type: &str) -> String {
     let label = content_type
         .split(';')
@@ -264,12 +204,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_request_says_who_is_asking() {
-        // Wikipedia answers an unnamed client with 403, and it is the most
-        // likely URL to be pasted first. Matched on the header, so a client
-        // that stopped sending it is a 404 here rather than a passing test.
-        //
-        // `header_regex` for the `Accept`: wiremock reads a comma in an exact
-        // value as a list of values, and this one is a list to nobody else.
+        // `header_regex`: wiremock reads a comma in an exact value as a list of values.
         use wiremock::matchers::{header, header_regex};
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -293,9 +228,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_page_that_is_not_utf8_is_decoded_rather_than_refused() {
-        // Windows-1252 is still what a good deal of the older web serves, and
-        // an older page is exactly the kind worth keeping a copy of. Reading
-        // the bytes as UTF-8 and giving up refused those pages outright.
         let server = MockServer::start().await;
         // "Grüße" in Windows-1252: ü is 0xFC, ß is 0xDF, neither valid UTF-8.
         let body = b"<html><body><p>Gr\xFC\xDFe</p></body></html>".to_vec();
@@ -315,13 +247,10 @@ mod tests {
     fn the_charset_is_read_off_the_header_and_defaults_to_utf8() {
         assert_eq!(decode(b"caf\xe9", "text/html; charset=iso-8859-1"), "café");
         assert_eq!(decode("café".as_bytes(), "text/html"), "café");
-        // Quoted, spaced, and cased however the server felt like writing it.
         assert_eq!(
             decode(b"caf\xe9", "text/html; Charset=\"ISO-8859-1\""),
             "café"
         );
-        // An encoding nobody has heard of is read as UTF-8 rather than
-        // refused: a wrong guess renders badly, and refusing loses the page.
         assert_eq!(
             decode("café".as_bytes(), "text/html; charset=made-up"),
             "café"

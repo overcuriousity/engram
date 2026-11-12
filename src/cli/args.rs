@@ -1,23 +1,11 @@
-//! Which verb an invocation asked for, decided before anything is opened.
-//!
-//! A pure function of the parsed flags and one fact about the environment,
-//! rather than a branch inside `main`: every rule here — the leading count,
-//! what a pipe means, what `engram` alone means — is a rule worth a test, and
-//! none of them is testable through a real terminal.
+//! Which verb an invocation asked for: a pure function of the flags and stdin, so it is testable.
 
 use crate::error::{Error, Result};
 
-/// The client half of the binary's arguments. Flattened into `Args` in
-/// `main.rs`, so the server's flags and the client's are one parser and
-/// `--help` lists both.
+/// The client half of the binary's arguments, flattened into `Args` in `main.rs`.
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct CliArgs {
-    /// Capture a file, a link, a sentence, or `-` for standard input.
-    /// Repeatable: `engram -c *.pdf` is one invocation and several corpora.
-    /// An argument that names no file and looks like no path is the note
-    /// itself — see `cli::capture::read_target`. Several arguments are several
-    /// captures only where each one addresses something; an unquoted sentence
-    /// is joined back together — see `cli::capture::run`.
+    /// Capture a file, a link, a sentence, or `-` for standard input. Repeatable.
     #[arg(short = 'c', value_name = "PATH|URL|TEXT|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind"])]
     pub capture: Vec<String>,
     /// Search. A leading bare integer is how many hits are wanted.
@@ -27,34 +15,18 @@ pub struct CliArgs {
     #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search", "remind"])]
     pub ask: Vec<String>,
     /// Capture as a reminder: the classifier is skipped and the note is dated.
-    /// `-` reads stdin, as `-a` does.
     #[arg(short = 'r', value_name = "TEXT", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "show", "status"])]
     pub remind: Vec<String>,
-    /// What to call this capture. Refused with every verb but `-c`, for the
-    /// reason `--tag` is refused with `-a`: a search has no title to set.
+    /// What to call this capture (only with `-c`).
     #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show", "status"])]
     pub title: Option<String>,
     /// A note stored beside the capture: where it came from, why it matters.
     #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "show", "status"])]
     pub note: Option<String>,
     /// Narrow a search to artifacts carrying this tag. Repeatable.
-    ///
-    /// Refused with `-a`, along with `--category` and `--json`: the ask door
-    /// accepts all three over its JSON API, but no interactive door offers a
-    /// filtered ask, and a flag that is accepted and then dropped is worse
-    /// than one that is refused. See `cli::ask::run`.
-    ///
-    /// Refused with `--show` for the plainer version of the same reason: one
-    /// artifact named by id is not a list there is anything to narrow.
-    ///
-    /// And refused with `-r`, which does not carry them either: a reminder is
-    /// a capture the server tags for itself.
     #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status", "remind"])]
     pub tags: Vec<String>,
-    /// Narrow a search to artifacts in this category. Refused with `-a`, like
-    /// `--tag` — and with `-r` for the same reason `--tag` is: that door posts a
-    /// capture and answers with what it made, and a filter it accepts and
-    /// then drops is worse than one it refuses.
+    /// Narrow a search to artifacts in this category.
     #[arg(
         long,
         value_name = "CATEGORY",
@@ -62,18 +34,6 @@ pub struct CliArgs {
     )]
     pub category: Option<String>,
     /// Print the results as JSON instead of for a person.
-    ///
-    /// `--show` refuses it rather than ignoring it: the reading door renders a
-    /// body for a person to read and has no JSON form, and being handed the
-    /// human rendering after asking for JSON is the failure this whole rule is
-    /// about.
-    ///
-    /// `-r` refuses it too: it prints its own one-line receipt and has no JSON
-    /// form, so the flag was accepted and silently dropped.
-    ///
-    /// A search prints the server's rows as a bare array, which is what it has
-    /// always printed: the `{items, next}` envelope every API list answers
-    /// with is dropped here rather than handed to a pipe that predates it.
     #[arg(long, conflicts_with_all = ["ask", "show", "remind"])]
     pub json: bool,
     /// Never colour, never animate, never leave ASCII.
@@ -83,40 +43,19 @@ pub struct CliArgs {
     #[arg(long, value_name = "WHEN", default_value = "auto")]
     pub fancy: Fancy,
     /// After capturing, follow the background stages until they finish.
-    ///
-    /// There is nothing to follow behind the other three verbs: they finish
-    /// when their response arrives.
-    ///
-    /// Refused with `-r` for the reason `--tag` is refused with `-a`: that door
-    /// posts once and answers with what it made, and `--watch` was parsed,
-    /// accepted and then dropped on the floor by it.
     #[arg(long, conflicts_with_all = ["search", "ask", "show", "status", "remind"])]
     pub watch: bool,
-    /// Read one artifact in full: a rank from the last search, a leading piece
-    /// of an id, or a whole id.
+    /// Read one artifact in full: a rank from the last search, an id prefix, or a whole id.
     #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask"])]
     pub show: Option<String>,
-    /// What the base holds, what it is working through, and what it has been
-    /// learning.
-    ///
-    /// One shot, like every other verb. There is no ambient status line and no
-    /// footer under an ordinary search: that would make the cheapest door in
-    /// the application pay a request for something nobody asked for at that
-    /// moment.
+    /// What the base holds, what it is working through, and what it has been learning.
     #[arg(long, conflicts_with_all = ["capture", "search", "ask", "show"])]
     pub status: bool,
-    // Every flag `--show` does not honour refuses it from the other side —
-    // `--json`, `--tag`, `--category`, `--title`, `--note`, `--watch` — so the
-    // conflict is declared once, on the flag whose own doc comment explains it.
-    //
-    // `--status` is the same rule with one exception: it honours `--json` and
-    // nothing else, so the other five name it too. It had named none of them,
-    // which made `engram --status --watch` parse cleanly and then drop the
-    // flag — the failure the rule above exists to prevent.
+    // Flags `--show` does not honour refuse it from their side, so each conflict is declared once;
+    // `--status` likewise, except `--json`, which it honours.
 }
 
-/// When the drawn rendering is used. `Auto` is the only honest default: a pipe
-/// and a terminal want different things and the process can tell which it has.
+/// When the drawn rendering is used; `Auto` tells a pipe from a terminal.
 #[derive(clap::ValueEnum, Debug, Default, Clone, Copy, PartialEq)]
 pub enum Fancy {
     #[default]
@@ -128,36 +67,21 @@ pub enum Fancy {
 #[derive(Debug, PartialEq)]
 pub enum Verb {
     Capture(Vec<String>),
-    /// What arrived on stdin with no verb flag, already read.
-    ///
-    /// Carried rather than re-read: deciding whether a pipe held anything
-    /// consumes it, and stdin does not rewind.
+    /// What arrived on stdin with no verb flag, already read: stdin does not rewind.
     CapturePiped(String),
     Search {
         limit: Option<usize>,
         query: String,
     },
     Ask(String),
-    /// `-r`: a reminder, dated at capture.
     Remind(String),
-    /// What the base holds and what it has been learning.
     Status,
-    /// One artifact, read in full. Carries what the operator typed rather than
-    /// an id: a rank means nothing until the remembered list is read, and that
-    /// is a file, which is not something this decision touches.
+    /// One artifact, read in full; carries what was typed, as a rank needs the remembered list.
     Show(String),
 }
 
-/// The verb, or `None` for "no verb was asked for — be the server".
-///
-/// `stdin_piped` is passed rather than detected, and `stdin` is a closure
-/// rather than a read, so the whole decision runs in a test with no terminal
-/// and no process to pipe into.
-///
-/// `other_command` says the invocation already named something this binary
-/// does as the server — `--delete-user`, `--reindex`, `--print-config`. Asked
-/// for rather than derived, because `CliArgs` is the client half and cannot
-/// see the other half's flags.
+/// The verb, or `None` to be the server. `stdin` is a closure so this runs in a test.
+/// `other_command`: a server-side command was named, which `CliArgs` cannot see.
 pub fn verb(
     args: &CliArgs,
     other_command: bool,
@@ -176,14 +100,7 @@ pub fn verb(
     .filter(|x| **x)
     .count();
     if other_command {
-        // Answered before stdin is touched, which is the whole of why this
-        // parameter exists. `--delete-user` prints a prompt and reads the
-        // answer, and the obvious way to script past it is
-        // `echo yes | engram --delete-user sub@idp`. Without this, the pipe is
-        // taken for the gesture the terminal door exists for: "yes" is stored
-        // as a corpus, the process exits 0, and nothing is deleted. Reading
-        // stdin to find that out would be just as wrong the other way — the
-        // prompt below would then be handed EOF.
+        // Before stdin is read: `echo yes | engram --delete-user x` must not capture "yes".
         if named > 0 {
             return Err(Error::Validation(
                 "`-c`, `-s`, `-a`, `-r`, `--show` and `--status` are the client half \
@@ -196,29 +113,22 @@ pub fn verb(
     }
 
     if named > 1 {
-        // clap's `conflicts_with_all` refuses this before we are reached, and
-        // this is here for the caller that built `CliArgs` itself — which is
-        // every test, and one day some other entry point.
+        // clap refuses this first; this is for callers that build `CliArgs` themselves.
         return Err(Error::Validation(
             "one verb at a time: `-c`, `-s`, `-a`, `-r`, `--show` or `--status`".into(),
         ));
     }
 
-    // Answered before the pipe is looked at, for the reason `--show` is:
-    // `engram --status | grep failed` is an ordinary thing to type, and without
-    // this the pipe would be taken for the capture gesture below.
+    // Before the pipe: `engram --status | grep failed` is not a capture.
     if args.status {
         return Ok(Some(Verb::Status));
     }
     if let Some(which) = &args.show {
-        // Answered before the pipe is looked at. `engram --show 3 | less` is
-        // the ordinary way to read a long artifact, and without this the pipe
-        // would be taken for the capture gesture the door below exists for.
+        // Before the pipe: `engram --show 3 | less` is not a capture.
         return Ok(Some(Verb::Show(which.clone())));
     }
     if !args.capture.is_empty() {
-        // Not read here: a capture target may be a path or a link, and the
-        // reading of each belongs to the verb that knows what to do with it.
+        // Not read here: the verb decides what a path or link means.
         return Ok(Some(Verb::Capture(args.capture.clone())));
     }
     if !args.ask.is_empty() {
@@ -228,8 +138,7 @@ pub fn verb(
         return Ok(Some(Verb::Remind(read(&args.remind, stdin)?)));
     }
     if !args.search.is_empty() {
-        // A leading integer is a count only when something is left to be the
-        // query. A lone `42` has nothing left, so it is what was asked about.
+        // A leading integer is a count only when something is left to be the query.
         let (limit, rest) = match args.search.split_first() {
             Some((head, rest)) if !rest.is_empty() => match head.parse::<usize>() {
                 Ok(n) => (Some(n), rest.to_vec()),
@@ -243,17 +152,8 @@ pub fn verb(
         }));
     }
 
-    // No verb named. A pipe is still an instruction: capturing what was piped
-    // is the gesture the whole terminal door exists for, and requiring `-c -`
-    // there would be ceremony in front of the one case that has to be
-    // frictionless.
-    //
-    // But "not a terminal" is not "a pipe". A service started by systemd is
-    // handed `/dev/null` on stdin, and so is anything under `nohup`, `cron` or
-    // a bare `engram &` — none of which is a terminal and none of which is
-    // asking for a capture. Reading first and deciding on what came back is
-    // what keeps `engram` the server in every one of those: an empty stdin is
-    // not an instruction, so the binary stays what it has always been.
+    // No verb: a pipe is a capture. Decided on what was read: systemd, `nohup` and cron hand a
+    // service `/dev/null`, and an empty stdin keeps `engram` the server.
     if stdin_piped {
         let piped = stdin().map_err(|e| Error::Validation(format!("stdin: {e}")))?;
         if piped.trim().is_empty() {
@@ -264,12 +164,7 @@ pub fn verb(
     Ok(None)
 }
 
-/// The words a verb was given, or what stdin held when they are just `-`.
-///
-/// A free function rather than a closure inside `verb`, because the closure
-/// would have to capture the one-shot reader and every branch wants it: the
-/// borrow checker is right that only one of them may have it, and each branch
-/// returns, so handing it over per branch is the shape that says so.
+/// The words a verb was given, or stdin when they are just `-`.
 fn read(words: &[String], stdin: impl FnOnce() -> std::io::Result<String>) -> Result<String> {
     let joined = words.join(" ");
     if joined.trim() == "-" {
@@ -337,8 +232,7 @@ mod tests {
 
     #[test]
     fn a_query_that_is_itself_a_number_is_reachable() {
-        // `-s -- 42` puts the number after the separator, where clap stops
-        // reading flags: it is a query, not a count.
+        // After `--`, clap stops reading flags: it is a query, not a count.
         let mut a = args();
         a.search = vec!["42".into()];
         let v = verb(&a, false, false, piped("")).unwrap().unwrap();
@@ -368,10 +262,7 @@ mod tests {
 
     #[test]
     fn a_service_handed_dev_null_is_still_the_server() {
-        // systemd gives a unit `/dev/null` on stdin unless told otherwise, and
-        // so do `nohup`, `cron` and `engram &`. None of them is a terminal and
-        // none of them is asking for a capture: reading a service's stdin as
-        // an instruction is a server that never starts.
+        // systemd, `nohup`, `cron` and `engram &` hand stdin `/dev/null`; none asks for a capture.
         assert!(
             verb(&args(), false, true, piped("")).unwrap().is_none(),
             "an empty stdin is not an instruction"
@@ -419,7 +310,6 @@ mod tests {
                 argv.join(" ")
             );
         }
-        // The one it does honour stays accepted.
         assert!(parsed(&["--status", "--json"]).unwrap().cli.status);
     }
 

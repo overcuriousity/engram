@@ -4,11 +4,7 @@ use crate::cli::encode;
 use crate::cli::endpoint::{Endpoint, client};
 use crate::error::{Error, Result};
 
-/// Does this argument address something, or is it a word somebody typed?
-///
-/// The question `run` asks of a multi-argument invocation, and it is
-/// `read_target`'s own reading stated ahead of the read: stdin, a link, a name
-/// that is really there, or a shape only a path has. Everything else is prose.
+/// Does this argument address something (stdin, a link, a real name, a path's shape)?
 fn addresses_something(target: &str) -> bool {
     target == "-"
         || target.starts_with("http://")
@@ -17,29 +13,8 @@ fn addresses_something(target: &str) -> bool {
         || std::path::Path::new(target).exists()
 }
 
-/// Capture each target in turn, answering with the corpus ids in the order they
-/// were given.
-///
-/// One request per target rather than one multipart body holding all of them: a
-/// glob of forty PDFs that fails on the nineteenth should have stored eighteen,
-/// and the operator should be told which one stopped it.
-///
-/// Several arguments mean several captures only where every one of them
-/// addresses something. `-c` takes a list so that the shell can glob — `engram
-/// -c *.pdf` is one invocation and three corpora — and the same list is what an
-/// unquoted note arrives as: `engram -c buy milk` stored two corpora holding
-/// the single words "buy" and "milk", exit 0, where before `-c` accepted prose
-/// at all it had failed loudly with `buy: No such file or directory`. So the
-/// arguments are joined back into the sentence the shell took apart, which is
-/// what every other text verb does with its words (`args::read`), and the
-/// glob keeps its meaning because a glob is all paths.
-///
-/// Joined, they are prose outright and are not put back through the path
-/// heuristic: "dir/file plus a comment" would find `dir` on disk and be refused
-/// as a missing file, which is the failure this is here to remove.
-///
-/// A list that is *partly* paths is read by what the rest of it is — see
-/// `reading`.
+/// Capture each target in turn, answering with the corpus ids in order; one request each so a
+/// failure stops one target. An unquoted note is joined back into one sentence (see `reading`).
 pub async fn run(
     e: &Endpoint,
     targets: &[String],
@@ -49,9 +24,7 @@ pub async fn run(
 ) -> Result<Vec<String>> {
     let joined;
     let (targets, as_prose) = match reading(targets)? {
-        // One argument, or every one of them a path: the ordinary readings.
-        // A single argument that names nothing is `read_target`'s to refuse,
-        // and it says which file it could not open.
+        // One argument, or all paths; `read_target` refuses a single one that names nothing.
         Reading::Targets => (targets, false),
         Reading::Prose(line) => {
             joined = [line];
@@ -93,39 +66,20 @@ pub async fn run(
     Ok(ids)
 }
 
-/// What a list of arguments is: each its own capture, or one note.
 enum Reading {
     Targets,
     Prose(String),
 }
 
-/// A word with no path shape at all: not stdin, not a link, nothing on disk,
-/// no separator and no extension. What the shell hands over for a note typed
-/// without quotes — "pay", "to", "Anna".
+/// A word with no path shape at all: what the shell hands over for an unquoted note.
 fn plainly_prose(target: &str) -> bool {
     !addresses_something(target)
         && !target.contains('/')
         && !target.contains(std::path::MAIN_SEPARATOR)
 }
 
-/// How `run` reads its arguments.
-///
-/// One argument, or a list in which every argument addresses something, is
-/// read as it stands. A list in which nothing does is a sentence the shell
-/// took apart, joined back.
-///
-/// A list that is partly paths is read by what the rest of it is. A single
-/// word with no path shape at all makes the whole line a note: `engram -c pay
-/// 12.50 to Anna` is a sentence with a number in it, and `12.50` looking like
-/// a file name beside "pay" and "to" is no reason to refuse it — which is what
-/// this did. Where everything that names nothing still has a path's shape, the
-/// list is refused, because that is a typo rather than a sentence: `engram -c
-/// report.pdf notes/typo/q3.pdf` — one real file and one with a typo in the
-/// directory — used to send both through as one prose note, the PDF never
-/// read, exit 0. Those arguments are named back and nothing is stored.
-///
-/// A lone `12.50` is still asked of the filesystem, and anything meant as a
-/// note is one quoted argument away.
+/// How `run` reads its arguments: as they stand when all address something, joined when none do.
+/// Partly paths: any plain word makes it a note; path-shaped misses are a typo and refused.
 fn reading(targets: &[String]) -> Result<Reading> {
     let addressing = targets.iter().filter(|t| addresses_something(t)).count();
     if targets.len() < 2 || addressing == targets.len() {
@@ -147,11 +101,7 @@ fn reading(targets: &[String]) -> Result<Reading> {
     )))
 }
 
-/// Capture what arrived on stdin, already read.
-///
-/// Its own entry point because deciding whether a pipe held anything consumes
-/// it — see `args::verb` — and stdin does not rewind, so the bytes have to
-/// travel rather than be read a second time.
+/// Capture what arrived on stdin, already read: stdin does not rewind.
 pub async fn run_piped(
     e: &Endpoint,
     text: String,
@@ -180,34 +130,17 @@ pub async fn run_piped(
 }
 
 /// What a door knows about a capture beyond its bytes.
-///
-/// The two travel together everywhere — `run`, `run_piped` and `post` each
-/// take both or neither — and threading them as a separate pair is what pushed
-/// `post` past the argument count that is worth reading at a call site.
 #[derive(Clone, Copy)]
 struct Meta<'a> {
     title: Option<&'a str>,
     note: Option<&'a str>,
-    /// The process's IANA zone, so a date in the text is read where it was
-    /// typed rather than where the server runs.
+    /// The process's IANA zone, so a date in the text is read where it was typed.
     tz: Option<&'a str>,
-    /// `remind` for `-r`.
     intent: Option<&'a str>,
 }
 
-/// The zone this process is in, or none where the platform cannot say — or
-/// says something the server cannot read.
-///
-/// `/capture` parses `tz` with `chrono_tz` and answers 400 for anything it
-/// will not take, and a host has several ways to name a zone that is not an
-/// IANA identifier: `/etc/localtime` symlinked into the leap-second tree
-/// (`right/Europe/Berlin`), a hand-written `/etc/timezone`, a `TZ` holding a
-/// POSIX rule. Sent on regardless, that failed every `-c`, `-r` and
-/// piped capture from that host, naming a field the operator never typed.
-///
-/// So the same parser this end, and where it will not take the name the zone
-/// is simply not sent: the server then reads dates in its own zone, which is
-/// what it does for every client that cannot name one at all.
+/// The zone this process is in, or none where it is not a name `chrono_tz` takes: the server
+/// answers 400 to one (`right/Europe/Berlin`, a POSIX `TZ`), failing every capture.
 pub(crate) fn local_zone() -> Option<String> {
     let name = iana_time_zone::get_timezone().ok()?;
     if name.parse::<chrono_tz::Tz>().is_err() {
@@ -217,20 +150,8 @@ pub(crate) fn local_zone() -> Option<String> {
     Some(name)
 }
 
-/// The zone to send for a capture whose kind this end has not been told — a
-/// path, a link, a pipe — which is to say: only where the server will take it.
-///
-/// A server before `refuse_time_fields` let `tz` through refused it on every
-/// branch that is not a verbatim text capture, because a PDF, a photo and a
-/// fetched page are read on the server's own terms. Sent unconditionally to
-/// one of those, as it was, this made every
-/// `engram -c report.pdf`, `-c photo.jpg`, `-c https://example.com` and
-/// `echo https://x | engram` fail with `tz only applies to a text capture` on
-/// any host that can name its zone at all.
-///
-/// The condition is that server's, mirrored: text/plain, and not a body that
-/// is nothing but a link — which the server reads as a fetch. A current server
-/// ignores a zone there, so this only keeps an older one working.
+/// The zone to send where the server takes it: text/plain that is not a bare link. An older
+/// server refuses `tz` on every other branch.
 fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
     if !content_type.starts_with("text/plain") {
         return None;
@@ -244,13 +165,8 @@ fn zone_for(content_type: &str, bytes: &[u8]) -> Option<String> {
     local_zone()
 }
 
-/// One piece of text, sent as the reminder a verb said it is.
-///
-/// A body that is nothing but a link is refused here rather than sent. The
-/// server reads such a body as a page to fetch, and a fetched page carries none
-/// of the fields this path sets — `refuse_time_fields` answers with a 400
-/// naming a field the operator did not type for a verb they did. Said in the
-/// client, in terms of what they wrote: `-c` is the verb that captures a link.
+/// One piece of text, sent as the reminder a verb said it is. A bare link is refused here:
+/// the server would fetch it and 400 on the time fields.
 pub async fn run_text(
     e: &Endpoint,
     text: String,
@@ -285,8 +201,7 @@ pub async fn run_text(
     .await
 }
 
-/// One capture, answering with the corpus id. `label` is what the target is
-/// called when something goes wrong — a path, or `stdin`.
+/// One capture, answering with the corpus id; `label` names the target in errors.
 async fn post(
     http: &reqwest::Client,
     e: &Endpoint,
@@ -310,20 +225,8 @@ async fn post(
                 url.push_str(&format!("{key}={}&", encode(v)));
             }
         }
-        // The body is handed over in pieces so the track can fill as it goes.
-        // A book is tens of megabytes and the upload is the part of a capture
-        // an operator waits through; a client that showed nothing until the
-        // response arrived looked wedged for the whole of it.
-        //
-        // Where the face is off the whole vector goes at once, exactly as it
-        // did before: a pipe gets no chunked encoding it did not ask for.
-        //
-        // And where it is on, `content-length` is set by hand so the pieces are
-        // sent length-framed too. The length is known — it is `bytes.len()`,
-        // the whole reason the track can show a percentage — and without the
-        // header a streamed body goes out chunked, which made what the server
-        // and every proxy in front of it saw depend on nothing but whether the
-        // operator's stdout happened to be a terminal.
+        // Sent in pieces so the track fills during a long upload; whole where the face is off.
+        // `content-length` is set so the framing never depends on stdout being a terminal.
         let len = bytes.len();
         let res = http
             .post(url.trim_end_matches(['?', '&']))
@@ -345,11 +248,8 @@ async fn post(
                 .unwrap_or("the server refused it without saying why");
             return Err(Error::Validation(format!("{target}: {said}")));
         }
-        // Said, because the base will settle what the two repeat on its own
-        // and a person may want to know where the undo is. Not a wait: a
-        // flagged capture is read and searchable as usual.
-        // A link that could not be read is stored as the link and tried
-        // again; said, so nobody wonders why the page's words do not match.
+        // Said, so a person knows where the undo is; a flagged capture is searchable as usual.
+        // A link that could not be read is stored as the link and retried.
         if let Some(why) = body.get("link_unread").and_then(|v| v.as_str()) {
             eprintln!(
                 "{target}: the page could not be read ({why}) — stored as the link, \
@@ -370,18 +270,11 @@ async fn post(
     }
 }
 
-/// How much of the body goes out at a time. Small enough that the track moves
-/// on a slow link, large enough that a book is not a hundred thousand yields.
+/// Upload piece size: the track moves on a slow link, and a book is not a hundred thousand yields.
 const PIECE: usize = 64 * 1024;
 
-/// The request body, filling a track as the transport reads it.
-///
-/// One vector where the face is off, so nothing about a scripted capture
-/// changes: no track, and the length comes from the body itself.
-///
-/// The streamed form carries no length of its own, so the caller sets
-/// `content-length` from the vector before handing it over; both forms then go
-/// out identically framed.
+/// The request body, filling a track as the transport reads it; one vector where the face is off.
+/// The caller sets `content-length` so both forms are framed alike.
 fn tracked_body(bytes: Vec<u8>, face: &crate::cli::face::Face) -> reqwest::Body {
     if !face.on {
         return reqwest::Body::from(bytes);
@@ -397,34 +290,18 @@ fn tracked_body(bytes: Vec<u8>, face: &crate::cli::face::Face) -> reqwest::Body 
             fill.show(at, total);
             yield Ok::<Vec<u8>, std::io::Error>(piece);
         }
-        // Before the response is read, and so before anything is printed. The
-        // request that never gets here — a reset, a refusal mid-upload — is
-        // covered by `Fill`'s own `Drop`, which this only makes earlier.
+        // Before the response is printed; a failed upload is covered by `Fill`'s own `Drop`.
         fill.clear();
     };
     reqwest::Body::wrap_stream(stream)
 }
 
-/// Follow a capture through the stages that run after it is stored.
-///
-/// The other doors describe those stages in a sentence and leave; a terminal is
-/// a place a person is already sitting, so it can show them happening. It ends
-/// at the first status nothing moves out of — including `NeedsReview`, the
-/// parked near-duplicate, which is precisely the one a client must not sit
-/// waiting on because only a person can move it.
-///
-/// Matched on the parsed variant rather than on the string: `CorpusStatus`
-/// spells `NeedsReview` two different ways depending on whether it is going to
-/// the database or to a response, and a comparison against either literal would
-/// be right half the time.
+/// Follow a capture through its background stages to the first status nothing moves out of,
+/// `NeedsReview` included. Matched on the variant: `CorpusStatus` spells that one two ways.
 pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Result<()> {
     use crate::store::corpora::CorpusStatus;
     let http = client()?;
-    // The three background stages, redrawn in place from each poll. The
-    // generic strand that used to sit here said only "something is happening";
-    // these say which of the three it is, which is the whole reason `--watch`
-    // exists. No poll is added for them: they are drawn from the answer the
-    // loop was already asking for.
+    // The three stages, drawn from the poll the loop already makes.
     let mut track = face.track();
     for _ in 0..WATCH_POLLS {
         let res = http
@@ -433,15 +310,7 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
             .send()
             .await
             .map_err(|err| e.unreachable(err))?;
-        // Looked at before the body is read. Without this the loop polls a
-        // 401, a 404 or a deleted id six hundred times: `res.json()` falls
-        // back to `Null`, the status fails to parse, and five minutes later
-        // the client claims the capture is "still being read". A wrong token
-        // or a wrong `ENGRAM_URL` is not something waiting will fix.
-        //
-        // Only 4xx. A 502, or a restart caught mid-poll, is exactly what the
-        // retry is for, and giving up on one would be worse than the bug this
-        // fixes.
+        // Give up on 4xx: waiting fixes no wrong token or id. 5xx and restarts are retried.
         let code = res.status();
         if code.is_client_error() {
             track.clear();
@@ -468,75 +337,32 @@ pub async fn watch(e: &Endpoint, id: &str, face: &crate::cli::face::Face) -> Res
         tokio::time::sleep(WATCH_EVERY).await;
     }
     track.clear();
-    // Said rather than hidden: a capture still moving after five minutes is
-    // information, and a client that exits silently claims a completion it
-    // never saw.
+    // Said: exiting silently would claim a completion this client never saw.
     eprintln!("{id}: still being read — it carries on without this client");
     Ok(())
 }
 
-/// Five minutes of polling, twice a second. Long enough for a book through
-/// extraction and short enough that a wedged queue is not watched all night.
+/// Five minutes at two polls a second: enough for a book, not a night on a wedged queue.
 const WATCH_POLLS: usize = 600;
 const WATCH_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
-/// What one `-c` target turned out to be: the bytes to send, what to call
-/// them to the server, and what to call it back to the operator when something
-/// goes wrong. The label is the path for a file and `text` for a sentence —
-/// putting a whole paragraph in front of every error message it can produce is
-/// no way to report one.
+/// What one `-c` target turned out to be: bytes, a name for the server, and a label for errors
+/// (`text` for a sentence, not the whole paragraph).
 struct Read {
     bytes: Vec<u8>,
     content_type: String,
     label: String,
 }
 
-/// Does this argument look like an attempt at a path? A slash or a `~` says so
-/// outright, and so does a lone word carrying an extension. Prose does not:
-/// it has spaces in it, and a sentence's final full stop is not a suffix.
-///
-/// This is only ever asked about something that is *not* on disk, and only to
-/// choose between two answers: refuse it as a missing file, or store it as a
-/// note. `notes.pdf` typed with the file in the other directory should be the
-/// error it is, and `engram -c "buy milk"` should be the note it is.
-/// Whitespace argues against a path: a sentence that happens to carry a slash
-/// — "siehe https://example.com/x für Details", "Zahlung 12/2026 überweisen" —
-/// is exactly the prose the text fallthrough exists for, and the slash branch
-/// used to claim it anyway, failing the capture with the `File name too long`
-/// this heuristic was written to remove.
-///
-/// It does not settle it, though, and the answer is in two parts.
-///
-/// An *absolute* argument is a path and nothing else. Prose does not begin at
-/// the root, and `~/` is the same statement typed for a shell that did not
-/// expand it — quoted, on purpose. `engram -c /no/such/file` is a miss worth
-/// reporting, not a note, however little of the path is really there. That also
-/// closes the case this heuristic left open: `~/Documents/My Notes/plan.pdf`,
-/// quoted with a typo in it, used to be stored as a note whose whole text was
-/// the path somebody typed, exit 0, with nothing said.
-///
-/// A *relative* one with a slash in it is the genuinely ambiguous shape, and
-/// the filesystem answers what the form cannot: it is a path exactly when its
-/// parent directory is really there. Neither prose case above has one — "siehe
-/// https:/example.com", "Zahlung 12" — and both stay the notes they are.
-/// Whitespace does not enter into it. Requiring it as proof of prose refused a
-/// whole class of ordinary short notes as missing files — `engram -c
-/// "TODO/urgent"` and `engram -c 24/12` exited 2 with "No such file or
-/// directory" — while the examples above survived only by having spaces in
-/// them. The price is `dir/file`, meant as a path, typed where `dir` is not:
-/// that is stored as a note, because nothing on disk contradicts it and
-/// nothing in the shape does either.
+/// Does an argument that is not on disk look like an attempt at a path? Absolute or `~/` always;
+/// a relative slash only when its parent directory exists; a lone word with an extension.
 fn looks_like_a_path(target: &str) -> bool {
     let expanded = expand_home(target);
-    // Nobody's prose begins at the root. `~/` is the same statement typed for
-    // a shell that did not expand it, which is to say quoted on purpose.
+    // Prose never begins at the root; an unexpanded `~/` was quoted on purpose.
     if expanded.is_absolute() || target.starts_with("~/") {
         return true;
     }
-    // A lone word carrying an extension and naming no directory: `notes.pdf`,
-    // typed with the file somewhere else. Its parent is the working directory,
-    // which is always there, so the filesystem has nothing to add and the shape
-    // settles it on its own.
+    // A lone word with an extension: its parent is the working directory, so the shape decides.
     let addressed = target.contains(std::path::MAIN_SEPARATOR) || target.contains('/');
     if !addressed {
         return !target.chars().any(char::is_whitespace)
@@ -549,10 +375,7 @@ fn looks_like_a_path(target: &str) -> bool {
         .is_some_and(|p| !p.as_os_str().is_empty() && p.is_dir())
 }
 
-/// A leading `~/` resolved, for the directory question above and nothing else:
-/// the read itself goes through the argument as typed, the way every other
-/// program that is handed an unexpanded tilde does. A shell expands it before
-/// this ever sees it; what reaches here was quoted.
+/// A leading `~/` resolved, for the directory question only; the read uses the argument as typed.
 fn expand_home(target: &str) -> std::path::PathBuf {
     match target.strip_prefix("~/") {
         Some(rest) => match std::env::home_dir() {
@@ -563,16 +386,8 @@ fn expand_home(target: &str) -> std::path::PathBuf {
     }
 }
 
-/// The bytes to send and what to call them.
-///
-/// A link is sent as `text/plain` and the server decides it is a link, which is
-/// the same decision a share sheet's body gets: one rule about what a bare URL
-/// means, in one place, rather than one per client.
-///
-/// And what is not a file is what a person typed. `engram -c "PUID steht bei
-/// Microsoft für…"` is the same gesture as piping that paragraph in, and
-/// answering it with `Filename too long` is the client insisting on a reading
-/// of the argument that nothing about the argument supports.
+/// The bytes to send and what to call them. A link goes as `text/plain` for the server to decide;
+/// what is not a file is a note.
 fn read_target(target: &str) -> Result<Read> {
     let text = |bytes: Vec<u8>, label: &str| Read {
         bytes,
@@ -592,18 +407,8 @@ fn read_target(target: &str) -> Result<Read> {
     }
     let bytes = match std::fs::read(target) {
         Ok(b) => b,
-        // A path that misses is an error; a sentence was never a path.
-        //
-        // Keyed on `NotFound` and not on the error alone: every other kind
-        // says the target *is* a file and could not be read. `engram -c
-        // archive` in a directory holding one answered `EISDIR`, which fell
-        // through here and captured the word "archive" as a note, exit 0 —
-        // and an unreadable file (`EACCES`) did the same. Only "there is
-        // nothing at this name" leaves room for the reading that it was prose.
-        // `ENAMETOOLONG` is the same answer as `NotFound` for this purpose:
-        // there is no file at that name and there can be none. A sentence of
-        // more than 255 bytes — one ordinary paragraph — exited 2 with "File
-        // name too long" and the whole paragraph echoed back as the path.
+        // Only `NotFound` and `ENAMETOOLONG` leave room for prose; any other error means a file
+        // (`EISDIR`, `EACCES`) that could not be read.
         Err(e)
             if looks_like_a_path(target)
                 || !matches!(
@@ -615,9 +420,7 @@ fn read_target(target: &str) -> Result<Read> {
         }
         Err(_) => return Ok(text(target.as_bytes().to_vec(), "text")),
     };
-    // The extension is what this end knows; the server sniffs the bytes anyway.
-    // Guessing wrong here costs nothing, and guessing at all saves the common
-    // case of a PDF arriving labelled as text.
+    // The server sniffs the bytes anyway; guessing saves the common PDF-labelled-as-text case.
     let mime = mime_guess::from_path(target)
         .first_raw()
         .unwrap_or("text/plain")
@@ -694,8 +497,7 @@ mod tests {
             "erinnere mich",
             "siehe https://example.com/x für Details",
             "Zahlung 12/2026 überweisen",
-            // A relative slash whose directory is not there. Prose, and the
-            // shape a short note reaches for: `TODO/urgent`, `24/12`.
+            // A relative slash whose directory is not there: prose.
             "TODO/urgent",
             "24/12",
             "dir/file",
@@ -726,7 +528,6 @@ mod tests {
         };
         assert!(err.to_string().contains("archive"), "{err}");
 
-        // A path that misses is still an error, and a sentence is still prose.
         let missing = dir.path().join("no-such-file.txt");
         assert!(
             read_target(missing.to_str().unwrap()).is_err(),
@@ -745,7 +546,6 @@ mod tests {
         let b = dir.path().join("b.pdf");
         std::fs::write(&a, b"%PDF-1.4\n").unwrap();
         std::fs::write(&b, b"%PDF-1.4\n").unwrap();
-        // The glob: every argument names a file, so each is its own capture.
         for p in [&a, &b] {
             assert!(addresses_something(p.to_str().unwrap()), "{p:?}");
         }
@@ -755,7 +555,6 @@ mod tests {
             addresses_something("notes.pdf"),
             "a lone name with a suffix"
         );
-        // And the prose the shell split.
         for word in ["buy", "milk", "erinnere", "zahnarzt"] {
             assert!(!addresses_something(word), "{word}");
         }
@@ -818,7 +617,7 @@ mod tests {
         );
         assert!(!msg.contains("tz"), "and not a field nobody typed: {msg}");
 
-        // Prose that merely opens with a link is prose, and still goes.
+        // Prose that merely opens with a link is prose.
         run_text(
             &e,
             "https://example.com/x is the invoice, pay it".into(),
@@ -833,9 +632,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_sentence_nobody_could_open_is_captured_as_the_note_it_is() {
-        // `engram -c "PUID steht bei Microsoft für…"` is the same gesture as
-        // piping that paragraph in; `Filename too long` was the client
-        // insisting on a reading nothing about the argument supports.
         let (e, core) = endpoint().await;
         let text = "PUID steht bei Microsoft für „Personal User ID“ (Persönliche Benutzer-ID).\n\
                     Es handelt sich um einen eindeutigen alphanumerischen Code.";
@@ -848,13 +644,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_photo_a_document_and_a_link_are_captured_where_this_host_knows_its_zone() {
-        // The three time fields are refused on every branch of `/capture` that
-        // is not a verbatim text capture, and the zone used to be attached to
-        // every target regardless. On any host that can name its zone — which
-        // is every ordinary desktop — this made `-c report.pdf`, `-c photo.jpg`
-        // and `-c https://…` fail outright with `tz only applies to a text
-        // capture`. The one branch the CLI tests exercised was `.txt`, which is
-        // the one branch that accepts it.
+        // `/capture` refuses the time fields on every non-text branch; the zone must not go there.
         let (e, _core) = endpoint().await;
         assert!(
             local_zone().is_some(),
@@ -868,9 +658,7 @@ mod tests {
             .await
             .expect("a photo");
 
-        // A link is a fetch, and this fixture has nothing to fetch — so it is
-        // the *reason* that is asserted. What must not come back is the door
-        // refusing the request before it ever tried.
+        // The fixture has nothing to fetch, so the reason is asserted: not a refusal before trying.
         for said in [
             run(&e, &["https://example.com/a".into()], None, None, &off())
                 .await
@@ -991,11 +779,7 @@ mod tests {
             .unwrap();
         let face = crate::cli::face::Face::decide(&Default::default(), false, true, None);
 
-        // A fresh capture is `raw`, which a worker moves along — so the client
-        // is right to keep waiting there, and this drives it to each state
-        // that nothing moves out of instead. `NeedsReview` is the one that
-        // matters most: only a person can move a parked near-duplicate, so a
-        // client that waited on it would wait for ever.
+        // A fresh capture is `raw`, which a worker moves; `NeedsReview` only a person moves.
         for terminal in [
             CorpusStatus::Ready,
             CorpusStatus::Partial,

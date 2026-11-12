@@ -32,7 +32,6 @@ impl<T: Clone + Send + 'static> Broadcaster<T> {
     }
 }
 
-/// What changed, as far as a page needs to know to refetch it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LiveEvent {
     Queue,

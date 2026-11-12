@@ -8,22 +8,16 @@ fn options() -> Options {
     o.insert(Options::ENABLE_TABLES);
     o.insert(Options::ENABLE_STRIKETHROUGH);
     o.insert(Options::ENABLE_FOOTNOTES);
-    // `$…$` and `$$…$$`. A price written `5$ und 10$` is not math: an opening
-    // `$` followed by a space never opens one.
+    // `$…$` and `$$…$$`; an opening `$` followed by a space never opens math, so prices are safe.
     o.insert(Options::ENABLE_MATH);
     o
 }
 
-/// One converter for the process. Building it compiles the command table, and
-/// converting with local state keeps one formula's `\def` out of the next.
+/// One converter: building it compiles the command table, and local state keeps one formula's `\def` out of the next.
 static LATEX: LazyLock<Option<LatexToMathML>> =
     LazyLock::new(|| LatexToMathML::new(MathCoreConfig::default()).ok());
 
-/// MathML Core, the subset every current browser draws without a script.
-///
-/// Exactly what `math-core` emits, minus `style` and `id`: `style` would hand
-/// model-written raw HTML a way to position things over the page, and costs
-/// only `\color`.
+/// MathML Core minus `style` and `id`: `style` would let model-written HTML position things over the page.
 const MATHML_TAGS: &[&str] = &[
     "math",
     "semantics",
@@ -76,11 +70,7 @@ const MATHML_ATTRIBUTES: &[&str] = &[
     "encoding",
 ];
 
-/// A formula as MathML, or its source in a code span when it does not parse.
-///
-/// The source rather than nothing: a command `math-core` does not know is still
-/// what the answer said, and shown as written it is readable to anyone who
-/// reads LaTeX.
+/// The source in a code span when it does not parse, since it is still what the answer said.
 fn math(latex: &str, display: MathDisplay) -> Event<'static> {
     match LATEX
         .as_ref()
@@ -91,12 +81,7 @@ fn math(latex: &str, display: MathDisplay) -> Event<'static> {
     }
 }
 
-/// Render chunk markdown to HTML, then sanitize.
-///
-/// Chunk text is written by a language model and displayed inside the
-/// operator's authenticated session, so it is untrusted input by definition.
-/// Sanitizing after rendering catches both raw HTML passed through by the
-/// markdown parser and anything the parser itself emits — the MathML included.
+/// Chunk text is model-written and shown in an authenticated session, so it is sanitized after rendering.
 pub fn render(markdown: &str) -> String {
     let parser = Parser::new_ext(markdown, options()).map(|event| match event {
         Event::InlineMath(latex) => math(&latex, MathDisplay::Inline),
@@ -116,18 +101,8 @@ pub fn render(markdown: &str) -> String {
         .to_string()
 }
 
-/// Render text that is not markdown: a passage kept as the document wrote it.
-///
-/// Escaped rather than parsed, and inside a `<pre>`, because the line breaks
-/// are the structure. Read as markdown, a table of contents lifted out of a
-/// PDF loses every break and becomes one paragraph of stretched leader dots,
-/// and a section number written `# 3` becomes a heading.
-///
-/// Escaping is the whole sanitization: no markup is produced from the input,
-/// so there is nothing to clean afterwards. Three replacements are the
-/// complete set for text content — quotes and spaces only need escaping inside
-/// an attribute, and `ammonia::clean_text` escaping them too turned every
-/// space and newline of a document into a numeric entity.
+/// Escaped inside a `<pre>`: the line breaks are the structure.
+/// Three replacements suffice for text content; `ammonia::clean_text` would entity-encode every space.
 pub fn render_verbatim(text: &str) -> String {
     let escaped = text
         .replace('&', "&amp;")
@@ -136,8 +111,7 @@ pub fn render_verbatim(text: &str) -> String {
     format!("<pre class=\"verbatim\">{escaped}</pre>")
 }
 
-/// Plain-text preview with markup removed. Used in list views where rendered
-/// HTML would break the layout.
+/// Markup removed, for list views where rendered HTML would break the layout.
 pub fn snippet(markdown: &str, max_chars: usize) -> String {
     let mut text = String::new();
     for event in Parser::new_ext(markdown, options()) {
@@ -153,14 +127,7 @@ pub fn snippet(markdown: &str, max_chars: usize) -> String {
     truncate_at_word(&text, max_chars)
 }
 
-/// Truncate at a word, never inside one, and never inside a codepoint.
-///
-/// `chars().take(n)` was the whole of this, and it is what produced "…darin
-/// vo" in the sitting: a name cut mid-word reads as a broken name, where one
-/// cut at a space reads as an opening. Falls back to the hard cut when there
-/// is no space to fall back to — one unbroken 200-character token is still
-/// better shortened than shown whole — and refuses a break so early that a
-/// single word would stand for a whole passage.
+/// Falls back to a hard cut when there is no space, and refuses a break so early one word stands for a passage.
 pub fn truncate_at_word(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -174,27 +141,13 @@ pub fn truncate_at_word(text: &str, max_chars: usize) -> String {
     format!("{}…", cut.trim_end())
 }
 
-/// A name for something that has none, derived from its own opening.
-///
-/// A verbatim passage has no title by design. Where the layout can let a
-/// snippet speak for the row there should be no heading at all — see
-/// `render_hit`. Where a name is structurally required, a button label or a
-/// list of what this sitting touched, this is that name: the body's opening,
-/// with the markup and the leading punctuation that are structure rather than
-/// subject taken off the front. `Keep "- schneller Schreibzugriff (…) -"` is
-/// what the dedupe queue offered without this.
+/// The body's opening minus leading markup and punctuation, for where a name is structurally required.
 pub fn stand_in_title(text: &str, max_chars: usize) -> String {
     let flat = snippet(text, usize::MAX);
     let opening = flat.trim_start_matches(|c: char| {
         c.is_whitespace() || matches!(c, '-' | '–' | '—' | '*' | '#' | '>' | '·' | '•' | '|')
     });
-    // Put back a number the parse took for structure. `snippet` is a whole
-    // CommonMark read that keeps the text events, so `1. Einleitung` arrives
-    // here as `Einleitung`: an ordered-list marker is structure to the parser
-    // and part of the name to everyone else. It matters twice over now that
-    // stored titles come through here too — two syntheses called `1. Einleitung`
-    // and `2. Einleitung` were shown under one name, and the number is the
-    // whole of what told them apart.
+    // Put back the list number the parse took for structure: `1. Einleitung` and `2. Einleitung` differ only by it.
     let name = match leading_enumerator(text) {
         Some(marker) => format!("{marker} {opening}"),
         None => opening.to_string(),
@@ -202,18 +155,11 @@ pub fn stand_in_title(text: &str, max_chars: usize) -> String {
     truncate_at_word(name.trim(), max_chars)
 }
 
-/// The `1.` or `1)` a text opens with, if it opens with one.
-///
-/// Only what CommonMark itself would have eaten: digits, one `.` or `)`, and
-/// whitespace after it. A date written `1.9. Termin` has no space after the
-/// first dot and is not a list to the parser either, so both leave it whole.
-/// Returns the marker as the text wrote it — `10.` stays `10.`, and `)` does not
-/// come back as `.` — because a name is what was written.
+/// Only what CommonMark would eat (digits, `.` or `)`, whitespace), returned as written.
 fn leading_enumerator(text: &str) -> Option<&str> {
     let start = text.trim_start();
     let digits = start.len() - start.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    // Nine is CommonMark's own limit on how long an ordered marker may be; past
-    // it the parser stops reading a list, and so does this.
+    // Nine digits is CommonMark's own limit on an ordered marker.
     if digits == 0 || digits > 9 {
         return None;
     }
@@ -221,8 +167,7 @@ fn leading_enumerator(text: &str) -> Option<&str> {
     if !matches!(delim, '.' | ')') {
         return None;
     }
-    // A marker with nothing after it is not a list item, and a title that is
-    // only `3.` has nothing for this to be the marker of.
+    // A marker with nothing after it is not a list item.
     let marker = &start[..digits + delim.len_utf8()];
     match start[marker.len()..].starts_with(|c: char| c.is_whitespace()) {
         true => Some(marker),
@@ -230,7 +175,7 @@ fn leading_enumerator(text: &str) -> Option<&str> {
     }
 }
 
-/// Escaped text in which a URL stays readable but is not a reference: `://` is spelled with entities.
+/// `://` is spelled with entities, so a URL stays readable but is not a reference.
 pub fn inert(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -262,9 +207,6 @@ mod tests {
 
     #[test]
     fn verbatim_keeps_the_line_structure_markdown_would_flatten() {
-        // A table of contents lifted out of a PDF: every entry is its own
-        // line, and read as markdown they collapse into one paragraph whose
-        // leader dots then stretch the width of the card.
         let html = render_verbatim("Dateiattribute\n.........24\n\nSlack\n.....24");
         assert!(html.contains("<pre"), "{html}");
         assert!(html.contains("Dateiattribute\n.........24"), "{html}");
@@ -273,8 +215,6 @@ mod tests {
 
     #[test]
     fn verbatim_is_shown_as_written_not_read_as_markup() {
-        // Source text, not model output: `#` is a number sign the document
-        // used, and `<b>` is four characters it contains.
         let html = render_verbatim("# 3 auf Seite 12\n<b>not bold</b>");
         assert!(!html.contains("<h1"), "{html}");
         assert!(!html.contains("<b>"), "{html}");
@@ -289,8 +229,7 @@ mod tests {
 
     #[test]
     fn strips_script_tags_from_llm_written_markdown() {
-        // Chunk text is model output rendered into the operator's own
-        // authenticated session. Unsanitized, this is stored XSS.
+        // Unsanitized, this is stored XSS.
         let html = render("normal text\n\n<script>alert(1)</script>");
         assert!(!html.contains("<script"), "{html}");
         assert!(!html.contains("alert(1)"), "{html}");
@@ -310,8 +249,7 @@ mod tests {
 
     #[test]
     fn strips_data_urls_too() {
-        // data: can carry script in some contexts; the scheme allowlist must
-        // not quietly permit it.
+        // data: can carry script; the scheme allowlist must not permit it.
         let html = render("[click](data:text/html;base64,PHNjcmlwdD4=)");
         assert!(!html.contains("data:text/html"), "{html}");
     }
@@ -328,7 +266,6 @@ mod tests {
 
     #[test]
     fn code_content_is_escaped_not_executed() {
-        // A chunk documenting an XSS payload must render as text.
         let html = render("Payload:\n\n```html\n<script>alert(1)</script>\n```");
         assert!(html.contains("&lt;script&gt;"), "{html}");
         assert!(!html.contains("<script>"), "{html}");
@@ -336,8 +273,6 @@ mod tests {
 
     #[test]
     fn renders_inline_and_display_math_as_mathml() {
-        // The answer that asked for this: a learning rule written the way a
-        // model writes one, inline and displayed.
         let html = render(
             "Mit $\\eta$ als Lernrate:\n\n$$w_i \\leftarrow w_i + \\eta \\cdot c \\cdot [h(x) - c(x)]$$",
         );
@@ -385,8 +320,6 @@ mod tests {
 
     #[test]
     fn a_stand_in_title_stops_at_a_word() {
-        // The sitting rendered "…zusätzlich darin vo" — a name cut mid-word
-        // reads as a truncated name, not as the opening of a passage.
         let t = stand_in_title(
             "Die digitale Forensik unterscheidet sich zusätzlich darin von einem Tatort",
             60,
@@ -398,8 +331,6 @@ mod tests {
 
     #[test]
     fn a_stand_in_title_drops_leading_punctuation_and_markup() {
-        // `Keep "- schneller Schreibzugriff (…) -"` was a body opening,
-        // dashes and all, pressed into service as a name.
         assert_eq!(
             stand_in_title("- schneller Schreibzugriff auf den Stapel", 60),
             "schneller Schreibzugriff auf den Stapel"
@@ -412,28 +343,19 @@ mod tests {
 
     #[test]
     fn a_stand_in_title_keeps_the_number_a_section_opens_with() {
-        // The number is structure to the parser and part of the name to
-        // everyone else: without it two syntheses are shown under one name.
         assert_eq!(stand_in_title("1. Einleitung", 60), "1. Einleitung");
         assert_eq!(stand_in_title("2. Einleitung", 60), "2. Einleitung");
-        // As written: the width of the number and the delimiter both survive.
         assert_eq!(stand_in_title("10. Kapitel Zehn", 60), "10. Kapitel Zehn");
         assert_eq!(stand_in_title("1) Foo", 60), "1) Foo");
-        // A marker inside a heading was never a list marker; the heading's own
-        // `#` still goes, and the text under it is untouched either way.
         assert_eq!(stand_in_title("## 1. Einleitung", 60), "1. Einleitung");
     }
 
     #[test]
     fn a_number_that_is_not_a_marker_is_left_alone() {
-        // No space after the dot: not a list to CommonMark, and not one here.
         assert_eq!(
             stand_in_title("1.9. Termin im Mai", 60),
             "1.9. Termin im Mai"
         );
-        // Nothing for the marker to mark: an empty list item, which flattens
-        // to nothing at all, exactly as `---` does. `title_of` falls back to
-        // the id there rather than showing a name that is one number.
         assert_eq!(stand_in_title("3.", 60), "");
         assert_eq!(stand_in_title("2024 war ein Jahr", 60), "2024 war ein Jahr");
     }

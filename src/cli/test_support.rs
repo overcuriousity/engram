@@ -1,12 +1,6 @@
-//! A real engram on a real port, for the client tests.
-//!
-//! The client speaks HTTP and nothing else, so a mock would be asserting
-//! against a fiction. This is the actual router, served on a port the OS chose,
-//! with a real bearer token — the same app every `web/` test drives, reached
-//! the way the client reaches it.
+//! A real engram on a real port, for the client tests: the client speaks only HTTP.
 
-/// `(base_url, token)`, plus the core behind them for a test that needs to read
-/// what the client wrote.
+/// `(base_url, token)`, plus the core behind them.
 pub async fn serve_test_app() -> (String, String, crate::core::Core) {
     let core = crate::core::test_support::test_core().await;
     let handle = core.clone();

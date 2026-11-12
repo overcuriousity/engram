@@ -1,27 +1,10 @@
-//! What this sitting has touched.
-//!
-//! The base could already name what you were working on last Tuesday and not
-//! what you are working on now: `jobs/pursuit.rs` reconstructs a sitting from
-//! idle gaps in the search log, which means it exists only once it is over.
-//! This is the live half — a working memory, read while the sitting is
-//! happening, carried between the doors, gone when it goes.
-//!
-//! **In memory only.** No table, no migration, no expiry sweep. It dies with
-//! the process, and a deploy mid-afternoon costs the operator their carried
-//! context. That is the accepted price: a working memory that survives a
-//! restart is a long-term memory, and engram has one of those already.
-//!
-//! It does not write activation, it does not open a pursuit, and it exists at
-//! the web door only — for the API and `/mcp` an access token is not a
-//! conversation, and two agent sessions sharing a token would share a sitting,
-//! which is worse than having none.
+//! What the current sitting has touched: in memory only, web door only.
+//! An access token is not a conversation; two agents sharing one would share a sitting.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
-/// How much of a sitting is carried. Twenty is well past what any page shows;
-/// the cap is here so a long afternoon cannot grow the map without bound, not
-/// to decide what is worth remembering.
+/// A bound on the map for a long afternoon, not a judgement of what is worth remembering.
 pub const CARRY: usize = 20;
 
 /// An artifact this sitting has been in.
@@ -31,7 +14,6 @@ pub struct Touched {
     pub at: i64,
 }
 
-/// One live sitting.
 #[derive(Debug, Default)]
 struct Sitting {
     /// Most recent first, capped at `CARRY`.
@@ -41,18 +23,15 @@ struct Sitting {
     last_at: i64,
 }
 
-/// What a door reads: a copy, so nothing holds the lock across a render.
+/// A copy, so nothing holds the lock across a render.
 #[derive(Debug, Default, Clone)]
 pub struct Carried {
-    /// Artifact ids, most recently touched first.
     pub touched: Vec<String>,
-    /// Queries typed in this sitting, most recent first.
     pub queries: Vec<String>,
 }
 
 impl Carried {
-    /// A cold sitting: nothing has happened, or what happened has gone quiet.
-    /// The pages render nothing at all for one, rather than an empty box.
+    /// Nothing happened, or it went quiet; pages render nothing for one.
     pub fn is_cold(&self) -> bool {
         self.touched.is_empty() && self.queries.is_empty()
     }
@@ -65,13 +44,7 @@ pub struct Sittings {
 }
 
 impl Sittings {
-    /// Whether any sitting is being kept at all.
-    ///
-    /// Expired entries count: `with` drops what has gone cold on the next write
-    /// from any session, so a map that still holds rows nobody has come back to
-    /// is not holding working memory. Read by `Working::is_idle`, which is what
-    /// lets the registry drop a departed subject's state instead of keeping a
-    /// row per subject the process has ever opened.
+    /// Read by `Working::is_idle` so the registry can drop a departed subject's state.
     pub fn is_empty(&self) -> bool {
         self.inner
             .lock()
@@ -79,7 +52,6 @@ impl Sittings {
             .is_empty()
     }
 
-    /// This sitting opened an artifact.
     pub fn touched(&self, session: &str, artifact_id: &str, at: i64, idle_secs: i64) {
         self.with(session, at, idle_secs, |s| {
             s.touched.retain(|t| t.artifact_id != artifact_id);
@@ -91,13 +63,7 @@ impl Sittings {
         });
     }
 
-    /// This sitting typed a query.
-    ///
-    /// A typing burst folds into one entry, the same way `record_search` folds
-    /// one into a single event: the search box searches as you type, so a
-    /// finished query arrives as every prefix of itself, and a rail listing
-    /// "h", "ho", "how" would be a rail of one query spelled slowly. What is
-    /// kept is the longest of a run — the query that was actually meant.
+    /// Search-as-you-type sends every prefix, so a typing burst folds into its longest query.
     pub fn queried(&self, session: &str, query: &str, at: i64, idle_secs: i64) {
         let query = query.trim();
         if query.is_empty() {
@@ -110,12 +76,8 @@ impl Sittings {
                 // A backspace, or a repeat. The longer spelling stands.
                 return;
             }
-            // Only the head is a prefix of the run being typed. Scanning the
-            // whole carried list deleted queries from earlier in the sitting
-            // that merely happen to be prefixes: "E01" in the morning and
-            // "E01 mounting on Linux" ten minutes later are two searches, and
-            // the rail kept one. Anything else is dropped only when it is the
-            // same query again, which is a repeat and not a run.
+            // Only the head can be the run being typed; an earlier query that is a prefix is a
+            // separate search.
             if s.queries
                 .front()
                 .is_some_and(|f| query.starts_with(f.as_str()))
@@ -128,12 +90,6 @@ impl Sittings {
         });
     }
 
-    /// What this sitting has touched, or nothing if it has gone quiet.
-    ///
-    /// Expiry happens here and on write rather than on a timer: there is no
-    /// sweep to run, because a sitting is dropped by the next read that finds
-    /// it stale — or, for the sitting nobody ever comes back to, by the next
-    /// write from any session at all. See `with`.
     pub fn read(&self, session: &str, at: i64, idle_secs: i64) -> Carried {
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         match map.get(session) {
@@ -149,20 +105,9 @@ impl Sittings {
         }
     }
 
-    /// The whole of the locking, once, and the whole of the expiry with it. An
-    /// entry idle for longer than `idle_secs` is not extended, it is dropped —
-    /// the same number that already defines a sitting for the pursuit sweep, so
-    /// the live definition and the reconstructed one agree by construction.
-    ///
-    /// Every entry, not only this session's, because expiring only the one
-    /// being touched leaves out the case that matters: a browser tab closed and
-    /// never opened again is a session no later read or write ever names, so
-    /// nothing would find it stale and the map would grow for the life of the
-    /// process, one abandoned sitting at a time. The lock is already held here,
-    /// so the walk costs one integer comparison per live session — and the map
-    /// is only ever large in exactly the case where the walk is worth doing.
-    /// This session's own stale entry goes the same way, which is what makes a
-    /// returning sitting a new one rather than a continued one.
+    /// The locking and the expiry: an entry idle past `idle_secs` (the pursuit sweep's number) is
+    /// dropped. Every entry, not only this session's, or a closed tab would stay in the map for the
+    /// process's life.
     fn with(&self, session: &str, at: i64, idle_secs: i64, f: impl FnOnce(&mut Sitting)) {
         if session.is_empty() {
             return;
@@ -186,7 +131,6 @@ mod tests {
         let s = Sittings::default();
         s.touched("sess", "a", 10, IDLE);
         s.touched("sess", "b", 20, IDLE);
-        // Touching something again moves it, rather than listing it twice.
         s.touched("sess", "a", 30, IDLE);
 
         let c = s.read("sess", 40, IDLE);
@@ -195,7 +139,6 @@ mod tests {
 
     #[test]
     fn a_sitting_that_went_quiet_is_gone() {
-        // The same number the pursuit sweep uses to decide a sitting ended.
         let s = Sittings::default();
         s.queried("sess", "how do I mount an E01", 100, IDLE);
 
@@ -205,9 +148,6 @@ mod tests {
 
     #[test]
     fn a_sitting_nobody_comes_back_to_is_swept_by_somebody_elses_write() {
-        // The abandoned tab is the case expiring-on-touch cannot reach: no
-        // later read or write ever names that session, so nothing would find it
-        // stale and the map would grow for the life of the process.
         let s = Sittings::default();
         s.touched("gone", "a", 100, IDLE);
         assert_eq!(s.inner.lock().unwrap().len(), 1);
@@ -234,13 +174,10 @@ mod tests {
 
     #[test]
     fn a_typing_burst_is_one_query() {
-        // The search box searches as you type, so a finished query arrives as
-        // every prefix of itself.
         let s = Sittings::default();
         for q in ["h", "how", "how do I mount an E01"] {
             s.queried("sess", q, 10, IDLE);
         }
-        // And a backspace afterwards does not undo it.
         s.queried("sess", "how do I mount an E0", 11, IDLE);
 
         assert_eq!(
@@ -251,10 +188,6 @@ mod tests {
 
     #[test]
     fn a_later_query_does_not_delete_an_earlier_one_it_happens_to_begin_with() {
-        // Folding a typing run is about the run, not about the whole sitting.
-        // Scanning everything carried meant that coming back to a subject with
-        // a longer question deleted the shorter question asked before it — two
-        // searches, ten minutes apart, and the rail remembered one.
         let s = Sittings::default();
         s.queried("sess", "E01", 10, IDLE);
         s.queried("sess", "write blocker", 20, IDLE);
@@ -291,8 +224,6 @@ mod tests {
 
     #[test]
     fn a_door_with_no_session_carries_nothing() {
-        // An access token is not a conversation, and two agent sessions sharing
-        // one would share a sitting — worse than having none.
         let s = Sittings::default();
         s.queried("", "from a token", 10, IDLE);
         assert!(s.read("", 20, IDLE).is_cold());

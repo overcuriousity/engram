@@ -1,11 +1,4 @@
-//! The doors the phone presses that the read contract in `docs/api.md` did
-//! not list: the decisions and the pages the web interface has beyond reading.
-//!
-//! Every handler here is the JSON face of a `/ui` route, calling the same
-//! store method with the same guards, so a verdict from a phone and one from a
-//! browser are one kind of verdict. Where the web handler's logic was worth
-//! sharing it was lifted into a `pub(crate)` function beside it and both call
-//! that; where it was three lines, it is three lines here too.
+//! The JSON faces of `/ui` routes the phone presses, calling the same store methods with the same guards.
 
 use crate::error::{Error, Result};
 use crate::tenants::Tenant;
@@ -43,8 +36,6 @@ pub fn routes() -> Router<AppState> {
         .route("/insights/report", get(report))
 }
 
-// ── Search verdicts ──────────────────────────────────────────────────────
-
 #[derive(serde::Deserialize)]
 pub struct SearchVerdictBody {
     /// `hit`, `no`, `skip`, or `none` to take a verdict back.
@@ -52,9 +43,7 @@ pub struct SearchVerdictBody {
     pub artifact_id: String,
 }
 
-/// What the bar shows afterwards. `already` is the one refusal that is not
-/// an error: another door judged this search first, and the bar says so in
-/// words rather than failing.
+/// `already` is not an error: another door judged this search first.
 #[derive(serde::Serialize)]
 pub struct VerdictAnswer {
     /// `hit`, `no`, `skip`, or empty for no verdict.
@@ -62,9 +51,7 @@ pub struct VerdictAnswer {
     pub already: bool,
 }
 
-/// `POST /search/{id}/verdict`: *was this what you were looking for?*, from
-/// the phone. The rules are `workspace::judge_search`'s, and only that
-/// function's.
+/// The rules are `workspace::judge_search`'s and only that function's.
 async fn search_verdict(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -93,8 +80,7 @@ pub struct GapAnswer {
     pub recorded: bool,
 }
 
-/// `POST /search/{id}/gap`: *nothing here has it*, against the search that
-/// filled the list. `recorded: false` means the search was already judged.
+/// `recorded: false` means the search was already judged.
 async fn search_gap(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -104,8 +90,6 @@ async fn search_gap(
     Ok(Json(GapAnswer { recorded }))
 }
 
-// ── Ask verdicts, carried, keep ──────────────────────────────────────────
-
 #[derive(serde::Deserialize)]
 pub struct AskVerdictBody {
     /// `right`, `wrong`, `nothing_here`, or `none` to take it back.
@@ -114,8 +98,7 @@ pub struct AskVerdictBody {
 
 #[derive(serde::Serialize)]
 pub struct AskVerdictAnswer {
-    /// The verdict as the web's bar words it — `right`, `wrong`, `nothing
-    /// here` — or null where the question stands unjudged.
+    /// As the web's bar words it, or null while unjudged.
     pub verdict: Option<String>,
 }
 
@@ -155,8 +138,7 @@ pub struct CarriedBody {
 #[derive(serde::Serialize)]
 pub struct CarriedAnswer {
     pub carried: bool,
-    /// Saying an excerpt carried the answer is saying the answer was right,
-    /// so the bar's state comes back with the toggle, as it does on the web.
+    /// An excerpt carrying the answer makes the answer right, so the bar's state comes back too.
     pub verdict: Option<String>,
 }
 
@@ -181,19 +163,17 @@ async fn ask_carried(
     }))
 }
 
-/// What became of a kept answer — the words `_ask_kept.html` says.
+/// The words `_ask_kept.html` says.
 #[derive(serde::Serialize)]
 pub struct KeptAnswer {
-    /// The source it became.
     pub id: String,
     pub duplicate: bool,
-    /// Stored and flagged as resembling a near-identical source; read and searchable as usual.
+    /// Flagged as resembling a near-identical source; still read and searchable.
     pub parked: bool,
     pub near_dupe_percent: i64,
 }
 
-/// `POST /asks/{id}/keep`: store the answer as a source, with the question
-/// and the artifacts it was written from. `workspace::ask_keep`'s rules.
+/// With the question and its sources; `workspace::ask_keep`'s rules.
 async fn ask_keep(tenant: Tenant, Path(id): Path<String>) -> Result<Json<KeptAnswer>> {
     if !tenant.core.asks() {
         return Err(Error::NotFound);
@@ -223,8 +203,6 @@ async fn ask_keep(tenant: Tenant, Path(id): Path<String>) -> Result<Json<KeptAns
     }))
 }
 
-// ── Reminders ────────────────────────────────────────────────────────────
-
 #[derive(serde::Deserialize)]
 pub struct DateBody {
     /// The new instant, Unix seconds.
@@ -233,7 +211,7 @@ pub struct DateBody {
     pub tz: String,
 }
 
-/// `POST /moments/{id}/date`: move a reminder, or give an undated one a date.
+/// Move a reminder, or give an undated one a date.
 async fn moment_date(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -253,14 +231,11 @@ async fn moment_date(
 
 #[derive(serde::Serialize)]
 pub struct NotAReminderAnswer {
-    /// The artifact `POST /artifacts/{id}/is-a-reminder` would restore the
-    /// reminder on, where that is possible; null where the read cannot be
-    /// handed back.
+    /// The artifact `POST /artifacts/{id}/is-a-reminder` would restore it on; null where it cannot.
     pub undo: Option<String>,
 }
 
-/// `POST /moments/{id}/not-a-reminder`: *I never asked to be reminded of
-/// this*. The stage's reading is retracted; a reminder somebody set is left.
+/// Retracts the stage's reading; a reminder somebody set is left.
 async fn not_a_reminder(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -292,7 +267,7 @@ async fn not_a_reminder(
     }))
 }
 
-/// `POST /artifacts/{id}/is-a-reminder`: the undo of the above.
+/// The undo of `not_a_reminder`.
 async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
     tenant.core.set_reminder(&id, true).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -302,17 +277,14 @@ async fn is_a_reminder(tenant: Tenant, Path(id): Path<String>) -> Result<StatusC
 pub struct ReminderBody {
     /// The instant, Unix seconds.
     pub at: i64,
-    /// The zone it was chosen in, which a repetition keeps its time of day in.
+    /// A repetition keeps its time of day in this zone.
     pub tz: String,
-    /// The RRULE, in the subset `validate_rule` admits; absent or null for a
-    /// one-off.
+    /// In the subset `validate_rule` admits; absent or null for a one-off.
     #[serde(default)]
     pub rule: Option<String>,
 }
 
-/// `POST /artifacts/{id}/reminder`: the web's reminder editor, as a call.
-/// Restates the open reminder on this artifact, or makes one by hand on an
-/// ordinary entry. A rule outside the subset is a 400.
+/// Restates the open reminder, or makes one on an ordinary entry; a rule outside the subset is a 400.
 async fn save_reminder(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -327,19 +299,14 @@ async fn save_reminder(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /artifacts/{id}/reminder/remove`: the reminder taken off, the
-/// operator's own included; the artifact stays an ordinary entry and a
-/// re-read does not file it again.
+/// Takes off any reminder, the operator's own included; a re-read does not file it again.
 async fn remove_reminder(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
     tenant.core.store.get_artifact(&id).await?;
     tenant.core.clear_reminder(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── Artifacts ────────────────────────────────────────────────────────────
-
-/// `POST /artifacts/{id}/links/{other}/dismiss`: *not related*. Final for
-/// that pair.
+/// *Not related*; final for that pair.
 async fn dismiss_link(
     tenant: Tenant,
     Path((id, other)): Path<(String, String)>,
@@ -353,8 +320,7 @@ pub struct DwellBody {
     pub secs: i64,
 }
 
-/// `POST /artifacts/{id}/dwell`: how long an artifact was on screen. Scoped
-/// to the person, as the web's is.
+/// Scoped to the person, as the web's is.
 async fn artifact_dwell(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -366,28 +332,20 @@ async fn artifact_dwell(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The lines of the pane that are about the artifact rather than of it.
 #[derive(serde::Serialize)]
 pub struct About {
-    /// What the base found when this arrived, as a sentence. Null before the
-    /// artifact has been integrated.
+    /// Null before the artifact has been integrated.
     pub tag: Option<String>,
-    /// The probes for this artifact, one line each.
     pub probes: Vec<String>,
-    /// The open condensation's action id, where the live text is a condensed
-    /// one: `POST /condensations/{id}/undo` puts the last version back.
+    /// `POST /condensations/{id}/undo` with this id puts the last version back.
     pub condensed: Option<String>,
-    /// `in 2 h`, `3 d ago`, … when this artifact carries an open reminder.
     pub due_in: Option<String>,
     /// That open reminder as an editor needs it, or null where there is none.
     pub reminder: Option<Reminder>,
 }
 
-/// The open reminder on an artifact: what `POST /artifacts/{id}/reminder`
-/// takes, read back.
 #[derive(serde::Serialize)]
 pub struct Reminder {
-    /// The moment, as the band's own routes name it.
     pub id: String,
     /// Unix seconds; null for a reminder that has no date yet.
     pub at: Option<i64>,
@@ -396,8 +354,7 @@ pub struct Reminder {
     pub rule: Option<String>,
 }
 
-/// `GET /artifacts/{id}/about`. Its own read, like `related`: none of this is
-/// the artifact, and none of it should hold the text up.
+/// Its own read, like `related`, so none of it holds the text up.
 async fn artifact_about(tenant: Tenant, Path(id): Path<String>) -> Result<Json<About>> {
     let c = tenant.core.store.get_artifact(&id).await?;
     let a = crate::web::artifact::about(&tenant.core, &c).await?;
@@ -421,21 +378,16 @@ async fn artifact_about(tenant: Tenant, Path(id): Path<String>) -> Result<Json<A
     }))
 }
 
-// ── The corpus page ──────────────────────────────────────────────────────
-
 #[derive(serde::Serialize)]
 pub struct BandOut {
     pub from: i64,
     pub to: i64,
     /// Nothing was written from these lines, and the loss is final.
     pub gap: bool,
-    /// The window a re-read would read, where one is offered: `reads lines
-    /// 118–141`.
+    /// The window a re-read would read, e.g. `reads lines 118–141`.
     pub reread: Option<String>,
     pub lines: Vec<crate::web::api::SourceLine>,
-    /// The artifacts written from these lines, in order. The first band an
-    /// artifact appears in carries it; a later band it also spans names it in
-    /// `echoes`.
+    /// In order; a later band an artifact also spans names it in `echoes`.
     pub artifact_ids: Vec<String>,
     pub echoes: Vec<String>,
 }
@@ -447,7 +399,6 @@ pub struct PromotedOut {
     pub to: i64,
 }
 
-/// `corpus.html` as data: what stands above the bands, and the bands.
 #[derive(serde::Serialize)]
 pub struct CorpusPage {
     pub image: bool,
@@ -467,9 +418,7 @@ pub struct CorpusPage {
     pub written_from: Vec<String>,
 }
 
-/// `GET /corpora/{id}/bands`: the source band by band beside what was
-/// written from it. The same cut `corpus_detail` renders, from the same
-/// function, so a phone and a browser show the same red.
+/// The same cut and function as `corpus_detail`, so phone and browser agree.
 async fn corpus_bands(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<CorpusPage>> {
     use crate::store::corpora::CorpusStatus;
     let s = tenant.core.store.get_corpus(&cid).await?;
@@ -591,9 +540,7 @@ pub struct RereadBody {
     pub to: i64,
 }
 
-/// `POST /corpora/{id}/reread`: read one passage again. `202` where a read
-/// was queued, `204` where there was nothing to re-read — a capture still
-/// being read, or a band that is not a final loss.
+/// `202` where a read was queued, `204` where there was nothing to re-read.
 async fn corpus_reread(
     tenant: Tenant,
     Path(cid): Path<String>,
@@ -607,8 +554,7 @@ async fn corpus_reread(
     )
 }
 
-/// `POST /corpora/{id}/segments/{idx}/unpromote`: put the verbatim text back
-/// in results and retire what a promotion wrote.
+/// Puts the verbatim text back in results and retires what the promotion wrote.
 async fn unpromote(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> Result<StatusCode> {
     tenant.core.undo_promotion(&cid, idx).await?;
     tenant
@@ -624,17 +570,13 @@ async fn unpromote(tenant: Tenant, Path((cid, idx)): Path<(String, i64)>) -> Res
     Ok(StatusCode::NO_CONTENT)
 }
 
-// ── Facets, feedback, settings ───────────────────────────────────────────
-
 #[derive(serde::Deserialize)]
 pub struct EchoParams {
     #[serde(default)]
     pub q: String,
 }
 
-/// What capture will do with the box, said before it is pressed. The same
-/// count the web's echo makes — the tokenizer and the budget the fork itself
-/// uses, no model call. Empty `kind` for an empty box.
+/// The same count as the web's echo, with no model call; empty `kind` for an empty box.
 #[derive(serde::Serialize)]
 pub struct Echo {
     pub kind: String,
@@ -654,7 +596,6 @@ async fn echo(
     }))
 }
 
-/// `GET /facets`: what the box's chips narrow by.
 async fn facets(tenant: Tenant) -> Result<Json<crate::vector::Facets>> {
     Ok(Json(
         tenant
@@ -679,8 +620,7 @@ pub struct AskedRecorded {
     pub judged: i64,
 }
 
-/// What this installation is keeping about how it is used. Both null while
-/// `[learn]` is off, which is when nothing is recorded.
+/// Both null while `[learn]` is off, when nothing is recorded.
 #[derive(serde::Serialize)]
 pub struct Feedback {
     pub searches: Option<Recorded>,
@@ -718,7 +658,6 @@ pub struct Purged {
     pub dropped: u64,
 }
 
-/// `DELETE /feedback`: forget every captured search, question and situation.
 /// `settings::purge_feedback_ui`'s two steps, in the same order.
 async fn purge_feedback(tenant: Tenant) -> Result<Json<Purged>> {
     let cleared = tenant.core.forget_situations().await;
@@ -828,16 +767,10 @@ async fn test_notify(tenant: Tenant, Json(b): Json<NotifyTestBody>) -> Result<Js
     ))
 }
 
-// ── Insights ─────────────────────────────────────────────────────────────
-
-/// `GET /insights/machine`: what the machine is doing — the disclosure at the
-/// foot of Insights, as data.
 async fn machine(tenant: Tenant) -> Result<Json<crate::web::insights::Machine>> {
     Ok(Json(crate::web::insights::machine(&tenant).await?))
 }
 
-/// `GET /insights/report`: last night, the ranking, and the pursuits line —
-/// the sentences Insights says about what the base did on its own.
 async fn report(tenant: Tenant) -> Result<Json<crate::web::insights::Report>> {
     Ok(Json(crate::web::insights::report(&tenant).await?))
 }
@@ -904,7 +837,6 @@ mod tests {
     async fn a_search_from_the_app_is_recorded_and_the_result_it_opens_can_be_judged() {
         let (app, token, _core, aid) = learning_base().await;
 
-        // Without the door, a bearer search is an agent's: nothing to judge.
         let v = json_of(
             app.clone()
                 .oneshot(get("/api/v1/search?q=invoice", &token))
@@ -926,7 +858,6 @@ mod tests {
             .expect("the app's search waits for its id")
             .to_string();
 
-        // The open names the search; the answer says which one it was attributed to.
         let d = json_of(
             app.clone()
                 .oneshot(get(&format!("/api/v1/artifacts/{aid}?event={ev}"), &token))
@@ -935,7 +866,6 @@ mod tests {
         )
         .await;
         assert_eq!(d["search_event"], ev, "{d}");
-        // Opened without one, there is no bar to draw.
         let d = json_of(
             app.clone()
                 .oneshot(get(&format!("/api/v1/artifacts/{aid}"), &token))
@@ -956,7 +886,6 @@ mod tests {
         let v = json_of(app.clone().oneshot(judge("hit")).await.unwrap()).await;
         assert_eq!(v["state"], "hit");
         assert_eq!(v["already"], false);
-        // Judged twice is the sentence, not an error.
         let v = json_of(app.clone().oneshot(judge("hit")).await.unwrap()).await;
         assert_eq!(v["already"], true, "{v}");
         let v = json_of(app.clone().oneshot(judge("none")).await.unwrap()).await;
@@ -966,7 +895,6 @@ mod tests {
         let res = app.clone().oneshot(judge("maybe")).await.unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-        // A gap, against a fresh search, and only once.
         let v = json_of(
             app.clone()
                 .oneshot(get("/api/v1/search?q=quarterly%20tax&door=app", &token))
@@ -1055,7 +983,6 @@ mod tests {
             "kept as a source"
         );
 
-        // And through the capture door with the question riding along.
         let res = app
             .clone()
             .oneshot(
@@ -1130,7 +1057,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-        // A reminder somebody set is not a misreading: nothing to retract, no undo offered.
         let v = json_of(
             app.oneshot(bare(
                 "POST",
@@ -1215,7 +1141,6 @@ mod tests {
             "a one-off done is done: nothing armed"
         );
 
-        // An ordinary entry made a weekly reminder by hand, then taken off.
         let res = app
             .clone()
             .oneshot(with_body(
@@ -1291,8 +1216,6 @@ mod tests {
             "{v}"
         );
 
-        // A flag is a fact about the text, not a question: there is no door
-        // that clears one, and a client pressing the old one finds nothing.
         core.store
             .set_artifact_flags(&aid, &["stale".to_string()], Some("a detail"))
             .await
@@ -1398,7 +1321,6 @@ mod tests {
             "a done window that superseded nothing is not promoted: {v}"
         );
 
-        // Now the window does stand over a passage, as a promotion leaves it.
         let p = core
             .store
             .insert_artifacts_with_provenance(&src.id, &[na(1, "passage")], Provenance::Passage)
@@ -1436,7 +1358,6 @@ mod tests {
         assert_eq!(v["restored"], false);
         assert!(v["unplaced"].is_array() && v["written_from"].is_array());
 
-        // A band that is not a loss has nothing to re-read: said, not errored.
         let res = app
             .clone()
             .oneshot(with_body(
@@ -1566,7 +1487,6 @@ mod tests {
         .await;
         assert_eq!(v["gotify_url"], "https://gotify.example/message");
         assert_eq!(v["gotify_token_set"], true);
-        // A channel nobody configured: the sentence, not an error.
         let v = json_of(
             app.oneshot(with_body(
                 "POST",
@@ -1608,7 +1528,6 @@ mod tests {
             v["pursuits"].is_array(),
             "learning is on, so the line is there: {v}"
         );
-        // No pair waits on anyone, so there is nothing to count.
         assert!(v.get("more_pairs").is_none(), "{v}");
 
         let v = json_of(

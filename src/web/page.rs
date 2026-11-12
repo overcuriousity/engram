@@ -1,8 +1,4 @@
-//! The one shape every list in the API answers with, and the cursor that
-//! pages it.
-//!
-//! Always an object and never a bare array, so a route that does not page
-//! today can start without changing shape, and a client writes one pager.
+//! Every API list answers this object, never a bare array, so a route can start paging without changing shape.
 
 use crate::error::{Error, Result};
 use base64::Engine;
@@ -11,10 +7,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 #[derive(Debug, serde::Serialize)]
 pub struct Page<T> {
     pub items: Vec<T>,
-    /// Passed back as `?after=` for the next page; `null` on the last one and
-    /// on every list that is bounded rather than paged. Opaque on purpose: a
-    /// client that never looks inside is a client the server can change the
-    /// inside for.
+    /// Passed back as `?after=`; `null` on the last page and on bounded lists. Opaque on purpose.
     pub next: Option<String>,
 }
 
@@ -24,8 +17,7 @@ impl<T> Page<T> {
         Page { items, next: None }
     }
 
-    /// One page out of `limit + 1` fetched rows: the extra row is how the page
-    /// learns there is another without a second query, and it is not served.
+    /// The extra row says there is another page without a second query; it is not served.
     pub fn of(mut rows: Vec<T>, limit: usize, cursor: impl Fn(&T) -> Cursor) -> Self {
         let more = rows.len() > limit;
         rows.truncate(limit);
@@ -37,12 +29,7 @@ impl<T> Page<T> {
     }
 }
 
-/// A place in a list ordered by `(at, id)`.
-///
-/// A keyset and not an offset: these lists grow at the head, and a phone that
-/// captures and then opens the list is the ordinary case. An offset counted
-/// from the top would serve the last row of page one again as the first row
-/// of page two.
+/// A keyset, not an offset: lists grow at the head, and an offset would repeat a row.
 #[derive(Debug, PartialEq)]
 pub struct Cursor {
     pub at: i64,
@@ -54,8 +41,7 @@ impl Cursor {
         URL_SAFE_NO_PAD.encode(format!("{}:{}", self.at, self.id))
     }
 
-    /// A `400` for anything this server did not issue. Never a `500`: the
-    /// value arrives in a query string, and a query string can say anything.
+    /// A `400` for anything this server did not issue; the value comes from a query string.
     pub fn decode(s: &str) -> Result<Cursor> {
         let bad = || Error::Validation("after: not a cursor this server issued".into());
         let bytes = URL_SAFE_NO_PAD.decode(s).map_err(|_| bad())?;

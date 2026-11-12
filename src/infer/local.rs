@@ -1,15 +1,5 @@
-//! The inference roles, run in this process over llama.cpp.
-//!
-//! A llama.cpp context is a pointer into C++ state and is not `Send`, so a
-//! loaded model lives on a thread of its own and is handed jobs over a
-//! channel. The thread drops the model when nothing has asked for it in a
-//! while, and the next job starts a new thread that loads it again — weights
-//! are memory-mapped, so that is fractions of a second. On a phone that is the
-//! whole of memory management: the embedder's idle period is long, the
-//! others' short, and a model nobody is using is not resident.
-//!
-//! Only the wire calls live here. Templates, prompts and budgets are the
-//! callers', and are the same ones the HTTP implementations serve.
+//! Inference roles in process over llama.cpp. A context is not `Send`, so each model lives on its own
+//! thread fed by a channel and is dropped when idle; weights are memory-mapped, so a reload is cheap.
 
 use crate::config::{AskRole, EmbedRole, EmbedTemplates};
 use crate::error::{Error, Result};
@@ -28,18 +18,17 @@ use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-/// How long each role keeps its model after the last call.
 const EMBED_IDLE: Duration = Duration::from_secs(600);
 const RERANK_IDLE: Duration = Duration::from_secs(60);
 const ASK_IDLE: Duration = Duration::from_secs(20);
 
-/// llama.cpp's process-wide state. It may be initialised once, ever.
+/// llama.cpp's process-wide state may be initialised once, ever.
 fn backend(role: &'static str) -> Result<&'static LlamaBackend> {
     static BACKEND: OnceLock<Option<LlamaBackend>> = OnceLock::new();
     BACKEND
         .get_or_init(|| {
             LlamaBackend::init().ok().map(|mut b| {
-                // It logs every tensor it loads to stderr; none of that is ours to show.
+                // It logs every tensor it loads to stderr.
                 b.void_logs();
                 b
             })
@@ -55,8 +44,7 @@ fn failed(role: &'static str, detail: impl std::fmt::Display) -> Error {
     }
 }
 
-/// The big cores, roughly. More threads than that on a phone lands work on
-/// the efficiency cores, and the whole batch then waits for the slowest.
+/// More threads than the big cores lands work on efficiency cores, and the batch waits for the slowest.
 fn threads() -> i32 {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -64,27 +52,20 @@ fn threads() -> i32 {
         .clamp(1, 4) as i32
 }
 
-/// Something a model thread can be asked to do, and told it cannot.
 trait Job: Send + 'static {
     fn fail(self, role: &'static str, detail: &str);
 }
 
-/// What a model's thread runs: build the context, then answer jobs until
-/// `next` says there are no more. The context never leaves that thread.
+/// The context never leaves the model's thread.
 type Serve<J> = dyn Fn(&LlamaModel, &mut dyn FnMut() -> Option<J>) -> Result<()> + Send + Sync;
 
-/// One model, on one thread, for as long as it is being used.
-///
-/// `tx` is `Some` while a thread is serving. The thread clears it under the
-/// lock as the last thing it does, and a sender holds the lock while it sends,
+/// The thread clears `tx` under the lock as its last act and senders hold the lock while sending,
 /// so a job is never handed to a thread that has decided to stop.
 struct Worker<J: Job> {
     role: &'static str,
     path: PathBuf,
     idle: Duration,
     tx: Arc<Mutex<Option<mpsc::Sender<J>>>>,
-    /// Builds the context and answers jobs until `next` says there are no
-    /// more. Runs on the model's thread; the context never leaves it.
     serve: Arc<Serve<J>>,
 }
 
@@ -131,9 +112,7 @@ impl<J: Job> Worker<J> {
         let spawned = std::thread::Builder::new()
             .name(format!("engram-{role}"))
             .spawn(move || {
-                // The next job, or `None` once idle — decided under the lock,
-                // so `submit` either sees the slot cleared or gets its job in
-                // before the last look.
+                // Decided under the lock, so `submit` sees the slot cleared or gets its job in first.
                 let mut next = || match rx.recv_timeout(idle) {
                     Ok(job) => Some(job),
                     Err(_) => {
@@ -149,9 +128,7 @@ impl<J: Job> Worker<J> {
                         }
                     }
                 };
-                // Looked at first because the binding asserts the file is
-                // there, and a panic would tell the caller only that the
-                // thread ended — not which file it could not find.
+                // Checked first: the binding panics on a missing file, which would hide which file.
                 let loaded = if path.is_file() {
                     backend(role).and_then(|b| {
                         LlamaModel::load_from_file(b, &path, &LlamaModelParams::default())
@@ -165,8 +142,6 @@ impl<J: Job> Worker<J> {
                 };
                 let outcome = loaded.and_then(|model| serve(&model, &mut next));
                 if let Err(e) = outcome {
-                    // Could not load, or could not build a context: say so to
-                    // everyone waiting, then stop.
                     let detail = e.to_string();
                     let mut slot = slot
                         .lock()
@@ -179,8 +154,7 @@ impl<J: Job> Worker<J> {
                 }
             });
         if let Err(e) = spawned {
-            // The job goes with the closure, so its caller sees its reply channel close; the
-            // next submit finds the receiver gone and starts a thread again.
+            // The job goes with the closure, so its caller sees its reply channel close.
             tracing::error!(error = %e, role = self.role, "could not start the model thread");
         }
     }
@@ -201,7 +175,6 @@ fn context<'m>(
         .map_err(|e| failed(role, e))
 }
 
-// ---- embed ----------------------------------------------------------------
 
 struct EmbedJob {
     texts: Vec<String>,
@@ -223,8 +196,7 @@ pub struct LocalEmbedder {
 }
 
 impl LocalEmbedder {
-    /// `role` still says what a vector *means* — the dimension, the window,
-    /// the templates. Only its endpoint goes unused.
+    /// `role` still says what a vector means (dimension, window, templates); only its endpoint goes unused.
     pub fn new(path: PathBuf, role: &EmbedRole) -> LocalEmbedder {
         let n_ctx = role.max_input_tokens.max(8) as u32;
         let worker = Worker::new(
@@ -235,8 +207,7 @@ impl LocalEmbedder {
                 let params = LlamaContextParams::default()
                     .with_embeddings(true)
                     .with_n_ctx(NonZeroU32::new(n_ctx))
-                    // An embedding model attends both ways, so a text has to fit
-                    // one physical batch: there is no carrying state across two.
+                    // Embedding attends both ways, so a text must fit one physical batch.
                     .with_n_batch(n_ctx)
                     .with_n_ubatch(n_ctx)
                     .with_n_threads(threads())
@@ -276,8 +247,7 @@ fn embed_one(
     let mut tokens = model
         .str_to_token(text, AddBos::Always)
         .map_err(|e| failed("embed", e))?;
-    // Cut, not refused: the callers budget against an estimate, and an
-    // estimate that ran a few tokens short must not lose the artifact.
+    // Cut, not refused: callers budget by estimate, and a short estimate must not lose the artifact.
     tokens.truncate(n_ctx);
     let mut batch = LlamaBatch::new(n_ctx, 1);
     batch
@@ -318,7 +288,6 @@ impl Embedder for LocalEmbedder {
     }
 }
 
-// ---- rerank ---------------------------------------------------------------
 
 struct RerankJob {
     query: String,
@@ -332,7 +301,6 @@ impl Job for RerankJob {
     }
 }
 
-/// A cross-encoder: query and passage read together, one score out.
 pub struct LocalReranker {
     worker: Worker<RerankJob>,
 }
@@ -368,9 +336,7 @@ impl LocalReranker {
     }
 }
 
-/// `[BOS] query [EOS] [SEP] passage [EOS]`, the pair layout llama.cpp's own
-/// server builds for a rank-pooled model. The passage gives way when the pair
-/// is too long; the query never does.
+/// The pair layout llama.cpp's server builds for a rank-pooled model; the passage gives way, never the query.
 fn score_one(
     model: &LlamaModel,
     ctx: &mut LlamaContext,
@@ -427,7 +393,6 @@ impl Reranker for LocalReranker {
     }
 }
 
-// ---- ask ------------------------------------------------------------------
 
 struct AskJob {
     system: String,
@@ -449,8 +414,7 @@ pub struct LocalCompleter {
     max_output_tokens: usize,
 }
 
-/// Prompt tokens decoded per step. Small enough that a long prompt does not
-/// hold one allocation the size of the window.
+/// Small enough that a long prompt does not hold one window-sized allocation.
 const PROMPT_BATCH: usize = 512;
 
 impl LocalCompleter {
@@ -506,7 +470,6 @@ fn generate(
     job: &AskJob,
     n_ctx: usize,
 ) -> Result<Completion> {
-    // The model's own template, from its file: the one it was trained on.
     let template = model.chat_template(None).map_err(|e| failed("ask", e))?;
     let chat = [
         LlamaChatMessage::new("system".into(), job.system.clone()).map_err(|e| failed("ask", e))?,
@@ -544,21 +507,18 @@ fn generate(
         ctx.decode(&mut batch).map_err(|e| failed("ask", e))?;
     }
 
-    // Near-greedy: an answer over retrieved passages wants the likeliest
-    // words, and a little temperature only to step out of a repetition.
+    // Near-greedy, with a little temperature only to escape repetition.
     let mut sampler = LlamaSampler::chain_simple([
         LlamaSampler::top_k(20),
         LlamaSampler::temp(0.3),
         LlamaSampler::dist(0),
     ]);
     let mut decoder = encoding_rs::UTF_8.new_decoder();
-    // Some templates open the thinking themselves, and then the model only
-    // ever writes the closing tag.
+    // Some templates open the thinking themselves; the model then writes only the closing tag.
     let mut split = ThinkSplit::new(prompt.trim_end().ends_with(THINK_OPEN));
     let mut text = String::new();
     let emit = |parts: Vec<(bool, String)>, text: &mut String| {
         for (thinking, mut part) in parts {
-            // What follows the closing tag is a blank line before the answer.
             if !thinking && text.is_empty() {
                 part = part.trim_start().to_string();
             }
@@ -569,8 +529,7 @@ fn generate(
                 text.push_str(&part);
             }
             if let Some(sink) = &job.sink {
-                // A reader that went away does not stop the answer; see
-                // `Completer::answer_streaming`.
+                // A reader that went away does not stop the answer; see `Completer::answer_streaming`.
                 let _ = sink.blocking_send(if thinking {
                     Delta::Reasoning(part)
                 } else {
@@ -605,11 +564,7 @@ fn generate(
 const THINK_OPEN: &str = "<think>";
 const THINK_CLOSE: &str = "</think>";
 
-/// Parts a reasoning model's thinking from its answer, as the pieces arrive.
-///
-/// An endpoint does this on its side and sends `reasoning_content`; in process
-/// the tags are in the text. A piece can end inside a tag, so what might be
-/// the start of one is held back until the next piece settles it.
+/// In process the think tags are in the text; a piece ending mid-tag is held until the next settles it.
 struct ThinkSplit {
     thinking: bool,
     held: String,
@@ -623,7 +578,6 @@ impl ThinkSplit {
         }
     }
 
-    /// `(is thinking, text)` for everything now known to be one or the other.
     fn feed(&mut self, piece: &str) -> Vec<(bool, String)> {
         self.held.push_str(piece);
         let mut out = Vec::new();
@@ -640,7 +594,7 @@ impl ThinkSplit {
                 self.thinking = !self.thinking;
                 continue;
             }
-            // The longest tail that a tag could still grow out of.
+            // The longest tail a tag could still grow out of.
             let keep = (1..tag.len())
                 .rev()
                 .find(|n| self.held.ends_with(&tag[..*n]))
@@ -699,29 +653,21 @@ impl Completer for LocalCompleter {
     }
 }
 
-/// Which roles run on this device, by the file each one loads. A role left
-/// `None` keeps whatever the configuration gave it — an endpoint, or nothing.
+/// A role left `None` keeps whatever the configuration gave it.
 #[derive(Debug, Clone, Default)]
 pub struct LocalModels {
     pub embed: Option<PathBuf>,
     pub rerank: Option<PathBuf>,
     pub ask: Option<PathBuf>,
-    /// A whisper.cpp model. Where there is one, the microphone's door is open.
+    /// Where there is one, the microphone's door is open.
     pub speech: Option<PathBuf>,
 }
 
-// ---- speech ---------------------------------------------------------------
 
-/// Speech to words on this device, over whisper.cpp.
-///
-/// The model is loaded for a recording and dropped when the words are out.
-/// Dictation is a held button a few times a day, not a stream, and on a phone
-/// the memory is worth more than the second a load costs: this is the one
-/// model here that does not keep a thread of its own. One recording at a time
-/// — two held buttons do not exist, and two loaded models should not either.
+/// Loaded per recording and dropped after: dictation is rare, and phone memory is worth more than the load.
 pub struct LocalTranscriber {
     path: PathBuf,
-    /// An ISO-639-1 code, or `None` to let the model decide from the audio.
+    /// ISO-639-1, or `None` to detect.
     lang: Option<String>,
     one: tokio::sync::Mutex<()>,
 }
@@ -933,8 +879,7 @@ mod tests {
         let Some(path) = model("ask.gguf") else {
             return;
         };
-        // Thinking is billed against the ceiling, and sixty-four tokens of it
-        // leave none for the answer.
+        // Thinking is billed against the ceiling; sixty-four tokens leave none for the answer.
         let mut role = ask_role();
         role.max_output_tokens = 1024;
         let c = LocalCompleter::new(path, &role);

@@ -1,14 +1,9 @@
-//! What the last search printed, so a rank in it can be named later.
-//!
-//! `engram -s` is one process and `engram --show 3` is another, and nothing
-//! between them remembers which artifact was third. A small file does: the ids
-//! in the order they were drawn, the question they answered, and when. It holds
-//! no text and no scores — everything in it is already on the operator's screen.
+//! What the last search printed, so a later process can name a rank in it.
+//! Ids, query and time only: nothing that is not already on screen.
 
 use crate::error::{Error, Result};
 use std::path::PathBuf;
 
-/// The ranked ids of one search, in the order they were printed.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct LastSearch {
     pub query: String,
@@ -16,15 +11,8 @@ pub struct LastSearch {
     pub ids: Vec<String>,
 }
 
-/// Where the list is kept: `$XDG_STATE_HOME/engram/last-search.json`, or the
-/// path the specification says that variable defaults to.
-///
-/// State rather than config or cache: it is neither something the operator
-/// edits nor something that can be regenerated, which is exactly what the XDG
-/// state directory is for.
-///
-/// `get` is passed rather than read for the reason `Face::decide` takes its
-/// facts as arguments — two tests must not race on one process's environment.
+/// `$XDG_STATE_HOME/engram/last-search.json`, or the spec's default for that variable.
+/// `get` is passed in so tests do not race on the process environment.
 pub fn path_from(get: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     let base = match get("XDG_STATE_HOME").filter(|v| !v.is_empty()) {
         Some(dir) => PathBuf::from(dir),
@@ -35,23 +23,16 @@ pub fn path_from(get: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
     Some(base.join("engram").join("last-search.json"))
 }
 
-/// `path_from`, against this process.
 pub fn path() -> Option<PathBuf> {
     path_from(|k| std::env::var(k).ok())
 }
 
-/// Whether a search is one anybody will name a rank out of.
-///
-/// A search in a pipeline is not, and neither is `--json`, which is read by a
-/// machine even when a person is watching it arrive. Both would otherwise
-/// overwrite the list somebody is working from in another window.
+/// Whether a search is one anybody will name a rank out of: not in a pipeline, not `--json`.
 pub fn worth_remembering(is_tty: bool, json: bool) -> bool {
     is_tty && !json
 }
 
-/// Remember what was drawn. Failure is silent by design: a search that found
-/// its hits succeeded, whatever the state directory did, and an error here
-/// would report a working search as broken.
+/// Remember what was drawn. Silent on failure: the search itself succeeded.
 pub fn save_to(p: &std::path::Path, query: &str, ids: Vec<String>) {
     let Some(dir) = p.parent() else { return };
     if std::fs::create_dir_all(dir).is_err() {
@@ -71,7 +52,6 @@ pub fn save_to(p: &std::path::Path, query: &str, ids: Vec<String>) {
     }
 }
 
-/// `save_to`, at the path this process keeps it.
 pub fn save(query: &str, ids: Vec<String>) {
     if let Some(p) = path() {
         save_to(&p, query, ids);
@@ -83,25 +63,19 @@ pub fn load_from(p: &std::path::Path) -> Option<LastSearch> {
     serde_json::from_str(&std::fs::read_to_string(p).ok()?).ok()
 }
 
-/// `load_from`, at the path this process keeps it.
 pub fn load() -> Option<LastSearch> {
     load_from(&path()?)
 }
 
-/// Turn what the operator typed into one artifact id.
-///
-/// Three forms, because three are what a person actually types: a rank from the
-/// list still on screen, a leading piece of an id, or the whole id pasted from
-/// somewhere else. The first two need the remembered list; the last one does
-/// not, and must keep working in a shell that has never run a search.
+/// Turn what the operator typed into one artifact id: a rank, an id prefix, or a whole id;
+/// a whole id must work without any remembered list.
 pub fn resolve(needle: &str, last: Option<&LastSearch>) -> Result<String> {
     let needle = needle.trim();
     if needle.is_empty() {
         return Err(Error::Validation("--show needs a rank or an id".into()));
     }
 
-    // A rank first: a small integer is never an id, and reading it as one would
-    // send `3` to the server as a lookup that can only 404.
+    // A rank first: a small integer is never an id.
     if let Ok(n) = needle.parse::<usize>() {
         let Some(last) = last else {
             return Err(Error::Validation(format!(
@@ -110,9 +84,7 @@ pub fn resolve(needle: &str, last: Option<&LastSearch>) -> Result<String> {
             )));
         };
         return match n.checked_sub(1).and_then(|i| last.ids.get(i)) {
-            // A source the answer cited and named no artifact for. It holds a
-            // rank so the numbering matches what was printed
-            // (`ask::citation_ids`), and there is nothing behind it to open.
+            // A cited source with no artifact holds a rank so numbering matches what was printed.
             Some(id) if id.is_empty() => Err(Error::Validation(format!(
                 "the source listed as [{n}] carried no artifact id, so there \
                  is nothing to read"
@@ -126,9 +98,7 @@ pub fn resolve(needle: &str, last: Option<&LastSearch>) -> Result<String> {
         };
     }
 
-    // A prefix, against what was drawn. Checked before the pass-through so that
-    // a prefix naming two hits is refused rather than sent to the server, where
-    // it would 404 and say nothing about the ambiguity.
+    // A prefix naming two hits is refused here; the server would only 404.
     if let Some(last) = last {
         let matched: Vec<&String> = last
             .ids
@@ -147,8 +117,6 @@ pub fn resolve(needle: &str, last: Option<&LastSearch>) -> Result<String> {
         }
     }
 
-    // Neither a rank nor a prefix of anything remembered: it is an id, and the
-    // server is the one that decides whether it exists.
     Ok(needle.to_string())
 }
 

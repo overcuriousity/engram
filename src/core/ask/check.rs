@@ -1,14 +1,7 @@
 //! Checking an answer against what the model was actually shown.
 
-/// Literals the answer carries that appear in none of its excerpts.
-///
-/// The same guard `jobs::window` already applies to every synthesised artifact
-/// (`verify::missing_literals`), pointed at generation instead of synthesis. A
-/// number, command or path that appears in no cited excerpt is not a fact the
-/// base holds — it is the model's own, and the page must say so rather than let
-/// it be read as retrieved.
-///
-/// No inference: this is a string operation over text already generated.
+/// Literals the answer carries that appear in none of its excerpts: the model's own, not the
+/// base's.
 pub(super) fn unsupported_literals(answer: &str, excerpts: &[String]) -> Vec<String> {
     if excerpts.is_empty() {
         return Vec::new();
@@ -19,18 +12,7 @@ pub(super) fn unsupported_literals(answer: &str, excerpts: &[String]) -> Vec<Str
         .collect()
 }
 
-/// Which of the `n` excerpts the answer actually referenced.
-///
-/// The ask prompt numbers the excerpts and the answer cites them as `[k]`;
-/// the page turns those brackets into links (`ui::link_citations`). The same
-/// scan, run once at record time, is what tells a pursuit apart from a
-/// question that was merely handed a lot of text: being packed into the prompt
-/// is not engagement, and an abstention references nothing however many
-/// excerpts it was given.
-///
-/// A bare scan, deliberately. An `arr[1]` inside a code fence counts as a
-/// reference it is not, and the cost of that is one artifact scored a point
-/// too high in a sweep — against the cost of teaching this function markdown.
+/// Which of the `n` excerpts the answer cites as `[k]`. A bare scan: `arr[1]` in code also counts.
 pub(super) fn referenced(answer: &str, n: usize) -> Vec<bool> {
     let mut used = vec![false; n];
     let mut rest = answer;
@@ -48,25 +30,9 @@ pub(super) fn referenced(answer: &str, n: usize) -> Vec<bool> {
     used
 }
 
-/// A candidate that is a bullet of prose rather than a literal.
-///
-/// `extract_literals` treats a line indented four spaces as code, which is
-/// right for the reference documentation synthesis reads and wrong for an
-/// answer: a bullet list nested four spaces deep is ordinary markdown, and
-/// every nested bullet then arrives here as an invented literal. One answer
-/// with a nested list produced three, each marking a whole sentence of prose.
-///
-/// The badge's whole value is being believed. A guard that fires on formatting
-/// teaches the reader to dismiss it, and the fabricated command this exists for
-/// gets dismissed with the noise.
-///
-/// The rule lives here rather than in `extract_literals`, which synthesis
-/// shares and where the indented-code rule is load-bearing.
-///
-/// The cost, accepted deliberately: a fabricated diff line — `- removed this` —
-/// is now missed, because a diff and a bullet share a prefix. Diffs in answers
-/// are rare and four-space nested bullets are not. A flag is unaffected, since
-/// `--dry-run` has no space after the dashes.
+/// A nested markdown bullet, which `extract_literals` reads as four-space-indented code. Kept out
+/// of `extract_literals`, where synthesis needs the indented-code rule; costs missing `- ` diff
+/// lines.
 fn looks_like_a_list_item(lit: &str) -> bool {
     let t = lit.trim_start();
     if let Some(rest) = t.strip_prefix(['-', '*', '+']) {
@@ -76,25 +42,9 @@ fn looks_like_a_list_item(lit: &str) -> bool {
     digits.len() < t.len() && digits.starts_with(". ")
 }
 
-/// A literal escaped the way the sanitizer writes text, so it can be looked for
-/// as the text a reader sees.
-///
-/// Exactly what `html5ever`'s text serializer emits, which is the whole
-/// requirement: `&`, `<`, `>`, and the non-breaking space. NBSP is not
-/// structural and is easy to leave out — but models emit it, and a literal
-/// containing one would then be badged and never marked, which is the quiet
-/// erosion this check cannot afford.
-///
-/// `"` and `'` are deliberately left alone: the rendered answer has been through
-/// `ammonia`, whose serializer escapes them in attribute values and not in text,
-/// so escaping them here would make every literal containing a quote
-/// unmatchable. They are harmless in the position this ever writes into —
-/// element content, never an attribute — and `mark_unsupported` quotes its own
-/// attribute itself.
-///
-/// Local rather than a dependency because the requirement is not "escape HTML"
-/// but "escape it exactly as the document already is": a general escaper that
-/// also handled quotes would be correct in the abstract and wrong here.
+/// Escapes exactly as `html5ever`'s text serializer does (`&`, `<`, `>`, NBSP), so needles match
+/// the page. Quotes stay unescaped: `ammonia` escapes them only in attributes, and this writes
+/// element content.
 fn escape_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -109,57 +59,29 @@ fn escape_text(s: &str) -> String {
     out
 }
 
-/// Wrap each unsupported literal in the rendered answer.
-///
-/// Operates on already-escaped HTML, and escapes the needle the same way before
-/// searching, so a literal is matched as the text a reader sees. That is also
-/// what makes it safe: the needle never re-enters the document as markup.
-///
-/// Only text is searched, never the inside of a tag. A literal that is also a
-/// path would otherwise match inside an `href`, and a `<mark>` opened in the
-/// middle of an attribute value is markup the sanitizer never saw.
-///
-/// Longest first, so a literal that contains a shorter one is marked whole
-/// rather than being broken in half by the shorter match landing first.
+/// Wrap each unsupported literal in the rendered, already-escaped answer, longest first.
+/// Only text between tags is searched, so a `<mark>` never lands inside an attribute.
 pub(crate) fn mark_unsupported(html: &str, literals: &[String]) -> String {
     let mut needles: Vec<String> = literals
         .iter()
         .map(|l| escape_text(l))
         .filter(|n| !n.is_empty())
         .collect();
-    // Length first, then value, so `dedup` — which only drops neighbours —
-    // actually sees the duplicates.
+    // `dedup` only drops neighbours, so sort by length then value.
     needles.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
     needles.dedup();
     if needles.is_empty() {
         return html.to_string();
     }
 
-    // Marking inside code is the point rather than an accident: a fabricated
-    // command is exactly what hides in a code span, and a `<mark>` there is at
-    // worst noise. `in_code` is ignored here for that reason.
+    // Marking inside code is intended: a fabricated command hides there.
     for_text_between_tags(html, |t, _in_code| {
         std::borrow::Cow::Owned(mark_text(t, &needles))
     })
 }
 
-/// Walks serialized HTML, handing every run of text between tags to `on_text`
-/// and copying every tag through byte for byte.
-///
-/// Shared rather than written twice. Two passes now walk this markup — one
-/// marking unsupported literals, one linking `[n]` citations — and two copies
-/// of a walker whose whole job is knowing what is markup and what is prose
-/// drift, quietly, in whichever copy is edited less.
-///
-/// `in_code` says whether the run sits inside a `<code>` or `<pre>` element,
-/// because the two callers want opposite things there and only the walker can
-/// tell them apart.
-///
-/// Counted rather than flagged, because these do nest: a fenced block is
-/// `<pre><code>…</code></pre>`, and a flag cleared at the inner `</code>` would
-/// call the rest of the block prose. Nothing sits between those two tags today,
-/// so the flag happened to be harmless — but that is a fact about the current
-/// renderer, not about the walker, and it is not one worth depending on.
+/// Hands every run of text between tags to `on_text`, copying tags through byte for byte.
+/// Code depth is counted, not flagged, because `<pre><code>` nests.
 pub(crate) fn for_text_between_tags<'a>(
     html: &'a str,
     mut on_text: impl FnMut(&'a str, bool) -> std::borrow::Cow<'a, str>,
@@ -180,15 +102,12 @@ pub(crate) fn for_text_between_tags<'a>(
                 if opens_code(tag) {
                     code_depth += 1;
                 } else if closes_code(tag) {
-                    // Saturating, so markup with more closes than opens leaves
-                    // the walker outside code rather than underflowing.
                     code_depth = code_depth.saturating_sub(1);
                 }
                 rest = &rest[open + close + 1..];
             }
-            // Unterminated `<`. Cannot happen in serialized output, and copying
-            // the remainder through unchanged is the one response that can
-            // neither drop text nor invent markup.
+            // Unterminated `<`: copy the rest unchanged, which neither drops text nor invents
+            // markup.
             None => {
                 out.push_str(&rest[open..]);
                 return out;
@@ -197,8 +116,7 @@ pub(crate) fn for_text_between_tags<'a>(
     }
 }
 
-/// Matched on the whole delimiter rather than a prefix, so a future `<codepen>`
-/// element cannot be read as a code span.
+/// Whole delimiter, so a `<codepen>` element is not read as code.
 fn opens_code(tag: &str) -> bool {
     ["<code>", "<code ", "<pre>", "<pre "]
         .iter()
@@ -209,11 +127,7 @@ fn closes_code(tag: &str) -> bool {
     matches!(tag, "</code>" | "</pre>")
 }
 
-/// One left-to-right pass over a run of text between tags.
-///
-/// A pass per literal would let a later one match inside the `<mark>` an
-/// earlier one just wrote, which is how a marker corrupts its own output. This
-/// never looks at what it has already emitted.
+/// One pass, so a later needle cannot match inside a `<mark>` an earlier one wrote.
 fn mark_text(text: &str, needles: &[String]) -> String {
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -243,7 +157,6 @@ mod tests {
     fn only_the_numbers_the_answer_used_come_back() {
         let used = super::referenced("The path is /etc [2], and see [4] — not [9] or [x].", 4);
         assert_eq!(used, vec![false, true, false, true]);
-        // An abstention references nothing, however much it was shown.
         assert_eq!(
             super::referenced("Not in the knowledge base. Nothing covers it.", 3),
             vec![false; 3]

@@ -7,23 +7,17 @@ use crate::cli::endpoint::client;
 use crate::core::search::SearchResult;
 use crate::error::{Error, Result};
 
-/// The URL a search is asked for at.
-///
-/// Its own function because one test asserts the door this client claims, and a
-/// whole request is a poor place to assert it from.
+/// The URL a search is asked for at; split out so a test can assert the door.
 pub fn query_url(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs) -> String {
     url_for(e, "/search", limit, query, cli)
 }
 
-/// The same search, at the door that reports its stages.
 pub fn stream_url(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs) -> String {
     url_for(e, "/search/stream", limit, query, cli)
 }
 
 fn url_for(e: &Endpoint, path: &str, limit: Option<usize>, query: &str, cli: &CliArgs) -> String {
-    // `door=cli` rather than the default `api`: a query typed at a shell is
-    // composed before anything came back, which is the least contaminated
-    // question the base receives, and the judge queue should be able to tell.
+    // `door=cli`: a shell query is composed before anything came back, the least contaminated kind.
     let mut url = format!("{}?q={}&door=cli", e.api(path), encode(query));
     if let Some(n) = limit {
         url.push_str(&format!("&limit={n}"));
@@ -45,41 +39,29 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
         std::env::var_os("NO_COLOR").is_some(),
         crate::cli::face::locale().as_deref(),
     );
-    // `--json` never streams: its reader wants the server's own body, and
-    // frames are of no use to it.
+    // `--json` never streams: its reader wants the server's own body.
     let streamed = match cli.json {
         true => None,
         false => streaming(e, limit, query, cli, &face).await?,
     };
     let (hits, elapsed, body) = match streamed {
         Some((hits, ms)) => (hits, Some(ms), None),
-        // The door every version of the server has had. Reached when this one
-        // does not know the streaming route, when the transport failed before a
-        // frame arrived, or when the search was refused — and in that last case
-        // it is this door that says why, in the words it has always used.
+        // The door every server has had: the stream route is unknown, failed before a frame, or the
+        // search was refused, which this door explains.
         None => {
             let (hits, ms, body) = plain(e, limit, query, cli).await?;
             (hits, Some(ms), Some(body))
         }
     };
 
-    // What `--show 3` will mean. Written before anything is printed, so the
-    // list on screen and the list on disk cannot disagree, and only for a
-    // search a person watched: see `last::worth_remembering`.
+    // Written before printing, so screen and disk agree; see `last::worth_remembering`.
     if crate::cli::last::worth_remembering(is_tty, cli.json) {
         crate::cli::last::save(query, hits.iter().map(|h| h.artifact_id.clone()).collect());
     }
 
     match body {
-        // The server's rows, as it serialised them, and as a bare array.
-        //
-        // The one place a door here takes the API's shape apart, and
-        // deliberately: `--json` is a shape scripts already pipe into `jq`,
-        // and it was a bare array before every list gained the
-        // `{items, next}` envelope. The envelope has nothing for this reader
-        // — `next` is always null on a search, and the CLI never asks to
-        // explain, so no key ever sits beside `items` — so passing it on
-        // would break every caller to say nothing.
+        // A bare array, not the `{items, next}` envelope: scripts pipe `--json` into `jq`, and the
+        // envelope says nothing on a search.
         Some(items) if cli.json => println!("{items}"),
         _ => print!("{}", face.render(&hits, elapsed)),
     }
@@ -87,26 +69,8 @@ pub async fn run(e: &Endpoint, limit: Option<usize>, query: &str, cli: &CliArgs)
     Ok(if hits.is_empty() { 1 } else { 0 })
 }
 
-/// The streaming door: the hits and what the whole round trip took, or `None`
-/// where this client should ask the plain one instead.
-///
-/// A failure before the search ran is a `None` rather than an error. The plain
-/// door runs the same search and has said why a search was refused since before
-/// this one existed, so one code path reports failure and it is the older one.
-///
-/// A failure after it ran is an error, and this is the whole of the difference.
-/// Falling back across that line runs the same query a second time and records
-/// it a second time, which is a duplicate in the data nobody typed and nobody
-/// can tell from a real repeat — `record_search` coalesces the two typing
-/// doors and not this one, so a shell's duplicate never folds.
-///
-/// The line is drawn at the first `stage` frame rather than at `results`,
-/// which is later than it needs to be and is the point. `record_search` is
-/// spawned onto the server's background inside `search_inner`, before the
-/// `results` frame is yielded and out of reach of the client hanging up, so a
-/// transport that dies in that window has recorded a search this client never
-/// saw. A stage frame proves the search is running over there; from then on
-/// the honest answer to a dead stream is to say so, not to run it again.
+/// The streaming door: hits and round-trip time, or `None` to ask the plain door instead.
+/// After the first `stage` frame a failure is an error: the server may have recorded the search.
 async fn streaming(
     e: &Endpoint,
     limit: Option<usize>,
@@ -129,18 +93,15 @@ async fn streaming(
 
     let mut stages = face.stages();
     let mut body = res.bytes_stream();
-    // Two buffers, for the reason `ask` keeps two: a chunk from the network is
-    // cut at neither boundary that matters.
+    // Two buffers: a network chunk is cut at neither the character nor the frame boundary.
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = String::new();
     let mut hits: Option<Vec<SearchResult>> = None;
-    // Whether this search may already have been written down over there. Set
-    // from the first stage frame, for the reason above, and never unset.
+    // Set from the first stage frame and never unset: the search may be recorded over there.
     let mut ran = false;
     while let Some(chunk) = body.next().await {
         let chunk = match chunk {
             Ok(c) => c,
-            // Nothing has been recorded yet, so the older door can run it.
             Err(_) if !ran => return Ok(None),
             Err(err) => return Err(Error::Validation(format!("{err}"))),
         };
@@ -163,9 +124,7 @@ async fn streaming(
                     ran = true;
                     hits = serde_json::from_value(data["results"].clone()).ok();
                 }
-                // Said by the plain door, which is about to run this search
-                // again and refuse it in the words it has always used. A
-                // refusal recorded nothing, whatever stages preceded it.
+                // The plain door reruns it and says why; a refusal recorded nothing.
                 "error" => return Ok(None),
                 _ => {}
             }
@@ -175,21 +134,15 @@ async fn streaming(
     stages.clear();
     match (hits, ran) {
         (Some(h), _) => Ok(Some((h, began.elapsed().as_millis()))),
-        // The search started and its results never arrived here: a frame in a
-        // shape this client could not read, or a stream that stopped between
-        // the stages and the list. Either way it may already be recorded, so
-        // the plain door must not be asked to run it again.
+        // The search started and its results never arrived; it may be recorded, so do not rerun it.
         (None, true) => Err(Error::Validation(
             "the search ran and its results did not arrive".into(),
         )),
-        // The stream ended before the search started. Nothing was recorded and
-        // the older door can be asked cleanly.
         (None, false) => Ok(None),
     }
 }
 
-/// The door every version of the server has had, and the one that says why a
-/// search was refused. Answers the body as well, for `--json`.
+/// The door every server has had, and the one that says why a search was refused; also the body.
 async fn plain(
     e: &Endpoint,
     limit: Option<usize>,
@@ -219,46 +172,30 @@ async fn plain(
                 .into(),
         ));
     }
-    // The list envelope every API list answers with. `next` is always null
-    // here — a search is bounded by `limit`, not paged — so it is not read.
+    // `next` is always null on a search, so it is not read.
     let mut body: serde_json::Value =
         serde_json::from_str(&body).map_err(|err| Error::Internal(format!("results: {err}")))?;
     let items = items_of(&mut body);
     let hits: Vec<SearchResult> = serde_json::from_value(items.clone())
         .map_err(|err| Error::Internal(format!("results: {err}")))?;
-    // The rows as the server serialised them, and nothing this client built:
-    // `--json` is the server's own answer, and a client that re-shaped its
-    // rows would be a second definition of them. The envelope around them is
-    // dropped, which is the one thing this door does take apart — see the
-    // print site in `run`.
+    // The server's rows, not re-shaped by this client.
     Ok((hits, began.elapsed().as_millis(), items.to_string()))
 }
 
-/// The rows out of the list envelope.
-///
-/// `get_mut`, not `body["items"]`: indexing a `Value` by name panics outright
-/// on anything that is not an object or null — and the one body that is not is
-/// an older server's bare array, which is the very skew this door has to
-/// survive. Absent reads as null and fails at the deserialize with the message
-/// the caller is written around, as `status.rs` does for the same skew.
+/// The rows out of the list envelope. `get_mut`, not indexing: indexing a `Value` panics on an
+/// older server's bare array.
 fn items_of(body: &mut serde_json::Value) -> serde_json::Value {
     body.get_mut("items")
         .map(serde_json::Value::take)
         .unwrap_or(serde_json::Value::Null)
 }
 
-/// The form a pipe, a test and a script see.
-///
-/// No colour, no motion, no glyph outside ASCII — and every claim the rail makes
-/// said in words, because a rendering that marks the cliff only by being dim
-/// marks it for nobody in a monochrome terminal, in a screenshot, or in a
-/// redirected file.
+/// The form a pipe, a test and a script see: no colour, motion or non-ASCII, every claim in words.
 pub fn render_plain(hits: &[SearchResult]) -> String {
     let mut out = String::new();
     for (i, h) in hits.iter().enumerate() {
         let mark = if h.past_cliff { "." } else { " " };
-        // The server names a passage by its note when it has no heading; a
-        // merged artifact has no note, and is named by its own opening.
+        // Named by its note when it has no heading, by its own opening when it has no note.
         let title = match &h.title {
             Some(t) => t.clone(),
             None => crate::web::markdown::stand_in_title(&h.text, 60),
@@ -280,13 +217,7 @@ pub fn render_plain(hits: &[SearchResult]) -> String {
     out
 }
 
-/// The first `n` lines of a hit's text that have anything on them.
-///
-/// A clip is a budget for showing text, so a blank line must not consume any
-/// of it: an artifact whose first line is a heading spends line two on the gap
-/// beneath it, and the list shows one line where it promised `n`. Leading
-/// indentation goes with it — it positions text against a document that is not
-/// on screen here.
+/// The first `n` non-blank lines of a hit's text, unindented: a blank must not spend the clip.
 pub(crate) fn body_lines(text: &str, n: usize) -> impl Iterator<Item = &str> {
     text.lines()
         .map(str::trim_end)
@@ -295,24 +226,16 @@ pub(crate) fn body_lines(text: &str, n: usize) -> impl Iterator<Item = &str> {
         .take(n)
 }
 
-/// A hit's text laid out to fit `width`, up to `budget` display lines.
-///
-/// Clipping a source line at the terminal's edge threw away the rest of the
-/// sentence and gave the space back to nobody — a hit whose one interesting
-/// clause sat past column 74 read as a fragment. Wrapping spends the same
-/// budget on text instead, and the budget is display lines rather than source
-/// lines so a document's own line breaks cannot decide how much you are shown.
+/// A hit's text wrapped to `width`, up to `budget` display lines, not source lines.
 pub(crate) fn excerpt(text: &str, budget: usize, width: usize) -> Vec<String> {
     let room = width.max(24);
     let mut out: Vec<String> = Vec::new();
     for line in body_lines(text, budget) {
-        // Each source line starts a new display line. Flowing one into the next
-        // would run a heading into the paragraph under it, which is the one
-        // break in a document that was carrying meaning.
+        // Each source line starts a new display line, so a heading never runs into its paragraph.
         let mut fresh = true;
         for word in line.split_whitespace() {
             match out.last_mut() {
-                // `+ 1` is the space that joining would add.
+                // `+ 1` is the joining space.
                 Some(last) if !fresh && last.chars().count() + 1 + word.chars().count() <= room => {
                     last.push(' ');
                     last.push_str(word);
@@ -321,9 +244,7 @@ pub(crate) fn excerpt(text: &str, budget: usize, width: usize) -> Vec<String> {
                     if out.len() == budget {
                         return out;
                     }
-                    // A word longer than the line gets the line to itself and
-                    // is cut there; nothing else can be done with it, and the
-                    // alternative is a row that breaks the layout.
+                    // A word longer than the line gets the line to itself and is cut there.
                     out.push(word.chars().take(room).collect());
                     fresh = false;
                 }
@@ -333,10 +254,7 @@ pub(crate) fn excerpt(text: &str, budget: usize, width: usize) -> Vec<String> {
     out
 }
 
-/// What this hit is, in words, or `None` when there is nothing to say.
-///
-/// Shared with the drawn rendering so the two cannot drift into saying
-/// different things about the same hit.
+/// What this hit is, in words; shared with the drawn rendering so the two cannot drift.
 pub(crate) fn badges(h: &SearchResult) -> Option<String> {
     let mut said: Vec<&str> = Vec::new();
     let due_word = h.due_in.as_ref().map(|d| format!("due {d}"));
@@ -362,8 +280,7 @@ pub(crate) fn badges(h: &SearchResult) -> Option<String> {
 pub(crate) mod fixture {
     use crate::core::search::SearchResult;
 
-    /// One hit, with only the fields a rendering reads set to anything
-    /// interesting. Shared with the face's tests.
+    /// One hit with only the fields a rendering reads; shared with the face's tests.
     pub(crate) fn hit(title: &str, score: f32, weak: bool, past_cliff: bool) -> SearchResult {
         SearchResult {
             artifact_id: format!("art-{title}"),
@@ -540,11 +457,7 @@ mod tests {
         tokio::spawn(async move {
             use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
             let (mut sock, _) = listener.accept().await.expect("a client");
-            // Read the request before answering. Closed with it unread, the
-            // socket sends a reset rather than a FIN, and a reset may discard
-            // the frames below before the client reads them. Under a loaded
-            // full run, that turned the dying stream into one that never
-            // started, which falls back.
+            // Read the request first: closing it unread sends a reset, losing the frames below.
             let mut head = Vec::new();
             let mut buf = [0u8; 1024];
             while !head.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -553,9 +466,7 @@ mod tests {
                     Ok(n) => head.extend_from_slice(&buf[..n]),
                 }
             }
-            // Enough of a chunked response to carry two frames, and then the
-            // socket goes away without its terminating chunk: a proxy timing
-            // out mid-search, seen from here.
+            // Two frames, then no terminating chunk: a proxy timing out mid-search.
             let body = "event: stages\ndata: {\"stages\":[\"embed\",\"retrieve\"]}\n\n\
                         event: stage\ndata: {\"stage\":\"embed\"}\n\n";
             sock.write_all(

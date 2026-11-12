@@ -10,12 +10,7 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use serde_json::json;
 
-/// One client per role, so a slow model only widens its own patience.
-///
-/// A timeout here looks exactly like a dead endpoint to the job runner: the
-/// call fails, the job retries, and it fails again at the same wall. A local
-/// reasoning model can spend well over three minutes on one segmentation
-/// window, so the ceiling is configurable per role.
+/// Per role, so a slow model widens only its own timeout; a local reasoning model can take minutes per window.
 fn client(timeout_secs: u64) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -31,15 +26,7 @@ fn url(base: &str, path: &str) -> String {
     )
 }
 
-/// A 4xx that says the request itself is wrong. 408 and 429 are 4xx by number
-/// but "come back later" by meaning, and stay retryable.
-///
-/// So do 401, 403 and 404. Those three describe the endpoint rather than the
-/// request: a key expires, a token is rotated, a proxy answers 404 for as long
-/// as the backend behind it is restarting — and in every one of them the same
-/// request succeeds once the wall is fixed. Calling them permanent meant one
-/// expired key was enough to mark chunks `embed_failed` and settle their
-/// corpora to `partial`, which coming back up does not undo.
+/// A 4xx meaning the request itself is wrong. 408, 429, 401, 403 and 404 describe the endpoint and heal, so stay retryable.
 pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
     use reqwest::StatusCode as S;
     status.is_client_error()
@@ -53,48 +40,23 @@ pub fn permanent_upstream_status(status: reqwest::StatusCode) -> bool {
         )
 }
 
-/// A status that means "not now" rather than "not ever" or "something broke".
-///
-/// Both of these come from an endpoint that is up and understood the request.
-/// 429 is a limiter in front of it — the shape a shared proxy sheds load in,
-/// and what a burst of keystrokes meets first. 503 is the model itself not
-/// being ready: a llama.cpp-style server answers it while it loads, which is
-/// the whole of what "the model is cold" looks like from here.
-///
-/// Kept out of [`permanent_upstream_status`] rather than folded into it: that
-/// predicate answers "will this request ever work", and both of these will.
-/// This one answers the narrower question of whether waiting is the fix, which
-/// is what decides the status a person sees and whether a keystroke's search
-/// gets a second chance.
+/// "Not now": 429 is a limiter, 503 a model still loading. Decides the status shown and whether search retries.
 pub fn busy_upstream_status(status: reqwest::StatusCode) -> bool {
     use reqwest::StatusCode as S;
     matches!(status, S::TOO_MANY_REQUESTS | S::SERVICE_UNAVAILABLE)
 }
 
-/// One configured endpoint: where to post, as whom, and which role a failure
-/// is reported under.
 pub(crate) struct Endpoint {
     client: reqwest::Client,
     base_url: String,
     model: String,
     api_key: Option<String>,
     role: &'static str,
-    /// Which name this endpoint takes the output ceiling under, corrected in
-    /// place the first time the endpoint rejects the name we guessed.
-    ///
-    /// Shared mutable state on a struct that is otherwise plain configuration,
-    /// because the correction is worth nothing if every later call re-learns it.
-    /// Shared *between* endpoints too — see [`LEARNED_CEILING`] — so that is one
-    /// 400 per server per process, and not one per role pointed at it.
+    /// Corrected in place on the first rejection and shared per server ([`LEARNED_CEILING`]): one 400 per server per process.
     ceiling_param: std::sync::Arc<AtomicCeilingParam>,
 }
 
-/// `CeilingParam` behind an atomic, so a `&self` call can record what it
-/// learned.
-///
-/// `explicit` records whether the name currently held was named by the operator
-/// or merely inferred, so a role that was told the name outranks one that
-/// guessed it — see [`learned_ceiling`].
+/// `explicit`: the operator named it, so it outranks an inferred name. See [`learned_ceiling`].
 struct AtomicCeilingParam {
     param: std::sync::atomic::AtomicBool,
     explicit: std::sync::atomic::AtomicBool,
@@ -131,8 +93,7 @@ impl AtomicCeilingParam {
         );
     }
 
-    /// Set a name that is not a guess — one the operator gave, or one a 400
-    /// taught — so that a role which only inferred a name cannot unseat it.
+    /// For a name the operator gave or a 400 taught, which an inferred name cannot unseat.
     fn set_authoritative(&self, p: CeilingParam) {
         self.set(p);
         self.explicit
@@ -140,12 +101,7 @@ impl AtomicCeilingParam {
     }
 }
 
-/// A completion, and how it ended.
-///
-/// `truncated` is `finish_reason == "length"`: the model did not stop, the
-/// ceiling stopped it. Carried out of the transport rather than only logged
-/// because the caller is the only one that knows what a cut-off reply costs —
-/// synthesis salvages what parsed, ask has to say so on the answer.
+/// `truncated` is `finish_reason == "length"`; only the caller knows what a cut-off reply costs.
 pub(crate) struct ChatReply {
     text: String,
     truncated: bool,
@@ -165,28 +121,13 @@ impl Endpoint {
             model: model.to_string(),
             api_key: api_key.map(str::to_string),
             role,
-            // Unshared until a role that actually sends a ceiling claims the
-            // server's cell below. `embed` and `rerank` send none, and have no
-            // business seeding a name for a model they are not the one calling.
+            // Unshared until a role that sends a ceiling claims the server's cell; embed and rerank send none.
             ceiling_param: std::sync::Arc::new(AtomicCeilingParam::new(CeilingParam::MaxTokens)),
         }
     }
 
-    /// The name to send the output ceiling under, configured or inferred, in the
-    /// cell this server's other roles read and write.
-    ///
-    /// The cell is shared per server, so what this role resolves must not simply
-    /// overwrite what another role resolved for the same server: the roles are
-    /// constructed in a fixed order and the last one would otherwise win. An
-    /// operator who sets `ask.ceiling_param` explicitly while `synthesize` — the
-    /// same URL and model in the shipped example — only sets `reasoning_effort`
-    /// would have their explicit setting replaced by synthesize's guess, and
-    /// against an endpoint that ignores unknown fields that leaves `ask` with no
-    /// ceiling at all, which is the failure this is all here to prevent.
-    ///
-    /// So: a name the operator gave outranks one a role inferred, and between
-    /// two of equal standing the first wins and the disagreement is reported.
-    /// See [`learned_ceiling`].
+    /// Roles are built in a fixed order, so the shared cell is not simply overwritten: an explicit name outranks
+    /// an inferred one, and between equals the first wins with a warning. See [`learned_ceiling`].
     fn with_ceiling_param(
         mut self,
         configured: Option<CeilingParam>,
@@ -203,18 +144,13 @@ impl Endpoint {
         self
     }
 
-    /// Post and hand back the response with its status already judged, so a
-    /// caller that wants the body as a stream is not forced to buffer it into
-    /// JSON first.
+    /// Status already judged, so a streaming caller need not buffer the body.
     async fn post(&self, path: &str, body: serde_json::Value) -> Result<reqwest::Response> {
         self.send(self.client.post(url(&self.base_url, path)).json(&body))
             .await
     }
 
-    /// The same call with a form body instead of JSON. One role needs it —
-    /// transcription, whose API takes the recording as a file part — and it
-    /// goes through here rather than around it so that a speech endpoint's
-    /// failures are judged, logged and classified like every other role's.
+    /// For transcription, routed here so speech failures are judged and classified like every other role's.
     async fn post_multipart(
         &self,
         path: &str,
@@ -224,8 +160,6 @@ impl Endpoint {
             .await
     }
 
-    /// Send a request that is already built, and judge what comes back: the
-    /// key, the timing log, and which of the two failure kinds a bad status is.
     async fn send(&self, mut req: reqwest::RequestBuilder) -> Result<reqwest::Response> {
         let role = self.role;
         if let Some(k) = &self.api_key {
@@ -241,8 +175,7 @@ impl Endpoint {
 
         if !status.is_success() {
             let body = res.text().await.unwrap_or_default();
-            // Truncate: an upstream error page can be megabytes, and this string
-            // ends up in a job's last_error column.
+            // Truncate: an error page can be megabytes, and this lands in a job's last_error column.
             let detail: String = body.chars().take(400).collect();
             let detail = format!("HTTP {status}: {detail}");
             return Err(if permanent_upstream_status(status) {
@@ -268,15 +201,8 @@ impl Endpoint {
             })
     }
 
-    /// One chat completion; `body` carries everything but `model` and the
-    /// output ceiling. Logs the cost of every call — on local hardware a window
-    /// takes minutes, and the log is what tells a long wait from a hang.
-    ///
-    /// `ceiling` is applied here rather than by the caller because the name it
-    /// goes out under is a property of the endpoint, and one that has to be
-    /// learned: a request rejected for naming the wrong one is retried under the
-    /// other, once, and the answer is remembered for every later call. Only the
-    /// name is retried — a 400 about anything else stays a 400.
+    /// The ceiling's parameter name is learned per endpoint: a 400 naming it is retried once under the other name.
+    /// Only the name is retried; any other 400 stays a 400.
     async fn send_with_ceiling(
         &self,
         mut body: serde_json::Value,
@@ -317,11 +243,7 @@ impl Endpoint {
         self.buffered_reply(res, ceiling, started).await
     }
 
-    /// The whole-response half of `chat`: one JSON object, read to its end.
-    ///
-    /// Its own method because the streaming path needs it too — for the
-    /// endpoint that was asked to stream and answered with a plain completion
-    /// instead, which is a valid reply and not a broken stream.
+    /// Separate because the streaming path needs it for an endpoint that answers a stream request with a plain completion.
     async fn buffered_reply(
         &self,
         res: reqwest::Response,
@@ -347,13 +269,7 @@ impl Endpoint {
         self.reply(text, finish_reason, ceiling, "no message content")
     }
 
-    /// How a completion ended, whichever way it arrived.
-    ///
-    /// `length` means the ceiling stopped the model rather than the model
-    /// stopping itself, and a reply nothing marks as cut off is read as a
-    /// complete one — by the parser, and by whoever asked. `empty` is the
-    /// detail for a reply with no content at all that was *not* cut off; the
-    /// buffered and streamed paths describe that differently.
+    /// An unmarked cut-off reply would be read as complete. `empty` describes a reply with no content that was not cut off.
     fn reply(
         &self,
         text: Option<String>,
@@ -371,10 +287,7 @@ impl Endpoint {
         }
         let text = text.ok_or_else(|| Error::Inference {
             role: self.role,
-            // An empty reply at `length` is the one failure that reads as a
-            // transport fault and is not one: a reasoning model bills its
-            // thinking against this ceiling, and can spend all of it before
-            // the message content starts.
+            // An empty reply at `length` looks like a transport fault: a reasoning model can spend the ceiling thinking.
             detail: if truncated {
                 "the output ceiling was spent before any message content was written; \
                  raise max_output_tokens or lower reasoning_effort"
@@ -387,27 +300,14 @@ impl Endpoint {
     }
 }
 
-/// The ceiling name learned per server, shared by every role that calls it.
-///
-/// What a 400 buys is worth one call and only if it is not re-bought: `ask`,
-/// `judge`, `link_judge`, `vision` and `synthesize` are five [`Endpoint`]s that
-/// may all be one server, and the two judges always are. Keyed by address and
-/// model, because that pair is what decides how a request gets read.
+/// Keyed by address and model; `ask`, the judges, `vision` and `synthesize` may all be one server.
 type CeilingRegistry =
     std::collections::HashMap<(String, String), std::sync::Arc<AtomicCeilingParam>>;
 
 static LEARNED_CEILING: std::sync::LazyLock<std::sync::Mutex<CeilingRegistry>> =
     std::sync::LazyLock::new(Default::default);
 
-/// The shared cell for one server, seeded with `resolved` if this is the first
-/// role to ask for it.
-///
-/// When a later role resolves a different name for the same server, the cell is
-/// *not* simply overwritten — see [`Endpoint::with_ceiling_param`] for what that
-/// costs. `explicit` says whether the operator named this one or the role
-/// inferred it, and an explicit name replaces an inferred one. Anything else
-/// keeps what is already there and says so, because the two roles disagreeing
-/// about one server is a configuration mistake only the operator can settle.
+/// An explicit name replaces an inferred one; otherwise the first stays and a disagreement is reported for the operator.
 fn learned_ceiling(
     base_url: &str,
     model: &str,
@@ -425,8 +325,7 @@ fn learned_ceiling(
 
     let held = cell.get();
     if held == resolved {
-        // Agreement still promotes an inferred name to an explicit one: the
-        // operator has now said it, so a later inferring role cannot unseat it.
+        // Agreement promotes an inferred name to explicit, so a later inferring role cannot unseat it.
         if explicit {
             cell.set_authoritative(resolved);
         }
@@ -451,13 +350,7 @@ fn learned_ceiling(
     cell
 }
 
-/// Whether this rejection is the endpoint saying the ceiling went out under the
-/// wrong name — as opposed to any of the other things a 400 can mean.
-///
-/// The two names share no substring, so naming the other one is unambiguous;
-/// OpenAI's own message does exactly that ("Use 'max_completion_tokens'
-/// instead"). An endpoint that only names the field it refused is read as such
-/// when it also says it did not understand it.
+/// The two names share no substring, so naming the other one is unambiguous (OpenAI's own message does).
 fn rejects_ceiling_name(detail: &str, sent: CeilingParam) -> bool {
     if detail.contains(sent.flipped().as_str()) {
         return true;
@@ -475,7 +368,6 @@ fn rejects_ceiling_name(detail: &str, sent: CeilingParam) -> bool {
         .any(|w| lower.contains(w))
 }
 
-/// The message an upstream failure carries, whichever way it was classified.
 fn error_detail(e: &Error) -> &str {
     match e {
         Error::Inference { detail, .. } | Error::InferenceRejected { detail, .. } => detail,
@@ -483,7 +375,6 @@ fn error_detail(e: &Error) -> &str {
     }
 }
 
-// ── Synthesizer ──────────────────────────────────────────────────────────────────
 
 pub struct HttpSynthesizer {
     ep: Endpoint,
@@ -491,21 +382,11 @@ pub struct HttpSynthesizer {
     max_artifact_tokens: usize,
     reasoning_effort: Option<String>,
     structured_output: bool,
-    /// What a prompt costs, counted the way the windowing side counts it.
-    ///
-    /// Not `TokenCounter::default()`. The estimator and the bundled tokenizer
-    /// agree closely on English and do not agree at all on Cyrillic, Polish or
-    /// Turkish — the reason `synthesize.rs` sizes windows per language. Once
-    /// `WindowContext::build` and `segment_budget` moved to the real
-    /// tokenizer, a Russian window sized to N real tokens was *estimated* here
-    /// at roughly 0.6N, `ceiling_for_prompt` handed back the difference as room
-    /// to answer in, and the endpoint answered 400. `checked_ceiling_for_prompt`
-    /// could not catch it either: it shared the undercount.
+    /// The real tokenizer, not the estimator: on Cyrillic the estimate undercounted windows by ~40 % and drew 400s.
     counter: std::sync::Arc<crate::infer::budget::TokenCounter>,
 }
 
-/// What a chat message list costs as a prompt: the text of every `content`,
-/// which is everything an endpoint counts that this side controls.
+/// The text of every `content`: everything the endpoint counts that this side controls.
 fn message_tokens(
     messages: &serde_json::Value,
     counter: &crate::infer::budget::TokenCounter,
@@ -549,26 +430,19 @@ impl HttpSynthesizer {
         }
     }
 
-    /// The tokenizer the rest of the system budgets with, handed over during
-    /// wiring. Without it this side falls back to the estimator, which is what
-    /// every test runs on and what an install with no loadable tokenizer gets.
+    /// Without it this side uses the estimator.
     pub fn with_counter(mut self, c: std::sync::Arc<crate::infer::budget::TokenCounter>) -> Self {
         self.counter = c;
         self
     }
 
-    /// Caps chunk size so the embedder never receives an oversized chunk.
-    /// Set from `embed.max_input_tokens * 0.8` during wiring.
+    /// Set from `embed.max_input_tokens * 0.8` so the embedder never receives an oversized chunk.
     pub fn with_max_artifact_tokens(mut self, n: usize) -> Self {
         self.max_artifact_tokens = n;
         self
     }
 
-    /// `schema`, when given, is sent as an OpenAI `json_schema` response format.
-    /// An endpoint that honours it compiles the schema into a decoding
-    /// constraint, which is the only thing that reliably stops a small local
-    /// model closing an array with a brace or dropping a required field. The
-    /// calls that want prose rather than JSON — titles — pass `None`.
+    /// `schema` goes as a `json_schema` response format: a decoding constraint is the only reliable fix for small-model JSON.
     async fn chat(
         &self,
         messages: serde_json::Value,
@@ -585,16 +459,8 @@ impl HttpSynthesizer {
         if let Some((name, value)) = schema.filter(|_| self.structured_output) {
             body["response_format"] = response_format(name, value);
         }
-        // The same invariant every other caller keeps: prompt plus ceiling has
-        // to fit the window as the server counts both. `segment`'s first call
-        // is budgeted against the window by construction, but the repair call
-        // carries the whole first reply as well — up to `max_output_tokens` of
-        // it — so asking for the full ceiling again is a permanent 400 on
-        // precisely the windows that needed repairing.
-        //
-        // Truncation is not an error here: `parse_response` salvages the
-        // artifacts a cut-off list still got right, and losing nine good ones to
-        // the tenth is the worst trade in the write path.
+        // The repair call carries the first reply too, so the full ceiling again would be a permanent 400.
+        // Truncation is not an error: `parse_response` salvages what a cut-off list got right.
         let ceiling = crate::infer::budget::ceiling_for_prompt(
             self.budget.context_tokens,
             spent,
@@ -605,14 +471,9 @@ impl HttpSynthesizer {
 }
 
 impl HttpSynthesizer {
-    /// One synthesis call, judged or plain: the same transport, prompt
-    /// scaffold, and one repair attempt; only the schema, the JUDGE block,
-    /// and the parse differ.
     async fn run_segment(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
         let judged = input.judge.is_some();
-        // Fixed for both calls of this segment, the repair included: a repair
-        // that changed language would be a second system prompt over the first
-        // one's reply.
+        // Fixed for the repair too: a different language would be a second system prompt over the first one's reply.
         let system = prompt::synthesizer_system(input.lang);
         let user = prompt::user_prompt(
             input.core,
@@ -651,8 +512,7 @@ impl HttpSynthesizer {
         match parse(&first) {
             Ok(reply) => Ok(reply),
             Err(e) => {
-                // One repair attempt with the parser error fed back. Beyond
-                // that the caller falls back to a structural split.
+                // One repair attempt; beyond that the caller falls back to a structural split.
                 tracing::warn!(error = %e, "synthesizer returned unparsable output; repairing");
                 let repair = prompt::repair_prompt(&first, &e.to_string());
                 let messages = json!([
@@ -662,12 +522,7 @@ impl HttpSynthesizer {
                     {"role":"user","content": repair}
                 ]);
 
-                // The repair prompt is the first one plus the whole reply it is
-                // repairing, so on a window the first call nearly filled there
-                // is no room left to answer in. Sending it anyway spends a call
-                // to be refused; not sending it leaves the parse error to stand,
-                // and the caller falls back to a structural split — which is
-                // what happens when the repair fails in any case.
+                // The repair prompt includes the whole reply, so it may not fit; skipping it falls back as a failed repair would.
                 if crate::infer::budget::checked_ceiling_for_prompt(
                     self.budget.context_tokens,
                     message_tokens(&messages, &self.counter),
@@ -719,14 +574,11 @@ impl Synthesizer for HttpSynthesizer {
                 None,
             )
             .await?;
-        // A model that ignores "no quotes" should not put them on the screen,
-        // and a model that answers with an essay should not become a title.
         let t = out.trim().trim_matches('"').trim();
         Ok((!t.is_empty()).then(|| t.chars().take(120).collect()))
     }
 }
 
-// ── Embedder ─────────────────────────────────────────────────────────────────
 
 pub struct HttpEmbedder {
     ep: Endpoint,
@@ -758,10 +610,7 @@ impl Embedder for HttpEmbedder {
         if texts.is_empty() {
             return Ok(vec![]);
         }
-        // `encoding_format` is optional in OpenAI's own API and defaults to
-        // float there, but proxies in front of llama.cpp-style servers pass the
-        // absent field through as null and the backend rejects it. Sending it
-        // explicitly costs nothing and keeps those endpoints usable.
+        // Proxies before llama.cpp-style servers forward an absent `encoding_format` as null, which the backend rejects.
         let body = json!({
             "model": self.ep.model,
             "input": texts,
@@ -828,7 +677,6 @@ impl Embedder for HttpEmbedder {
     }
 }
 
-// ── Reranker ─────────────────────────────────────────────────────────────────
 
 pub struct HttpReranker {
     ep: Endpoint,
@@ -858,8 +706,7 @@ impl Reranker for HttpReranker {
         docs: &[String],
         top_n: usize,
     ) -> Result<Vec<(usize, f32)>> {
-        // There is no OpenAI-standard rerank endpoint; each server shapes it
-        // differently, so the style is configured rather than guessed.
+        // There is no standard rerank endpoint, so the style is configured rather than guessed.
         let (path, body) = match self.style {
             RerankStyle::Tei => ("rerank", json!({ "query": query, "texts": docs })),
             RerankStyle::Cohere => (
@@ -902,10 +749,7 @@ impl Reranker for HttpReranker {
     }
 }
 
-/// An OpenAI `json_schema` response format.
-///
-/// `strict` is what makes the difference between a schema the endpoint treats
-/// as a hint and one it compiles into a grammar the decoder cannot leave.
+/// `strict` makes the endpoint compile the schema into a grammar rather than treat it as a hint.
 fn response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
     json!({
         "type": "json_schema",
@@ -913,9 +757,7 @@ fn response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
     })
 }
 
-// ── Server-sent events ───────────────────────────────────────────────────────
 
-/// The response's `content-type`, or `""` when it sent none.
 fn content_type(res: &reqwest::Response) -> &str {
     res.headers()
         .get(reqwest::header::CONTENT_TYPE)
@@ -923,12 +765,7 @@ fn content_type(res: &reqwest::Response) -> &str {
         .unwrap_or("")
 }
 
-/// Whether a reply is one JSON document rather than a stream of frames.
-///
-/// Asked the narrow way round on purpose: a server that streams under a sloppy
-/// content-type must go on being read as a stream, so only a reply that calls
-/// itself JSON is taken for the whole completion object. Compared on the media
-/// type alone, so a `; charset=utf-8` suffix or a stray capital changes nothing.
+/// Only a reply calling itself JSON (by media type) is taken as one document; sloppy content-types stay streams.
 fn is_json_document(res: &reqwest::Response) -> bool {
     content_type(res)
         .split(';')
@@ -936,22 +773,16 @@ fn is_json_document(res: &reqwest::Response) -> bool {
         .is_some_and(|t| t.trim().eq_ignore_ascii_case("application/json"))
 }
 
-/// One `data:` frame of an OpenAI-shaped stream.
 #[derive(Debug, Default)]
 pub(crate) struct SseChunk {
     pub content: Option<String>,
     pub reasoning: Option<String>,
     pub finish_reason: Option<String>,
-    /// The server's own account of a failure, sent as a frame because the
-    /// headers — and the 200 — had already gone out when it happened. llama.cpp
-    /// does this for a prompt that outgrows the context; vLLM and most proxies
-    /// do it too. A frame like that has no `choices`, and a parser that only
-    /// reads `choices` drops the one line that says why the stream ended.
+    /// Sent as a frame once the 200 has gone out (llama.cpp, vLLM, proxies); it has no `choices`.
     pub error: Option<String>,
 }
 
-/// Parse one line. `None` for anything that is not a chunk: blank lines,
-/// comment lines, and the `[DONE]` sentinel.
+/// `None` for blank lines, comments and the `[DONE]` sentinel.
 pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
     let payload = line.strip_prefix("data:")?.trim();
     if payload.is_empty() || payload == "[DONE]" {
@@ -959,9 +790,7 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
     }
     let v: serde_json::Value = serde_json::from_str(payload).ok()?;
     if let Some(err) = v.get("error") {
-        // `{"error":{"message":..}}` is the OpenAI shape; `{"error":"..."}`
-        // is what some servers send. Either way the message is what matters,
-        // and the whole object is a fair fallback for a shape neither of these.
+        // `{"error":{"message":..}}` is OpenAI's shape, `{"error":"..."}` some servers'; else the whole object.
         let message = err
             .get("message")
             .and_then(|m| m.as_str())
@@ -983,9 +812,7 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
     };
     Some(SseChunk {
         content: s(delta, "content"),
-        // Endpoints disagree on the name — llama.cpp and vLLM say
-        // `reasoning_content`, others say `reasoning` — and reading one spelling
-        // drops the thinking entirely on the servers that use the other.
+        // llama.cpp and vLLM say `reasoning_content`, others `reasoning`.
         reasoning: s(delta, "reasoning_content").or_else(|| s(delta, "reasoning")),
         finish_reason: choice
             .get("finish_reason")
@@ -995,21 +822,13 @@ pub(crate) fn parse_sse_line(line: &str) -> Option<SseChunk> {
     })
 }
 
-/// Reassembles frames out of a byte stream that is cut wherever the network
-/// cut it.
-///
-/// One read is not one line: a JSON object — and a single UTF-8 character —
-/// can be split across two of them. A parser that decodes and parses each read
-/// on its own loses tokens on exactly the long answers streaming exists for,
-/// and does it intermittently. So bytes accumulate here, and only whole lines
-/// leave; whatever follows the last newline stays for the next read.
+/// A read can split a JSON object or a UTF-8 character, so bytes accumulate and only whole lines leave.
 #[derive(Default)]
 pub(crate) struct SseBuffer {
     buf: Vec<u8>,
 }
 
 impl SseBuffer {
-    /// The chunks the newly arrived bytes completed, in order.
     pub(crate) fn push(&mut self, bytes: &[u8]) -> Vec<SseChunk> {
         self.buf.extend_from_slice(bytes);
         let mut out = Vec::new();
@@ -1024,9 +843,7 @@ impl SseBuffer {
         out
     }
 
-    /// What a stream that ended without a final newline still owes. Endpoints
-    /// terminate their last frame properly, but a truncated connection is
-    /// exactly the case where the tokens already received are worth keeping.
+    /// A truncated connection is where the tokens already received are worth keeping.
     pub(crate) fn finish(&mut self) -> Vec<SseChunk> {
         let rest = std::mem::take(&mut self.buf);
         parse_sse_line(String::from_utf8_lossy(&rest).trim_end_matches('\r'))
@@ -1035,35 +852,20 @@ impl SseBuffer {
     }
 }
 
-// ── Completer ────────────────────────────────────────────────────────────────
 
 pub struct HttpCompleter {
     ep: Endpoint,
     context_tokens: usize,
-    /// Hard ceiling on output tokens, sent on every call.
-    ///
-    /// Not optional, and not merely a cost control. `response_schema` compiles
-    /// into a decoding constraint, and while the model is inside a JSON string
-    /// the end-of-sequence token is not a valid continuation — so it is masked
-    /// out and the model *cannot* stop there. A small model that wanders into a
-    /// long or repeating `merged.text` therefore has nothing of its own to stop
-    /// it: without this ceiling the only limit is the server's, which one judge
-    /// call reached after ~190KB and a quarter hour, to be thrown away whole
-    /// because a reply cut off mid-string does not parse.
+    /// Inside a schema-constrained JSON string EOS is masked, so the model cannot stop; one judge call ran to ~190 KB.
     max_output_tokens: usize,
     reasoning_effort: Option<String>,
-    /// The JSON Schema this role's replies must satisfy, sent as a response
-    /// format so the endpoint constrains decoding. `None` for the ask role,
-    /// whose answer is prose for a person to read.
+    /// `None` for ask, whose answer is prose for a person.
     response_schema: Option<(&'static str, serde_json::Value)>,
-    /// See `HttpSynthesizer::counter` — the same disagreement, on the path
-    /// that carries whole artifacts into a judge call.
+    /// See `HttpSynthesizer::counter`: whole artifacts go into judge calls.
     counter: std::sync::Arc<crate::infer::budget::TokenCounter>,
 }
 
 impl HttpCompleter {
-    /// The tokenizer the rest of the system budgets with, handed over during
-    /// wiring.
     pub fn with_counter(mut self, c: std::sync::Arc<crate::infer::budget::TokenCounter>) -> Self {
         self.counter = c;
         self
@@ -1087,11 +889,7 @@ impl HttpCompleter {
         }
     }
 
-    /// The request body both the buffered and the streamed call send. One
-    /// place, because a difference between the two would be a difference in the
-    /// answer: which name the ceiling goes out under, how hard the model is
-    /// told to think, and whether the reply is schema-constrained all decide
-    /// what comes back.
+    /// One body for buffered and streamed calls, so they cannot differ in ceiling name, effort or schema.
     fn body(&self, system: &str, user: &str) -> serde_json::Value {
         let mut body = json!({
             "messages": [
@@ -1109,76 +907,40 @@ impl HttpCompleter {
         body
     }
 
-    /// Never above what the role was configured to allow: a caller asking for
-    /// room it measured against the context window is asking for a smaller
-    /// ceiling, never a larger one.
+    /// A caller may ask for less than configured, never more.
     fn clamped(&self, ceiling: usize) -> usize {
         ceiling.min(self.max_output_tokens).max(1)
     }
 
-    /// The judge that rules on duplicate pairs, on the synthesize endpoint.
-    ///
-    /// Judging is the same kind of work as segmentation — read a passage,
-    /// decide something about it, answer in a fixed shape — and nothing like
-    /// answering a user's question. It also runs in the background, where a
-    /// slow careful model costs nobody a wait, while sharing the ask endpoint
-    /// puts sweep traffic in front of an interactive request.
+    /// On the synthesize endpoint: background work like segmentation, kept off ask's interactive endpoint.
     pub fn for_judging(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("verdict", prompt::dedupe_schema()))
     }
 
-    /// The judge that rules on associative links, on the same endpoint.
-    ///
-    /// A separate completer rather than a second caller of `for_judging`,
-    /// because the response format is carried by the struct and the two judges
-    /// answer different questions. Sharing one meant every link went out under
-    /// the dedupe grammar, which cannot express `related` or `unrelated` at all.
+    /// Separate from `for_judging` because the struct carries the response format; the dedupe grammar cannot say `related`.
     pub fn for_link_judging(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("link", prompt::link_schema()))
     }
 
-    /// The model that names a knowledge gap, on the judges' endpoint.
     pub fn for_gap_naming(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
     }
 
-    /// The judge that rules on a retired artifact, on the judges' endpoint.
-    ///
-    /// Its own completer for the reason `for_link_judging` is: the response
-    /// format lives in the struct, and reap asks a question the dedupe grammar
-    /// cannot express. Sharing `for_judging` meant every reap verdict came back
-    /// as `{"verdict":{"relation":…}}` and failed to parse, so the sweep judged
-    /// each nominee at full cost and acted on none of them.
+    /// Separate because the dedupe grammar cannot express a reap verdict.
     pub fn for_reaping(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("reap", prompt::reap_schema()))
     }
 
-    /// The model that writes an artifact from a pursuit, on the judges'
-    /// endpoint: background work in a fixed shape, like every other judge.
     pub fn for_generating(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("artifact", prompt::generate_schema()))
     }
 
-    /// The model that writes one artifact from a pair an operator asked to
-    /// have synthesized, on the judges' endpoint.
-    ///
-    /// Its own completer for the reason `for_link_judging` is: the response
-    /// format lives in the struct, and this asks for a merged artifact rather
-    /// than a verdict. Under the dedupe grammar the reply would have to carry a
-    /// `relation` — a decision this call is explicitly not making, because a
-    /// person already made it.
+    /// Separate: it asks for a merged artifact, while the dedupe grammar would demand a `relation` a person already decided.
     pub fn for_pair_synthesis(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("synthesis", prompt::synthesize_schema()))
     }
 
-    /// The model that says, once, which subjects one answer still lacks.
-    ///
-    /// Takes a `TierConfig` rather than a role because that is honestly what it
-    /// is handed: this call has no role of its own, it runs on whichever
-    /// endpoint the operator pointed `ask.plan_tier` at — the efficient one,
-    /// typically, while the answer it feeds runs on the deep one. Falling back
-    /// to the ask role's own endpoint is the config layer's job, so by the time
-    /// this is called there is exactly one endpoint to build.
+    /// A `TierConfig`, not a role: it runs on whichever endpoint `ask.plan_tier` names, resolved by the config layer.
     pub fn for_plan(cfg: &TierConfig) -> Self {
         Self {
             ep: Endpoint::new(
@@ -1220,19 +982,8 @@ impl HttpCompleter {
 
 #[async_trait]
 impl Completer for HttpCompleter {
-    /// The judges come through here, and neither asks for a ceiling that fits
-    /// what it sent: `dedupe_prompt` carries two whole artifacts and, behind a
-    /// merged one, the captured sources it was written from — and asking for the
-    /// full configured ceiling beside that is a request the endpoint refuses. So
-    /// the ceiling is measured against what the prompt costs, the way `ask`
-    /// measures its own.
-    ///
-    /// A prompt that leaves no room for a reply is refused here rather than
-    /// sent under a ceiling of 1. The clamped call does not fail cleanly: it
-    /// returns 200 with an empty message and `finish_reason = "length"`, which
-    /// surfaces as a retryable `Error::Inference`, so the sweep re-sends the
-    /// same structurally impossible request forever. `InferenceRejected` is
-    /// permanent, which is what a prompt too large for its window is.
+    /// The ceiling is measured against the prompt, since dedupe prompts carry whole artifacts.
+    /// No room for a reply is `InferenceRejected`: a ceiling of 1 yields an empty 200 that the sweep retries forever.
     async fn complete(&self, system: &str, user: &str) -> Result<String> {
         let spent = self.counter.count(system) + self.counter.count(user);
         let Some(ceiling) = crate::infer::budget::checked_ceiling_for_prompt(
@@ -1273,10 +1024,7 @@ impl Completer for HttpCompleter {
         })
     }
 
-    /// The same call as `answer`, read a frame at a time.
-    ///
-    /// The body is the one `answer` sends with `stream` added, so the reply is
-    /// the same reply — what changes is only when the caller sees it.
+    /// The body `answer` sends with `stream` added, so the reply is the same.
     async fn answer_streaming(
         &self,
         system: &str,
@@ -1291,11 +1039,7 @@ impl Completer for HttpCompleter {
         body["stream"] = json!(true);
 
         let mut res = self.ep.send_with_ceiling(body, Some(ceiling)).await?;
-        // An endpoint or proxy that ignores `stream` answers with the plain
-        // completion object. That is not a broken stream, it is the reply —
-        // and every door reaches the model through here now, including the
-        // two that never asked for a stream. So the buffered parse takes it,
-        // and the sink sees the whole answer as one token rather than none.
+        // An endpoint that ignores `stream` sends the plain completion; that is the reply, delivered as one token.
         if is_json_document(&res) {
             tracing::debug!(
                 role,
@@ -1323,22 +1067,14 @@ impl Completer for HttpCompleter {
             };
             for c in chunks {
                 if let Some(message) = c.error {
-                    // Surfaced as-is: this is the server's reason, and without
-                    // it the failure below reads as a transport fault with an
-                    // empty body — which is what it looked like before.
+                    // Surfaced as-is: the server's reason, without which this reads as a transport fault.
                     return Err(Error::Inference {
                         role,
                         detail: format!("the stream carried an error: {message}"),
                     });
                 }
                 if let Some(r) = c.reasoning {
-                    // Send errors are ignored throughout: the receiver is a
-                    // reader that may stop reading, and the response is still
-                    // read to its end rather than abandoned mid-body, so the
-                    // connection is reusable and the call ends when the GPU is
-                    // actually free. Nothing records what comes back once the
-                    // receiver is gone: the caller that dropped it was the only
-                    // recorder.
+                    // Send errors are ignored: the body is still read to its end so the connection is reusable and the GPU free.
                     let _ = sink.send(Delta::Reasoning(r)).await;
                 }
                 if let Some(t) = c.content {
@@ -1354,9 +1090,7 @@ impl Completer for HttpCompleter {
             }
         }
 
-        // Truncation is read from the last frame that carried a reason, because
-        // a stream has no whole-response object to read it from — and an answer
-        // cut off mid-sentence that nothing marks is read as a finished one.
+        // A stream has no whole-response object, so truncation comes from the last frame with a reason.
         tracing::info!(
             role,
             ms = started.elapsed().as_millis(),
@@ -1384,22 +1118,15 @@ impl Completer for HttpCompleter {
     }
 }
 
-// ── Describer ────────────────────────────────────────────────────────────────
 
 pub struct HttpDescriber {
     ep: Endpoint,
-    /// Hard ceiling on output tokens, sent on every call — the same rule the
-    /// other roles follow, and for a stronger reason: what comes back is stored
-    /// as a corpus and segmented, so a reply nothing bounds is a document
-    /// nothing bounds.
+    /// What comes back is stored and segmented, so an unbounded reply is an unbounded document.
     max_output_tokens: usize,
 }
 
 impl HttpDescriber {
-    /// Takes both roles because a vision role without its own `base_url` is the
-    /// synthesize endpoint: it borrows that endpoint's address, key and — since
-    /// it is the same server reading the request — the name it takes the output
-    /// ceiling under.
+    /// Without its own `base_url` vision borrows the synthesize endpoint's address, key and ceiling name.
     pub fn new(cfg: &crate::config::VisionRole, synth: Option<&SynthesizeRole>) -> Self {
         let (base_url, api_key) = cfg.resolve(synth);
         Self {
@@ -1410,11 +1137,7 @@ impl HttpDescriber {
                 cfg.timeout_secs,
                 "vision",
             )
-            // This role has no `reasoning_effort` of its own. Where it borrows
-            // the synthesize endpoint it inherits that role's — not just its
-            // explicit `ceiling_param` — because otherwise the two roles guess
-            // different names for one server, and against a silent endpoint the
-            // describer's ceiling is the one that gets dropped.
+            // Inherits synthesize's `reasoning_effort` too, or the two roles guess different names for one server.
             .with_ceiling_param(
                 cfg.ceiling_param(synth),
                 cfg.inherited_reasoning_effort(synth),
@@ -1442,15 +1165,11 @@ impl Describer for HttpDescriber {
             ],
             "temperature": 0.2,
         });
-        // A description cut off at the ceiling is still worth storing — it is
-        // prose, and the part that arrived describes what it describes — so the
-        // truncation is logged rather than raised. An empty one is not, and
-        // `chat` says so in terms the operator can act on.
+        // A truncated description is still stored, with a log line; an empty one is an error from `chat`.
         Ok(self.ep.chat(body, Some(self.max_output_tokens)).await?.text)
     }
 }
 
-/// The microphone's other end: one recording in, the words in it out.
 pub struct HttpTranscriber {
     ep: Endpoint,
     language: Option<String>,
@@ -1471,13 +1190,7 @@ impl HttpTranscriber {
     }
 }
 
-/// The extension to send the recording under.
-///
-/// Not decoration: whisper.cpp's server and faster-whisper-server both pick
-/// the demuxer from the part's filename, and a WebM container arriving as
-/// `audio.bin` is refused before any model sees it. The subtype is the
-/// extension in every container a browser records — the map exists for
-/// `audio/mpeg`, where it is not.
+/// whisper.cpp's server and faster-whisper-server choose the demuxer by filename; `audio/mpeg` is why this is a map.
 fn audio_extension(mime: &str) -> &str {
     let subtype = mime
         .split(';')
@@ -1490,12 +1203,7 @@ fn audio_extension(mime: &str) -> &str {
     match subtype {
         "mpeg" => "mp3",
         "x-wav" | "wave" => "wav",
-        // An empty or unrecognised type is still a recording, and the one
-        // format a browser produces without saying so is WebM.
-        // `application/octet-stream` says the same nothing: it is what a
-        // multipart part with no `Content-Type` is read as, and passing it
-        // through named the file `recording.octet-stream`, which the local
-        // servers refuse — they pick the demuxer from the name.
+        // No type, or `octet-stream` (an untyped multipart part), is WebM: the one format browsers send unlabelled.
         "" | "octet-stream" => "webm",
         other => other,
     }
@@ -1507,11 +1215,7 @@ impl Transcriber for HttpTranscriber {
         let role = "transcribe";
         let part = reqwest::multipart::Part::bytes(audio.to_vec())
             .file_name(format!("recording.{}", audio_extension(mime)))
-            // `split` always yields at least one element, so the old
-            // `unwrap_or` here was dead and an empty content-type reached
-            // `mime_str("")` — which errors, failing the whole transcription
-            // on the one case `audio_extension` goes out of its way to accept:
-            // an unrecognised or absent type is still a recording.
+            // An empty content-type must not reach `mime_str("")`, which errors.
             .mime_str(
                 mime.split(';')
                     .next()
@@ -1526,9 +1230,7 @@ impl Transcriber for HttpTranscriber {
         let mut form = reqwest::multipart::Form::new()
             .part("file", part)
             .text("model", self.ep.model.clone())
-            // Plain text would spare the parse, but `json` is the format every
-            // one of these servers agrees on: the OpenAI default, and what the
-            // local ones implement first.
+            // `json` is the format every one of these servers agrees on.
             .text("response_format", "json");
         if let Some(l) = &self.language {
             form = form.text("language", l.clone());
@@ -1543,10 +1245,7 @@ impl Transcriber for HttpTranscriber {
                 role,
                 detail: e.to_string(),
             })?;
-        // Silence is a legitimate answer — a button pressed and released with
-        // nothing said — so an empty string is returned rather than raised. A
-        // reply with no `text` at all is a different thing: the endpoint
-        // answered something this is not the client for.
+        // Silence is a legitimate empty answer; a reply without `text` is not this client's endpoint.
         body.get("text")
             .and_then(|t| t.as_str())
             .map(|t| t.trim().to_string())
@@ -1557,15 +1256,12 @@ impl Transcriber for HttpTranscriber {
     }
 }
 
-/// One cheap reachability check per role at startup. Failure is a warning, not
-/// a fatal error: ingest is designed to survive a dead inference endpoint.
+/// Failure is a warning: ingest survives a dead inference endpoint.
 pub async fn probe(role: &str, base_url: &str, api_key: Option<&str>) -> bool {
     probe_path(role, base_url, "models", api_key).await
 }
 
-/// Same as [`probe`], against a caller-chosen path instead of the OpenAI
-/// convention of `models` — for a server whose reachability isn't checked
-/// under that name.
+/// For a server whose reachability is not checked under `models`.
 pub async fn probe_path(role: &str, base_url: &str, path: &str, api_key: Option<&str>) -> bool {
     let c = client(crate::config::DEFAULT_TIMEOUT_SECS);
     let mut req = c.get(url(base_url, path));
@@ -1601,8 +1297,7 @@ mod tests {
         assert!(permanent_upstream_status(S::UNPROCESSABLE_ENTITY));
         assert!(!permanent_upstream_status(S::REQUEST_TIMEOUT));
         assert!(!permanent_upstream_status(S::TOO_MANY_REQUESTS));
-        // The endpoint, not the request: an expired key and a restarting proxy
-        // both answer like this, and both heal on their own.
+        // An expired key and a restarting proxy both answer like this, and both heal.
         assert!(!permanent_upstream_status(S::UNAUTHORIZED));
         assert!(!permanent_upstream_status(S::FORBIDDEN));
         assert!(!permanent_upstream_status(S::NOT_FOUND));
@@ -1735,10 +1430,7 @@ mod tests {
 
     #[tokio::test]
     async fn segmentation_constrains_the_reply_to_the_schema_the_parser_wants() {
-        // A 9B model asked for JSON closes an array with a brace and drops
-        // required fields, and the parse error that follows is indistinguishable
-        // from a truncated reply. The schema is the only thing that makes the
-        // malformed reply ungeneratable rather than merely unwanted.
+        // Only the schema makes a malformed reply ungeneratable for a 9B model.
         let server = echoing_server(
             r#"{"artifacts":[{"text":"body","title":"A","category":"n","tags":[]}]}"#,
         )
@@ -1763,8 +1455,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_title_is_asked_for_as_prose_not_as_json() {
-        // `chat` is shared with segmentation, and a schema leaking onto this
-        // call would constrain a one-line title into a JSON object.
+        // A schema leaking onto this call would constrain a one-line title into a JSON object.
         let server = echoing_server("A Good Title").await;
         let t = HttpSynthesizer::new(&synthesize_cfg(server.uri()))
             .title("some text", &[], crate::infer::lang::Lang::En)
@@ -1801,9 +1492,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_judge_constrains_its_verdict_and_the_ask_path_does_not() {
-        // Same struct, two roles: the judge's reply is parsed as a verdict and
-        // must be constrained, while the ask reply is prose for a person and
-        // would be ruined by a schema.
         let judge_server = echoing_server(r#"{"relation":"distinct"}"#).await;
         let mut cfg = synthesize_cfg(judge_server.uri());
         cfg.api_key = None;
@@ -1846,8 +1534,7 @@ mod tests {
     #[tokio::test]
     async fn synthesizer_retries_once_with_a_repair_prompt() {
         let server = MockServer::start().await;
-        // First call garbage, second valid. `up_to_n_times` makes the first
-        // mock retire after one hit so the second takes over.
+        // `up_to_n_times` retires the first mock after one hit.
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -1872,17 +1559,8 @@ mod tests {
     #[tokio::test]
     async fn the_repair_call_still_fits_the_window_it_is_repairing() {
         let server = MockServer::start().await;
-        // A long unparsable reply. The repair prompt carries it twice — once as
-        // the assistant turn, once quoted back in the repair instruction — so
-        // this leaves the window with less room than the configured ceiling.
-        //
-        // With slack, deliberately. At 533 the repair prompt cleared the
-        // `max_output_tokens` line below by nine tokens, which made this test a
-        // measurement of the system prompt's length: a line removed from
-        // `SYNTHESIZER_SYSTEM` dropped it under and failed a test about the
-        // repair's arithmetic. The subject here is that arithmetic, so the
-        // fixture is sized to be plainly over the line rather than exactly on
-        // it.
+        // The repair prompt carries the reply twice, leaving less room than the ceiling.
+        // Sized well over the line so the test does not measure the system prompt's length.
         let long_prose = "sorry, here is prose ".repeat(700);
         Mock::given(method("POST"))
             .and(path("/chat/completions"))
@@ -1900,11 +1578,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        // A ceiling that is half its window, which is the shape the shipped
-        // example config uses and the one where this fails. Doubled first:
-        // the system prompt grew with the judged contract, and this test is
-        // about the repair's arithmetic, not about a window too small for
-        // the scaffolding itself.
+        // Half-window ceiling, as in the example config; doubled so the scaffolding itself fits.
         let mut cfg = synthesize_cfg(server.uri());
         cfg.context_tokens *= 2;
         cfg.max_output_tokens = cfg.context_tokens / 2;
@@ -2018,20 +1692,16 @@ mod tests {
         use reqwest::StatusCode as S;
         assert!(busy_upstream_status(S::TOO_MANY_REQUESTS));
         assert!(busy_upstream_status(S::SERVICE_UNAVAILABLE));
-        // Up and broken, or nothing behind the proxy at all. Retryable, but
-        // not a promise that waiting is what fixes it.
+        // Retryable, but waiting is not promised to fix it.
         assert!(!busy_upstream_status(S::INTERNAL_SERVER_ERROR));
         assert!(!busy_upstream_status(S::BAD_GATEWAY));
         assert!(!busy_upstream_status(S::GATEWAY_TIMEOUT));
-        // Permanent, and classified before this predicate is consulted.
         assert!(!busy_upstream_status(S::BAD_REQUEST));
     }
 
     #[tokio::test]
     async fn embedder_sends_float_encoding_and_orders_results_by_index() {
-        // `encoding_format` is sent explicitly: a litellm proxy in front of a
-        // llama.cpp-style server forwards the absent field as null and the
-        // backend answers 500. And `index` is authoritative over array position.
+        // A litellm proxy forwards an absent `encoding_format` as null; `index` beats array position.
         use wiremock::matchers::body_partial_json;
         let server = MockServer::start().await;
         let reply = serde_json::json!({"data":[
@@ -2065,7 +1735,6 @@ mod tests {
             {"index":0,"embedding":[1.0,0.0,0.0,0.0]},
             {"index":1,"embedding":[0.0,1.0,0.0,0.0]}
         ]});
-        // The document side: titled and untitled take different templates.
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .and(body_partial_json(serde_json::json!({
@@ -2075,7 +1744,6 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        // The query side: the retrieval task prefix, nothing else.
         Mock::given(method("POST"))
             .and(path("/embeddings"))
             .and(body_partial_json(serde_json::json!({
@@ -2113,8 +1781,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(reply))
             .mount(&server)
             .await;
-        // Config says dim 4, server returned 2. Writing this to Qdrant would
-        // corrupt the collection.
+        // Writing a mismatched dimension to Qdrant would corrupt the collection.
         let e = HttpEmbedder::new(&embed_cfg(server.uri()))
             .embed_raw(&["x".into()])
             .await
@@ -2125,8 +1792,7 @@ mod tests {
     #[tokio::test]
     async fn embedder_rejects_a_short_batch() {
         let server = MockServer::start().await;
-        // Two inputs, one embedding back. Accepting this would silently pair
-        // the wrong vector with the wrong chunk.
+        // Accepting this would pair the wrong vector with the wrong chunk.
         let reply = serde_json::json!({"data":[{"index":0,"embedding":[1.0,0.0,0.0,0.0]}]});
         Mock::given(method("POST"))
             .and(path("/embeddings"))
@@ -2142,10 +1808,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_reranker_reads_both_wire_shapes_and_drops_bad_indexes() {
-        // TEI answers a bare list of {index, score}; Cohere wraps
-        // {index, relevance_score} in `results`. Either way the caller gets
-        // (index, score) best first, and an index outside the batch is dropped
-        // rather than panicking on `results.get(idx)`.
+        // An index outside the batch is dropped rather than panicking.
         type Case = (RerankStyle, serde_json::Value, usize, Vec<(usize, f32)>);
         let cases: [Case; 3] = [
             (
@@ -2248,8 +1911,6 @@ mod tests {
             };
             completer.complete("s", "u").await.unwrap();
 
-            // 1024 from the ask role, 2048 from the synthesize role the judge
-            // borrows: each carries its own ceiling, not a shared constant.
             let want = if label == "ask" { 1024 } else { 2048 };
             assert_eq!(
                 sent_body(&server).await["max_tokens"].as_u64(),
@@ -2322,8 +1983,7 @@ mod tests {
     async fn a_judge_prompt_that_fills_the_window_shrinks_its_own_ceiling() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
         let cfg = synthesize_cfg(server.uri());
-        // Roughly 7000 tokens by the character estimate: 2048 of reply on top of
-        // it does not fit the role's 8192-token window.
+        // About 7000 estimated tokens: 2048 of reply does not fit the 8192 window.
         let user = "x".repeat(7000 * 7 / 2);
         HttpCompleter::for_judging(&cfg)
             .complete("s", &user)
@@ -2365,7 +2025,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        // No `reasoning_effort`, so the guess is `max_tokens` — and wrong.
+        // No `reasoning_effort`, so the guess is `max_tokens`, and wrong.
         let completer = HttpCompleter::for_judging(&synthesize_cfg(server.uri()));
         assert_eq!(completer.complete("s", "u").await.unwrap(), "the answer");
 
@@ -2378,7 +2038,6 @@ mod tests {
             "the retry carried both names: {retry}"
         );
 
-        // And the next call starts where the first one left off.
         completer.complete("s", "u").await.unwrap();
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 3, "the second call was retried again");
@@ -2406,7 +2065,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        // Both built up front, the way the core builds them at startup.
         let cfg = synthesize_cfg(server.uri());
         let dedupe = HttpCompleter::for_judging(&cfg);
         let link = HttpCompleter::for_link_judging(&cfg);
@@ -2433,8 +2091,6 @@ mod tests {
             let mut ask = ask_cfg(server.uri());
             ask.ceiling_param = Some(CeilingParam::MaxTokens);
             let mut synth = synthesize_cfg(server.uri());
-            // One server, one model: the same endpoint by every measure that
-            // decides how a request is read.
             synth.model = ask.model.clone();
             synth.reasoning_effort = Some("high".into());
             assert!(synth.ceiling_param.is_none(), "synthesize only guesses");
@@ -2464,7 +2120,6 @@ mod tests {
     async fn a_prompt_that_cannot_fit_its_window_is_refused_rather_than_clamped() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
         let cfg = synthesize_cfg(server.uri());
-        // 8192 tokens of window; 3.5 chars to the token, so this is well past it.
         let huge = "x".repeat(cfg.context_tokens * 4);
 
         let e = HttpCompleter::for_judging(&cfg)
@@ -2631,8 +2286,6 @@ mod tests {
         assert_eq!(req.headers.get("authorization").unwrap(), "Bearer k");
         let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
         assert_eq!(body["model"], model);
-        // Every completion carries a ceiling, this one most of all: what comes
-        // back is stored as a corpus and segmented from there.
         assert_eq!(body["max_tokens"].as_u64(), Some(2048));
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], prompt::DESCRIBE_SYSTEM);
@@ -2700,7 +2353,6 @@ mod tests {
         assert!(e.retryable());
     }
 
-    // ── streaming ────────────────────────────────────────────────────────────
 
     fn completer_against(uri: &str) -> HttpCompleter {
         HttpCompleter::new(&ask_cfg(uri.to_string()))
@@ -2882,7 +2534,6 @@ mod tests {
             .unwrap();
         assert_eq!(done.text, "whole");
         assert!(!done.truncated);
-        // The reader still gets the answer, all at once.
         assert!(matches!(rx.recv().await, Some(Delta::Token(t)) if t == "whole"));
     }
 
@@ -2953,8 +2604,7 @@ mod tests {
             .transcribe(b"\x1a\x45\xdf\xa3fake webm", "audio/webm;codecs=opus")
             .await
             .unwrap();
-        // Trimmed: whisper returns its text with a leading space, every time,
-        // and that space would land in the search box.
+        // whisper returns a leading space that would land in the search box.
         assert_eq!(out, "hello");
 
         let reqs = server.received_requests().await.unwrap();
@@ -3026,8 +2676,6 @@ mod tests {
 
     #[test]
     fn the_recording_is_named_after_the_container_it_is_in() {
-        // The servers that read the extension are the ones this is for, and
-        // Safari's recorder is the reason the map is not just the subtype.
         assert_eq!(audio_extension("audio/webm;codecs=opus"), "webm");
         assert_eq!(audio_extension("audio/mp4"), "mp4");
         assert_eq!(audio_extension("audio/ogg"), "ogg");

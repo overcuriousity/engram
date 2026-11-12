@@ -1,10 +1,4 @@
-//! Why a hit is where it is.
-//!
-//! A rank is the product of eight stages, and each used to say what it did
-//! in its own way or not at all. This is the one object all three doors read,
-//! so that the rail, MCP's meta line and the API cannot disagree about what
-//! happened to a result.
-//!
+//! Why a hit is where it is: the one object the rail, MCP and the API all read.
 //! Nothing here is stored and nothing here reorders anything.
 
 /// What one stage did to one hit. `None` everywhere the stage did not apply.
@@ -13,7 +7,6 @@ pub struct StageEffect {
     /// Rank before the stage, where the stage reorders.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<usize>,
-    /// Rank after it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub to: Option<usize>,
     /// Score contribution, where the stage is additive.
@@ -28,41 +21,22 @@ pub enum CapEffect {
     /// No cap configured, or this hit never went through one.
     #[default]
     NotApplied,
-    /// Took a place within its corpus's allowance.
     Kept,
-    /// Over its cap in one of its corpora, and in the answer anyway because
-    /// the refill had nothing else to offer. The case the cap silently fails
-    /// in: a pool filled by one corpus leaves nothing to redistribute, so the
-    /// displaced hits come straight back and the list is dominated despite a
-    /// configured `per_source_cap`.
-    ///
-    /// Set on every displaced hit as the pool is built, which is honest only
-    /// because the truncate at the end of the search cuts the ones the cap did
-    /// hold out: a hit still carrying this when a door renders it is one that
-    /// reached the caller over its cap.
+    /// Over its cap but in the answer because the refill had nothing else to offer.
+    /// Set on every displaced hit; the final truncate removes the ones the cap did hold out.
     Refilled,
 }
 
 /// Why one hit is where it is.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HitExplanation {
-    /// Rank as retrieval returned it — fusion *and* the scoring stage, since
-    /// Qdrant applies both before anything comes back. Not the RRF rank on its
-    /// own: that would need a second query, which the design forbids.
-    ///
-    /// Read before the cap runs, because the cap reorders: enumerating the
-    /// capped list would report where the cap put a hit and call it where
-    /// retrieval did.
-    ///
-    /// `None` for a hit retrieval never returned — an associated one. A zero
-    /// here would read as rank #1, which is the one thing a recalled hit must
-    /// not claim.
+    /// Rank as Qdrant returned it (fusion and scoring), read before the cap reorders.
+    /// `None` for an associated hit, which must not read as rank #1.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrieved_rank: Option<usize>,
     /// The recency term's contribution to the score, reconstructed locally.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recency: Option<f32>,
-    /// The pinned term's, likewise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,29 +46,18 @@ pub struct HitExplanation {
     pub prime: Option<StageEffect>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
-    /// Found by its words in SQLite, not by the index: text with no vector
-    /// yet, or every hit while the query itself could not be embedded. See
-    /// `Store::keyword_matches`.
+    /// Found by its words in SQLite, not by the index; see `Store::keyword_matches`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keyword: bool,
-    /// Set for the one row an exploring search lifted into the window: from
-    /// the rank the ranking gave it, to the row it was lent.
-    ///
-    /// The only place in a result list where the order is not the ranking's
-    /// answer, so it is the one place that has to say so out loud. See
-    /// `Core::explore_swap`.
+    /// The one row an exploring search lent the window; see `Core::explore_swap`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explored: Option<StageEffect>,
-    /// Set for a hit the association stage appended. Every other field is then
-    /// absent: it never competed for a place, so there is no ranking story to
-    /// tell.
+    /// Set for a hit the association stage appended; every other field is then absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recalled_via: Option<String>,
 }
 
 impl HitExplanation {
-    /// The explanation of a hit association appended, which is that it was
-    /// recalled and nothing more.
     pub fn recalled(via: &str) -> Self {
         Self {
             recalled_via: Some(via.to_string()),
@@ -106,50 +69,26 @@ impl HitExplanation {
 /// What cannot belong to a hit: the shape of the pool it was drawn from.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SearchExplanation {
-    /// How wide the fetch was — `limit * CANDIDATE_MULTIPLIER`, or wider when
-    /// capture asked for a bigger pool.
+    /// `limit * CANDIDATE_MULTIPLIER`, or wider when capture asked for a bigger pool.
     pub candidates_fetched: usize,
-    /// Distinct corpora in the pool before the cap ran. One here, with a
-    /// `per_source_cap` configured, is the saturation the design is about.
+    /// Before the cap ran; one here with a `per_source_cap` configured is saturation.
     pub corpora_in_pool: usize,
-    /// The cap in force, `None` when uncapped.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capped: Option<usize>,
-    /// How many hits the cap found over their source's allowance, across the
-    /// whole candidate pool.
+    /// Hits over their source's allowance across the whole candidate pool.
     pub displaced: usize,
-    /// How many of those are in the answer regardless — counted after the
-    /// truncate, over the list the caller will see.
-    ///
-    /// Not counted over the pool, where the refill always takes every
-    /// displaced hit back and this could only ever equal `displaced`. Any
-    /// number above zero is the cap failing to redistribute: it wanted these
-    /// out and had nothing to put in their place.
+    /// Displaced hits in the answer regardless, counted after the truncate; above zero the cap
+    /// failed.
     pub refilled: usize,
     pub reranked: bool,
-    /// The query could not be embedded and the answer is keyword matches
-    /// only: degraded, and said so.
+    /// The query could not be embedded and the answer is keyword matches only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keyword_only: bool,
 }
 
-/// The two score terms Qdrant applied, reconstructed from the payload.
-///
-/// The recency decay and the pinned boost run inside Qdrant as one sum and
-/// only the final score comes back (`src/vector/qdrant.rs`, `scoring_formula`).
-/// Both terms are nonetheless computable here from fields the payload already
-/// carries, so a full explanation costs no second query.
-///
-/// `exp_decay` with `midpoint: 0.5` and `scale: s` is `0.5^(|x - target| / s)`
-/// — a half-life curve whose half-life is `scale`. A weight of zero omits its
-/// term from the formula entirely, so this returns `None` rather than `0.0`: a
-/// rendered zero would claim a stage ran and contributed nothing, which is a
-/// different statement from the stage not being configured.
-///
-/// This re-implements another system's semantics, which is the one real risk
-/// in the design. It is pinned against real Qdrant in
-/// `tests/integration_qdrant.rs`, not against our own belief about the
-/// formula.
+/// The recency and pinned terms Qdrant summed, reconstructed from the payload without a second
+/// query. `None` for a zero weight, which Qdrant omits; pinned against real Qdrant in
+/// `tests/integration_qdrant.rs`.
 pub fn scoring_terms(
     payload: &crate::vector::VectorPayload,
     now: i64,
@@ -159,12 +98,10 @@ pub fn scoring_terms(
     pinned_tag: &str,
 ) -> (Option<f32>, Option<f32>) {
     let recency = (recency_weight > 0.0).then(|| {
-        // Absent means `now`, exactly as the formula's `"defaults"` says.
+        // Absent means `now`, as the formula's `"defaults"` says.
         let stamp = payload.last_verified_at.unwrap_or(now);
-        // Absolute, as `exp_decay`'s `|x - target|` is: a stamp in the future
-        // — clock skew between a writer and the query host, or an imported
-        // one — decays in Qdrant, and clamping to zero here would report the
-        // undecayed weight for a term the store had already cut.
+        // Absolute, as `exp_decay`'s `|x - target|` is: a future stamp from clock skew still decays
+        // in Qdrant.
         let age = (now - stamp).abs() as f64;
         let decay = 0.5f64.powf(age / half_life_secs.max(1) as f64);
         recency_weight * decay as f32

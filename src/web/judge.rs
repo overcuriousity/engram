@@ -1,11 +1,5 @@
 //! What the base did on its own, and the undo for each, as JSON.
-//!
-//! The insights read, the journal of what the base merged, wrote, hid and
-//! buried, and the routes that take one of those back. Nothing here asks a
-//! person to decide anything: the pair review, the gap list and the
-//! still-accurate button that used to live here went when the base began
-//! settling all three itself. Every undo shares the core call its `/ui/ops`
-//! sibling uses, so the two doors cannot answer one press differently.
+//! Every undo shares the core call of its `/ui/ops` sibling.
 
 use crate::error::Result;
 use crate::tenants::Tenant;
@@ -15,31 +9,20 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-// ── What the base has been doing ─────────────────────────────────────────────
-
-/// One thing the base did on its own.
-///
-/// `kind` is the whole of what says which undo this row admits — each of
-/// them is a route of its own, and a client knows the four. A `kind` this
-/// client has never heard of draws no buttons rather than guessing, which is
-/// what lets the server grow another without breaking an older app.
-///
+/// `kind` names which undo route applies; an unknown `kind` draws no buttons.
 /// `subject_id` is what those routes name: the artifact, for every kind.
 #[derive(serde::Serialize)]
 pub struct SetAsideFacts {
     pub kind: &'static str,
     pub subject_id: String,
-    /// The artifact to open.
     pub artifact_id: String,
     pub label: String,
     pub named: bool,
-    /// What tells two rows with one label apart. Empty where nothing does.
+    /// Empty where nothing tells two rows apart.
     pub subtitle: String,
-    /// Why it is here, in a sentence. Never a mechanism the reader has to
-    /// already know.
+    /// Never a mechanism the reader has to already know.
     pub why: String,
-    /// What the base put beside it — the sources a merge came from, the
-    /// artifact a near-duplicate lost to.
+    /// The sources of a merge, or the artifact a near-duplicate lost to.
     pub beside: Vec<Beside>,
     /// The one thing about this row that is not simply reversible.
     pub caveat: Option<String>,
@@ -53,8 +36,6 @@ pub struct Beside {
     pub named: bool,
 }
 
-/// `GET /insights/set-aside` — the journal of what the base did on its own,
-/// and whether any cap bit.
 async fn set_aside(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     let (rows, capped) = crate::web::insights::set_aside_rows(&tenant).await?;
     let items: Vec<SetAsideFacts> = rows
@@ -87,10 +68,7 @@ async fn set_aside(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     })))
 }
 
-/// What the base is like, read-only.
-///
-/// Read-only by the programme: the base tunes itself, and Insights says what
-/// it did. There is nothing on this page to press.
+/// Read-only: the base tunes itself and Insights reports it.
 async fn insights(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     let held = tenant.core.store.held().await?;
     let used = tenant
@@ -98,9 +76,7 @@ async fn insights(tenant: Tenant) -> Result<Json<serde_json::Value>> {
         .store
         .used(tenant.core.activation.half_life_days, crate::store::now())
         .await?;
-    // Only where searches are recorded. On an installation that records none
-    // the honest answer is that there is nothing to say — not 0.00, which
-    // would read as a score.
+    // Only where searches are recorded; otherwise null, since 0.00 reads as a score.
     let retrieval = match tenant.core.learn.enabled {
         true => {
             let f = tenant
@@ -142,8 +118,6 @@ pub fn routes() -> Router<AppState> {
         .route("/condensations/{id}/undo", post(undo_condensation))
 }
 
-// ── Taking things back ───────────────────────────────────────────────────────
-
 async fn deprecate(tenant: Tenant, Path(aid): Path<String>) -> Result<StatusCode> {
     tenant.core.deprecate(&aid).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -164,9 +138,7 @@ async fn undo_merge(tenant: Tenant, Path(aid): Path<String>) -> Result<StatusCod
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// The path is the condensation's id, not the artifact's. The artifact it was
-/// on comes back from the call and is answered, because a client that just put
-/// a version back wants to re-read that artifact and the path never named it.
+/// The path is the condensation's id; the artifact is answered so the client can re-read it.
 async fn undo_condensation(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -205,8 +177,6 @@ mod tests {
             .unwrap()
     }
 
-    // ── What the base has been doing ────────────────────────────────────────
-
     #[tokio::test]
     async fn insights_says_what_is_held_and_nothing_about_tuning() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -219,9 +189,7 @@ mod tests {
         assert_eq!(body["held"]["artifacts"], 2);
         assert_eq!(body["held"]["corpora"], 1);
         assert!(body["used"].is_array());
-        // Recording is off in the fixture, so there is nothing to say about
-        // retrieval — and nothing to say is null, never 0.00, which would read
-        // as a score.
+        // Nothing to say is null, never 0.00, which would read as a score.
         assert!(body["retrieval"].is_null(), "{body}");
         assert!(
             body.get("tune").is_none(),
@@ -251,9 +219,7 @@ mod tests {
         assert_eq!(hidden["kind"], "hidden");
         assert_eq!(hidden["artifact_id"], ids[1].as_str());
         assert!(hidden["why"].as_str().is_some_and(|w| !w.is_empty()));
-        // What it lost to, so the row can say what took its place.
         assert_eq!(hidden["beside"][0]["id"], ids[0].as_str());
-        // Facts, not a rendering: no hrefs and no button labels.
         let text = body.to_string();
         assert!(!text.contains("/ui/"), "a link crossed the API: {text}");
         assert!(!text.contains("Restore"), "a button label crossed: {text}");
@@ -283,7 +249,6 @@ mod tests {
         use crate::store::actions::{Job, Kind, NewAction};
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
-        // Hidden behind the other by the sweep, journaled as the sweep journals it.
         core.supersede_with(
             &ids[0],
             &ids[1],
@@ -335,10 +300,7 @@ mod tests {
     async fn reactivating_an_artifact_hidden_both_ways_takes_one_press() {
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
-        // Straight to the store, because both doors refuse to make this state
-        // now: `supersede` refuses a deprecated loser and `deprecate` refuses a
-        // superseded one. Rows filed before those guards existed are still in
-        // live bases, and this is the shape they have.
+        // Straight to the store: both doors now refuse this state, but older bases hold it.
         core.deprecate(&ids[0]).await.unwrap();
         core.store
             .set_superseded_by(&ids[0], Some(&ids[1]))

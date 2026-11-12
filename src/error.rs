@@ -19,23 +19,10 @@ pub enum Error {
     Forbidden,
     #[error("inference[{role}]: {detail}")]
     Inference { role: &'static str, detail: String },
-    /// The endpoint understood the request and refused it — a model that does
-    /// not take images, a body over its limit, a name it does not serve. Kept
-    /// apart from `Inference` because the two ask opposite things of a worker:
-    /// one is a wait, the other is the same answer for as long as the same
-    /// request is sent.
+    /// The endpoint understood the request and refused it; retrying sends the same answer back.
     #[error("inference[{role}] rejected: {detail}")]
     InferenceRejected { role: &'static str, detail: String },
-    /// The endpoint is up, understood the request, and will not do it *now* —
-    /// a rate limit, or a model still loading. The third of the three answers
-    /// an endpoint can give, and the only one that waiting fixes.
-    ///
-    /// Apart from `Inference` because reporting it as a bad gateway was a lie
-    /// twice over: the gateway was fine, and the page told an operator their
-    /// endpoint was not answering while it was answering in milliseconds. A
-    /// person typing into the box meets this one far more than either of the
-    /// others — a search is an embedding call per keystroke — so it is the
-    /// variant the interactive path is shaped around.
+    /// The endpoint is up but will not do it now (rate limit, model loading); waiting fixes it.
     #[error("inference[{role}] busy: {detail}")]
     InferenceBusy { role: &'static str, detail: String },
     #[error("vector store: {0}")]
@@ -44,18 +31,13 @@ pub enum Error {
     Store(String),
     #[error("malformed llm output: {0}")]
     MalformedLlmOutput(String),
-    /// This server broke, and no amount of fixing the request will help. Kept
-    /// apart from `Validation` so that a panic in a parser fed a hostile page
-    /// is not reported to the caller as "your input was malformed": the two
-    /// need different status codes, and a 400 hides a crash from every log
-    /// that watches for 5xx.
+    /// This server broke; apart from `Validation` so a crash gets a 5xx, not a 400.
     #[error("internal: {0}")]
     Internal(String),
 }
 
 impl Error {
-    /// Whether a worker should spend another attempt on this. Classified once,
-    /// here, rather than by string-matching at the call site later.
+    /// Whether a worker should spend another attempt on this.
     pub fn retryable(&self) -> bool {
         matches!(
             self,
@@ -76,10 +58,7 @@ impl Error {
             Error::Inference { .. } | Error::InferenceRejected { .. } | Error::Vector(_) => {
                 StatusCode::BAD_GATEWAY
             }
-            // Not a bad gateway: the gateway answered. 503 is the status whose
-            // meaning is "ask again", and it is what lets the client tell a
-            // blip apart from an outage without reading the body — which is
-            // what keeps a rate-limited keystroke from wiping the rail.
+            // 503 means "ask again": the client tells a blip from an outage without the body.
             Error::InferenceBusy { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Error::Store(_) | Error::MalformedLlmOutput(_) | Error::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -87,9 +66,7 @@ impl Error {
         }
     }
 
-    /// What the client is allowed to see. Store and LLM-parse failures carry
-    /// schema and prompt fragments, so they are replaced with a generic string
-    /// and the detail goes to the log instead.
+    /// What the client may see: store and LLM-parse failures carry schema and prompt fragments.
     pub fn client_message(&self) -> String {
         match self {
             Error::Store(_) => "internal error".into(),
@@ -188,8 +165,7 @@ mod tests {
         assert!(Error::Vector("connection refused".into()).retryable());
         assert!(Error::Store("database is locked".into()).retryable());
         assert!(Error::MalformedLlmOutput("expected `{`".into()).retryable());
-        // The endpoint answered and said no: another attempt sends the same
-        // request and gets the same answer.
+        // The endpoint said no: another attempt gets the same answer.
         assert!(
             !Error::InferenceRejected {
                 role: "vision",
@@ -198,7 +174,6 @@ mod tests {
             .retryable()
         );
 
-        // Retrying these burns inference calls and never succeeds.
         assert!(!Error::Validation("empty text".into()).retryable());
         assert!(!Error::NotFound.retryable());
         assert!(!Error::Unauthorized.retryable());

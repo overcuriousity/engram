@@ -1,112 +1,62 @@
-//! How an artifact came to exist, as a tree.
-//!
-//! A merged artifact's pane used to answer "where did this come from" with a
-//! flat list of the captured artifacts underneath it. That is what it is *made
-//! of*, and it is true, but it is not how it came to be: a merge written from
-//! two earlier merges and one fresh capture read as three equal siblings, and
-//! the generation between them — the thing that shows a base consolidating —
-//! was on the page nowhere.
-//!
-//! The generation is stored. `artifact_sources` records the resolved closure,
-//! child to captured root, and beside each row the `via_id` it entered
-//! through; the schema marks that column "rendering only", and this is the
-//! rendering it was left there for.
-//!
-//! What this cannot show is how an artifact's *wording* developed.
-//! `update_artifact_text` overwrites in place and no table keeps revisions, so
-//! an artifact rewritten by hand five times is indistinguishable here from one
-//! nobody has touched. The tree is assembly, not authorship.
+//! How an artifact came to exist, as a tree built from `artifact_sources.via_id`.
+//! It shows assembly, not authorship: text edits keep no revisions.
 
 use crate::error::Result;
 use crate::store::Store;
 use crate::store::artifacts::Chunk;
 use std::collections::{HashMap, HashSet};
 
-/// How deep the tree may go, and how many nodes it may hold.
-///
-/// Merging is bounded in practice — each generation halves the number of
-/// artifacts standing — but the walk reads rows rather than reasoning about
-/// them, and a base with a pathological history should cost a truncated
-/// picture rather than a page that never renders. Truncation is stated, never
-/// silent: see `Lineage::truncated`.
+/// The walk reads rows rather than reasoning about them, so a pathological history is truncated, and says so.
 const MAX_DEPTH: usize = 6;
 const MAX_NODES: usize = 200;
 
-/// The document a captured artifact was drawn from, as facts: what the
-/// `source_href` beside it is built out of. What crosses the API, where a
-/// client builds its own way there.
+/// What `source_href` is built from, and what crosses the API.
 #[derive(Clone, serde::Serialize)]
 pub struct NodeSource {
     pub corpus_id: String,
-    /// The document's title, its URL where it has no title, or the sentence
-    /// that says it is no longer stored.
+    /// The title, the URL where there is none, or a sentence saying it is no longer stored.
     pub label: String,
-    /// The lines it was written from. Absent for an artifact written before
-    /// spans were recorded, or restored from the vector store.
+    /// Absent for an artifact written before spans were recorded, or restored from the vector store.
     pub start_line: Option<i64>,
     pub end_line: Option<i64>,
 }
 
-/// One artifact in the tree, and what it was written from.
-///
-/// Serialised for `GET /api/v1/artifacts/{id}/lineage` as its facts. The three
-/// fields that are a rendering of those facts — `when`, `source_href`,
-/// `source_label` — are the HTML door's and do not cross.
+/// Serialised for `GET /api/v1/artifacts/{id}/lineage`; `when`, `source_href` and `source_label` are HTML-only.
 #[derive(serde::Serialize)]
 pub struct LineageNode {
     pub id: String,
     #[serde(rename = "label")]
     pub title: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`. A node is a link and nothing
-    /// else, so it can never be empty; it can say it is not a name.
+    /// Whether `title` is a given name; see `ui::RowLabel`.
     pub named: bool,
     /// `merge` or `captured` — what kind of artifact this is, in one word.
     pub kind: &'static str,
     #[serde(skip)]
     pub when: String,
-    /// Not rendered. What the levels are ordered by: a tree read top to bottom
-    /// is a history, and one ordered by id is a history in no order at all.
+    /// Not rendered; levels are ordered by it.
     pub created_at: i64,
-    /// The document this was drawn from, deep-linked to its exact lines.
-    /// Empty for a merge, which belongs to no document.
+    /// Deep-linked to its exact lines; empty for a merge.
     #[serde(skip)]
     pub source_href: String,
     #[serde(skip)]
     pub source_label: String,
-    /// The same document as facts. `None` for a merge.
+    /// `None` for a merge.
     pub source: Option<NodeSource>,
-    /// This artifact was superseded by the one at the root of the tree — the
-    /// ordinary outcome of a merge, and worth saying on the node rather than
-    /// leaving the reader to infer it from the arrangement.
+    /// Superseded by the tree's root, the ordinary outcome of a merge.
     pub replaced: bool,
-    /// The row is gone: a source deleted since the merge was written. Named
-    /// rather than dropped, because a tree that silently loses a branch claims
-    /// less provenance than the artifact's text carries.
+    /// A source deleted since the merge; named so the tree does not silently lose a branch.
     pub missing: bool,
     pub children: Vec<LineageNode>,
 }
 
-/// The whole picture for one artifact.
-///
-/// `Default` is the empty one: a captured artifact that has replaced nothing,
-/// and the fallback when the walk itself fails — a pane must render without
-/// its lineage, the same way it renders without its neighbours.
+/// `Default` is the empty tree, also the fallback when the walk fails.
 #[derive(Default, serde::Serialize)]
 pub struct Lineage {
-    /// What it was written from, nested by generation. Empty for a captured
-    /// artifact, which was written from a document rather than from artifacts.
+    /// Empty for a captured artifact.
     pub roots: Vec<LineageNode>,
-    /// Artifacts this one replaced that are nowhere in the tree above.
-    ///
-    /// Kept apart on purpose: the dedupe sweep can supersede a near-duplicate
-    /// without merging anything, and that is a different claim from "this was
-    /// written from it". Rendering both under one heading would say the text
-    /// of one is carried by the other, which in this case nothing checked.
+    /// Kept apart: a dedupe supersede is not a claim that this was written from it.
     pub also_replaced: Vec<LineageNode>,
-    /// The walk hit `MAX_DEPTH` or `MAX_NODES` and the tree is a prefix of the
-    /// truth. The page says so; a tree that quietly stops is worse than no
-    /// tree, because it reads as a complete history.
+    /// The walk hit `MAX_DEPTH` or `MAX_NODES`; the page says so.
     pub truncated: bool,
 }
 
@@ -115,24 +65,20 @@ impl Lineage {
         self.roots.is_empty() && self.also_replaced.is_empty()
     }
 
-    /// The tree, depth first, for the template.
     pub fn flat_roots(&self) -> Vec<FlatNode<'_>> {
         let mut out = Vec::new();
         flatten(&self.roots, 0, &mut out);
         out
     }
 
-    /// The near duplicates it replaced. Flat by nature — nothing was written
-    /// from them, so they have no lineage to show under them here.
+    /// Flat: nothing was written from them.
     pub fn flat_replaced(&self) -> Vec<FlatNode<'_>> {
         let mut out = Vec::new();
         flatten(&self.also_replaced, 0, &mut out);
         out
     }
 
-    /// How many captured artifacts the tree ends in — what "written from four
-    /// artifacts" counts. The generations between are not artifacts this was
-    /// written from; they are the route it took.
+    /// The generations between are the route, not sources.
     pub fn leaves(&self) -> usize {
         fn walk(ns: &[LineageNode]) -> usize {
             ns.iter()
@@ -149,16 +95,10 @@ impl Lineage {
     }
 }
 
-/// One node as the template draws it: the tree flattened, depth first, with
-/// the depth it sits at.
-///
-/// Askama resolves `include` at compile time, so a template cannot include
-/// itself and a nested `<ul>` is not expressible. Flattening here rather than
-/// contorting the model: the tree is the honest shape to build, test and reason
-/// about, and indentation is a rendering concern.
+/// Askama cannot include a template recursively, so the tree is flattened here with its depth.
 pub struct FlatNode<'a> {
     pub depth: usize,
-    /// Last child of its parent — which connector glyph to draw.
+    /// Last child of its parent, for the connector glyph.
     pub last: bool,
     pub n: &'a LineageNode,
 }
@@ -174,24 +114,17 @@ fn flatten<'a>(ns: &'a [LineageNode], depth: usize, out: &mut Vec<FlatNode<'a>>)
     }
 }
 
-/// Everything one page of this needs from the store, read once.
-///
-/// Corpus titles are looked up per leaf and a wide merge has many leaves from
-/// few documents; the cache is what keeps that one query per document rather
-/// than one per artifact.
+/// Corpus titles are cached: one query per document, not per leaf.
 struct Walk<'a> {
     store: &'a Store,
     corpora: HashMap<String, String>,
-    /// Ids this artifact superseded, for the `replaced` tag.
     replaced: HashSet<String>,
-    /// Every id the tree already holds — cycle guard, and the answer to which
-    /// superseded artifacts still need their own section.
+    /// Cycle guard, and which superseded artifacts still need their own section.
     seen: HashSet<String>,
     nodes: usize,
     truncated: bool,
 }
 
-/// The lineage of `id`: what it was written from, and what it replaced.
 pub async fn build(store: &Store, id: &str) -> Result<Lineage> {
     let mut w = Walk {
         store,
@@ -208,8 +141,7 @@ pub async fn build(store: &Store, id: &str) -> Result<Lineage> {
 
     let roots = w.expand(id, 0).await?;
 
-    // What it replaced without being written from it. Read after the walk, so
-    // "already in the tree" means the whole tree and not the part built so far.
+    // Read after the walk, so "already in the tree" means the whole tree.
     let mut also_replaced = Vec::new();
     let outside: Vec<String> = w
         .replaced
@@ -228,15 +160,13 @@ pub async fn build(store: &Store, id: &str) -> Result<Lineage> {
     })
 }
 
-/// Deterministic order for a set: two runs of the same page must not shuffle.
+/// Deterministic order, so two renders do not shuffle.
 fn sorted(mut ids: Vec<String>) -> Vec<String> {
     ids.sort();
     ids
 }
 
 impl Walk<'_> {
-    /// The children of `id`: the artifacts it was written from, each with its
-    /// own children under it.
     async fn expand(&mut self, id: &str, depth: usize) -> Result<Vec<LineageNode>> {
         if depth >= MAX_DEPTH || self.nodes >= MAX_NODES {
             self.truncated = true;
@@ -244,16 +174,12 @@ impl Walk<'_> {
         }
         let rows = self.store.sources_with_via(id).await?;
 
-        // Two kinds of row. `via == root` is a root merged in directly; anything
-        // else names the intermediate it came through, and those group into one
-        // node per intermediate — that node is the generation the flat list had
-        // no way to show.
+        // `via == root` is a direct root; anything else groups under its intermediate, which is the generation.
         let mut direct: Vec<String> = Vec::new();
         let mut through: HashMap<String, Vec<String>> = HashMap::new();
         for (root, via) in rows {
             match via {
-                // `None` is an intermediate deleted since; the row still knows
-                // its root, so the root is shown where it would have hung.
+                // `None` is an intermediate deleted since; the root still shows.
                 Some(v) if v != root => through.entry(v).or_default().push(root),
                 _ => direct.push(root),
             }
@@ -273,19 +199,14 @@ impl Walk<'_> {
                 self.truncated = true;
                 break;
             }
-            // A cycle cannot happen — a merge is written before it supersedes
-            // anything, so its sources are always older — but the guard costs a
-            // hash lookup and the alternative is a page that never returns.
+            // A cycle cannot happen (sources are always older), but the guard is cheap.
             if !self.seen.insert(via.clone()) {
                 continue;
             }
             let mut n = self.node(&via).await;
             n.children = Box::pin(self.expand(&via, depth + 1)).await?;
             if n.children.is_empty() {
-                // The intermediate's own lineage rows are gone, but this
-                // artifact's rows still name what came through it. Better the
-                // roots under an empty parent than a parent claiming nothing
-                // came through it at all.
+                // The intermediate's rows are gone; show the roots under an empty parent.
                 for root in sorted(through[&via].clone()) {
                     self.seen.insert(root.clone());
                     n.children.push(self.node(&root).await);
@@ -293,16 +214,11 @@ impl Walk<'_> {
             }
             out.push(n);
         }
-        // Oldest first, so the level reads as the order things happened. `sorted`
-        // above only makes the walk deterministic; it says nothing about time,
-        // and a merge listed before the capture it was written from reads as a
-        // history running backwards.
+        // Oldest first, so the level reads in the order things happened.
         out.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.title.cmp(&b.title)));
         Ok(out)
     }
 
-    /// One node, read from the store. An id with no row is a source deleted
-    /// since; it becomes a node that says so rather than disappearing.
     async fn node(&mut self, id: &str) -> LineageNode {
         self.nodes += 1;
         let replaced = self.replaced.contains(id);
@@ -310,13 +226,11 @@ impl Walk<'_> {
             return LineageNode {
                 id: id.to_string(),
                 title: "deleted since".into(),
-                // Not a name and not an opening either — it is the tree saying
-                // what happened. Set as text, like the other nameless nodes.
+                // Not a name: the tree saying what happened, set as text.
                 named: false,
                 kind: "gone",
                 when: String::new(),
-                // Nothing is known about when it was written; it sorts to the
-                // front, where a reader looking for what is missing will be.
+                // Unknown age sorts to the front, where a reader looking for what is missing will be.
                 created_at: 0,
                 source_href: String::new(),
                 source_label: String::new(),
@@ -350,9 +264,7 @@ impl Walk<'_> {
         }
     }
 
-    /// Where a captured artifact was drawn from, as a link and its label. The
-    /// same deep link the pane's own Source label uses, so a leaf of the tree
-    /// opens the document at the lines it was written from.
+    /// The same deep link as the pane's Source label.
     async fn source_of(&mut self, c: &Chunk) -> (String, String, Option<NodeSource>) {
         let Some(cid) = c.corpus_id.clone() else {
             return (String::new(), String::new(), None);
@@ -365,8 +277,7 @@ impl Walk<'_> {
                         .title_hint
                         .or(s.source_url)
                         .unwrap_or_else(|| "untitled".into()),
-                    // The document row is gone; the artifact still names it, and
-                    // the link still resolves to a page that says so.
+                    // The document row is gone; the link still resolves to a page that says so.
                     Err(_) => "a document no longer stored".to_string(),
                 };
                 self.corpora.insert(cid.clone(), t.clone());
@@ -392,8 +303,7 @@ impl Walk<'_> {
                 },
                 source,
             ),
-            // No span: written before spans were recorded, or restored from the
-            // vector store. The document is still the honest answer.
+            // No span: written before spans were recorded, or restored from the vector store.
             None => (
                 format!("/ui/corpora/{cid}"),
                 format!("from {title}"),
@@ -512,7 +422,6 @@ mod tests {
             askama::Template::render(&crate::web::artifact::ArtifactDetailFragment { d }).unwrap();
         assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
         assert!(html.contains("name-opening"), "{html}");
-        // And the class has to do something, or the distinction lives nowhere.
         let css = include_str!("../../assets/css/73-components.css");
         assert!(css.contains(".name-opening"), "the class has no rule");
     }
@@ -690,8 +599,6 @@ mod tests {
 
         let l = build(&s, &m.id).await.unwrap();
 
-        // The row is gone with its lineage row, so what survives is one live
-        // source; either way nothing here may claim two.
         assert!(
             l.roots
                 .iter()
@@ -701,8 +608,6 @@ mod tests {
         assert!(l.roots.iter().any(|n| n.id == ids[1]));
         assert!(!l.roots.iter().any(|n| n.id == ids[0] && !n.missing));
     }
-
-    // ── The JSON door, held to what the tree is held to ────────────────────
 
     async fn json_lineage(core: crate::core::Core, id: &str) -> (u16, serde_json::Value) {
         use tower::ServiceExt;

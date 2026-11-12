@@ -15,8 +15,7 @@ pub fn hash_password(password: &str) -> Result<String> {
 
 pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> Option<Identity> {
     if username != cfg.username {
-        // Still run the hash so a wrong username and a wrong password take
-        // the same time.
+        // Hash anyway so wrong username and wrong password take the same time.
         let _ = verify_secret(password, &cfg.password_hash);
         return None;
     }
@@ -24,8 +23,6 @@ pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> O
         Some(Identity {
             subject: cfg.username.clone(),
             email: None,
-            // The session does not exist yet: this is the check that decides
-            // whether to create one.
             session: None,
         })
     } else {
@@ -33,7 +30,6 @@ pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> O
     }
 }
 
-/// Local auth answers on loopback only; a proxy in front is how it is reached from elsewhere.
 pub fn assert_bind_is_safe(bind: &str) -> Result<()> {
     let host = bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind);
     let host = host.trim_start_matches('[').trim_end_matches(']');
@@ -80,8 +76,7 @@ mod tests {
 
     #[test]
     fn local_mode_refuses_a_non_loopback_bind() {
-        // A dev shortcut reachable from the network is production auth by
-        // accident. Refuse rather than warn.
+        // A network-reachable dev shortcut is production auth by accident.
         assert!(assert_bind_is_safe("0.0.0.0:8080").is_err());
         assert!(assert_bind_is_safe("192.168.1.10:8080").is_err());
         assert!(assert_bind_is_safe("[::]:8080").is_err());

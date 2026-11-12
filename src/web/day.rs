@@ -1,6 +1,4 @@
-//! One day of the base: what was captured, what was due, what refers to it,
-//! and the sittings — every section a read over tables that exist, no model
-//! call, no prose generated.
+//! One day of the base: captures, due, references and sittings, read from tables with no model call.
 
 use crate::core::moments::zone;
 use crate::error::Error;
@@ -36,10 +34,7 @@ pub(crate) struct Line {
     pub detail: String,
 }
 
-/// One artifact a sitting opened, as the row links to it. A pair of strings
-/// could not say whether the label was a name or the opening of the text
-/// standing in for one — see `ui::RowLabel` — and the row is a link and
-/// nothing else, so it needs both.
+/// The row is a link only, so it needs to know whether the label is a name (see `ui::RowLabel`).
 #[derive(serde::Serialize)]
 pub(crate) struct Opened {
     pub id: String,
@@ -59,10 +54,7 @@ pub(crate) struct Sitting {
 pub(crate) struct DayTemplate {
     pub prev: String,
     pub next: String,
-    /// What the two arrows say out loud. The heading beside them is
-    /// "Sunday, 6 September 2026" and the arrows were `2026-09-05` and
-    /// `2026-09-07` — three dates in one row, written two ways. Short, because
-    /// they sit either side of the heading and are a step rather than a date.
+    /// Short: the arrows are a step beside the long-form heading, not dates.
     pub prev_label: String,
     pub next_label: String,
     pub tz: String,
@@ -71,17 +63,11 @@ pub(crate) struct DayTemplate {
     pub was_due: Vec<Line>,
     pub refers: Vec<Line>,
     pub sittings: Vec<Sitting>,
-    /// `false` on the embed-only floor: nothing is read for a date, so "Was
-    /// due" and "Refers to this day" can never fill, and the page says why.
+    /// `false` on the embed-only floor: nothing is read for a date, so the page says why "Was due" is empty.
     pub synthesizes: bool,
 }
 
 impl DayTemplate {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
     fn section(&self) -> &'static str {
         ""
     }
@@ -96,19 +82,14 @@ impl DayTemplate {
     }
 }
 
-/// The day's `[from, to)` in Unix seconds, in the viewer's zone.
+/// `[from, to)` in Unix seconds, in the viewer's zone.
 fn bounds(date: NaiveDate, tz: Tz) -> Option<(i64, i64)> {
-    // Checked: chrono's `%Y` reads signed six-digit years, so a URL can name
-    // `NaiveDate::MAX`, and a plain `+ days(1)` on it panics the connection
-    // away instead of answering the 404 the caller makes of `None`.
+    // Checked: chrono's `%Y` reads six-digit years, so a URL can name `NaiveDate::MAX`.
     let next = date.checked_add_signed(chrono::Duration::days(1))?;
     Some((day_start(date, tz)?, day_start(next, tz)?))
 }
 
-/// Local midnight — or, where there is no local midnight, the first instant of
-/// the day there is. A zone whose clocks go forward at 00:00 (Havana, and
-/// Santiago and São Paulo historically) has one day a year with no 00:00 at
-/// all, and that day's page is reachable from every "today" link.
+/// Or the day's first instant where there is no local midnight (zones that spring forward at 00:00).
 fn day_start(date: NaiveDate, tz: Tz) -> Option<i64> {
     for hour in 0..4 {
         let local = date.and_hms_opt(hour, 0, 0)?;
@@ -141,15 +122,12 @@ async fn today(tenant: Tenant, Query(q): Query<TzQuery>) -> UiResult<Response> {
     .into_response())
 }
 
-/// One day, as facts: ids, instants and labels, and nothing that belongs to a
-/// rendering. No `href`, no "14:32" — the HTML page builds those from this,
-/// and the JSON door serialises it as it stands, so the two are one
-/// computation and cannot disagree about what happened on a day.
+/// Facts only, no rendering: the HTML page and the JSON door share this computation.
 #[derive(serde::Serialize)]
 pub(crate) struct Day {
     pub date: String,
     pub tz: String,
-    /// The day's `[from, to)` in Unix seconds, in `tz`.
+    /// `[from, to)` in Unix seconds, in `tz`.
     pub from: i64,
     pub to: i64,
     pub captured: Vec<DayCorpus>,
@@ -162,7 +140,7 @@ pub(crate) struct Day {
 pub(crate) struct DayCorpus {
     pub id: String,
     pub label: String,
-    /// Whether `label` is a name somebody gave it — see `ui::RowLabel`.
+    /// Whether `label` is a given name; see `ui::RowLabel`.
     pub named: bool,
     pub at: i64,
 }
@@ -172,7 +150,7 @@ pub(crate) struct DayMoment {
     pub id: String,
     pub artifact_id: String,
     pub label: String,
-    /// Whether `label` is a name somebody gave the artifact.
+    /// Whether `label` is a given name.
     pub named: bool,
     /// `due` or `event`.
     pub kind: &'static str,
@@ -191,24 +169,19 @@ pub(crate) struct DaySitting {
     pub opened: Vec<Opened>,
 }
 
-/// What happened on `date`, read in `tz`. `NotFound` for a date that is not
-/// one, which is what both doors answer it with.
+/// `NotFound` for a date that is not one, which both doors answer with.
 pub(crate) async fn facts(tenant: &Tenant, date: &str, tz: Tz) -> Result<Day, Error> {
     let Ok(day) = NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
         return Err(Error::NotFound);
     };
-    // Round-tripped through the parse: chrono reads `%Y-%m-%d` leniently, so
-    // `/ui/day/2026-8-30` parses, and the spelling goes back out on the page
-    // and in the JSON.
+    // Round-tripped: chrono reads `%Y-%m-%d` leniently, so the canonical spelling goes back out.
     let date = day.format("%Y-%m-%d").to_string();
     let Some((from, to)) = bounds(day, tz) else {
         return Err(Error::NotFound);
     };
     let store = &tenant.core.store;
 
-    // Every corpus created on the day. A row is a link, never a body: a day
-    // on which a book was captured would otherwise send the whole book down
-    // the wire and into the phone's cache — `docs/api.md` rule 2.
+    // A row is a link, never a body (`docs/api.md` rule 2).
     let captured = store
         .corpora_between(from, to)
         .await?
@@ -283,7 +256,7 @@ pub(crate) async fn facts(tenant: &Tenant, date: &str, tz: Tz) -> Result<Day, Er
     })
 }
 
-/// The JSON door onto the same day. `GET /api/v1/days/{date}?tz=`.
+/// `GET /api/v1/days/{date}?tz=`.
 pub(crate) async fn api_day(
     tenant: Tenant,
     Path(date): Path<String>,
@@ -299,12 +272,9 @@ async fn page(
 ) -> UiResult<Response> {
     let tz = zone(Some(&q.tz));
     let d = facts(&tenant, &date, tz).await?;
-    // `facts` answered, so the date parses; canonical, because `facts` made it so.
     let day = NaiveDate::parse_from_str(&d.date, "%Y-%m-%d").map_err(|_| Error::NotFound)?;
     let from = d.from;
-    // The zone as the zone table spells it, never as the query string spelled
-    // it: it goes back out on every `prev`/`next` href, and `due.rs::render`
-    // normalises for the same reason.
+    // As the zone table spells it: it goes back out on every `prev`/`next` href.
     let tz_name = d.tz;
 
     let corpus_line = |c: DayCorpus| Line {
@@ -430,9 +400,7 @@ mod tests {
 
     #[test]
     fn a_day_with_no_local_midnight_still_has_bounds() {
-        // Havana moved its clocks forward at 00:00 on 2026-03-08: there is no
-        // 00:00 that day, and `.earliest()` on it is None. The day page is
-        // reachable from every "today" link and must not 404 for it.
+        // Havana skipped 00:00 on 2026-03-08, so `.earliest()` is None that day.
         let tz: Tz = "America/Havana".parse().unwrap();
         let day = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
         let (from, to) = bounds(day, tz).expect("the day starts at 01:00, not never");
@@ -442,9 +410,7 @@ mod tests {
 
     #[test]
     fn the_edge_of_representable_time_is_a_404_not_a_panic() {
-        // chrono's `%Y` reads signed six-digit years, so a URL can spell the
-        // last representable day; the +1 for the day's upper bound must
-        // answer `None` — the page's 404 — not abort the connection.
+        // The +1 for the upper bound of `NaiveDate::MAX` must answer `None`, not panic.
         assert!(bounds(NaiveDate::MAX, "UTC".parse().unwrap()).is_none());
     }
 
@@ -464,10 +430,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_zone_the_table_cannot_spell_never_reaches_a_location_header() {
-        // The raw query value went straight into `Redirect::to`. A `tz` with a
-        // character no header may carry built a `Location` axum then refused
-        // to send, and the day page answered 500 instead of redirecting — on
-        // the `today` link, which is how the page is reached at all.
+        // A `tz` no header may carry must not reach `Redirect::to`, or the redirect is a 500.
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         for tz in ["%C3%9C", "Europe%2FBerlin%0D%0AX:+1", "Not/AZone"] {
@@ -533,8 +496,6 @@ mod tests {
             ))
             .await
             .unwrap();
-        // The capture lands at the real now, not on the fixed day; the row is
-        // moved into the day's bounds by hand, as the fixture above does it.
         let (from, _) = bounds(NaiveDate::from_ymd_opt(2026, 8, 30).unwrap(), tz).unwrap();
         sqlx::query!(
             "UPDATE corpora SET created_at = ? WHERE id = ?",
@@ -629,11 +590,6 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::test_support::drain(&core).await;
-        // The live one, and not simply the first: `drain` promotes this
-        // capture, so `artifacts_for_corpus` opens with the superseded
-        // verbatim passage. Hanging the day's moments off that row was the
-        // test asserting the very thing `moments_between`'s missing
-        // `status = 'active'` used to let through.
         let aid = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -675,9 +631,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // The capture itself landed at the real now, not on the fixed day;
-        // what is pinned for "Captured" is the section over a corpus created
-        // inside the day's bounds, so one is written there by hand.
         let (from, _) = bounds(NaiveDate::from_ymd_opt(2026, 8, 30).unwrap(), tz).unwrap();
         sqlx::query!(
             "UPDATE corpora SET created_at = ? WHERE id = ?",
@@ -707,8 +660,6 @@ mod tests {
             assert!(html.contains(s), "{s}");
         }
 
-        // The other door onto the same day, over the same fixture: two doors
-        // onto one fact that disagree are worse than one door.
         let res = app
             .oneshot(get("/api/v1/days/2026-08-30?tz=Europe/Berlin", &cookie))
             .await
@@ -728,7 +679,6 @@ mod tests {
         assert_eq!(day["refers"][0]["span"], "12.9.");
         assert_eq!(day["sittings"][0]["query"], "qdrant payload filter");
         assert_eq!(day["sittings"][0]["opened"][0]["id"], aid.as_str());
-        // Facts, and nothing a rendering made of them.
         let text = day.to_string();
         assert!(!text.contains("/ui/"), "an href crossed the API: {text}");
     }

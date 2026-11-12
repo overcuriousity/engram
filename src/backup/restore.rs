@@ -1,15 +1,5 @@
-//! `engram --restore DIR [--user S] [--reembed] [--force-version]`.
-//!
-//! Spec §4. `preflight` is every check, and writes nothing: not a file under
-//! `store.dir`, not the lock file, not a sidecar of the live control
-//! database. Only once it has passed does `apply` take the lock, stage the
-//! databases beside their targets, load each tenant's snapshot into the next
-//! generation and point the alias at it, then swap the databases in by
-//! `rename` — tenants first, the control database last — and end with the
-//! verification of §5, reconciling as it goes.
-//!
-//! The previous generation of every alias is left in Qdrant: it is the
-//! rollback, and the report names it with the request that deletes it.
+//! `engram --restore` (spec §4). `preflight` writes nothing, not even the lock or a control sidecar.
+//! `apply` swaps tenants before the control database; previous alias generations stay as the rollback.
 
 use super::generations::{AliasState, Generations, QdrantGenerations};
 use super::manifest::{
@@ -25,22 +15,17 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
 pub struct RestoreOpts {
-    /// One tenant, by slug or subject. Never touches `control.db`.
+    /// Never touches `control.db`.
     pub user: Option<String>,
-    /// Restore the databases and skip the snapshots: every tenant gets an
-    /// empty generation at the configured width and re-embeds.
+    /// Skip the snapshots: every tenant gets an empty generation and re-embeds.
     pub reembed: bool,
-    /// Accept an archive written by a newer engram.
     pub force_version: bool,
 }
 
-/// Why a restore will not start. Nothing has been written when one of these
-/// is returned.
+/// Nothing has been written when one of these is returned.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Refusal {
-    /// The manifest does not parse, or a file it names is absent or altered.
     Archive(String),
-    /// The server lock is held.
     ServerRunning(String),
     VersionSkew {
         archive: String,
@@ -118,34 +103,31 @@ impl std::fmt::Display for Refusal {
     }
 }
 
-/// What `preflight` agreed to restore.
 #[derive(Debug, Clone)]
 pub struct Plan {
     pub dir: PathBuf,
     pub manifest: Manifest,
-    /// The tenants to restore: all of them, or the one `--user` named.
     pub tenants: Vec<TenantEntry>,
-    /// Whether `control.db` is restored too (not under `--user`).
+    /// Not under `--user`.
     pub control: bool,
     pub reembed: bool,
     /// Said, not refused: an archive from another build of the same version.
     pub warnings: Vec<String>,
 }
 
-/// How an archive's `engram_version` stands against this binary's.
 #[derive(Debug, PartialEq)]
 enum Skew {
     /// Same version, and the same build or one of the two builds unknown.
     Same,
-    /// Older: the schema files migrate forward.
+    /// The schema files migrate forward.
     Older,
-    /// Newer, or not comparable: refused unless `--force-version`.
+    /// Refused unless `--force-version`.
     Newer,
-    /// Same semver, two different known commits: reported, not refused.
+    /// Reported, not refused.
     OtherBuild(String),
 }
 
-/// Both sides are `<semver>[+<sha>]`; the `+<sha>` is what `build.rs` adds.
+/// The `+<sha>` is what `build.rs` adds.
 fn version_skew(archive: &str, binary: &str) -> Skew {
     let (a, b) = match (semver(archive), semver(binary)) {
         (Some(a), Some(b)) => (a, b),
@@ -168,7 +150,6 @@ fn version_skew(archive: &str, binary: &str) -> Skew {
     }
 }
 
-/// `x.y.z`, anything after a `-` or `+` ignored.
 fn semver(v: &str) -> Option<(u64, u64, u64)> {
     let core = v.split(['-', '+']).next()?;
     let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
@@ -176,9 +157,7 @@ fn semver(v: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(t)
 }
 
-/// Every check of spec §4 steps 0–1, in an order that reads nothing it does
-/// not have to: the archive, then the lock, then the archive against this
-/// build and config, and only then the live control database.
+/// Ordered to read nothing it need not: archive, lock, config, and only then the live control database.
 pub async fn preflight(
     cfg: &Config,
     dir: &Path,
@@ -187,8 +166,7 @@ pub async fn preflight(
 ) -> std::result::Result<Plan, Refusal> {
     let archive = |e: Error| Refusal::Archive(e.to_string());
     let m = Manifest::load(dir).map_err(archive)?;
-    // Names are rebuilt from validated slugs and aliases before any is joined
-    // to `dir`; `verify` refuses the rest before it opens anything.
+    // Names are rebuilt from validated slugs before any is joined to `dir`.
     for t in &m.tenants {
         let named = match &t.vector {
             Some(v) => valid_slug(&t.slug) && valid_alias(&v.alias),
@@ -233,9 +211,7 @@ pub async fn preflight(
 
     let configured = cfg.infer.embed.dim;
     if !opts.reembed {
-        // The width is part of the fingerprint, so a width change is a recipe
-        // change; it is named as such because it is the one that cannot be
-        // queried at all. `--force-version` bypasses neither.
+        // The width is in the fingerprint but named separately: it cannot be queried at all.
         let archived_dim = std::iter::once(m.embed.dim)
             .chain(
                 m.tenants
@@ -294,10 +270,7 @@ pub async fn preflight(
     })
 }
 
-/// `(slug, subject)` of every user in the live control database, read
-/// `immutable`: no lock, and no `-wal` or `-shm` created beside a file this
-/// command may be about to refuse to touch. The server is stopped (the lock
-/// probe said so), so there is no writer to miss.
+/// Read `immutable` so no `-wal`/`-shm` appears beside a file this may refuse to touch; the lock says no writer runs.
 async fn live_users(control: &Path) -> Result<Vec<(String, String)>> {
     if !control.is_file() {
         return Err(Error::Store(format!(
@@ -319,26 +292,20 @@ async fn live_users(control: &Path) -> Result<Vec<(String, String)>> {
     Ok(rows.into_iter().map(|r| (r.slug, r.subject)).collect())
 }
 
-/// What happened to one tenant's vectors.
 #[derive(Debug, Clone)]
 pub struct Moved {
     pub slug: String,
     pub alias: String,
-    /// The generation the alias served before, now the rollback.
     pub previous: Option<String>,
-    /// What it serves now, or why it still serves `previous`.
     pub current: std::result::Result<String, String>,
-    /// Points uploaded minus the manifest's count, when an online archive
-    /// counted after its snapshot and the two differ; the reconcile settles it.
+    /// Uploaded minus manifest count for an online archive; the reconcile settles it.
     pub drift: Option<i64>,
 }
 
 #[derive(Debug)]
 pub struct Outcome {
-    /// What preflight said but did not refuse.
     pub warnings: Vec<String>,
     pub moved: Vec<Moved>,
-    /// Tenants whose database was swapped in.
     pub swapped: Vec<String>,
     pub control_swapped: bool,
     pub reembed: bool,
@@ -346,7 +313,6 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// FAIL when any tenant was not restored, else the verification's word.
     pub fn verdict(&self) -> Verdict {
         if self.moved.iter().any(|m| m.current.is_err()) {
             Verdict::Fail
@@ -413,7 +379,6 @@ impl std::fmt::Display for Outcome {
     }
 }
 
-/// `--restore` against the configured Qdrant.
 pub async fn restore(
     cfg: &Config,
     dir: &Path,
@@ -425,7 +390,6 @@ pub async fn restore(
     restore_with(cfg, dir, opts, Backend::Qdrant, &gens).await
 }
 
-/// A refusal (nothing written) or a failure part way (see the message).
 #[derive(Debug)]
 pub enum RestoreError {
     Refused(Refusal),
@@ -461,8 +425,7 @@ pub async fn apply(cfg: &Config, plan: &Plan, gens: &dyn Generations) -> Result<
     stage_all(cfg, plan)?;
     let moved = move_vectors(cfg, plan, gens).await;
 
-    // A tenant whose vectors did not move keeps its old database too: the
-    // old pair agrees with itself, a new database over old vectors would not.
+    // A tenant whose vectors did not move keeps its old database: the old pair agrees with itself.
     let mut swapped = vec![];
     for (t, m) in plan.tenants.iter().zip(&moved) {
         let target = tenant_db(cfg, &t.slug);
@@ -499,7 +462,6 @@ fn tenant_db(cfg: &Config, slug: &str) -> PathBuf {
     Path::new(&cfg.store.dir).join(format!("{slug}.db"))
 }
 
-/// Step 3: every database copied beside its target and re-hashed.
 fn stage_all(cfg: &Config, plan: &Plan) -> Result<()> {
     std::fs::create_dir_all(&cfg.store.dir)
         .map_err(|e| Error::Store(format!("{}: {e}", cfg.store.dir)))?;
@@ -525,7 +487,6 @@ fn stage_all(cfg: &Config, plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-/// Step 4, per tenant: the next generation, filled and checked, then adopted.
 async fn move_vectors(cfg: &Config, plan: &Plan, gens: &dyn Generations) -> Vec<Moved> {
     let mut out = Vec::with_capacity(plan.tenants.len());
     for t in &plan.tenants {
@@ -565,8 +526,7 @@ async fn one_tenant(
             let file = plan.dir.join(manifest::vector_file(&v.alias));
             gens.import(alias, &file, &target, dim).await?;
             let got = gens.count(alias, &target).await?;
-            // An online archive counts after its snapshot, so concurrent
-            // upserts can make the two differ; the reconcile settles that.
+            // An online archive counts after its snapshot, so concurrent upserts can make them differ.
             if got != v.points && plan.manifest.mode == Mode::Online {
                 drift = Some(got as i64 - v.points as i64);
             } else if got != v.points {
@@ -578,7 +538,6 @@ async fn one_tenant(
                 )));
             }
         }
-        // The vectors are in the database itself; nothing to move.
         (None, false) => return Ok((String::new(), None)),
     }
     gens.adopt(alias, &target).await?;
@@ -604,7 +563,6 @@ pub(crate) mod tests {
         pub slugs: Vec<String>,
         pub subjects: Vec<String>,
         pub gens: MemGens,
-        /// Per slug, the one artifact the base calls embedded.
         pub embedded: Vec<String>,
     }
 
@@ -631,15 +589,11 @@ pub(crate) mod tests {
         }
     }
 
-    /// Two tenants, three artifacts each with one embedded and its point
-    /// served from `{alias}_v1`, the queue empty, every pool closed (the
-    /// server is stopped), and a backup of all of it in `archive`.
+    /// Two tenants, one embedded artifact each, queue empty, pools closed, backed up into `archive`.
     pub(crate) async fn backed_up() -> Base {
         backed_up_with(|id| vec![point(id)]).await
     }
 
-    /// `backed_up`, with `points(embedded_id)` the points each tenant's
-    /// generation holds when the backup is taken, to put a skew into it.
     pub(crate) async fn backed_up_with(points: impl Fn(&str) -> Vec<VectorPoint>) -> Base {
         let tmp = tempfile::tempdir().unwrap();
         let store_dir = tmp.path().join("store");
@@ -695,7 +649,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// Every file under `dir`, by relative path, with its SHA-256.
     pub(crate) fn hash_dir(dir: &Path) -> BTreeMap<PathBuf, String> {
         let mut out = BTreeMap::new();
         let mut stack = vec![dir.to_path_buf()];
@@ -717,7 +670,6 @@ pub(crate) mod tests {
         manifest::sha256_file(p).unwrap().0
     }
 
-    /// Run `preflight`, expect a refusal, and prove it wrote nothing.
     async fn refused(base: &Base, opts: &RestoreOpts, backend: Backend) -> Refusal {
         let before = hash_dir(&base.store_dir);
         let control = sha(&base.control());
@@ -762,7 +714,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Older is allowed: the schema files migrate forward.
         edit_manifest(&base, |v| v["engram_version"] = "0.0.1".into());
         preflight(
             &base.cfg,
@@ -782,8 +733,7 @@ pub(crate) mod tests {
         assert_eq!(version_skew("0.0.1+bbb", "0.1.0+aaa"), Skew::Older);
         assert_eq!(version_skew("0.1.0", "0.1.0"), Skew::Same);
         assert_eq!(version_skew("0.1.0+aaa", "0.1.0+aaa"), Skew::Same);
-        // An archive from before builds were recorded, or a binary built
-        // without `.git`, says nothing either way.
+        // Pre-build-record archives or binaries built without `.git` say nothing either way.
         assert_eq!(version_skew("0.1.0", "0.1.0+aaa"), Skew::Same);
         assert_eq!(version_skew("0.1.0+aaa", "0.1.0"), Skew::Same);
         let Skew::OtherBuild(w) = version_skew("0.1.0+bbb", "0.1.0+aaa") else {
@@ -795,7 +745,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn an_archive_from_another_build_of_this_version_is_restored_with_a_warning() {
         let base = backed_up().await;
-        // A manifest takes the binary's own version, build and all.
         let taken = Manifest::load(&base.archive).unwrap().engram_version;
         assert_eq!(taken, env!("ENGRAM_VERSION"));
 
@@ -809,7 +758,6 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        // Only a binary that knows its own commit can tell the two apart.
         if env!("ENGRAM_GIT_SHA") == "unknown" {
             assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
         } else {
@@ -908,7 +856,6 @@ pub(crate) mod tests {
         assert!(matches!(r, Refusal::UnknownUser(_)), "{r:?}");
         assert!(r.to_string().contains("--user nobody names no user"), "{r}");
 
-        // Live, but not in the archive.
         let control = Control::connect(&base.cfg.store.control_path)
             .await
             .unwrap();
@@ -1042,11 +989,9 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_embedded_row_without_a_point_is_rearmed_and_the_verdict_is_repair() {
-        // The skew an online backup can carry: a row embedded after its
-        // tenant's vectors were captured. The snapshot lacks the point.
+        // The online-backup skew: a row embedded after its tenant's vectors were captured.
         let base = backed_up_with(|_| vec![]).await;
-        // An empty memory store cannot know its width and exports 0; Qdrant
-        // reports the collection's own.
+        // An empty memory store exports width 0; Qdrant reports the collection's own.
         edit_manifest(&base, |v| {
             for t in v["tenants"].as_array_mut().unwrap() {
                 t["vector"]["dim"] = 2.into();
@@ -1074,8 +1019,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_orphan_point_is_pruned_and_the_verdict_is_pass() {
-        // The other skew: a row deleted between the two captures leaves its
-        // point in the snapshot.
         let base = backed_up_with(|id| vec![point(id), point("deleted-meanwhile")]).await;
         wipe(&base);
         let out = run(&base, &RestoreOpts::default()).await;
@@ -1102,7 +1045,6 @@ pub(crate) mod tests {
         )
         .await
         .unwrap();
-        // The first run dies after step 4: aliases moved, nothing renamed.
         {
             let _lock = lock::acquire(&base.control()).unwrap();
             stage_all(&base.cfg, &plan).unwrap();
@@ -1130,7 +1072,6 @@ pub(crate) mod tests {
     async fn a_per_tenant_restore_never_touches_control_db() {
         let base = backed_up().await;
         wipe(&base);
-        // The live base: control.db and the other tenant as they are now.
         let (ctl, other) = {
             let control = Control::connect(&base.cfg.store.control_path)
                 .await

@@ -1,54 +1,29 @@
-//! What to offer under the search box, and why.
-//!
-//! One vector query against the `ctx` multivector, then the winning cluster
-//! re-derived locally — because Qdrant returns the `max_sim` score and not
-//! *which* element produced it, and the display needs the element.
-//!
-//! That places the same arithmetic in two places. It is the price of holding
-//! the vectors in the index and the reason outside it, and a test pins that
-//! both pick the same artifact: if they drift, the line under the offer
-//! explains a hit it is not explaining.
+//! What to offer under the search box, and why. Qdrant's `max_sim` does not say which element won,
+//! so the winning cluster is re-derived locally; a test pins that both pick the same artifact.
 
 use crate::core::Core;
 use crate::core::context::{Bundle, context_score, contributions, encode};
 use crate::error::Result;
 
-/// How many artifacts the store is asked for.
-///
-/// Ten. Every one of them has its clusters reloaded and rescored locally, at
-/// most five clusters of 45 dimensions apiece — a few thousand multiplications,
-/// which is free next to the round trip that fetched them.
+/// Each candidate's clusters are rescored locally, which is free next to the round trip.
 pub const CANDIDATES: usize = 10;
 
-/// How many blocks the line names. Three, sorted by contribution: enough to say
-/// what decided it, short enough to stay one line.
+/// Enough to say what decided it, short enough to stay one line.
 pub const NAMED_BLOCKS: usize = 3;
 
-/// Which rung of the ladder the offer rests on.
-///
-/// Two questions decide it, not one. *How well does the situation match* —
-/// which separates `Pattern` from `Similar` — and *how often has it happened*,
-/// which separates both from `Tentative`. The second used to be thrown away
-/// after the sweep applied it as a cutoff, and throwing it away is what made a
-/// thing done twice indistinguishable from a thing done twenty times.
-///
-/// `Random` is the floor, and it is not a claim. Nothing about the situation
-/// produced it, so nothing is printed beside it: it exists because a base that
-/// has not learned anything yet should still have something to look at, and
-/// saying "here is a card, no reason" is the honest way to do that.
+/// Which rung of the ladder the offer rests on: match quality and how often the situation occurred.
+/// `Random` is the floor and claims nothing, so nothing is printed beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rung {
     Pattern,
     Similar,
-    /// A real situation, seen once or twice. Held to a higher bar on the match
-    /// than `Similar` is, because there is less behind it.
+    /// A real situation seen once or twice, held to a higher match bar than `Similar`.
     Tentative,
     Random,
 }
 
 impl Rung {
-    /// For the recorded row, and for the Ops breakdown. Fixed buckets, unlike
-    /// the wording, which varies with the count.
+    /// Fixed buckets for the recorded row and the Ops breakdown.
     pub fn as_str(&self) -> &'static str {
         match self {
             Rung::Pattern => "pattern",
@@ -58,12 +33,8 @@ impl Rung {
         }
     }
 
-    /// The inverse, for the one place a rung arrives as text: the marker the
-    /// offer link carries back on the open. A viewer can type anything into a
-    /// query string, and the value goes straight into the recorded row and from
-    /// there into `offer_rates`' `GROUP BY rung` — so an unrecognised word
-    /// would appear on Ops as a rung of the ladder, beside the four that exist.
-    /// Anything not written by `as_str` is not a rung.
+    /// The offer link's marker is viewer-typed and reaches `offer_rates`' `GROUP BY rung`; only
+    /// `as_str` words parse.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "pattern" => Some(Rung::Pattern),
@@ -74,45 +45,32 @@ impl Rung {
         }
     }
 
-    /// Whether this rung explains itself at all. `Random` does not, and the
-    /// page prints no line beside it.
     pub fn is_explained(&self) -> bool {
         !matches!(self, Rung::Random)
     }
 }
 
-/// What is offered under the search box, and everything the page needs to say
-/// why.
+/// What is offered under the search box, and everything the page needs to say why.
 #[derive(Debug, Clone)]
 pub struct Offer {
     pub artifact_id: String,
     pub title: String,
     pub rung: Rung,
-    /// The winning cluster, for the recorded row. `None` on the random card.
+    /// `None` on the random card.
     pub slot: Option<i64>,
-    /// How many events the winning cluster was built from. Zero on the random
-    /// card. What `Tentative` puts into words.
+    /// Zero on the random card.
     pub events: i64,
-    /// The blocks that decided it, largest contribution first, at most
-    /// `NAMED_BLOCKS`. Empty on the random card, which matched nothing.
+    /// Largest contribution first, at most `NAMED_BLOCKS`; empty on the random card.
     pub blocks: Vec<&'static str>,
-    /// The representative event's stamp. What "like 08.08., 15:04" prints.
     pub at: Option<i64>,
-    /// The zone the representative event happened in, so that stamp is printed
-    /// as the device read it. Taking the *current* bundle's zone would misdate
-    /// every situation recorded on a trip.
+    /// The event's own zone; the current bundle's would misdate every situation recorded on a trip.
     pub at_tz: Option<String>,
     /// The raw bundle and the contribution numbers, JSON, for the `<details>`.
     pub detail: String,
 }
 
 impl Core {
-    /// What to offer, from the situation this page view happened in.
-    ///
-    /// One vector query and no embedding. The winning cluster is re-derived
-    /// here because Qdrant's `max_sim` yields the maximum and not which element
-    /// produced it — and the display needs the element, both to quote it and to
-    /// name the blocks that decided it.
+    /// One vector query and no embedding.
     pub async fn offer(&self, scope: Option<&str>, bundle: &Bundle) -> Result<Option<Offer>> {
         if !self.recommends() {
             return Ok(None);
@@ -120,17 +78,13 @@ impl Core {
         let now_at = self.clock.now();
         let now = encode(now_at, bundle, &self.recommend.weights);
 
-        // Superseded and deprecated are out, by `must_not` — the same rule
-        // search obeys, and for the same reason a hand-written point carrying
-        // no `status` key must still be offered.
+        // `must_not`, as in search, so a hand-written point with no `status` key is still offered.
         let hits = self
             .vectors
             .context_query(&now, CANDIDATES, &Default::default())
             .await
             .unwrap_or_else(|e| {
-                // A vector store that cannot answer must not take the search
-                // page down with it: without an offer the page is what it was
-                // yesterday, and the ladder still has two rungs below this.
+                // A vector store that cannot answer must not take the search page down.
                 tracing::warn!(error = %e, "context query unavailable; falling through the ladder");
                 Vec::new()
             });
@@ -138,17 +92,9 @@ impl Core {
         let ids: Vec<String> = hits.iter().map(|h| h.payload.artifact_id.clone()).collect();
         let clusters = self.store.context_clusters_of(&ids).await?;
 
-        // Ranked by `context_score`, which is the whole vector — the same
-        // number `max_sim` scored in the store, so this reproduces its choice
-        // rather than re-deciding it. It was two numbers while a `scope` block
-        // dominated the ranking at weight 10 and was sliced off the gate; with
-        // that block gone the rank and the rung read the same evidence.
-        //
-        // Still every candidate in that order rather than the argmax alone: the
-        // rung also turns on `firm_at`, so the closest situation can be a
-        // cluster seen twice that fails `strong_at` while an established
-        // Friday-afternoon pattern sits second and would pass. The first
-        // candidate that clears its rung is the offer.
+        // Ranked by `context_score`, reproducing `max_sim`'s choice; every candidate is tried in
+        // order because the rung also turns on `firm_at`, so the closest may fail where the second
+        // passes.
         let mut ranked: Vec<(
             &crate::vector::SearchHit,
             &crate::store::context::StoredCluster,
@@ -159,26 +105,13 @@ impl Core {
                 continue;
             };
             for c in mine {
-                // Exact, and now the only cut there is. A `scope` block in the
-                // vector used to keep a foreign cluster from ranking first,
-                // but a near-orthogonal direction is a probability and
-                // isolation must not be one — so this check was always the
-                // guarantee and the block was never more than a nudge in front
-                // of it. A cluster belongs to whoever opened the artifact, and
-                // this reads only the ones that belong to the caller.
-                //
-                // Qdrant cannot make the cut for us: a payload filter acts on
-                // the point, not on elements of the set, and the `ctx`
-                // multivector is one array shared by everyone who opened this
-                // artifact. Loading the clusters is what makes it available,
-                // and the read path loads them anyway to produce the reason.
+                // The only isolation cut, and it must be exact: a Qdrant payload filter acts on the
+                // point, not on elements of the shared `ctx` multivector.
                 if c.scope.as_deref() != scope {
                     continue;
                 }
-                // A cluster written under another layout is skipped rather than
-                // explained with the wrong blocks. Its centroid may still be in
-                // the index — a rebuild copies any set whose width matches —
-                // and the next sweep replaces it.
+                // A cluster from another encoder layout is skipped rather than explained with the
+                // wrong blocks.
                 if c.encoder_version
                     != crate::core::context::encoder_version(&self.recommend.weights)
                     || c.centroid.len() != now.len()
@@ -188,16 +121,12 @@ impl Core {
                 ranked.push((hit, c, context_score(&now, &c.centroid)));
             }
         }
-        // Descending, and stable underneath: two clusters on the same score
-        // keep the store's own order rather than swapping between page views.
+        // Stable, so equal scores keep the store's order between page views.
         ranked.sort_by(|a, b| b.2.total_cmp(&a.2));
 
         for (hit, cluster, score) in &ranked {
             let score = *score;
-            // Established, or seen only once or twice. A thin cluster has to
-            // match the situation *better* before anything is said, which is
-            // what keeps a single accident from being offered as if it meant
-            // something.
+            // A thin cluster must match better, so one accident is not offered as a pattern.
             let firm = cluster.weight >= self.recommend.firm_at;
             let rung = match (firm, score) {
                 (true, s) if s >= self.recommend.strong_at => Some(Rung::Pattern),
@@ -215,16 +144,8 @@ impl Core {
                     rung,
                     slot: Some(cluster.slot),
                     events: cluster.events,
-                    // Only the blocks that actually agreed. `cosine` returns
-                    // zero for a zero vector — which is what an absent block
-                    // is — and zero sorts above every negative contribution,
-                    // so taking the top three unconditionally printed
-                    // "Pattern · weekday, hour, battery" on a pair where
-                    // neither side ever sent a battery reading. The line names
-                    // what decided it, or fewer things, or nothing. The
-                    // `<details>` still carries every block including the ones
-                    // that disagreed: that is the pane for exactness, and this
-                    // is the line a person reads.
+                    // Only blocks that agreed: `cosine` is zero for an absent block, which sorts
+                    // above negative contributions.
                     blocks: all
                         .iter()
                         .filter(|(_, v)| *v > 0.0)
@@ -252,14 +173,8 @@ impl Core {
             }
         }
 
-        // The floor: something to look at while the base has nothing to say
-        // about this situation. Drawn at random and claimed to be nothing —
-        // no blocks, no stamp, no line under it.
-        //
-        // Deliberately not `resurface`. That answers "what has been forgotten",
-        // which on a base anyone has just started using is nothing at all, and
-        // it stamps what it draws as seen — draining the pool the search page's
-        // own resurfacing lives on, one page view at a time.
+        // Not `resurface`: it is empty on a new base and stamps what it draws, draining the search
+        // page's pool.
         Ok(self
             .store
             .random_artifact()
@@ -285,16 +200,8 @@ impl Core {
 }
 
 impl Core {
-    /// Write down the situation this page view happened in.
-    ///
-    /// Off the request path: a page view must not get slower, or fail, because
-    /// a bookkeeping write did — and a situation dropped at shutdown is a
-    /// Friday afternoon the base never learns about, which is why it goes
-    /// through `background` rather than a bare `tokio::spawn`.
-    ///
-    /// The raw string is stored whole, including the fields the encoder does
-    /// not read today. The denormalised columns are for a person reading the
-    /// table with `sqlite3`; the sweep re-derives all three from the bundle.
+    /// Through `background`, off the request path, so a situation is not dropped at shutdown.
+    /// The raw string is stored whole; the denormalised columns are for a person using `sqlite3`.
     pub fn record_context_event(&self, raw: &str, bundle: &Bundle, scope: Option<&str>) {
         if !self.recommends() {
             return;
@@ -317,13 +224,8 @@ impl Core {
                 tracing::warn!(error = %e, "could not record the situation of a page view");
                 return;
             }
-            // The producer half of the sweep's empty-run backoff, and the thing
-            // that makes backing off safe there: the context sweep is a full
-            // recompute, so it can only report work when a profile decays away,
-            // and a base being read all week would otherwise still double its
-            // wait until situations written today waited hours to be learned
-            // from. This is the arming `rearm_periodic_with` says every producer
-            // does; for this unit it was the one nobody had written.
+            // Arms the sweep's empty-run backoff, which is a full recompute and otherwise waits
+            // ever longer.
             if let Err(e) = store
                 .arm_now(
                     crate::store::jobs::Stage::Context,
@@ -337,13 +239,7 @@ impl Core {
         });
     }
 
-    /// Write down that something was offered, or that the offer was taken.
-    ///
-    /// Shown against clicked, broken down by rung, is a hit rate — the only
-    /// number that can later settle whether the block weights are right. They
-    /// are chosen, not measured, and a recommender with no visible hit rate
-    /// becomes `[sitting] prime`: a default nobody ever moved because nobody
-    /// could see its effect.
+    /// Shown against clicked, by rung, is the only hit rate that can settle the block weights.
     pub fn record_recommendation(
         &self,
         artifact_id: &str,
@@ -375,21 +271,8 @@ impl Core {
 }
 
 impl Core {
-    /// Clear the learned situations out of the index.
-    ///
-    /// The rows in `context_clusters` are the bookkeeping; the centroids
-    /// themselves are a named vector on each artifact's point, and a `DELETE`
-    /// in SQLite does not reach them. Without this, Forget would leave the
-    /// averaged situations — a device, an hour, a weekday — sitting in Qdrant
-    /// after the person asked to be rid of them. They would no longer produce
-    /// an offer, because the read path filters every hit through the rows that
-    /// are now gone, but "inert" is not "deleted" and the button does not
-    /// promise inert.
-    ///
-    /// Called before the rows go, because the rows are what says which points
-    /// carry a set. Failing here is reported and does not stop the delete: a
-    /// vector store that is down must not be able to block a person from
-    /// forgetting what is in SQLite.
+    /// The centroids live in Qdrant and a SQLite `DELETE` does not reach them. Runs before the rows
+    /// go, since they say which points carry a set; a failure does not block the delete.
     pub async fn forget_situations(&self) -> u64 {
         let ids = match self.store.artifacts_with_context_clusters().await {
             Ok(ids) => ids,
@@ -413,13 +296,7 @@ impl Core {
     }
 }
 
-/// What the offer card calls the artifact it is offering.
-///
-/// Empty where nobody named this text: a passage carries the heading of the
-/// section it was cut from and a note carries none, and the card shows a
-/// snippet of the text underneath either way — see
-/// `Provenance::names_its_own_text`. The card renders no heading at all rather
-/// than one belonging to something else.
+/// Empty where nobody named this text; the card shows no heading rather than someone else's.
 fn title_of(p: &crate::vector::VectorPayload) -> String {
     let names_itself = p
         .provenance
@@ -435,8 +312,7 @@ fn title_of(p: &crate::vector::VectorPayload) -> String {
         .unwrap_or_else(|| first_line(&p.text))
 }
 
-/// The opening of the text, for something with no title. Deliberately short:
-/// the offer is one line under a search box, not a result card.
+/// Deliberately short: the offer is one line under a search box.
 fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or("").trim();
     match line.char_indices().nth(70) {
@@ -562,23 +438,14 @@ mod tests {
 
     #[tokio::test]
     async fn six_fridays_and_the_seventh_offers_it_before_it_is_asked_for() {
-        // The whole feature in one test, and the example it was asked for:
-        // seed six Fridays, set the clock to the seventh at 14:52, send the
-        // phone bundle, and assert the artifact comes back at rung Pattern with
-        // weekday, hour and device named. Nothing here calls a model or an
-        // embedder — every step is the production path with a fixed clock in
-        // it, and the sweep is the real one.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre opening hours").await;
         let noise = seed_artifact(&core, "invoice template").await;
 
-        // Six Fridays at 15:00 on the phone, opening the recycling centre.
         for w in 1..=6 {
             let at = FRIDAY - w * 7 * 86_400;
             seen_and_opened(&core, &aid, at, &phone_bundle()).await;
         }
-        // And six Tuesday mornings at a desk, opening something else — so the
-        // answer is a choice rather than the only candidate.
         for w in 1..=6 {
             let at = FRIDAY - w * 7 * 86_400 - 3 * 86_400 - 7 * 3600;
             seen_and_opened(&core, &noise, at, &desk()).await;
@@ -588,7 +455,6 @@ mod tests {
         assert_eq!(learned.standing.events, 12);
         assert_eq!(learned.standing.profiled, 2, "both situations were learned");
 
-        // The seventh Friday, eight minutes before the usual hour.
         let mut seventh = core.clone();
         seventh.clock = Clock::Fixed(FRIDAY - 8 * 60);
 
@@ -606,7 +472,6 @@ mod tests {
         assert!(offer.blocks.contains(&"weekday"), "{:?}", offer.blocks);
         assert!(offer.blocks.contains(&"hour"), "{:?}", offer.blocks);
         assert!(offer.blocks.contains(&"device"), "{:?}", offer.blocks);
-        // And it quotes a Friday that actually happened.
         let at = offer.at.expect("a representative event");
         assert!(
             (1..=6).any(|w| at == FRIDAY - w * 7 * 86_400),
@@ -638,9 +503,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_reason_explains_the_artifact_that_was_offered() {
-        // If the local recomputation and the store disagree, the line explains a
-        // different artifact than the one shown — which is the one dishonesty
-        // this feature must not commit.
         let core = recommending_core(FRIDAY).await;
         let near = seed_artifact(&core, "recycling centre").await;
         let far = seed_artifact(&core, "invoice template").await;
@@ -728,11 +590,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_resemblance_is_not_called_a_pattern() {
-        // The wording says what it rests on. The distance between "Fridays
-        // around 15:00" and "similar to" is the whole honesty of the feature.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        // Same Friday and same phone, four hours off, on wifi and in landscape.
         let mut other = phone_bundle();
         other.network = Some("wifi".into());
         other.orientation = Some("landscape".into());
@@ -748,18 +607,11 @@ mod tests {
 
     #[tokio::test]
     async fn one_persons_situations_are_never_offered_to_another() {
-        // Until per-user collections exist, the `scope` block is the whole of
-        // the isolation, and it needs a test that says so.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
 
-        // Twenty other names, not one. The first version of the `scope` block
-        // was one-hot over eight buckets, so any two people had a one-in-eight
-        // chance of sharing a slot outright — and a single hand-picked pair
-        // that happened not to collide would have passed while the guarantee
-        // was worth 87%. Isolation is not a probability, so this does not test
-        // it like one.
+        // Twenty names, not one pair: a single pair that happens not to collide proves nothing.
         for n in 0..20 {
             let who = format!("person-{n}");
             let offer = core.offer(Some(&who), &phone_bundle()).await.unwrap();
@@ -774,17 +626,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_foreign_scope_is_cut_exactly_rather_than_out_scored() {
-        // Nothing in the vector says whose situation it is, and nothing ever
-        // should have: a `scope` block kept a foreign cluster from ranking
-        // first in the store, but it was a direction two of which are only
-        // ever near-orthogonal, and isolation must not be a probability. What
-        // makes it exact is that the read path loads the clusters — which it
-        // does anyway, to produce the reason — and reads only the ones
-        // belonging to the caller.
-        //
-        // So: bob has learned nothing, and alice's cluster is the *only* thing
-        // in the index. The store therefore returns it however anyone scores,
-        // and bob must still not be offered it as a pattern.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
@@ -810,13 +651,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_situation_seen_twice_says_twice_rather_than_pattern() {
-        // The middle ground. Two occurrences are a real thing that happened and
-        // worth offering, and calling them a pattern would be a claim the
-        // evidence does not carry. The line says the number instead.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        // Weight below `firm_at`, which at the default half-life is what two
-        // weekly repetitions come to.
+        // Below `firm_at`, which at the default half-life is two weekly repetitions.
         learn_n(
             &core,
             &aid,
@@ -841,12 +678,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_thin_situation_is_held_to_a_higher_bar_than_an_established_one() {
-        // With less behind it, the situation has to match *better* before
-        // anything is said at all. Otherwise one accident on a Tuesday would be
-        // offered every Tuesday after it.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
-        // A middling match — the kind that earns `Similar` when established.
         let mut other = phone_bundle();
         other.network = Some("wifi".into());
         other.orientation = Some("landscape".into());
@@ -875,9 +708,6 @@ mod tests {
 
     #[tokio::test]
     async fn with_nothing_learned_a_card_is_drawn_and_claims_nothing() {
-        // The floor. Something to look at while the base has nothing to say
-        // about the situation — and nothing printed beside it, because nothing
-        // about the situation produced it.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
 
@@ -897,10 +727,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_card_works_on_a_base_nobody_has_used_yet() {
-        // The whole reason this is not `resurface`: that one answers "older
-        // than thirty days and unshown for thirty days", which on a base
-        // somebody started this morning is nothing at all — empty in exactly
-        // the moment this rung exists for.
         let core = recommending_core(FRIDAY).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         core.store
@@ -926,10 +752,6 @@ mod tests {
 
     #[tokio::test]
     async fn drawing_a_card_does_not_mark_anything_as_seen() {
-        // `resurface` stamps what it draws, which is right for a list somebody
-        // asked for and wrong for something that fires on every page view: it
-        // would drain the pool the search page's own resurfacing lives on, one
-        // page view at a time.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         for _ in 0..5 {
@@ -976,9 +798,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_cluster_from_an_older_encoder_explains_nothing() {
-        // Its centroid may still be in the index — a rebuild copies a set whose
-        // width matches — but the blocks it was built from are not the blocks
-        // this reader knows. Skipped, rather than described with the wrong ones.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
@@ -1003,15 +822,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_cluster_built_under_other_weights_is_not_compared_against_new_ones() {
-        // The weights are the geometry, not a knob on top of it: `encode`
-        // scales every block by its weight before anything is compared. An
-        // operator who edits one and restarts leaves the store full of
-        // centroids built under the old numbers while this path encodes the
-        // present situation under the new ones — and for the six hours until
-        // the next sweep rebuilds them, `context_score` and the argmax are
-        // computed across two different encodings. Which is exactly the
-        // recommendation nobody can account for that `BlockWeights::of` refuses
-        // a typo to avoid.
         let mut core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         for w in 1..=6 {
@@ -1030,8 +840,6 @@ mod tests {
             "this test needs a learned offer to invalidate: {offered:?}"
         );
 
-        // One weight moved, nothing else touched. The stored centroids are now
-        // a geometry this reader does not know.
         core.recommend.weights.network += 0.5;
         let offer = core.offer(Some("alice"), &phone_bundle()).await.unwrap();
         assert!(
@@ -1042,11 +850,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_reason_names_only_the_blocks_that_agreed() {
-        // `cosine` returns zero for a zero vector — which is what a block the
-        // browser said nothing about is — and zero sorts above every negative
-        // contribution. Taking the top three unconditionally printed
-        // "Pattern · weekday, hour, battery" on a pair where neither side ever
-        // sent a battery reading.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         let bare = Bundle {
@@ -1064,9 +867,6 @@ mod tests {
                 offer.blocks
             );
         }
-        // The `<details>` pane still carries every block, including the ones
-        // worth nothing: that is the pane for exactness, and this is the line a
-        // person reads.
         assert!(offer.detail.contains("battery"), "{}", offer.detail);
     }
 
@@ -1093,9 +893,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_details_carry_the_bundle_and_the_numbers() {
-        // "The parameters must be visible" — whoever wants to know exactly,
-        // expands it. It is also the answer to what is being collected:
-        // inspectable rather than promised.
         let core = recommending_core(FRIDAY).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         learn(&core, &aid, "alice", FRIDAY - 7 * 86_400, &phone_bundle()).await;
@@ -1115,9 +912,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_offer_costs_one_query_and_no_embedding() {
-        // The constraint from the top of the roadmap: no model call and no
-        // embedding at read time. A counting embedder proves it rather than a
-        // comment claiming it.
         let (mut core, embedder) =
             crate::core::test_support::test_core_counting_embed_calls().await;
         core.recommend.enabled = true;
@@ -1133,30 +927,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_candidate_that_fails_its_rung_does_not_take_the_others_down_with_it() {
-        // The rung is not the ranking. One number orders the candidates, and
-        // `firm_at` decides which threshold each of them has to clear: a
-        // cluster seen once needs a *strong* match where an established one
-        // needs only a resemblance. So the closest situation can be the one
-        // that fails.
-        //
-        // This used to be an argmax and a single gate: whichever cluster won
-        // the ranking was the only one ever tested, and if it failed, the page
-        // fell to the random card — with an established situation sitting
-        // second that would have passed. A pattern replaced by a card claiming
-        // nothing is the worst rung the ladder can produce.
         let core = recommending_core(FRIDAY).await;
         let now = encode(FRIDAY, &Bundle::default(), &core.recommend.weights);
 
-        // A direction the present situation has nothing in, so a candidate can
-        // be placed at a chosen angle to it. An empty bundle reports no
-        // viewport at all, which leaves that block at zero.
         let free = crate::core::context::BLOCKS
             .iter()
             .find(|b| b.name == "viewport")
             .unwrap()
             .at;
-        // `cos(t) * now_hat + sin(t) * e` scores exactly `cos(t)` against
-        // `now`, because `e` is orthogonal to it.
+        // `cos(t) * now_hat + sin(t) * e` scores exactly `cos(t)` against `now`, as `e` is
+        // orthogonal to it.
         let at_score = |target: f32| {
             let n = now.iter().map(|v| v * v).sum::<f32>().sqrt();
             let mut v: Vec<f32> = now.iter().map(|x| x / n * target).collect();
@@ -1164,10 +944,7 @@ mod tests {
             v
         };
 
-        // Seen once, and the closest match there is — but a thin cluster has to
-        // clear `strong_at` to be offered at all, and this does not.
         let thin = at_score(0.65);
-        // Established, and further away. `weak_at` is all it has to clear.
         let firm = at_score(0.55);
 
         let a = seed_artifact(&core, "a coincidence").await;
@@ -1175,10 +952,8 @@ mod tests {
         learn_raw(&core, &a, "alice", thin.clone(), 1.0, 1).await;
         learn_raw(&core, &b, "alice", firm.clone(), 6.0, 6).await;
 
-        // The premise: the thin one ranks first, and the firm one is the only
-        // one that clears a rung. Asserted rather than assumed — if the
-        // encoder's weights move, this test must fail loudly rather than pass
-        // for a reason it was not written for.
+        // Asserted, so a change in the encoder's weights fails this test instead of passing it for
+        // another reason.
         let thin_score = context_score(&now, &thin);
         let firm_score = context_score(&now, &firm);
         assert!(

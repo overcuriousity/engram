@@ -9,7 +9,7 @@ use axum::routing::get;
 #[folder = "assets/"]
 pub struct Assets;
 
-/// `/assets/<path>?v=<hash of that file>`, so an immutable cache can never serve stale bytes.
+/// `/assets/<path>?v=<hash>`, so an immutable cache never serves stale bytes.
 pub fn url(path: &str) -> String {
     match Assets::get(path) {
         Some(f) => format!(
@@ -30,18 +30,11 @@ fn content_type(path: &str) -> String {
     }
 }
 
-/// Embedded, but not public.
-///
-/// `build.rs` writes the browser packages under `assets/extension/`, which is
-/// the directory `rust-embed` takes wholesale. They are served by
-/// `web::extension` instead, behind the same authentication as everything else
-/// and with `no-store` — and neither of those means anything while the same
-/// bytes are reachable here anonymously with a year-long `max-age`.
+/// `build.rs` writes the browser packages here; `web::extension` serves them behind auth with `no-store`.
 const PRIVATE: [&str; 1] = ["extension/"];
 
 async fn serve(Path(path): Path<String>) -> Response {
-    // rust-embed matches on exact stored paths, so a traversal attempt simply
-    // finds nothing. Reject it explicitly anyway rather than relying on that.
+    // rust-embed would find nothing for a traversal anyway; refused explicitly.
     if path.contains("..") {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -61,13 +54,7 @@ async fn serve(Path(path): Path<String>) -> Response {
     }
 }
 
-/// How long a browser may keep an asset.
-///
-/// A year for everything the page references by name, because those are
-/// rebuilt with the binary. The manifest is the exception, for the same reason
-/// the service worker is: it is read once at install time and then held by the
-/// installed app, so a year-long copy of a stale `start_url` or a stale icon
-/// set outlives several deployments.
+/// A year for assets referenced by name; the manifest is held by the installed app, so it gets an hour.
 fn cache_control(path: &str) -> &'static str {
     if path.ends_with(".webmanifest") {
         "public, max-age=3600"
@@ -76,13 +63,7 @@ fn cache_control(path: &str) -> &'static str {
     }
 }
 
-/// The service worker, from the root rather than from `/assets`.
-///
-/// Two reasons it cannot be an ordinary asset. A worker may only control paths
-/// under the directory it was served from, so one under `/assets` could not see
-/// a navigation to `/ui/search`. And it must not carry the year-long `max-age`
-/// the other assets do: an update has to be able to reach a phone that already
-/// installed the app.
+/// From the root: a worker under `/assets` could not control `/ui`, and it must not carry the year-long `max-age`.
 async fn service_worker() -> Response {
     match Assets::get("sw.js") {
         Some(file) => (
@@ -104,7 +85,6 @@ async fn service_worker() -> Response {
 #[template(path = "offline.html")]
 struct OfflineTemplate;
 
-/// What the service worker shows when the server cannot be reached.
 async fn offline() -> Response {
     use askama::Template;
     match OfflineTemplate.render() {
@@ -158,8 +138,6 @@ mod tests {
 
     #[tokio::test]
     async fn assets_are_public_and_cacheable() {
-        // Static assets carry no data, so they need no auth, and a long
-        // max-age keeps the UI snappy.
         let res = app()
             .oneshot(
                 Request::builder()
@@ -180,10 +158,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_extension_packages_are_not_reachable_through_assets() {
-        // `build.rs` writes them under `assets/`, so they are embedded here
-        // whether or not they belong here. `web::extension` serves them behind
-        // authentication and with `no-store`; both are undone if the same
-        // bytes answer anonymously from this route with a year-long max-age.
         for path in [
             "/assets/extension/chrome.zip",
             "/assets/extension/firefox.xpi",
@@ -217,8 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_manifest_is_served_as_a_manifest() {
-        // A manifest sent as text/plain is ignored, and the install prompt
-        // never appears.
+        // A manifest sent as text/plain is ignored and the install prompt never appears.
         let res = app()
             .oneshot(
                 Request::builder()
@@ -230,17 +203,11 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.headers()["content-type"], "application/manifest+json");
-        // Not the year the other assets get: an installed app re-reads this,
-        // and a stale copy would outlive several deployments.
         assert_eq!(res.headers()["cache-control"], "public, max-age=3600");
     }
 
     #[test]
     fn the_manifest_declares_no_share_target() {
-        // The Web Share Target door was retired (engram#97): a platform share
-        // never carried the session cookie, so the system share sheet offered
-        // a door that always dropped what it was handed. The Android app is
-        // the phone's share sheet entry now.
         let m = Assets::get("manifest.webmanifest").expect("manifest");
         let v: serde_json::Value = serde_json::from_slice(&m.data).expect("valid json");
         assert!(v.get("share_target").is_none(), "share_target is back");
@@ -249,9 +216,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_service_worker_is_served_from_the_root_and_is_not_cached() {
-        // Under /assets it could not control /ui, and with the year-long
-        // max-age the other assets carry, an update could never reach a phone
-        // that already installed the app.
         let res = app()
             .oneshot(
                 Request::builder()

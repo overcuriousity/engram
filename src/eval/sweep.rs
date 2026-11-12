@@ -1,23 +1,5 @@
-//! What the idle pass replays: the pairs, the ranks, the gate and the chooser.
-//!
-//! The cargo harness froze a corpus because its numbers had to be comparable
-//! across months. The pass asks a smaller question: what would *these* pairs
-//! score under neighbouring settings, right now, against the base as it
-//! stands. Baseline and candidates run in one pass over one index, so nothing
-//! needs freezing and nothing needs re-embedding — every pair carries the
-//! vector its query was searched with, and every candidate is one vector read
-//! over it, whether it reorders what came back or changes how much comes back.
-//!
-//! Two kinds of pair, one shape. A verdict on the bar — *this artifact was the
-//! answer* — and a positive observation — an excerpt an answer drew on, a
-//! result somebody opened — make the same claim about the same query, and
-//! `evidence_pairs` hands both to the ladder as one sample. Where a verdict
-//! confirms the very open it was given under, the claim is counted once.
-//!
-//! It reads the live index and only reads it. `Door::Judge` and `mark: false`
-//! are the same discipline every replay follows, for the same reason: a
-//! replay is not someone reading their notes, and its queries are run in full
-//! knowledge of their answers.
+//! What the idle pass replays: pairs, ranks, the gate and the chooser. It only reads the live
+//! index; `Door::Judge` and `mark: false` because a replay knows its answers.
 
 use crate::core::Core;
 use crate::core::ranking::RankingParams;
@@ -25,34 +7,15 @@ use crate::error::Result;
 use crate::eval::metrics::{mrr, recall_at};
 use crate::store::eval_runs::{DiffRow, NewEvalRun};
 
-/// The `k` in recall@k, and the depth a rank is looked for in. The judge
-/// page's own figure is recall@10; a replay reporting recall@20 beside it would
-/// be two numbers with one name.
+/// The `k` in recall@k: the judge page's own figure is recall@10.
 pub(crate) const LIMIT: usize = 10;
 
-/// The recency weight and per-source cap ladders. Both are scoring knobs —
-/// they reorder what retrieval already returned — and sit here beside the
-/// chooser that walks them; the retrieval ladders live in `core::ranking`.
+/// The scoring ladders (recency weight, per-source cap); retrieval ladders live in `core::ranking`.
 const RECENCY: [f32; 5] = [0.0, 0.05, 0.1, 0.15, 0.25];
 const CAPS: [Option<usize>; 4] = [Some(2), Some(3), Some(5), None];
 
-/// A bounded set of candidates, drawn a step at a time from the running
-/// configuration rather than enumerated.
-///
-/// The grid is twenty candidates over two axes and every axis added multiplies
-/// it; this is what the idle pass walks instead, over all five knobs of
-/// `RankingParams`. The running configuration comes first — it is the baseline
-/// — then its nearest neighbour on each axis, then the next step out on each,
-/// until `budget` is spent. A parameter set already tried and taken back is
-/// never offered.
-///
-/// Deliberately not a learned sampler. Neighbours-first is the whole
-/// heuristic: a knob that helps usually helps a little, and the pass runs every
-/// quiet period, so a long walk is reached in small steps that each get their
-/// own watch. Every candidate moves exactly one knob off the baseline, which
-/// is what keeps a result about caps from arriving wearing a recency change.
-/// A reorder knob and a retrieval knob cost the pass the same — one vector
-/// read per pair — so the axes are interleaved rather than ordered.
+/// A bounded set of candidates: the running configuration, then neighbours outward on each axis
+/// until `budget` is spent, each moving one knob; a set tried and taken back is never offered.
 pub fn candidates(
     current: RankingParams,
     tried: &[crate::store::generations::GenerationParams],
@@ -85,20 +48,8 @@ pub fn candidates(
         |v| *v < current.prime_lift,
         |v| *v == current.prime_lift,
     );
-    // The sitting shares the lift's budget, so below a non-zero lift turning
-    // it *on* is a guaranteed tie, and offering it would burn a rank per pair
-    // every quiet period, forever, on a question the arithmetic already
-    // answers. Not offered where it can do nothing, the way `rerank` is not
-    // offered where no reranker is configured. The practical effect is an
-    // order: the lift ladder is walked first, and the sitting is asked about
-    // only once there is a budget for it to share.
-    //
-    // Turning it *off* is offered whatever the lift, and that asymmetry is the
-    // whole point. Adopt the flip, then let the lift ladder walk back to zero,
-    // and the rule above withdrew the axis: the generation row, the file an
-    // Apply writes and the Insights parameter string all went on saying the
-    // sitting was on while it did nothing, and nothing could ever propose
-    // saying otherwise. A knob that cannot be turned off is not on the ladder.
+    // The sitting shares the lift's budget, so turning it on under a zero lift is a sure tie.
+    // Turning it off is offered whatever the lift, so an adopted sitting can always be undone.
     let sittings: Vec<bool> = match current.sitting_prime || current.prime_lift > 0 {
         true => SITTING_PRIMES
             .iter()
@@ -168,8 +119,7 @@ pub fn candidates(
     out
 }
 
-/// The rungs of one ladder in order of distance from the current one, nearest
-/// first and alternating sides, with the current rung left out.
+/// The rungs of one ladder nearest first, alternating sides, the current rung left out.
 fn outward<T: Copy>(
     ladder: &[T],
     below: impl Fn(&T) -> bool,
@@ -189,8 +139,7 @@ fn outward<T: Copy>(
     out
 }
 
-/// Whether `cand` placed a pair better than `base` did. A miss loses to any
-/// rank; two misses are equal.
+/// Whether `cand` placed a pair better than `base`; a miss loses to any rank.
 fn better(cand: Option<usize>, base: Option<usize>) -> bool {
     match (cand, base) {
         (Some(c), Some(b)) => c < b,
@@ -199,38 +148,12 @@ fn better(cand: Option<usize>, base: Option<usize>) -> bool {
     }
 }
 
-/// Replayed pairs a candidate needs behind it, whatever it scores. Ten,
-/// the same floor as `lived::MIN_OBSERVATIONS`, `rehearsed::MIN_PROBES` and
-/// `tune::MIN_BAND`, and here it is the one the design already claimed to
-/// have: "a base with four observations adopts nothing" was not true of the
-/// arithmetic below. Two net better pairs out of four is two opens that each
-/// moved up one place under a neighbouring rung — a whole generation adopted,
-/// and a watch begun, on that. At ten the same two net pairs are a fifth of
-/// the sample rather than the whole of it.
-///
-/// Applied by `score` and `rerank_flip` rather than inside `recommend`,
-/// because `recommend` is arithmetic two callers share and only one of them is
-/// choosing a candidate: `jobs::retract` asks it whether one corpus action's
-/// own record beats its replay, over the observations naming that one
-/// artifact. A floor there would not raise the bar on a candidate, it
-/// would stop the corpus rules taking a merge or a condensation back at all on
-/// any base that has not been used a great deal — a different decision, and
-/// nobody's here to make.
+/// Replayed pairs a candidate needs behind it. Applied by `score` and `rerank_flip`, not in
+/// `recommend`, which `jobs::retract` also uses over a single artifact's observations.
 pub const MIN_PAIRS: usize = 10;
 
-/// The gate, and the reason the whole feature is safe to run automatically.
-///
-/// An aggregate delta can be a single flipped pair wearing a percentage: on
-/// fifty pairs one is two points of recall. Requiring two *net* better pairs
-/// is what a change has to look like before it is worth a person's attention,
-/// and refusing any candidate that costs either aggregate keeps a trade the
-/// operator did not ask for from being presented as an improvement. Ties keep
-/// the current values, always: a knob that moves nothing should keep its
-/// default.
-///
-/// The arithmetic only. How big a sample it takes before the answer is worth
-/// acting on is the caller's question, because the callers are asking
-/// different ones — see `MIN_PAIRS`.
+/// The gate: two net better pairs and no loss on either aggregate; ties keep the current values.
+/// Sample size is the caller's question (see `MIN_PAIRS`).
 pub fn recommend(base: &[Option<usize>], cand: &[Option<usize>]) -> bool {
     let improved = base
         .iter()
@@ -247,15 +170,8 @@ pub fn recommend(base: &[Option<usize>], cand: &[Option<usize>]) -> bool {
         && mrr(cand) >= mrr(base)
 }
 
-/// How many knobs a candidate moves off the running configuration.
-///
-/// The last tie-break, and the reason it has to exist: among candidates whose
-/// rank vectors are identical — the ordinary case, since most pairs carry no
-/// recency signal at all — the first one walked would otherwise win, and a
-/// cap change could arrive with a recency change attached to it, measured by
-/// nothing. `recommend` already promises a knob that moves nothing keeps its
-/// value; this is that promise held among the candidates rather than only
-/// against the base.
+/// How many knobs a candidate moves off the running configuration: the last tie-break, so
+/// identical rank vectors do not let a second knob ride along.
 fn moved(cand: RankingParams, current: RankingParams) -> usize {
     usize::from(cand.recency_weight != current.recency_weight)
         + usize::from(cand.per_source_cap != current.per_source_cap)
@@ -268,118 +184,50 @@ fn moved(cand: RankingParams, current: RankingParams) -> usize {
         + usize::from(cand.sitting_prime != current.sitting_prime)
 }
 
-/// One pair to replay: a query, every id that satisfies it already resolved,
-/// and — where the pair came from an observation — the vector the query was
-/// searched with, so replaying it costs no embedding.
+/// One pair to replay: a query, the ids that satisfy it, and the query vector where recorded.
 #[derive(Debug, Clone)]
 pub(crate) struct Pair {
     pub(crate) query: String,
     pub(crate) satisfies: Vec<String>,
     pub(crate) query_vec: Option<Vec<f32>>,
-    /// What priming read when the search this came from ran, where it was
-    /// recorded. Handed in on the Judge door so a rung of `prime_lift` can be
-    /// replayed; a pair without one ties on that axis.
+    /// What priming read when the source search ran; a pair without one ties on `prime_lift`.
     pub(crate) priming: Option<crate::core::search::Priming>,
-    /// The rank this observation was served at — 1-based and unbounded, as
-    /// `observations.rank` records it. The rerank axis's base: the one row
-    /// that has the reranker in it where the reranker is live. `None` for a
-    /// judged pair whose answer was never in the pool, and for an observation
-    /// that recorded no rank at all.
-    ///
-    /// Raw, and narrowed to the window by `served()` at the point of
-    /// measurement. Stored already narrowed, "served beyond `LIMIT`" and
-    /// "never served" were the same `None`, and `rerank_flip` — which selects
-    /// on exactly that — threw away every deep observation in the sample.
-    /// Those are the rows `observation_pairs` spends half its budget going out
-    /// of its way to gather, so the axis could not accumulate the evidence it
-    /// needs to offer a flip.
+    /// The 1-based, unbounded rank this was served at; narrowed by `served()` only when measured,
+    /// so "served beyond `LIMIT`" stays apart from "never served".
     pub(crate) served_rank: Option<i64>,
-    /// Whether the list `served_rank` is a place in was ordered by the
-    /// reranker — which is what makes it a baseline the rerank axis can be
-    /// scored against.
-    ///
-    /// Not every positive observation is. `Opened` is a place in a search
-    /// result list and `Cited` is a position in an answer's excerpt list, and
-    /// `rerank.apply` scopes the two doors separately: under
-    /// `apply = ["search"]` an ask never reranks, so a cited rank comes from a
-    /// pipeline the flip is not about. Scored as though it did, the replay —
-    /// which reranks — reads its own ordering as a change the flip caused, and
-    /// counts it for or against a setting that had nothing to do with it.
-    ///
-    /// Nothing writes `Cited` observations today, so no live base can have
-    /// such a row; this is the rule stated where the assumption lives, rather
-    /// than a bug being fixed. A citation path is an obvious thing to add.
+    /// Whether `served_rank` comes from a reranked list: `rerank.apply` scopes doors separately,
+    /// so a cited rank may come from a pipeline the flip is not about.
     pub(crate) served_reranked: bool,
-    /// Artifacts that must not count as results for this pair.
-    ///
-    /// A capture probe's query *is* an artifact's text, so that artifact
-    /// answers it at cosine 1.0 and a perfect lexical match and stands at rank
-    /// one of every replay, whatever the parameters are. Left in, it caps a
-    /// probe's reciprocal rank at one half — which is half the range
-    /// `Rehearsed::noise` is calibrated over, so the refuse gate was twice as
-    /// lenient as it reads — and makes the source an interferer of its own
-    /// owner in every rehearsal. Removed before the rank is read, so a probe
-    /// measures where the *owner* landed among everything else.
-    ///
-    /// Empty for an observation pair: a person's query is not an artifact.
+    /// Artifacts that must not count as results: a capture probe's source answers it first.
     pub(crate) exclude: Vec<String>,
 }
 
 impl Pair {
-    /// Where the artifact was served, 0-based, as the replay measures it —
-    /// `None` past `LIMIT`, which is a miss on both sides alike. See
-    /// `served_at`.
+    /// Where the artifact was served, 0-based; `None` past `LIMIT`. See `served_at`.
     pub(crate) fn served(&self) -> Option<usize> {
         served_at(self.served_rank)
     }
 }
 
-/// The place an observation was served at, 0-based, as the replay measures it.
-///
-/// `observations.rank` is 1-based and unbounded: `record_search` writes a rank
-/// for every candidate in the pool, which is `feedback.candidates` wide. Every
-/// number it is ever compared against comes from `rank_of`, which searches at
-/// `limit: LIMIT` and answers `None` for anything past it. Carried through
-/// raw, an opened result that sat at pool position fifteen became
-/// `Some(14)` against a replay's `None`, and `recommend` read that as the
-/// candidate having made the pair *worse* — though both are misses at ten —
-/// while `mrr` credited the served side with a fifteenth the replay could not
-/// earn. `rerank_flip` was the loser: its base was inflated on both aggregates
-/// at once, so the flip was systematically under-offered and `Flip::predicted`
-/// biased negative.
-///
-/// So a hit outside the window is a miss here, which is what it is to
-/// everything else in this module.
+/// The served place 0-based and `None` past `LIMIT`, as `rank_of` measures a replay;
+/// `observations.rank` is 1-based and unbounded.
 pub(crate) fn served_at(rank: Option<i64>) -> Option<usize> {
     rank.map(|r| (r - 1).max(0) as usize).filter(|r| *r < LIMIT)
 }
 
-/// How many pairs one pass will draw on, of both kinds together. A bound
-/// rather than a setting: the pass re-ranks every pair under every candidate,
-/// so the work is pairs times candidates, and a base that has been used for a
-/// year would otherwise make one pass unbounded.
-///
-/// One bound over the whole sample and not one per kind, because the two costs
-/// it holds down are both counted in pairs. The grid is `tune::BUDGET` vector
-/// reads per pair, which a night absorbs either way; the flip is one reranker
-/// call per pair, on the card that is also serving embeddings and the chat
-/// model, and that is the one a doubled sample would be felt on.
+/// Pairs one pass draws on, both kinds together: work is pairs times candidates, and the flip
+/// costs one reranker call per pair on the card serving everything else.
 pub(crate) const OBSERVATION_LIMIT: usize = 500;
 
-/// Where one configuration put the answer to one pair. `None` past `LIMIT`.
-///
-/// `rerank` is whether the reranker may run. The ladder may spend no
-/// inference at all, so it passes `false` and measures the ordering that
-/// feeds the reranker where one serves search; the flip passes `true`, once,
-/// to ask what the reranker would have changed.
+/// Where one configuration put the answer to one pair, `None` past `LIMIT`. The ladder passes
+/// `rerank: false` to spend no inference; the flip passes `true`.
 pub(crate) async fn rank_of(
     core: &Core,
     pair: &Pair,
     params: RankingParams,
     rerank: bool,
 ) -> Result<Option<usize>> {
-    // The vector the query was actually searched with, handed to the cache so
-    // the search below finds it there and embeds nothing.
+    // The query's recorded vector, cached so the search embeds nothing.
     if let Some(v) = &pair.query_vec {
         core.remember_query_vector(&pair.query, v.clone());
     }
@@ -388,8 +236,7 @@ pub(crate) async fn rank_of(
         limit: LIMIT,
         tags: vec![],
         category: None,
-        // Resurfacing reads `last_seen_at`, and a scored run is not someone
-        // reading their notes.
+        // Resurfacing reads `last_seen_at`; a scored run is not someone reading their notes.
         mark: false,
         rerank,
         explain: false,
@@ -404,8 +251,7 @@ pub(crate) async fn rank_of(
     Ok(kept(pair, &results).position(|id| pair.satisfies.iter().any(|s| s == id)))
 }
 
-/// The results a pair is scored over: everything the search returned, minus
-/// what the pair excludes. See `Pair::exclude`.
+/// The results a pair is scored over, minus `Pair::exclude`.
 fn kept<'a>(
     pair: &'a Pair,
     results: &'a [crate::core::search::SearchResult],
@@ -416,9 +262,7 @@ fn kept<'a>(
         .filter(|id| !pair.exclude.iter().any(|e| &e == id))
 }
 
-/// Where the answer landed, 0-based, and every artifact above it in order —
-/// the whole top `LIMIT` when it was not found. `rank_of` with the list kept,
-/// for the replay that wants to know who stood in the way.
+/// Where the answer landed, 0-based, and every artifact above it (the top `LIMIT` on a miss).
 pub(crate) async fn rank_and_above(
     core: &Core,
     pair: &Pair,
@@ -452,15 +296,8 @@ pub(crate) async fn rank_and_above(
     Ok((rank, above))
 }
 
-/// Every pair under every configuration, one row per configuration.
-///
-/// Query-major, and that is the whole point of the function. A pass per
-/// configuration walks the same queries in the same order twenty-one times,
-/// which is the one access pattern an insertion-ordered cache of
-/// `QUERY_CACHE_CAPACITY` entries can never serve: past that many distinct
-/// judged queries the hit rate was zero and every search in the grid embedded
-/// its query again. Asking all twenty-one questions about one query before
-/// moving to the next embeds it once, however many pairs there are.
+/// Every pair under every configuration. Query-major so each query embeds once: a pass per
+/// configuration defeats the insertion-ordered query cache.
 async fn ranks_over_grid(
     core: &Core,
     pairs: &[Pair],
@@ -470,8 +307,7 @@ async fn ranks_over_grid(
 ) -> Result<Option<Vec<Vec<Option<usize>>>>> {
     let mut ranks = vec![Vec::with_capacity(pairs.len()); grid.len()];
     for pair in pairs {
-        // Between pairs, not between candidates: a pair is a handful of vector
-        // reads, and whoever came back is behind at most that.
+        // Between pairs: a pair is a handful of vector reads, so whoever came back waits that long.
         if let Some(since) = stop_after
             && core.store.activity_since(since).await?
         {
@@ -484,22 +320,8 @@ async fn ranks_over_grid(
     Ok(Some(ranks))
 }
 
-/// The answers people gave under one generation, as pairs the ranking can be
-/// scored on, and how many named an artifact that no longer exists.
-///
-/// The same claim an observation makes — this query was answered by that
-/// artifact — made out loud, on the bar under a result or the rail beside a
-/// list. Far fewer than the observations, and never the volume of the sample;
-/// but each one is a person saying so, and an answer the pool never held is
-/// the one kind of pair no observation can ever supply, since an open needs
-/// something on screen to open.
-///
-/// Both rules `observation_pairs` enforces apply unchanged, because these go
-/// through the same `get_artifact` and the same `satisfied_by`: a merged
-/// artifact is satisfied by what superseded it, and a deleted one is skipped
-/// rather than scored as a miss. Each pair carries the vector its search was
-/// made with and the priming that search recorded, so a replay embeds nothing
-/// and the lift axis has something to read.
+/// The verdicts under one generation as pairs, and how many named a gone artifact. Merged
+/// artifacts are satisfied by their successor; deleted ones are skipped, not scored as misses.
 async fn pairs_from_verdicts(
     core: &Core,
     verdicts: Vec<crate::store::feedback::JudgedPair>,
@@ -517,8 +339,6 @@ async fn pairs_from_verdicts(
                     query_vec: Some(p.query_vec),
                     priming,
                     served_rank: p.served_rank,
-                    // A verdict is given on a search result list, and that
-                    // list is the one the search scope reranks or does not.
                     served_reranked: core.reranks_search(),
                     exclude: Vec::new(),
                 });
@@ -530,16 +350,8 @@ async fn pairs_from_verdicts(
     Ok((pairs, skipped))
 }
 
-/// Everything the ladder is scored on under one generation: the judged answers
-/// and the positive observations, and how many of either named an artifact
-/// that is gone.
-///
-/// One claim, counted once. A result somebody opened and then confirmed on
-/// the bar is an `Opened` observation and a `hit` verdict on the same search
-/// naming the same artifact; handed in as two pairs it would weigh twice what
-/// either says alone. The verdict is kept — it is the one a person made — and
-/// the observation that repeats it is left out. An open on the same search of
-/// a *different* artifact is a different claim and stays.
+/// Everything the ladder is scored on: verdicts and positive observations, and how many named a
+/// gone artifact. An open confirmed by a verdict on the same search counts once, as the verdict.
 pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(Vec<Pair>, i64)> {
     let verdicts = core
         .store
@@ -550,13 +362,7 @@ pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(
         .map(|p| (p.event_id.clone(), p.expect.clone()))
         .collect();
     let (mut pairs, mut skipped) = pairs_from_verdicts(core, verdicts).await?;
-    // One budget over both kinds — see `OBSERVATION_LIMIT` — and the verdicts
-    // are served out of it first. Not an ordering of convenience: a verdict is
-    // a person having said so, and an observation is the system's reading of
-    // an open, so where the two compete for the last of the budget the one a
-    // person made is the one that is kept. A deleted artifact costs a verdict
-    // its place and hands the room back to the observations, which is right:
-    // what was skipped is not evidence either.
+    // Verdicts take the shared budget first: a person said so, an observation is an inference.
     let room = OBSERVATION_LIMIT.saturating_sub(pairs.len());
     let (observed, left_out) =
         observation_pairs_except(core, generation_id, &confirmed, room).await?;
@@ -565,31 +371,8 @@ pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(
     Ok((pairs, skipped))
 }
 
-/// The positive observations under one generation, as pairs the ranking can be
-/// scored on, and how many named an artifact that no longer exists.
-///
-/// Bounded at what the verdicts left of `OBSERVATION_LIMIT`, and within that
-/// bound split in half.
-///
-/// Prioritising by how wrong the system was — worst-placed first — is the
-/// half that reads well and cannot stand alone. Every candidate is scored by
-/// `rank_of` at `LIMIT`, so an observation whose artifact sat below ten is
-/// `None` under the baseline, and on a well-used base the worst five hundred
-/// are all of them: `recommend` compares `None` with `None` five hundred
-/// times, never reaches its net-two, and `score()` answers `best: None` for
-/// the life of the base. The selection was choosing precisely the rows the
-/// scorer cannot tell apart.
-///
-/// So half the budget goes to those — a miss the knobs can lift into the
-/// window is a real recall gain, and nothing else would ever look for one —
-/// and half to observations that placed *inside* the window, where a
-/// candidate moving a hit from six to three is a difference `recommend` can
-/// actually see. Either half takes the other's unused room. It is the same
-/// split `sleep::rehearse` makes between what wobbles and the lap, for the
-/// same reason: one signal spent whole is one signal.
-///
-/// Each pair carries the vector the query was searched with, so a replay
-/// embeds nothing.
+/// The positive observations under one generation as pairs, and how many named a gone artifact.
+/// Half the budget to misses past `LIMIT`, half to hits inside it: misses alone all tie at `None`.
 pub(crate) async fn observation_pairs(
     core: &Core,
     generation_id: &str,
@@ -597,15 +380,7 @@ pub(crate) async fn observation_pairs(
     observation_pairs_except(core, generation_id, &Default::default(), OBSERVATION_LIMIT).await
 }
 
-/// `observation_pairs`, leaving out every observation that repeats a verdict:
-/// one whose `(event_id, artifact_id)` is in `confirmed`, and drawing at most
-/// `budget` of what is left. See `evidence_pairs`.
-///
-/// `budget` is the room the verdicts did not take, so it is `OBSERVATION_LIMIT`
-/// where there are none and zero where they filled it. The halves below split
-/// what they are given rather than the constant: a shrunken budget still buys
-/// the worst-placed observations their share, which is the half that cannot
-/// stand alone and the half nothing else would look for.
+/// `observation_pairs`, minus observations repeating a verdict in `confirmed`, at most `budget`.
 async fn observation_pairs_except(
     core: &Core,
     generation_id: &str,
@@ -626,16 +401,12 @@ async fn observation_pairs_except(
             _ => true,
         })
         .collect();
-    // Worst-placed first; newest first among equals, which is the order they
-    // arrived in.
+    // Worst-placed first; newest first among equals.
     observations.sort_by_key(|o| std::cmp::Reverse(o.rank.unwrap_or(i64::MAX)));
-    // `rank` is 1-based, so `> LIMIT` is exactly what `served_at` calls a miss.
     let (deep, inside): (Vec<_>, Vec<_>) = observations
         .into_iter()
         .partition(|o| o.rank.is_none_or(|r| r as usize > LIMIT));
     let half = budget / 2;
-    // Each half takes the other's unused room, so a base with nothing on one
-    // side still fills the budget from the other.
     let from_deep = half
         .max(budget.saturating_sub(inside.len()))
         .min(deep.len());
@@ -664,8 +435,6 @@ async fn observation_pairs_except(
                     query_vec: Some(o.query_vec),
                     priming,
                     served_rank: o.rank,
-                    // Which door's list this rank is a place in, against the
-                    // scope the reranker is configured for.
                     served_reranked: match o.source {
                         crate::store::observations::Source::Cited => core.reranks_ask(),
                         _ => core.reranks_search(),
@@ -680,23 +449,15 @@ async fn observation_pairs_except(
     Ok((pairs, skipped))
 }
 
-/// Every pair ranked under every candidate, and the one that cleared the gate.
 pub(crate) struct Scored {
     grid: Vec<RankingParams>,
     ranks: Vec<Vec<Option<usize>>>,
-    /// The running configuration's row: the baseline.
     base_at: usize,
-    /// The winning row, if any candidate cleared `recommend`.
     best: Option<usize>,
 }
 
-/// Rank `pairs` under every configuration in `grid` and pick the winner, if
-/// there is one. `grid` must carry `current`: it is the baseline everything
-/// else is measured against.
-///
-/// `stop_after` is the moment the pass began; a search or a question recorded
-/// after it ends the pass with nothing scored, and `None` comes back. `None`
-/// as the argument never stops.
+/// Rank `pairs` under every configuration in `grid` (which must carry `current`) and pick the
+/// winner. `None` when a search or question recorded after `stop_after` ends the pass.
 pub(crate) async fn score(
     core: &Core,
     pairs: &[Pair],
@@ -713,9 +474,7 @@ pub(crate) async fn score(
     })?;
     let base = &ranks[base_at];
 
-    // The sample floor. The run is still journalled — a quiet pass is a fact
-    // about the base — but nothing under `MIN_PAIRS` pairs clears the gate,
-    // and `tune::propose` adopts only what this picks.
+    // Under `MIN_PAIRS` nothing clears the gate; the run is still journalled.
     if base.len() < MIN_PAIRS {
         return Ok(Some(Scored {
             grid,
@@ -730,10 +489,7 @@ pub(crate) async fn score(
         if !recommend(base, &ranks[cand]) {
             continue;
         }
-        // MRR first, then recall: the gate has already refused anything that
-        // costs either, so this only chooses among improvements. Then the
-        // fewest knobs moved, which is what keeps a candidate the measurements
-        // cannot tell apart from claiming credit for the axis it changed.
+        // MRR, then recall, then fewest knobs moved; the gate refused anything that costs either.
         let beats = best.is_none_or(|b| {
             let score = |i: usize| (mrr(&ranks[i]), recall_at(&ranks[i], LIMIT));
             score(cand) > score(b)
@@ -752,21 +508,17 @@ pub(crate) async fn score(
 }
 
 impl Scored {
-    /// The candidate that cleared the gate, or `None` when the running
-    /// configuration held.
     pub(crate) fn winner(&self) -> Option<RankingParams> {
         self.best.map(|i| self.grid[i])
     }
 
-    /// How much the winner improved MRR over the baseline. What an adopted
-    /// generation is recorded as having promised.
+    /// How much the winner improved MRR: what an adopted generation promised.
     pub(crate) fn predicted(&self) -> Option<f64> {
         self.best
             .map(|i| mrr(&self.ranks[i]) - mrr(&self.ranks[self.base_at]))
     }
 
-    /// The row the journal keeps. A quiet pass is recorded too: without the
-    /// row a page can only say nothing, which reads as "no pass has ever run".
+    /// The journal row; a quiet pass is recorded too, or a page reads "no pass has ever run".
     pub(crate) fn eval_run(&self, pairs: &[Pair], judged: i64, skipped: i64) -> NewEvalRun {
         let base = &self.ranks[self.base_at];
         let (winner, winning_ranks) = match self.best {
@@ -778,8 +530,7 @@ impl Scored {
             .zip(base.iter().zip(winning_ranks))
             .filter(|(_, (b, n))| b != n)
             .map(|(pair, (b, n))| DiffRow {
-                // The query names its own row, as it does in the harness's miss
-                // list. No artifact text is written here.
+                // No artifact text is written here.
                 query: pair.query.chars().take(48).collect(),
                 base: *b,
                 new: *n,
@@ -800,42 +551,27 @@ impl Scored {
     }
 }
 
-/// The other value of the rerank knob, and what it promised.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Flip {
     pub params: RankingParams,
-    /// MRR of the flipped replay, less MRR over the served ranks.
     pub predicted: f64,
-    /// The two rows' aggregates, for the journal: the served record is the
-    /// base of this axis, not the pre-rerank replay the ladder measures from.
+    /// The served record's aggregates: the base of this axis, not the pre-rerank replay.
     pub served_mrr: f64,
     pub served_recall: f64,
     pub mrr: f64,
     pub recall: f64,
 }
 
-/// What `rerank_flip` came back with.
-///
-/// Three outcomes, not two. "No flip" and "somebody came back mid-replay" are
-/// opposite instructions to the caller — the first says carry on to the next
-/// rule, the second says stop the pass — and an `Option` that spelled both
-/// `None` had the idle pass adopt a generation and rewrite the running ranking
-/// while a user was searching. `score` returns `None` for exactly the second
-/// case; this says which one it is out loud.
+/// What `rerank_flip` came back with: "held" continues the pass, "interrupted" stops it.
 pub(crate) enum FlipOffer {
-    /// The flip cleared `recommend` against the served ranks.
     Offered(Flip),
-    /// No reranker, no pair with a served rank, or the flip did not clear the
-    /// gate. The pass carries on.
+    /// No reranker, no pair with a served rank, or the flip did not clear the gate.
     Held,
-    /// A search or a question landed while the replay ran. The pass stops.
     Stopped,
 }
 
 impl FlipOffer {
-    /// The flip, where one was offered. The pass matches on the variants
-    /// directly, because it has to answer `Stopped` differently; this is for
-    /// the tests, which drive the gate on its own.
+    /// The flip, where one was offered; for the tests, which drive the gate alone.
     #[cfg(test)]
     pub(crate) fn offered(self) -> Option<Flip> {
         match self {
@@ -845,14 +581,8 @@ impl FlipOffer {
     }
 }
 
-/// Offer the rerank flip, if a reranker serves search and the flip clears
-/// `recommend` against the ranks that were actually served.
-///
-/// Its own base, because the served rank is the only row that has the
-/// reranker in it where the reranker is live. Where the live value is "on",
-/// the candidate is the replay without the reranker, which costs nothing;
-/// where it is "off", the candidate is one reranker call per pair — spent
-/// only because the operator configured the reranker, and only here.
+/// Offer the rerank flip if a reranker serves search and the flip clears `recommend` against
+/// the served ranks, the only row with the live reranker in it.
 pub(crate) async fn rerank_flip(
     core: &Core,
     pairs: &[Pair],
@@ -862,21 +592,13 @@ pub(crate) async fn rerank_flip(
     if !core.reranks_search() {
         return Ok(FlipOffer::Held);
     }
-    // Every pair that came from an observation with a rank on it, deep ones
-    // included: a place past `LIMIT` is a miss the base has to be charged
-    // with, not a row to leave out of the sample.
-    //
-    // And only ranks from a list the reranker actually ordered — see
-    // `Pair::served_reranked`. This axis is scored against what was served,
-    // so a rank from a door the reranker does not serve is not a baseline for
-    // it: the replay reranks, and the difference it would read is its own.
+    // Deep ranks count (a miss the base is charged with); only ranks from a reranked list,
+    // since this axis is scored against what was served. See `Pair::served_reranked`.
     let with_served: Vec<&Pair> = pairs
         .iter()
         .filter(|p| p.served_rank.is_some() && p.served_reranked)
         .collect();
-    // Before the replay, not after it: the same sample floor `score` applies,
-    // and here it also saves one reranker call per pair on a base that could
-    // not have been offered the flip whatever the calls came back with.
+    // Before the replay: saves a reranker call per pair where the flip cannot be offered.
     if with_served.len() < MIN_PAIRS {
         return Ok(FlipOffer::Held);
     }
@@ -907,8 +629,7 @@ pub(crate) async fn rerank_flip(
     }))
 }
 
-/// A base with an improvement in it, for this module's tests and the idle
-/// pass's: the same corpus, so what the replay can find the pass can adopt.
+/// A base with an improvement in it, shared with the idle pass's tests.
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::LIMIT;
@@ -916,21 +637,13 @@ pub(crate) mod test_support {
 
     pub(crate) const QUERY: &str = "the image will not mount";
 
-    /// Two sources of three identical, untitled chunks each, and the order the
-    /// uncapped ranking gives them.
-    ///
-    /// Identical within a source so the three tie and the cap is the only
-    /// thing that can separate them; the order is read back rather than
-    /// assumed, because which source leads is a property of the fake
-    /// embedder's hashes and nothing this is testing.
+    /// Two sources of three identical chunks each, so only the cap separates them, and the uncapped
+    /// order, read back because it depends on the fake embedder's hashes.
     pub(crate) async fn seeded() -> (crate::core::Core, Vec<String>) {
         seeded_on(crate::core::test_support::test_core().await).await
     }
 
-    /// The same base on a core that has the reversing, counting fake
-    /// reranker. `order` is still the vector order: the pass replays with
-    /// the reranker off, and the tests that want the reranked order reverse
-    /// it themselves.
+    /// The same base with the reversing, counting fake reranker; `order` is still the vector order.
     pub(crate) async fn seeded_with_reranker() -> (
         crate::core::Core,
         Vec<String>,
@@ -960,8 +673,7 @@ pub(crate) mod test_support {
                 crate::jobs::embed::run(&core, &c.id).await.unwrap();
             }
         }
-        // The baseline the replay is measured against: one source may fill the
-        // whole list, so a cap is the improvement available to be found.
+        // One source may fill the whole list, so a cap is the improvement to find.
         core.ranking
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -983,8 +695,6 @@ pub(crate) mod test_support {
             mark: false,
             include_deprecated: false,
             include_superseded: false,
-            // The vector order, whatever reranker the core has: the ladder
-            // replays with the reranker off, and this is its baseline.
             rerank: false,
             explain: false,
         };
@@ -997,10 +707,7 @@ pub(crate) mod test_support {
             .collect()
     }
 
-    /// One search of `QUERY` on the web door, judged a hit on `expect`, the
-    /// way the bar records one: the search carries the vector the query was
-    /// embedded with, and the verdict names the answer. The event's id, for a
-    /// test that wants to observe on the same search.
+    /// One web search of `QUERY` judged a hit on `expect`, as the bar records one; the event id.
     pub(crate) async fn judge(core: &crate::core::Core, expect: &str) -> String {
         let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
         let id = core
@@ -1018,8 +725,7 @@ pub(crate) mod test_support {
                     answered: false,
                     context: None,
                 },
-                // Folding off: these are the same query on purpose, and two
-                // pairs are what the gate needs.
+                // Folding off: two identical queries are the two pairs the gate needs.
                 0,
             )
             .await
@@ -1122,9 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn evidence_belongs_to_the_generation_it_was_gathered_under() {
-        // Seed under the generation that is live, then mint another — which
-        // supersedes it. A model change ends the era its evidence belonged to,
-        // and the pass reads the live generation's evidence only.
+        // A model change ends the era its evidence belonged to.
         use crate::store::generations::{GenerationParams, NewGeneration};
         use crate::store::observations::Source;
         let (core, order) = seeded().await;
@@ -1173,9 +877,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_verdict_and_the_open_it_confirms_are_one_pair() {
-        // A result opened and then confirmed on the bar is one claim made
-        // twice — an observation and a verdict on the same search naming the
-        // same artifact. Counted twice it would weigh double.
         use crate::store::observations::Source;
         let (core, order) = seeded().await;
         let generation = a_generation(&core).await;
@@ -1187,8 +888,6 @@ mod tests {
             "the observation repeats the verdict"
         );
 
-        // A different artifact opened on the same search is a different
-        // claim, and an open with no search behind it is not this verdict's.
         observe_on(&core, &generation, &order[4], Source::Opened, Some(&event)).await;
         observe(&core, &generation, &order[3], Source::Cited).await;
         assert_eq!(evidence_pairs(&core, &generation).await.unwrap().0.len(), 3);
@@ -1198,9 +897,7 @@ mod tests {
     async fn the_two_kinds_of_evidence_share_one_budget_and_a_verdict_is_served_first() {
         let (core, order) = seeded().await;
         let generation = a_generation(&core).await;
-        // Between them far more than the budget. A verdict here carries no
-        // served place — the bar's search recorded no pool — and every
-        // observation carries one, so the two are told apart below by that.
+        // A verdict here carries no served place and every observation does; that tells them apart.
         for _ in 0..300 {
             judge(&core, &order[3]).await;
         }
@@ -1216,8 +913,6 @@ mod tests {
             "every verdict is kept; the observations take the room left"
         );
 
-        // And where the verdicts alone fill it, the observations take none —
-        // the budget is spent on what people said, not topped up past it.
         for _ in 0..300 {
             judge(&core, &order[3]).await;
         }
@@ -1231,9 +926,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_judged_answer_whose_artifact_is_gone_is_counted_rather_than_scored() {
-        // Housekeeping, not a ranking result. Scored as a miss it would look
-        // like a ranking failure forever; raised it would stop every later
-        // pass over one deletion.
+        // Scored as a miss it would look like a ranking failure; raised, it stops every later pass.
         let (core, order) = seeded().await;
         let generation = a_generation(&core).await;
         judge(&core, &order[3]).await;
@@ -1296,8 +989,7 @@ mod tests {
         assert_eq!(served_at(Some(LIMIT as i64 + 1)), None);
         assert_eq!(served_at(Some(15)), None);
         assert_eq!(served_at(None), None);
-        // A rank of zero should not exist — the column counts from one — and
-        // if one ever does it is the first place, not a negative.
+        // The column counts from one; a rank of zero, if ever written, is the first place.
         assert_eq!(served_at(Some(0)), Some(0));
     }
 
@@ -1305,8 +997,6 @@ mod tests {
     async fn the_observation_budget_is_not_spent_wholly_on_places_the_window_cannot_see() {
         let (core, order) = seeded().await;
         let generation = a_generation(&core).await;
-        // More deep observations than the whole budget, and a handful inside
-        // the window behind them.
         for i in 0..OBSERVATION_LIMIT + 10 {
             observed_at(
                 &core,
@@ -1359,8 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_replay_without_the_reranker_that_places_two_net_pairs_better_adopts_rerank_off() {
-        // The fake reranker reverses the list. Served ranks are what it
-        // produced; the replay without it is the vector order.
+        // The fake reranker reverses the list; the replay without it is the vector order.
         let (core, order, _) = super::test_support::seeded_with_reranker().await;
         let current = RankingParams {
             rerank: true,
@@ -1369,7 +1058,6 @@ mod tests {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
-        // Five of each: the gate wants `MIN_PAIRS` behind a candidate.
         let pairs: Vec<Pair> = (0..5)
             .flat_map(|_| [served_pair(&order, 0, 5), served_pair(&order, 1, 4)])
             .collect();
@@ -1433,8 +1121,7 @@ mod tests {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
-        // Served where the vector order already puts them: a tie, read over
-        // enough pairs that the tie is what holds it rather than the floor.
+        // A tie over enough pairs that the tie, not the floor, holds it.
         let pairs: Vec<Pair> = (0..5)
             .flat_map(|_| [served_pair(&order, 0, 0), served_pair(&order, 1, 1)])
             .collect();
@@ -1454,7 +1141,6 @@ mod tests {
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
-        // The same pairs that offer a flip when nothing interrupts.
         let pairs: Vec<Pair> = (0..5)
             .flat_map(|_| [served_pair(&order, 0, 5), served_pair(&order, 1, 4)])
             .collect();
@@ -1542,7 +1228,6 @@ mod tests {
             current,
             "and it comes first"
         );
-        // A hand-set value off every ladder is still the baseline.
         let odd = RankingParams {
             recency_weight: 0.07,
             per_source_cap: Some(4),
@@ -1604,16 +1289,11 @@ mod tests {
 
     #[test]
     fn every_candidate_moves_at_most_one_knob() {
-        // `moved` is what keeps a result about caps from arriving wearing a
-        // recency change; the chooser must not hand it a candidate that already
-        // moved both.
         let current = RankingParams::default();
         let all = candidates(current, &[], 64);
         for c in &all {
             assert!(moved(*c, current) <= 1, "{c:?}");
         }
-        // And from a baseline that has the sitting axis available, so the flip
-        // is counted rather than merely absent.
         let lifted_base = RankingParams {
             prime_lift: 2,
             ..current
@@ -1628,8 +1308,6 @@ mod tests {
                 + (crate::core::ranking::MULTIPLIERS.len() - 1)
                 + (crate::core::ranking::HALF_LIVES.len() - 1)
                 + (crate::core::ranking::PRIME_LIFTS.len() - 1)
-                // The shipped lift is above zero, so the sitting flip is on
-                // offer from the shipped parameters.
                 + 1,
             "every rung on every ladder, once, and nothing off them"
         );
@@ -1637,22 +1315,14 @@ mod tests {
 
     #[test]
     fn the_pass_budget_covers_every_rung_on_every_axis() {
-        // A tie keeps the current value, so an improvement two rungs out
-        // behind a rung that ties would never be reached by a pass that only
-        // tried the nearest step. The budget has to reach the whole ladder —
-        // including the sitting flip, which only exists above a zero lift, so
-        // the widest grid is the one the budget has to cover.
-        // The lift ships above zero; the narrowest grid is the one at zero,
-        // where the sitting flip is withheld.
+        // A tie keeps the current value, so the budget must reach the whole of every ladder.
         let zero = RankingParams {
             prime_lift: 0,
             ..RankingParams::default()
         };
         let at_zero = candidates(zero, &[], usize::MAX);
         assert_eq!(at_zero.len(), crate::jobs::tune::BUDGET - 1, "{at_zero:?}");
-        // The other widest grid, and the reason the budget is not `BUDGET - 1`:
-        // a base at a zero lift whose sitting is on is offered the flip that
-        // turns it off.
+        // Not `BUDGET - 1`: at a zero lift with the sitting on, the off flip is offered.
         let primed_at_zero = candidates(
             RankingParams {
                 sitting_prime: true,
@@ -1672,10 +1342,7 @@ mod tests {
         };
         let lifted = candidates(lifted_base, &[], usize::MAX);
         assert_eq!(lifted.len(), crate::jobs::tune::BUDGET, "{lifted:?}");
-        // Not re-asserted against one shared baseline: a lifted candidate
-        // differs from the shipped parameters on two knobs by construction, so
-        // that comparison would be either wrong or vacuous. Each grid is
-        // checked against its own baseline in the test above.
+        // Each grid is checked against its own baseline above; a lifted one differs on two knobs.
         for c in &at_zero {
             assert!(moved(*c, zero) <= 1, "{c:?}");
         }
@@ -1686,9 +1353,6 @@ mod tests {
 
     #[test]
     fn the_chooser_walks_the_lift_ladder_both_ways_from_the_shipped_rung() {
-        // Shipped at one: off is one step down and on offer, the way two is
-        // one step up. Nearest first, so the pass can turn priming off on
-        // evidence as readily as it can raise it.
         let current = RankingParams::default();
         assert_eq!(current.prime_lift, 1, "the shipped rung");
         let grid = candidates(current, &[], crate::jobs::tune::BUDGET);
@@ -1702,12 +1366,7 @@ mod tests {
 
     #[test]
     fn the_sitting_flip_is_not_offered_where_it_can_do_nothing() {
-        // At a lift of zero the flip is a guaranteed tie — `prime` returns
-        // early — and a tie is never adopted, never becomes a generation, and
-        // so never reaches `tried_candidates`, which holds only the reverted
-        // and the refused. Offered here it would be re-measured every quiet
-        // period forever, at one rank per pair, to settle something the
-        // arithmetic settles for free.
+        // At a zero lift the flip is a sure tie, never adopted and so never in `tried_candidates`.
         let current = RankingParams {
             prime_lift: 0,
             ..RankingParams::default()
@@ -1718,9 +1377,7 @@ mod tests {
             "no sitting flip at a lift of zero"
         );
 
-        // Turning it off is another matter. The lift ladder can walk back to
-        // zero under an adopted `sitting_prime = true`, and there the base was
-        // stuck saying the sitting was on while it did nothing.
+        // Turning it off is still offered: the lift ladder can walk back to zero under a sitting.
         let primed = RankingParams {
             sitting_prime: true,
             ..current
@@ -1755,9 +1412,7 @@ mod tests {
     async fn a_pair_with_a_sitting_ranks_differently_at_lift_two_and_the_same_without_one() {
         use crate::core::search::Priming;
         let (core, order) = seeded().await;
-        // The last-ranked hit was read in this sitting: at lift 2, and with the
-        // sitting flag on, it climbs two places on the Judge door, where
-        // priming is otherwise off.
+        // At lift 2 with the sitting on, the last-ranked hit climbs two places on the Judge door.
         let with = Pair {
             query: QUERY.into(),
             satisfies: vec![order[5].clone()],
@@ -1802,11 +1457,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_recorded_sitting_moves_a_rank_when_only_the_flip_changes() {
-        // The counterfactual the axis rests on, with the lift held constant so
-        // the flip is the only thing that moved. Honest as a counterfactual
-        // precisely because the searcher saw the unprimed order: the evidence
-        // was recorded while the knob was off, so the sitting influenced
-        // nothing about the list this replays.
+        // The evidence was recorded with the knob off, so the sitting shaped nothing this replays.
         use crate::core::search::Priming;
         let (core, order) = seeded().await;
         let buried = order[5].clone();
@@ -1847,8 +1498,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_sitting_flip_ties_at_a_zero_lift() {
-        // Why the chooser does not offer the axis there: there is nothing to
-        // measure, and a tie keeps the current value forever.
         use crate::core::search::Priming;
         let (core, order) = seeded().await;
         let buried = order[5].clone();

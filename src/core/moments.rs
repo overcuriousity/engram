@@ -1,11 +1,5 @@
-//! Time, as the base keeps it: the intent vocabulary and its refusals, the
-//! zone table, and the recurrence subset. Pure functions — no store, no
-//! model, no clock of its own.
-//!
-//! Reading time out of prose retired in the 2026-09 capture reshape: the
-//! judged synthesis call is the reader now (`jobs::judgement`), and the cue
-//! tables, the prototype classifier and the date rules went with it. What
-//! stays is what the judgement and the band still stand on.
+//! Time as the base keeps it: intent vocabulary and refusals, the zone table, the recurrence
+//! subset. Pure functions: no store, no model, no clock of its own.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -21,15 +15,8 @@ impl Intent {
     }
 }
 
-/// Example phrasings per intent and language, ten languages. Once the
-/// classifier's prototypes; now the example table the capture box teaches
-/// from — see `examples_for`, which reads the first row of each language.
-///
-/// The language tag is carried in the row rather than in a parallel array: a
-/// tag is not recoverable from a sentence, and at forty rows two lists kept
-/// in step by counting is a defect waiting for its first careless insert.
+/// Example phrasings per intent and language; `examples_for` reads each language's first row.
 pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
-    // ── en ──
     (
         Intent::Remind,
         "en",
@@ -46,7 +33,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "en",
         "i need to renew my passport before the end of the month",
     ),
-    // ── de ──
     (
         Intent::Remind,
         "de",
@@ -72,7 +58,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "de",
         "erinnerung termin foto ausweis mittwoch 0900 zimmer a323",
     ),
-    // ── fr ──
     (
         Intent::Remind,
         "fr",
@@ -93,7 +78,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "fr",
         "je dois refaire mon passeport avant la fin du mois",
     ),
-    // ── es ──
     (
         Intent::Remind,
         "es",
@@ -114,7 +98,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "es",
         "tengo que renovar el pasaporte antes de fin de mes",
     ),
-    // ── pt ──
     (
         Intent::Remind,
         "pt",
@@ -135,7 +118,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "pt",
         "preciso pagar o aluguel até o dia primeiro",
     ),
-    // ── it ──
     (
         Intent::Remind,
         "it",
@@ -156,7 +138,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "it",
         "devo rinnovare il passaporto entro fine mese",
     ),
-    // ── nl ──
     (
         Intent::Remind,
         "nl",
@@ -177,7 +158,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "nl",
         "ik moet mijn paspoort verlengen voor het eind van de maand",
     ),
-    // ── pl ──
     (
         Intent::Remind,
         "pl",
@@ -198,7 +178,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "pl",
         "muszę wyrobić paszport do końca miesiąca",
     ),
-    // ── tr ──
     (Intent::Remind, "tr", "yarın bana faturayı ödemeyi hatırlat"),
     (
         Intent::Remind,
@@ -211,7 +190,6 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
         "tr",
         "ay sonuna kadar pasaportu yenilemem lazım",
     ),
-    // ── ru ──
     (Intent::Remind, "ru", "напомни мне завтра позвонить маме"),
     (
         Intent::Remind,
@@ -226,24 +204,8 @@ pub const PROTOTYPES: &[(Intent, &str, &str)] = &[
     ),
 ];
 
-/// One reminder example, in the reader's language where the example table has
-/// it and in English where it does not.
-///
-/// `accept_language` is the raw header. Only the primary subtag of the first
-/// entry is read: `de-DE,de;q=0.9,en;q=0.8` is a reader who wants German, and
-/// weighing the rest to discover that is arithmetic for nothing.
-/// Which language the example above came back in.
-///
-/// The example is one of the classifier's own prototypes in the reader's
-/// language, and the page around it is English — so a German browser reads an
-/// English interface with a German sentence quoted in it. That is correct,
-/// because those are the words that base would actually be written in; what
-/// was wrong is that nothing in the markup said the language had changed,
-/// which is what a screen reader needs in order not to read German aloud in an
-/// English voice.
-///
-/// The answer is the language actually used, so a subtag with no prototypes
-/// reports the `en` it fell back to rather than the one that was asked for.
+/// The language `examples_for` answered in (`en` where it fell back), so markup can say the
+/// language changed.
 pub fn examples_lang_for(accept_language: &str) -> &'static str {
     let want = crate::infer::lang::primary_subtag(accept_language);
     PROTOTYPES
@@ -254,10 +216,7 @@ pub fn examples_lang_for(accept_language: &str) -> &'static str {
 }
 
 pub fn examples_for(accept_language: &str) -> &'static str {
-    // The same reading `infer::lang` gives the header, and deliberately the
-    // same one: the examples this table teaches and the language the
-    // synthesizer is instructed in are one decision, and two parsers over one
-    // header is two places for a `de-DE` to stop being German.
+    // Same reading as `infer::lang`: the examples and the synthesizer's language are one decision.
     let want = crate::infer::lang::primary_subtag(accept_language);
     let of = |lang: &str| {
         PROTOTYPES
@@ -268,12 +227,7 @@ pub fn examples_for(accept_language: &str) -> &'static str {
     of(&want).or_else(|| of("en")).unwrap_or("")
 }
 
-/// Whether the operator has already said this note is not that.
-///
-/// `metadata.intent_refused` is a list of intent names, and it has to outlive
-/// a re-read: the judged synthesis derives the intent again every time a
-/// window is re-read, so without a record of the refusal a re-synthesis
-/// quietly files the note again over somebody who had said no.
+/// `metadata.intent_refused` must outlive a re-read, which derives the intent again each time.
 pub fn intent_refused(meta: &serde_json::Value, intent: Intent) -> bool {
     meta["intent_refused"]
         .as_array()
@@ -293,8 +247,7 @@ pub fn refuse_intent(meta: &mut serde_json::Value, intent: Intent) {
     meta["intent_refused"] = serde_json::Value::Array(all);
 }
 
-/// Withdraw one — turning a filing back on by hand is the operator saying the
-/// note may be read again.
+/// Turning a filing back on by hand says the note may be read again.
 pub fn allow_intent(meta: &mut serde_json::Value, intent: Intent) {
     if let Some(a) = meta["intent_refused"].as_array() {
         let kept: Vec<serde_json::Value> = a
@@ -322,10 +275,7 @@ pub fn zone(name: Option<&str>) -> Tz {
     name.and_then(|n| n.parse::<Tz>().ok()).unwrap_or(Tz::UTC)
 }
 
-/// The zone the server itself is in, named the way the zone table names it, or
-/// `UTC` where the platform cannot say. Resolved once: it is read on the path
-/// of every capture that arrives without a zone, and asking the host on each
-/// one is a syscall and a file read for an answer that does not change.
+/// Resolved once: it is read for every capture that arrives without a zone.
 static SERVER_ZONE: LazyLock<String> = LazyLock::new(|| {
     match iana_time_zone::get_timezone()
         .ok()
@@ -341,8 +291,7 @@ static SERVER_ZONE: LazyLock<String> = LazyLock::new(|| {
     }
 });
 
-/// The zone a door that sent none is read in: what `time.default_tz` names, or
-/// — where it is empty, which is the shipped default — the server's own.
+/// `time.default_tz`, or the server's own zone where that is empty (the default).
 pub fn default_zone_name(configured: &str) -> String {
     let configured = configured.trim();
     if configured.is_empty() {
@@ -351,9 +300,7 @@ pub fn default_zone_name(configured: &str) -> String {
     configured.to_string()
 }
 
-/// The RRULE subset: FREQ, INTERVAL, BYDAY (weekday codes), BYMONTHDAY, and
-/// UNTIL or COUNT. Spelled as iCalendar so a feed can carry it later; parsed
-/// here and nowhere else.
+/// The RRULE subset: FREQ, INTERVAL, BYDAY, BYMONTHDAY, and UNTIL or COUNT.
 #[derive(Debug)]
 struct Rule {
     freq: Freq,
@@ -364,30 +311,20 @@ struct Rule {
     count: Option<u32>,
 }
 
-/// How far a recurrence runs, in the terms the rule stated it.
-///
-/// Kept apart rather than normalised to one instant at parse time, because the
-/// two forms answer to different clocks and the parser has no zone: `parse_rule`
-/// is handed a string, while the zone belongs to the moment. Collapsing the
-/// date-only form into a UTC instant there is what dropped the operator's last
-/// day west of Greenwich.
+/// Kept in the rule's own terms: the parser has no zone, and a date-only UNTIL read as UTC drops a
+/// day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Until {
     /// `UNTIL=20260901T235959Z`: an instant, as written, in UTC.
     Instant(i64),
-    /// `UNTIL=20260901T235959`: a wall clock carrying no zone at all. RFC 5545
-    /// reads a floating DATE-TIME against the event's own zone, which here is
-    /// the reader's — the same reading `LastDay` gets, one step finer.
+    /// Floating DATE-TIME, read in the reader's zone per RFC 5545.
     Local(chrono::NaiveDateTime),
-    /// `UNTIL=20260901`: the last calendar day the recurrence may land on,
-    /// read in whichever zone the occurrences are resolved in.
+    /// The last calendar day, read in the zone the occurrences resolve in.
     LastDay(NaiveDate),
 }
 
-/// The largest INTERVAL the subset accepts. `next_after` walks day by day and
-/// its bound scales with the interval, so an unbounded one is an unbounded
-/// loop inside a request. Every hundredth year is past anything a reminder
-/// means, and a rule beyond it is a typo or an attack, not an intention.
+/// `next_after` walks day by day with a bound scaling with the interval; larger is a typo or an
+/// attack.
 pub const MAX_INTERVAL: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -431,13 +368,7 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                     .ok_or_else(|| format!("INTERVAL must be between 1 and {MAX_INTERVAL}"))?
             }
             "BYDAY" => {
-                // Deduped, which is also what bounds it. `INTERVAL` is capped
-                // at `MAX_INTERVAL` precisely because `next_after` walks the
-                // calendar a day at a time, and `BYDAY` is read on every one
-                // of those days — an eight-megabyte `BYDAY=MO,MO,MO,…` was
-                // parsed whole and then scanned once per step, which blocks a
-                // tokio worker for seconds every time the row is read. Seven
-                // weekdays exist; a list naming one twice means it once.
+                // Deduped, which also bounds it: `next_after` scans `BYDAY` once per day walked.
                 for d in v.split(',') {
                     let day = match d {
                         "MO" => Weekday::Mon,
@@ -465,28 +396,9 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
                 )
             }
             "UNTIL" => {
-                // The two forms are two different kinds of claim, and reading
-                // the second as the first drops a day.
-                //
-                // `20260901T235959Z` names an instant, in UTC, because the `Z`
-                // says so. `20260901` names a calendar day with no time and no
-                // zone in it at all, and RFC 5545 reads that against the
-                // event's own zone — which here is the reader's. Turned into
-                // 23:59:59 UTC and compared against occurrences resolved in
-                // that zone, every zone west of Greenwich lost the last day
-                // the operator named: "every day at 6pm until September 1" in
-                // America/Los_Angeles stopped after 31 August, because the
-                // 1 September occurrence is 2026-09-02T01:00Z.
-                //
-                // So the day is kept as a day and compared as one below.
-                // And `20260916T090000` — no `Z`, no offset — names neither:
-                // RFC 5545 calls that floating and reads it against the
-                // event's own zone, so it is the day's reading one step
-                // finer. It is also the spelling the configured model reaches
-                // for, the prompt having spent a paragraph asking it for
-                // local wall-clock times without a zone; matching none of the
-                // formats, it failed the whole rule and took the only date the
-                // answer carried with it.
+                // `...Z` is a UTC instant; a bare date is a calendar day and a bare DATE-TIME is
+                // floating (RFC 5545), both read in the reader's zone, or every zone west of
+                // Greenwich loses the last day.
                 r.until = Some(
                     chrono::NaiveDateTime::parse_from_str(v, "%Y%m%dT%H%M%SZ")
                         .map(|dt| Until::Instant(dt.and_utc().timestamp()))
@@ -512,21 +424,12 @@ fn parse_rule(rule: &str) -> Result<Rule, String> {
     if !has_freq {
         return Err("FREQ is required".into());
     }
-    // BYDAY under YEARLY expands to every such weekday of the year, which is
-    // a rule nobody means and which the ordinals the subset refuses are what
-    // would narrow. Every other pairing `next_after` honours; this one is
-    // refused here rather than silently ignored there.
+    // Refused rather than ignored: BYDAY under YEARLY needs the ordinals this subset refuses.
     if !r.by_day.is_empty() && r.freq == Freq::Yearly {
         return Err("BYDAY under FREQ=YEARLY is outside the subset".into());
     }
-    // And its mirror. `next_after`'s Daily and Weekly arms never read
-    // `by_month_day`, so the constraint was accepted and then dropped:
-    // `FREQ=DAILY;BYMONTHDAY=15` validated, was stored by the API door, and
-    // fired every day of the month with the whole push ladder behind each one —
-    // a rule that says "the fifteenth" behaving as "always". RFC 5545 forbids
-    // the WEEKLY pairing outright, and under DAILY the day-of-month is a limit
-    // this subset does not implement. Refused for the reason directly above:
-    // silently ignoring a constraint somebody wrote is the failure.
+    // `next_after`'s Daily and Weekly arms never read `by_month_day`; RFC 5545 forbids the WEEKLY
+    // pairing.
     if r.by_month_day.is_some() && matches!(r.freq, Freq::Daily | Freq::Weekly) {
         return Err("BYMONTHDAY under FREQ=DAILY or FREQ=WEEKLY is outside the subset".into());
     }
@@ -537,34 +440,19 @@ pub fn validate_rule(rule: &str) -> Result<(), String> {
     parse_rule(rule).map(|_| ())
 }
 
-/// How many occurrences the rule allows in all, `None` for open-ended. A
-/// bounded recurrence is bounded by its rows: see `Store::occurrences_of_rule`
-/// and `complete_moment`, which is where this is enforced.
+/// `None` for open-ended; enforced by `complete_moment` counting the rule's rows.
 pub fn rule_count(rule: &str) -> Option<u32> {
     parse_rule(rule).ok()?.count
 }
 
-/// The instants a moment may name: the range a calendar year can be spelled
-/// in, which is also the range every reader of a moment can do arithmetic in.
-/// `api::set_moment` holds a raw timestamp to it, and `resolve_local` holds
-/// every wall-clock time typed at the base to it.
+/// Every reader of a moment can do arithmetic in this range; `resolve_local` and `api::set_moment`
+/// hold to it.
 pub const YEAR_ONE: i64 = -62_135_596_800;
 pub const END_OF_9999: i64 = 253_402_300_799;
 
-/// A local wall-clock time as an instant, choosing for the operator on the
-/// two days a year when the zone cannot. An ambiguous fall-back hour takes
-/// its earlier reading; a time inside a spring-forward gap rolls forward to
-/// the first instant the zone has again, in quarter-hour steps — chrono's
-/// mapping for a gap is `None` with nothing to call `earliest()` on, and
-/// treating that as "no answer" silently dropped a date the operator named.
-///
-/// `None` outside years 1 to 9999, the same range `api::set_moment` holds a
-/// timestamp to, and the arithmetic is checked. `%Y` parses a signed
-/// six-digit year, so `when=+262142-12-31T23:59` reached here from the band's
-/// own form: the gap recovery added quarter-hours to a `NaiveDateTime` already
-/// at chrono's ceiling, and `+` on that panics — inside a handler, which
-/// aborts the connection. The range is the fix and the checked add is the
-/// belt: neither should depend on the other being there.
+/// An ambiguous fall-back hour takes its earlier reading; a spring-forward gap rolls to the first
+/// valid instant. `None` outside years 1 to 9999: `%Y` parses six-digit years and an unchecked add
+/// at chrono's ceiling panics.
 pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
     let stamped = |d: chrono::DateTime<Tz>| {
         let ts = d.timestamp();
@@ -573,8 +461,8 @@ pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
     if let Some(d) = tz.from_local_datetime(&dt).earliest() {
         return stamped(d);
     }
-    // Gaps are 30 or 60 minutes almost everywhere (Lord Howe's is 30); three
-    // hours of quarter-hour steps covers the historical 2 h ones too.
+    // Gaps are 30 or 60 minutes almost everywhere; three hours of quarter-hour steps covers
+    // historical 2 h ones.
     (1..=12)
         .find_map(|q| {
             dt.checked_add_signed(chrono::Duration::minutes(15 * q))
@@ -583,28 +471,13 @@ pub(crate) fn resolve_local(dt: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
         .and_then(stamped)
 }
 
-/// The next occurrence strictly after `at`, keeping `at`'s wall-clock time in
-/// `tz`. None when the rule is exhausted or invalid. COUNT is enforced by
-/// `complete_moment`, which counts the occurrences already on the artifact.
+/// Strictly after `at`, keeping `at`'s wall-clock in `tz`. COUNT is enforced by `complete_moment`.
 pub fn next_after(rule: &str, at: i64, tz: Tz) -> Option<i64> {
     next_after_anchored(rule, at, tz, None)
 }
 
-/// The same, with the wall-clock time read off `anchor` rather than off `at`.
-///
-/// Which matters exactly twice a year. `resolve_local` rolls a time that falls
-/// inside a spring-forward gap to the first instant the zone has again, which
-/// is the right answer for *that* occurrence — a daily 02:30 in Europe/Berlin
-/// has to happen somewhere on the Sunday the zone has no 02:30. But the next
-/// occurrence then took its wall-clock from that stored instant and the
-/// reminder read 03:00 from that day on, for good: an RRULE with no DTSTART
-/// has nothing to re-anchor to, so the roll became the new time.
-///
-/// The anchor is the series' own starting wall-clock — see
-/// `Store::series_anchor`, which prefers a time somebody moved the reminder to
-/// over the one it was first read at, because a person moving a recurring row
-/// is restating what time it happens. `None` keeps the old reading, which is
-/// what a one-shot and every pre-series row have.
+/// Takes the wall-clock from `anchor`, so a time rolled out of a DST gap does not become the new
+/// time. See `Store::series_anchor`; `None` reads it off `at`.
 pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> Option<i64> {
     let r = parse_rule(rule).ok()?;
     let start = tz.timestamp_opt(at, 0).single()?;
@@ -614,14 +487,11 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
         .unwrap_or_else(|| start.time());
     let origin = start.date_naive();
     let mut date = origin;
-    // Day by day, bounded: the subset never needs more than four years of
-    // days per interval step to find the next occurrence (a yearly 29 Feb).
+    // Bounded: one interval step never needs more than four years of days (a yearly 29 Feb).
     for _ in 0..(366 * 4 * r.interval as usize + 1) {
         date += chrono::Duration::days(1);
         let hit = match r.freq {
-            // BYDAY narrows a daily rule rather than expanding it (RFC 5545):
-            // "every weekday at 9" is FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR, and
-            // read without the filter it fired on Saturday too.
+            // BYDAY narrows a daily rule rather than expanding it (RFC 5545).
             Freq::Daily => {
                 (date - origin).num_days() % r.interval as i64 == 0
                     && (r.by_day.is_empty() || r.by_day.contains(&date.weekday()))
@@ -629,10 +499,8 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
             Freq::Weekly => {
                 let own = [origin.weekday()];
                 let days: &[Weekday] = if r.by_day.is_empty() { &own } else { &r.by_day };
-                // RFC 5545 counts calendar weeks (WKST defaults to Monday),
-                // not 7-day blocks from the origin instant: INTERVAL=2 with
-                // BYDAY=MO from a Wednesday origin must skip the Monday five
-                // days later — it is already the next week.
+                // RFC 5545 counts calendar weeks (WKST defaults to Monday), not 7-day blocks from
+                // the origin.
                 let monday = |d: chrono::NaiveDate| {
                     d - chrono::Duration::days(d.weekday().num_days_from_monday() as i64)
                 };
@@ -642,10 +510,8 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
             Freq::Monthly => {
                 let months = (date.year() - origin.year()) * 12
                     + (date.month() as i32 - origin.month() as i32);
-                // BYDAY with no ordinal names every such weekday of the month
-                // — "every Monday" as a monthly rule — and with BYMONTHDAY
-                // beside it the two are an intersection. Only when neither is
-                // given does the origin's day-of-month stand in.
+                // BYDAY without an ordinal names every such weekday; with BYMONTHDAY the two
+                // intersect.
                 let day = match (r.by_month_day, r.by_day.is_empty()) {
                     (Some(dom), _) => date.day() == dom,
                     (None, false) => true,
@@ -654,8 +520,7 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
                 day && (r.by_day.is_empty() || r.by_day.contains(&date.weekday()))
                     && months % r.interval as i32 == 0
             }
-            // BYMONTHDAY moves a yearly rule off the origin's day within the
-            // origin's month; BYDAY is refused for YEARLY in `parse_rule`.
+            // BYDAY is refused for YEARLY in `parse_rule`.
             Freq::Yearly => {
                 date.month() == origin.month()
                     && date.day() == r.by_month_day.unwrap_or(origin.day())
@@ -669,10 +534,8 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
         let Some(ts) = resolve_local(dt, tz) else {
             continue;
         };
-        // Each against its own clock: an instant against the instant this
-        // occurrence resolved to, a named day against the day it falls on in
-        // the reader's zone. An occurrence *on* the named day is inside the
-        // rule; the one after it is not.
+        // Each against its own clock: an instant against the instant, a named day against the
+        // reader's day.
         let past = match r.until {
             Some(Until::Instant(u)) => ts > u,
             Some(Until::Local(u)) => dt > u,
@@ -688,18 +551,7 @@ pub fn next_after_anchored(rule: &str, at: i64, tz: Tz, anchor: Option<i64>) -> 
 }
 
 impl crate::core::Core {
-    /// Done, and — for a recurring moment — the next occurrence as a new row
-    /// carrying the same rule and source. The done row stays: the history of
-    /// a recurring reminder is its rows.
-    /// Answers whether the completion actually happened, so a door can tell
-    /// "done" from "there was nothing there to finish" — a button pressed
-    /// twice, or one on a page open since before a re-read replaced the row.
-    /// The band reported "Done · undone" for both, and offered an undo for a
-    /// moment nothing had changed.
-    /// The wall-clock a recurrence is anchored to, or `None` where there is
-    /// no series to read one from — a row written before `series_id` existed.
-    /// A store error here is not the completion's to fail on: the worst it
-    /// costs is the reading `next_after` did before the anchor existed.
+    /// `None` for a row from before `series_id`; a store error only costs the unanchored reading.
     async fn series_anchor_of(&self, m: &crate::store::moments::Moment) -> Option<i64> {
         let series = m.series_id.as_deref()?;
         self.store.series_anchor(series).await.unwrap_or_else(|e| {
@@ -711,52 +563,31 @@ impl crate::core::Core {
     pub async fn complete_moment(&self, id: &str) -> crate::error::Result<bool> {
         let now = self.clock.now();
         if let Some(m) = self.store.moment(id).await?
-            // The claim, and the gate: everything below arms rows and retires
-            // corpora, and none of it may run twice for one completion.
+            // The claim and the gate: everything below must run once per completion.
             && self.store.mark_done(id, now).await?
         {
-            // A bounded recurrence is bounded by its rows: the done row stays,
-            // so the occurrences that have existed are the ones on the
-            // artifact carrying this rule — including the one just completed.
-            // At COUNT, nothing further is armed.
+            // A bounded recurrence is bounded by its rows, the just-completed one included.
             if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
                 && !self
                     .store
                     .rule_is_exhausted(&m.artifact_id, rule, m.series_id.as_deref())
                     .await?
-                // Anchored, so a daylight-saving gap cannot move the time of
-                // day permanently. `uncomplete_moment` anchors the same way,
-                // or it would look for the successor at a different instant
-                // than the one this armed.
+                // Anchored, as `uncomplete_moment` is, so both look for the same successor instant.
                 && let Some(next) = next_after_anchored(
                     rule,
                     at,
                     zone(Some(&m.tz)),
                     self.series_anchor_of(&m).await,
                 )
-                // Not `has_moment_at`, which is the re-read's question and
-                // answers yes for an instant that is only some row's
-                // `moved_from`. Moving this very reminder off next week's
-                // occurrence is exactly what an operator does with a recurring
-                // row, and it made completion decline to arm the successor it
-                // had just stepped over — the recurrence ended there, with
-                // `has_operator_moment` refusing every re-read that might have
-                // put it back. What arming needs to know is whether a row is
-                // parked on the instant, and nothing else.
+                // Not `has_moment_at`, which also answers yes for a row's `moved_from`; arming
+                // needs a parked row.
                 && !self
                     .store
                     .moment_parked_at(&m.artifact_id, crate::store::moments::Kind::Due, Some(next))
                     .await?
             {
-                // Both ends of the recurrence in one series. Where this row
-                // already has one it keeps it and nothing is written; where it
-                // does not — a row from before the column existed — it adopts
-                // its own id, because it *is* the head of this recurrence.
-                //
-                // Stamping only the successor would be worse than leaving both
-                // alone: `rule_is_exhausted` counts by series once a row has
-                // one, so the successor would be counted alone and a `COUNT=5`
-                // reminder would fire five more times from every completion.
+                // Adopt its own id as series head, or `rule_is_exhausted` would count the successor
+                // alone.
                 if m.series_id.is_none() {
                     self.store.adopt_into_own_series(&m.id).await?;
                 }
@@ -767,50 +598,23 @@ impl crate::core::Core {
                         at: Some(next),
                         tz: m.tz,
                         rule: m.rule.clone(),
-                        // Not the parent's reading. Nothing read this
-                        // occurrence out of the prose and nobody set it, and a
-                        // row wearing `cue` here is one a re-read takes for
-                        // its own and deletes — after which the re-read finds
-                        // the original instant, sees it done, and arms
-                        // nothing. See `Source::Armed`.
+                        // Not the parent's `cue`: a re-read would take a `cue` row for its own and
+                        // delete it. See `Source::Armed`.
                         source: crate::store::moments::Source::Armed,
                         span: m.span,
-                        // The successor continues this recurrence rather than
-                        // starting one: same series, so `COUNT` keeps counting
-                        // from where the completed occurrence left it however
-                        // many supersessions the rows have ridden since.
-                        //
-                        // Falling back to this row's own id, because a NULL
-                        // here is not "no series" — it is a row written before
-                        // the column existed, and `series_id` is
-                        // migration-added, so on any upgraded base it is every
-                        // recurring row. `insert_moment` reads `(None, Some(rule))`
-                        // as the head of a *new* series and stamps the
-                        // successor with its own id, which restarts the
-                        // `COUNT`: a `FREQ=DAILY;COUNT=5` reminder fired five
-                        // times, started again, and fired nine.
-                        //
-                        // This row is the series head in that case, which is
-                        // the same answer `set_rule`'s `COALESCE(series_id, id)`
-                        // writes for a rule set today.
+                        // A NULL series is a pre-migration row, which is the head; `None` would
+                        // restart the `COUNT`.
                         series_id: m.series_id.clone().or_else(|| Some(m.id.clone())),
                     })
                     .await?;
             }
-            // Warn and carry on, as every other `rearm_remind` on this path
-            // does. The one-shot `mark_done` above has already committed: a
-            // transient SQLITE_BUSY here reported the completion as *failed*,
-            // the retirement below never ran for this moment again, and the
-            // retry the failure invited answered "nothing to finish".
+            // Warn and carry on: `mark_done` has committed, and failing here would block the
+            // retirement for good.
             if let Err(e) = self.store.rearm_remind().await {
                 tracing::warn!(error = %e, moment_id = id, "could not re-arm Remind after a completion");
             }
-            // Last, and only after the recurrence above has armed the next
-            // occurrence: "no open reminder remains" is a question about the
-            // state this call leaves behind, not the one it found.
-            // Best-effort for the same reason as the re-arm above: the row is
-            // already done, and failing the call here is the one outcome that
-            // guarantees this never runs again.
+            // Last, after the successor is armed: "no open reminder remains" is about the state
+            // this leaves.
             if let Err(e) = self.retire_the_note_if_nothing_is_owed_on_it(id, now).await {
                 tracing::warn!(error = %e, moment_id = id, "could not retire the note behind a completed reminder");
             }
@@ -819,8 +623,7 @@ impl crate::core::Core {
         Ok(false)
     }
 
-    /// The retirement half of a completion, lifted out so `complete_moment`
-    /// can run it best-effort.
+    /// Lifted out so `complete_moment` can run it best-effort.
     async fn retire_the_note_if_nothing_is_owed_on_it(
         &self,
         moment_id: &str,
@@ -835,24 +638,14 @@ impl crate::core::Core {
         Ok(())
     }
 
-    /// The exact inverse of `complete_moment`, and the only way to undo one.
-    ///
-    /// Undoing has to put back everything completing changed, or the undo the
-    /// band offers a second after "Done" leaves the base in a state neither
-    /// press asked for: the successor occurrence a recurrence armed would stay
-    /// on the band beside the row that came back — two open rows for one rule,
-    /// and one occurrence of a `COUNT=n` burned — and the note the completion
-    /// retired would stay out of `recent_captures` and below the search cliff
-    /// with nothing left to clear it.
-    ///
-    /// The successor is deleted rather than marked: it never happened.
+    /// The exact inverse of `complete_moment`: the armed successor is deleted and the retired note
+    /// restored.
     pub async fn uncomplete_moment(&self, id: &str) -> crate::error::Result<()> {
         let Some(m) = self.store.moment(id).await? else {
             return Ok(());
         };
-        // Before the row is reopened: while it is still done, it is the row
-        // whose completion armed the successor, and `next_after` from its own
-        // `at` is the instant that successor was given.
+        // While the row is still done, `next_after` from its `at` is the instant the successor was
+        // given.
         if let (Some(rule), Some(at)) = (m.rule.as_deref(), m.at)
             && let Some(next) =
                 next_after_anchored(rule, at, zone(Some(&m.tz)), self.series_anchor_of(&m).await)
@@ -862,8 +655,7 @@ impl crate::core::Core {
                 .await?;
         }
         self.store.undo_done(id).await?;
-        // The row comes back, so the note comes back with it. Unconditional: a
-        // corpus that was never retired is already NULL here.
+        // Unconditional: a corpus that was never retired is already NULL here.
         if let Some(cid) = self.store.corpus_of_moment(id).await? {
             self.store.unretire_corpus(&cid).await?;
         }
@@ -871,14 +663,8 @@ impl crate::core::Core {
         Ok(())
     }
 
-    /// The artifact page's reminder editor: the open reminder on this
-    /// artifact restated as the operator typed it, or one made where there was
-    /// none. Answers the moment's id.
-    ///
-    /// The rule is restated on every save, unchanged or not, because a save is
-    /// a person saying what this reminder is — see `Store::restate_rule`. That
-    /// is what takes an invented recurrence off a one-off for good: the row
-    /// stops being the model's to re-read.
+    /// The rule is restated on every save, so the row stops being the model's to re-read. Answers
+    /// the id.
     pub async fn edit_reminder(
         &self,
         artifact_id: &str,
@@ -899,10 +685,8 @@ impl crate::core::Core {
                 m.id
             }
             None => {
-                // A note the operator once said was no reminder is one now,
-                // by their own hand. The refusal would only go on deleting
-                // readings the `set` row already outranks, so it is withdrawn
-                // rather than left contradicting the row.
+                // The operator now makes it a reminder, so a past refusal is withdrawn rather than
+                // left contradicting it.
                 if let Some(cid) = art.corpus_id.as_deref() {
                     let mut meta = self.store.get_corpus(cid).await?.metadata;
                     if meta.is_object() && intent_refused(&meta, Intent::Remind) {
@@ -923,8 +707,7 @@ impl crate::core::Core {
                         series_id: None,
                     })
                     .await?;
-                // A finished reminder retired its note; a new one on the same
-                // note brings it back, as the judged read's arming does.
+                // A new reminder brings back the note a finished one retired.
                 if let Some(cid) = self.store.corpus_of_moment(&id).await?
                     && self.store.is_retired(&cid).await?
                 {
@@ -937,10 +720,7 @@ impl crate::core::Core {
         Ok(id)
     }
 
-    /// "Remove reminder" on the artifact page: the note stays an ordinary
-    /// entry. Every open row goes, the operator's own included, and the
-    /// refusal is recorded where there is a note to record it on, so a
-    /// re-read does not file the reminder again. Answers whether anything went.
+    /// Every open row goes and the refusal is recorded, so a re-read does not file it again.
     pub async fn clear_reminder(&self, artifact_id: &str) -> crate::error::Result<bool> {
         let refused = self.set_reminder(artifact_id, false).await?;
         let rest = self.store.delete_open_due(artifact_id).await?;
@@ -1194,7 +974,6 @@ mod tests {
                     .unwrap(),
             );
         }
-        // Both from before the column, and the first already done.
         sqlx::query!(
             "UPDATE moments SET series_id = NULL WHERE artifact_id = ?",
             &aid
@@ -1313,8 +1092,6 @@ mod tests {
             })
             .await
             .unwrap();
-        // Moved a day earlier by hand. `next_after` from Tuesday is Wednesday,
-        // which is now this row's `moved_from`.
         let tue = wed - 86_400;
         core.store
             .move_moment(&id, tue, "Europe/Berlin")
@@ -1364,7 +1141,6 @@ mod tests {
             series_id: None,
         };
         let first = core.store.insert_moment(&row(day(2))).await.unwrap();
-        // Somebody already set tomorrow's by hand.
         core.store.insert_moment(&row(day(3))).await.unwrap();
         assert!(core.complete_moment(&first).await.unwrap());
         let open = core.store.open_due(0, i64::MAX).await.unwrap();
@@ -1432,8 +1208,6 @@ mod tests {
             "the last one takes the key with it"
         );
 
-        // A refusal another binary wrote for an intent this one no longer
-        // knows is left where it is, and reads as no refusal of a reminder.
         let mut old = serde_json::json!({"intent_refused": ["journal"]});
         assert!(!intent_refused(&old, Intent::Remind));
         allow_intent(&mut old, Intent::Remind);
@@ -1454,15 +1228,13 @@ mod tests {
             .and_hms_opt(0, 0, 0)
             .unwrap();
         assert_eq!(resolve_local(past_9999, berlin()), None);
-        // The bound is on the instant and not on the local year, so the first
-        // midnight of the year 10000 in a zone east of UTC is still 9999 to
-        // everything that reads the stamp — and is allowed.
+        // The bound is on the instant, not the local year, so 10000-01-01 east of UTC is still
+        // allowed.
         let just_inside = chrono::NaiveDate::from_ymd_opt(10_000, 1, 1)
             .unwrap()
             .and_hms_opt(0, 0, 0)
             .unwrap();
         assert!(resolve_local(just_inside, berlin()).is_some_and(|at| at <= END_OF_9999));
-        // And an ordinary date still resolves, inside the range on both sides.
         let ordinary = chrono::NaiveDate::from_ymd_opt(2026, 9, 11)
             .unwrap()
             .and_hms_opt(9, 0, 0)
@@ -1496,14 +1268,8 @@ mod tests {
             "BYDAY=MO",
             "FREQ=WEEKLY;BYSETPOS=1",
             "",
-            // `next_after` walks day by day and its bound scales with the
-            // interval: unbounded here is an unbounded loop inside a request.
             "FREQ=DAILY;INTERVAL=0",
             "FREQ=DAILY;INTERVAL=4000000000",
-            // `next_after`'s Daily and Weekly arms never read `by_month_day`,
-            // so accepting these was accepting a constraint and then dropping
-            // it: "the fifteenth" stored, and a push every day of the month.
-            // RFC 5545 forbids the weekly pairing outright.
             "FREQ=DAILY;BYMONTHDAY=15",
             "FREQ=WEEKLY;BYMONTHDAY=15",
         ] {
@@ -1589,7 +1355,6 @@ mod tests {
             "MO,".repeat(50_000) + "MO"
         );
         assert_eq!(parse_rule(&huge).unwrap().by_day, vec![Weekday::Mon]);
-        // And the meaning is untouched: order of first mention is kept.
         let mon = berlin()
             .with_ymd_and_hms(2026, 8, 31, 9, 0, 0)
             .unwrap()
@@ -1638,11 +1403,9 @@ mod tests {
                 .to_string(),
             "2026-09-01 18:00"
         );
-        // And it ends there: the 2nd is past the named day.
         assert!(next_after("FREQ=DAILY;UNTIL=20260901", next, la).is_none());
 
-        // The zoned form still means the instant it names, in UTC, for
-        // everyone — that is what the `Z` is for.
+        // The `Z` form means its UTC instant for everyone.
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T000000Z", at, la).is_none());
     }
 
@@ -1662,10 +1425,7 @@ mod tests {
                 .to_string(),
             "2026-09-01 18:00"
         );
-        // And it ends on its own wall clock: the 2nd at 18:00 is past
-        // 23:59:59 on the 1st, in the reader's zone and in no other.
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959", next, la).is_none());
-        // An occurrence earlier in the day than the named time still stands.
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959", at, la).is_some());
     }
 
@@ -1687,10 +1447,6 @@ mod tests {
 
     #[test]
     fn a_weekly_interval_counts_calendar_weeks_not_day_blocks() {
-        // RFC 5545: INTERVAL=2 with BYDAY=MO from a Wednesday origin skips
-        // the Monday five days later — it is already the next week — and
-        // fires the one after. Counted in 7-day blocks from the origin it
-        // fired at +5 days.
         let wed = resolve_local(
             chrono::NaiveDate::from_ymd_opt(2026, 9, 2)
                 .unwrap()
@@ -1705,9 +1461,6 @@ mod tests {
 
     #[test]
     fn byday_narrows_a_daily_rule_instead_of_being_ignored() {
-        // "every weekday at 9" is the natural answer to a note that says so,
-        // and the parser took the BYDAY while `next_after` read past it: the
-        // Friday occurrence armed Saturday.
         let fri = berlin()
             .with_ymd_and_hms(2026, 9, 4, 9, 0, 0)
             .unwrap()
@@ -1721,8 +1474,6 @@ mod tests {
 
     #[test]
     fn byday_under_monthly_names_every_such_weekday_of_the_month() {
-        // No BYMONTHDAY beside it: the origin's day-of-month must not stand
-        // in, or the rule fires only when the two happen to coincide.
         let mon = berlin()
             .with_ymd_and_hms(2026, 9, 7, 9, 0, 0)
             .unwrap()
@@ -1735,7 +1486,6 @@ mod tests {
 
     #[test]
     fn monthly_with_both_parts_is_their_intersection() {
-        // BYMONTHDAY=13 and BYDAY=SU: the next 13th that is a Sunday.
         let at = berlin()
             .with_ymd_and_hms(2026, 9, 13, 9, 0, 0)
             .unwrap()
@@ -1767,9 +1517,6 @@ mod tests {
 
     #[test]
     fn a_time_in_the_spring_forward_gap_rolls_to_the_gap_close() {
-        // 02:30 on 2027-03-28 does not exist in Berlin. chrono maps it to
-        // `None` — there is no `earliest()` to take — and the date was
-        // silently dropped where the operator had named one.
         let dt = chrono::NaiveDate::from_ymd_opt(2027, 3, 28)
             .unwrap()
             .and_hms_opt(2, 30, 0)

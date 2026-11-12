@@ -1,13 +1,5 @@
-//! The settings page, and everything an operator changes from it.
-//!
-//! Split out of `web::ui`, which had grown into the module every page's
-//! leftovers landed in. This is one screen and the writes it makes: the
-//! account it names, the capture language, where reminders are pushed, the
-//! API tokens, and the one button that forgets the search log.
-//!
-//! `push_url` and `points_inward` are here rather than beside the notifier
-//! that spends them, because a destination is vetted once, at save time —
-//! `jobs::remind` says so in its own comments and relies on it.
+//! The settings page and the writes it makes.
+//! `push_url` and `points_inward` live here because a destination is vetted once, at save time; `jobs::remind` relies on it.
 
 use crate::error::{Error, Result};
 use crate::fmt::fmt_time;
@@ -26,9 +18,7 @@ pub struct TokenRow {
     pub name: String,
     pub created: String,
     pub last_used: String,
-    /// What asked for the token, as it announced itself, or `—` for one minted
-    /// before this was recorded. The extension names every token it mints the
-    /// same thing, so this is what tells two of those rows apart.
+    /// As the asker announced itself, or `—`; extension tokens share one name, so this tells them apart.
     pub minted_by: String,
     pub revoked: bool,
 }
@@ -36,41 +26,24 @@ pub struct TokenRow {
 #[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsTemplate {
-    /// Where due reminders are pushed. The token is never rendered; only
-    /// whether one is stored.
+    /// The token is never rendered; only whether one is stored.
     gotify_url: String,
     gotify_token_set: bool,
     up_endpoint: String,
-    /// What registered the endpoint over the API, where something did. A row
-    /// typed into the field has none.
+    /// What registered the endpoint over the API; none for a typed row.
     up_device: Option<String>,
-    /// An endpoint with no keys: a registration from before Web Push, still
-    /// pushed to in plaintext. Said on the page, because the difference is
-    /// invisible in the field and it is the difference between a push the
-    /// push service can read and one it cannot.
+    /// An endpoint with no keys is pushed in plaintext; said, since the field cannot show it.
     up_legacy: bool,
     tokens: Vec<TokenRow>,
-    /// `None` when capture is switched off, which renders nothing at all: a
-    /// section about a log nobody is keeping is noise.
+    /// `None` when capture is off, which renders nothing.
     feedback: Option<crate::store::feedback::Stats>,
-    /// The questions, counted beside the searches. Set exactly when `feedback`
-    /// is: one switch records both, one purge takes both, and a page that named
-    /// only the searches let an operator clear their query log without knowing
-    /// the judged questions went with it.
+    /// Set exactly when `feedback` is: one switch records both and one purge takes both.
     asks: Option<crate::store::asks::AskStats>,
-    /// Who is looking at this base.
-    ///
-    /// Every user has held their own database and their own collection since
-    /// #52, and no page said so. The email where the identity provider gave
-    /// one, because that is the name a person recognises as theirs; the
-    /// subject otherwise, because a stable identifier beats no answer.
+    /// The email where the provider gave one, else the subject.
     account: String,
-    /// Every language a capture can be read in, with the one currently chosen
-    /// marked. Built here rather than iterated in the template so the "follow
-    /// the browser" row and the ten sit in one list in one order.
+    /// Built here so "follow the browser" and the ten sit in one list.
     langs: Vec<LangRow>,
-    /// What the browser would choose, named beside the automatic row: "follow
-    /// this browser" says nothing about what that would mean today.
+    /// Named beside the automatic row, since "follow this browser" says nothing on its own.
     browser_lang: &'static str,
     /// The capture language instructs the synthesizer; without one it means nothing.
     synthesizes: bool,
@@ -79,19 +52,13 @@ struct SettingsTemplate {
 }
 
 impl SettingsTemplate {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
     fn section(&self) -> &'static str {
         "settings"
     }
 }
 
-/// One row of the language control.
 pub struct LangRow {
-    /// The stored value: a tag, or `""` for automatic.
+    /// A tag, or `""` for automatic.
     pub value: &'static str,
     pub label: &'static str,
     pub selected: bool,
@@ -103,14 +70,12 @@ struct TokenCreatedTemplate {
     token: String,
 }
 
-/// The API tokens, formatted for a table.
 async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
     Ok(tenant
         .core
         .store
         .control
-        // This user's, not the instance's: `api_tokens` is one table for
-        // everybody now.
+        // This user's: `api_tokens` is one table for everybody.
         .list_tokens(&tenant.user.subject)
         .await?
         .into_iter()
@@ -122,23 +87,13 @@ async fn token_rows(tenant: &Tenant) -> Result<Vec<TokenRow>> {
                 .last_used_at
                 .map(fmt_time)
                 .unwrap_or_else(|| "never".into()),
-            // What asked for it. Two tokens can carry one name — the extension
-            // gives every token it mints the same one — and when neither has
-            // been used yet, this is the only thing that differs.
+            // Extension tokens share one name, so the user agent is what differs.
             minted_by: t.user_agent.clone().unwrap_or_else(|| "—".into()),
             revoked: t.revoked_at.is_some(),
         })
         .collect())
 }
 
-/// What is true about this installation, as opposed to what is in it.
-///
-/// Split off Housekeeping, which had grown to hold six tables about the corpus
-/// plus the extension, the tokens and the feedback purge — so revoking a token
-/// meant scrolling past every merge and every hidden artifact first. Reached
-/// from the same quiet line under Capture, and no more advertised than
-/// Housekeeping is: neither belongs in a top row that is three destinations
-/// wide on purpose.
 async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Response> {
     let chosen = tenant.core.store.control.lang(&tenant.user.subject).await?;
     let browser = headers
@@ -214,25 +169,8 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Re
     .into_response())
 }
 
-/// Forget every captured search, every recorded question, and every situation.
-///
-/// Judgements go with them: a verdict is a statement about a query, and one
-/// whose query no longer exists records nothing. The situations a page view
-/// was made in go too, in both places they live — the rows in SQLite and the
-/// centroids on the points — because a profile is the situations that formed
-/// it, and a button that says "forget" may not leave the average behind. Accepted settings and their
-/// history stay, because they describe how the application is configured now.
-///
-/// Both tables, because one switch records both and `expire_feedback` ages both
-/// under one window — but the questions are the harder loss, being the only
-/// source `--export-eval` has for `questions.json`, so the button and its
-/// confirmation name them rather than leaving them to the word "searches".
-///
-/// The observations go too, and are not named separately because they are not
-/// a separate thing: an observation is what one of these searches left behind,
-/// carrying the same query text and its vector. Nothing cascades to that table
-/// — `event_id` is a bare column — so it has to be reached by name or the
-/// press empties the pages and leaves the log.
+/// Takes judgements, situations (rows and point centroids) and observations with it; accepted settings stay.
+/// Observations do not cascade (`event_id` is a bare column), so they are deleted by name.
 pub const PURGE_NAME: &str = "recorded searches";
 
 #[derive(serde::Deserialize)]
@@ -241,7 +179,7 @@ pub(crate) struct TypedName {
     pub name: String,
 }
 
-/// The typed name did not match: a 422 the dialog swaps in place.
+/// A 422 the dialog swaps in place.
 pub(crate) fn name_mismatch() -> Response {
     (
         axum::http::StatusCode::UNPROCESSABLE_ENTITY,
@@ -286,13 +224,7 @@ struct NotifyForm {
     up_endpoint: String,
 }
 
-/// A push destination, checked before it is stored.
-///
-/// Both fields were taken on `trim()` alone, while the URL capture path
-/// (`api.rs`) has always refused anything that is not `http(s)` in as many
-/// words. That mattered more here, not less: nothing fetches a captured URL on
-/// a schedule, and `jobs::remind::run` POSTs to whatever is saved here on a
-/// timer, from the server, for as long as it stands.
+/// Only `http(s)`: `jobs::remind::run` POSTs here from the server on a timer.
 pub(crate) fn push_url(field: &str, raw: &str) -> Result<()> {
     let u = url::Url::parse(raw).map_err(|e| Error::Validation(format!("{field}: {e}")))?;
     if !matches!(u.scheme(), "http" | "https") {
@@ -316,25 +248,8 @@ pub(crate) fn push_url(field: &str, raw: &str) -> Result<()> {
     Ok(())
 }
 
-/// Does this host name the server itself, or the link-local range?
-///
-/// The reason the field is validated at all. Whoever fills this form is telling
-/// the server to make an HTTP request from *its* network position, and it then
-/// makes that request twice over: once immediately, for the "Test Gotify"
-/// button, and on a timer for as long as the setting stands. Pointed at
-/// `http://127.0.0.1:9200/`, the button's two-way "Sent." / "Could not send"
-/// answer says whether something is listening on that port of the server's own
-/// loopback — a port scan of a machine the person at the form may have no other
-/// access to, one entry at a time — and the timer turns an unauthenticated
-/// internal endpoint into a POST it will keep receiving.
-///
-/// Loopback, unspecified and link-local only. The private ranges are
-/// deliberately left alone: engram is self-hosted, a Gotify at `192.168.1.5` is
-/// an ordinary setup, and refusing it would break the common case to narrow an
-/// attack that the loopback rule has already taken the sharp edge off. A
-/// hostname that *resolves* to loopback still gets through — closing that means
-/// resolving at save time and again at send time, which is a different piece of
-/// work.
+/// Loopback, unspecified and link-local: the test button would otherwise port-scan the server.
+/// Private ranges stay allowed (a LAN Gotify is ordinary); a hostname resolving to loopback is not caught.
 fn points_inward(host: &url::Host<&str>) -> bool {
     use std::net::Ipv4Addr;
     let v4 = |a: Ipv4Addr| a.is_loopback() || a.is_link_local() || a.is_unspecified();
@@ -344,8 +259,7 @@ fn points_inward(host: &url::Host<&str>) -> bool {
             d == "localhost" || d.ends_with(".localhost")
         }
         url::Host::Ipv4(a) => v4(*a),
-        // `fe80::/10` written out, because `is_unicast_link_local` is unstable.
-        // A v4-mapped address is the v4 question again and not a second one.
+        // `fe80::/10` written out: `is_unicast_link_local` is unstable. A v4-mapped address is the v4 question again.
         url::Host::Ipv6(a) => match a.to_ipv4_mapped() {
             Some(m) => v4(m),
             None => a.is_loopback() || a.is_unspecified() || a.segments()[0] & 0xffc0 == 0xfe80,
@@ -353,21 +267,14 @@ fn points_inward(host: &url::Host<&str>) -> bool {
     }
 }
 
-/// Save the channels. A blank token keeps the stored one while the url stays;
-/// a blank url or endpoint switches that channel off. Saving re-arms the
-/// Remind unit, because a channel just configured is what makes it worth arming.
+/// A blank token keeps the stored one; a blank url or endpoint switches the channel off.
 #[derive(serde::Deserialize)]
 struct LangForm {
     #[serde(default)]
     lang: String,
 }
 
-/// Choose the language captures are read in, or clear it back to automatic.
-///
-/// It changes nothing already stored: a corpus carries the language it was
-/// captured in, and re-reading old documents under a new setting would rewrite
-/// artifacts nobody asked to have rewritten. What it changes is the next
-/// capture.
+/// Changes the next capture only: stored corpora keep their language.
 async fn save_lang(tenant: Tenant, Form(f): Form<LangForm>) -> UiResult<Response> {
     let chosen = match f.lang.trim() {
         "" => None,
@@ -384,15 +291,13 @@ async fn save_lang(tenant: Tenant, Form(f): Form<LangForm>) -> UiResult<Response
     Ok(Redirect::to("/ui/settings").into_response())
 }
 
-/// The notification channels as the settings page shows them.
 #[derive(serde::Serialize)]
 pub(crate) struct NotifySetting {
     pub gotify_url: String,
-    /// The token is never read back; this says whether one is stored.
+    /// The token is never read back; only whether one is stored.
     pub gotify_token_set: bool,
     pub up_endpoint: String,
-    /// The device that registered the UnifiedPush endpoint with its keys,
-    /// where one did.
+    /// Where an app registered the endpoint with keys.
     pub up_device: Option<String>,
     /// A pasted endpoint with no keys: plaintext.
     pub up_legacy: bool,
@@ -432,9 +337,7 @@ pub(crate) async fn notify_setting(tenant: &Tenant) -> Result<NotifySetting> {
     })
 }
 
-/// Save the channels. An empty field switches that channel off; an empty
-/// token keeps the stored one; an endpoint the app registered keeps its keys
-/// as long as the URL is the same.
+/// An empty field switches the channel off; an empty token keeps the stored one; a registered endpoint keeps its keys while the URL is the same.
 pub(crate) async fn set_notify(
     tenant: &Tenant,
     gotify_url: &str,
@@ -474,8 +377,7 @@ async fn save_notify(tenant: Tenant, Form(f): Form<NotifyForm>) -> UiResult<Resp
     Ok(Redirect::to("/ui/settings").into_response())
 }
 
-/// Send one test message down a channel. `Ok(Err(why))` is a channel that is
-/// not configured or did not take the message, in the words the page says.
+/// `Ok(Err(why))`: not configured or not accepted, in the page's words.
 pub(crate) async fn test_channel(
     tenant: &Tenant,
     channel: &str,
@@ -522,7 +424,6 @@ struct NotifyTestForm {
     channel: String,
 }
 
-/// One test message down the named channel, answered as a fragment.
 async fn test_notify(tenant: Tenant, Form(f): Form<NotifyTestForm>) -> UiResult<Response> {
     Ok(
         axum::response::Html(match test_channel(&tenant, &f.channel).await? {
@@ -574,7 +475,7 @@ fn render_row(t: TokenRow) -> Result<String> {
         .map_err(|e| crate::error::Error::Internal(e.to_string()))
 }
 
-/// At once, with an undo notice. Scoped to the caller: an unknown id and someone else's answer alike.
+/// At once, with an undo notice; an unknown id and someone else's answer alike.
 async fn revoke_token_ui(tenant: Tenant, Path(tid): Path<String>) -> UiResult<Response> {
     crate::auth::tokens::revoke(&tenant.core.store.control, &tid, &tenant.user.subject).await?;
     let row = token_row(&tenant, &tid).await?;
@@ -600,9 +501,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/ui/settings/lang", post(save_lang))
         .route("/ui/settings/notify", post(save_notify))
         .route("/ui/settings/notify/test", post(test_notify))
-        // `/ui/ops/...` rather than `/ui/settings/...`: the tokens and the
-        // purge were on Housekeeping before they were on this page, and a
-        // form action is a URL somebody may have open in a tab.
+        // Under `/ui/ops/...`: these form actions predate this page and may be open in a tab.
         .route("/ui/ops/tokens", post(mint_token))
         .route("/ui/ops/tokens/{id}/revoke", post(revoke_token_ui))
         .route("/ui/ops/tokens/{id}/restore", post(restore_token_ui))
@@ -727,8 +626,7 @@ mod tests {
                 "{inward} points at the server itself"
             );
         }
-        // A self-hosted push server on the network is the ordinary case and
-        // stays allowed — the private ranges are deliberately not refused.
+        // A LAN push server is the ordinary case; private ranges are not refused.
         for outward in [
             "http://192.168.1.5:8080/message",
             "http://10.0.0.9/message",
@@ -790,9 +688,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_tokens_with_one_name_are_still_tellable_apart() {
-        // The extension mints every token under the same name, so two rows
-        // called "browser extension" and neither used yet were the same row
-        // twice — and one of them was the one currently working.
         let (app, cookie, core) = app_session_and_core().await;
         crate::auth::tokens::mint(
             &core.store.control,
@@ -830,9 +725,6 @@ mod tests {
             "the token must be shown once: {html}"
         );
 
-        // It is not recoverable from any later page. Settings, not Housekeeping:
-        // that is the page the token table moved to, and asserting against a
-        // page that renders no tokens at all asserts nothing.
         let page = body_of(
             app.oneshot(
                 Request::builder()
@@ -857,11 +749,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_purged_search_is_not_the_bar_owner_s_any_more() {
-        // Where the bar's writing guards do *not* come into it: the ownership
-        // check runs first and a row that is gone belongs to nobody, so all
-        // four answers stop there. Worth pinning, because the store guards
-        // below it read as the thing standing between a stale tab and a purged
-        // event, and they are not — this is.
+        // The ownership check runs first, and a gone row belongs to nobody: that is the guard pinned here.
         let (app, cookie, handle, a, event) = searched_app().await;
         handle.store.purge_feedback().await.unwrap();
 
@@ -1042,10 +930,6 @@ mod tests {
 
     #[test]
     fn a_token_table_with_no_tokens_says_so_instead_of_showing_its_headings() {
-        // Five column headings over nothing is a table pretending to have
-        // rows — the same thing the old review card named at its top: the Ops
-        // page answered five headings with "None." and made an empty base look
-        // like a backlog.
         let html = settings_fixture(vec![]);
         assert!(!html.contains("Minted by"), "{html}");
         assert!(html.contains("No API tokens yet."), "{html}");

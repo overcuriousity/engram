@@ -10,9 +10,7 @@ use base64::Engine;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
-/// Results go straight into an agent's context, so they stay markdown: the
-/// artifact text is already markdown, and the surrounding structure has to be
-/// readable rather than JSON-shaped.
+/// Markdown, since results go straight into an agent's context.
 pub fn format_search_results(
     results: &[SearchResult],
     explanation: Option<&crate::core::explain::SearchExplanation>,
@@ -20,10 +18,7 @@ pub fn format_search_results(
     if results.is_empty() {
         return "No matches in the knowledge base.".to_string();
     }
-    // The pool's shape cannot belong to a hit: no result can say how many
-    // corpora it was drawn from, and that number is what distinguishes one
-    // source dominating because the rule failed from one source being all
-    // there was.
+    // Only the pool can say how many corpora it drew from: one source dominating versus being all there was.
     let head = match explanation {
         Some(s) => format!(
             "_Pool: {} candidates, {} corpus{}{}{}._\n\n",
@@ -34,12 +29,7 @@ pub fn format_search_results(
                 Some(n) => format!(" · cap {n} per source"),
                 None => " · uncapped".to_string(),
             },
-            // Displaced counts the pool; refilled counts the answer. The
-            // refill puts every displaced hit back into the pool either way,
-            // so "how many were refilled" is only a question worth asking of
-            // the list that came back: an over-cap hit still in it is one the
-            // cap meant to drop and could not, because there was nothing else
-            // to put in its place.
+            // Refilled counts the answer: an over-cap hit still in it had no replacement.
             match (s.displaced, s.refilled) {
                 (0, _) => String::new(),
                 (d, 0) => format!(" · {d} displaced"),
@@ -55,18 +45,12 @@ pub fn format_search_results(
     let body = results
         .iter()
         .map(|r| {
-            // Never "Untitled": a verbatim passage has no title by design, and
-            // an agent reading a list of them has the same problem the search
-            // rail has — a column of a word that says nothing where a name
-            // would say something. The opening of the passage says what it is.
+            // Never "Untitled": the passage opening says what it is.
             let title = r
                 .title
                 .clone()
                 .unwrap_or_else(|| crate::web::markdown::stand_in_title(&r.text, 60));
-            // `stand_in_title` takes markup and leading punctuation off the
-            // front, so a passage that is only those leaves nothing — and a
-            // heading with no text after it is a numbered entry an agent
-            // cannot refer back to. The id is a poor name and a working one.
+            // `stand_in_title` can leave nothing; the id is a poor name but a working one.
             let title = if title.is_empty() {
                 r.artifact_id.clone()
             } else {
@@ -77,18 +61,14 @@ pub fn format_search_results(
             } else {
                 format!(" · {}", r.tags.join(", "))
             };
-            // An agent reads this as a ranked list unless it is told
-            // otherwise, and a bare ordinal is the strongest ranking signal
-            // there is. An associated hit did not compete for a place, so it
-            // gets no number at all rather than one that continues the count.
+            // A bare ordinal reads as rank, and an associated hit did not compete, so it gets no number.
             let heading = if r.via.is_none() {
                 rank += 1;
                 format!("### {rank}. {title}")
             } else {
                 format!("### {title}")
             };
-            // An agent reading a numbered list has no grey to see, so a hit
-            // past the cliff says so in words.
+            // An agent has no grey to see, so a hit past the cliff says so in words.
             let how = match (&r.via, &r.reason) {
                 (Some(_), Some(why)) => format!("recalled beside the answer — {why}"),
                 (Some(_), None) => "recalled beside the answer".to_string(),
@@ -97,8 +77,7 @@ pub fn format_search_results(
                 }
                 (None, _) => format!("score {:.3}", r.score),
             };
-            // Everything the rail says with a badge or a shade of grey, said
-            // here in words: an agent reads the meta line and nothing else.
+            // An agent reads the meta line and nothing else, so badges become words.
             let mut facts = Vec::new();
             if r.weak {
                 facts.push("only loosely related".to_string());
@@ -136,8 +115,7 @@ pub fn format_search_results(
                 (true, Some(e)) => why_line(e),
                 _ => String::new(),
             };
-            // The rail's disagreement line, in words: an agent that reads one
-            // side of a contradiction as settled repeats it as fact.
+            // An agent reading one side of a contradiction as settled repeats it as fact.
             let disagrees = r
                 .disagrees_with
                 .iter()
@@ -153,8 +131,7 @@ pub fn format_search_results(
     format!("{head}{body}")
 }
 
-/// One disagreement under a hit: which note, when it was written, and the
-/// judge's sentence on what differs. Neither side is called right.
+/// Neither side is called right.
 fn disagreement_line(d: &crate::store::pairs::Disagreement) -> String {
     format!(
         "Disagrees with \"{}\" ({}){}",
@@ -167,21 +144,12 @@ fn disagreement_line(d: &crate::store::pairs::Disagreement) -> String {
     )
 }
 
-/// How far ahead the `due` tool looks, from a number that came off the wire.
-///
-/// Clamped before the cast, and that is the whole point of the function. A
-/// `u64` past `i64::MAX` casts to a negative — `u64::MAX` becomes -1, for a
-/// horizon an hour *behind* now and a window that can never hold anything —
-/// and anything past `i64::MAX / 3_600` overflows the multiply, which in a
-/// debug build is a panic raised inside the tool handler. A century is
-/// further ahead than any due list means.
+/// Clamped before the cast: a `u64` past `i64::MAX` goes negative, and a large one overflows the multiply.
 pub(crate) fn due_horizon(now: i64, hours: u64) -> i64 {
     const MAX_HORIZON_HOURS: u64 = 100 * 365 * 24;
     now.saturating_add(hours.min(MAX_HORIZON_HOURS) as i64 * 3_600)
 }
 
-/// The `due` tool's answer: three sections, each row in its own zone, and one
-/// line when there is nothing.
 pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> String {
     if rows.is_empty() {
         return "_Nothing is due._".to_string();
@@ -226,18 +194,12 @@ pub(crate) fn format_due(rows: &[crate::store::moments::DueRow], now: i64) -> St
     out.trim_end().to_string()
 }
 
-/// One hit's stages, in the order they ran. Named rather than counted: an
-/// agent gets this string and nothing else, so a number it cannot attribute
-/// to a stage is worse than no line at all.
+/// Named rather than counted: a number an agent cannot attribute to a stage is worse than none.
 fn why_line(e: &crate::core::explain::HitExplanation) -> String {
     if let Some(via) = &e.recalled_via {
         return format!("\n_why it is here: recalled beside `{via}`; never ranked._");
     }
-    // Absent rather than zero for a hit retrieval never returned. `recalled_via`
-    // is the only case today and returns above, so this cannot go silent on a
-    // ranked hit — but a rendered "#1" for a rank that does not exist is the
-    // failure this field's `Option` is for, and reading it as one here is how
-    // that stays true of a future stage as well.
+    // Absent rather than zero for a hit retrieval never returned: there is no "#1" for a rank that does not exist.
     let mut parts: Vec<String> = e
         .retrieved_rank
         .map(|r| format!("retrieved at #{}", r + 1))
@@ -256,8 +218,7 @@ fn why_line(e: &crate::core::explain::HitExplanation) -> String {
             s.to.unwrap_or(0) + 1
         ));
     }
-    // Kept says nothing: the cap holding is the ordinary case, and a line that
-    // reports every no-op is one an agent stops reading.
+    // Kept is the ordinary case; reporting every no-op trains an agent to skip the line.
     if matches!(e.cap, crate::core::explain::CapEffect::Refilled) {
         parts.push("over its source's cap, kept anyway".to_string());
     }
@@ -277,10 +238,8 @@ fn why_line(e: &crate::core::explain::HitExplanation) -> String {
     format!("\n_why it is here: {}._", parts.join(" · "))
 }
 
-/// The channel a tool call arrives through.
 const ORIGIN_MCP: &str = "mcp";
 
-/// One line above a document: what it is called and where it came from.
 fn corpus_head(c: &crate::store::corpora::Corpus) -> String {
     let title = c
         .title_hint
@@ -295,9 +254,7 @@ fn corpus_head(c: &crate::store::corpora::Corpus) -> String {
 
 const READ_PAGE_CHARS: usize = 20_000;
 
-/// A page of a document, in characters, ending with where the next page
-/// begins when there is one. A 50 MB PDF read whole would be one tool result
-/// that fills an agent's context; a page is something it can keep asking for.
+/// Paged so a 50 MB PDF does not fill an agent's context in one tool result.
 fn page_of(text: &str, offset: usize, max_chars: Option<usize>) -> String {
     let max = max_chars.unwrap_or(READ_PAGE_CHARS).max(1);
     let total = text.chars().count();
@@ -313,17 +270,11 @@ fn page_of(text: &str, offset: usize, max_chars: Option<usize>) -> String {
     }
 }
 
-/// Where a tool call's `Core` comes from.
-///
-/// The whole point of the enum is that the production variant does *not* hold
-/// one. See `PkdbTools`.
+/// The production variant deliberately holds no core. See `PkdbTools`.
 #[derive(Clone)]
 enum CoreSource {
-    /// One fixed core, held for the life of the tools. The single-base tests,
-    /// and nothing that serves a request. Boxed because it is by far the larger
-    /// of the two and by far the rarer.
+    /// Single-base tests only. Boxed: larger and rarer.
     Fixed(Box<Core>),
-    /// Resolved from the registry on every call, by subject.
     Tenant(std::sync::Arc<crate::tenants::Tenants>, String),
 }
 
@@ -335,12 +286,7 @@ impl CoreSource {
         }
     }
 
-    /// Which of the ten a capture through this door is read in.
-    ///
-    /// The account setting alone: MCP is a program talking to a program and
-    /// sends no `Accept-Language`, so there is no browser to fall back to and
-    /// the fallback is English. A control database that will not answer is not
-    /// a reason to refuse the capture.
+    /// The account setting alone: MCP sends no `Accept-Language`. A failing control database falls back to English.
     async fn lang(&self, core: &Core) -> crate::infer::lang::Lang {
         match self {
             CoreSource::Fixed(_) => Default::default(),
@@ -359,17 +305,11 @@ impl CoreSource {
 #[derive(Clone)]
 pub struct PkdbTools {
     source: CoreSource,
-    /// Whether `ask` is a tool at all.
-    ///
-    /// Carried rather than asked of the core, because `routes` is synchronous —
-    /// the handler macro calls it — and resolving a tenant is not. It costs
-    /// nothing to carry: `Core::asks` is `infer.complete` being configured,
-    /// which is instance-wide and identical for every tenant on it.
+    /// Carried because `routes` is synchronous; `Core::asks` is instance-wide, the same for every tenant.
     asks: bool,
 }
 
 impl PkdbTools {
-    /// Tools over one fixed core.
     pub fn over(core: Core) -> PkdbTools {
         PkdbTools {
             asks: core.asks(),
@@ -377,7 +317,6 @@ impl PkdbTools {
         }
     }
 
-    /// Tools that look their tenant up when a call arrives.
     fn for_subject(
         tenants: std::sync::Arc<crate::tenants::Tenants>,
         subject: String,
@@ -475,8 +414,7 @@ pub struct AskParams {
 
 #[tool_router]
 impl PkdbTools {
-    /// The tools this core can actually serve. `ask` is not a tool that says
-    /// "not configured" — it is not a tool.
+    /// `ask` is absent rather than "not configured" when nothing can answer.
     pub(crate) fn routes(&self) -> rmcp::handler::server::router::tool::ToolRouter<Self> {
         let mut r = Self::tool_router();
         if !self.asks {
@@ -506,9 +444,7 @@ impl PkdbTools {
             return "Ingest failed: supply exactly one of `text`, `url` or `file_base64`."
                 .to_string();
         }
-        // Before `capture_time` takes it: `intent` reaches only the text
-        // branch, and a client told "Stored" while it was dropped has been
-        // lied to. A `tz` is let through; see `refuse_time_fields`.
+        // Checked before `capture_time` takes it: `intent` reaches only the text branch. See `refuse_time_fields`.
         if p.text.is_none()
             && let Err(e) = crate::web::api::refuse_time_fields(p.intent.as_deref())
         {
@@ -546,8 +482,7 @@ impl PkdbTools {
         };
         match outcome {
             Ok(o) if o.duplicate => format!("Already stored as `{}`.", o.id),
-            // A flagged capture is read and indexed like any other; the flag
-            // is for a person who may want to keep only one of the two.
+            // The flag is for a person who may want to keep only one of the two.
             Ok(o) if o.link_unread.is_some() => format!(
                 "Stored as `{}`, but the page could not be read ({}). The link and any \
                  note are stored and searchable; the page is fetched again in the background.",
@@ -565,8 +500,7 @@ impl PkdbTools {
                     n.map_or("", |n| n.corpus_id.as_str())
                 )
             }
-            // What was stored is not yet what search finds; the reply says
-            // which reading still stands between the two.
+            // Stored is not yet searchable; the reply says which reading still stands between.
             Ok(o) => match o.status {
                 CorpusStatus::Extracting => format!(
                     "Stored as `{}`. Text extraction, then segmentation and embedding, \
@@ -601,8 +535,7 @@ impl PkdbTools {
         };
         let (head, body) = match core.store.get_corpus(&p.id).await {
             Ok(c) => (corpus_head(&c), c.raw_text),
-            // Not a corpus: perhaps an artifact, whose parent is the document
-            // wanted. A merged artifact has no parent, and is its own text.
+            // Perhaps an artifact, whose parent document is wanted; a merged artifact is its own text.
             Err(Error::NotFound) => match core.store.get_artifact(&p.id).await {
                 Ok(a) => match &a.corpus_id {
                     Some(cid) => match core.store.get_corpus(cid).await {
@@ -675,8 +608,7 @@ impl PkdbTools {
             Ok(c) => c,
             Err(e) => return format!("Search failed: {e}"),
         };
-        // The cap `Core::search` would have applied, read the same way, so
-        // asking for an explanation cannot change what the door returns.
+        // The cap `Core::search` applies, so an explanation cannot change what the door returns.
         let cap = core
             .ranking
             .read()
@@ -723,19 +655,8 @@ impl PkdbTools {
 #[rmcp::tool_handler(router = self.routes())]
 impl rmcp::ServerHandler for PkdbTools {}
 
-/// An answer, with everything the page would have shown around it.
-///
-/// A function rather than prose inside the tool, because MCP is the door with
-/// no page: an agent gets this string and nothing else, so what it does or does
-/// not say is the whole of what the caller knows — and that is worth being able
-/// to test directly.
-///
-/// Order is by consequence. Truncation first, because an agent reading a
-/// cut-off answer as a complete one acts on half a procedure. Then the literals
-/// the base does not hold, because the page marks those inline and badges them
-/// and an agent sees neither — and an agent is the caller most likely to *run*
-/// a fabricated command. Named rather than counted: "one unsupported literal"
-/// is not actionable, the literal is.
+/// MCP has no page, so this string is all the caller knows. Ordered by consequence: truncation, then the
+/// unsupported literals by name, since an agent is the caller most likely to run a fabricated command.
 fn format_answer(a: &crate::core::ask::AskResponse) -> String {
     let mut out = a.answer.clone();
     if a.truncated {
@@ -756,8 +677,7 @@ fn format_answer(a: &crate::core::ask::AskResponse) -> String {
              and the model wrote them: {named}._"
         ));
     }
-    // Beside the unsupported literals, for the same reason: what an agent
-    // must not repeat as settled. Both sides were cited; neither is picked.
+    // Both sides were cited; neither is picked.
     for d in &a.disagreements {
         let this = a
             .citations
@@ -788,8 +708,7 @@ fn format_answer(a: &crate::core::ask::AskResponse) -> String {
     out
 }
 
-/// Guard in front of the MCP service. Extracting `Identity` here means an
-/// unauthenticated request is rejected before any tool can run.
+/// Unauthenticated requests are rejected before any tool runs.
 async fn mcp_guard(
     _id: crate::auth::Identity,
     req: axum::extract::Request,
@@ -798,10 +717,7 @@ async fn mcp_guard(
     next.run(req).await
 }
 
-/// rmcp's DNS-rebinding guard accepts loopback hosts only, which is right for
-/// a laptop and wrong behind a reverse proxy: there the Host header is the
-/// deployment's public name, and a guard that does not know it answers 403 to
-/// every remote client. The public host comes from `server.public_url`.
+/// rmcp's DNS-rebinding guard allows loopback only; behind a proxy the Host is `server.public_url`'s host.
 fn service_config(
     public_host: Option<String>,
 ) -> rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
@@ -815,45 +731,14 @@ fn service_config(
     if let Some(host) = public_host {
         hosts.push(host);
     }
-    // Serve statelessly. `default()` leaves `legacy_session_mode = true`, which
-    // routes any request rmcp classifies as legacy — i.e. one carrying no modern
-    // per-request protocol-version signal — through the session path. A modern
-    // stateless client whose connector probe is a bare `tools/list`/`ping` (no
-    // `Mcp-Session-Id`, no `initialize` handshake first), as Paperclip's "check
-    // link" does, is then answered 422 "Unexpected message, expect initialize
-    // request". Turning it off sends every request down the stateless path,
-    // which serves such a probe directly (each tool call is self-contained, so
-    // engram needs no per-connection session state).
+    // Stateless: legacy session mode answers a bare `tools/list` probe (no `initialize`) with 422.
     StreamableHttpServerConfig::default()
         .with_legacy_session_mode(false)
         .with_allowed_hosts(hosts)
 }
 
-/// One MCP service per tenant, built on first use and kept — up to the same
-/// cap the tenant registry holds cores to.
-///
-/// `StreamableHttpService` is constructed with the tools it will serve, so a
-/// single service is a single user's tools, and the door has to pick the right
-/// one before the request reaches it. Building one per tenant also gives each
-/// user their own `LocalSessionManager`, which is what an MCP session ought to
-/// be: one client talking to one base.
-///
-/// What the tools carry is a subject and the registry, never a `Core`. Holding
-/// the core the door happened to be given would pin it here for as long as the
-/// service stayed in this map — a second lifetime beside the registry's own, so
-/// an instance would hold up to `2 × max_open_tenants` SQLite pools and vector
-/// clients with one cap in charge of each half and neither in charge of the
-/// total. It also kept `Working::is_idle` false forever for anybody who had
-/// ever used `/mcp`, since a pinned core is a live `Arc` on their sittings, so
-/// the registry could never reap their working memory. Resolving per call puts
-/// `store.max_open_tenants` back in sole charge of what is open.
-///
-/// The map still cannot only grow — an entry keyed by subject with nothing that
-/// removes it is a `LocalSessionManager` per person who has ever opened `/mcp`
-/// — so: a recency list beside it, and the same cap.
-///
-/// Evicting a service ends the MCP sessions it was tracking; a client that
-/// comes back initializes a new one, which is the ordinary reconnect path.
+/// One service per tenant, capped like the registry. Tools hold a subject, never a `Core`: a pinned core doubles the
+/// open pools and blocks `Working::is_idle`. Eviction ends a client's MCP session; it reconnects as usual.
 type TenantServices = std::sync::Mutex<(
     std::collections::HashMap<
         String,
@@ -865,17 +750,7 @@ type TenantServices = std::sync::Mutex<(
     Vec<String>,
 )>;
 
-/// rmcp reaps an idle session after five minutes, and an agent's session is not
-/// idle in the sense that number assumes: the gap between one tool call and the
-/// next is a person thinking, which routinely runs longer than that. The SSE
-/// keep-alive does not help, because its pings are written at the HTTP layer
-/// and never reach the session worker whose timer is running. So a client that
-/// holds the stream open watches the session die under it, and its reconnect
-/// carries a session id the server has already forgotten.
-///
-/// An hour is the working unit: longer than any pause between calls, short
-/// enough that a session abandoned by a dropped connection is still reclaimed
-/// rather than held until the service is evicted.
+/// rmcp reaps idle sessions after five minutes and SSE pings never reach its timer; a person's pause runs longer.
 const SESSION_KEEP_ALIVE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 fn session_manager() -> rmcp::transport::streamable_http_server::session::local::LocalSessionManager
@@ -898,8 +773,7 @@ fn service_for(
 > {
     use rmcp::transport::streamable_http_server::StreamableHttpService;
     let subject = tenant.user.subject.clone();
-    // The one thing read off the core the door was handed, and only because
-    // `routes` is synchronous. It is the same answer for every tenant.
+    // Read off the handed core only because `routes` is synchronous; the same for every tenant.
     let asks = tenant.core.asks();
     let mut g = services
         .lock()
@@ -925,8 +799,7 @@ fn service_for(
         .clone();
     order.retain(|s| *s != subject);
     order.push(subject);
-    // The caller's own entry was just moved to the back, so it is never the
-    // one dropped here.
+    // The caller's entry was just moved to the back, so it is never the one dropped.
     while map.len() > cap.max(1) {
         let Some(oldest) = order.first().cloned() else {
             break;
@@ -948,7 +821,6 @@ async fn protected_resource(
     })))
 }
 
-/// Points a client without a token at the resource metadata.
 async fn bearer_challenge(
     axum::extract::State(st): axum::extract::State<AppState>,
     req: axum::extract::Request,
@@ -1077,9 +949,6 @@ mod tests {
 
     #[test]
     fn the_mcp_door_names_a_passage_by_its_opening() {
-        // Claude Code reads this list. A verbatim passage has no title by
-        // design, and three headings reading "Untitled" is a list of a word
-        // that says nothing where a name would say something.
         let out = format_search_results(
             &[search_hit(
                 None,
@@ -1124,8 +993,7 @@ mod tests {
             created_at: 1_772_280_000,
             other_id: other.into(),
             other_title: Some("Backup schedule (2025)".into()),
-            // 2026-03-01, midday UTC, so the day reads the same in any zone
-            // the test machine is in.
+            // Midday UTC, so the day reads the same in any zone.
             other_created_at: 1_772_366_400,
             detail: Some("one says nightly, the other weekly".into()),
         }
@@ -1144,8 +1012,6 @@ mod tests {
             "{out}"
         );
 
-        // Untitled, and with no sentence from the judge: still said, with
-        // nothing invented in place of what is missing.
         let mut h = search_hit(Some("Backup schedule"), "Backups run nightly.");
         let mut d = disagreement("a", "b");
         d.other_title = None;
@@ -1306,8 +1172,6 @@ mod tests {
             None,
         );
 
-        // An agent consumes this directly, so it must stay markdown and keep
-        // the corpus id for follow-up lookups.
         assert!(text.contains("mount /dev/sda1"), "{text}");
         assert!(text.contains("corpus:"), "{text}");
     }
@@ -1355,8 +1219,6 @@ mod tests {
             now,
             "and so is asking for nothing ahead"
         );
-        // Both of the shapes an unclamped `as i64 * 3_600` got wrong: a
-        // negative horizon, and an overflowing multiply.
         let century = 100 * 365 * 24 * 3_600;
         assert_eq!(due_horizon(now, u64::MAX), now + century);
         assert_eq!(due_horizon(now, i64::MAX as u64 / 3_600 + 1), now + century);
@@ -1443,18 +1305,12 @@ mod tests {
 
     #[test]
     fn an_associated_result_says_it_was_recalled_rather_than_ranked() {
-        // Straight into an agent's context: without this the extra result reads
-        // as the fourth-best match for the query, which it is not.
         let out = format_search_results(
             &[hit("ranked", None), hit("recalled", Some("ranked"))],
             None,
         );
         assert!(out.contains("recalled beside"), "{out}");
 
-        // A bare ordinal is the strongest ranking signal there is: an agent
-        // reads a numbered list as ranked unless told otherwise. The ranked
-        // hit keeps its number; the associated one gets none, rather than a
-        // number that continues the count as if it had competed for one.
         assert!(out.contains("### 1. ranked"), "{out}");
         assert!(out.contains("### recalled"), "{out}");
         assert!(!out.contains("### 2"), "{out}");
@@ -1586,7 +1442,6 @@ mod tests {
                 max_chars: Some(30),
             }))
             .await;
-        // Below the head line, which quotes the opening as a stand-in title.
         let body = page.split_once("\n\n").unwrap().1;
         assert!(body.contains(&"abcdefghij".repeat(3)), "{page}");
         assert!(!body.contains(&"abcdefghij".repeat(4)), "{page}");
@@ -1739,16 +1594,12 @@ mod tests {
 
     #[test]
     fn the_mcp_door_trusts_the_deployments_own_host() {
-        // rmcp's DNS-rebinding guard accepts loopback hosts only; behind the
-        // reverse proxy the Host header is the public name, and without this
-        // the door answers 403 to every remote client.
         let config = service_config(Some("engram.example".to_string()));
         assert!(
             config.allowed_hosts.iter().any(|h| h == "engram.example"),
             "{:?}",
             config.allowed_hosts
         );
-        // Loopback stays: local development talks to the same door directly.
         assert!(
             config.allowed_hosts.iter().any(|h| h == "127.0.0.1"),
             "{:?}",
@@ -1758,10 +1609,7 @@ mod tests {
 
     #[test]
     fn an_mcp_session_outlives_the_pause_between_tool_calls() {
-        // rmcp's own default is five minutes, which expires while the person
-        // driving the agent is still reading the last answer. The client
-        // holding the stream cannot tell that apart from the server going
-        // away, so the session has to outlast a human pause.
+        // rmcp's five-minute default expires while the person is still reading the last answer.
         let configured = session_manager()
             .session_config
             .keep_alive
@@ -1810,13 +1658,9 @@ mod tests {
                 .unwrap()
         };
 
-        // What production answered before the fix: a loopback-only guard
-        // rejects the public name before any tool can run.
         let rejected = call(StreamableHttpServerConfig::default()).await;
         assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
-        // With the deployment's host named, the same request gets through to
-        // the protocol layer — which complains about the missing session, not
-        // the host.
+        // Past the host check, the protocol layer complains about the missing session instead.
         let accepted = call(service_config(Some("engram.example".to_string()))).await;
         assert_ne!(accepted.status(), StatusCode::FORBIDDEN);
     }

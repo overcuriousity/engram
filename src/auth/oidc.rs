@@ -4,8 +4,7 @@ use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-/// A login attempt older than this is abandoned. Long enough for a slow
-/// identity provider, short enough that a leaked state value is useless.
+/// Long enough for a slow provider, short enough that a leaked state value is useless.
 pub const PENDING_TTL_SECS: i64 = 600;
 
 #[derive(Debug, Clone)]
@@ -14,13 +13,11 @@ pub struct PendingAuth {
     pub nonce: String,
     pub pkce_verifier: String,
     pub created_at: i64,
-    /// The page that asked for the login. The provider hands back only
-    /// `state`, so the destination has to wait here for the callback.
+    /// The provider returns only `state`, so the destination waits here for the callback.
     pub next: Option<String>,
 }
 
-/// In-memory, single-use, expiring store of in-flight login attempts. Not
-/// persisted: a restart mid-login just means logging in again.
+/// Not persisted: a restart mid-login just means logging in again.
 pub struct PendingStore {
     inner: Mutex<HashMap<String, PendingAuth>>,
 }
@@ -42,8 +39,7 @@ impl PendingStore {
         m.insert(p.csrf.clone(), p);
     }
 
-    /// Removes and returns the attempt. Single use: a replayed `state` value
-    /// finds nothing.
+    /// Single use: a replayed `state` finds nothing.
     pub fn take(&self, csrf: &str) -> Option<PendingAuth> {
         let mut m = self
             .inner
@@ -63,20 +59,7 @@ impl Default for PendingStore {
     }
 }
 
-/// Who may sign in.
-///
-/// A deployment names its people in one of the three lists, and membership of
-/// any one of them admits. The provider is the gate for *authentication* —
-/// engram does not keep a second one — but who that gate is allowed to let
-/// through is still engram's to say, because a subject arriving for the first
-/// time gets a tenant provisioned for it: a control row, a database file and a
-/// vector collection.
-///
-/// With all three lists empty nobody is admitted unless
-/// `open_registration` is set, which is the deployment saying in writing that
-/// the provider's own registration is the door. Startup refuses a
-/// configuration that is silent on the question rather than picking either
-/// answer on the operator's behalf — see `validate_auth` in `main.rs`.
+/// Empty lists admit nobody unless `open_registration` is set, since a new subject gets a tenant provisioned.
 /// Admission by subject or group, never by e-mail: a provider may let a user set their own.
 pub fn is_allowed(cfg: &OidcConfig, subject: &str, groups: &[String]) -> bool {
     if cfg.allowed_subs.is_empty() && cfg.allowed_groups.is_empty() {
@@ -95,11 +78,7 @@ pub fn is_allowed(cfg: &OidcConfig, subject: &str, groups: &[String]) -> bool {
     false
 }
 
-/// The one claim this reads beyond the OIDC standard set: which groups the
-/// provider says the subject belongs to. A provider that never sends it — the
-/// common case, since Nextcloud's OIDC provider app only includes `groups`
-/// when an admin turns on group provisioning for the client — simply
-/// deserializes to an empty list rather than failing the claim parse.
+/// Absent `groups` (Nextcloud sends it only with group provisioning on) deserializes to an empty list.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct GroupClaims {
     #[serde(default)]
@@ -117,10 +96,7 @@ type EngramIdTokenFields = openidconnect::IdTokenFields<
 type EngramTokenResponse =
     openidconnect::StandardTokenResponse<EngramIdTokenFields, openidconnect::core::CoreTokenType>;
 
-/// `openidconnect::core::CoreClient` with its additional-claims parameter
-/// swapped from `EmptyAdditionalClaims` to [`GroupClaims`], so the `groups`
-/// claim decodes rather than being discarded. Otherwise identical to `Core*`
-/// — same algorithms, same error and token types.
+/// `CoreClient` with [`GroupClaims`] as its additional claims, so `groups` decodes.
 type EngramClient<
     HasAuthUrl = openidconnect::EndpointNotSet,
     HasDeviceAuthUrl = openidconnect::EndpointNotSet,
@@ -149,20 +125,12 @@ type EngramClient<
 >;
 
 pub struct OidcClient {
-    /// Discovery result, fetched once at startup.
-    ///
-    /// The constructed client is deliberately NOT stored: openidconnect
-    /// encodes which endpoints are configured in a seventeen-parameter
-    /// typestate, and naming that type in a struct field pins us to one patch
-    /// release. Rebuilding per call costs nothing (no I/O) and lets inference
-    /// carry the type.
+    /// The client is not stored: its seventeen-parameter typestate would pin one openidconnect release.
     metadata: openidconnect::core::CoreProviderMetadata,
-    /// The credential-bearing client: no redirects. The permissive one built
-    /// for discovery is deliberately not kept — see `discover`.
+    /// No redirects: it carries credentials. See `discover`.
     http: openidconnect::reqwest::Client,
     cfg: OidcConfig,
     redirect_url: String,
-    /// The audience an MCP client's access token names.
     resource: String,
     jwks: tokio::sync::RwLock<Option<(jsonwebtoken::jwk::JwkSet, std::time::Instant)>>,
 }
@@ -172,30 +140,18 @@ pub fn callback_url(base: &str) -> String {
 }
 
 impl OidcClient {
-    /// `base` is the deployment's public origin; the callback is derived from it.
     pub async fn discover(cfg: &OidcConfig, base: &str) -> Result<OidcClient> {
         use openidconnect::IssuerUrl;
         use openidconnect::core::CoreProviderMetadata;
 
-        // Two clients, because the two kinds of request carry different things.
-        //
-        // Discovery follows redirects: Nextcloud's documented nginx recipe 301s
-        // the bare .well-known path to /index.php/.well-known/..., while
-        // issuer_url stays the bare domain, since that is what the discovery
-        // document declares as `issuer` and what ID tokens carry as `iss`. The
-        // request is an unauthenticated GET, so a hop costs nothing but the
-        // hop; the count is bounded anyway.
+        // Discovery follows redirects: Nextcloud's nginx recipe 301s the bare .well-known path.
         let discovery_http = openidconnect::reqwest::ClientBuilder::new()
             .redirect(openidconnect::reqwest::redirect::Policy::limited(5))
             .build()
             .map_err(|e| Error::Validation(e.to_string()))?;
 
-        // Everything after discovery refuses to follow one. The token exchange
-        // POSTs `client_secret` and the authorization code, and on a 307/308
-        // reqwest replays method and body at the redirect target — so a
-        // provider that could be made to answer with a redirect would be
-        // handed our credentials for an arbitrary host. userinfo is on this
-        // client too: it bears the access token.
+        // No redirects after discovery: on 307/308 reqwest would replay `client_secret`,
+        // the code or the access token to the redirect target.
         let http = openidconnect::reqwest::ClientBuilder::new()
             .redirect(openidconnect::reqwest::redirect::Policy::none())
             .build()
@@ -248,7 +204,6 @@ impl OidcClient {
         Ok(set)
     }
 
-    /// An IdP access token for this deployment's MCP resource, as `(issuer, subject)`.
     pub async fn verify_jwt(&self, token: &str) -> Result<Option<(String, String)>> {
         use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
         let Ok(header) = decode_header(token) else {
@@ -331,16 +286,13 @@ impl OidcClient {
                 nonce: nonce.secret().clone(),
                 pkce_verifier: verifier.secret().clone(),
                 created_at: crate::store::now(),
-                // Filled in by the caller, which is the half that knows where
-                // the browser was going. See `web::auth_routes::login_page`.
+                // Set by the caller; see `web::auth_routes::login_page`.
                 next: None,
             },
         ))
     }
 
-    /// Exchange the authorization code and validate the ID token. The
-    /// openidconnect crate verifies the signature, issuer, audience and
-    /// expiry; the nonce and the allowlist are checked here.
+    /// The crate verifies signature, issuer, audience and expiry; nonce and allowlist are checked here.
     pub async fn exchange(
         &self,
         pending: &PendingAuth,
@@ -388,16 +340,8 @@ impl OidcClient {
         let mut email = claims.email().map(|e| e.to_string());
         let mut groups = claims.additional_claims().groups.clone();
 
-        // Nextcloud's OIDC provider app does not put `email` (or `groups`) in
-        // the ID token even when the scope is granted — they only appear from
-        // the userinfo endpoint. Without this, an allowlist keyed on either
-        // always sees nothing and every sign-in is refused, however correctly
-        // the config names the account.
-        //
-        // Best-effort: the subject from the ID token is already verified by
-        // its signature, so an endpoint that is absent or unreachable must
-        // not turn into a failed sign-in for someone the ID token itself
-        // vouches for.
+        // Nextcloud sends `email` and `groups` only from userinfo, not in the ID token.
+        // Best-effort: the signed ID token already vouches for the subject.
         if email.is_none() || groups.is_empty() {
             match client.user_info(
                 tokens.access_token().clone(),
@@ -435,13 +379,11 @@ impl OidcClient {
         Ok(Identity {
             subject,
             email,
-            // The session is created from this, after it returns.
             session: None,
         })
     }
 }
 
-/// A provider served by wiremock, discovered for real.
 #[cfg(test)]
 pub(crate) async fn fake_client(base: &str) -> (wiremock::MockServer, OidcClient) {
     use wiremock::matchers::path;
@@ -514,16 +456,11 @@ mod tests {
 
     #[test]
     fn an_empty_allowlist_admits_nobody_on_its_own() {
-        // Naming nobody is not the same as naming everybody. It used to be:
-        // three empty lists admitted whoever the provider authenticated, and
-        // every new subject arriving got a tenant provisioned for it.
         assert!(!is_allowed(&cfg(&[], &[]), "sub-1", &[]));
     }
 
     #[test]
     fn open_registration_is_what_opens_an_empty_allowlist() {
-        // The deployment whose identity provider already holds the right
-        // membership, saying so in writing.
         let mut c = cfg(&[], &[]);
         c.open_registration = true;
         assert!(is_allowed(&c, "sub-1", &[]));
@@ -531,8 +468,7 @@ mod tests {
 
     #[test]
     fn a_populated_list_outranks_open_registration() {
-        // A deployment that both lists people and leaves the flag on has
-        // already stated the narrower intent; the flag must not widen it back.
+        // The lists already state a narrower intent; the flag must not widen it.
         let mut c = cfg(&["sub-1"], &[]);
         c.open_registration = true;
         assert!(is_allowed(&c, "sub-1", &[]));
@@ -541,9 +477,7 @@ mod tests {
 
     #[test]
     fn one_populated_list_closes_the_door_on_everyone_else() {
-        // The lists are only permissive while all three are empty: naming a
-        // single subject must not leave the other two lists reading as
-        // "anyone", or a narrowing edit would silently change nothing.
+        // Naming one subject must not leave the other lists reading as "anyone".
         let c = cfg(&["sub-1"], &[]);
         assert!(!is_allowed(&c, "sub-2", &[]));
         assert!(!is_allowed(&c, "sub-2", &["engram-users".to_string()]));

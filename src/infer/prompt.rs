@@ -1,23 +1,9 @@
-//! Every instruction the application puts in front of a model, in one file.
-//!
-//! Four calls, in pipeline order: the synthesizer that turns a segment into
-//! artifacts, the titler that names the document they came from, the judge that
-//! decides whether two artifacts contradict each other, and the answerer behind
-//! `ask`. Nothing else in the tree writes model-facing prose, so changing how
-//! engram talks to a model is an edit here and nowhere else.
-//!
-//! The parsers live here too, deliberately. Three of the four prompts specify a
-//! JSON shape, and the code that reads that shape back has to change in the same
-//! breath as the prompt that asks for it.
+//! Every model-facing instruction, with the parsers for the JSON shapes they ask for: the two change together.
 
 use super::ProposedArtifact;
 use crate::error::{Error, Result};
 
-/// The English original. Every other language is a translation of *this*
-/// text, so a change here is a change nine other constants owe an edit.
-/// `the_translations_carry_the_same_contract` is what notices when they do
-/// not: it compares the parts a parser reads, which is the half that must not
-/// drift.
+/// The English original; the nine translations must keep the parsed contract (`the_translations_carry_the_same_contract`).
 pub const SYNTHESIZER_SYSTEM: &str = r#"You turn captured material into atomic, self-contained knowledge artifacts, written to be found again by semantic search.
 
 Each artifact holds exactly one thing: one technique, one procedure, one fact,
@@ -972,13 +958,7 @@ pub const TITLE_SYSTEM_TR: &str = r#"Belgeleri adlandırırsın. Bir belgenin ba
 
 Belgenin neyle ilgili olduğunu adlandır, ne olduğunu değil. Asla "Belge", "Notlar", "Kılavuz", "Başlıksız"."#;
 
-/// The synthesizer's instructions, in the language the artifacts are wanted in.
-///
-/// A translation and not a translated *request*: an English instruction that
-/// ends "and answer in German" is a rule a 9B model follows for a paragraph and
-/// then quietly stops following, because everything around it — the schema, the
-/// judge block, the field descriptions — goes on being English right up to the
-/// token before it writes. Asking in German is not a rule it can drift off.
+/// Translated, not "answer in German": a 9B model drifts off a language request but not off a language.
 pub fn synthesizer_system(lang: crate::infer::lang::Lang) -> &'static str {
     use crate::infer::lang::Lang;
     match lang {
@@ -995,9 +975,6 @@ pub fn synthesizer_system(lang: crate::infer::lang::Lang) -> &'static str {
     }
 }
 
-/// The titler's, likewise. Its own call and its own system prompt, and for as
-/// long as this was English only a German document got German artifacts under
-/// an English name.
 pub fn title_system(lang: crate::infer::lang::Lang) -> &'static str {
     use crate::infer::lang::Lang;
     match lang {
@@ -1022,9 +999,7 @@ pub fn user_prompt(
     judge: Option<&crate::infer::JudgeAsk>,
 ) -> String {
     let mut out = String::new();
-    // The opening leads so that the system prompt followed by it is a
-    // byte-identical prefix for every window of a corpus, which a prompt cache
-    // or a llama.cpp slot can reuse. Everything per-window follows.
+    // The opening leads so system prompt plus opening is a byte-identical, cacheable prefix across windows.
     if let Some(o) = &context.opening {
         out.push_str(&format!(
             "----- DOCUMENT OPENING (context only) -----\n{o}\n\
@@ -1078,19 +1053,11 @@ pub fn repair_prompt(previous: &str, err: &str) -> String {
     )
 }
 
-/// The judge is asked one question and given no room to be helpful.
-///
-/// It is not asked which artifact is right, nor to merge them, nor to rewrite
-/// anything. Deciding which of two contradictory artifacts is current needs
-/// context the base does not hold — what the reader is actually running — and
-/// is a judgement only they can make. All this call does is tell them there is
-/// a judgement waiting.
 pub const TITLE_SYSTEM: &str = r#"You name documents. Given the opening of a document and the titles of the notes taken from it, reply with one short title — at most eight words, no quotes, no trailing punctuation, no preamble.
 
 Name what the document is about, not what it is. Never "Document", "Notes", "Guide", "Untitled"."#;
 
-/// The opening rather than the whole document: a title needs the subject, and
-/// the artifact titles already say what the rest of it turned out to cover.
+/// The opening, not the whole document: the artifact titles already cover the rest.
 pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
     let opening: String = text.chars().take(2000).collect();
     format!(
@@ -1099,40 +1066,20 @@ pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
     )
 }
 
-/// What the dedupe pass decided about a group of near-duplicate artifacts.
-///
-/// Four outcomes, and the ordering between them is the design. `Replaced` is
-/// preferred over `Duplicate` wherever it applies: the survivor is then a stored
-/// original with a valid span and corpus lines to render beside it, which is
-/// strictly better than a rewrite. A merge is the answer only when *both* sides
-/// carry something the other lacks — the case where neither original is
-/// sufficient and the pre-merge state was already losing something.
+/// `Replaced` beats `Duplicate` where both apply (a stored original beats a rewrite); merge only when each side adds something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Relation {
-    /// Different subjects. Both stay exactly where they are.
     Distinct,
-    /// The same subject with a different value for one detail, and no way to
-    /// tell which is current. Kept as a disagreement both sides of which search
-    /// and Ask show; never merged, and no side picked.
+    /// Same subject, a different detail, no way to tell which is current: shown as a disagreement, never merged.
     Conflict,
-    /// One artifact plainly replaces another. Superseded, with no synthetic
-    /// text written at all.
+    /// Superseded, with no synthetic text written.
     Replaced,
-    /// The same claim, each side carrying detail the other lacks. Merged.
     Duplicate,
-    /// Neither side states anything a person could act on or be wrong about, so
-    /// there is nothing to keep and nothing to merge. Two artifacts can be
-    /// alike because they say the same thing or alike because neither says
-    /// anything, and the second is not answered by keeping one of them.
-    ///
-    /// Carried out where it is found (`jobs::dedupe::discard_both`): both sides
-    /// are deprecated, which is reversible, and the undo on Insights is the
-    /// review.
+    /// Neither side states anything actionable; both are deprecated (`jobs::dedupe::discard_both`), reversibly.
     Vacuous,
 }
 
-/// The artifact a `Duplicate` verdict asks to be written.
 #[derive(Debug, Clone)]
 pub struct MergedDraft {
     pub title: Option<String>,
@@ -1142,13 +1089,11 @@ pub struct MergedDraft {
     pub caveats: Vec<String>,
 }
 
-/// One dedupe verdict, parsed.
 #[derive(Debug, Clone)]
 pub struct Dedupe {
     pub relation: Relation,
     pub detail: Option<String>,
-    /// Which artifact was named obsolete, as the letter it was shown under.
-    /// Only meaningful for `Replaced`.
+    /// The letter it was shown under; only meaningful for `Replaced`.
     pub supersedes: Option<char>,
     /// `Some` if and only if `relation` is `Duplicate`.
     pub merged: Option<MergedDraft>,
@@ -1165,12 +1110,9 @@ You are given the retired artifact, the replacement that retired it if one was n
 
 Reply with JSON only: {"verdict":"worthless"|"valuable","reason":"one line naming the deciding fact"}"#;
 
-/// What the reap judge is shown: the candidate, its named replacement if the
-/// retirement was a supersession, and the nearest live artifacts.
 pub struct ReapCase<'a> {
     pub title: &'a str,
     pub text: &'a str,
-    /// `(title, text)` of the successor, when one was named.
     pub successor: Option<(&'a str, &'a str)>,
     /// `(title, text)`, nearest first.
     pub neighbours: Vec<(&'a str, &'a str)>,
@@ -1213,8 +1155,7 @@ pub fn parse_reap(body: &str) -> Result<Reap> {
         Error::MalformedLlmOutput(format!("reap reply was not the expected JSON: {e}"))
     })?;
     let reason = r.reason.unwrap_or_default();
-    // An unknown verdict is an error, never a default: this call's "worthless"
-    // destroys text, so a reply that cannot be read must act on nothing.
+    // An unknown verdict is an error: "worthless" destroys text, so an unreadable reply acts on nothing.
     match r.verdict.as_str() {
         "worthless" => Ok(Reap::Worthless { reason }),
         "valuable" => Ok(Reap::Valuable { reason }),
@@ -1277,22 +1218,8 @@ Reply with JSON only, no commentary, in exactly this shape:
 - supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
 - merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
 
-/// Writing one artifact from two, when a person has already judged that the two
-/// cover the same ground.
-///
-/// Deliberately not `DEDUPE_SYSTEM` with the branch forced. That prompt's whole
-/// body is about *deciding*, and the deciding here is done: an operator read
-/// both sides and pressed the button. Asking the model to decide again invites
-/// it to answer "distinct" and leave the press with nothing to show for it —
-/// and on this shape of pair it does not decide reliably. Asked twelve times
-/// about two artifacts describing one veterinary practice, one carrying the
-/// contact details and the other the services, the live judge wrote the same
-/// reasoning every time and labelled it `distinct` nine times and `duplicate`
-/// three. The reading was sound; the label was a coin flip.
-///
-/// The merge-writing rules are `DEDUPE_SYSTEM`'s own, restated rather than
-/// referenced, because they are the requirement rather than a style: a merge
-/// that drops a number is worse than no merge at all.
+/// Not `DEDUPE_SYSTEM` with the branch forced: a person already decided, and the live judge labels such pairs by coin flip.
+/// The merge rules are restated because a merge that drops a number is worse than none.
 pub const SYNTHESIZE_SYSTEM: &str = r#"You are given two knowledge artifacts that a person has already judged to cover the same ground. Whether they do is settled and is not your question. Write one artifact that says everything both of them said.
 
 The merged text must contain every number, version, date, path, flag, command and error string that appeared in either input. Where two of them disagree, keep both values and say what distinguishes them — the version, the platform, the date, whichever the inputs give. Dropping one is the failure this task exists to avoid.
@@ -1310,12 +1237,7 @@ Reply with JSON only, no commentary, in exactly this shape:
 - category: one of the listed categories.
 - caveats: the conditions under which it does not apply; an empty list when there are none."#;
 
-/// The response format for `SYNTHESIZE_SYSTEM`.
-///
-/// Every property is listed and required, for the reason `dedupe_schema` gives:
-/// under `strict` a listed-but-optional property is not a looser schema, it is
-/// one the hosted APIs reject outright — which fails the call rather than
-/// loosening it.
+/// Every property required: under `strict` the hosted APIs reject a listed-but-optional property.
 pub fn synthesize_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1337,14 +1259,7 @@ pub fn synthesize_schema() -> serde_json::Value {
     })
 }
 
-/// One synthesis, parsed.
-///
-/// Unlike `parse_dedupe` there is no salvage and no downgrade. That parser can
-/// turn an unreadable direction into a conflict because a conflict is still a
-/// true thing to say about the pair; here the judgement was a person's, so a
-/// reply carrying no usable text is a failed call and nothing else. Returning
-/// an empty draft would write an artifact that says nothing and hide two that
-/// did.
+/// No salvage: the judgement was a person's, so a reply without usable text is a failed call.
 pub fn parse_synthesis(body: &str) -> Result<MergedDraft> {
     #[derive(serde::Deserialize)]
     struct Raw {
@@ -1377,58 +1292,9 @@ pub fn parse_synthesis(body: &str) -> Result<MergedDraft> {
     })
 }
 
-/// The two artifacts, each under its letter and its title, each followed by its
-/// captured sources when it has any.
-///
-/// Exactly two, because the unit judges one pair. It used to letter as many
-/// artifacts as the connected component held, which is what made fan-in
-/// something one call had to survive and what `merge_max_roots` was capping —
-/// with the cap settling whole clusters before any call was made.
-///
-/// A merged member is shown its own text as the thing under judgement, with the
-/// originals it was written from beneath it as reference. Those are unlettered,
-/// so a verdict cannot name one: the mismatch between a lettered list of roots
-/// and a different list of members is what used to supersede artifacts the model
-/// had never been shown.
-///
-/// The title is not decoration here, it is the subject. Synthesis writes a body
-/// that stands on its own within its segment, which is not the same as naming
-/// what it is about: a section headed "FAT32" becomes an artifact whose text
-/// opens "32 Bit Clusternummern" and never says FAT32 again. Handed the bodies
-/// alone, the model saw two anonymous spec lists with different numbers and
-/// called them a contradiction — correctly, on the evidence it was given.
-///
-/// No prior about differing values is named here, and that is the decision.
-/// `facts::differing_values` compared value-shaped tokens between the artifacts
-/// and this prompt passed the difference on as something to look at. Both halves
-/// of that were wrong on real text. The tokenizer splits on whitespace, so
-/// whether a version list yields tokens at all depends on how it is punctuated:
-/// `Win7/8/10` yields nothing (digits glued to a word), `(Windows 7-10)` yields
-/// `7-10`, and `Windows 7, 8 und 10` yields `7`, `8`, `10`. Three artifacts
-/// stating one fact three ways produced three different token sets and a
-/// non-empty difference, and the prompt then named four bare integers — stripped
-/// of any sign that they were Windows versions — as values the artifacts do not
-/// state the same way. The model read that against a table of registry codes and
-/// called the version mapping a contradiction, which is the correct reading of
-/// the evidence it was handed. The second half is the conflation: a value only
-/// one artifact states is reported the same as a value the two give differently,
-/// so a strict superset — one artifact listing more Outlook versions than the
-/// other — arrived as a dispute rather than as one side saying more.
-///
-/// Nothing is lost by leaving it out. The prior decided nothing; the model sees
-/// both artifacts whole and has every verdict available either way. The rule it
-/// also justified — a value in the list must survive into merged text — went
-/// with `infer::facts` itself: `merge::losses` now checks machine literals only.
-///
-/// `attempt` is how many times this group has already been asked about, and it
-/// is in the prompt for one reason: the endpoint caches by exact prompt text and
-/// replays a cached reply in milliseconds. A retry of a reply the parser could
-/// not read would otherwise re-read the same unreadable bytes, five times, and
-/// call it five attempts.
-///
-/// Zero adds nothing at all, so a first ask stays byte-identical between runs —
-/// and keeps hitting the cache when it should, on a group re-armed after a
-/// settled verdict was lost.
+/// Exactly two lettered members; their sources are unlettered so no verdict can name them. The title is the subject.
+/// No differing-values prior: whitespace tokens primed the model into false contradictions.
+/// `attempt` defeats the endpoint's exact-prompt cache on retries; zero adds nothing, keeping first asks cacheable.
 pub fn dedupe_prompt(a: &DedupeMember<'_>, b: &DedupeMember<'_>, attempt: i64) -> String {
     let mut s = String::new();
     if attempt > 0 {
@@ -1450,16 +1316,7 @@ pub fn dedupe_prompt(a: &DedupeMember<'_>, b: &DedupeMember<'_>, attempt: i64) -
     s
 }
 
-/// One of the two artifacts under judgement, and — when it is itself a merge —
-/// the captured originals behind it.
-///
-/// `sources` is context and never an input. It is there so that a detail an
-/// earlier merge dropped can be put back into this one, which is what keeps
-/// repeated pairwise merging from walking away from the wording someone
-/// actually captured. It is unlettered so that no verdict can name it: `a` and
-/// `b` are the two members and nothing else, and a letter that could resolve to
-/// a source would supersede an artifact on the strength of a text the model was
-/// shown as reference.
+/// `sources` is unlettered reference so a dropped detail can return without a verdict naming a source.
 pub struct DedupeMember<'a> {
     pub title: &'a str,
     pub text: &'a str,
@@ -1467,8 +1324,6 @@ pub struct DedupeMember<'a> {
     pub sources: Vec<(&'a str, &'a str)>,
 }
 
-/// Two knowledge artifacts keep being retrieved by the same searches, and this
-/// call says what that means, in one line a reader would find useful.
 pub const LINK_SYSTEM: &str = r#"Two knowledge artifacts keep being retrieved by the same searches. You say what that means, in one line a reader would find useful.
 
 Choose exactly one:
@@ -1486,16 +1341,8 @@ Reply with JSON only, no commentary, in exactly this shape:
 - relation: one of "related", "unrelated", "duplicate".
 - reason: one sentence. For "related" it is shown to the reader beside the link, so write it for them and not about the task."#;
 
-/// Two artifacts, and the questions that kept returning both.
-///
-/// The cues are the evidence. Without them this asks whether two arbitrary texts
-/// are related, which is a worse question with a worse answer: what is being
-/// judged is why these two keep being *needed at once*.
-///
-/// `attempt` is in the prompt for the same reason it is in `dedupe_prompt`: the
-/// endpoint caches by exact prompt text, and a retry of a reply the parser could
-/// not read would otherwise re-read the same unreadable bytes. Zero adds
-/// nothing, so a first ask stays byte-identical between runs.
+/// The cues are the evidence: the question is why these two keep being needed at once.
+/// `attempt` is here for the cache reason `dedupe_prompt` gives.
 pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i64) -> String {
     let mut s = String::new();
     if attempt > 0 {
@@ -1514,72 +1361,11 @@ pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i
     s
 }
 
-/// The words an abstaining answer opens with. One definition for the string
-/// the model is told and the string `abstained` looks for, for the reason
-/// `Caveat:` is: splitting the two apart is how the agreement quietly breaks.
+/// One definition for what the model is told and what `abstained` looks for.
 pub const ABSTAIN_PREFIX: &str = "Not in the knowledge base";
 
-/// The one instruction here that is not advice to the model is the abstention
-/// rule, and it is written to be *decidable*.
-///
-/// "If the excerpts do not contain the answer, abstain" sounds like one test and
-/// is really two, because the excerpts almost never fail a question outright —
-/// they answer a neighbouring one. Retrieval that works returns near misses: the
-/// question asks where mail is *read* and the excerpt says where it is *stored*.
-/// Told only that abstention is for when the answer is absent, a model with a
-/// reasoning budget spends the budget deciding which of those it is, and there
-/// is no fact in the prompt that settles it. Observed on a 9B against two short
-/// excerpts: four and a half thousand tokens of thinking, twenty-five restarts
-/// re-litigating the same choice, and a one-sentence answer at the end of it —
-/// and at a lower ceiling, no answer at all, because the deliberation ate the
-/// whole allowance before any content was written.
-///
-/// So the near miss gets a stated resolution rather than a judgement call:
-/// answer the part that is covered, name the part that is not.
-///
-/// That alone moves the deliberation rather than ending it. Abstention phrased
-/// as "only when nothing bears on the question at all" is the same weighing
-/// wearing a different hat — asked a question the corpus genuinely does not
-/// cover, the model litigates whether excerpts about Outlook *bear on* a
-/// question about BGP, and does it for longer than it ever litigated the near
-/// miss. Measured, on the same two excerpts: 113 restarts and the whole ceiling,
-/// against 25 for the wording it replaced.
-///
-/// What ends it is a test the model can *run* rather than weigh: does any
-/// excerpt mention the subject. Lexical, decidable in one pass, and no more
-/// accurate than the semantic version needs to be — the case it has to catch is
-/// a corpus that has nothing to say, and a corpus that has nothing to say does
-/// not mention the subject. Abstention then costs about a thousand tokens
-/// instead of the whole allowance.
-///
-/// Two nearby wordings were tried and are worse, which is why this one reads
-/// oddly concrete. Telling the model to decide the coverage question once and
-/// not revisit it made it revisit it *more* — 86 restarts on the near miss that
-/// the plain wording answered. Asking for an unconditional coverage report —
-/// what is covered, then what is not — fixed the near miss and left the
-/// no-match case looping at the ceiling. Only the lexical test passes both.
-///
-/// What the lexical test does not settle on its own is which rule applies when
-/// the subject is *compound*. "macOS artifacts worth reading on a ransomware
-/// offender's machine" is two subjects, and excerpts that carry one and not the
-/// other answer the abstention test and the partial-coverage rule at the same
-/// time. Both conditions read as true, neither is stated to win, and the model
-/// recomputes the same undecidable question until something else stops it —
-/// observed on nine excerpts: fifteen restarts, five of them re-running the
-/// abstention test and reaching the same answer every time. So the two are
-/// ordered outright. Any part of the subject that appears is a partial answer;
-/// abstention is what is left when no part appears at all.
-///
-/// Everything else is stated once and briefly, because a rule the model can
-/// rehearse is a rule it does rehearse: the same transcript closes by walking
-/// the citation rule and the caveat rule one at a time with the answer already
-/// drafted.
-///
-/// [`ABSTAIN_PREFIX`] still has to reach the reply verbatim: [`abstained`] reads
-/// it, and a gap cluster is recorded on the strength of it. Narrowing when it is
-/// asked for narrows what gets recorded — a question half-covered is now an
-/// answer naming its own gap rather than a gap event — which is the more honest
-/// of the two records, and the one the reader of the answer is better served by.
+/// Abstention is a lexical test (does any excerpt mention any part of the subject): every weighed wording made a 9B
+/// model loop, 25 to 113 restarts measured. [`ABSTAIN_PREFIX`] must reach the reply verbatim for [`abstained`].
 pub const ASK_SYSTEM: &str = "You answer questions using only the provided knowledge-base excerpts. \
 Quote commands, paths and code exactly as they appear, and cite each claim by the number of the \
 excerpt it came from. \
@@ -1596,27 +1382,8 @@ Lines beginning `Caveat:` give the conditions under which an excerpt does not ap
 that bears on your answer. \
 Where a caveat says another note states something differently and your answer rests on it, give both readings with their dates and cite each one that is excerpted; do not choose between them.";
 
-/// Whether an answer opened with `ABSTAIN_PREFIX`. Leading whitespace, markdown
-/// emphasis, heading and list marks, and opening quotes are skipped, because
-/// models wrap an opening sentence in them no matter what they were told; the
-/// comparison is case-insensitive for the same reason. Mentioning the phrase
-/// later in a real answer is not an abstention.
-///
-/// Skipping an opening quote is what makes that last rule hard, because the one
-/// thing a quote mark can mean is that the phrase is being *quoted* — `"Not in
-/// the knowledge base" is the wrong read here; excerpt 3 covers it.` is an
-/// answer, not an abstention, and scoring it as one records a gap that is not
-/// there. So a lead-in that included a quote is only accepted when the phrase
-/// runs on: a quote closing immediately after it, with an answer behind that,
-/// is the shape of a quotation and nothing else. An abstention that was itself
-/// quoted closes after its full stop — `„Not in the knowledge base.“ Nothing
-/// covers it.` — and a bare quoted phrase with nothing behind it has no answer
-/// to be the quotation's point, so both still count.
-///
-/// Compared over characters rather than over a byte slice of the prefix's
-/// length: a non-ASCII lead-in — a typographic quote, a bullet — moves the
-/// prefix off a byte boundary, and slicing there yields `None`, which scored a
-/// correct abstention as a wrong answer.
+/// Lead-in marks and quotes are skipped case-insensitively; a quote that closes right after the phrase with text
+/// behind it is a quotation, not an abstention. Compared by characters: non-ASCII lead-ins break byte slicing.
 pub fn abstained(answer: &str) -> bool {
     let quote = |c: char| matches!(c, '"' | '\'' | '„' | '“' | '”' | '‘' | '’' | '«' | '»');
     let marks = |c: char| {
@@ -1625,8 +1392,7 @@ pub fn abstained(answer: &str) -> bool {
             || matches!(c, '*' | '_' | '#' | '>' | '`' | '-' | '+' | '•' | '·')
     };
     let opening = answer.trim_start_matches(marks);
-    // An ordered list marker — `1.` or `1)` — is the one lead-in that is not a
-    // single class of character.
+    // An ordered list marker is the one lead-in that is not a single character class.
     let digits = opening.len()
         - opening
             .trim_start_matches(|c: char| c.is_ascii_digit())
@@ -1645,8 +1411,7 @@ pub fn abstained(answer: &str) -> bool {
     if !answer[..answer.len() - opening.len()].contains(quote) {
         return true;
     }
-    // A quote was opened. Where it closes decides what it was doing: right after
-    // the phrase with an answer behind it, the phrase was being quoted.
+    // Closing right after the phrase with an answer behind it means the phrase was being quoted.
     let rest = &opening[head.len()..];
     match rest.chars().next() {
         Some(c) if quote(c) => rest[c.len_utf8()..].trim().is_empty(),
@@ -1654,16 +1419,8 @@ pub fn abstained(answer: &str) -> bool {
     }
 }
 
-/// One retrieved excerpt, numbered so the answer can cite it.
-///
-/// The caveats are appended here rather than left to the caller because their
-/// `Caveat:` prefix is the exact string `ASK_SYSTEM` tells the model to look
-/// for. Splitting the two apart is how that agreement quietly breaks.
-///
-/// `dated` is the day the note was written, given only for an excerpt that
-/// takes part in a disagreement: the model is told to give both readings with
-/// their dates, and the date of this side is the one thing the other side's
-/// caveat cannot carry.
+/// Caveats are appended here because their `Caveat:` prefix is what `ASK_SYSTEM` tells the model to look for.
+/// `dated` only for excerpts in a disagreement, which the model must give with both dates.
 pub fn ask_excerpt(
     number: usize,
     title: &str,
@@ -1682,23 +1439,13 @@ pub fn ask_excerpt(
     block
 }
 
-/// A passage whose text was printed under an earlier number, because the two
-/// abut and are one piece of continuous text (`Core::stitch_passages`).
-///
-/// It keeps its own number rather than vanishing from the prompt: the number
-/// is what the rail links to the artifact, so a run of three passages printed
-/// under one number leaves the model no way to cite the two it did not print
-/// without pointing the reader at a page that does not hold the words.
+/// Keeps its own number: the rail links each number to an artifact the model may cite.
 pub fn ask_continues(number: usize, printed_under: usize) -> String {
     format!("[{number}] (continues [{printed_under}])")
 }
 
-/// The question and whatever excerpts survived the context budget.
 pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
-    // Empty blocks are dropped. Stitching no longer makes any — a stitched
-    // passage keeps its slot and points at the block its text went into — but
-    // an excerpt with neither title nor text still has nothing to say, and a
-    // bare `[7]` in the prompt is worse than one number unused.
+    // A bare `[7]` in the prompt is worse than one number unused.
     let shown: Vec<&str> = excerpts
         .iter()
         .map(String::as_str)
@@ -1710,24 +1457,10 @@ pub fn ask_prompt(question: &str, excerpts: &[String]) -> String {
     )
 }
 
-/// How many extra queries one plan may name.
-///
-/// Three, because a question that genuinely spans more subjects than that is
-/// several questions, and answering it from three excerpts per subject is not
-/// what a context window has room for. It doubles as the fan-out's concurrency
-/// bound: the cap on how many queries may be planned is the cap on how many
-/// searches run at once, so there is one number to reason about rather than
-/// two that can disagree.
+/// Also the fan-out's concurrency bound, so one number governs both.
 pub const PLAN_MAX_QUERIES: usize = 3;
 
-/// What else to search for, asked once, over the whole question.
-///
-/// The bounded version of a mechanism whose unbounded version is an agent, and
-/// an agent is not what this is: the model is asked once, sees the excerpts one
-/// round already found, and names the subjects that round missed. It is never
-/// asked to answer, to say how many rounds it wants, or to judge its own
-/// output. What it may say is a list of at most [`PLAN_MAX_QUERIES`] queries,
-/// and the rounds those become all run on the same terms the first one did.
+/// Asked once over the whole question, never to answer or judge itself: bounded, not an agent.
 pub const PLAN_SYSTEM: &str = r#"You are helping a search system decide what else to look for.
 
 You are given a question and the excerpts retrieved for it so far. A question
@@ -1744,22 +1477,7 @@ Reply with JSON only, in exactly this shape:
   question, not a sentence, and never the original question repeated back.
   Do not name a subject the excerpts already cover just to be thorough."#;
 
-/// `need` is an array rather than a nullable string, because "several subjects
-/// are missing" is the case this exists for and a grammar that can only express
-/// one would force the model to drop the rest. The empty array carries what
-/// `null` used to: a grammar that can say "I have enough" without inventing a
-/// query to say it with.
-///
-/// No `maxItems`, deliberately, though the plan is capped at
-/// [`PLAN_MAX_QUERIES`]. Array-length keywords are not something every
-/// structured-output backend's grammar compiler can express, and one that
-/// cannot rejects the whole request rather than ignoring the keyword — every
-/// planning call 400s, and the fan-out degrades to the single-round answer at
-/// one wasted call per question. The audience for `plan_tier` is precisely the
-/// small local endpoint where that is most likely. The cap is not lost by
-/// leaving it out: `parse_plan` truncates to `PLAN_MAX_QUERIES` whatever
-/// arrives, and it is the parser the fan-out reads. Stating it in the schema
-/// too was belt-and-braces bought at the price of the belt.
+/// No `maxItems`: some grammar compilers reject the whole request over it; `parse_plan` truncates instead.
 pub fn plan_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1774,22 +1492,7 @@ pub fn plan_schema() -> serde_json::Value {
     })
 }
 
-/// The queries to run next, or empty for "the excerpts are enough".
-///
-/// Every failure reads as empty: unparsable output, a missing field, a reply
-/// that was prose. The fan-out is extra retrieval on top of a round that already
-/// happened, so anything that is not unambiguously a list of queries has to mean
-/// "spend no further retrieval on it" — the alternative is searching for a
-/// fragment of an error message.
-///
-/// A bare string where an array was asked for is read as the one query it
-/// plainly is. That is the way a small model most often gets this shape wrong,
-/// and refusing it would throw away a usable query over its brackets.
-///
-/// Blank entries are dropped and repeats are dropped, for the same reason a
-/// model answering `{"need": []}` means it has enough: an empty search finds the
-/// whole base or none of it, and the same search run twice costs two rounds to
-/// learn what one already said.
+/// Every failure reads as empty; a bare string is the one query it plainly is. Blanks and repeats are dropped.
 pub fn parse_plan(reply: &str) -> Vec<String> {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(extract_json(reply)) else {
         return Vec::new();
@@ -1797,7 +1500,6 @@ pub fn parse_plan(reply: &str) -> Vec<String> {
     let raw: Vec<&str> = match &v["need"] {
         serde_json::Value::String(one) => vec![one.as_str()],
         serde_json::Value::Array(many) => many.iter().filter_map(|q| q.as_str()).collect(),
-        // `null`, a missing field, an object: nothing further.
         _ => return Vec::new(),
     };
     let mut out: Vec<String> = Vec::new();
@@ -1814,23 +1516,14 @@ pub fn parse_plan(reply: &str) -> Vec<String> {
     out
 }
 
-/// Names a knowledge gap from the questions in it. Sees questions only, never
-/// answers: it names the hole, not the guess.
+/// Sees questions only, never answers: it names the hole, not the guess.
 pub const GAP_LABEL_SYSTEM: &str = r#"You name topics. Given several questions a knowledge base could not answer, reply with the name of the subject they share — three to six words, a noun phrase, no quotes, no trailing punctuation. Reply with JSON only: {"label":"…"}"#;
 
-/// How many questions one naming call is shown, and how much of each.
-///
-/// A cluster can hold every open gap of a kind, and every other prompt in this
-/// module packs to a budget while this one concatenated whatever it was handed.
-/// A prompt over the context window fails the call, the group falls back to a
-/// terms label, and — because a terms label is offered to the model again — it
-/// pays that failed call on every sweep for as long as the group lives. Twelve
-/// questions is far more than naming a subject needs, and a question long enough
-/// to be cut is a pasted paragraph rather than a question.
+/// Bounded because an over-window prompt fails and the fallback label re-pays that failure every sweep.
 pub const GAP_LABEL_MAX_QUESTIONS: usize = 12;
 pub const GAP_LABEL_MAX_CHARS: usize = 200;
 
-/// The caller passes its questions newest first, so the cap keeps the newest.
+/// Questions arrive newest first, so the cap keeps the newest.
 pub fn gap_label_prompt(questions: &[&str]) -> String {
     let mut s = String::from("Questions:\n");
     for q in questions.iter().take(GAP_LABEL_MAX_QUESTIONS) {
@@ -1847,17 +1540,7 @@ pub fn gap_label_prompt(questions: &[&str]) -> String {
     s
 }
 
-/// The generation behind a pursuit: one self-contained artifact written from
-/// the excerpts the operator engaged with, to answer the questions they asked.
-/// The abstention rule is the same one [`ASK_SYSTEM`] carries, and for the same
-/// reason: the excerpts here were chosen by what the operator *clicked*, not by
-/// what answers the question, so a pursuit over a base that held nothing on the
-/// subject arrives with four near misses and a question none of them touch. A
-/// model told only to write from the excerpts writes the refusal — "the
-/// provided excerpts do not contain information regarding …" — and the refusal
-/// is what gets stored, titled with the question, embedded, and returned to the
-/// next person who asks it. Giving the refusal a sanctioned shape is what lets
-/// the caller recognise it and close the pursuit instead.
+/// Carries `ASK_SYSTEM`'s abstention rule: clicked excerpts may not answer, and a stored refusal would be retrieved later.
 pub const GENERATE_SYSTEM: &str = r#"You write one self-contained knowledge-base artifact from the excerpts you are given, to answer the questions listed. Answer the questions and nothing else: use only the excerpts that bear on them and leave the rest out, however much they say. Write only what the excerpts support: every command, path, version, port and flag in your text must appear in an excerpt verbatim. Atomic — one subject, standing alone, readable without the excerpts. Abstain only when no excerpt mentions any part of the subject the questions ask about: then make the artifact text begin with the exact words `Not in the knowledge base.` and say what is missing. Never write an artifact whose subject is that the excerpts fall short. Write formulas in LaTeX: `$…$` inline, `$$…$$` on a line of their own; never `\(…\)` or `\[…\]`. Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
 pub fn generate_prompt(questions: &[String], sources: &[(String, String)]) -> String {
@@ -1897,7 +1580,6 @@ pub fn generate_schema() -> serde_json::Value {
     })
 }
 
-/// What a generation call produced.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Generated {
     pub title: String,
@@ -1921,20 +1603,7 @@ pub fn parse_generation(reply: &str) -> Result<Generated> {
     Ok(g)
 }
 
-/// The shape `parse_reap` will accept.
-///
-/// Its own schema, and not the dedupe one, because reap is its own question:
-/// under `("verdict", dedupe_schema())` the endpoint forces every reply into
-/// `{"verdict":{"relation":…}}`, `parse_reap` then finds no `verdict` string,
-/// and every candidate is logged as an unreadable judgement. Nothing is ever
-/// reaped or rescued — the sweep runs, costs a call per nominee, and acts on
-/// nothing. Every other distinct question here has its own completer for the
-/// same reason; see `for_link_judging`.
-///
-/// Flat at the root rather than wrapped, because that is the shape
-/// `REAP_SYSTEM` asks for in prose. `unwrap_verdict` passes it through
-/// untouched: it unwraps only when `verdict` holds an *object*, and here it
-/// holds the verdict word itself.
+/// Its own schema: under the dedupe one every reap reply parsed as nothing. Flat at the root, as `REAP_SYSTEM` asks.
 pub fn reap_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1956,8 +1625,7 @@ pub fn gap_label_schema() -> serde_json::Value {
     })
 }
 
-/// The label out of the reply, trimmed of quotes and trailing punctuation;
-/// an empty label is an error, because a cluster must be called something.
+/// An empty label is an error: a cluster must be called something.
 pub fn parse_gap_label(reply: &str) -> Result<String> {
     let v: serde_json::Value = serde_json::from_str(extract_json(reply))
         .map_err(|e| Error::MalformedLlmOutput(format!("gap label was not JSON: {e}")))?;
@@ -1974,13 +1642,7 @@ pub fn parse_gap_label(reply: &str) -> Result<String> {
     Ok(label)
 }
 
-/// The verdict inside the envelope, or the reply itself if it came without one.
-///
-/// `dedupe_schema` and `link_schema` both wrap their union under `verdict`,
-/// because a strict `json_schema` response format needs an object at the root.
-/// The bare shape is still accepted: `structured_output` can be off, and a model
-/// told the shape in prose sometimes writes the inner object alone. Either is
-/// readable, and refusing one of them would only cost a verdict that was fine.
+/// The bare shape is accepted too: `structured_output` can be off.
 pub fn unwrap_verdict(body: &str) -> Result<serde_json::Value> {
     let v: serde_json::Value = serde_json::from_str(body)
         .map_err(|e| Error::MalformedLlmOutput(format!("judge reply was not JSON at all: {e}")))?;
@@ -1990,12 +1652,7 @@ pub fn unwrap_verdict(body: &str) -> Result<serde_json::Value> {
     })
 }
 
-/// A reply that cannot be read is an error, not a verdict.
-///
-/// Defaulting to "conflict" would fill the escalation queue with noise a person
-/// has to clear by hand; defaulting to "distinct" would quietly close real
-/// duplicates. Failing leaves the group pending, and the unit retries under the
-/// queue's backoff with a prompt that differs by its attempt number.
+/// Defaulting either way would flood the queue or close real duplicates; failing retries with a new attempt number.
 pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
     #[derive(serde::Deserialize)]
     struct Raw {
@@ -2022,20 +1679,8 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
     })?;
 
-    // Any single letter, and not a range this parser enforces. The prompt now
-    // hands out exactly two, but a parser that pins the count is a parser that
-    // silently downgrades a perfectly good direction the day the prompt changes
-    // — which is what happened when it stopped at "d" against a prompt that
-    // lettered a whole component: every direction named in a group of five or
-    // more became a conflict, turning the cheapest and most faithful outcome,
-    // superseding one stored original by another, into a queue entry for a
-    // person.
-    //
-    // How far the letters actually run is the caller's to know: it resolves this
-    // against the list it showed, and a letter past the end downgrades there.
-    // Anything else the model wrote — a stray word, a whole sentence — is
-    // treated the same as omitting it. An unreadable direction must not fail an
-    // otherwise perfectly readable verdict.
+    // Any single letter: the caller resolves it against the list it showed. A parser pinning the count downgraded
+    // valid directions to conflicts; anything else the model wrote counts as omitted.
     let side = r.supersedes.as_deref().and_then(|s| {
         let mut chars = s.trim().chars();
         match (chars.next(), chars.next()) {
@@ -2046,9 +1691,7 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
 
     let relation = match r.relation.trim().to_ascii_lowercase().as_str() {
         "duplicate" => Relation::Duplicate,
-        // A direction the model would not name is not a direction. Falling back
-        // to a conflict is what stops this picking a side by accident, which on
-        // a supersede means hiding an artifact for no stated reason.
+        // Falling back to a conflict stops a supersede picking a side by accident.
         "replaced" if side.is_some() => Relation::Replaced,
         "replaced" | "conflict" => Relation::Conflict,
         "distinct" => Relation::Distinct,
@@ -2060,10 +1703,7 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
         }
     };
 
-    // `merged` belongs to `duplicate` and to nothing else. A conflict verdict
-    // that still handed us text to write would defeat the one outcome that
-    // verdict exists to produce — and a duplicate with no text is a merge the
-    // write path cannot carry out.
+    // `merged` belongs to `duplicate` only; a duplicate without text is a merge the write path cannot carry out.
     match (&relation, &r.merged) {
         (Relation::Duplicate, None) => {
             return Err(Error::MalformedLlmOutput(
@@ -2098,11 +1738,7 @@ pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
             title: m.title,
             text: m.text,
             category: m.category.map(|c| normalize_category(&c)),
-            // Same rule as a synthesised artifact: nothing writes tags on a
-            // caller's behalf, and a merge inventing its own would be the
-            // drifting vocabulary arriving by a second door. What the sources
-            // were already filed under is added back by `merge::carried_tags`,
-            // which is a different question from what the model may name.
+            // Nothing writes tags on a caller's behalf; `merge::carried_tags` adds back what the sources had.
             tags: Vec::new(),
             caveats: m.caveats,
         }),
@@ -2114,8 +1750,7 @@ struct Envelope {
     artifacts: Vec<RawArtifact>,
 }
 
-/// Deserialize to `None` on a type mismatch instead of failing: a malformed
-/// judgement half must never cost the artifacts beside it.
+/// A malformed judgement half must never cost the artifacts beside it.
 fn lenient<'de, D, T>(d: D) -> std::result::Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -2126,23 +1761,9 @@ where
         .and_then(|v| serde_json::from_value(v).ok()))
 }
 
-/// The judged reply: the artifacts, plus the moment/events/links the JUDGE
-/// block asked for — each one lenient, so a model that fumbles the judgement
-/// still delivers its artifacts.
 #[derive(serde::Deserialize)]
 struct JudgedEnvelope {
-    /// Defaulted, like every other field here, and for the reason the note at
-    /// `parse_judged_response` gives about the empty array: a note that is
-    /// nothing but a reminder leaves the model nothing it is *allowed* to
-    /// write, so the judgement alone is a real answer. That note handled
-    /// `"artifacts": []` and the blank placeholder; it did not handle the key
-    /// simply not being there, which is what a model answers with when the
-    /// grammar is not being enforced — `structured_output` off, or an endpoint
-    /// that ignores it, both cases this file plans for elsewhere. Without the
-    /// default the whole reply failed on `missing field 'artifacts'`, and
-    /// `salvage_objects` cannot rescue it either: it looks for the substring
-    /// `"artifacts"` and there is none. The reminder was lost to a reply that
-    /// stated it perfectly.
+    /// Defaulted: without an enforced grammar a reminder-only reply omits the key, and `salvage_objects` cannot rescue it.
     #[serde(default)]
     artifacts: Vec<RawArtifact>,
     #[serde(default, deserialize_with = "lenient")]
@@ -2183,34 +1804,12 @@ struct RawArtifact {
     caveats: Vec<String>,
     #[serde(default, deserialize_with = "lenient")]
     tags: Option<Vec<String>>,
-    /// Lenient like `tags` beside it, and for a sharper version of the same
-    /// reason: this was the one strict field left on the struct, so a reply
-    /// answering `"pinned": null` — or `0`, or the string `"false"` — failed
-    /// the whole envelope. `salvage_objects` cannot rescue that either, since
-    /// it deserializes this same struct per object, so every artifact in the
-    /// window was lost and the repair call spent on a reply whose only fault
-    /// was the shape of a flag that the plain path discards anyway.
-    ///
-    /// `None` is read as not pinned. Nothing here tries to make sense of
-    /// `"false"`: a value that is not a boolean is a value the model did not
-    /// state, and guessing at its text would be a second reading of the
-    /// reply — see `lenient`.
+    /// Lenient: a strict flag failed the whole envelope on `"pinned": null`. `None` is not pinned.
     #[serde(default, deserialize_with = "lenient")]
     pinned: Option<bool>,
 }
 
-/// What kind of thing an artifact is.
-///
-/// A field about *form*, not about subject. These words are true of a corpus of
-/// recipes, of case law, or of forensics notes alike, which is what makes them
-/// safe to state here: naming forms hard-codes no domain.
-///
-/// Closed, because leaving it open is what let a domain in. Given a free
-/// string the model answered "System Administration" and "Forensic Science /
-/// Criminalistics" — subject words in a form field, which the filter row then
-/// offered beside `concept` and `procedure` as though they were the same kind
-/// of choice, in a second unlabelled taxonomy nothing had asked for. Anything
-/// off this list becomes `other`.
+/// Form, not subject, and closed: a free string filled the filter row with domains. Unknown words become `other`.
 pub const CATEGORIES: &[&str] = &[
     "concept",
     "procedure",
@@ -2222,11 +1821,7 @@ pub const CATEGORIES: &[&str] = &[
     "other",
 ];
 
-/// The stored form of whatever the model answered.
-///
-/// Never rejects: a good artifact carrying an unrecognised label is still a
-/// good artifact, and refusing it would spend the call again to get the same
-/// text back with a different word beside it.
+/// Never rejects: a good artifact with an unrecognised label is still good.
 pub fn normalize_category(raw: &str) -> String {
     let t = raw.trim().to_ascii_lowercase();
     if CATEGORIES.contains(&t.as_str()) {
@@ -2236,16 +1831,8 @@ pub fn normalize_category(raw: &str) -> String {
     }
 }
 
-/// The shape `parse_response` will accept, as a JSON Schema for the endpoint to
-/// constrain generation with.
-///
-/// Lives beside `RawArtifact` so the two are read together: a schema that has
-/// drifted from the struct it describes constrains the model into output the
-/// parser then rejects, which is worse than not constraining it at all.
-///
-/// Every field is required. The optional ones are optional to *serde*, so an
-/// older reply still parses, but there is no reason to let a model that is
-/// being told the shape anyway omit the line range or the caveats.
+/// Kept beside `RawArtifact`: a drifted schema constrains the model into output the parser rejects.
+/// Every field required, though serde keeps them optional for older replies.
 pub fn artifacts_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -2278,8 +1865,7 @@ pub fn artifacts_schema() -> serde_json::Value {
     })
 }
 
-/// [`artifacts_schema`] plus the judged fields — each nullable, because a
-/// strict decoder must be able to say "no judgement" without inventing one.
+/// Each judged field nullable, so a strict decoder can say "no judgement".
 pub fn judged_artifacts_schema() -> serde_json::Value {
     let mut schema = artifacts_schema();
     schema["properties"]["moment"] = serde_json::json!({
@@ -2312,44 +1898,8 @@ pub fn judged_artifacts_schema() -> serde_json::Value {
     schema
 }
 
-/// The shape `parse_dedupe` will accept. Lives beside `Raw` for the same reason
-/// `artifacts_schema` lives beside `RawArtifact`.
-///
-/// One variant per relation, rather than one object with everything optional.
-///
-/// A single flat object cannot say "the merged artifact is required exactly when
-/// the relation is duplicate" — and requiring it unconditionally would make the
-/// model write a merged artifact for every pair it was asked to keep apart. But
-/// a union of per-relation objects says exactly that, and an endpoint that
-/// compiles the schema into a decoding constraint then makes the pairing
-/// unwritable rather than merely wrong: `duplicate` cannot be emitted without
-/// `merged`, and `distinct` cannot be emitted with it.
-///
-/// Both halves of that guarantee rest on `additionalProperties: false`. Without
-/// it a JSON Schema object accepts any property it does not mention, so
-/// `{"relation":"distinct","merged":{…}}` satisfies the third variant and the
-/// union constrains nothing it was written to constrain. llama.cpp's grammar
-/// generator closes objects implicitly and hid that; a validating gateway does
-/// not.
-///
-/// The union is nested under `verdict` rather than sitting at the root because
-/// a strict `json_schema` response format must have an object at the root — a
-/// bare `anyOf` there is rejected outright by the hosted APIs, which turns a
-/// loose constraint into a failed call. `parse_dedupe` unwraps the envelope.
-///
-/// That is worth more here than anywhere else, because `parse_dedupe` has no
-/// salvage path. A verdict it rejects is not a degraded verdict, it is no
-/// verdict, and the pair waits for a whole sweep to be asked about again — which
-/// left pairs pending after ten attempts at a conditional a 9B model kept
-/// getting wrong.
-///
-/// `parse_dedupe` still checks the same conditions. A grammar is only as good as
-/// the endpoint honouring it, and `structured_output` can be switched off.
-///
-/// Every variant requires every property it names, which `strict` demands: a
-/// listed-but-optional property is not a looser schema, it is a rejected one.
-/// `supersedes`'s `pattern` is in the same supported set as the item bounds
-/// `artifacts_schema` already relies on.
+/// A union per relation makes `merged` writable exactly for `duplicate`; this rests on `additionalProperties: false`.
+/// Nested under `verdict` because strict mode needs an object root. `parse_dedupe` still checks: grammars can be off.
 pub fn dedupe_schema() -> serde_json::Value {
     let merged = serde_json::json!({
         "type": "object",
@@ -2359,12 +1909,7 @@ pub fn dedupe_schema() -> serde_json::Value {
             "category": {"type": "string", "enum": CATEGORIES},
             "caveats": {"type": "array", "items": {"type": "string"}}
         },
-        // Every field, for the reason `artifacts_schema` requires every field:
-        // a model being told the shape anyway has no reason to omit a field,
-        // and `strict` makes the rule structural rather than stylistic — a
-        // property a strict schema lists and does not require is a schema the
-        // hosted APIs reject outright, which fails the call rather than
-        // loosening it.
+        // Every field required: `strict` rejects listed-but-optional properties.
         "required": ["text", "title", "category", "caveats"],
         "additionalProperties": false
     });
@@ -2384,16 +1929,7 @@ pub fn dedupe_schema() -> serde_json::Value {
                         "additionalProperties": false
                     },
                     {
-                        // `supersedes` is required for the same reason `merged`
-                        // is: a direction the model would not name is downgraded
-                        // to a conflict by `parse_dedupe`, which turns the
-                        // cheapest faithful outcome into a queue entry for a
-                        // person.
-                        //
-                        // The pattern is that parser's rule written down. Left
-                        // unconstrained, a grammar satisfies "string" with "the
-                        // second one" and the verdict downgrades anyway — the
-                        // exact outcome requiring the field was meant to avoid.
+                        // Required and pattern-bound, or the grammar accepts "the second one" and the verdict downgrades.
                         "type": "object",
                         "properties": {
                             "relation": {"type": "string", "enum": ["replaced"]},
@@ -2406,12 +1942,7 @@ pub fn dedupe_schema() -> serde_json::Value {
                     {
                         "type": "object",
                         "properties": {
-                            // The three verdicts that name no side: they are
-                            // one variant because they carry one shape, not
-                            // because they mean anything alike. "distinct" and
-                            // "conflict" write nothing; "vacuous" retires both
-                            // artifacts where it is found, so this branch is
-                            // not the shape of the verdicts that touch nothing.
+                            // One variant because one shape; "vacuous" still retires both artifacts.
                             "relation": {
                                 "type": "string",
                                 "enum": ["distinct", "conflict", "vacuous"]
@@ -2429,17 +1960,7 @@ pub fn dedupe_schema() -> serde_json::Value {
     })
 }
 
-/// The shape `associate::parse_link` will accept.
-///
-/// Its own schema, and not the dedupe one, because the two judges share an
-/// endpoint and a `HttpCompleter` used to share a response format with it. A
-/// link asked under the dedupe grammar can only answer with a dedupe verdict —
-/// `related` and `unrelated` are not in that enum and `reason` is not one of its
-/// properties — so every link either came back as a spurious `duplicate` or
-/// failed to parse until the pair was shelved as unreadable.
-///
-/// Nested under `verdict` for the same reason `dedupe_schema` is, so both
-/// judges unwrap the same envelope shape.
+/// Its own schema: under the dedupe grammar a link can only answer with a dedupe verdict.
 pub fn link_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -2459,8 +1980,7 @@ pub fn link_schema() -> serde_json::Value {
     })
 }
 
-/// Models wrap JSON in fences and preface it with prose no matter what the
-/// prompt says, so slice from the first `{` to the last `}` before parsing.
+/// Models wrap JSON in fences and prose regardless of the prompt.
 pub(crate) fn extract_json(body: &str) -> &str {
     let start = body.find('{');
     let end = body.rfind('}');
@@ -2470,20 +1990,7 @@ pub(crate) fn extract_json(body: &str) -> &str {
     }
 }
 
-/// Recover the artifact objects a truncated or malformed reply still got right.
-///
-/// A small local model routinely runs out of output budget mid-list, or drops
-/// a comma, or leaves a quote unescaped in a passage that itself quotes
-/// something — and any of those fails the whole list however complete the
-/// rest is. Losing nine good artifacts to one bad one is the worst trade in
-/// the write path: it costs a segment of someone's corpus, and re-running it
-/// means minutes of a local model's time for a reply just as likely to
-/// stumble in the same place.
-///
-/// So parse the objects one at a time and keep the ones that stand up. A fault
-/// that also derails the scanner's idea of where strings end makes everything
-/// after it unreliable, which is why this returns what it could read rather
-/// than claiming completeness — the caller flags the result as degraded.
+/// Parses objects one at a time so one bad object does not lose the rest; the caller flags the result as degraded.
 fn salvage_objects(json: &str) -> Vec<RawArtifact> {
     let Some(start) = json.find("\"artifacts\"") else {
         return Vec::new();
@@ -2526,9 +2033,7 @@ fn salvage_objects(json: &str) -> Vec<RawArtifact> {
     out
 }
 
-/// Characters of an unparsable reply kept for diagnosis. Enough to see the
-/// shape and the first offending construct without pasting a whole segment of
-/// someone's corpus into a log file.
+/// Enough to see the shape without pasting a segment of someone's corpus into a log.
 const RAW_ON_FAILURE: usize = 800;
 
 pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
@@ -2536,16 +2041,9 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     let env: Envelope = match serde_json::from_str(json) {
         Ok(env) => env,
         Err(e) => {
-            // Salvage before giving up: read the list object by object and
-            // keep whatever stands up on its own. Asking a slow model to try
-            // again is expensive.
             let objects = salvage_objects(json);
             if objects.is_empty() {
-                // The parser's complaint names an offset into a reply nobody
-                // kept, which is not enough to tell a truncated list from a
-                // bad escape from prose where JSON was asked for. Debug rather
-                // than warn: this is model output, so it carries corpus text,
-                // and it belongs in a log only when someone has gone looking.
+                // Debug, not warn: model output carries corpus text.
                 tracing::debug!(
                     error = %e,
                     raw = %json.chars().take(RAW_ON_FAILURE).collect::<String>(),
@@ -2565,13 +2063,7 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     proposed_from(env.artifacts, false)
 }
 
-/// Raw artifacts to proposed ones, shared by the plain and judged parses.
-///
-/// `judged` gates the model-written tags and the pin: on the judged capture
-/// path the operator asked for them; on a promotion window model tags stay
-/// off — no domain-agnostic vocabulary exists for subject words, so a
-/// generated one drifts (`forensics` and `forensik`, two filters over one
-/// idea), and a promoted rewrite of an old window must not pin itself.
+/// `judged` gates model tags and the pin: off for promotions, where tags drift and a rewrite must not pin itself.
 fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArtifact>> {
     let artifacts: Vec<ProposedArtifact> = raws
         .into_iter()
@@ -2579,11 +2071,7 @@ fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArt
         .map(|c| ProposedArtifact {
             text: c.text.trim().to_string(),
             title: c.title.filter(|t| !t.trim().is_empty()),
-            // An absent category stays absent: a model that answered nothing
-            // made no claim, and `other` is a claim. Anything it did answer is
-            // held to the list — the schema asks for one of them, and a model
-            // that ignores an enum would otherwise put its own word straight
-            // into the filter row.
+            // Absent stays absent (`other` is a claim); anything answered is held to the list.
             category: c
                 .category
                 .filter(|t| !t.trim().is_empty())
@@ -2603,9 +2091,7 @@ fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArt
                 Some([a, b]) => Some((*a, *b)),
                 _ => None,
             },
-            // Capped at the three the prompt asks for: a model that starts
-            // listing general advice must not turn one artifact into a page of
-            // it, and the tail is the least source-grounded part of the list.
+            // Capped at the three the prompt asks for; the tail is the least grounded.
             caveats: c
                 .caveats
                 .into_iter()
@@ -2625,11 +2111,7 @@ fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArt
     Ok(artifacts)
 }
 
-/// Parse a judged reply: the artifacts under the same rules as
-/// [`parse_response`], plus whatever of the judgement stands up. A missing or
-/// malformed judgement never fails artifacts that are otherwise fine, and a
-/// reply that needed salvaging carries no judgement at all — half-read
-/// intent is worse than none.
+/// A bad judgement never fails good artifacts, and a salvaged reply carries no judgement: half-read intent is worse.
 pub fn parse_judged_response(body: &str) -> Result<crate::infer::SegmentReply> {
     let json = extract_json(body);
     match serde_json::from_str::<JudgedEnvelope>(json) {
@@ -2650,25 +2132,8 @@ pub fn parse_judged_response(body: &str) -> Result<crate::infer::SegmentReply> {
                     })
                     .collect(),
             };
-            // An empty artifact list is a real answer here, and only here.
-            // The system prompt's last rule forbids an artifact that
-            // describes the note's intent, repeats its dates or names its
-            // relation to a neighbour — so a note that is *only* a reminder
-            // leaves the model nothing it is allowed to write, and it
-            // answers with the judgement alone. Held to `proposed_from`'s
-            // floor that reply was thrown away as malformed, the reminder
-            // with it, and the window retried the same call to exhaustion.
-            //
-            // "Nothing it is allowed to write" is asked of the *text*, not of
-            // the array. A small model reaching for that shape often answers
-            // with one blank placeholder artifact rather than an empty list,
-            // and against `is_empty()` that took the else branch, where
-            // `proposed_from` filters the empty text out and then errors on
-            // having nothing left — throwing away a good judgement and retrying
-            // the window to exhaustion. The system prompt's own tension makes
-            // the shape likely: "one or two sentences yields exactly one
-            // artifact" against "never write an artifact that describes the
-            // note's intent".
+            // Empty (or blank-only) artifacts are a real answer here: a reminder-only note leaves nothing the prompt allows
+            // writing, so the judgement alone is the reply. Judged by text, since small models send a blank placeholder.
             let nothing_to_write = env.artifacts.iter().all(|c| c.text.trim().is_empty());
             let artifacts = if nothing_to_write && judgement.says_something() {
                 Vec::new()
@@ -2713,19 +2178,7 @@ Rules:
 - You may be given context about the capture: a note from the person who took it, when and where it was taken, the device. Where it is relevant, weave it in naturally so the text can be found again by it — as a short opening line or where it explains the content — but do not repeat it mechanically or invent detail around it.
 - Output markdown only. No preamble, no closing remarks, no mention of these instructions."#;
 
-/// The user turn's text part for `Describer::describe`: the language first,
-/// then the note, then the facts the file carried, each only when present.
-///
-/// The language rides here rather than in a translated `DESCRIBE_SYSTEM`
-/// because what a description of an image has to say about language is not
-/// the same thing a synthesis does. A described image *becomes* the corpus's
-/// `raw_text` — it is the verbatim the operator reads as the source — and it
-/// is two texts at once: the transcription of whatever is written in the
-/// image, which belongs to the image and must not be translated by anybody,
-/// and the describer's own prose about it, which belongs to the reader. Nine
-/// mechanical translations of the system prompt would have said nothing about
-/// which is which; this line says it once, and a tenth language is one more
-/// endonym away.
+/// Language here, not in a translated `DESCRIBE_SYSTEM`: transcribed text stays untranslated, the prose does not.
 pub fn describe_context(metadata: &serde_json::Value) -> String {
     let mut lines: Vec<String> = Vec::new();
     let lang = crate::infer::lang::of_corpus(metadata);
@@ -2740,8 +2193,7 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
         ));
     }
     if let Some(note) = metadata["note"].as_str().filter(|n| !n.trim().is_empty()) {
-        // The stored note is whole; this is the copy that costs tokens, and it
-        // leads the prompt — so it is the one place a long one does damage.
+        // This copy leads the prompt and costs tokens; the stored note is whole.
         lines.push(format!(
             "Context from the person who captured this: {}",
             note.trim()
@@ -2862,8 +2314,6 @@ mod tests {
                 "backup schedule".to_string()
             ]
         );
-        // Models fence their JSON and preface it with prose no matter what the
-        // prompt says, which is what `extract_json` is for.
         assert_eq!(
             parse_plan("Here you go:\n```json\n{\"need\": [\"ticker interval\"]}\n```"),
             vec!["ticker interval".to_string()]
@@ -2924,9 +2374,7 @@ mod tests {
 
     #[test]
     fn the_schema_asks_for_tags_and_a_pin_and_the_judged_one_for_the_moment() {
-        // Strict decoding requires every property, so both are in the schema;
-        // whether they are *honored* is the parse's per-path decision — see
-        // `the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model`.
+        // Whether they are honored is per path; see `the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model`.
         let items = &artifacts_schema()["properties"]["artifacts"]["items"];
         let required: Vec<&str> = items["required"]
             .as_array()
@@ -2951,11 +2399,6 @@ mod tests {
 
     #[test]
     fn a_category_off_the_list_becomes_other() {
-        // Subject words are what an unconstrained field collects: a corpus of
-        // forensics notes filled it with "Forensic Science / Criminalistics",
-        // which then appeared in the filter row beside "concept" as though it
-        // were the same kind of choice. The field is about form, and the enum
-        // is what keeps a domain out of the schema.
         assert_eq!(
             normalize_category("Forensic Science / Criminalistics"),
             "other"
@@ -2986,9 +2429,6 @@ mod tests {
 
     #[test]
     fn the_link_prompt_carries_both_titles_and_the_questions_that_bound_them() {
-        // The binding queries are the evidence. Without them the model is being
-        // asked whether two arbitrary texts are related, which is a different
-        // and much worse question than why these two keep being needed at once.
         let p = link_prompt(
             ("Mounting E01 images", "ewfmount /dev/..."),
             ("Loop device limits", "max_loop=64"),
@@ -3021,9 +2461,6 @@ mod tests {
         assert!(p.contains("next window head"));
         assert!(p.contains("----- INPUT -----\nthe window body\n----- END INPUT -----"));
 
-        // The opening leads, so system prompt + opening is a byte-identical
-        // prefix across every window of a corpus and a prompt cache can reuse
-        // it. Everything that varies per window sits after it.
         let opening_at = p.find("PBS 3.x").unwrap();
         let before_at = p.find("previous window tail").unwrap();
         let input_at = p.find("----- INPUT -----").unwrap();
@@ -3074,9 +2511,7 @@ mod tests {
             "17:07",
             "`## `",
         ];
-        // Whitespace-normalised on both sides: these prompts are hard-wrapped
-        // prose, and a translation wraps in different places — `FREQ,\nINTERVAL`
-        // is the same contract as `FREQ, INTERVAL` and must not read as a loss.
+        // Translations wrap differently; `FREQ,\nINTERVAL` is the same contract as `FREQ, INTERVAL`.
         let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
         for lang in Lang::ALL {
             let p = flat(synthesizer_system(lang));
@@ -3087,15 +2522,10 @@ mod tests {
                     lang.tag()
                 );
             }
-            // And a title prompt exists for every one of them, which is the
-            // thing that was missing entirely: German artifacts under an
-            // English name.
             assert!(!title_system(lang).is_empty());
         }
 
-        // Translated, not merely relabelled. Nine distinct texts and one
-        // English original — a `match` arm pointing at the wrong constant is
-        // otherwise invisible.
+        // A `match` arm pointing at the wrong constant is otherwise invisible.
         let seen: std::collections::BTreeSet<&str> =
             Lang::ALL.iter().map(|l| synthesizer_system(*l)).collect();
         assert_eq!(seen.len(), Lang::ALL.len(), "two languages share a prompt");
@@ -3133,8 +2563,6 @@ mod tests {
             .collect::<Vec<_>>();
         let reply = r#"{"artifacts":[{"text":"body","title":"A","category":"note",
             "tags":["t"],"pinned":false,"corpus_lines":[1,4],"caveats":["only on linux"]}]}"#;
-        // The literal above is the model's side of the bargain: every field the
-        // schema makes mandatory has to be one this parser reads.
         for field in &required {
             assert!(
                 reply.contains(&format!("\"{field}\"")),
@@ -3183,10 +2611,7 @@ mod tests {
                 let r = relation.as_str().unwrap();
                 seen.push(r.to_string());
 
-                // The minimum this variant permits: the relation plus whatever
-                // it makes mandatory alongside. A grammar built from this schema
-                // cannot emit less, so a parser that rejects it rejects a reply
-                // the model was steered into writing.
+                // A grammar from this schema cannot emit less, so the parser must accept it.
                 let mut body = serde_json::json!({ "relation": r });
                 for field in &required {
                     match *field {
@@ -3201,16 +2626,12 @@ mod tests {
                                 "caveats": []
                             })
                         }
-                        // A single letter, which is all `parse_dedupe` reads as
-                        // a direction; anything else downgrades to a conflict.
                         "supersedes" => body["supersedes"] = serde_json::json!("a"),
                         other => {
                             panic!("the schema requires {other:?}, which this test cannot build")
                         }
                     }
                 }
-                // Read through the envelope the schema actually asks for, which
-                // is what a constrained endpoint will send.
                 let sent = serde_json::json!({ "verdict": body });
                 assert!(
                     parse_dedupe(&sent.to_string()).is_ok(),
@@ -3249,8 +2670,6 @@ mod tests {
             }
         }
 
-        // And the parser still refuses both, because a grammar is only as good
-        // as the endpoint honouring it and `structured_output` can be off.
         assert!(parse_dedupe(r#"{"verdict":{"relation":"duplicate"}}"#).is_err());
         assert!(
             parse_dedupe(r#"{"verdict":{"relation":"distinct","merged":{"text":"x"}}}"#).is_err()
@@ -3280,10 +2699,7 @@ mod tests {
                     closed(sub, &format!("{path}.{k}"));
                 }
             }
-            // Into arrays too: the one array of objects in the set lives here,
-            // and a walker that stops at `properties` never checks it — it would
-            // pass this test while shipping exactly the open object the test
-            // exists to catch.
+            // Into arrays too, or the one array of objects goes unchecked.
             if v.get("items").is_some() {
                 closed(&v["items"], &format!("{path}[]"));
             }
@@ -3300,9 +2716,6 @@ mod tests {
             ("plan", plan_schema()),
             ("artifacts", artifacts_schema()),
         ] {
-            // A strict `json_schema` response format needs an object at the
-            // root: the hosted APIs reject a bare `anyOf` there outright, which
-            // turns a loose constraint into a failed call.
             assert_eq!(
                 schema["type"], "object",
                 "the {name} schema is not rooted in an object"
@@ -3320,18 +2733,13 @@ mod tests {
             .iter()
             .find(|v| v["properties"]["relation"]["enum"][0] == "replaced")
             .expect("a variant for replaced");
-        // Asserted literally rather than matched: the crate carries no regex
-        // engine, and the point is that the field is anchored to exactly one
-        // letter in either case — `dedupe_prompt` heads artifacts uppercase and
-        // its example answers lowercase. Anything looser ("artifact B", "the
-        // second one") satisfies the grammar and downgrades in the parser.
+        // Literal: there is no regex engine, and the field is anchored to one letter in either case.
         assert_eq!(
             replaced["properties"]["supersedes"]["pattern"].as_str(),
             Some("^[A-Za-z]$"),
             "supersedes is not constrained to a direction parse_dedupe reads"
         );
 
-        // And the parser agrees about which of those is a direction.
         let verdict =
             parse_dedupe(r#"{"verdict":{"relation":"replaced","supersedes":"B"}}"#).unwrap();
         assert_eq!(verdict.relation, Relation::Replaced);
@@ -3356,8 +2764,6 @@ mod tests {
             assert_eq!(reason, "because");
         }
 
-        // No dedupe verdict is a link verdict, which is the whole point of the
-        // two schemas being separate.
         for r in ["distinct", "conflict", "replaced"] {
             assert!(
                 !names.contains(&r),
@@ -3368,11 +2774,6 @@ mod tests {
 
     #[test]
     fn the_dedupe_pass_is_told_what_each_artifact_is_about() {
-        // The real case this fixes: an artifact headed "FAT32 Specifications"
-        // whose body opens "32 Bit Clusternummern" and never says FAT32 again.
-        // Given the bodies alone, the model saw two anonymous spec lists with
-        // different numbers and called them a contradiction — which was the
-        // only honest answer to the question it was actually asked.
         let p = dedupe_prompt(
             &member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
             &member("FAT32 Specifications", "32 Bit Clusternummern."),
@@ -3385,8 +2786,6 @@ mod tests {
 
     #[test]
     fn the_pair_is_lettered_so_a_direction_can_name_one() {
-        // `supersedes` answers with a letter, so the letters have to be in the
-        // prompt and in the same order the caller will read them back in.
         let p = dedupe_prompt(&member("one", "a"), &member("two", "b"), 0);
         assert!(p.contains("ARTIFACT A"), "{p}");
         assert!(p.contains("ARTIFACT B"), "{p}");
@@ -3431,15 +2830,7 @@ mod tests {
 
     #[test]
     fn no_prior_about_values_is_named_to_the_dedupe_judge() {
-        // Three real artifacts stating one fact three ways. Whitespace
-        // tokenization made the token sets differ on punctuation alone —
-        // `Win7/8/10` yields nothing, `(Windows 7-10)` yields `7-10`,
-        // `Windows 7, 8 und 10` yields `7`, `8`, `10` — and the prompt named the
-        // difference as values the artifacts do not state the same way. The
-        // model read four bare integers against a table of registry codes and
-        // called the version mapping a contradiction, which was the honest
-        // answer to the question it was handed. Nothing about the artifacts is
-        // withheld by leaving the prior out; only the priming is.
+        // One fact written three ways gave different token sets; the prior primed a false contradiction.
         let p = dedupe_prompt(
             &member(
                 "USB Device Registry Keys",
@@ -3456,38 +2847,25 @@ mod tests {
             !p.contains("not stated the same way"),
             "the differing-values prior is back in the prompt: {p}"
         );
-        // The artifacts themselves are still there in full, which is what the
-        // model is supposed to decide on.
         assert!(p.contains("0066 = Last Connected (Win8-10)"), "{p}");
         assert!(p.contains("0066 für Last Connected (Windows 8-)"), "{p}");
     }
 
     #[test]
     fn a_retry_does_not_ask_the_endpoint_the_question_it_has_cached() {
-        // The endpoint replays a cached reply for an identical prompt in
-        // milliseconds. A group whose reply the parser could not read is retried
-        // up to `MAX_ATTEMPTS` times, and every one of those would have read the
-        // same unreadable bytes back.
+        // The endpoint replays a cached reply for an identical prompt.
         let a = member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB.");
         let b = member("FAT32 Specifications", "32 Bit Clusternummern.");
         let first = dedupe_prompt(&a, &b, 0);
         let second = dedupe_prompt(&a, &b, 1);
         assert_ne!(first, second);
         assert_ne!(second, dedupe_prompt(&a, &b, 2));
-        // A first ask stays exactly what it was, so the cache still earns its
-        // keep on a group re-armed after a verdict was lost.
         assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
     }
 
     #[test]
     fn the_dedupe_pass_is_told_what_makes_a_pair_worth_discarding_and_what_does_not() {
-        // The failure mode of this verdict is that it eats real notes. What
-        // brought it about was a whole-file capture — a day of study notes
-        // stored verbatim, never distilled — pairing with another at 99%: the
-        // two are alike because neither is *about* anything in particular, not
-        // because either is empty. That pair is content awaiting extraction and
-        // must come back "distinct", so the guard is named as explicitly as the
-        // verdict itself.
+        // Vacuous eats real notes when misapplied; an undistilled study file must come back "distinct".
         assert!(DEDUPE_SYSTEM.contains(r#""vacuous""#));
         assert!(DEDUPE_SYSTEM.contains("neither"));
         assert!(
@@ -3498,23 +2876,16 @@ mod tests {
 
     #[test]
     fn the_dedupe_pass_is_told_that_different_subjects_are_not_a_conflict() {
-        // Two sections of one reference document are near-identical in form and
-        // deliberately different in content, so similarity puts them in a pair
-        // and every number in them differs. Without this rule the feature fires
-        // hardest exactly where it is most wrong — and now it would not merely
-        // flag them, it would merge them into mush.
+        // Sibling sections of one reference differ in every number and must not be merged.
         assert!(DEDUPE_SYSTEM.contains("same subject"));
         assert!(DEDUPE_SYSTEM.contains("different things"));
         assert!(DEDUPE_SYSTEM.contains(r#"Answer "distinct" and stop."#));
-        // And the fidelity preference, which is what keeps most groups from
-        // producing synthetic text at all.
         assert!(DEDUPE_SYSTEM.contains("Prefer this whenever it applies"));
     }
 
     #[test]
     fn a_truncated_list_keeps_the_artifacts_that_finished() {
-        // Exactly what a small local model emits when it runs out of output
-        // budget: two complete objects, then a third cut mid-string.
+        // What a small model emits out of budget: two complete objects, a third cut mid-string.
         let cut = r###"{"artifacts":[
           {"text":"first complete","title":"one","tags":[],"corpus_lines":[1,2]},
           {"text":"second complete","title":"two","tags":[]},
@@ -3543,10 +2914,6 @@ mod tests {
 
     #[test]
     fn one_malformed_object_costs_only_itself() {
-        // The list is complete and the outer shape is fine; the middle object
-        // is missing a comma. Whole-document loss over one bad object is the
-        // failure this salvage exists to prevent — a legal text with unusual
-        // punctuation took down every artifact in its segment this way.
         let broken = r###"{"artifacts":[
           {"text":"first good","title":"one","tags":[]},
           {"text":"middle bad" "title":"two","tags":[]},
@@ -3560,9 +2927,7 @@ mod tests {
 
     #[test]
     fn a_bad_escape_does_not_cost_the_objects_before_it() {
-        // An unescaped quote also derails the scanner's idea of where strings
-        // end, so what comes after is unreliable. What must hold is that the
-        // objects it had already closed are still returned.
+        // An unescaped quote derails the scanner; objects already closed must still be returned.
         let broken = r###"{"artifacts":[
           {"text":"first good","title":"one","tags":[]},
           {"text":"he said "stop" here","title":"two","tags":[]}
@@ -3574,9 +2939,7 @@ mod tests {
 
     #[test]
     fn a_reply_with_no_parsable_object_is_still_an_error() {
-        // Salvage must not turn prose into an empty success: a segment that
-        // produced nothing has to fail so the artifact is recorded as missing
-        // rather than silently dropped.
+        // A segment producing nothing must fail, so it is recorded as missing rather than dropped.
         let prose = r###"{"artifacts":[{"text":"unterminated and "broken, "tags":}]}"###;
         assert!(parse_response(prose).is_err());
     }
@@ -3593,17 +2956,11 @@ mod tests {
         let m = d.merged.as_ref().unwrap();
         assert_eq!(m.text, "Use mount --bind.");
         assert_eq!(m.title.as_deref(), Some("Bind mounts"));
-        // Offered by the model and not kept: a merge writes no tags of its own,
-        // for the same reason synthesis does not.
         assert!(m.tags.is_empty());
     }
 
     #[test]
     fn a_merged_block_on_a_non_duplicate_verdict_is_unreadable() {
-        // `merged` belongs to `duplicate` and to nothing else. Accepting it
-        // elsewhere would let a reply that classified a group as a conflict
-        // still hand us text to write — which is the one outcome the conflict
-        // verdict exists to prevent.
         for relation in ["conflict", "replaced", "distinct"] {
             let body = format!(
                 r#"{{"relation":"{relation}","supersedes":"a",
@@ -3618,8 +2975,6 @@ mod tests {
 
     #[test]
     fn a_duplicate_verdict_with_nothing_to_write_is_unreadable() {
-        // A merge the write path cannot carry out. Failing re-asks; accepting
-        // would settle the group having done nothing.
         assert!(matches!(
             parse_dedupe(r#"{"relation":"duplicate","detail":"x"}"#),
             Err(Error::MalformedLlmOutput(_))
@@ -3644,12 +2999,7 @@ mod tests {
 
     #[test]
     fn a_direction_reaches_as_far_as_the_letters_the_prompt_hands_out() {
-        // The prompt hands out A and B, and `interpret` is what refuses a letter
-        // past the end — deliberately, so that this parser does not have to be
-        // edited in lockstep with the prompt. It was pinned at D once, against a
-        // prompt that lettered a whole component, and turned every direction
-        // named in a group of five or more into a conflict: a person spent on a
-        // group the model had already resolved the cheap way.
+        // `interpret` refuses letters past the end, so this parser need not change with the prompt.
         for (letter, want) in [("E", 'e'), ("f", 'f'), ("H", 'h')] {
             let d = parse_dedupe(&format!(
                 r#"{{"relation":"replaced","supersedes":"{letter}","detail":"stale"}}"#
@@ -3666,9 +3016,6 @@ mod tests {
 
     #[test]
     fn a_replacement_naming_no_side_falls_back_to_a_conflict() {
-        // A direction the model would not name is not a direction. Treating it
-        // as one would pick a side by accident, and on a supersede that means
-        // hiding an artifact for no stated reason.
         let d = parse_dedupe(r#"{"relation":"replaced","detail":"one of them is old"}"#).unwrap();
         assert_eq!(d.relation, Relation::Conflict);
         let d =
@@ -3678,17 +3025,12 @@ mod tests {
 
     #[test]
     fn a_verdict_wrapped_in_prose_and_fences_still_parses() {
-        // The same models that fence the synthesis reply fence this one.
         let d = parse_dedupe("Sure:\n```json\n{\"relation\": \"distinct\"}\n```").unwrap();
         assert_eq!(d.relation, Relation::Distinct);
     }
 
     #[test]
     fn an_unparsable_verdict_is_an_error_not_a_default() {
-        // Defaulting to "conflict" would fill the escalation queue with noise a
-        // person has to clear by hand; defaulting to "distinct" would quietly
-        // close real duplicates. Neither: it fails, the group stays pending, and
-        // the unit asks again with a prompt the endpoint has not cached.
         assert!(parse_dedupe("I could not decide.").is_err());
         assert!(parse_dedupe(r#"{"relation":"maybe"}"#).is_err());
     }
@@ -3716,8 +3058,6 @@ mod tests {
 
     #[test]
     fn an_artifact_without_caveats_parses_to_an_empty_list() {
-        // Most models will omit the field most of the time, and a missing
-        // field must never fail a segment that is otherwise fine.
         let body = r#"{"artifacts":[{"text":"plain","title":"t","category":"c","tags":[]}]}"#;
         assert!(parse_response(body).unwrap()[0].caveats.is_empty());
     }
@@ -3744,9 +3084,6 @@ mod tests {
         let out = parse_response(GOOD).unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].title.as_deref(), Some("Mount an E01 image"));
-        // The reply still carries tags and they are still dropped: the schema
-        // stopped asking, and what a model volunteers anyway is the same
-        // drifting vocabulary by another route.
         assert!(out[0].tags.is_empty());
         assert_eq!(out[0].corpus_lines, Some((3, 9)));
     }
@@ -3776,7 +3113,6 @@ mod tests {
 
     #[test]
     fn empty_chunk_list_is_rejected() {
-        // Silently accepting this would lose the whole source.
         assert!(parse_response(r#"{"artifacts":[]}"#).is_err());
     }
 
@@ -3789,8 +3125,6 @@ mod tests {
 
     #[test]
     fn code_fences_inside_artifact_text_survive_extraction() {
-        // The `}` inside a fenced snippet must not confuse the brace slicing,
-        // and the code itself must come through byte-for-byte.
         let body =
             r#"{"artifacts":[{"text":"Run:\n```bash\nawk '{print $1}' file\n```","title":"awk"}]}"#;
         let out = parse_response(body).unwrap();
@@ -3809,7 +3143,6 @@ mod tests {
 
     #[test]
     fn system_prompt_states_the_hard_rules() {
-        // These instructions are the guardrail against paraphrased commands.
         assert!(SYNTHESIZER_SYSTEM.contains("VERBATIM"));
         assert!(SYNTHESIZER_SYSTEM.contains("markdown"));
         assert!(SYNTHESIZER_SYSTEM.contains("H1") || SYNTHESIZER_SYSTEM.contains("`#`"));
@@ -3869,9 +3202,7 @@ mod tests {
             "the transcription must not be swept along: {de}"
         );
 
-        // English is the default everywhere and says nothing extra: the system
-        // prompt is already in it, and a line repeating that is tokens for
-        // nothing on every image capture that never set a language.
+        // English adds no line: tokens for nothing on every image capture.
         for m in [
             serde_json::json!({ "lang": "en" }),
             serde_json::json!({}),
@@ -3890,29 +3221,23 @@ mod tests {
         assert!(abstained(
             "  not in the knowledge base — the excerpts are about FAT."
         ));
-        // Models wrap the opening in emphasis or a heading; that is still the opening.
         assert!(abstained(
             "**Not in the knowledge base.** The excerpts describe…"
         ));
         assert!(abstained("# Not in the knowledge base\n\nThe excerpts…"));
-        // A non-ASCII lead-in puts the prefix off a byte boundary; a list
-        // marker is a lead-in the emphasis set does not cover.
+        // A non-ASCII lead-in puts the prefix off a byte boundary.
         assert!(abstained("„Not in the knowledge base.“ Nothing covers it."));
         assert!(abstained(
             "• Not in the knowledge base — the excerpts are about FAT."
         ));
         assert!(abstained("- Not in the knowledge base."));
         assert!(abstained("1. Not in the knowledge base."));
-        // The whole answer, quoted and nothing behind it: there is no answer for
-        // the quotation to have been making a point about.
         assert!(abstained("\"Not in the knowledge base\""));
     }
 
     #[test]
     fn an_answer_that_quotes_the_phrase_to_argue_with_it_is_not_an_abstention() {
-        // The cost of skipping an opening quote. Scored as an abstention, this
-        // records a gap for a question the base did answer, and the gap sweep
-        // then groups and names it.
+        // Scored as an abstention this would record a gap for a question the base answered.
         assert!(!abstained(
             "\"Not in the knowledge base\" is the wrong read here; excerpt 3 covers it."
         ));
@@ -3967,10 +3292,6 @@ mod tests {
 
     #[test]
     fn naming_a_gap_is_shown_a_bounded_number_of_bounded_questions() {
-        // A cluster can hold every open gap of a kind. Unbounded, the prompt
-        // goes over the context window, the call fails, the group falls back to
-        // a terms label — and a terms label is offered to the model again, so
-        // the failure is paid for on every sweep for as long as the group lives.
         let long = "x".repeat(GAP_LABEL_MAX_CHARS + 50);
         let mut qs: Vec<&str> = vec![long.as_str(); GAP_LABEL_MAX_QUESTIONS + 20];
         qs[0] = "the newest question, which the caller passes first";
@@ -4050,12 +3371,6 @@ mod tests {
 
     #[test]
     fn a_reminder_note_that_is_only_a_judgement_keeps_its_judgement() {
-        // The prompt's own last rule — "Das Urteil ist kein Artefakt" — leaves
-        // a bare reminder with nothing it is allowed to write an artifact
-        // about, so the model answers with an empty list and the judgement
-        // filled in. That is the reply the capture door exists for; refusing
-        // it as malformed threw the reminder away and retried the call until
-        // the unit gave up.
         let body = r#"{"artifacts":[],
             "moment":{"intent":"remind","when":"2026-09-05T13:45","rule":null},
             "events":["2026-09-05T13:45"],"links":[]}"#;
@@ -4068,12 +3383,7 @@ mod tests {
 
     #[test]
     fn a_blank_placeholder_artifact_is_the_same_answer_as_an_empty_list() {
-        // The shape a small model reaches for instead of `[]`, pushed there by
-        // the system prompt's own tension: "one or two sentences yields exactly
-        // one artifact" against "never write an artifact that describes the
-        // note's intent". Held to `is_empty()` it took the else branch, where
-        // the blank text is filtered out and the floor then errors on having
-        // nothing left — the good judgement thrown away with it.
+        // A blank placeholder is what small models send instead of `[]`.
         let body = r#"{"artifacts":[{"text":"   ","title":""}],
             "moment":{"intent":"remind","when":"2026-09-05T13:45","rule":null},
             "events":[],"links":[]}"#;
@@ -4083,7 +3393,6 @@ mod tests {
             r.judgement.expect("kept").when.as_deref(),
             Some("2026-09-05T13:45")
         );
-        // And a blank placeholder with nothing beside it is still nothing.
         let empty = r#"{"artifacts":[{"text":"  "}],"moment":{"intent":"none","when":null,"rule":null},
             "events":[],"links":[]}"#;
         assert!(parse_judged_response(empty).is_err());
@@ -4091,9 +3400,7 @@ mod tests {
 
     #[test]
     fn a_judged_reply_with_neither_artifacts_nor_a_judgement_is_still_malformed() {
-        // The empty list is only meaningful beside a judgement. A reply that
-        // says nothing at all is a model that answered nothing, and the
-        // window must go on treating that as a failure to retry.
+        // The empty list means something only beside a judgement.
         let body = r#"{"artifacts":[],"moment":{"intent":"none","when":null,"rule":null},
             "events":[],"links":[]}"#;
         assert!(parse_judged_response(body).is_err());
@@ -4108,15 +3415,11 @@ mod tests {
         let j = r.judgement.expect("the moment was read");
         assert_eq!(j.intent.as_deref(), Some("remind"));
         assert_eq!(j.when.as_deref(), Some("2026-09-04T09:00"));
-        // And the reply that says nothing at all is still a failure to retry,
-        // exactly as an explicit empty list with no judgement is.
         assert!(parse_judged_response("{}").is_err());
     }
 
     #[test]
     fn the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model() {
-        // Promotion windows: model tags stay off (vocabulary drift), and a
-        // rewrite must not pin itself.
         let body = r#"{"artifacts":[{"text":"x","tags":["topic"],"pinned":true}]}"#;
         let arts = parse_response(body).unwrap();
         assert!(arts[0].tags.is_empty());

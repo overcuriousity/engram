@@ -1,72 +1,43 @@
-//! The knobs a sweep may move while the server runs.
-//!
-//! Everything else that shapes ranking is read once at startup and threaded
-//! down. These are different: the tuning sweep and the idle pass rank the same
-//! pairs under several of them in one pass, and adopting a candidate has to
-//! change the search the *next* request runs. So they live behind
-//! `Core::ranking` rather than being copied into the places that use them.
-//!
-//! Three reorder what retrieval returned (`recency_weight`, `per_source_cap`,
-//! `prime_lift`); two change what is retrieved at all (`candidate_multiplier`,
-//! `recency_half_life_days`). Both kinds cost the idle pass the same thing —
-//! one vector read per pair per candidate — which is what lets them share a
-//! struct and a chooser. Two more sit beside them and are moved on their own
-//! rules: `rerank`, scored against the rank that was served, and
-//! `spread_max`, scored on what the appended band earned while serving.
+//! Ranking knobs a sweep may change while the server runs, kept behind `Core::ranking`
+//! so adopting a candidate changes the next request's search.
 
 use crate::config::VectorConfig;
 
-/// The rungs the idle pass may step the pool depth along. Values, not a
-/// threshold: the pass never prefers one over another except by measuring.
+/// The rungs the idle pass may step the pool depth along.
 pub const MULTIPLIERS: [usize; 5] = [1, 2, 3, 5, 8];
 /// The rungs for the recency half-life, in days.
 pub const HALF_LIVES: [u32; 5] = [30, 90, 180, 365, 730];
-/// The rungs for `prime_lift`: how many places an accessible hit may climb.
-/// Zero is the off rung; the shipped value is one step above it, so the pass
-/// can walk it either way.
+/// Zero is off; the shipped value sits one above it so the pass can walk either way.
 pub const PRIME_LIFTS: [usize; 4] = [0, 1, 2, 4];
-/// The rungs for `sitting_prime`. Two, because it is a switch — the ladder
-/// shape is kept so the chooser can treat it like every other axis.
+/// A switch, kept ladder-shaped so the chooser treats it like every other axis.
 pub const SITTING_PRIMES: [bool; 2] = [false, true];
 /// The rungs for `spread_max`: how many linked artifacts hang under the list.
 pub const SPREADS: [usize; 6] = [0, 1, 2, 3, 5, 8];
-/// The rungs for `review_min`: the cosine at which a pair is worth asking the
-/// judge about. A rung at or above `consolidate.auto_supersede` is never
-/// offered.
+/// A rung at or above `consolidate.auto_supersede` is never offered.
 pub const REVIEW_MINS: [f32; 4] = [0.80, 0.84, 0.88, 0.92];
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RankingParams {
     pub recency_weight: f32,
-    /// Chunks one document may contribute. `None` lets a single document fill
-    /// the whole list — which is what `ask` wants, and what the sweep offers as
-    /// one of its candidates.
+    /// `None` lets one document fill the whole list, which is what `ask` wants.
     pub per_source_cap: Option<usize>,
-    /// How many times the answer size retrieval fetches when something
-    /// downstream — the cap or the reranker — will narrow the list. Wider
-    /// costs a bigger vector read and gives the cap more to choose from.
+    /// Fetch this many times the answer size when the cap or reranker will narrow it.
     pub candidate_multiplier: usize,
     /// How many days it takes a result's recency term to halve.
     pub recency_half_life_days: u32,
     /// How many places priming may lift a hit. Zero is off.
     pub prime_lift: usize,
-    /// Whether what this sitting has already touched may take part in the
-    /// lift. It shares `prime_lift`'s budget rather than holding one of its
-    /// own, so at a lift of zero this changes nothing.
+    /// Shares `prime_lift`'s budget, so at a lift of zero it changes nothing.
     pub sitting_prime: bool,
     /// How many associated artifacts are appended under the ranked list.
     pub spread_max: usize,
-    /// Whether the configured reranker runs. Meaningless where none is
-    /// configured: serving treats it as `false` there.
+    /// Serving treats this as `false` where no reranker is configured.
     pub rerank: bool,
-    /// The cosine at which a pair of artifacts is worth asking the judge
-    /// about. A corpus job's threshold, carried here because the generation
-    /// is the running configuration and `relate.rs` reads it off this lock.
+    /// Here because `relate.rs` reads the running generation off this lock.
     pub review_min: f32,
 }
 
-/// The shipped values — the same ones `VectorConfig`'s serde defaults hold,
-/// read from the same functions so the two cannot drift.
+/// Read from the same functions as `VectorConfig`'s serde defaults so the two cannot drift.
 impl Default for RankingParams {
     fn default() -> Self {
         Self {
@@ -84,9 +55,7 @@ impl Default for RankingParams {
 }
 
 impl RankingParams {
-    /// The file's starting rungs. `reranker_configured` is whether `[infer]`
-    /// names one: the knob starts on where it can, and there is nothing to
-    /// start where it cannot.
+    /// `reranker_configured`: whether `[infer]` names a reranker, so the knob can start on.
     pub fn from_config(
         cfg: &VectorConfig,
         associate: &crate::config::AssociateConfig,
@@ -96,9 +65,7 @@ impl RankingParams {
     ) -> Self {
         Self {
             recency_weight: cfg.recency_weight,
-            // `0` is how a file says "no cap": a setting cannot hold `None`,
-            // and a cap of zero would otherwise mean a search that returns
-            // nothing at all.
+            // A file writes "no cap" as `0`; a cap of zero would return nothing.
             per_source_cap: match cfg.per_source_cap {
                 0 => None,
                 n => Some(n),
@@ -202,8 +169,6 @@ mod tests {
         assert!(PRIME_LIFTS.contains(&p.prime_lift));
         assert!(SPREADS.contains(&p.spread_max));
         assert!(SITTING_PRIMES.contains(&p.sitting_prime));
-        // Zero is off, and the shipped rung sits one above it so the pass can
-        // step priming off as well as up.
         assert_eq!(PRIME_LIFTS[0], 0);
         assert_eq!(PRIME_LIFTS[1], p.prime_lift);
         assert!(PRIME_LIFTS.windows(2).all(|w| w[0] < w[1]), "ascending");
@@ -231,8 +196,6 @@ mod tests {
 
     #[test]
     fn the_shipped_values_sit_in_the_middle_of_their_ladders() {
-        // A ladder walked from its end can only go one way; the pass would
-        // then be told the shipped value is an extreme, which nobody decided.
         let d = RankingParams::default();
         assert_eq!(MULTIPLIERS[MULTIPLIERS.len() / 2], d.candidate_multiplier);
         assert_eq!(HALF_LIVES[HALF_LIVES.len() / 2], d.recency_half_life_days);
