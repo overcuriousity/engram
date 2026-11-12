@@ -36,7 +36,7 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 | Rule | Deviation | Reason |
 |---|---|---|
 | SQLite only | Qdrant beside SQLite | integral to engram's retrieval; SQLite vectors serve the contained build |
-| `unsafe_code = "forbid"` | not yet enforced; to be allowed only in the `contained` FFI (llama.cpp, whisper.cpp, sqlite-vec) | in-process inference needs FFI |
+| `unsafe_code = "forbid"` | `deny`, allowed only in `src/infer/whisper.rs` and `register()` in `src/vector/sqlite.rs` | in-process inference needs FFI; `forbid` cannot be overridden |
 | sqlx migrations | `Store::migrate` / `Control::migrate` | they read a base's columns before touching it; live bases depend on it |
 | compile-time-checked queries | runtime `sqlx::query` throughout | not yet converted |
 | utoipa OpenAPI + parity test | none | owner's decision |
