@@ -89,3 +89,6 @@
 }
 .band-gap-label { font-size: var(--text-dense); color: var(--color-danger); }
 
+.capture-figure { margin: var(--space-3) 0; }
+.capture-figure figcaption { font-size: var(--text-micro); margin-top: var(--space-1); }
+.artifact-row { border-top: 1px solid var(--color-border-subtle); padding-block: var(--space-3); }
