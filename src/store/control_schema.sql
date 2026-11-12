@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS users (
   lang         TEXT NOT NULL DEFAULT '',
   -- The OIDC issuer this subject belongs to; '' for a local user.
   issuer       TEXT NOT NULL DEFAULT '',
+  -- 'system' | 'light' | 'dark', and 'default' | 'compact'.
+  theme        TEXT NOT NULL DEFAULT 'system',
+  density      TEXT NOT NULL DEFAULT 'default',
   created_at   INTEGER NOT NULL
 );
 

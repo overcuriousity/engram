@@ -146,7 +146,17 @@ impl Control {
     /// old rows mean is not something a boot path may guess about.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("control_schema.sql");
-        const ADDITIVE: [(&str, &str, &str); 6] = [
+        const ADDITIVE: [(&str, &str, &str); 8] = [
+            (
+                "users",
+                "theme",
+                "ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'system'",
+            ),
+            (
+                "users",
+                "density",
+                "ALTER TABLE users ADD COLUMN density TEXT NOT NULL DEFAULT 'default'",
+            ),
             (
                 "api_tokens",
                 "scheme",
@@ -247,6 +257,31 @@ impl Control {
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
         self.backfill_job_class().await?;
+        Ok(())
+    }
+
+    pub async fn prefs(&self, subject: &str) -> Result<crate::web::prefs::Prefs> {
+        use crate::web::prefs::{Density, Prefs, Theme};
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT theme, density FROM users WHERE subject = ?")
+                .bind(subject)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row
+            .map(|(t, d)| Prefs {
+                theme: Theme::parse(&t).unwrap_or_default(),
+                density: Density::parse(&d).unwrap_or_default(),
+            })
+            .unwrap_or_default())
+    }
+
+    pub async fn set_prefs(&self, subject: &str, p: crate::web::prefs::Prefs) -> Result<()> {
+        sqlx::query("UPDATE users SET theme = ?, density = ? WHERE subject = ?")
+            .bind(p.theme.as_str())
+            .bind(p.density.as_str())
+            .bind(subject)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 

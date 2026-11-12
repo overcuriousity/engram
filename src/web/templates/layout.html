@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-prefs="local">
+<html lang="en"{{ crate::web::prefs::html_attrs() }}>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -62,10 +62,16 @@
       {# The light palette has been in the stylesheet since the port and nobody
          has ever seen it, because it activated only on prefers-color-scheme.
          The label names where the button goes, not where it is. #}
-      <button class="btn btn-ghost btn-sm" type="button" data-theme-toggle
-              aria-label="Switch between dark and light">
-        <span data-theme-label>Theme</span>
-      </button>
+      {% let theme = crate::web::prefs::theme() %}
+      {% let compact = crate::web::prefs::density() == crate::web::prefs::Density::Compact %}
+      <button type="button" class="oc-btn oc-btn--icon oc-theme-toggle" data-oc-pref="theme"
+              data-oc-value="{{ theme.as_str() }}" aria-label="{{ theme.next_label() }}"
+              data-oc-tip="{{ theme.next_label() }}">{{ crate::web::icons::icon("monitor", 16) }}{{ crate::web::icons::icon("sun", 16) }}{{ crate::web::icons::icon("moon", 16) }}</button>
+      <button type="button" class="oc-btn oc-btn--icon" data-oc-pref="density"
+              data-oc-value="{% if compact %}compact{% else %}default{% endif %}"
+              aria-pressed="{{ compact }}"
+              aria-label="{% if compact %}Use default text size{% else %}Use compact text size{% endif %}"
+              data-oc-tip="{% if compact %}Use default text size{% else %}Use compact text size{% endif %}">{{ crate::web::icons::icon("a-large-small", 16) }}</button>
       <form method="post" action="/auth/logout" class="inline-form">
         <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
       </form>

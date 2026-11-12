@@ -194,3 +194,42 @@ fn no_template_polls() {
         offenders.join("\n")
     );
 }
+
+#[test]
+fn no_css_sets_a_px_root_font_size_or_text_below_12px() {
+    let mut offenders = Vec::new();
+    for (name, src) in files("assets/css", "css") {
+        for (n, line) in src.lines().enumerate() {
+            let t = line.trim();
+            if (t.starts_with("html") || t.starts_with(":root"))
+                && t.contains("font-size")
+                && t.contains("px")
+            {
+                offenders.push(format!("{name}:{}: px root font size", n + 1));
+            }
+            let mut rest = line;
+            while let Some(i) = rest.find("font-size:") {
+                let v = rest[i + 10..].trim_start();
+                let num: String = v
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                let unit = &v[num.len()..];
+                if let Ok(x) = num.parse::<f64>() {
+                    let px = if unit.starts_with("rem") {
+                        Some(x * 14.0)
+                    } else if unit.starts_with("px") {
+                        Some(x)
+                    } else {
+                        None
+                    };
+                    if px.is_some_and(|p| p > 0.0 && p < 12.0) {
+                        offenders.push(format!("{name}:{}: {}", n + 1, line.trim()));
+                    }
+                }
+                rest = &rest[i + 10..];
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}

@@ -1,7 +1,7 @@
 /* Element defaults: the reset, the document, focus, selection, scrollbars. */
 
 *, *::before, *::after { box-sizing: border-box; }
-html { font-size: 16px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 body {
   margin: 0; background: var(--color-bg-base); color: var(--color-fg-primary);
   font-family: var(--font-ui); line-height: 1.5;

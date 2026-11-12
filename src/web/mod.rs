@@ -22,6 +22,7 @@ pub mod notice;
 pub mod ops;
 pub mod page;
 pub mod pair;
+pub mod prefs;
 pub mod push;
 pub mod security;
 pub mod settings;
@@ -150,6 +151,7 @@ pub fn router(state: AppState) -> Router {
         .merge(corpus::routes())
         .merge(artifact::routes())
         .merge(trash::routes())
+        .merge(prefs::routes())
         .route("/ui/live", get(live::live))
         .merge(ops::routes())
         .merge(pair::pair_router())
@@ -171,6 +173,10 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))
         .layer(axum::middleware::from_fn(declare_html_uncacheable))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            prefs::render_prefs,
+        ))
         .layer(sessions)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)

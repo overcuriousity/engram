@@ -1161,7 +1161,7 @@ body { overflow-x: hidden; }
 /* A citation in the prose. Small and raised, so `[1]` reads as a mark on the
    sentence rather than as a word in it. */
 .cite {
-  font-family: var(--font-mono); font-size: 0.75em;
+  font-family: var(--font-mono); font-size: var(--text-micro);
   vertical-align: super; line-height: 0;
   text-decoration: none; padding: 0 0.1em;
 }
