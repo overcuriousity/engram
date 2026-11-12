@@ -4190,12 +4190,17 @@ mod tests {
     }
 
     async fn pool_with_exploration(core: &crate::core::Core) -> Vec<(String, i64, Option<i64>)> {
-        sqlx::query_as(
+        sqlx::query!(
             "SELECT artifact_id, shown, explored_from
-               FROM search_candidates WHERE band = 0 ORDER BY rank",
+               FROM search_candidates WHERE band = 0 ORDER BY rank"
         )
         .fetch_all(&core.store.pool)
         .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.artifact_id, r.shown, r.explored_from))
+                .collect::<Vec<_>>()
+        })
         .unwrap()
     }
 
@@ -4424,11 +4429,16 @@ mod tests {
     }
 
     async fn captured_pool(core: &crate::core::Core, a: &str, b: &str) -> Vec<(&'static str, i64)> {
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT artifact_id, shown FROM search_candidates WHERE band = 0 ORDER BY rank",
+        let rows: Vec<(String, i64)> = sqlx::query!(
+            "SELECT artifact_id, shown FROM search_candidates WHERE band = 0 ORDER BY rank"
         )
         .fetch_all(&core.store.pool)
         .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.artifact_id, r.shown))
+                .collect::<Vec<_>>()
+        })
         .unwrap();
         rows.into_iter()
             .map(|(id, shown)| {

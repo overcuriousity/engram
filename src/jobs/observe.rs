@@ -56,6 +56,7 @@ pub async fn run(core: &Core) -> Result<usize> {
     let holes = vec!["?"; doors.len()].join(", ");
     // No generation recorded, nothing honest to charge. Already written searches are skipped: the
     // watermark moves only after the pass.
+    // runtime: one placeholder per item in the IN list.
     let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT e.id AS id, e.query AS query, e.query_vec AS query_vec,
                 e.embed_model AS embed_model, e.generation_id AS generation_id

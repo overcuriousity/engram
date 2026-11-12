@@ -300,6 +300,7 @@ pub(crate) async fn missing_columns(pool: &sqlx::SqlitePool, schema: &str) -> Re
     let mut missing = Vec::new();
     for (table, columns) in schema_columns(schema) {
         // The table-valued form takes a bind parameter; the pragma statement would need splicing.
+        // runtime: reads the live schema of the database at hand.
         let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
             .bind(&table)
             .fetch_all(pool)
@@ -348,6 +349,7 @@ pub(crate) async fn drop_removed(
     removed: &[(&'static str, &'static str, &'static str)],
 ) -> Result<()> {
     for &(table, column, ddl) in removed {
+        // runtime: reads the live schema of the database at hand.
         let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
             .bind(table)
             .fetch_all(pool)
@@ -506,9 +508,10 @@ mod tests {
 
         store.migrate().await.unwrap();
         let (text, stamp): (String, i64) =
-            sqlx::query_as("SELECT text, updated_at FROM artifacts WHERE id = 'a'")
+            sqlx::query!("SELECT text, updated_at FROM artifacts WHERE id = 'a'")
                 .fetch_one(&store.pool)
                 .await
+                .map(|r| (r.text, r.updated_at))
                 .unwrap();
         assert_eq!(text, "hours", "the row was rewritten");
         assert_eq!(stamp, 0, "a stamp nobody has set is not a claim about when");
@@ -539,6 +542,7 @@ mod tests {
         .unwrap();
 
         store.migrate().await.unwrap();
+        // runtime: reads the live schema of the database at hand.
         let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('eval_runs')")
             .fetch_all(&store.pool)
             .await
@@ -584,12 +588,12 @@ mod tests {
         .unwrap();
 
         store.migrate().await.unwrap();
-        let (verdict, by, opened): (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT verdict, judged_by, opened_at FROM search_events WHERE id = 'e'",
-        )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
+        let (verdict, by, opened): (String, Option<String>, Option<i64>) =
+            sqlx::query!(r#"SELECT verdict AS "verdict!", judged_by, opened_at FROM search_events WHERE id = 'e'"#)
+                .fetch_one(&store.pool)
+                .await
+                .map(|r| (r.verdict, r.judged_by, r.opened_at))
+                .unwrap();
         assert_eq!((verdict.as_str(), by, opened), ("gap", None, None));
     }
 
@@ -614,12 +618,12 @@ mod tests {
         .unwrap();
 
         store.migrate().await.unwrap();
-        let (shown, explored): (i64, Option<i64>) = sqlx::query_as(
-            "SELECT shown, explored_from FROM search_candidates WHERE event_id = 'e'",
-        )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
+        let (shown, explored): (i64, Option<i64>) =
+            sqlx::query!("SELECT shown, explored_from FROM search_candidates WHERE event_id = 'e'")
+                .fetch_one(&store.pool)
+                .await
+                .map(|r| (r.shown, r.explored_from))
+                .unwrap();
         assert_eq!(
             (shown, explored),
             (1, None),
@@ -630,20 +634,32 @@ mod tests {
     #[tokio::test]
     async fn applying_the_schema_twice_changes_nothing() {
         let store = Store::memory().await.unwrap();
-        let before: Vec<(String, String)> =
-            sqlx::query_as("SELECT type, name FROM sqlite_master ORDER BY type, name")
-                .fetch_all(&store.pool)
-                .await
-                .unwrap();
+        let before: Vec<(String, String)> = sqlx::query!(
+            r#"SELECT type AS "type!", name AS "name!" FROM sqlite_master ORDER BY type, name"#
+        )
+        .fetch_all(&store.pool)
+        .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.r#type, r.name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
 
         store.migrate().await.unwrap();
         store.migrate().await.unwrap();
 
-        let after: Vec<(String, String)> =
-            sqlx::query_as("SELECT type, name FROM sqlite_master ORDER BY type, name")
-                .fetch_all(&store.pool)
-                .await
-                .unwrap();
+        let after: Vec<(String, String)> = sqlx::query!(
+            r#"SELECT type AS "type!", name AS "name!" FROM sqlite_master ORDER BY type, name"#
+        )
+        .fetch_all(&store.pool)
+        .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.r#type, r.name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
         assert_eq!(before, after);
         assert!(
             before.iter().any(|(_, n)| n == "artifacts"),
@@ -687,9 +703,10 @@ mod tests {
              a bare column error from the middle of the file: {err}"
         );
         let tables: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table'")
+            sqlx::query!(r#"SELECT name AS "name!" FROM sqlite_master WHERE type='table'"#)
                 .fetch_all(&store.pool)
                 .await
+                .map(|v| v.into_iter().map(|r| (r.name,)).collect::<Vec<_>>())
                 .unwrap();
         assert!(
             tables.len() == 1,
@@ -709,11 +726,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let tables: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                .fetch_all(&store.pool)
-                .await
-                .unwrap();
+        let tables: Vec<(String,)> = sqlx::query!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE type='table' ORDER BY name"#
+        )
+        .fetch_all(&store.pool)
+        .await
+        .map(|v| v.into_iter().map(|r| (r.name,)).collect::<Vec<_>>())
+        .unwrap();
         let names: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
         for expected in [
             "artifact_pairs",

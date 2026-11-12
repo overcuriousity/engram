@@ -1918,9 +1918,10 @@ pub(crate) mod tests {
         // Nothing runs it: the worker is busy.
         run(&core).await.unwrap();
         let first: (String, i64) =
-            sqlx::query_as("SELECT target_id, id FROM jobs WHERE stage = 'dedupe'")
+            sqlx::query!("SELECT target_id, id FROM jobs WHERE stage = 'dedupe'")
                 .fetch_one(&core.store.control.pool)
                 .await
+                .map(|r| (r.target_id, r.id))
                 .unwrap();
         let later = crate::store::now() + 3600;
         sqlx::query!(
@@ -1935,10 +1936,10 @@ pub(crate) mod tests {
         run(&core).await.unwrap();
 
         let (attempts, run_after): (i64, i64) =
-            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
-                .bind(first.1)
+            sqlx::query!("SELECT attempts, run_after FROM jobs WHERE id = ?", first.1)
                 .fetch_one(&core.store.control.pool)
                 .await
+                .map(|r| (r.attempts, r.run_after))
                 .unwrap();
         assert_eq!(
             (attempts, run_after),

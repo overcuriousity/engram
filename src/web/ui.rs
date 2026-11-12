@@ -4575,12 +4575,14 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let body = body_of(res).await;
 
-        let (corpus_id, origin, metadata): (String, String, String) =
-            sqlx::query_as("SELECT id, origin, metadata FROM corpora WHERE raw_text = ?")
-                .bind(&answer)
-                .fetch_one(&core.store.pool)
-                .await
-                .unwrap();
+        let (corpus_id, origin, metadata): (String, String, String) = sqlx::query!(
+            r#"SELECT id AS "id!", origin, metadata FROM corpora WHERE raw_text = ?"#,
+            &answer
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .map(|r| (r.id, r.origin, r.metadata))
+        .unwrap();
         assert_eq!(origin, "ask", "a kept answer must not read as a paste");
         let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap();
         assert_eq!(meta["ask"]["event_id"], id.as_str());
@@ -4617,12 +4619,12 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        let corpus: (String, String) = sqlx::query_as(
-            "SELECT origin, metadata FROM corpora WHERE raw_text = 'edited by hand'",
-        )
-        .fetch_one(&core.store.pool)
-        .await
-        .unwrap();
+        let corpus: (String, String) =
+            sqlx::query!("SELECT origin, metadata FROM corpora WHERE raw_text = 'edited by hand'")
+                .fetch_one(&core.store.pool)
+                .await
+                .map(|r| (r.origin, r.metadata))
+                .unwrap();
         assert_eq!(corpus.0, "ask", "a kept answer must not read as a paste");
         let meta: serde_json::Value = serde_json::from_str(&corpus.1).unwrap();
         assert_eq!(meta["ask"]["event_id"], id.as_str());
@@ -4649,11 +4651,12 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
-        let row: (String, String) = sqlx::query_as(
-            "SELECT origin, metadata FROM corpora WHERE raw_text = 'an answer whose question expired'",
+        let row: (String, String) = sqlx::query!(
+            "SELECT origin, metadata FROM corpora WHERE raw_text = 'an answer whose question expired'"
         )
         .fetch_one(&core.store.pool)
         .await
+        .map(|r| (r.origin, r.metadata))
         .unwrap();
         assert_eq!(
             row.0, "web",

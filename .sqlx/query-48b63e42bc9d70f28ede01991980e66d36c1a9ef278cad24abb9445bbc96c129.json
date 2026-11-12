@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", question, query_vec, created_at, abstained, scope FROM ask_events\n              WHERE created_at > ? AND created_at <= ? ORDER BY created_at, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ask_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "question",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ask_events",
+            "name": "question"
+          }
+        }
+      },
+      {
+        "name": "query_vec",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "ask_events",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ask_events",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "abstained",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ask_events",
+            "name": "abstained"
+          }
+        }
+      },
+      {
+        "name": "scope",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ask_events",
+            "name": "scope"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "48b63e42bc9d70f28ede01991980e66d36c1a9ef278cad24abb9445bbc96c129"
+}

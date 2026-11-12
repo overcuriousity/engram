@@ -246,6 +246,7 @@ impl Store {
             return Ok(vec![]);
         }
         let mut out = vec![];
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(pursuit_gaps_sql!(""))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS)
@@ -269,6 +270,7 @@ impl Store {
     pub async fn open_gaps(&self, embed_model: &str, weak_below: f32) -> Result<OpenGaps> {
         let mut out: Vec<(i64, GapVec)> = Vec::new();
         // One row past the cap, so exactly `MAX_OPEN_GAPS` is not mistaken for truncation.
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(ask_gaps_sql!(", query_vec, judged_at"))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS + 1)
@@ -290,6 +292,7 @@ impl Store {
         let asks_capped = out.len() as i64 > MAX_OPEN_GAPS;
         out.truncate(MAX_OPEN_GAPS as usize);
         let asks = out.len();
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(search_gaps_sql!(", query_vec, judged_at"))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS + 1)
@@ -312,6 +315,7 @@ impl Store {
         let searches_capped = (out.len() - asks) as i64 > MAX_OPEN_GAPS;
         out.truncate(asks + MAX_OPEN_GAPS as usize);
         let searches = out.len() - asks;
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(unmatched_gaps_sql!(
             ", e.query_vec, e.created_at AS judged_at"
         ))
@@ -337,6 +341,7 @@ impl Store {
         out.truncate(asks + searches + MAX_OPEN_GAPS as usize);
         let unmatched = out.len() - asks - searches;
         let before_pursuits = out.len();
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(pursuit_gaps_sql!(", query_vec, opened_at"))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS + 1)
@@ -359,6 +364,7 @@ impl Store {
         out.truncate(before_pursuits + MAX_OPEN_GAPS as usize);
         let pursuits = out.len() - before_pursuits;
         let before_subjects = out.len();
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(subject_gaps_sql!(", s.query_vec, s.created_at"))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS + 1)
@@ -437,6 +443,7 @@ impl Store {
             (search_gaps_sql!(""), GapKind::Search),
             (subject_gaps_sql!(""), GapKind::Subject),
         ] {
+            // runtime: the gap kinds share their predicates through macros.
             for r in sqlx::query(sql)
                 .bind(embed_model)
                 .bind(MAX_OPEN_GAPS)
@@ -451,6 +458,7 @@ impl Store {
             }
         }
         // One more bind than the other two, so it is read on its own.
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(unmatched_gaps_sql!(""))
             .bind(embed_model)
             .bind(weak_below)
@@ -464,6 +472,7 @@ impl Store {
                 text: r.get("text"),
             });
         }
+        // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(pursuit_gaps_sql!(""))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS)
@@ -485,6 +494,7 @@ impl Store {
         &self,
         embed_model: &str,
     ) -> Result<std::collections::HashSet<String>> {
+        // runtime: the gap kinds share their predicates through macros.
         Ok(sqlx::query(pursuit_gaps_sql!(""))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS)
@@ -505,6 +515,7 @@ impl Store {
             concat!("SELECT COUNT(*) AS n", subject_gaps_from!()),
             concat!("SELECT COUNT(*) AS n", pursuit_gaps_from!()),
         ] {
+            // runtime: the gap kinds share their predicates through macros.
             n += sqlx::query(sql)
                 .bind(embed_model)
                 .fetch_one(&self.pool)
@@ -512,6 +523,7 @@ impl Store {
                 .get::<i64, _>("n");
         }
         // One more bind than the other four, so it is read on its own.
+        // runtime: the gap kinds share their predicates through macros.
         n += sqlx::query(concat!("SELECT COUNT(*) AS n", unmatched_gaps_from!()))
             .bind(embed_model)
             .bind(weak_below)
@@ -525,6 +537,7 @@ impl Store {
     pub async fn count_open_pursuit_gaps(&self, embed_model: &str) -> Result<i64> {
         use sqlx::Row;
         Ok(
+            // runtime: the gap kinds share their predicates through macros.
             sqlx::query(concat!("SELECT COUNT(*) AS n", pursuit_gaps_from!()))
                 .bind(embed_model)
                 .fetch_one(&self.pool)
@@ -541,6 +554,7 @@ impl Store {
             "SELECT query_vec FROM search_events WHERE embed_model = ? AND vec_dim > 0
              ORDER BY id DESC LIMIT ?",
         ] {
+            // runtime: the gap kinds share their predicates through macros.
             for r in sqlx::query(sql)
                 .bind(embed_model)
                 .bind(CALIBRATION_SAMPLE)
@@ -604,6 +618,7 @@ impl Store {
         }
         // The ids are bound; only a count of placeholders is spliced.
         let holes = vec!["?"; corpus_ids.len()].join(", ");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT c.corpus_id, c.kind, c.gap_id,
                     COALESCE(a.question, s.query, p.queries, sub.subject) AS text
@@ -791,17 +806,16 @@ impl Store {
             open.iter().map(|g| ((g.kind, g.id.as_str()), g)).collect();
         let mut clustered: std::collections::HashSet<(GapKind, &str)> = Default::default();
         let mut rows = Vec::new();
-        for r in sqlx::query(
-            "SELECT label, labelled_by, members FROM gap_clusters ORDER BY created_at DESC",
+        for r in sqlx::query!(
+            "SELECT label, labelled_by, members FROM gap_clusters ORDER BY created_at DESC"
         )
         .fetch_all(&self.pool)
         .await?
         {
             let members: Vec<serde_json::Value> =
-                serde_json::from_str(&r.get::<String, _>("members"))
-                    .map_err(|e| Error::Internal(e.to_string()))?;
+                serde_json::from_str(&r.members).map_err(|e| Error::Internal(e.to_string()))?;
             let mut resolved = Vec::new();
-            for m in &members {
+            for m in members {
                 let kind = m["kind"].as_str().and_then(GapKind::parse);
                 let id = m["id"].as_str();
                 if let (Some(kind), Some(id)) = (kind, id)
@@ -813,8 +827,8 @@ impl Store {
             }
             if !resolved.is_empty() {
                 rows.push(GapRow {
-                    label: r.get("label"),
-                    labelled_by: r.get("labelled_by"),
+                    label: r.label,
+                    labelled_by: r.labelled_by,
                     members: resolved,
                 });
             }

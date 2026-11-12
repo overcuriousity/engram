@@ -1,0 +1,105 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT e.opened_at AS opened_at, e.query AS query,\n                    e.query_vec AS query_vec, e.embed_model AS embed_model,\n                    (SELECT COUNT(*) FROM search_candidates s\n                      WHERE s.event_id = e.id AND s.shown = 1\n                        AND (s.band < c.band\n                             OR (s.band = c.band AND s.rank < c.rank))) AS shown_rank,\n                    c.shown AS shown,\n                    c.rank AS rank,\n                    c.explored_from AS explored_from\n               FROM search_events e\n               JOIN search_candidates c\n                 ON c.event_id = e.id AND c.artifact_id = ?\n              WHERE e.id = ?\n              ORDER BY c.shown DESC, c.rank ASC\n              LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "opened_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "opened_at"
+          }
+        }
+      },
+      {
+        "name": "query",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "embed_model"
+          }
+        }
+      },
+      {
+        "name": "shown_rank",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "shown",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "shown"
+          }
+        }
+      },
+      {
+        "name": "rank",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "rank"
+          }
+        }
+      },
+      {
+        "name": "explored_from",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "explored_from"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ade7cfe7f57c719f25fc05707b0d66debf2279beb57e3fc562fcdbe0c97016c1"
+}

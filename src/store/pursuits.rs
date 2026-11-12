@@ -3,7 +3,6 @@
 
 use super::Store;
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 /// Queries are normalised and sorted, so a re-read after a crash hashes the same.
 fn pursuit_id(opened_at: i64, queries: &[String]) -> String {
@@ -154,50 +153,48 @@ impl Store {
 
     /// The instrument for later fitting the block weights, which are chosen, not measured.
     pub async fn offer_rates(&self, since: i64) -> Result<Vec<OfferRate>> {
-        let rows = sqlx::query(
-            "SELECT json_extract(detail, '$.rung') AS rung,
+        let rows = sqlx::query!(
+            r#"SELECT json_extract(detail, '$.rung') AS "rung?: String",
                     SUM(kind = 'recommended_shown') AS shown,
                     SUM(kind = 'recommended_open')  AS opened
                FROM interaction_events
               WHERE at >= ? AND kind IN ('recommended_shown', 'recommended_open')
-              GROUP BY rung
-              ORDER BY shown DESC, rung",
+              GROUP BY 1
+              ORDER BY shown DESC, 1"#,
+            since
         )
-        .bind(since)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .iter()
             .map(|r| OfferRate {
-                rung: r
-                    .get::<Option<String>, _>("rung")
-                    .unwrap_or_else(|| "unknown".into()),
-                shown: r.get("shown"),
-                opened: r.get("opened"),
+                rung: r.rung.clone().unwrap_or_else(|| "unknown".into()),
+                shown: r.shown,
+                opened: r.opened,
             })
             .collect())
     }
 
     /// `from < at <= to`, oldest first.
     pub async fn interactions_between(&self, from: i64, to: i64) -> Result<Vec<Interaction>> {
-        let rows = sqlx::query(
-            "SELECT id, artifact_id, kind, via, detail, scope, at FROM interaction_events
-              WHERE at > ? AND at <= ? ORDER BY at, id",
+        let rows = sqlx::query!(
+            r#"SELECT id, artifact_id AS "artifact_id!", kind, via, detail, scope, at FROM interaction_events
+              WHERE at > ? AND at <= ? ORDER BY at, id"#,
+            from,
+            to
         )
-        .bind(from)
-        .bind(to)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| Interaction {
-                id: r.get("id"),
-                artifact_id: r.get("artifact_id"),
-                kind: r.get("kind"),
-                via: r.get("via"),
-                detail: r.get("detail"),
-                scope: r.get("scope"),
-                at: r.get("at"),
+                id: r.id,
+                artifact_id: r.artifact_id,
+                kind: r.kind,
+                via: r.via,
+                detail: r.detail,
+                scope: r.scope,
+                at: r.at,
             })
             .collect())
     }
@@ -276,13 +273,15 @@ impl Store {
 
     /// Kept off [`Pursuit`]: list readers do not need a 768-float blob per row.
     pub async fn pursuit_vec(&self, id: &str) -> Result<Option<(Vec<f32>, String)>> {
-        let row = sqlx::query("SELECT query_vec, embed_model FROM pursuits WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query!(
+            r#"SELECT query_vec AS "query_vec!", embed_model FROM pursuits WHERE id = ?"#,
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(row) = row else { return Ok(None) };
-        let blob: Vec<u8> = row.get("query_vec");
-        let model: Option<String> = row.get("embed_model");
+        let blob: Vec<u8> = row.query_vec;
+        let model: Option<String> = row.embed_model;
         let v = crate::store::feedback::blob_to_vec(&blob);
         match model {
             Some(m) if !v.is_empty() => Ok(Some((v, m))),
@@ -328,13 +327,10 @@ impl Store {
 
     /// Not `recent_pursuits().len()`, which caps at the page size.
     pub async fn count_pursuits(&self, state: &str) -> Result<i64> {
-        use sqlx::Row;
         Ok(
-            sqlx::query("SELECT COUNT(*) AS n FROM pursuits WHERE state = ?")
-                .bind(state)
+            sqlx::query_scalar!("SELECT COUNT(*) AS n FROM pursuits WHERE state = ?", state)
                 .fetch_one(&self.pool)
-                .await?
-                .get("n"),
+                .await?,
         )
     }
 

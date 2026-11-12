@@ -2,7 +2,6 @@
 //! per-tenant databases, so no tenant filter exists to forget.
 
 use crate::error::Result;
-use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 
@@ -23,14 +22,22 @@ pub struct User {
 }
 
 impl User {
-    fn from_row(r: &sqlx::sqlite::SqliteRow) -> User {
+    fn from_row(r: UserRow) -> User {
         User {
-            subject: r.get("subject"),
-            email: r.get("email"),
-            slug: r.get("slug"),
-            created_at: r.get("created_at"),
+            subject: r.subject,
+            email: r.email,
+            slug: r.slug,
+            created_at: r.created_at,
         }
     }
+}
+
+/// The `users` columns a `User` is read from, for `query_as!`.
+struct UserRow {
+    subject: String,
+    email: Option<String>,
+    slug: String,
+    created_at: i64,
 }
 
 /// Both halves base64url without padding: the private scalar and the uncompressed public point.
@@ -210,11 +217,13 @@ impl Control {
 
     pub async fn prefs(&self, subject: &str) -> Result<crate::web::prefs::Prefs> {
         use crate::web::prefs::{Density, Prefs, Theme};
-        let row: Option<(String, String)> =
-            sqlx::query_as("SELECT theme, density FROM users WHERE subject = ?")
-                .bind(subject)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row: Option<(String, String)> = sqlx::query!(
+            "SELECT theme, density FROM users WHERE subject = ?",
+            subject
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map(|o| o.map(|r| (r.theme, r.density)))?;
         Ok(row
             .map(|(t, d)| Prefs {
                 theme: Theme::parse(&t).unwrap_or_default(),
@@ -280,6 +289,7 @@ impl Control {
             .collect();
         // The stage names are `&'static str` from our own enum, so only a count is spliced.
         let holes = vec!["?"; background.len()].join(", ");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE jobs SET class = 1 WHERE class = 0 AND stage IN ({holes})"
         )));
@@ -309,20 +319,26 @@ impl Control {
     }
 
     pub async fn user(&self, subject: &str) -> Result<Option<User>> {
-        Ok(sqlx::query("SELECT * FROM users WHERE subject = ?")
-            .bind(subject)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|r| User::from_row(&r)))
+        Ok(sqlx::query_as!(
+            UserRow,
+            r#"SELECT subject AS "subject!", email, slug, created_at FROM users WHERE subject = ?"#,
+            subject
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(User::from_row))
     }
 
     pub async fn users(&self) -> Result<Vec<User>> {
-        Ok(sqlx::query("SELECT * FROM users ORDER BY created_at")
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(User::from_row)
-            .collect())
+        Ok(sqlx::query_as!(
+            UserRow,
+            r#"SELECT subject AS "subject!", email, slug, created_at FROM users ORDER BY created_at"#
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(User::from_row)
+        .collect())
     }
 
     /// The language this account's captures are read in, or `None` for automatic.
@@ -418,6 +434,7 @@ impl Control {
             if max_attempts.is_some() {
                 sql.push_str(" AND attempts < ?");
             }
+            // runtime: one placeholder per item in the IN list.
             let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql))
                 .bind(subject)
                 .bind(stage.as_str());
@@ -450,6 +467,7 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     #[test]
     fn a_slug_is_stable_hex_and_safe_in_a_filename() {
@@ -488,6 +506,7 @@ mod tests {
             "the operator has to be told which column is missing: {err}"
         );
 
+        // runtime: reads the live schema of the database at hand.
         let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('users')")
             .fetch_all(&control.pool)
             .await
@@ -708,6 +727,7 @@ mod tests {
             .provision("sub-1", None)
             .await
             .expect("a sign-in still provisions");
+        // runtime: reads the live schema of the database at hand.
         let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('users')")
             .fetch_all(&control.pool)
             .await

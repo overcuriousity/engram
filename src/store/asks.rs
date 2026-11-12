@@ -2,7 +2,6 @@
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 #[derive(Debug, Clone)]
 pub struct NewAskCitation {
@@ -357,17 +356,17 @@ impl Store {
 
     /// `from < created_at <= to`, oldest first.
     pub async fn asks_between(&self, from: i64, to: i64) -> Result<Vec<RecordedAsk>> {
-        let rows = sqlx::query(
-            "SELECT id, question, query_vec, created_at, abstained, scope FROM ask_events
-              WHERE created_at > ? AND created_at <= ? ORDER BY created_at, id",
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", question, query_vec, created_at, abstained, scope FROM ask_events
+              WHERE created_at > ? AND created_at <= ? ORDER BY created_at, id"#,
+            from,
+            to
         )
-        .bind(from)
-        .bind(to)
         .fetch_all(&self.pool)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let id: String = r.get("id");
+        for r in rows {
+            let id: String = r.id;
             let cited: Vec<String> = sqlx::query_scalar!(
                 "SELECT artifact_id FROM ask_citations
                   WHERE event_id = ? AND used = 1 ORDER BY n",
@@ -377,12 +376,12 @@ impl Store {
             .await?;
             out.push(RecordedAsk {
                 id,
-                question: r.get("question"),
-                query_vec: crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-                created_at: r.get("created_at"),
-                abstained: r.get::<i64, _>("abstained") != 0,
+                question: r.question,
+                query_vec: crate::store::feedback::blob_to_vec(&r.query_vec),
+                created_at: r.created_at,
+                abstained: r.abstained != 0,
                 cited,
-                scope: r.get("scope"),
+                scope: r.scope,
             });
         }
         Ok(out)

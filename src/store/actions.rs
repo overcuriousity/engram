@@ -3,7 +3,6 @@
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Job {
@@ -136,29 +135,39 @@ pub struct Action {
     pub undone_reason: Option<String>,
 }
 
-const COLUMNS: &str = "id, at, job, kind, subject_id, survivor_id, detail, evidence_json, \
-                       pair_score, undone_at, undone_by, undone_reason";
+/// A row as `read` reads it, for `query_as!`.
+pub(crate) struct ActionRow {
+    pub id: String,
+    pub at: i64,
+    pub job: String,
+    pub kind: String,
+    pub subject_id: String,
+    pub survivor_id: Option<String>,
+    pub detail: Option<String>,
+    pub evidence_json: String,
+    pub pair_score: Option<f64>,
+    pub undone_at: Option<i64>,
+    pub undone_by: Option<String>,
+    pub undone_reason: Option<String>,
+}
 
-fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Action> {
-    let job: String = r.get("job");
-    let kind: String = r.get("kind");
+fn read(r: ActionRow) -> Result<Action> {
+    let job: String = r.job;
+    let kind: String = r.kind;
     Ok(Action {
-        id: r.get("id"),
-        at: r.get("at"),
+        id: r.id,
+        at: r.at,
         job: Job::parse(&job).ok_or_else(|| Error::Store(format!("corpus_actions: job {job}")))?,
         kind: Kind::parse(&kind)
             .ok_or_else(|| Error::Store(format!("corpus_actions: kind {kind}")))?,
-        subject_id: r.get("subject_id"),
-        survivor_id: r.get("survivor_id"),
-        detail: r.get("detail"),
-        evidence_json: r.get("evidence_json"),
-        pair_score: r.get("pair_score"),
-        undone_at: r.get("undone_at"),
-        undone_by: r
-            .get::<Option<String>, _>("undone_by")
-            .as_deref()
-            .and_then(UndoneBy::parse),
-        undone_reason: r.get("undone_reason"),
+        subject_id: r.subject_id,
+        survivor_id: r.survivor_id,
+        detail: r.detail,
+        evidence_json: r.evidence_json,
+        pair_score: r.pair_score.map(|x| x as f32),
+        undone_at: r.undone_at,
+        undone_by: r.undone_by.as_deref().and_then(UndoneBy::parse),
+        undone_reason: r.undone_reason,
     })
 }
 
@@ -208,20 +217,20 @@ impl Store {
     ) -> Result<Vec<Action>> {
         let mut out = Vec::new();
         for kind in kinds {
-            let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT {COLUMNS} FROM corpus_actions
+            let rows = sqlx::query_as!(
+                crate::store::actions::ActionRow,
+                r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions
                   WHERE kind = ? AND undone_at IS NULL
                     AND (at > ? OR (at = ? AND id > ?))
-                  ORDER BY at ASC, id ASC LIMIT ?"
-            )))
-            .bind(kind.as_str())
-            .bind(after.at)
-            .bind(after.at)
-            .bind(&after.id)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
+                  ORDER BY at ASC, id ASC LIMIT ?"#,
+                kind.as_str(),
+                after.at,
+                after.at,
+                &after.id,
+                limit as i64
+            ).fetch_all(&self.pool)
             .await?;
-            for r in &rows {
+            for r in rows {
                 out.push(read(r)?);
             }
         }
@@ -231,28 +240,26 @@ impl Store {
     }
 
     pub async fn action(&self, id: &str) -> Result<Option<Action>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM corpus_actions WHERE id = ?"
-        )))
-        .bind(id)
-        .fetch_optional(&self.pool)
+        sqlx::query_as!(
+            crate::store::actions::ActionRow,
+            r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions WHERE id = ?"#,
+            id
+        ).fetch_optional(&self.pool)
         .await?
-        .as_ref()
         .map(read)
         .transpose()
     }
 
     pub async fn open_action_on(&self, subject_id: &str, kind: Kind) -> Result<Option<Action>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM corpus_actions
+        sqlx::query_as!(
+            crate::store::actions::ActionRow,
+            r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions
               WHERE subject_id = ? AND kind = ? AND undone_at IS NULL
-              ORDER BY at DESC, id DESC LIMIT 1"
-        )))
-        .bind(subject_id)
-        .bind(kind.as_str())
-        .fetch_optional(&self.pool)
+              ORDER BY at DESC, id DESC LIMIT 1"#,
+            subject_id,
+            kind.as_str()
+        ).fetch_optional(&self.pool)
         .await?
-        .as_ref()
         .map(read)
         .transpose()
     }
@@ -326,13 +333,13 @@ impl Store {
     }
 
     pub async fn recent_actions(&self, limit: usize) -> Result<Vec<Action>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM corpus_actions ORDER BY at DESC, id DESC LIMIT ?"
-        )))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+        sqlx::query_as!(
+            crate::store::actions::ActionRow,
+            r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions ORDER BY at DESC, id DESC LIMIT ?"#,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }

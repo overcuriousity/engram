@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO search_events\n                       (id, query, door, scope, filters, query_vec, vec_dim, embed_model,\n                        created_at, answered, generation_id)\n                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,\n                             (SELECT id FROM generations WHERE state = 'live'\n                               ORDER BY created_at DESC, id DESC LIMIT 1))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": []
+  },
+  "hash": "e3ca4fa332750831c53ba3b8bd1d126862d7f98944d1be2a3afa3c12513e3fb8"
+}

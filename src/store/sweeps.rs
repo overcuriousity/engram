@@ -2,7 +2,6 @@
 
 use super::{Store, now};
 use crate::error::Result;
-use sqlx::Row;
 
 /// Trimmed by the repair pass, which no setting switches off: the sweeps keep writing regardless.
 pub const MAX_RUNS: i64 = 2000;
@@ -42,37 +41,37 @@ impl Store {
     }
 
     pub async fn sweep_runs_since(&self, since: i64, limit: i64) -> Result<Vec<SweepRun>> {
-        let rows = sqlx::query(
-            "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
-              WHERE started_at >= ? ORDER BY started_at DESC LIMIT ?",
-        )
-        .bind(since)
-        .bind(limit)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+            crate::store::sweeps::SweepRunRow,
+            r#"SELECT stage AS "stage!", started_at AS "started_at!", ended_at AS "ended_at!", outcome AS "outcome!", detail AS "detail!" FROM sweep_runs
+              WHERE started_at >= ? ORDER BY started_at DESC LIMIT ?"#,
+            since,
+            limit
+        ).fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(read_run).collect())
+        Ok(rows.into_iter().map(read_run).collect())
     }
 
     pub async fn sweep_history(&self, limit: i64) -> Result<Vec<SweepRun>> {
-        let rows = sqlx::query(
-            "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
-              ORDER BY started_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+            crate::store::sweeps::SweepRunRow,
+            r#"SELECT stage AS "stage!", started_at AS "started_at!", ended_at AS "ended_at!", outcome AS "outcome!", detail AS "detail!" FROM sweep_runs
+              ORDER BY started_at DESC LIMIT ?"#,
+            limit
+        ).fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(read_run).collect())
+        Ok(rows.into_iter().map(read_run).collect())
     }
 
     pub async fn last_sweep_run(&self, stage: &str) -> Result<Option<SweepRun>> {
-        let row = sqlx::query(
-            "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
-              WHERE stage = ? ORDER BY started_at DESC LIMIT 1",
-        )
-        .bind(stage)
-        .fetch_optional(&self.pool)
+        let row = sqlx::query_as!(
+            crate::store::sweeps::SweepRunRow,
+            r#"SELECT stage AS "stage!", started_at AS "started_at!", ended_at AS "ended_at!", outcome AS "outcome!", detail AS "detail!" FROM sweep_runs
+              WHERE stage = ? ORDER BY started_at DESC LIMIT 1"#,
+            stage
+        ).fetch_optional(&self.pool)
         .await?;
-        Ok(row.as_ref().map(read_run))
+        Ok(row.map(read_run))
     }
 
     pub async fn trim_sweep_runs(&self) -> Result<u64> {
@@ -88,13 +87,22 @@ impl Store {
     }
 }
 
-fn read_run(r: &sqlx::sqlite::SqliteRow) -> SweepRun {
+/// A row as `read_run` reads it, for `query_as!`.
+pub(crate) struct SweepRunRow {
+    pub stage: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub outcome: String,
+    pub detail: String,
+}
+
+fn read_run(r: SweepRunRow) -> SweepRun {
     SweepRun {
-        stage: r.get("stage"),
-        started_at: r.get("started_at"),
-        ended_at: r.get("ended_at"),
-        outcome: r.get("outcome"),
-        detail: r.get("detail"),
+        stage: r.stage,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        outcome: r.outcome,
+        detail: r.detail,
     }
 }
 

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT run_after, class FROM jobs WHERE stage = 'pursuit'",
+  "describe": {
+    "columns": [
+      {
+        "name": "run_after",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "run_after"
+          }
+        }
+      },
+      {
+        "name": "class",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "class"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "26cd44dface58c841d8c5444585675b8fbcd8f5804d134e2b4a385a80d569915"
+}

@@ -914,9 +914,10 @@ mod tests {
         run(&core).await.unwrap();
 
         let states: Vec<(String, String)> =
-            sqlx::query_as("SELECT id, state FROM pursuits ORDER BY id")
+            sqlx::query!(r#"SELECT id AS "id!", state FROM pursuits ORDER BY id"#)
                 .fetch_all(&core.store.pool)
                 .await
+                .map(|v| v.into_iter().map(|r| (r.id, r.state)).collect::<Vec<_>>())
                 .unwrap();
         assert_eq!(
             states.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(),

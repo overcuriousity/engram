@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status, superseded_by FROM artifacts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "status",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "superseded_by",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "superseded_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "7efa5679fba8a2486b5ca09d67039c8da46c68a0ce2209af9fb89a7cf1189a81"
+}

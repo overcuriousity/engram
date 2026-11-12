@@ -2,7 +2,6 @@
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 /// The same type as a generation's params, so the two records stay comparable.
 pub type RunParams = super::generations::GenerationParams;
@@ -74,8 +73,10 @@ impl Store {
     }
 
     pub async fn latest_eval_run(&self) -> Result<Option<EvalRun>> {
-        let row = sqlx::query("SELECT * FROM eval_runs ORDER BY created_at DESC, id DESC LIMIT 1")
-            .fetch_optional(&self.pool)
+        let row = sqlx::query_as!(
+            crate::store::eval_runs::EvalRunRow,
+            r#"SELECT id AS "id!", created_at AS "created_at!", judged_count AS "judged_count!", pairs_used AS "pairs_used!", pairs_skipped AS "pairs_skipped!", base_params AS "base_params!", base_recall AS "base_recall!", base_mrr AS "base_mrr!", best_params AS "best_params!", best_recall AS "best_recall!", best_mrr AS "best_mrr!", diff AS "diff!" FROM eval_runs ORDER BY created_at DESC, id DESC LIMIT 1"#
+        ).fetch_optional(&self.pool)
             .await?;
         row.map(hydrate).transpose()
     }
@@ -91,20 +92,36 @@ fn json<T: serde::Serialize>(v: &T) -> Result<String> {
     serde_json::to_string(v).map_err(|e| Error::Store(format!("eval_runs: {e}")))
 }
 
-fn hydrate(row: sqlx::sqlite::SqliteRow) -> Result<EvalRun> {
+/// A row as `hydrate` reads it, for `query_as!`.
+pub(crate) struct EvalRunRow {
+    pub id: String,
+    pub created_at: i64,
+    pub judged_count: i64,
+    pub pairs_used: i64,
+    pub pairs_skipped: i64,
+    pub base_params: String,
+    pub base_recall: f64,
+    pub base_mrr: f64,
+    pub best_params: String,
+    pub best_recall: f64,
+    pub best_mrr: f64,
+    pub diff: String,
+}
+
+fn hydrate(row: EvalRunRow) -> Result<EvalRun> {
     Ok(EvalRun {
-        id: row.get("id"),
-        created_at: row.get("created_at"),
-        judged_count: row.get("judged_count"),
-        pairs_used: row.get("pairs_used"),
-        pairs_skipped: row.get("pairs_skipped"),
-        base_params: parse(row.get("base_params"))?,
-        base_recall: row.get("base_recall"),
-        base_mrr: row.get("base_mrr"),
-        best_params: parse(row.get("best_params"))?,
-        best_recall: row.get("best_recall"),
-        best_mrr: row.get("best_mrr"),
-        diff: parse(row.get("diff"))?,
+        id: row.id,
+        created_at: row.created_at,
+        judged_count: row.judged_count,
+        pairs_used: row.pairs_used,
+        pairs_skipped: row.pairs_skipped,
+        base_params: parse(&row.base_params)?,
+        base_recall: row.base_recall,
+        base_mrr: row.base_mrr,
+        best_params: parse(&row.best_params)?,
+        best_recall: row.best_recall,
+        best_mrr: row.best_mrr,
+        diff: parse(&row.diff)?,
     })
 }
 

@@ -334,16 +334,17 @@ impl Store {
     /// Four columns, not `SELECT *`: `raw_text` can be a whole book. `Ok(None)` for a gone
     /// corpus: a reading is not refused because its document was deleted.
     pub async fn corpus_origin(&self, id: &str) -> Result<Option<CorpusOrigin>> {
-        let row =
-            sqlx::query("SELECT id, title_hint, origin, source_url FROM corpora WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = sqlx::query!(
+            r#"SELECT id AS "id!", title_hint, origin, source_url FROM corpora WHERE id = ?"#,
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.map(|r| CorpusOrigin {
-            id: r.get("id"),
-            title_hint: r.get("title_hint"),
-            origin: r.get("origin"),
-            source_url: r.get("source_url"),
+            id: r.id,
+            title_hint: r.title_hint,
+            origin: r.origin,
+            source_url: r.source_url,
         }))
     }
 
@@ -366,6 +367,7 @@ impl Store {
         let holes = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT id, title_hint FROM corpora WHERE title_hint IS NOT NULL AND id IN ({holes})"
         )));
@@ -481,21 +483,21 @@ impl Store {
             return Ok(None);
         }
         let rows =
-            sqlx::query("SELECT id, title_hint, shingles FROM corpora WHERE shingles IS NOT NULL")
+            sqlx::query!(r#"SELECT id AS "id!", title_hint, shingles AS "shingles!" FROM corpora WHERE shingles IS NOT NULL"#)
                 .fetch_all(&self.pool)
                 .await?;
 
         let mut best: Option<NearDuplicate> = None;
-        for r in &rows {
-            let stored: String = r.get("shingles");
+        for r in rows {
+            let stored: String = r.shingles;
             let s = super::shingle::similarity(sig, &super::shingle::decode(&stored));
             if s < min {
                 continue;
             }
             if best.as_ref().is_none_or(|b| s > b.similarity) {
                 best = Some(NearDuplicate {
-                    corpus_id: r.get("id"),
-                    title_hint: r.get("title_hint"),
+                    corpus_id: r.id,
+                    title_hint: r.title_hint,
                     similarity: s,
                 });
             }
@@ -573,6 +575,7 @@ impl Store {
             .collect::<Vec<_>>()
             .join(",");
         // Only a counted run of `?` is spliced; values are bound.
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
             "SELECT id FROM corpora WHERE retired_at IS NOT NULL AND id IN ({marks})"
         )));
@@ -592,6 +595,7 @@ impl Store {
             .collect::<Vec<_>>()
             .join(",");
         // Only a counted run of `?` is spliced; values are bound.
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(format!(
             "SELECT id, json_extract(metadata, '$.search.event_id') AS event_id
                FROM corpora
@@ -610,14 +614,17 @@ impl Store {
         &self,
         limit: i64,
     ) -> Result<Vec<(String, Option<String>, String, i64, String)>> {
-        Ok(sqlx::query_as(
-            "SELECT id, title_hint, origin, created_at, substr(raw_text, 1, 400) \
-             FROM corpora WHERE retired_at IS NULL \
-             ORDER BY created_at DESC, id DESC LIMIT ?",
+        Ok(sqlx::query!(
+            r#"SELECT id AS "id!", title_hint, origin, created_at, substr(raw_text, 1, 400) AS "opening!: String"
+             FROM corpora WHERE retired_at IS NULL
+             ORDER BY created_at DESC, id DESC LIMIT ?"#,
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
-        .await?)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.title_hint, r.origin, r.created_at, r.opening))
+        .collect())
     }
 
     pub async fn list_corpora(&self, limit: i64, offset: i64) -> Result<Vec<Corpus>> {
@@ -642,39 +649,35 @@ impl Store {
             Some((ts, id)) => (*ts, id.as_str()),
             None => (i64::MAX, ""),
         };
-        let rows = sqlx::query(
-            "SELECT id, substr(raw_text, 1, 400) AS opening, origin, title_hint, status,
-                    created_at, updated_at, coverage, near_dupe_of, near_dupe_score,
-                    source_url, restored_at, metadata
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", substr(raw_text, 1, 400) AS "opening!", origin AS "origin!", title_hint, status, created_at, updated_at, coverage, near_dupe_of, near_dupe_score, source_url, restored_at, metadata
                FROM corpora
               WHERE created_at < ? OR (created_at = ? AND id < ?)
-              ORDER BY created_at DESC, id DESC LIMIT ?",
+              ORDER BY created_at DESC, id DESC LIMIT ?"#,
+            ts,
+            ts,
+            id,
+            limit
         )
-        .bind(ts)
-        .bind(ts)
-        .bind(id)
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| CorpusSummary {
-                id: r.get("id"),
-                opening: r.get("opening"),
-                origin: r.get("origin"),
-                title_hint: r.get("title_hint"),
-                status: CorpusStatus::parse(r.get::<String, _>("status").as_str()),
-                created_at: r.get("created_at"),
-                updated_at: r.get("updated_at"),
-                coverage: r.get("coverage"),
-                near_dupe_of: r.get("near_dupe_of"),
-                near_dupe_score: r.get("near_dupe_score"),
-                source_url: r.get("source_url"),
-                restored_at: r.get("restored_at"),
-                metadata: r
-                    .get::<Option<String>, _>("metadata")
-                    .and_then(|s| serde_json::from_str(&s).ok())
-                    .unwrap_or_else(|| serde_json::json!({})),
+                id: r.id,
+                opening: r.opening,
+                origin: r.origin,
+                title_hint: r.title_hint,
+                status: CorpusStatus::parse(r.status.as_str()),
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+                coverage: r.coverage,
+                near_dupe_of: r.near_dupe_of,
+                near_dupe_score: r.near_dupe_score,
+                source_url: r.source_url,
+                restored_at: r.restored_at,
+                metadata: serde_json::from_str(&r.metadata)
+                    .unwrap_or_else(|_| serde_json::json!({})),
             })
             .collect())
     }
@@ -1084,6 +1087,7 @@ mod tests {
             "SELECT superseded_by, caveats FROM artifacts LIMIT 1",
             "SELECT id, a_id, b_id, score, state, detail, created_at FROM artifact_pairs LIMIT 1",
         ] {
+            // runtime: checks what `migrate` built in memory, not the reference schema.
             sqlx::query(sql)
                 .fetch_optional(&s.pool)
                 .await

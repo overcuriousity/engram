@@ -535,14 +535,12 @@ impl Store {
     }
 
     pub async fn count_synthesized_artifacts(&self) -> Result<i64> {
-        use sqlx::Row;
-        Ok(sqlx::query(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) AS n FROM artifacts
-              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL",
+              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL"
         )
         .fetch_one(&self.pool)
-        .await?
-        .get("n"))
+        .await?)
     }
 
     pub async fn insert_artifacts(
@@ -707,6 +705,7 @@ impl Store {
         let holes = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT id, caveats FROM artifacts WHERE id IN ({holes})"
         )));
@@ -765,6 +764,7 @@ impl Store {
         let holes = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT a.id AS id,
                     (SELECT n.id FROM artifacts n
@@ -1020,16 +1020,16 @@ impl Store {
         corpus_id: &str,
         segment_idx: i64,
     ) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT id FROM artifacts WHERE corpus_id = ? AND provenance != 'note'
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE corpus_id = ? AND provenance != 'note'
                AND (segment_idx = ? OR segment_idx IS NULL)
-             ORDER BY ordinal",
+             ORDER BY ordinal"#,
+            corpus_id,
+            segment_idx
         )
-        .bind(corpus_id)
-        .bind(segment_idx)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
     /// Chunks inserted into the gap keep reading order without renumbering the source.
@@ -1047,19 +1047,19 @@ impl Store {
 
     /// Ordering by window, then by within-window number, reproduces reading order.
     pub async fn renumber_artifacts(&self, corpus_id: &str) -> Result<()> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT id FROM artifacts WHERE corpus_id = ?
              ORDER BY COALESCE(segment_idx, 0), ordinal, rowid",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_all(&self.pool)
         .await?;
         let mut tx = self.pool.begin().await?;
-        for (n, r) in rows.iter().enumerate() {
+        for (n, r) in rows.into_iter().enumerate() {
             sqlx::query!(
                 "UPDATE artifacts SET ordinal = ? WHERE id = ?",
                 n as i64,
-                r.get::<String, _>("id")
+                r.id
             )
             .execute(&mut *tx)
             .await?;
@@ -1087,18 +1087,19 @@ impl Store {
         };
         // The marker and `retired_at` ride the statement they describe. COALESCE keeps the first
         // retirement's clock; it clears on reactivation.
-        let res = sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query!(
             "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1,
                     retired_at = CASE WHEN ? THEN COALESCE(retired_at, ?) ELSE NULL END
              WHERE id = ?",
+            by,
+            status.as_str(),
+            by.is_some(),
+            now(),
+            artifact_id
         )
-        .bind(by)
-        .bind(status.as_str())
-        .bind(by.is_some())
-        .bind(now())
-        .bind(artifact_id);
-        let mut tx = self.pool.begin().await?;
-        let res = res.execute(&mut *tx).await?;
+        .execute(&mut *tx)
+        .await?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -1251,6 +1252,7 @@ impl Store {
     }
 
     pub async fn list_all_artifact_ids(&self) -> Result<Vec<String>> {
+        // runtime: shares its statement with the backup's counts, so the two cannot drift.
         let rows = sqlx::query(ALL_ARTIFACT_IDS).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
@@ -1258,6 +1260,7 @@ impl Store {
     /// Pending and `failed` rows are not drift. Reaped stubs are excluded: `bury` keeps
     /// `embed_state`, and re-embedding a stub would undo the burial every pass.
     pub async fn list_embedded_artifact_ids(&self) -> Result<Vec<String>> {
+        // runtime: shares its statement with the backup's counts, so the two cannot drift.
         let rows = sqlx::query(EMBEDDED_ARTIFACT_IDS)
             .fetch_all(&self.pool)
             .await?;
@@ -1278,34 +1281,30 @@ impl Store {
             Some((ts, id)) => (*ts, id.as_str()),
             None => (i64::MIN, ""),
         };
-        let rows = sqlx::query(
-            "SELECT a.id, a.created_at FROM artifacts a
+        let rows = sqlx::query!(
+            r#"SELECT a.id AS "id!", a.created_at FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
                 AND a.provenance <> 'passage' AND a.provenance <> 'merged'
                 AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
               ORDER BY a.created_at ASC, a.id ASC
-              LIMIT ?",
+              LIMIT ?"#,
+            ts,
+            ts,
+            from,
+            window
         )
-        .bind(ts)
-        .bind(ts)
-        .bind(from)
-        .bind(window)
         .fetch_all(&self.pool)
         .await?;
         // A short window ends the walk; the next lap starts from the oldest again.
         let next = match rows.last() {
             Some(r) if (rows.len() as i64) == window => {
-                format!(
-                    "{}:{}",
-                    r.get::<i64, _>("created_at"),
-                    r.get::<String, _>("id")
-                )
+                format!("{}:{}", r.created_at, r.id)
             }
             _ => String::new(),
         };
         self.meta_set(CURSOR, &next).await?;
-        let candidates: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
+        let candidates: Vec<String> = rows.into_iter().map(|r| r.id).collect();
         let armed = self
             .control
             .targets_with_jobs(
@@ -1326,25 +1325,27 @@ impl Store {
     /// No foreign key on `superseded_by`, so a deleted keeper leaves its loser hidden. A read:
     /// the caller clears the payload first. Reaped stubs are excluded; `exhume` undoes a burial.
     pub async fn dangling_superseded(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT id FROM artifacts
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!" FROM artifacts
               WHERE superseded_by IS NOT NULL
                 AND reaped_at IS NULL
                 AND status <> 'trashed'
-                AND superseded_by NOT IN (SELECT id FROM artifacts WHERE status <> 'trashed')",
+                AND superseded_by NOT IN (SELECT id FROM artifacts WHERE status <> 'trashed')"#
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+        Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
     /// A superseded winner's losers must be re-pointed, or they lead to a dead end.
     pub async fn artifacts_superseded_by(&self, winner_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT id FROM artifacts WHERE superseded_by = ?")
-            .bind(winner_id)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE superseded_by = ?"#,
+            winner_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
@@ -1408,14 +1409,14 @@ impl Store {
 
     /// Two columns, not the full row: `arm_dedupe` checks 200 pairs per tick. `None` means gone.
     pub async fn artifact_in_results(&self, id: &str) -> Result<Option<bool>> {
-        let row = sqlx::query(
-            "SELECT status = 'active' AND superseded_by IS NULL AS live
-               FROM artifacts WHERE id = ?",
+        let row = sqlx::query!(
+            r#"SELECT status = 'active' AND superseded_by IS NULL AS "live!: bool"
+               FROM artifacts WHERE id = ?"#,
+            id
         )
-        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.get::<bool, _>("live")))
+        Ok(row.map(|r| r.live))
     }
 
     /// Without lowering `source_count`, the orphan flag returns on the next sweep.
@@ -1524,6 +1525,7 @@ impl Store {
         let reaped_at = now();
         let cutoff = reaped_at - min_age_secs;
         let mut tx = self.pool.begin().await?;
+        // runtime: shares the REAPABLE predicate with the graveyard insert and the bury update.
         let res = sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO graveyard (id, title, text, meta_json, reaped_at, vec, embed_model)
              SELECT art.id, art.title, art.text, ?, ?, ?, ? FROM artifacts art
@@ -1558,24 +1560,22 @@ impl Store {
 
     /// Only graves whose stub exists: this list is the Restore button.
     pub async fn graveyard_list(&self, limit: i64) -> Result<Vec<Grave>> {
-        sqlx::query(
-            "SELECT g.id AS id, g.title AS title, g.meta_json AS meta_json,
-                    g.reaped_at AS reaped_at
+        sqlx::query!(
+            r#"SELECT g.id AS "id!", g.title AS title, g.meta_json AS meta_json, g.reaped_at AS reaped_at
                FROM graveyard g
                JOIN artifacts a ON a.id = g.id
-              ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?",
+              ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?"#,
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(|r| {
-            let meta: serde_json::Value =
-                serde_json::from_str(&r.get::<String, _>("meta_json")).unwrap_or_default();
+            let meta: serde_json::Value = serde_json::from_str(&r.meta_json).unwrap_or_default();
             Ok(Grave {
-                id: r.get("id"),
-                title: r.get("title"),
-                reaped_at: r.get("reaped_at"),
+                id: r.id,
+                title: r.title,
+                reaped_at: r.reaped_at,
                 reason: meta
                     .get("reason")
                     .and_then(|v| v.as_str())
@@ -1588,27 +1588,23 @@ impl Store {
     /// Compared in Rust: the graveyard is small. Only graves whose stub exists, or
     /// `retract::rule_two` picks an orphan that cannot be restored.
     pub async fn graveyard_vectors(&self, embed_model: &str) -> Result<Vec<(String, Vec<f32>)>> {
-        Ok(sqlx::query(
-            "SELECT g.id AS id, g.vec AS vec FROM graveyard g
+        Ok(sqlx::query!(
+            r#"SELECT g.id AS "id!", g.vec AS "vec!" FROM graveyard g
                    JOIN artifacts a ON a.id = g.id
-                  WHERE g.vec IS NOT NULL AND g.embed_model = ?",
+                  WHERE g.vec IS NOT NULL AND g.embed_model = ?"#,
+            embed_model
         )
-        .bind(embed_model)
         .fetch_all(&self.pool)
         .await?
-        .iter()
-        .map(|r| {
-            (
-                r.get::<String, _>("id"),
-                crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("vec")),
-            )
-        })
+        .into_iter()
+        .map(|r| (r.id, crate::store::feedback::blob_to_vec(&r.vec)))
         .collect())
     }
 
     /// `bury`'s guard for the other verdict: the snapshot is minutes old by now.
     pub async fn supersede_if_reapable(&self, id: &str, by: &str, min_age_secs: i64) -> Result<()> {
         let cutoff = now() - min_age_secs;
+        // runtime: shares the REAPABLE predicate with the graveyard insert and the bury update.
         let res = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1,
                     retired_at = COALESCE(retired_at, ?)
@@ -1636,14 +1632,13 @@ impl Store {
     /// `lifecycle_dirty` is cleared: there is no point to write a payload onto until the embed.
     pub async fn exhume(&self, id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let Some(row) = sqlx::query("SELECT text FROM graveyard WHERE id = ?")
-            .bind(id)
+        let Some(row) = sqlx::query!("SELECT text FROM graveyard WHERE id = ?", id)
             .fetch_optional(&mut *tx)
             .await?
         else {
             return Ok(false);
         };
-        let text: String = row.get("text");
+        let text: String = row.text;
         let res = sqlx::query!(
             "UPDATE artifacts
                 SET text = ?, reaped_at = NULL, embed_state = 'pending',
@@ -1667,11 +1662,13 @@ impl Store {
     }
 
     pub async fn graveyard_row(&self, id: &str) -> Result<Option<(String, String, i64)>> {
-        let row = sqlx::query("SELECT text, meta_json, reaped_at FROM graveyard WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| (r.get("text"), r.get("meta_json"), r.get("reaped_at"))))
+        let row = sqlx::query!(
+            "SELECT text, meta_json, reaped_at FROM graveyard WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.text, r.meta_json, r.reaped_at)))
     }
 
     /// How many retired rows still hold their text — the standing count the
@@ -1687,14 +1684,14 @@ impl Store {
     }
 
     async fn count_by_embed_state(&self, corpus_id: &str, state: &str) -> Result<i64> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT COUNT(*) AS n FROM artifacts WHERE corpus_id = ? AND embed_state = ?",
+            corpus_id,
+            state
         )
-        .bind(corpus_id)
-        .bind(state)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.get("n"))
+        Ok(row.n)
     }
 
     pub async fn pending_embed_count(&self, corpus_id: &str) -> Result<i64> {

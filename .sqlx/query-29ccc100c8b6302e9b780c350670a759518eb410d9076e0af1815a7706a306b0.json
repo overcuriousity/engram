@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", created_at AS \"created_at!\", generation_id AS \"generation_id!\", query AS \"query!\", query_vec AS \"query_vec!\", artifact_id AS \"artifact_id?\", rank AS \"rank?\", source AS \"source!\", strength AS \"strength!\", event_id AS \"event_id?\", embed_model AS \"embed_model!\" FROM observations\n              WHERE generation_id = ? AND excluded_at IS NULL\n              ORDER BY created_at DESC, id DESC\n              LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "generation_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "generation_id"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec!",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "artifact_id?",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "rank?",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "rank"
+          }
+        }
+      },
+      {
+        "name": "source!",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "name": "strength!",
+        "ordinal": 8,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "strength"
+          }
+        }
+      },
+      {
+        "name": "event_id?",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "name": "embed_model!",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "embed_model"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "29ccc100c8b6302e9b780c350670a759518eb410d9076e0af1815a7706a306b0"
+}

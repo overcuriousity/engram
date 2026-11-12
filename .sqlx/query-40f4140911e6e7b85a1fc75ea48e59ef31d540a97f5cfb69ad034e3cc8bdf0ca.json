@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", created_at AS \"created_at!\", class AS \"class!\", query AS \"query!\", query_vec AS \"query_vec!\", embed_model AS \"embed_model!\", artifact_id AS \"artifact_id!\", source_id AS \"source_id?\", retired_at AS \"retired_at?\" FROM rehearsals\n              WHERE retired_at IS NULL\n                AND (created_at > ? OR (created_at = ? AND id > ?))\n              ORDER BY created_at ASC, id ASC\n              LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "class!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "class"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec!",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "embed_model"
+          }
+        }
+      },
+      {
+        "name": "artifact_id!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "source_id?",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "retired_at?",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "retired_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "40f4140911e6e7b85a1fc75ea48e59ef31d540a97f5cfb69ad034e3cc8bdf0ca"
+}

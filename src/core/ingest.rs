@@ -2958,20 +2958,21 @@ mod tests {
             .await
             .unwrap();
         let before: (i64, i64) =
-            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
-                .bind(job.id)
+            sqlx::query!("SELECT attempts, run_after FROM jobs WHERE id = ?", job.id)
                 .fetch_one(&core.store.control.pool)
                 .await
+                .map(|r| (r.attempts, r.run_after))
                 .unwrap();
         assert!(before.0 > 0 && before.1 > 0, "the unit is not backing off");
 
         core.heal_store_drift().await.unwrap();
 
-        let after: (i64, i64) = sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
-            .bind(job.id)
-            .fetch_one(&core.store.control.pool)
-            .await
-            .unwrap();
+        let after: (i64, i64) =
+            sqlx::query!("SELECT attempts, run_after FROM jobs WHERE id = ?", job.id)
+                .fetch_one(&core.store.control.pool)
+                .await
+                .map(|r| (r.attempts, r.run_after))
+                .unwrap();
         assert_eq!(
             after, before,
             "the drift repair cleared a retrying unit's backoff"

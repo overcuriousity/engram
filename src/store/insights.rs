@@ -22,15 +22,18 @@ pub struct Bucket {
 impl Store {
     pub async fn held(&self) -> Result<Held> {
         // `synthesized` names its values: `!= 'captured'` would sweep in verbatim `passage` rows.
-        let (corpora, artifacts, segments, synthesized) = sqlx::query_as(
-            "SELECT (SELECT count(*) FROM corpora), \
-                    (SELECT count(*) FROM artifacts WHERE status = 'active'), \
-                    (SELECT count(*) FROM segments), \
-                    (SELECT count(*) FROM artifacts \
-                     WHERE status = 'active' AND provenance IN ('merged', 'synthesized'))",
+        let r = sqlx::query!(
+            r#"SELECT (SELECT count(*) FROM corpora) AS "corpora!: i64",
+                    (SELECT count(*) FROM artifacts WHERE status = 'active') AS "artifacts!: i64",
+                    (SELECT count(*) FROM segments) AS "segments!: i64",
+                    (SELECT count(*) FROM artifacts
+                     WHERE status = 'active' AND provenance IN ('merged', 'synthesized'))
+                     AS "synthesized!: i64""#
         )
         .fetch_one(&self.pool)
         .await?;
+        let (corpora, artifacts, segments, synthesized) =
+            (r.corpora, r.artifacts, r.segments, r.synthesized);
         Ok(Held {
             corpora,
             artifacts,
@@ -41,26 +44,28 @@ impl Store {
 
     /// The idle rail renders on every box-clear; `held()` computes two counts it would discard.
     pub async fn held_brief(&self) -> Result<(i64, i64)> {
-        Ok(sqlx::query_as(
-            "SELECT (SELECT count(*) FROM corpora), \
-                    (SELECT count(*) FROM artifacts WHERE status = 'active')",
+        let r = sqlx::query!(
+            r#"SELECT (SELECT count(*) FROM corpora) AS "corpora!: i64",
+                    (SELECT count(*) FROM artifacts WHERE status = 'active') AS "artifacts!: i64""#
         )
         .fetch_one(&self.pool)
-        .await?)
+        .await?;
+        Ok((r.corpora, r.artifacts))
     }
 
     /// Bands over engagement above the capture baseline (`links::engagement_at`), in units of an
     /// open; the bottom band is exactly zero. A full scan in Rust, because SQLite has `pow` only
     /// with `SQLITE_ENABLE_MATH_FUNCTIONS`; streamed, so it holds four counters.
     pub async fn used(&self, half_life_days: f64, now: i64) -> Result<Vec<Bucket>> {
-        let mut rows = sqlx::query_as::<_, (f64, i64, i64)>(
-            "SELECT activation, activated_at, created_at FROM artifacts WHERE status = 'active'",
+        let mut rows = sqlx::query!(
+            "SELECT activation, activated_at, created_at FROM artifacts WHERE status = 'active'"
         )
         .fetch(&self.pool);
         // The same formula as priming and promotion, so the three readers cannot drift apart.
         let (mut often, mut reached, mut once, mut never) = (0i64, 0i64, 0i64, 0i64);
         while let Some(row) = tokio_stream::StreamExt::next(&mut rows).await {
-            let (activation, at, created_at) = row?;
+            let row = row?;
+            let (activation, at, created_at) = (row.activation, row.activated_at, row.created_at);
             let e = super::links::engagement_at(activation, at, created_at, now, half_life_days);
             match e {
                 // A confirmation, or three opens.

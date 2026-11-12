@@ -1,0 +1,69 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", title_hint, origin, created_at, substr(raw_text, 1, 400) AS \"opening!: String\"\n             FROM corpora WHERE retired_at IS NULL\n             ORDER BY created_at DESC, id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "title_hint",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "title_hint"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "origin"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "opening!: String",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "01147e806297c7807019f599ebf0bd582007d048349179cc2c0b4cfb91b72550"
+}

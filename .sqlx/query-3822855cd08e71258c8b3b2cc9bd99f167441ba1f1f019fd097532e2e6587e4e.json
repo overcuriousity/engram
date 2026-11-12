@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status = 'active' AND superseded_by IS NULL AS \"live!: bool\"\n               FROM artifacts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "live!: bool",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3822855cd08e71258c8b3b2cc9bd99f167441ba1f1f019fd097532e2e6587e4e"
+}

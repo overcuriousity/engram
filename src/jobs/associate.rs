@@ -4,7 +4,6 @@
 use crate::core::Core;
 use crate::error::Result;
 use crate::store::links::normalize_query;
-use sqlx::Row;
 
 /// Last `search_events.created_at` folded into links.
 pub const EVENTS_AFTER: &str = "associate.events_after";
@@ -146,26 +145,23 @@ async fn replay_events(core: &Core, at: i64) -> Result<usize> {
         .unwrap_or(0);
     let settled = settled_cutoff(at, core.feedback.coalesce_secs);
 
-    let events = sqlx::query(
-        "SELECT id, query, created_at FROM search_events
+    let events = sqlx::query!(
+        r#"SELECT id AS "id!", query, created_at FROM search_events
           WHERE created_at > ? AND created_at < ?
-          ORDER BY created_at ASC, id ASC LIMIT ?",
+          ORDER BY created_at ASC, id ASC LIMIT ?"#,
+        after,
+        settled,
+        REPLAY_LIMIT
     )
-    .bind(after)
-    .bind(settled)
-    .bind(REPLAY_LIMIT)
     .fetch_all(&core.store.pool)
     .await?;
 
-    let stamps: Vec<i64> = events
-        .iter()
-        .map(|e| e.get::<i64, _>("created_at"))
-        .collect();
+    let stamps: Vec<i64> = events.iter().map(|e| e.created_at).collect();
     let end = replayable(&stamps, REPLAY_LIMIT as usize);
 
     for (idx, e) in events[..end].iter().enumerate() {
-        let id: String = e.get("id");
-        let cue = normalize_query(&e.get::<String, _>("query"));
+        let id: String = e.id.clone();
+        let cue = normalize_query(&e.query);
         let shown = shown_candidates(core, &id).await?;
         // One transaction per event: pairs are quadratic in what was shown, and each transaction is
         // exclusive.
@@ -204,27 +200,24 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
 
     // Bounded above at `at`: a verdict written later in the same second would otherwise fail `> at`
     // forever. Verdicts do not coalesce, so `settled_cutoff` is not needed.
-    let events = sqlx::query(
-        "SELECT id, expect_id, judged_at FROM search_events
+    let events = sqlx::query!(
+        r#"SELECT id AS "id!", expect_id AS "expect_id!", judged_at AS "judged_at!" FROM search_events
           WHERE judged_at > ? AND judged_at < ?
             AND verdict = 'hit' AND expect_id IS NOT NULL
-          ORDER BY judged_at ASC, id ASC LIMIT ?",
+          ORDER BY judged_at ASC, id ASC LIMIT ?"#,
+        after,
+        at,
+        REPLAY_LIMIT
     )
-    .bind(after)
-    .bind(at)
-    .bind(REPLAY_LIMIT)
     .fetch_all(&core.store.pool)
     .await?;
 
-    let stamps: Vec<i64> = events
-        .iter()
-        .map(|e| e.get::<i64, _>("judged_at"))
-        .collect();
+    let stamps: Vec<i64> = events.iter().map(|e| e.judged_at).collect();
     let end = replayable(&stamps, REPLAY_LIMIT as usize);
 
     for (idx, e) in events[..end].iter().enumerate() {
-        let id: String = e.get("id");
-        let expect: String = e.get("expect_id");
+        let id: String = e.id.clone();
+        let expect: String = e.expect_id.clone();
         let shown = shown_candidates(core, &id).await?;
         // Only a shown pair containing the answer binds harder: a find has no shown pair, and
         // binding it would invent a co-retrieval.

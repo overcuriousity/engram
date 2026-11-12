@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!\", a.created_at FROM artifacts a\n              WHERE a.status = 'active' AND a.superseded_by IS NULL\n                AND a.embed_state = 'embedded'\n                AND a.provenance <> 'passage' AND a.provenance <> 'merged'\n                AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))\n              ORDER BY a.created_at ASC, a.id ASC\n              LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "4f94cfa2c8917bf16027791ca3e64b7cd6e49cc8c8b02f45d2ff5ef809a8d583"
+}

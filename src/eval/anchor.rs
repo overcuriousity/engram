@@ -3,7 +3,6 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use sqlx::Row;
 
 /// Judged searches one reading looks at, newest first.
 const VERDICT_LIMIT: i64 = 500;
@@ -24,16 +23,16 @@ pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
     let Some(live) = core.store.live_generation().await? else {
         return Ok(None);
     };
-    let verdicts = sqlx::query(
-        "SELECT query, verdict, expect_id FROM (
+    let verdicts = sqlx::query!(
+        r#"SELECT query, verdict AS "verdict!", expect_id FROM (
            SELECT query, verdict, expect_id, judged_at, id,
                   ROW_NUMBER() OVER (PARTITION BY query ORDER BY judged_at DESC, id DESC) AS n
              FROM search_events WHERE verdict IN ('hit', 'gap') AND judged_at >= ?
          ) WHERE n = 1
-          ORDER BY judged_at DESC, id DESC LIMIT ?",
+          ORDER BY judged_at DESC, id DESC LIMIT ?"#,
+        crate::store::now() - VERDICT_WINDOW_SECS,
+        VERDICT_LIMIT
     )
-    .bind(crate::store::now() - VERDICT_WINDOW_SECS)
-    .bind(VERDICT_LIMIT)
     .fetch_all(&core.store.pool)
     .await?;
 
@@ -42,8 +41,8 @@ pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
         disagreed: 0,
     };
     let mut any = false;
-    for v in &verdicts {
-        let query: String = v.get("query");
+    for v in verdicts {
+        let query: String = v.query;
         let positives: Vec<String> = sqlx::query_scalar!(
             r#"SELECT o.artifact_id AS "artifact_id!" FROM observations o
                JOIN generations g ON g.id = o.generation_id
@@ -68,8 +67,8 @@ pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
         .fetch_one(&core.store.pool)
         .await?;
 
-        let verdict: String = v.get("verdict");
-        let agreed = match (verdict.as_str(), v.get::<Option<String>, _>("expect_id")) {
+        let verdict: String = v.verdict.clone();
+        let agreed = match (verdict.as_str(), v.expect_id.clone()) {
             ("hit", Some(expect)) if !positives.is_empty() => {
                 // A verdict naming a merged-away artifact is satisfied by what replaced it.
                 let satisfies = crate::eval::satisfied_by(core, &expect).await;

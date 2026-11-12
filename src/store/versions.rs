@@ -3,7 +3,6 @@
 
 use super::{Store, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 const IMMEDIATE: &str = "BEGIN IMMEDIATE";
 
@@ -31,14 +30,16 @@ impl Store {
         mut evidence: serde_json::Value,
     ) -> Result<Option<(String, i64)>> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-        let row = sqlx::query("SELECT text, title, caveats, embed_rev FROM artifacts WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound)?;
+        let row = sqlx::query!(
+            "SELECT text, title, caveats, embed_rev FROM artifacts WHERE id = ?",
+            id
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NotFound)?;
         // Checked before any write, so no version or journal row is minted for a discarded rewrite.
         if let Some(want) = expected_rev
-            && row.get::<i64, _>("embed_rev") != want
+            && row.embed_rev != want
         {
             return Ok(None);
         }
@@ -69,9 +70,9 @@ impl Store {
              VALUES (?, ?, ?, ?, ?, ?, ?)",
             id,
             n,
-            row.get::<String, _>("text"),
-            row.get::<Option<String>, _>("title"),
-            row.get::<String, _>("caveats"),
+            row.text,
+            row.title,
+            row.caveats,
             now(),
             &action_id
         )
@@ -95,23 +96,23 @@ impl Store {
     }
 
     pub async fn versions_of(&self, artifact_id: &str) -> Result<Vec<Version>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT artifact_id, n, text, title, caveats, created_at, action_id
                FROM artifact_versions WHERE artifact_id = ? ORDER BY n ASC",
+            artifact_id
         )
-        .bind(artifact_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| Version {
-                artifact_id: r.get("artifact_id"),
-                n: r.get("n"),
-                text: r.get("text"),
-                title: r.get("title"),
-                caveats: serde_json::from_str(&r.get::<String, _>("caveats")).unwrap_or_default(),
-                created_at: r.get("created_at"),
-                action_id: r.get("action_id"),
+                artifact_id: r.artifact_id,
+                n: r.n,
+                text: r.text,
+                title: r.title,
+                caveats: serde_json::from_str(&r.caveats).unwrap_or_default(),
+                created_at: r.created_at,
+                action_id: r.action_id,
             })
             .collect())
     }
@@ -120,27 +121,29 @@ impl Store {
     /// made after a condensation survives a restore.
     pub async fn restore_version(&self, artifact_id: &str, n: i64, action_id: &str) -> Result<()> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT text, title, caveats FROM artifact_versions WHERE artifact_id = ? AND n = ?",
+            artifact_id,
+            n
         )
-        .bind(artifact_id)
-        .bind(n)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::NotFound)?;
-        let current = sqlx::query("SELECT text, title, caveats FROM artifacts WHERE id = ?")
-            .bind(artifact_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(Error::NotFound)?;
+        let current = sqlx::query!(
+            "SELECT text, title, caveats FROM artifacts WHERE id = ?",
+            artifact_id
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NotFound)?;
         sqlx::query!(
             "INSERT INTO artifact_versions (artifact_id, n, text, title, caveats, created_at, action_id)
              SELECT ?, COALESCE(MAX(n), 0) + 1, ?, ?, ?, ?, ?
                FROM artifact_versions WHERE artifact_id = ?",
             artifact_id,
-            current.get::<String, _>("text"),
-            current.get::<Option<String>, _>("title"),
-            current.get::<String, _>("caveats"),
+            current.text,
+            current.title,
+            current.caveats,
             now(),
             action_id,
             artifact_id
@@ -152,9 +155,9 @@ impl Store {
                     embed_state = 'pending', embed_model = NULL,
                     embed_rev = embed_rev + 1, updated_at = ?
               WHERE id = ?",
-            row.get::<String, _>("text"),
-            row.get::<Option<String>, _>("title"),
-            row.get::<String, _>("caveats"),
+            row.text,
+            row.title,
+            row.caveats,
             now(),
             artifact_id
         )

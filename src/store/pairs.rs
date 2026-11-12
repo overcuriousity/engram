@@ -452,6 +452,7 @@ impl Store {
     /// judge is unreliable on this class. Only while awaiting review, checked in the statement.
     pub async fn ask_pair_synthesis(&self, id: i64) -> Result<bool> {
         let holes = vec!["?"; AWAITING_REVIEW.len()].join(", ");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE artifact_pairs SET synthesis_asked = 1 WHERE id = ? AND state IN ({holes})"
         )))
@@ -666,6 +667,7 @@ impl Store {
             return Ok(Vec::new());
         }
         let holes = vec!["?"; ids.len()].join(", ");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT p.a_id, p.b_id, p.detail,
                     a.title AS a_title, a.created_at AS a_created,
@@ -738,6 +740,7 @@ impl Store {
         if loser == winner {
             return Ok(Followed::default());
         }
+        // runtime: shares OPEN_STATES with the other open-pair statements.
         let rows = sqlx::query_as::<_, PairRow>(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifact_pairs
               WHERE state IN {}
@@ -854,6 +857,7 @@ impl Store {
     /// After the repair pass, and only for pairs whose chain does not end in results: those
     /// the repair still owes a move. `decided_by` becomes the model.
     pub async fn stale_unreachable_pairs(&self) -> Result<u64> {
+        // runtime: shares OPEN_STATES with the other open-pair statements.
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT p.id AS pair_id, x.id AS side, x.superseded_by AS winner
                FROM artifact_pairs p
@@ -900,6 +904,7 @@ impl Store {
         // Chunked under SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32).
         for chunk in to_settle.chunks(500) {
             let holes = vec!["?"; chunk.len()].join(", ");
+            // runtime: one placeholder per item in the IN list.
             let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
                 "UPDATE artifact_pairs
                     SET state = 'stale', obsolete_id = NULL, merged_into = NULL,
@@ -938,6 +943,7 @@ impl Store {
     /// Reports the chain's end, not the first hop. Chains ending outside results yield nothing;
     /// `stale_unreachable_pairs` settles those.
     pub async fn supersessions_with_open_pairs(&self, limit: i64) -> Result<Vec<(String, String)>> {
+        // runtime: shares OPEN_STATES with the other open-pair statements.
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT DISTINCT loser.id AS loser, loser.superseded_by AS winner
                FROM artifacts loser
@@ -970,12 +976,14 @@ impl Store {
         let mut at = from.to_string();
         let mut seen = vec![at.clone()];
         for _ in 0..MAX_HOPS {
-            let row = sqlx::query("SELECT status, superseded_by FROM artifacts WHERE id = ?")
-                .bind(&at)
-                .fetch_optional(&self.pool)
-                .await?;
+            let row = sqlx::query!(
+                "SELECT status, superseded_by FROM artifacts WHERE id = ?",
+                &at
+            )
+            .fetch_optional(&self.pool)
+            .await?;
             let Some(row) = row else { return Ok(None) };
-            match row.get::<Option<String>, _>("superseded_by") {
+            match row.superseded_by {
                 Some(next) => {
                     if seen.contains(&next) {
                         tracing::warn!(artifact = %at, "a supersession chain loops");
@@ -985,7 +993,7 @@ impl Store {
                     at = next;
                 }
                 None => {
-                    return Ok((row.get::<String, _>("status") == "active").then_some(at));
+                    return Ok((row.status == "active").then_some(at));
                 }
             }
         }

@@ -161,6 +161,7 @@ impl Store {
         let holes = std::iter::repeat_n("?", artifact_ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT scope, artifact_id, slot, centroid, weight, events, last_at,
                     encoder_version, representative

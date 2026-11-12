@@ -59,10 +59,6 @@ pub struct Rehearsal {
     pub retired_at: Option<i64>,
 }
 
-const COLUMNS: &str =
-    "id, created_at, class, query, query_vec, embed_model, artifact_id, source_id, retired_at";
-const QUALIFIED: &str = "r.id, r.created_at, r.class, r.query, r.query_vec, r.embed_model, r.artifact_id, r.source_id, r.retired_at";
-
 #[derive(Debug, Clone)]
 pub struct NewResult {
     pub rehearsal_id: String,
@@ -86,28 +82,51 @@ fn outranked(json: &str) -> Result<Vec<String>> {
         .map_err(|e| Error::Store(format!("rehearsal_results.outranked_by: {e}")))
 }
 
-fn read_result(r: &sqlx::sqlite::SqliteRow) -> Result<RehearsalResult> {
+/// A row as `read_result` reads it, for `query_as!`.
+pub(crate) struct RehearsalResultRow {
+    pub id: String,
+    pub rehearsal_id: String,
+    pub generation_id: String,
+    pub at: i64,
+    pub rank: Option<i64>,
+    pub outranked_by: String,
+}
+
+fn read_result(r: RehearsalResultRow) -> Result<RehearsalResult> {
     Ok(RehearsalResult {
-        id: r.get("id"),
-        rehearsal_id: r.get("rehearsal_id"),
-        generation_id: r.get("generation_id"),
-        at: r.get("at"),
-        rank: r.get("rank"),
-        outranked_by: outranked(&r.get::<String, _>("outranked_by"))?,
+        id: r.id,
+        rehearsal_id: r.rehearsal_id,
+        generation_id: r.generation_id,
+        at: r.at,
+        rank: r.rank,
+        outranked_by: outranked(&r.outranked_by)?,
     })
 }
 
-fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Rehearsal> {
+/// A row as `read` reads it, for `query_as!`.
+pub(crate) struct RehearsalRow {
+    pub id: String,
+    pub created_at: i64,
+    pub class: String,
+    pub query: String,
+    pub query_vec: Vec<u8>,
+    pub embed_model: String,
+    pub artifact_id: String,
+    pub source_id: Option<String>,
+    pub retired_at: Option<i64>,
+}
+
+fn read(r: RehearsalRow) -> Result<Rehearsal> {
     Ok(Rehearsal {
-        id: r.get("id"),
-        created_at: r.get("created_at"),
-        class: Class::parse(&r.get::<String, _>("class"))?,
-        query: r.get("query"),
-        query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-        embed_model: r.get("embed_model"),
-        artifact_id: r.get("artifact_id"),
-        source_id: r.get("source_id"),
-        retired_at: r.get("retired_at"),
+        id: r.id,
+        created_at: r.created_at,
+        class: Class::parse(&r.class)?,
+        query: r.query,
+        query_vec: blob_to_vec(&r.query_vec),
+        embed_model: r.embed_model,
+        artifact_id: r.artifact_id,
+        source_id: r.source_id,
+        retired_at: r.retired_at,
     })
 }
 
@@ -135,47 +154,50 @@ impl Store {
     }
 
     pub async fn rehearsal(&self, id: &str) -> Result<Option<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM rehearsals WHERE id = ?"
-        )))
-        .bind(id)
-        .fetch_optional(&self.pool)
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"SELECT id AS "id!", created_at AS "created_at!", class AS "class!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!", artifact_id AS "artifact_id!", source_id AS "source_id?", retired_at AS "retired_at?" FROM rehearsals WHERE id = ?"#,
+            id
+        ).fetch_optional(&self.pool)
         .await?
-        .as_ref()
+
         .map(read)
         .transpose()
     }
 
     /// `(created_at, id)`: the clock is seconds, and a limit cutting inside one would lose rows.
     pub async fn rehearsals_after(&self, cursor: &Cursor, limit: usize) -> Result<Vec<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM rehearsals
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"SELECT id AS "id!", created_at AS "created_at!", class AS "class!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!", artifact_id AS "artifact_id!", source_id AS "source_id?", retired_at AS "retired_at?" FROM rehearsals
               WHERE retired_at IS NULL
                 AND (created_at > ? OR (created_at = ? AND id > ?))
               ORDER BY created_at ASC, id ASC
-              LIMIT ?"
-        )))
-        .bind(cursor.at)
-        .bind(cursor.at)
-        .bind(&cursor.id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              LIMIT ?"#,
+            cursor.at,
+            cursor.at,
+            &cursor.id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
 
     pub async fn rehearsals_of(&self, artifact_id: &str) -> Result<Vec<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM rehearsals
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"SELECT id AS "id!", created_at AS "created_at!", class AS "class!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!", artifact_id AS "artifact_id!", source_id AS "source_id?", retired_at AS "retired_at?" FROM rehearsals
               WHERE artifact_id = ? AND retired_at IS NULL
-              ORDER BY created_at ASC, id ASC"
-        )))
-        .bind(artifact_id)
-        .fetch_all(&self.pool)
+              ORDER BY created_at ASC, id ASC"#,
+            artifact_id
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
@@ -244,16 +266,16 @@ impl Store {
         rehearsal_id: &str,
         limit: usize,
     ) -> Result<Vec<RehearsalResult>> {
-        sqlx::query(
-            "SELECT id, rehearsal_id, generation_id, at, rank, outranked_by
+        sqlx::query_as!(
+            crate::store::rehearsals::RehearsalResultRow,
+            r#"SELECT id AS "id!", rehearsal_id AS "rehearsal_id!", generation_id AS "generation_id!", at AS "at!", rank AS "rank?", outranked_by AS "outranked_by!"
                FROM rehearsal_results WHERE rehearsal_id = ?
-              ORDER BY at DESC, id DESC LIMIT ?",
-        )
-        .bind(rehearsal_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY at DESC, id DESC LIMIT ?"#,
+            rehearsal_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read_result)
         .collect()
     }
@@ -266,17 +288,17 @@ impl Store {
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<RehearsalResult>> {
-        sqlx::query(
-            "SELECT id, rehearsal_id, generation_id, at, rank, outranked_by
+        sqlx::query_as!(
+            crate::store::rehearsals::RehearsalResultRow,
+            r#"SELECT id AS "id!", rehearsal_id AS "rehearsal_id!", generation_id AS "generation_id!", at AS "at!", rank AS "rank?", outranked_by AS "outranked_by!"
                FROM rehearsal_results WHERE rehearsal_id = ? AND generation_id = ?
-              ORDER BY at DESC, id DESC LIMIT ?",
-        )
-        .bind(rehearsal_id)
-        .bind(generation_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY at DESC, id DESC LIMIT ?"#,
+            rehearsal_id,
+            generation_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read_result)
         .collect()
     }
@@ -291,6 +313,7 @@ impl Store {
             return Ok(std::collections::HashMap::new());
         }
         let holes = vec!["?"; rehearsal_ids.len()].join(", ");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT rehearsal_id, rank FROM (
                SELECT rehearsal_id, rank,
@@ -316,8 +339,10 @@ impl Store {
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "WITH ranked AS (
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"WITH ranked AS (
                SELECT rehearsal_id, rank, at,
                       ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n
                  FROM rehearsal_results WHERE generation_id = ?
@@ -328,16 +353,15 @@ impl Store {
                    ON a.rehearsal_id = b.rehearsal_id AND a.n = 1 AND b.n = 2
                 WHERE a.rank IS NOT b.rank
              )
-             SELECT {QUALIFIED} FROM rehearsals r
+             SELECT r.id AS "id!", r.created_at AS "created_at!", r.class AS "class!", r.query AS "query!", r.query_vec AS "query_vec!", r.embed_model AS "embed_model!", r.artifact_id AS "artifact_id!", r.source_id AS "source_id?", r.retired_at AS "retired_at?" FROM rehearsals r
                JOIN last_two l ON l.rehearsal_id = r.id
               WHERE r.retired_at IS NULL
-              ORDER BY l.at ASC, r.id ASC LIMIT ?"
-        )))
-        .bind(generation_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY l.at ASC, r.id ASC LIMIT ?"#,
+            generation_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
@@ -347,32 +371,40 @@ impl Store {
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<(Rehearsal, RehearsalResult)>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "WITH latest AS (
+        let rows = sqlx::query!(
+            r#"WITH latest AS (
                SELECT id, rehearsal_id, at, rank, outranked_by,
                       ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n
                  FROM rehearsal_results WHERE generation_id = ?
              )
-             SELECT {QUALIFIED},
-                    x.id AS x_id, x.at AS x_at, x.rank AS x_rank, x.outranked_by AS x_outranked_by
+             SELECT r.id AS "id!", r.created_at AS "created_at!", r.class AS "class!", r.query AS "query!", r.query_vec AS "query_vec!", r.embed_model AS "embed_model!", r.artifact_id AS "artifact_id!", r.source_id AS "source_id?", r.retired_at AS "retired_at?", x.id AS "x_id!", x.at AS x_at, x.rank AS x_rank, x.outranked_by AS x_outranked_by
                FROM latest x JOIN rehearsals r ON r.id = x.rehearsal_id
               WHERE x.n = 1 AND r.retired_at IS NULL
-              ORDER BY x.at DESC, x.id DESC LIMIT ?"
-        )))
-        .bind(generation_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY x.at DESC, x.id DESC LIMIT ?"#,
+            generation_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?;
-        rows.iter()
+        rows.into_iter()
             .map(|r| {
-                let probe = read(r)?;
+                let probe = read(RehearsalRow {
+                    id: r.id,
+                    created_at: r.created_at,
+                    class: r.class,
+                    query: r.query,
+                    query_vec: r.query_vec,
+                    embed_model: r.embed_model,
+                    artifact_id: r.artifact_id,
+                    source_id: r.source_id,
+                    retired_at: r.retired_at,
+                })?;
                 let result = RehearsalResult {
-                    id: r.get("x_id"),
+                    id: r.x_id,
                     rehearsal_id: probe.id.clone(),
                     generation_id: generation_id.to_string(),
-                    at: r.get("x_at"),
-                    rank: r.get("x_rank"),
-                    outranked_by: outranked(&r.get::<String, _>("x_outranked_by"))?,
+                    at: r.x_at,
+                    rank: r.x_rank,
+                    outranked_by: outranked(&r.x_outranked_by)?,
                 };
                 Ok((probe, result))
             })
@@ -381,25 +413,22 @@ impl Store {
 
     /// No live probe and no positive observation. The count, and the oldest `limit`.
     pub async fn unrehearsed(&self, limit: usize) -> Result<(i64, Vec<(String, Option<String>)>)> {
-        const WHERE: &str = "a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) FROM artifacts a WHERE a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
                 AND a.embed_state = 'embedded'
                 AND NOT EXISTS (SELECT 1 FROM rehearsals r WHERE r.artifact_id = a.id AND r.retired_at IS NULL)
-                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL)";
-        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT COUNT(*) FROM artifacts a WHERE {WHERE}"
-        )))
-        .fetch_one(&self.pool)
+                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL)"#
+        ).fetch_one(&self.pool)
         .await?;
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT a.id, a.title FROM artifacts a WHERE {WHERE} ORDER BY a.created_at ASC, a.id ASC LIMIT ?"
-        )))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query!(
+            r#"SELECT a.id AS "id!", a.title FROM artifacts a WHERE a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
+                AND a.embed_state = 'embedded'
+                AND NOT EXISTS (SELECT 1 FROM rehearsals r WHERE r.artifact_id = a.id AND r.retired_at IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL) ORDER BY a.created_at ASC, a.id ASC LIMIT ?"#,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?;
-        Ok((
-            count,
-            rows.iter().map(|r| (r.get("id"), r.get("title"))).collect(),
-        ))
+        Ok((count, rows.into_iter().map(|r| (r.id, r.title)).collect()))
     }
 
     /// Zero keeps for ever. `KEEP_PER_PROBE` is the table's real bound.

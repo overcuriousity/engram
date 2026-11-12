@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.a_id AS a_id, l.b_id AS b_id, l.weight AS weight,\n                        l.bumped_at AS bumped_at, l.state AS state, l.reason AS reason,\n                        l.cues AS cues,\n                        a.corpus_id AS a_corpus, b.corpus_id AS b_corpus\n                   FROM artifact_links l\n                   JOIN artifacts a ON a.id = l.a_id\n                   JOIN artifacts b ON b.id = l.b_id\n                  WHERE (l.a_id = ? OR l.b_id = ?)\n                    AND l.weight >= ?\n                    AND a.status = 'active' AND a.superseded_by IS NULL\n                    AND b.status = 'active' AND b.superseded_by IS NULL\n                  ORDER BY l.weight DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "a_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "a_id"
+          }
+        }
+      },
+      {
+        "name": "b_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "b_id"
+          }
+        }
+      },
+      {
+        "name": "weight",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "name": "bumped_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "bumped_at"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "cues",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "cues"
+          }
+        }
+      },
+      {
+        "name": "a_corpus",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "corpus_id"
+          }
+        }
+      },
+      {
+        "name": "b_corpus",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "corpus_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b94a1436bf20efb1dd9dcc8348fea39d68b772b5da9b912c89ab40af1b99b695"
+}

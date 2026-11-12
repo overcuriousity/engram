@@ -869,12 +869,13 @@ mod tests {
     }
 
     async fn pending_row(core: &Core, stage: Stage) -> (i64, i64) {
-        sqlx::query_as(
+        sqlx::query!(
             "SELECT run_after, empty_runs FROM jobs WHERE stage = ? AND state = 'pending'",
+            stage.as_str()
         )
-        .bind(stage.as_str())
         .fetch_one(&core.store.control.pool)
         .await
+        .map(|r| (r.run_after, r.empty_runs))
         .unwrap()
     }
 

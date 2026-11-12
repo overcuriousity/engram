@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO segments (corpus_id, idx, start_line, end_line, text, carry_lines)\n                 VALUES (?, ?, ?, ?, ?, 0)\n                 ON CONFLICT(corpus_id, idx) DO UPDATE SET\n                   start_line = excluded.start_line,\n                   end_line = excluded.end_line,\n                   text = excluded.text,\n                   carry_lines = 0,\n                   no_promote = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c7eac196687fa6a872bfa1dd49162642ec50c83a8225f1c66c2e30897583eb1c"
+}

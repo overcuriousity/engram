@@ -334,43 +334,6 @@ fn no_literal_colour_outside_the_token_file() {
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
 
-const NOT_YET_CHECKED: &[&str] = &[
-    "src/backup/sqlite.rs",
-    "src/core/ingest.rs",
-    "src/core/search.rs",
-    "src/eval/anchor.rs",
-    "src/jobs/associate.rs",
-    "src/jobs/consolidate.rs",
-    "src/jobs/mod.rs",
-    "src/jobs/observe.rs",
-    "src/jobs/pursuit.rs",
-    "src/jobs/synthesize.rs",
-    "src/store/actions.rs",
-    "src/store/artifacts.rs",
-    "src/store/asks.rs",
-    "src/store/context.rs",
-    "src/store/control.rs",
-    "src/store/corpora.rs",
-    "src/store/eval_runs.rs",
-    "src/store/feedback.rs",
-    "src/store/gaps.rs",
-    "src/store/generations.rs",
-    "src/store/insights.rs",
-    "src/store/jobs.rs",
-    "src/store/links.rs",
-    "src/store/mod.rs",
-    "src/store/moments.rs",
-    "src/store/observations.rs",
-    "src/store/pairs.rs",
-    "src/store/pursuits.rs",
-    "src/store/rehearsals.rs",
-    "src/store/segments.rs",
-    "src/store/sweeps.rs",
-    "src/store/versions.rs",
-    "src/vector/sqlite.rs",
-    "src/web/ui.rs",
-];
-
 fn runtime_query_lines(src: &str) -> Vec<usize> {
     let calls = [
         "sqlx::query(",
@@ -394,14 +357,7 @@ fn every_runtime_query_says_why() {
     sources.extend(files("tests", "rs"));
     for (name, src) in sources.iter().filter(|(n, _)| n != "tests/csp_static.rs") {
         let lines: Vec<&str> = src.lines().collect();
-        let found = runtime_query_lines(src);
-        if NOT_YET_CHECKED.contains(&name.as_str()) {
-            if found.is_empty() {
-                offenders.push(format!("{name}: converted; drop it from NOT_YET_CHECKED"));
-            }
-            continue;
-        }
-        for n in found {
+        for n in runtime_query_lines(src) {
             let why = lines[n.saturating_sub(3)..n]
                 .iter()
                 .any(|l| l.trim_start().starts_with("// runtime:"));

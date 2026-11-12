@@ -1,0 +1,165 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", substr(raw_text, 1, 400) AS \"opening!\", origin AS \"origin!\", title_hint, status, created_at, updated_at, coverage, near_dupe_of, near_dupe_score, source_url, restored_at, metadata\n               FROM corpora\n              WHERE created_at < ? OR (created_at = ? AND id < ?)\n              ORDER BY created_at DESC, id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "opening!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "name": "origin!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "origin"
+          }
+        }
+      },
+      {
+        "name": "title_hint",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "title_hint"
+          }
+        }
+      },
+      {
+        "name": "status",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "name": "coverage",
+        "ordinal": 7,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "coverage"
+          }
+        }
+      },
+      {
+        "name": "near_dupe_of",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "near_dupe_of"
+          }
+        }
+      },
+      {
+        "name": "near_dupe_score",
+        "ordinal": 9,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "near_dupe_score"
+          }
+        }
+      },
+      {
+        "name": "source_url",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "source_url"
+          }
+        }
+      },
+      {
+        "name": "restored_at",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "restored_at"
+          }
+        }
+      },
+      {
+        "name": "metadata",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "metadata"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "c081a81d4a586e3faffb54ea2ecab0289bf93b3c7f15d7b00726dd2cec9ecd6d"
+}

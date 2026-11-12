@@ -151,9 +151,34 @@ fn moment_of(r: MomentRow) -> Moment {
     }
 }
 
-fn row_of(r: &sqlx::sqlite::SqliteRow) -> Result<DueRow> {
-    let text: String = r.get("text");
-    let opening = text
+/// A moment joined with its artifact's title, text and provenance, for `query_as!`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct DueSql {
+    pub id: Option<String>,
+    pub artifact_id: String,
+    pub kind: String,
+    pub at: Option<i64>,
+    pub until: Option<i64>,
+    pub tz: String,
+    pub rule: Option<String>,
+    pub source: String,
+    pub span: Option<String>,
+    pub done_at: Option<i64>,
+    pub snoozed_until: Option<i64>,
+    pub notified_at: Option<i64>,
+    pub moved_from: Option<i64>,
+    pub moved_at: Option<i64>,
+    pub series_id: Option<String>,
+    pub origin_corpus_id: Option<String>,
+    pub created_at: i64,
+    pub title: Option<String>,
+    pub text: String,
+    pub provenance: String,
+}
+
+fn row_of(r: DueSql) -> Result<DueRow> {
+    let opening = r
+        .text
         .lines()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
@@ -162,12 +187,29 @@ fn row_of(r: &sqlx::sqlite::SqliteRow) -> Result<DueRow> {
         .collect::<String>();
     // Neither a passage's heading nor a note is a name for this text; see
     // `Provenance::names_its_own_text`.
-    let named = crate::store::artifacts::Provenance::parse(&r.get::<String, _>("provenance"))
-        .names_its_own_text();
-    let title: Option<String> = r.get("title");
-    let title = title.filter(|t| !t.is_empty() && named);
+    let named = crate::store::artifacts::Provenance::parse(&r.provenance).names_its_own_text();
+    let title = r.title.filter(|t| !t.is_empty() && named);
+    let moment = moment_of(MomentRow {
+        id: r.id,
+        artifact_id: r.artifact_id,
+        kind: r.kind,
+        at: r.at,
+        until: r.until,
+        tz: r.tz,
+        rule: r.rule,
+        source: r.source,
+        span: r.span,
+        done_at: r.done_at,
+        snoozed_until: r.snoozed_until,
+        notified_at: r.notified_at,
+        moved_from: r.moved_from,
+        moved_at: r.moved_at,
+        series_id: r.series_id,
+        origin_corpus_id: r.origin_corpus_id,
+        created_at: r.created_at,
+    });
     Ok(DueRow {
-        moment: moment_of(sqlx::FromRow::from_row(r)?),
+        moment,
         named: title.is_some(),
         title: title.unwrap_or_else(|| opening.clone()),
         opening,
@@ -178,8 +220,6 @@ fn row_of(r: &sqlx::sqlite::SqliteRow) -> Result<DueRow> {
 fn eff_at(r: &DueRow) -> i64 {
     r.moment.snoozed_until.or(r.moment.at).unwrap_or(0)
 }
-
-const JOINED: &str = "SELECT m.*, a.title, a.text, a.provenance FROM moments m JOIN artifacts a ON a.id = m.artifact_id";
 
 impl Store {
     /// `origin_corpus_id` first: `carry_moments` may have moved the row onto an artifact of
@@ -233,10 +273,10 @@ impl Store {
             (None, Some(_)) => Some(id.clone()),
             (None, None) => None,
         };
-        let corpus: Option<String> = match sqlx::query_scalar::<_, Option<String>>(
+        let corpus: Option<String> = match sqlx::query_scalar!(
             "SELECT corpus_id FROM artifacts WHERE id = ?",
+            &m.artifact_id
         )
-        .bind(&m.artifact_id)
         .fetch_optional(&self.pool)
         .await?
         .flatten()
@@ -559,18 +599,19 @@ impl Store {
     /// The horizon and order use the effective (snoozed) instant, as `uncovered` and
     /// `next_notify_at` push on it.
     pub async fn open_due(&self, now: i64, to: i64) -> Result<Vec<DueRow>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'
+        let rows = sqlx::query_as!(
+
+    DueSql,
+    r#"SELECT m.id AS "id?", m.artifact_id AS "artifact_id!", m.kind AS "kind!", m.at AS "at?", m.until AS "until?", m.tz AS "tz!", m.rule AS "rule?", m.source AS "source!", m.span AS "span?", m.done_at AS "done_at?", m.snoozed_until AS "snoozed_until?", m.notified_at AS "notified_at?", m.moved_from AS "moved_from?", m.moved_at AS "moved_at?", m.series_id AS "series_id?", m.origin_corpus_id AS "origin_corpus_id?", m.created_at AS "created_at!", a.title AS "title?", a.text AS "text!", a.provenance AS "provenance!" FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'
                AND (m.at IS NULL
                     OR (COALESCE(m.snoozed_until, m.at) < ?
                         AND (m.snoozed_until IS NULL OR m.snoozed_until <= ?)))
-             ORDER BY m.at IS NULL, COALESCE(m.snoozed_until, m.at), m.created_at"
-        )))
-        .bind(to)
-        .bind(now)
-        .fetch_all(&self.pool)
+             ORDER BY m.at IS NULL, COALESCE(m.snoozed_until, m.at), m.created_at"#,
+            to,
+            now
+        ).fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_of).collect()
+        rows.into_iter().map(row_of).collect()
     }
 
     /// No lower bound: an overdue reminder most deserves the badge.
@@ -585,6 +626,7 @@ impl Store {
             return Ok(out);
         }
         let marks = vec!["?"; artifact_ids.len()].join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             // The effective instant, for the horizon too; see `eff_at`.
             "SELECT artifact_id, MIN(COALESCE(snoozed_until, at)) AS at FROM moments
@@ -605,28 +647,29 @@ impl Store {
     }
 
     pub async fn event_moments_between(&self, from: i64, to: i64) -> Result<Vec<DueRow>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE m.kind = 'event' AND a.status = 'active' AND m.at >= ? AND m.at < ? ORDER BY m.at"
-        )))
-        .bind(from)
-        .bind(to)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+
+    DueSql,
+    r#"SELECT m.id AS "id?", m.artifact_id AS "artifact_id!", m.kind AS "kind!", m.at AS "at?", m.until AS "until?", m.tz AS "tz!", m.rule AS "rule?", m.source AS "source!", m.span AS "span?", m.done_at AS "done_at?", m.snoozed_until AS "snoozed_until?", m.notified_at AS "notified_at?", m.moved_from AS "moved_from?", m.moved_at AS "moved_at?", m.series_id AS "series_id?", m.origin_corpus_id AS "origin_corpus_id?", m.created_at AS "created_at!", a.title AS "title?", a.text AS "text!", a.provenance AS "provenance!" FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE m.kind = 'event' AND a.status = 'active' AND m.at >= ? AND m.at < ? ORDER BY m.at"#,
+            from,
+            to
+        ).fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_of).collect()
+        rows.into_iter().map(row_of).collect()
     }
 
     /// Done rows stay listed whatever their artifact's status (`carry_moments` moves only open
     /// rows); open rows are filtered by status, or a carried moment lists twice.
     pub async fn moments_between(&self, from: i64, to: i64) -> Result<Vec<DueRow>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE (a.status = 'active' OR m.done_at IS NOT NULL) AND a.status <> 'trashed' \
-               AND m.at >= ? AND m.at < ? ORDER BY m.at"
-        )))
-        .bind(from)
-        .bind(to)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+
+    DueSql,
+    r#"SELECT m.id AS "id?", m.artifact_id AS "artifact_id!", m.kind AS "kind!", m.at AS "at?", m.until AS "until?", m.tz AS "tz!", m.rule AS "rule?", m.source AS "source!", m.span AS "span?", m.done_at AS "done_at?", m.snoozed_until AS "snoozed_until?", m.notified_at AS "notified_at?", m.moved_from AS "moved_from?", m.moved_at AS "moved_at?", m.series_id AS "series_id?", m.origin_corpus_id AS "origin_corpus_id?", m.created_at AS "created_at!", a.title AS "title?", a.text AS "text!", a.provenance AS "provenance!" FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE (a.status = 'active' OR m.done_at IS NOT NULL) AND a.status <> 'trashed'  AND m.at >= ? AND m.at < ? ORDER BY m.at"#,
+            from,
+            to
+        ).fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_of).collect()
+        rows.into_iter().map(row_of).collect()
     }
 
     /// `done_at IS NULL` stops two concurrent presses both arming a successor.
@@ -747,6 +790,7 @@ impl Store {
             return Ok(());
         }
         let marks = vec!["?"; ids.len()].join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE moments SET notified_at = ? WHERE id IN ({marks})"
         )))
@@ -777,15 +821,16 @@ impl Store {
     }
 
     async fn uncovered(&self) -> Result<Vec<DueRow>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "{JOINED} WHERE m.kind = 'due' AND m.done_at IS NULL AND m.at IS NOT NULL
+        let rows = sqlx::query_as!(
+
+    DueSql,
+    r#"SELECT m.id AS "id?", m.artifact_id AS "artifact_id!", m.kind AS "kind!", m.at AS "at?", m.until AS "until?", m.tz AS "tz!", m.rule AS "rule?", m.source AS "source!", m.span AS "span?", m.done_at AS "done_at?", m.snoozed_until AS "snoozed_until?", m.notified_at AS "notified_at?", m.moved_from AS "moved_from?", m.moved_at AS "moved_at?", m.series_id AS "series_id?", m.origin_corpus_id AS "origin_corpus_id?", m.created_at AS "created_at!", a.title AS "title?", a.text AS "text!", a.provenance AS "provenance!" FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE m.kind = 'due' AND m.done_at IS NULL AND m.at IS NOT NULL
                AND a.status = 'active'
                AND (m.notified_at IS NULL OR m.notified_at < COALESCE(m.snoozed_until, m.at))
-             ORDER BY COALESCE(m.snoozed_until, m.at)"
-        )))
-        .fetch_all(&self.pool)
+             ORDER BY COALESCE(m.snoozed_until, m.at)"#
+        ).fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_of).collect()
+        rows.into_iter().map(row_of).collect()
     }
 
     /// Called by every write that can move the earliest owed moment.

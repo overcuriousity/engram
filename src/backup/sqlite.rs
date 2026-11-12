@@ -53,6 +53,7 @@ pub async fn counts(db: &Path) -> Result<(u64, u64)> {
 
 /// `sql` is a crate constant, never input.
 async fn count(conn: &mut SqliteConnection, sql: &'static str) -> Result<u64> {
+    // runtime: shares its statement with the backup's counts, so the two cannot drift.
     let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT COUNT(*) AS n FROM ({sql})"
     )))

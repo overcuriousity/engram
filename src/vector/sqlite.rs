@@ -201,6 +201,7 @@ impl SqliteVectors {
         let status = status_word(p.status.unwrap_or(ArtifactStatus::Active));
         match embedding {
             Some(v) => {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "INSERT INTO vec_points (artifact_id, corpus_id, category, status, created_at,
                         last_seen_at, hit_count, last_verified_at, payload, embedding)
@@ -226,6 +227,7 @@ impl SqliteVectors {
                 .await?;
             }
             None => {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "UPDATE vec_points SET corpus_id=?, category=?, status=?, created_at=?,
                         last_seen_at=?, hit_count=?, last_verified_at=?, payload=?
@@ -244,11 +246,13 @@ impl SqliteVectors {
                 .await?;
             }
         }
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query("DELETE FROM vec_tags WHERE artifact_id=?")
             .bind(&p.artifact_id)
             .execute(&mut *tx)
             .await?;
         for tag in &p.tags {
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("INSERT OR IGNORE INTO vec_tags (artifact_id, tag) VALUES (?,?)")
                 .bind(&p.artifact_id)
                 .bind(tag)
@@ -259,6 +263,7 @@ impl SqliteVectors {
     }
 
     async fn stored(tx: &mut sqlx::SqliteConnection, id: &str) -> Result<Option<VectorPayload>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let row = sqlx::query(
             "SELECT payload, last_seen_at, hit_count, last_verified_at
              FROM vec_points WHERE artifact_id=?",
@@ -313,6 +318,7 @@ impl SqliteVectors {
              WHERE length(p.embedding) = ? AND p.artifact_id IS NOT ? AND {clause}
              ORDER BY dist IS NULL, dist, p.artifact_id LIMIT ?"
         );
+        // runtime: contained-only vector tables, absent from the reference database.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
             .bind(blob(vector))
             .bind((vector.len() * 4) as i64)
@@ -344,6 +350,7 @@ impl SqliteVectors {
         let (clause, binds) = Self::where_clause(filter);
         let mut scores: HashMap<String, f32> = HashMap::new();
         for (term, qv) in sparse.indices.iter().zip(&sparse.values) {
+            // runtime: contained-only vector tables, absent from the reference database.
             let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vec_sparse WHERE term=?")
                 .bind(*term as i64)
                 .fetch_one(&self.pool)
@@ -357,6 +364,7 @@ impl SqliteVectors {
                  JOIN vec_points p ON p.artifact_id = s.artifact_id
                  WHERE s.term = ? AND {clause}"
             );
+            // runtime: contained-only vector tables, absent from the reference database.
             let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(*term as i64);
             for b in &binds {
                 q = q.bind(b);
@@ -414,6 +422,7 @@ impl SqliteVectors {
 #[async_trait]
 impl VectorStore for SqliteVectors {
     async fn ensure_collection(&self, dim: usize) -> Result<()> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let have: Option<String> = sqlx::query_scalar("SELECT value FROM vec_meta WHERE key='dim'")
             .fetch_optional(&self.pool)
             .await?;
@@ -423,6 +432,7 @@ impl VectorStore for SqliteVectors {
                 "this base was embedded at {d} dimensions and the embedder now gives {dim}"
             ))),
             None => {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query("INSERT OR REPLACE INTO vec_meta (key, value) VALUES ('dim', ?)")
                     .bind(dim.to_string())
                     .execute(&self.pool)
@@ -444,11 +454,13 @@ impl VectorStore for SqliteVectors {
                 p.payload.superseded_by = p.payload.superseded_by.or(old.superseded_by);
             }
             Self::write_point(&mut tx, &p.payload, Some(&p.vector)).await?;
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("DELETE FROM vec_sparse WHERE artifact_id=?")
                 .bind(&p.payload.artifact_id)
                 .execute(&mut *tx)
                 .await?;
             for (term, value) in p.sparse.indices.iter().zip(&p.sparse.values) {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "INSERT OR REPLACE INTO vec_sparse (term, artifact_id, value) VALUES (?,?,?)",
                 )
@@ -507,6 +519,7 @@ impl VectorStore for SqliteVectors {
         at: i64,
         reset_hits: bool,
     ) -> Result<()> {
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query(
             "UPDATE vec_points SET last_verified_at=?,
                 hit_count=CASE WHEN ? THEN 0 ELSE hit_count END
@@ -526,6 +539,7 @@ impl VectorStore for SqliteVectors {
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT payload, last_seen_at, hit_count, last_verified_at FROM vec_points
              WHERE status='active' AND last_verified_at IS NOT NULL AND last_verified_at < ?
@@ -585,6 +599,7 @@ impl VectorStore for SqliteVectors {
         let mut tx = self.pool.begin().await?;
         for t in targets {
             if t.counts_as_hit {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "UPDATE vec_points SET last_seen_at=?,
                         hit_count=COALESCE(?, hit_count, 0) + 1
@@ -596,6 +611,7 @@ impl VectorStore for SqliteVectors {
                 .execute(&mut *tx)
                 .await?;
             } else {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query("UPDATE vec_points SET last_seen_at=? WHERE artifact_id=?")
                     .bind(seen_at)
                     .bind(&t.artifact_id)
@@ -643,6 +659,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         Ok(sqlx::query_scalar("SELECT artifact_id FROM vec_points")
             .fetch_all(&self.pool)
             .await?)
@@ -665,6 +682,7 @@ impl VectorStore for SqliteVectors {
         older_than: i64,
         unseen_since: i64,
     ) -> Result<Vec<SearchHit>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT payload, last_seen_at, hit_count, last_verified_at FROM vec_points
              WHERE status='active' AND created_at < ?
@@ -680,6 +698,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn facets(&self, limit: usize) -> Result<Facets> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT category, COUNT(*) AS n FROM vec_points WHERE category IS NOT NULL
              GROUP BY category ORDER BY n DESC, category LIMIT ?",
@@ -708,6 +727,7 @@ impl VectorStore for SqliteVectors {
 
     async fn set_context_vectors(&self, artifact_id: &str, vectors: Vec<Vec<f32>>) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        // runtime: contained-only vector tables, absent from the reference database.
         let there: Option<i64> = sqlx::query_scalar("SELECT 1 FROM vec_points WHERE artifact_id=?")
             .bind(artifact_id)
             .fetch_optional(&mut *tx)
@@ -716,11 +736,13 @@ impl VectorStore for SqliteVectors {
         if there.is_none() {
             return Ok(());
         }
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query("DELETE FROM vec_ctx WHERE artifact_id=?")
             .bind(artifact_id)
             .execute(&mut *tx)
             .await?;
         for (n, v) in vectors.iter().enumerate() {
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("INSERT INTO vec_ctx (artifact_id, n, embedding) VALUES (?,?,?)")
                 .bind(artifact_id)
                 .bind(n as i64)
@@ -747,6 +769,7 @@ impl VectorStore for SqliteVectors {
              WHERE length(c.embedding) = ? AND {clause}
              GROUP BY p.artifact_id ORDER BY dist, p.artifact_id LIMIT ?"
         );
+        // runtime: contained-only vector tables, absent from the reference database.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
             .bind(blob(vector))
             .bind((vector.len() * 4) as i64);
@@ -769,6 +792,7 @@ impl VectorStore for SqliteVectors {
         let mut tx = self.pool.begin().await?;
         for id in artifact_ids {
             // The tags, postings and context set go with it: ON DELETE CASCADE.
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("DELETE FROM vec_points WHERE artifact_id=?")
                 .bind(id)
                 .execute(&mut *tx)
@@ -779,6 +803,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query("DELETE FROM vec_points WHERE corpus_id=?")
             .bind(corpus_id)
             .execute(&self.pool)
@@ -787,6 +812,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT artifact_id, embedding FROM vec_points ORDER BY artifact_id LIMIT ?",
         )
@@ -801,6 +827,7 @@ impl VectorStore for SqliteVectors {
 
     async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
         let b: Option<Vec<u8>> =
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query_scalar("SELECT embedding FROM vec_points WHERE artifact_id=?")
                 .bind(artifact_id)
                 .fetch_optional(&self.pool)
@@ -814,6 +841,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn count(&self) -> Result<u64> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vec_points")
             .fetch_one(&self.pool)
             .await?;

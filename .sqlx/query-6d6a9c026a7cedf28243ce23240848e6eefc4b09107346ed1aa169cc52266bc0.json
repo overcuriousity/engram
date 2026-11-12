@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT weight, bumped_at, queries, cues FROM artifact_links\n              WHERE a_id = ? AND b_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "weight",
+        "ordinal": 0,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "name": "bumped_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "bumped_at"
+          }
+        }
+      },
+      {
+        "name": "queries",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "queries"
+          }
+        }
+      },
+      {
+        "name": "cues",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "cues"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6d6a9c026a7cedf28243ce23240848e6eefc4b09107346ed1aa169cc52266bc0"
+}

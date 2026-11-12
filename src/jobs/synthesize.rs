@@ -318,13 +318,14 @@ mod tests {
     }
 
     async fn job_row(core: &Core, stage: Stage, target: &str) -> (String, i64, i64, i64) {
-        sqlx::query_as(
+        sqlx::query!(
             "SELECT state, attempts, run_after, seq FROM jobs WHERE stage = ? AND target_id = ?",
+            stage.as_str(),
+            target
         )
-        .bind(stage.as_str())
-        .bind(target)
         .fetch_one(&core.store.control.pool)
         .await
+        .map(|r| (r.state, r.attempts, r.run_after, r.seq))
         .unwrap()
     }
 
@@ -962,12 +963,17 @@ mod tests {
 
         // Read off the table: the units are done, so claiming says nothing about how many there
         // were.
-        let embed_jobs: Vec<(String, String)> = sqlx::query_as(
+        let embed_jobs: Vec<(String, String)> = sqlx::query!(
             "SELECT target_kind, target_id FROM jobs
-              WHERE stage = 'embed' AND state = 'pending'",
+              WHERE stage = 'embed' AND state = 'pending'"
         )
         .fetch_all(&core.store.control.pool)
         .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.target_kind, r.target_id))
+                .collect::<Vec<_>>()
+        })
         .unwrap();
         assert_eq!(embed_jobs.len(), 1, "expected one batched embed job");
         assert_eq!(embed_jobs[0].0, "corpus");

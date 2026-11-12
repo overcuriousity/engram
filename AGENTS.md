@@ -39,7 +39,7 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 | SQLite only | Qdrant beside SQLite | integral to engram's retrieval; SQLite vectors serve the contained build |
 | `unsafe_code = "forbid"` | `deny`, allowed only in `src/infer/whisper.rs` and `register()` in `src/vector/sqlite.rs` | in-process inference needs FFI; `forbid` cannot be overridden |
 | sqlx migrations | `Store::migrate` / `Control::migrate` | they read a base's columns before touching it; live bases depend on it |
-| compile-time-checked queries | runtime `sqlx::query` in the files `NOT_YET_CHECKED` lists (`tests/csp_static.rs`) | conversion in progress; the list only shrinks |
+| compile-time-checked queries | runtime where the SQL is assembled: IN lists, predicates shared by several statements (`REAPABLE`, `OPEN_STATES`, `dealable!`, the gap macros), schema reads, migrators, the contained vector store | each carries a `// runtime:` reason, enforced by `every_runtime_query_says_why` |
 | utoipa OpenAPI + parity test | none | owner's decision |
 | passkeys | none | owner's decision |
 | `oc-kit` dependency | ported into engram's own modules | owner's decision; `oc-check` is a dev-dependency only |

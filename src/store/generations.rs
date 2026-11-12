@@ -2,7 +2,6 @@
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 /// The read decides the write, and a deferred transaction snapshots before the upgrade.
 const IMMEDIATE: &str = "BEGIN IMMEDIATE";
@@ -106,17 +105,30 @@ pub struct Generation {
     pub state: String,
 }
 
-fn hydrate(r: sqlx::sqlite::SqliteRow) -> Result<Generation> {
+/// A row as `hydrate` reads it, for `query_as!`.
+pub(crate) struct GenerationRow {
+    pub id: String,
+    pub created_at: i64,
+    pub params: String,
+    pub embed_recipe: String,
+    pub chat_model: String,
+    pub parent_id: Option<String>,
+    pub run_id: Option<String>,
+    pub predicted: Option<f64>,
+    pub state: String,
+}
+
+fn hydrate(r: GenerationRow) -> Result<Generation> {
     Ok(Generation {
-        id: r.get("id"),
-        created_at: r.get("created_at"),
-        params: from_json(&r.get::<String, _>("params"))?,
-        embed_recipe: r.get("embed_recipe"),
-        chat_model: r.get("chat_model"),
-        parent_id: r.get("parent_id"),
-        run_id: r.get("run_id"),
-        predicted: r.get("predicted"),
-        state: r.get("state"),
+        id: r.id,
+        created_at: r.created_at,
+        params: from_json(&r.params)?,
+        embed_recipe: r.embed_recipe,
+        chat_model: r.chat_model,
+        parent_id: r.parent_id,
+        run_id: r.run_id,
+        predicted: r.predicted,
+        state: r.state,
     })
 }
 
@@ -248,26 +260,24 @@ impl Store {
     }
 
     pub async fn generation(&self, id: &str) -> Result<Option<Generation>> {
-        sqlx::query(
-            "SELECT id, created_at, params, embed_recipe, chat_model, parent_id,
-                    run_id, predicted, state
-               FROM generations WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
+        sqlx::query_as!(
+            crate::store::generations::GenerationRow,
+            r#"SELECT id AS "id!", created_at AS "created_at!", params AS "params!", embed_recipe AS "embed_recipe!", chat_model AS "chat_model!", parent_id AS "parent_id?", run_id AS "run_id?", predicted AS "predicted?", state AS "state!"
+               FROM generations WHERE id = ?"#,
+            id
+        ).fetch_optional(&self.pool)
         .await?
         .map(hydrate)
         .transpose()
     }
 
     pub async fn live_generation(&self) -> Result<Option<Generation>> {
-        sqlx::query(
-            "SELECT id, created_at, params, embed_recipe, chat_model, parent_id,
-                    run_id, predicted, state
+        sqlx::query_as!(
+            crate::store::generations::GenerationRow,
+            r#"SELECT id AS "id!", created_at AS "created_at!", params AS "params!", embed_recipe AS "embed_recipe!", chat_model AS "chat_model!", parent_id AS "parent_id?", run_id AS "run_id?", predicted AS "predicted?", state AS "state!"
                FROM generations WHERE state = 'live'
-              ORDER BY created_at DESC, id DESC LIMIT 1",
-        )
-        .fetch_optional(&self.pool)
+              ORDER BY created_at DESC, id DESC LIMIT 1"#
+        ).fetch_optional(&self.pool)
         .await?
         .map(hydrate)
         .transpose()
@@ -296,13 +306,12 @@ impl Store {
     }
 
     pub async fn generation_history(&self, limit: usize) -> Result<Vec<Generation>> {
-        sqlx::query(
-            "SELECT id, created_at, params, embed_recipe, chat_model, parent_id,
-                    run_id, predicted, state
-               FROM generations ORDER BY created_at DESC, id DESC LIMIT ?",
-        )
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+        sqlx::query_as!(
+            crate::store::generations::GenerationRow,
+            r#"SELECT id AS "id!", created_at AS "created_at!", params AS "params!", embed_recipe AS "embed_recipe!", chat_model AS "chat_model!", parent_id AS "parent_id?", run_id AS "run_id?", predicted AS "predicted?", state AS "state!"
+               FROM generations ORDER BY created_at DESC, id DESC LIMIT ?"#,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
         .into_iter()
         .map(hydrate)

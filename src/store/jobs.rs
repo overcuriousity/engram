@@ -306,6 +306,7 @@ async fn upsert_job_with(
     seq: i64,
     guard: Guard,
 ) -> Result<()> {
+    // runtime: the conflict clause depends on the guard.
     sqlx::query(guard.statement())
         .bind(subject)
         .bind(stage.as_str())
@@ -689,6 +690,7 @@ impl Store {
               LIMIT 1",
             stages.join("','")
         ));
+        // runtime: one placeholder per item in the IN list.
         let r: Option<i64> = sqlx::query_scalar(sql)
             .bind(&self.subject)
             .bind(now() - crate::jobs::STUCK_AFTER_SECS)
@@ -724,6 +726,7 @@ impl Control {
               )
               RETURNING id, subject, stage, target_kind, target_id, attempts"
         );
+        // runtime: the claim leaves out a variable list of held stages.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql))
             .bind(now())
             .bind(now());
@@ -755,6 +758,7 @@ impl Control {
             "SELECT COUNT(*) FROM jobs WHERE subject = ? AND state = 'pending' AND stage IN ({})",
             vec!["?"; stages.len()].join(", ")
         );
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql)).bind(subject);
         for stage in stages {
             q = q.bind(stage.as_str());
@@ -1203,9 +1207,10 @@ mod tests {
             .unwrap();
 
         let (run_after, class): (i64, i64) =
-            sqlx::query_as("SELECT run_after, class FROM jobs WHERE stage = 'pursuit'")
+            sqlx::query!("SELECT run_after, class FROM jobs WHERE stage = 'pursuit'")
                 .fetch_one(&s.control.pool)
                 .await
+                .map(|r| (r.run_after, r.class))
                 .unwrap();
         assert_eq!(run_after, 0, "the unit must have been pulled forward");
         assert_eq!(class, 1, "and it must be background again");
@@ -1459,9 +1464,10 @@ mod tests {
             .await
             .unwrap();
         let (attempts, run_after): (i64, i64) =
-            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE target_id = 'src-1#0'")
+            sqlx::query!("SELECT attempts, run_after FROM jobs WHERE target_id = 'src-1#0'")
                 .fetch_one(&s.control.pool)
                 .await
+                .map(|r| (r.attempts, r.run_after))
                 .unwrap();
         assert_eq!(attempts, 1, "the sweep reset a unit's attempt count");
         assert!(run_after > now(), "the sweep cleared a unit's backoff");

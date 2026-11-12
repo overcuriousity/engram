@@ -3,7 +3,6 @@
 
 use super::{Store, new_id, now};
 use crate::error::Result;
-use sqlx::Row;
 
 /// A parameter, not a `SearchQuery` field: a deserialised default would mislabel the door.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,38 +225,36 @@ impl Store {
         // so it folds by searcher (`scope IS ?`). A judged or opened event is never folded into.
         let prev = match ev.door {
             Door::Ui => match ev.fold_onto.as_deref() {
-                Some(prev_id) => {
-                    sqlx::query(
-                        "SELECT id, created_at,
+                Some(prev_id) => sqlx::query!(
+                    r#"SELECT id AS "id!", created_at,
                                 (SELECT COUNT(*) FROM search_candidates
-                                  WHERE event_id = search_events.id) AS pool
+                                  WHERE event_id = search_events.id) AS "pool!: i64"
                            FROM search_events
                           WHERE id = ? AND door = ? AND scope IS ?
-                            AND judged_at IS NULL AND opened_at IS NULL",
-                    )
-                    .bind(prev_id)
-                    .bind(ev.door.as_str())
-                    .bind(&ev.scope)
-                    .fetch_optional(&mut *tx)
-                    .await?
-                }
+                            AND judged_at IS NULL AND opened_at IS NULL"#,
+                    prev_id,
+                    ev.door.as_str(),
+                    &ev.scope
+                )
+                .fetch_optional(&mut *tx)
+                .await?
+                .map(|r| (r.id, r.created_at, r.pool)),
                 None => None,
             },
-            Door::Extension | Door::App => {
-                sqlx::query(
-                    "SELECT id, created_at,
+            Door::Extension | Door::App => sqlx::query!(
+                r#"SELECT id AS "id!", created_at,
                             (SELECT COUNT(*) FROM search_candidates
-                              WHERE event_id = search_events.id) AS pool
+                              WHERE event_id = search_events.id) AS "pool!: i64"
                        FROM search_events
                       WHERE door = ? AND scope IS ? AND judged_at IS NULL
                         AND opened_at IS NULL
-                      ORDER BY created_at DESC, id DESC LIMIT 1",
-                )
-                .bind(ev.door.as_str())
-                .bind(&ev.scope)
-                .fetch_optional(&mut *tx)
-                .await?
-            }
+                      ORDER BY created_at DESC, id DESC LIMIT 1"#,
+                ev.door.as_str(),
+                &ev.scope
+            )
+            .fetch_optional(&mut *tx)
+            .await?
+            .map(|r| (r.id, r.created_at, r.pool)),
             _ => None,
         };
 
@@ -267,14 +264,11 @@ impl Store {
             Extends(String),
             New,
         }
-        let fold = match prev.as_ref() {
-            Some(r) => {
-                let created: i64 = r.get("created_at");
+        let fold = match prev {
+            Some((id, created, pool)) => {
                 // Zero means folding is off; a plain `<=` would fold within the same second.
                 let fresh = coalesce_secs > 0 && at - created <= coalesce_secs;
-                let id: String = r.get("id");
                 // Never fold a pool away to nothing: an empty narrowing starts its own event.
-                let pool: i64 = r.get("pool");
                 let empties = ev.candidates.is_empty() && pool > 0;
                 if !fresh || empties {
                     Fold::New
@@ -292,24 +286,24 @@ impl Store {
 
         let id = match extends {
             Some(id) => {
-                sqlx::query(
-                    // `skips` and the generation reset with the rest: a skip was about
-                    // the earlier wording, and `dealable!` would hide the new one forever.
+                // `skips` and the generation reset with the rest: a skip was about
+                // the earlier wording, and `dealable!` would hide the new one forever.
+                sqlx::query!(
                     "UPDATE search_events
                      SET query = ?, filters = ?, query_vec = ?, vec_dim = ?,
                          embed_model = ?, created_at = ?, answered = ?, skips = 0,
                          generation_id = (SELECT id FROM generations WHERE state = 'live'
                                            ORDER BY created_at DESC, id DESC LIMIT 1)
                      WHERE id = ?",
+                    &ev.query,
+                    &ev.filters,
+                    vec_to_blob(&ev.query_vec),
+                    ev.query_vec.len() as i64,
+                    &ev.embed_model,
+                    at,
+                    ev.answered as i64,
+                    &id
                 )
-                .bind(&ev.query)
-                .bind(&ev.filters)
-                .bind(vec_to_blob(&ev.query_vec))
-                .bind(ev.query_vec.len() as i64)
-                .bind(&ev.embed_model)
-                .bind(at)
-                .bind(ev.answered as i64)
-                .bind(&id)
                 .execute(&mut *tx)
                 .await?;
                 sqlx::query!("DELETE FROM search_candidates WHERE event_id = ?", &id)
@@ -322,25 +316,25 @@ impl Store {
             }
             None => {
                 let id = new_id();
-                sqlx::query(
-                    // Read in the same statement, under the same write lock, as the row it stamps.
+                // Read in the same statement, under the same write lock, as the row it stamps.
+                sqlx::query!(
                     "INSERT INTO search_events
                        (id, query, door, scope, filters, query_vec, vec_dim, embed_model,
                         created_at, answered, generation_id)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                              (SELECT id FROM generations WHERE state = 'live'
                                ORDER BY created_at DESC, id DESC LIMIT 1))",
+                    &id,
+                    &ev.query,
+                    ev.door.as_str(),
+                    &ev.scope,
+                    &ev.filters,
+                    vec_to_blob(&ev.query_vec),
+                    ev.query_vec.len() as i64,
+                    &ev.embed_model,
+                    at,
+                    ev.answered as i64
                 )
-                .bind(&id)
-                .bind(&ev.query)
-                .bind(ev.door.as_str())
-                .bind(&ev.scope)
-                .bind(&ev.filters)
-                .bind(vec_to_blob(&ev.query_vec))
-                .bind(ev.query_vec.len() as i64)
-                .bind(&ev.embed_model)
-                .bind(at)
-                .bind(ev.answered as i64)
                 .execute(&mut *tx)
                 .await?;
                 id
@@ -381,7 +375,7 @@ impl Store {
     }
 
     pub async fn band_use(&self, generation_id: &str, spread_max: usize) -> Result<BandUse> {
-        let r = sqlx::query(
+        let r = sqlx::query!(
             "SELECT
                COALESCE(SUM(CASE WHEN c.band = 1 THEN 1 ELSE 0 END), 0) AS band_used,
                COALESCE(SUM(CASE WHEN c.band = 0 AND c.rank >=
@@ -393,14 +387,14 @@ impl Store {
                ON c.event_id = o.event_id AND c.artifact_id = o.artifact_id
               AND c.shown = 1
             WHERE o.generation_id = ? AND o.source = 'opened' AND o.excluded_at IS NULL",
+            spread_max as i64,
+            generation_id
         )
-        .bind(spread_max as i64)
-        .bind(generation_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(BandUse {
-            band_used: r.get::<i64, _>("band_used") as usize,
-            tail_used: r.get::<i64, _>("tail_used") as usize,
+            band_used: r.band_used as usize,
+            tail_used: r.tail_used as usize,
         })
     }
 
@@ -568,7 +562,7 @@ impl Store {
 
         // Read before the stamp destroys "already opened". The rank recorded is the screen
         // position over shown rows (ranked window, then band), 1-based; pool rank is untouched.
-        let before = sqlx::query(
+        let before = sqlx::query!(
             "SELECT e.opened_at AS opened_at, e.query AS query,
                     e.query_vec AS query_vec, e.embed_model AS embed_model,
                     (SELECT COUNT(*) FROM search_candidates s
@@ -584,9 +578,9 @@ impl Store {
               WHERE e.id = ?
               ORDER BY c.shown DESC, c.rank ASC
               LIMIT 1",
+            artifact_id,
+            event_id
         )
-        .bind(artifact_id)
-        .bind(event_id)
         .fetch_optional(&mut *tx)
         .await?;
 
@@ -607,28 +601,23 @@ impl Store {
 
         // An open is the strongest thing a plain search says.
         if let (true, Some(g), Some(row)) = (stamped, &generation, &before)
-            && row.get::<Option<i64>, _>("opened_at").is_none()
+            && row.opened_at.is_none()
         {
             crate::store::observations::insert(
                 &mut *tx,
                 &crate::store::observations::NewObservation {
                     generation_id: g.id.clone(),
-                    query: row.get("query"),
-                    query_vec: blob_to_vec(&row.get::<Vec<u8>, _>("query_vec")),
-                    embed_model: row.get("embed_model"),
+                    query: row.query.clone(),
+                    query_vec: blob_to_vec(&row.query_vec),
+                    embed_model: row.embed_model.clone(),
                     artifact_id: Some(artifact_id.to_string()),
                     // 1-based screen position, or pool position if never shown. An explored row is
                     // charged where the ranking put it: the exploration's whole value.
-                    rank: Some(
-                        match (
-                            row.get::<Option<i64>, _>("explored_from"),
-                            row.get::<i64, _>("shown") == 1,
-                        ) {
-                            (Some(natural), _) => natural + 1,
-                            (None, true) => row.get::<i64, _>("shown_rank") + 1,
-                            (None, false) => row.get::<i64, _>("rank") + 1,
-                        },
-                    ),
+                    rank: Some(match (row.explored_from, row.shown == 1) {
+                        (Some(natural), _) => natural + 1,
+                        (None, true) => row.shown_rank + 1,
+                        (None, false) => row.rank + 1,
+                    }),
                     source: crate::store::observations::Source::Opened,
                     event_id: Some(event_id.to_string()),
                 },
@@ -677,15 +666,15 @@ impl Store {
     /// cannot erase somebody else's.
     pub async fn unjudge(&self, event_id: &str, by: Labeller) -> Result<()> {
         Self::judged_one(
-            sqlx::query(
-                // `skips` resets too, or the event stays invisible to `pending_count`.
+            // `skips` resets too, or the event stays invisible to `pending_count`.
+            sqlx::query!(
                 "UPDATE search_events
                  SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = NULL,
                      skips = 0
                  WHERE id = ? AND judged_by IS ?",
+                event_id,
+                by.as_sql()
             )
-            .bind(event_id)
-            .bind(by.as_sql())
             .execute(&self.pool)
             .await?,
         )
@@ -705,6 +694,7 @@ impl Store {
 
     /// Two index seeks per unjudged event (`dealable!`); with `retain_days = 0` the set only grows.
     pub(crate) async fn pending_count(&self, weak_below: f32) -> Result<i64> {
+        // runtime: shares the `dealable!` predicate with the other reads of the pool.
         Ok(sqlx::query_scalar(concat!(
             "SELECT count(*) FROM search_events WHERE ",
             dealable!()
@@ -740,7 +730,7 @@ impl Store {
 
         // A correlated subquery: an artifact may sit in the pool twice (ranked and band). The band
         // counts; the place is the screen position, the same expression `open_event` stamps.
-        let ranks: Vec<Option<i64>> = sqlx::query(
+        let ranks: Vec<Option<i64>> = sqlx::query!(
             "SELECT (SELECT CASE WHEN c.shown = 1
                                  THEN (SELECT COUNT(*) FROM search_candidates s
                                         WHERE s.event_id = e.id AND s.shown = 1
@@ -752,12 +742,12 @@ impl Store {
                       ORDER BY c.shown DESC, c.band ASC, c.rank ASC
                       LIMIT 1) AS rank
                FROM search_events e
-              WHERE e.verdict = 'hit'",
+              WHERE e.verdict = 'hit'"
         )
         .fetch_all(&self.pool)
         .await?
-        .iter()
-        .map(|r| r.get::<Option<i64>, _>("rank"))
+        .into_iter()
+        .map(|r| r.rank)
         .collect();
 
         s.finds = ranks.iter().filter(|r| r.is_none()).count() as i64;
@@ -780,28 +770,27 @@ impl Store {
     /// Gaps and discards name no artifact. Scoped to one generation: other eras' vectors are
     /// not readable by the live index.
     pub async fn judged_pairs(&self, generation_id: &str, limit: usize) -> Result<Vec<JudgedPair>> {
-        Ok(sqlx::query(
-            "SELECT e.id, e.query, e.expect_id, e.query_vec, e.embed_model,
-                    (SELECT MIN(COALESCE(c.explored_from, c.rank)) + 1
+        Ok(sqlx::query!(
+            r#"SELECT e.id AS "id!", e.query AS "query!", e.expect_id AS "expect_id!", e.query_vec, e.embed_model, (SELECT MIN(COALESCE(c.explored_from, c.rank)) + 1
                        FROM search_candidates c
                       WHERE c.event_id = e.id AND c.artifact_id = e.expect_id) AS served_rank
                FROM search_events e
               WHERE e.verdict = 'hit' AND e.expect_id IS NOT NULL AND e.generation_id = ?
               ORDER BY e.judged_at DESC, e.id DESC
-              LIMIT ?",
+              LIMIT ?"#,
+            generation_id,
+            limit as i64
         )
-        .bind(generation_id)
-        .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(|r| JudgedPair {
-            event_id: r.get("id"),
-            query: r.get("query"),
-            expect: r.get("expect_id"),
-            query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-            embed_model: r.get("embed_model"),
-            served_rank: r.get("served_rank"),
+            event_id: r.id,
+            query: r.query,
+            expect: r.expect_id,
+            query_vec: blob_to_vec(&r.query_vec),
+            embed_model: r.embed_model,
+            served_rank: r.served_rank,
         })
         .collect())
     }
@@ -883,47 +872,42 @@ impl Store {
 
     /// The judge door is excluded: a benchmark query is not a need.
     pub async fn events_between(&self, from: i64, to: i64) -> Result<Vec<RecordedEvent>> {
-        let rows = sqlx::query(
-            "SELECT id, query, query_vec, created_at, answered, verdict, expect_id, scope
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", query, query_vec, created_at, answered, verdict, expect_id, scope
                FROM search_events
               WHERE created_at > ? AND created_at <= ? AND door <> 'judge'
-              ORDER BY created_at, id",
+              ORDER BY created_at, id"#,
+            from,
+            to
         )
-        .bind(from)
-        .bind(to)
         .fetch_all(&self.pool)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let id: String = r.get("id");
-            let shown: Vec<(String, Option<f32>)> = sqlx::query(
+        for r in rows {
+            let id: String = r.id;
+            let shown: Vec<(String, Option<f32>)> = sqlx::query!(
                 "SELECT artifact_id, similarity FROM search_candidates
                   WHERE event_id = ? AND shown = 1 AND band = 0 ORDER BY rank",
+                &id
             )
-            .bind(&id)
             .fetch_all(&self.pool)
             .await?
-            .iter()
-            .map(|c| {
-                (
-                    c.get::<String, _>("artifact_id"),
-                    c.get::<Option<f32>, _>("similarity"),
-                )
-            })
+            .into_iter()
+            .map(|c| (c.artifact_id, c.similarity.map(|x| x as f32)))
             .collect();
-            let verdict: Option<String> = r.get("verdict");
+            let verdict: Option<String> = r.verdict;
             out.push(RecordedEvent {
                 id,
-                query: r.get("query"),
-                query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-                created_at: r.get("created_at"),
-                answered: r.get::<i64, _>("answered") != 0,
+                query: r.query,
+                query_vec: blob_to_vec(&r.query_vec),
+                created_at: r.created_at,
+                answered: r.answered != 0,
                 confirmed: if verdict.as_deref() == Some("hit") {
-                    r.get("expect_id")
+                    r.expect_id
                 } else {
                     None
                 },
-                scope: r.get("scope"),
+                scope: r.scope,
                 shown,
             });
         }
@@ -1360,12 +1344,12 @@ mod tests {
     }
 
     async fn queries(store: &Store) -> Vec<String> {
-        sqlx::query("SELECT query FROM search_events ORDER BY created_at")
+        sqlx::query!("SELECT query FROM search_events ORDER BY created_at")
             .fetch_all(&store.pool)
             .await
             .unwrap()
-            .iter()
-            .map(|r| r.get::<String, _>("query"))
+            .into_iter()
+            .map(|r| r.query)
             .collect()
     }
 
@@ -1667,7 +1651,9 @@ mod tests {
     #[tokio::test]
     async fn the_waiting_count_reads_the_pool_through_an_index() {
         // Both lookups must be index reads: the unjudged set only grows.
+        use sqlx::Row;
         let store = Store::memory().await.unwrap();
+        // runtime: shares the `dealable!` predicate with the other reads of the pool.
         let plan: Vec<String> = sqlx::query(concat!(
             "EXPLAIN QUERY PLAN SELECT count(*) FROM search_events WHERE ",
             dealable!()
@@ -1933,12 +1919,12 @@ mod tests {
         second.candidates[0].artifact_id = "a2".into();
         store.record_search(second, 15).await.unwrap();
 
-        let rows = sqlx::query("SELECT artifact_id FROM search_candidates")
+        let rows = sqlx::query!("SELECT artifact_id FROM search_candidates")
             .fetch_all(&store.pool)
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].get::<String, _>("artifact_id"), "a2");
+        assert_eq!(rows[0].artifact_id, "a2");
     }
 
     #[tokio::test]
@@ -1956,11 +1942,13 @@ mod tests {
         let second = store.record_search(filtered, 15).await.unwrap();
 
         assert_ne!(first, second, "the empty search started its own event");
-        let kept = sqlx::query("SELECT artifact_id FROM search_candidates WHERE event_id = ?")
-            .bind(&first)
-            .fetch_all(&store.pool)
-            .await
-            .unwrap();
+        let kept = sqlx::query!(
+            "SELECT artifact_id FROM search_candidates WHERE event_id = ?",
+            &first
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
         assert_eq!(kept.len(), 1, "the pool that answered the query survived");
     }
 
@@ -1977,12 +1965,12 @@ mod tests {
         store.record_search(filtered, 15).await.unwrap();
 
         assert_eq!(queries(&store).await, vec!["fat32"]);
-        let rows = sqlx::query("SELECT artifact_id FROM search_candidates")
+        let rows = sqlx::query!("SELECT artifact_id FROM search_candidates")
             .fetch_all(&store.pool)
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].get::<String, _>("artifact_id"), "a2");
+        assert_eq!(rows[0].artifact_id, "a2");
     }
 
     #[tokio::test]
@@ -2357,16 +2345,15 @@ mod tests {
     async fn the_query_vector_survives_a_round_trip_through_the_blob() {
         let store = Store::memory().await.unwrap();
         let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
-        let row = sqlx::query("SELECT query_vec, vec_dim FROM search_events WHERE id = ?")
-            .bind(&id)
-            .fetch_one(&store.pool)
-            .await
-            .unwrap();
-        assert_eq!(row.get::<i64, _>("vec_dim"), 2);
-        assert_eq!(
-            blob_to_vec(&row.get::<Vec<u8>, _>("query_vec")),
-            vec![0.5, -0.25]
-        );
+        let row = sqlx::query!(
+            "SELECT query_vec, vec_dim FROM search_events WHERE id = ?",
+            &id
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.vec_dim, 2);
+        assert_eq!(blob_to_vec(&row.query_vec), vec![0.5, -0.25]);
     }
 
     #[tokio::test]

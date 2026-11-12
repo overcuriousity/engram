@@ -110,8 +110,8 @@ impl Store {
         }
 
         for (idx, w) in windows.iter().enumerate() {
-            sqlx::query(
-                // `carry_lines` stays in the schema at a constant 0.
+            // `carry_lines` stays in the schema at a constant 0.
+            sqlx::query!(
                 "INSERT INTO segments (corpus_id, idx, start_line, end_line, text, carry_lines)
                  VALUES (?, ?, ?, ?, ?, 0)
                  ON CONFLICT(corpus_id, idx) DO UPDATE SET
@@ -120,12 +120,12 @@ impl Store {
                    text = excluded.text,
                    carry_lines = 0,
                    no_promote = 0",
+                corpus_id,
+                idx as i64,
+                w.start_line,
+                w.end_line,
+                w.text
             )
-            .bind(corpus_id)
-            .bind(idx as i64)
-            .bind(w.start_line)
-            .bind(w.end_line)
-            .bind(w.text)
             .execute(&mut *tx)
             .await?;
         }

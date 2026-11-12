@@ -4,7 +4,6 @@
 use super::feedback::{blob_to_vec, vec_to_blob};
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
@@ -80,21 +79,34 @@ pub struct Observation {
     pub embed_model: String,
 }
 
-const COLUMNS: &str = "id, created_at, generation_id, query, query_vec, artifact_id,                        rank, source, strength, event_id, embed_model";
+/// A row as `read` reads it, for `query_as!`.
+pub(crate) struct ObservationRow {
+    pub id: String,
+    pub created_at: i64,
+    pub generation_id: String,
+    pub query: String,
+    pub query_vec: Vec<u8>,
+    pub artifact_id: Option<String>,
+    pub rank: Option<i64>,
+    pub source: String,
+    pub strength: f64,
+    pub event_id: Option<String>,
+    pub embed_model: String,
+}
 
-fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Observation> {
+fn read(r: ObservationRow) -> Result<Observation> {
     Ok(Observation {
-        id: r.get("id"),
-        created_at: r.get("created_at"),
-        generation_id: r.get("generation_id"),
-        query: r.get("query"),
-        query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-        artifact_id: r.get("artifact_id"),
-        rank: r.get("rank"),
-        source: Source::parse(&r.get::<String, _>("source"))?,
-        strength: r.get("strength"),
-        event_id: r.get("event_id"),
-        embed_model: r.get("embed_model"),
+        id: r.id,
+        created_at: r.created_at,
+        generation_id: r.generation_id,
+        query: r.query,
+        query_vec: blob_to_vec(&r.query_vec),
+        artifact_id: r.artifact_id,
+        rank: r.rank,
+        source: Source::parse(&r.source)?,
+        strength: r.strength as f32,
+        event_id: r.event_id,
+        embed_model: r.embed_model,
     })
 }
 
@@ -138,17 +150,18 @@ impl Store {
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<Observation>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM observations
+        sqlx::query_as!(
+            ObservationRow,
+            r#"SELECT id AS "id!", created_at AS "created_at!", generation_id AS "generation_id!", query AS "query!", query_vec AS "query_vec!", artifact_id AS "artifact_id?", rank AS "rank?", source AS "source!", strength AS "strength!", event_id AS "event_id?", embed_model AS "embed_model!" FROM observations
               WHERE generation_id = ? AND excluded_at IS NULL
               ORDER BY created_at DESC, id DESC
-              LIMIT ?"
-        )))
-        .bind(generation_id)
-        .bind(limit as i64)
+              LIMIT ?"#,
+            generation_id,
+            limit as i64
+        )
         .fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
@@ -163,25 +176,24 @@ impl Store {
         chat_model: &str,
         limit: usize,
     ) -> Result<Vec<Observation>> {
-        sqlx::query(
-            "SELECT o.id, o.created_at, o.generation_id, o.query, o.query_vec, o.artifact_id,
-                    o.rank, o.source, o.strength, o.event_id, o.embed_model
+        sqlx::query_as!(
+            crate::store::observations::ObservationRow,
+            r#"SELECT o.id AS "id!", o.created_at AS "created_at!", o.generation_id AS "generation_id!", o.query AS "query!", o.query_vec AS "query_vec!", o.artifact_id AS "artifact_id?", o.rank AS "rank?", o.source AS "source!", o.strength AS "strength!", o.event_id AS "event_id?", o.embed_model AS "embed_model!"
                FROM observations o
                JOIN generations g ON g.id = o.generation_id
               WHERE o.artifact_id = ? AND o.created_at <= ? AND o.strength > 0
                 AND o.excluded_at IS NULL
                 AND g.embed_recipe = ? AND g.chat_model = ?
               ORDER BY o.created_at DESC, o.id DESC
-              LIMIT ?",
-        )
-        .bind(artifact_id)
-        .bind(before)
-        .bind(embed_recipe)
-        .bind(chat_model)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              LIMIT ?"#,
+            artifact_id,
+            before,
+            embed_recipe,
+            chat_model,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
@@ -193,20 +205,21 @@ impl Store {
         after: &crate::store::Cursor,
         limit: usize,
     ) -> Result<Vec<Observation>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM observations
+        sqlx::query_as!(
+            ObservationRow,
+            r#"SELECT id AS "id!", created_at AS "created_at!", generation_id AS "generation_id!", query AS "query!", query_vec AS "query_vec!", artifact_id AS "artifact_id?", rank AS "rank?", source AS "source!", strength AS "strength!", event_id AS "event_id?", embed_model AS "embed_model!" FROM observations
               WHERE source = 'gave_up' AND excluded_at IS NULL
                 AND (created_at > ? OR (created_at = ? AND id > ?))
               ORDER BY created_at ASC, id ASC
-              LIMIT ?"
-        )))
-        .bind(after.at)
-        .bind(after.at)
-        .bind(&after.id)
-        .bind(limit as i64)
+              LIMIT ?"#,
+            after.at,
+            after.at,
+            &after.id,
+            limit as i64
+        )
         .fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }

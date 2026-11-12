@@ -319,28 +319,27 @@ async fn bump_one(
     half_life_days: f64,
     at: i64,
 ) -> Result<()> {
-    let row = sqlx::query(
+    let row = sqlx::query!(
         "SELECT weight, bumped_at, queries, cues FROM artifact_links
               WHERE a_id = ? AND b_id = ?",
+        a,
+        b
     )
-    .bind(a)
-    .bind(b)
     .fetch_optional(&mut *tx)
     .await?;
 
     match row {
         Some(r) => {
-            let mut cues: Vec<Cue> =
-                serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default();
+            let mut cues: Vec<Cue> = serde_json::from_str(&r.cues).unwrap_or_default();
             let fresh = cue.is_some_and(|q| bump_cue(&mut cues, q));
-            let weight = decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days) + delta;
+            let weight = decayed(r.weight, r.bumped_at, at, half_life_days) + delta;
             sqlx::query!(
                 "UPDATE artifact_links
                         SET weight = ?, bumped_at = ?, queries = ?, cues = ?
                       WHERE a_id = ? AND b_id = ?",
                 weight,
                 at,
-                r.get::<i64, _>("queries") + i64::from(fresh),
+                r.queries + i64::from(fresh),
                 serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()),
                 a,
                 b
@@ -523,8 +522,9 @@ impl Store {
         let allowed: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
         let mut out: Vec<LinkedTo> = Vec::new();
         for anchor in anchors {
-            let rows = sqlx::query(
-                // Necessary, not sufficient: decay lowers it, and not every SQLite build has `pow`.
+            // Necessary, not sufficient: decay lowers it, and not every SQLite build has `pow`.
+            // SQLite reads a negative LIMIT as unbounded.
+            let rows = sqlx::query!(
                 "SELECT l.a_id AS a_id, l.b_id AS b_id, l.weight AS weight,
                         l.bumped_at AS bumped_at, l.state AS state, l.reason AS reason,
                         l.cues AS cues,
@@ -537,37 +537,36 @@ impl Store {
                     AND a.status = 'active' AND a.superseded_by IS NULL
                     AND b.status = 'active' AND b.superseded_by IS NULL
                   ORDER BY l.weight DESC LIMIT ?",
+                anchor,
+                anchor,
+                min_weight,
+                limit.max(0).saturating_mul(4)
             )
-            .bind(anchor)
-            .bind(anchor)
-            .bind(min_weight)
-            // SQLite reads a negative LIMIT as unbounded.
-            .bind(limit.max(0).saturating_mul(4))
             .fetch_all(&self.pool)
             .await?;
 
-            for r in &rows {
-                let state = LinkState::parse(r.get::<String, _>("state").as_str());
+            for r in rows {
+                let state = LinkState::parse(r.state.as_str());
                 // Enforced here, not by callers' `states`: the operator's "not related" is final.
                 if state == LinkState::Dismissed || !allowed.contains(&state.as_str()) {
                     continue;
                 }
-                let weight = decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days);
+                let weight = decayed(r.weight, r.bumped_at, at, half_life_days);
                 if weight < min_weight {
                     continue;
                 }
-                let a_id: String = r.get("a_id");
-                let b_id: String = r.get("b_id");
+                let a_id: String = r.a_id;
+                let b_id: String = r.b_id;
                 let other = if &a_id == anchor { b_id } else { a_id };
-                let a_corpus: Option<String> = r.get("a_corpus");
-                let b_corpus: Option<String> = r.get("b_corpus");
+                let a_corpus: Option<String> = r.a_corpus;
+                let b_corpus: Option<String> = r.b_corpus;
                 out.push(LinkedTo {
                     via: anchor.clone(),
                     other,
                     weight,
                     state,
-                    reason: r.get("reason"),
-                    cues: serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default(),
+                    reason: r.reason,
+                    cues: serde_json::from_str(&r.cues).unwrap_or_default(),
                     // Merges are decided below through origins.
                     cross_corpus: match (a_corpus, b_corpus) {
                         (Some(x), Some(y)) => x != y,
@@ -656,27 +655,28 @@ impl Store {
         .await?
         .rows_affected();
 
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT a_id, b_id, weight, bumped_at FROM artifact_links
               WHERE state = 'learning' ORDER BY bumped_at ASC LIMIT ?",
+            scan_limit
         )
-        .bind(scan_limit)
         .fetch_all(&self.pool)
         .await?;
-        for r in &rows {
-            if decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days) >= below {
+        let scanned = rows.len() as i64;
+        for r in rows {
+            if decayed(r.weight, r.bumped_at, at, half_life_days) >= below {
                 continue;
             }
             dropped += sqlx::query!(
                 "DELETE FROM artifact_links WHERE a_id = ? AND b_id = ?",
-                r.get::<String, _>("a_id"),
-                r.get::<String, _>("b_id")
+                r.a_id,
+                r.b_id
             )
             .execute(&self.pool)
             .await?
             .rows_affected();
         }
-        if rows.len() as i64 == scan_limit {
+        if scanned == scan_limit {
             tracing::info!(
                 scan_limit,
                 "prune scan hit its cap; the rest waits for the next sweep"
@@ -687,8 +687,8 @@ impl Store {
 
     /// The judge read text that no longer exists.
     pub async fn reopen_stale_judged_links(&self, limit: i64) -> Result<u64> {
-        Ok(sqlx::query(
-            // `judge_attempts` is kept: a re-embed gets one more call, not a fresh three.
+        // `judge_attempts` is kept: a re-embed gets one more call, not a fresh three.
+        Ok(sqlx::query!(
             "UPDATE artifact_links
                 SET state = 'learning', reason = NULL,
                     judged_rev_a = NULL, judged_rev_b = NULL
@@ -700,8 +700,8 @@ impl Store {
                    AND (a.embed_rev IS NOT l.judged_rev_a OR b.embed_rev IS NOT l.judged_rev_b)
                  LIMIT ?
               )",
+            limit
         )
-        .bind(limit)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -777,6 +777,7 @@ impl Store {
         let holes = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT id, activation, activated_at, created_at FROM artifacts WHERE id IN ({holes})"
         )));
@@ -813,15 +814,17 @@ impl Store {
         }
         for id in ids {
             let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-            let row = sqlx::query("SELECT activation, activated_at FROM artifacts WHERE id = ?")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?;
+            let row = sqlx::query!(
+                "SELECT activation, activated_at FROM artifacts WHERE id = ?",
+                id
+            )
+            .fetch_optional(&mut *tx)
+            .await?;
             let Some(row) = row else {
                 continue;
             };
-            let value: f64 = row.get("activation");
-            let stamp: i64 = row.get("activated_at");
+            let value: f64 = row.activation;
+            let stamp: i64 = row.activated_at;
             sqlx::query!(
                 "UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?",
                 decayed(value, stamp, at, half_life_days) + delta,
