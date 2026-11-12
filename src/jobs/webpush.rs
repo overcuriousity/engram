@@ -313,11 +313,6 @@ mod tests {
         B64.decode(s).unwrap()
     }
 
-    /// RFC 8291 §5, the published example: the receiver's key and auth
-    /// secret, and the ciphertext the sender produced from a known ephemeral
-    /// key and salt. Decrypting is the whole of RFC 8291 run backwards — the
-    /// same ECDH, the same HKDF info strings, the same record layer — and an
-    /// AEAD tag that verifies is not a coincidence.
     #[test]
     fn the_rfc_8291_example_decrypts_to_its_plaintext() {
         let secret =
@@ -338,10 +333,6 @@ mod tests {
         assert_eq!(plain, b"When I grow up, I want to be a watermelon");
     }
 
-    /// The same example forwards: the RFC's sender key and salt, encrypted
-    /// to the RFC's receiver, give the RFC's ciphertext byte for byte. The
-    /// one field that differs is the record size, which the example sets to
-    /// 4096 and `encrypt` sets to the one record it writes.
     #[test]
     fn the_rfc_8291_example_encrypts_to_its_ciphertext() {
         let ua_public = p256::PublicKey::from_sec1_bytes(&b64(
@@ -443,10 +434,6 @@ mod tests {
         );
     }
 
-    /// RFC 8292 §2 caps `exp` at 24 hours from the request, and FCM and
-    /// Mozilla reject at the boundary. `exp` was `now + TTL`, which is exactly
-    /// 24 hours: a server clock seconds ahead of the push service turned every
-    /// push into a 401.
     #[tokio::test]
     async fn the_vapid_token_expires_well_inside_the_cap_that_rfc_8292_sets() {
         let (_, _, keys) = a_receiver();

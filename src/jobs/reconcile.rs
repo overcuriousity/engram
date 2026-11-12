@@ -637,8 +637,6 @@ mod tests {
         );
     }
 
-    /// A finished capture whose windows are all resolved and whose one
-    /// artifact claims only lines 1..4 of eight: lines 5..8 were lost.
     async fn a_capture_that_lost_its_second_half(
         core: &Core,
         status: CorpusStatus,
@@ -646,8 +644,6 @@ mod tests {
         a_capture_that_lost_its_second_half_named(core, status, "eight").await
     }
 
-    /// The same capture with its last line given, so several can be told
-    /// apart — the store folds identical captures into one.
     async fn a_capture_that_lost_its_second_half_named(
         core: &Core,
         status: CorpusStatus,

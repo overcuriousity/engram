@@ -346,8 +346,6 @@ mod tests {
         );
     }
 
-    /// The paste-a-link door and the MCP door both point at documents, and a
-    /// document at a URL is as often a PDF as a page.
     #[tokio::test]
     async fn fetch_hands_back_a_pdf_as_bytes() {
         let server = MockServer::start().await;
@@ -383,8 +381,6 @@ mod tests {
         }
     }
 
-    /// A book is tens of megabytes and a page is not; each kind is held to
-    /// its own ceiling, the one the upload doors already apply.
     #[tokio::test]
     async fn a_fetched_pdf_is_held_to_the_pdf_ceiling_not_the_page_one() {
         let server = MockServer::start().await;

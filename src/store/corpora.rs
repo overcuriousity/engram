@@ -994,9 +994,6 @@ mod tests {
     use super::*;
     use crate::store::Store;
 
-    /// Four columns and not the row: `raw_text` on a captured book is the whole
-    /// book, and the single-artifact read that needs a source name was loading
-    /// it on every request to print a title.
     #[tokio::test]
     async fn where_a_corpus_came_from_is_read_without_its_text() {
         let s = Store::memory().await.unwrap();

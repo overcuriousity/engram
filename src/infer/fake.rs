@@ -908,9 +908,6 @@ impl Transcriber for FakeTranscriber {
 mod tests {
     use super::*;
 
-    /// The default implementation is the compatibility guarantee: an implementor
-    /// that knows nothing about streaming still streams, as one delta. Without
-    /// it every fake in the test suite would need a hand-written override.
     #[tokio::test]
     async fn a_completer_without_an_override_streams_its_whole_answer_as_one_delta() {
         let c = FakeCompleter {
@@ -928,9 +925,6 @@ mod tests {
         assert_eq!(done.text, "the answer");
     }
 
-    /// The returned completion, not the accumulated deltas, is what a caller
-    /// stores: a receiver that went away mid-answer must neither fail the call
-    /// nor shorten what it returns.
     #[tokio::test]
     async fn a_dropped_receiver_neither_fails_the_call_nor_truncates_its_answer() {
         let c = FakeCompleter {

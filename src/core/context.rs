@@ -633,7 +633,6 @@ mod tests {
         crate::config::BlockWeights::default()
     }
 
-    /// A bundle a phone in Berlin would send.
     fn phone() -> Bundle {
         Bundle {
             tz: Some("Europe/Berlin".into()),
@@ -659,8 +658,6 @@ mod tests {
         }
     }
 
-    /// A bundle a desktop in London would send. Nothing about it agrees with
-    /// `phone()`, which is what makes it useful.
     fn desktop() -> Bundle {
         Bundle {
             platform: Some("macOS".into()),
@@ -850,8 +847,6 @@ mod tests {
         assert_ne!(device_key(&phone()), device_key(&other));
     }
 
-    /// Every name the struct reads, off the source. Shared by the two tests
-    /// below and by the app.js test above, which reads it the same way.
     fn bundle_field_names() -> std::collections::BTreeSet<&'static str> {
         let src = include_str!("context.rs");
         let body = src

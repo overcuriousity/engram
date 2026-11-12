@@ -1774,8 +1774,6 @@ mod tests {
 
     use crate::web::test_support::chunk_fixture;
 
-    /// A passage fixture: the heading the document gave it, over text of its
-    /// own.
     fn passage_fixture(title: Option<&str>, text: &str) -> crate::store::artifacts::Chunk {
         crate::store::artifacts::Chunk {
             provenance: crate::store::artifacts::Provenance::Passage,
@@ -1783,10 +1781,6 @@ mod tests {
         }
     }
 
-    /// A table cell or a graph node whose whole content is the label has
-    /// nothing else to fall back on: emptied, it is a link nobody can see or
-    /// click. It shows the opening of the text instead, and says so, so the
-    /// door can set it as text rather than in the place a name would go.
     #[test]
     fn a_row_that_is_only_a_label_falls_back_to_the_text_not_to_a_name() {
         let c = passage_fixture(
@@ -1802,10 +1796,6 @@ mod tests {
         assert!(!l.named, "the opening of a text is not a name");
     }
 
-    /// The rule must not overshoot. `Captured` is the synthesis rewrite of a
-    /// window — a model wrote the text and named it in the same call — and it
-    /// is source text, so a rule written against `is_model_written` would have
-    /// stripped exactly the names worth keeping.
     #[test]
     fn an_artifact_a_writer_named_keeps_its_name() {
         let c = chunk_fixture(Some("Wie ein Journal wiederhergestellt wird"), "body");
@@ -1815,8 +1805,6 @@ mod tests {
         assert!(l.named);
     }
 
-    /// Store a passage carrying the heading of the section it was cut from,
-    /// and hand back its id.
     async fn stored_passage(core: &crate::core::Core, title: &str, text: &str) -> (String, String) {
         let src = core.ingest(text, "web", None).await.unwrap();
         let p = core
@@ -1836,9 +1824,6 @@ mod tests {
         (src.id, p[0].id.clone())
     }
 
-    /// Housekeeping lists a merge's sources as bare anchors — the label is the
-    /// whole cell. Emptying it there leaves a link with nothing to read and
-    /// nothing to click.
     #[tokio::test]
     async fn a_housekeeping_source_row_for_a_passage_is_still_a_link_you_can_read() {
         let core = crate::core::test_support::test_core().await;
@@ -1857,9 +1842,6 @@ mod tests {
         assert!(!rows[0].named, "the opening of a text is not a name");
     }
 
-    /// `row_subtitle` is "when it was written · how it opens", for a table
-    /// where the name alone may not be unique. Where the label already *is*
-    /// the opening, the subtitle repeated it directly underneath.
     #[tokio::test]
     async fn a_row_whose_label_is_its_opening_does_not_say_it_twice() {
         let core = crate::core::test_support::test_core().await;
@@ -2205,14 +2187,10 @@ mod tests {
         assert!(found, "nothing would ever retry the segment");
     }
 
-    /// A session on the given core, for pages that need a core built a
-    /// particular way.
     async fn app_for(core: crate::core::Core) -> (axum::Router, String) {
         app_with_cookie(core).await
     }
 
-    /// A core holding one pair the judge has not read yet — the state that
-    /// used to put a card in front of a person, and now waits on nobody.
     async fn app_with_a_waiting_pair() -> (axum::Router, String) {
         let core = crate::core::test_support::test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -2243,13 +2221,6 @@ mod tests {
         app_for(core).await
     }
 
-    /// The ask door, which is the workspace with the question already in the
-    /// box and Ask one press away — the link a question is carried by.
-    ///
-    /// Filled and still. A filled box otherwise carries a `load` trigger that
-    /// searches it on arrival, and through this door that meant the question
-    /// was searched for rather than asked — the one thing the door is named
-    /// after was the one thing it did not do.
     #[tokio::test]
     async fn the_ask_door_fills_the_one_box_and_runs_nothing_on_arrival() {
         let core = crate::core::test_support::test_core().await;
@@ -2285,13 +2256,6 @@ mod tests {
         }
     }
 
-    /// On a wide window the workspace is pinned to the viewport and the body
-    /// does not scroll; the height is handed down the chain to the artifact
-    /// card, which scrolls. The answer is not on that chain — `#ask-live` and
-    /// `#ask-result` are siblings of `#pane-content` — so a long answer grew
-    /// the column past the window and the body's `overflow: hidden` clipped
-    /// it, with nothing anywhere to scroll. Each has to be its own scroller
-    /// inside the pinned block, and the live one has to follow its own tail.
     #[test]
     fn a_long_answer_scrolls_inside_the_pinned_workspace() {
         let css = crate::web::assets::Assets::get("app.css").expect("app.css is embedded");
@@ -2323,8 +2287,6 @@ mod tests {
         );
     }
 
-    /// No ask model, no ask door: not a greyed-out button over a page that
-    /// explains itself, and not a route that 500s. The door is simply absent.
     #[tokio::test]
     async fn the_ask_door_is_absent_without_a_model() {
         let core = crate::core::test_support::test_core_without_ask().await;
@@ -2353,9 +2315,6 @@ mod tests {
         );
     }
 
-    /// The capture door, which is the workspace with the box already filled.
-    /// The extension posts here and so does *keep this answer*, and neither
-    /// knows anything about the page having folded into one.
     #[tokio::test]
     async fn the_capture_door_fills_the_one_box_and_keeps_its_provenance() {
         let (app, cookie, _core, _html, id) = ask_recorded().await;
@@ -2400,8 +2359,6 @@ mod tests {
         );
     }
 
-    /// The file control offers an image either way: without a vision role it
-    /// is stored and read once one is configured, and the hint says so.
     #[tokio::test]
     async fn the_file_control_offers_images_whether_or_not_vision_is_configured() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
@@ -2415,10 +2372,6 @@ mod tests {
         assert!(html.contains("read once a vision model is configured"));
     }
 
-    /// The one page. Capture, search and ask were three of them, and moving
-    /// between them meant retyping or carrying a prefill: the same words are a
-    /// query on one, a question on the second and a document on the third, and
-    /// the operator navigated to say which.
     #[tokio::test]
     async fn the_workspace_is_one_page_carrying_the_box_and_the_three_regions() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
@@ -2446,18 +2399,6 @@ mod tests {
         );
     }
 
-    /// Typing is the third verb, and `input` is what it fires. It was `keyup`,
-    /// which a paste made with the mouse — the context menu, the middle button,
-    /// the phone's own bubble — does not fire at all; and the box's `change` is
-    /// scoped away to the chip row on purpose, because it also fires on the
-    /// blur of the very click that opens a result. So nothing was left to
-    /// notice a pasted paragraph: the box grew, the verbs lit up, and the rail
-    /// under it did not move. On a page whose placeholder ends "paste anything
-    /// worth keeping", that is the hole this test exists to keep shut.
-    ///
-    /// The filter is the other half. `input` fires for every keystroke inside
-    /// an IME composition, so without it a Japanese or Chinese query embedded
-    /// each half-formed romaji fragment on the way to the word.
     #[tokio::test]
     async fn a_paste_searches_because_typing_is_an_input_event() {
         let core = crate::core::test_support::test_core().await;
@@ -2475,14 +2416,6 @@ mod tests {
         );
     }
 
-    /// What the box says it is, to something that is not looking at it.
-    ///
-    /// A placeholder is not a name — a screen reader may ignore it as one, and
-    /// it is gone by the second keystroke — so the one control the page is
-    /// built around announced itself as an unlabelled text field. And the rail
-    /// is replaced under a box that keeps its focus, so twelve results, or
-    /// none, arrived in silence; `#rail-head` is the only part of it that
-    /// survives every swap, and what it already holds is the announcement.
     #[tokio::test]
     async fn the_box_has_a_name_and_the_rail_says_what_it_found() {
         let core = crate::core::test_support::test_core().await;
@@ -2513,21 +2446,6 @@ mod tests {
         );
     }
 
-    /// The idle state is designed, not left over. With an empty box the rail
-    /// introduces the base instead of standing empty, and the file picker is
-    /// on the page from first paint: it once lived inside the staged box,
-    /// which is hidden until a file is staged — a state that rendered
-    /// correctly and a control nobody could reach.
-    /// The one contract behind "a reminder appears while you watch": the
-    /// column is hidden and revealed rather than removed, and the band is
-    /// re-fetchable in place.
-    ///
-    /// Asserted over the sources because the behaviour is a browser's. The
-    /// band used to be *removed* from the document on the first keystroke —
-    /// after which a capture emptied the box, the idle state was correct
-    /// again, and there was no `#due` left for anything to swap into. A
-    /// reminder armed a second ago was invisible until a reload, and no
-    /// server-side test could see it, because on the server nothing was wrong.
     #[test]
     fn the_idle_column_is_hidden_and_the_band_re_fetched_never_removed() {
         let js = include_str!("../../assets/app.js");
@@ -2595,8 +2513,6 @@ mod tests {
         assert!(html.contains("verbatim"), "{html}");
     }
 
-    /// The embed-only floor has no fork to describe: every capture is kept as
-    /// written, and the echo says that rather than promising a synthesis.
     #[tokio::test]
     async fn with_no_synthesizer_the_echo_promises_nothing_but_verbatim() {
         let core = crate::core::test_support::test_core_without_synthesizer().await;
@@ -2642,11 +2558,6 @@ mod tests {
         );
     }
 
-    /// And the bound the exact answer stops at. `search_results` asks this on
-    /// every debounced keystroke, so a whole `MarkdownSplitter` pass over a
-    /// pasted article is work the hottest route in the app must not repeat per
-    /// character. Over the bound the line says "at least", which is what the
-    /// arithmetic actually knows.
     #[tokio::test]
     async fn a_paste_too_big_to_split_twice_a_second_is_estimated_and_says_so() {
         let core = crate::core::test_support::test_core().await;
@@ -2802,10 +2713,6 @@ mod tests {
         assert!(!frag.contains("No matches"), "not a verdict on the base");
     }
 
-    /// The list is retired; the sitting behind it is not. Its own comment gave
-    /// the reason it existed — "the pages had nothing between them, so a hit
-    /// opened on search and wanted again on ask meant searching for it twice"
-    /// — and this is the commit that removes the pages.
     #[tokio::test]
     async fn the_read_just_now_list_is_gone_but_the_sitting_is_not() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
@@ -2819,12 +2726,6 @@ mod tests {
         // `sittings.touched()` still runs on every artifact open.
     }
 
-    /// The surfaces that are maintenance rather than searching. Capture is
-    /// about to stop being a page at all, and none of these belonged on it
-    /// even while it was one: a list of what was just stored is work *on* the
-    /// base rather than work with it. A pair the judge has not read yet was
-    /// the third of them, and is on neither page now — the judge reads it on
-    /// its own and nobody is asked.
     #[tokio::test]
     async fn the_maintenance_surfaces_are_on_insights_and_a_waiting_pair_is_on_neither() {
         let (app, cookie) = app_with_a_waiting_pair().await;
@@ -2852,12 +2753,6 @@ mod tests {
         assert!(!capture.contains("/ui/queue"), "so did the queue");
     }
 
-    /// Housekeeping is Insights now. The old door stays a door: it is in
-    /// bookmarks, in the quiet link at the bottom of the page, and in at least
-    /// one runbook — a 404 there is a broken promise, not a tidy-up.
-    /// Two words for one thing, switched between without a rule. This picks
-    /// the one already doing most of the work; the URLs keep theirs, because a
-    /// path is not addressed to the reader.
     #[tokio::test]
     async fn a_source_is_called_a_source_everywhere_a_person_reads_it() {
         let core = crate::core::test_support::test_core().await;
@@ -2916,9 +2811,6 @@ mod tests {
         );
     }
 
-    /// The page ships the install nudge hidden, on every page, and app.js
-    /// decides — so a browser without JS, or one that already installed the
-    /// app, never sees a banner offering it.
     #[tokio::test]
     async fn the_install_nudge_ships_hidden_and_app_js_gates_it() {
         let (app, cookie) = app_for(crate::core::test_support::test_core().await).await;
@@ -3093,9 +2985,6 @@ mod tests {
         }
     }
 
-    /// Nothing knows what a PDF says until the extraction lands, so the row has
-    /// no opening words to be called by — and an empty label is an anchor with
-    /// nothing to read and nothing to click.
     #[tokio::test]
     async fn a_pdf_waiting_to_be_extracted_is_called_a_document_in_the_queue() {
         let core = crate::core::test_support::test_core().await;
@@ -3117,8 +3006,6 @@ mod tests {
         );
     }
 
-    /// The same base, plus one established situation matching the bundle the
-    /// tests post — so the reason line actually renders.
     async fn app_with_a_learned_situation() -> (axum::Router, String, String) {
         app_with_a_learned_situation_over(
             "when the recycling centre is open",
@@ -3128,9 +3015,6 @@ mod tests {
         .await
     }
 
-    /// The same, over an artifact the caller describes. `provenance` is set on
-    /// the vector payload as well as the row, because the offer's name is read
-    /// from the payload and its snippet from the row.
     async fn app_with_a_learned_situation_over(
         text: &str,
         title: Option<&str>,
@@ -3209,15 +3093,6 @@ mod tests {
         (app, cookie, aid)
     }
 
-    /// Nothing to read means no card, not an empty one.
-    ///
-    /// The nameless branch of `_context.html` makes the snippet the whole of
-    /// the link, and a passage whose body renders to no text at all — a
-    /// figure alone, a rule alone — has no snippet either. Both empty is an
-    /// `offer-filled` box with a link in it that has nothing to read and
-    /// nothing to click, which is exactly the card that branch was added to
-    /// prevent. The area stays as it is when nothing is recommended, and the
-    /// `seen` beacon has nothing to confirm.
     #[tokio::test]
     async fn an_offer_with_neither_a_name_nor_a_snippet_is_not_made() {
         let (app, cookie, _aid) =
@@ -3366,18 +3241,6 @@ mod tests {
         assert!(page.contains(r#"class="offer""#));
     }
 
-    /// A phone hid the whole card and kept the instrument that counts it.
-    ///
-    /// The offer sits inside `.region-bar`, which under 40rem is the fixed bar
-    /// at the thumb, and the rule that sheds the bar's page furniture — the
-    /// hint, the chips, the key teaching — took the offer with it. Hidden did
-    /// not mean absent: `hx-trigger="load"` still fetched, the swap still
-    /// fired, and `confirmOffer` still posted `/ui/context/seen`. Every phone
-    /// view wrote an impression for a card no thumb could reach, into the
-    /// denominator of the one hit rate the rung weights are to be fitted
-    /// against. If it is not shown it must not be counted, and the card is
-    /// rendered only while the box is empty — which on a phone is the one
-    /// moment the screen above the bar is empty too.
     #[test]
     fn the_phone_does_not_hide_a_card_it_still_counts_as_seen() {
         let phone = include_str!("../../assets/css/78-phone.css");
@@ -3551,9 +3414,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The JSON door onto the same offer, held to what the fragment is held
-    /// to: the card names its artifact and its rung, computing it records
-    /// nothing, and `seen` is what writes `recommended_shown`.
     #[tokio::test]
     async fn the_json_offer_is_the_fragments_offer_and_seen_is_what_counts_it() {
         let (app, cookie, store, aid) = app_recommending().await;
@@ -3713,14 +3573,10 @@ mod tests {
         assert!(!page.contains("What was offered"));
     }
 
-    /// `get_body` under the argument order this module's fifty-two call sites
-    /// were written against. The body was a second copy of it.
     async fn get(app: &axum::Router, uri: &str, cookie: &str) -> String {
         get_body(app, cookie, uri).await
     }
 
-    /// A session on an installation that is recording searches, with `pending`
-    /// of them captured and waiting for a verdict.
     async fn app_recording_searches(pending: usize) -> (axum::Router, String) {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
@@ -3766,11 +3622,6 @@ mod tests {
         out
     }
 
-    /// One name for one destination. The nav entry, the tab and the empty
-    /// state were renamed together and two in-page links were left behind, so
-    /// "Judge some" on Insights and "Judge them" on Settings landed on a page
-    /// that called itself something else in all three of the places a reader
-    /// looks to confirm they arrived.
     #[tokio::test]
     async fn every_link_to_the_review_screen_calls_it_what_it_calls_itself() {
         let (app, cookie) = app_recording_searches(3).await;
@@ -3929,8 +3780,6 @@ mod tests {
         assert!(mixed.contains("3 results · 1 loose"), "{mixed}");
     }
 
-    /// A rail row reduced to what the continuation marker reads: which artifact
-    /// it is, and whether it carries a rank to be named by.
     #[cfg(test)]
     fn row(id: &str, rank: &str) -> RenderedResult {
         RenderedResult {
@@ -3960,9 +3809,6 @@ mod tests {
         }
     }
 
-    /// The two markers are exclusive on the page as well as in the struct: a
-    /// row that names a rank must not also carry the offer to fetch, or the
-    /// rail says both "it is over there" and "there is more" about one thing.
     #[test]
     fn the_rail_prints_one_continuation_marker_or_the_other() {
         let mut named = row("a", "#1");
@@ -3985,9 +3831,6 @@ mod tests {
         );
     }
 
-    /// The silent case, and the one worth pinning: a row that continues nowhere
-    /// must print nothing at all. An empty marker element is a line of space
-    /// the reader reads as meaning something.
     #[test]
     fn a_row_that_continues_nowhere_prints_no_marker() {
         let html = askama::Template::render(&ResultsTemplate {
@@ -3999,10 +3842,6 @@ mod tests {
         assert!(!html.contains("rail-continues"), "{html}");
     }
 
-    /// A search result and its next passage both placed. The rail says so by
-    /// pointing at the rank the reader can already see, because the row is
-    /// there and sending them to a second copy of it would be a claim that two
-    /// things are on the page when one is.
     #[test]
     fn a_hit_whose_next_passage_also_placed_names_its_rank() {
         let mut rows = vec![row("a", "#1"), row("b", "#2")];
@@ -4016,9 +3855,6 @@ mod tests {
         );
     }
 
-    /// The ordinary case: the document goes on, and what comes next did not
-    /// place. Nothing about it is on the page, so the row says the one true
-    /// thing — there is more — and the pane is where it gets read.
     #[test]
     fn a_hit_whose_next_passage_did_not_place_says_only_that_it_continues() {
         let mut rows = vec![row("a", "#1")];
@@ -4031,8 +3867,6 @@ mod tests {
         assert!(rows[0].continues_in.is_empty());
     }
 
-    /// The last passage of a document, and the case the whole marker must not
-    /// get wrong: an offer to read on where there is nothing to read.
     #[test]
     fn a_hit_at_the_end_of_its_document_is_marked_neither_way() {
         let mut rows = vec![row("a", "#1")];
@@ -4042,8 +3876,6 @@ mod tests {
         assert!(rows[0].continues_in.is_empty());
     }
 
-    /// An associated row is not a ranked one and carries no rank. Naming it as
-    /// a destination would print "setzt sich fort in" followed by nothing.
     #[test]
     fn a_continuation_into_a_row_with_no_rank_is_not_named_by_rank() {
         let mut rows = vec![row("a", "#1"), row("b", "")];
@@ -4116,9 +3948,6 @@ mod tests {
         }
     }
 
-    /// The offer card's only link is its heading. Dropping the heading for a
-    /// passage left a card nobody could open — the snippet under it is a
-    /// paragraph. With no name the snippet becomes the link, set as text.
     #[test]
     fn an_offer_with_no_name_is_still_a_card_you_can_open() {
         let card = |title: &str| {
@@ -4158,9 +3987,6 @@ mod tests {
         assert!(!named.contains("name-opening"), "{named}");
     }
 
-    /// The rule is drawn once, before the first row past the cliff, and the
-    /// rows past it are greyed but keep their ranks: they placed, they just
-    /// stopped being answers.
     #[test]
     fn the_rail_draws_the_cliff_once_and_greys_what_lies_past_it() {
         let mut above = rendered(None, None);
@@ -4199,11 +4025,6 @@ mod tests {
         assert!(!flat.contains("rail-past"), "{flat}");
     }
 
-    /// A borrowed name is no name. It used to be shown greyed under a "from"
-    /// prefix, which was honest about whose name it was and still put a name
-    /// over a passage — and where the passage carried the heading of its own
-    /// section there was nothing to grey, so the section's name stood over
-    /// twenty slices as if it were theirs. The rail shows the text instead.
     #[test]
     fn the_rail_shows_no_name_where_the_name_is_not_this_texts_own() {
         let hit = |borrowed: bool| crate::core::search::SearchResult {
@@ -4517,16 +4338,6 @@ mod tests {
         );
     }
 
-    /// The pane's controls say what they do, and none of them asks a
-    /// question the verdict bar already asks.
-    ///
-    /// "Verified", later *Still accurate*, sat a few lines above *Was this
-    /// what you were looking for?* and its Yes. It reset the age that search's
-    /// recency term reads; a Yes on an answer now confirms the notes it was
-    /// drawn from, which is the same reset made by the press a person was
-    /// already giving, so the second control went. "Hide" carried what it
-    /// hides from, and that the artifact survives it, only in a `title`, which
-    /// a phone never shows.
     #[test]
     fn the_pane_controls_name_the_question_they_answer() {
         let html = include_str!("templates/_artifact_detail.html");
@@ -4544,19 +4355,6 @@ mod tests {
         assert!(bar.contains("Was this what you were looking for?"));
     }
 
-    /// The offer is hidden by a keystroke, never destroyed by one.
-    ///
-    /// It used to be removed, on the argument that it is a measured impression
-    /// and one reappearing in a new situation would be a second impression
-    /// nobody had. `confirmOffer` runs on `htmx:afterSwap` and nowhere else,
-    /// so that argument is false: the impression is written once, when the
-    /// fragment arrives, and hiding a card already on screen writes nothing.
-    /// What the removal did was destroy the card on the first keystroke, after
-    /// which the idle column came back without it for the rest of the session.
-    ///
-    /// The race it was reaching for is handled where it happens: an offer
-    /// whose fetch lands after the keystroke was never seen, and `dropOffer`
-    /// on the swap refuses to count it.
     #[test]
     fn a_keystroke_hides_the_offer_and_does_not_destroy_it() {
         let js = include_str!("../../assets/app.js");
@@ -4964,13 +4762,6 @@ mod tests {
         );
     }
 
-    /// The spinner names which of the two passes is running.
-    ///
-    /// A seam with a compiler on neither side: the id lives in the template,
-    /// the words live in `app.js`, and the discrimination is `wasRefine` —
-    /// which the fast branch also reads. Renaming any one of the three
-    /// silently leaves the box saying the wrong thing about what it is doing,
-    /// with nothing failing anywhere.
     #[test]
     fn the_spinner_says_which_pass_is_in_flight() {
         let js = include_str!("../../assets/app.js");
@@ -5012,17 +4803,6 @@ mod tests {
         assert!(!html.contains("<html"), "results must be a fragment");
     }
 
-    /// A limiter is not a bad gateway.
-    ///
-    /// The endpoint answered — in milliseconds, with "too many requests" — and
-    /// the box used to report that as 502 over a page reading "the model
-    /// endpoint is not answering". The status is what the client reads to tell
-    /// a blip apart from an outage, so it has to be the truth before anything
-    /// in `app.js` can act on it.
-    ///
-    /// Busy for more calls than the budget can possibly spend, so what is
-    /// asserted here is the answer a person gets rather than the one the retry
-    /// hides.
     #[tokio::test]
     async fn a_rate_limited_search_is_busy_rather_than_a_bad_gateway() {
         let mut core = crate::core::test_support::test_core().await;
@@ -5044,11 +4824,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
-    /// The client half of the same rule. htmx swaps nothing on a 5xx, so what
-    /// the rail does about one is entirely `app.js`'s decision — and for a
-    /// keystroke that was merely shed, the decision must not be `failedSwap`:
-    /// typing one character into a box showing eight results would replace
-    /// them with an error box.
     #[test]
     fn a_busy_search_keeps_the_results_it_was_typed_over() {
         let js = include_str!("../../assets/app.js");
@@ -5107,10 +4882,6 @@ mod tests {
         );
     }
 
-    /// The tick's title is "Order confirmed by the reranker", so it has to be
-    /// derived from what the rerank call did — not from what the request asked
-    /// for. A reranker that is configured but down degrades to vector order
-    /// with a warning, and the fragment must degrade its claim with it.
     #[tokio::test]
     async fn a_fragment_whose_rerank_failed_never_claims_refinement() {
         let core = crate::core::test_support::test_core_with_failing_reranker().await;
@@ -5146,9 +4917,6 @@ mod tests {
         );
     }
 
-    /// The same claim over nothing: the server skips the rerank call for an
-    /// empty result set, so "0 results · refined" would be a confirmation of
-    /// an order that was never sent anywhere.
     #[tokio::test]
     async fn an_empty_result_set_never_claims_refinement() {
         let (core, _reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
@@ -5173,8 +4941,6 @@ mod tests {
         );
     }
 
-    /// The positive half, end to end: a working reranker asked for by the
-    /// request is what earns the tick.
     #[tokio::test]
     async fn a_rerank_that_actually_ran_earns_the_refined_tick() {
         let (core, _reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
@@ -5659,10 +5425,6 @@ mod tests {
         );
     }
 
-    /// A feedback-enabled session over an embedded base, an ask on it, and the
-    /// recorded event id. Built like `app_with_embedded_corpus`: synthesis and
-    /// embedding are run on the core before the router takes it, because a
-    /// capture through the page alone leaves nothing to retrieve.
     async fn ask_recorded() -> (axum::Router, String, crate::core::Core, String, String) {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
@@ -5689,8 +5451,6 @@ mod tests {
         (app, cookie, handle, html, id)
     }
 
-    /// The second door, for an operator who wants to rewrite the answer before
-    /// it is stored: prefilled, and nothing saved until they say so.
     #[tokio::test]
     async fn editing_an_answer_first_fills_the_capture_box_and_stores_nothing() {
         let (app, cookie, core, html, id) = ask_recorded().await;
@@ -5717,10 +5477,6 @@ mod tests {
         );
     }
 
-    /// Keep means keep. The button stores the answer where it is read — one
-    /// source, queued for the same pipeline every paste goes through, carrying
-    /// the question and the artifacts it was written from — rather than
-    /// shuttling the text to another page for the operator to save by hand.
     #[tokio::test]
     async fn keeping_an_answer_stores_it_and_queues_it_like_any_capture() {
         let (app, cookie, core, html, id) = ask_recorded().await;
@@ -5768,9 +5524,6 @@ mod tests {
         assert!(queued > 0, "a kept answer was stored but never processed");
     }
 
-    /// The point of carrying the id through the edit: what is stored says a
-    /// model wrote the text and what it was written from, however much the
-    /// operator changed before saving.
     #[tokio::test]
     async fn a_kept_answer_is_stored_as_a_paste_that_records_the_question() {
         let (app, cookie, core, _html, id) = ask_recorded().await;
@@ -5803,10 +5556,6 @@ mod tests {
         );
     }
 
-    /// Retention deletes unjudged questions, so an ask can vanish between the
-    /// page load and the save. Storing `origin = "ask"` with no provenance would
-    /// leave a corpus asserting a model wrote it and no way to check the claim,
-    /// which is worse than not making it.
     #[tokio::test]
     async fn a_kept_answer_whose_ask_is_gone_is_stored_as_an_ordinary_paste() {
         let (app, cookie, core) = app_session_and_core_with_feedback().await;
@@ -5835,7 +5584,6 @@ mod tests {
         assert!(meta.get("ask").is_none(), "{meta}");
     }
 
-    /// An ordinary paste is untouched by any of this.
     #[tokio::test]
     async fn an_ordinary_capture_still_records_itself_as_one() {
         let (app, cookie, core) = app_session_and_core_with_feedback().await;
@@ -6284,9 +6032,6 @@ mod tests {
         );
     }
 
-    /// A corpus that has been through synthesis and embedding, under a
-    /// feedback-enabled core, which is the only state in which an ask both
-    /// retrieves something and records a row.
     async fn app_session_and_core_with_an_embedded_base()
     -> (axum::Router, String, crate::core::Core) {
         let mut core = crate::core::test_support::test_core().await;
@@ -6304,9 +6049,6 @@ mod tests {
         (app, cookie, handle)
     }
 
-    /// `EventSource` is GET-only, and a GET that runs a model call and writes a
-    /// row is the kind history and prefetchers replay. The id is the guard, and
-    /// it is one-shot.
     #[tokio::test]
     async fn an_ask_handoff_id_cannot_be_used_twice() {
         let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
@@ -6317,7 +6059,6 @@ mod tests {
         assert_eq!(second.status(), StatusCode::NOT_FOUND);
     }
 
-    /// An unknown id is a 404, never a fresh ask against an empty question.
     #[tokio::test]
     async fn an_unknown_handoff_id_is_not_found() {
         let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
@@ -6325,8 +6066,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The stream runs a model call, so it takes the same identity as every
-    /// other `/ui` route. Unauthenticated, it would be free inference.
     #[tokio::test]
     async fn the_stream_route_refuses_a_visitor_without_a_session() {
         let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
@@ -6339,8 +6078,6 @@ mod tests {
         );
     }
 
-    /// The stream is SSE and terminates with the done event carrying the
-    /// rendered answer, which is what the page swaps in.
     #[tokio::test]
     async fn the_stream_ends_with_a_done_event_carrying_rendered_html() {
         let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
@@ -6386,26 +6123,6 @@ mod tests {
         assert!(body_of(res).await.contains("askDriver"), "not the driver");
     }
 
-    /// Both ways out of a stream close it.
-    ///
-    /// The consequence of losing one of these calls is invisible: the answer
-    /// still renders, and about three seconds later the browser reconnects to
-    /// the stream that ended and asks the question again — a model call nobody
-    /// requested, and a doubled bill on a metered endpoint. Nothing else in
-    /// this suite can see a browser, so this reads the shipped `app.js` and
-    /// insists the calls are there.
-    ///
-    /// A text assertion, and honestly a weak one: it pins that the lines exist,
-    /// not that they run. `tests/browser_ask.rs` is the other half, and it
-    /// counts the requests a real browser makes — but it needs node and a
-    /// headless Chrome, so it cannot be what guards this on every `cargo test`.
-    /// The three regions move with the act, and an ask is an act.
-    ///
-    /// `hideIdle` was bound to the box's `input` event alone, so the ask door —
-    /// `/ui/ask?q=…`, which renders `idle_state` true and pre-fills the box
-    /// server-side, so no keystroke is coming — streamed its answer into a
-    /// `#pane` still carrying `hidden`. The reader saw a spinner and then
-    /// nothing.
     #[test]
     fn pressing_ask_reveals_the_regions_the_answer_is_written_into() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -6426,11 +6143,6 @@ mod tests {
         );
     }
 
-    /// `dueTick` works from `Date.now() / 1000`, which is fractional. Every
-    /// branch of `spanWords` but the first floored its unit, so the last minute
-    /// before a reminder read `in 45.372s` and re-jittered on every tick — a
-    /// glitch that appeared exactly when the client timer took the row over
-    /// from the server's integer `due_words`.
     #[test]
     fn the_countdown_is_whole_seconds() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -6506,14 +6218,6 @@ mod tests {
         );
     }
 
-    /// The bundle is built on load, in the same turn `primePlace` runs, so a
-    /// place can only ever reach it from a fix an earlier load already had.
-    ///
-    /// This is the half of that a Rust test can see: the geohash is read back
-    /// from storage synchronously, before the asynchronous request whose answer
-    /// no bundle in this turn will live to see, and the request keeps what it
-    /// gets. Without the read the switch prompts for a permission and every
-    /// `b.place` is null forever — which is what it did.
     #[test]
     fn the_place_switch_reads_a_kept_geohash_before_it_asks_for_a_new_one() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -6558,17 +6262,6 @@ mod tests {
         );
     }
 
-    /// Every `from:` in a template names one element, in one word.
-    ///
-    /// htmx reads a `from:` selector up to the first space or comma. A
-    /// descendant selector therefore binds to its first word and the remainder
-    /// is thrown away as an `htmx:syntax:error` that nothing on the page
-    /// listens for — so the trigger silently listens to far more than it says.
-    /// Search is where that cost showed: `change from:#filters input[type=radio]`
-    /// bound to the whole form, the search box fires `change` on blur, and the
-    /// blur is caused by the very click that opens a result — so the first
-    /// click on a result re-ran the search, swapped the list out between the
-    /// press and the release, and opened nothing.
     #[test]
     fn no_trigger_scopes_itself_to_a_selector_htmx_will_cut_in_half() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/web/templates");
@@ -6607,14 +6300,6 @@ mod tests {
         assert!(checked >= 3, "no `from:` triggers were found to check");
     }
 
-    /// The page and the driver agree about what is on it.
-    ///
-    /// The stream driver in `app.js` reaches for its regions by id, and a
-    /// renamed or dropped element does not fail loudly in a browser — it leaves
-    /// an ask page that posts nothing and answers nothing, which is exactly the
-    /// state this task found the page in. Read out of the shipped `app.js`
-    /// rather than listed here, so the two cannot drift apart; scoped to the
-    /// `ask-` prefix, because only the ask driver's ids are this page's problem.
     #[tokio::test]
     async fn the_ask_page_carries_every_region_the_stream_driver_looks_up() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -6652,8 +6337,6 @@ mod tests {
         );
     }
 
-    /// The rail has to be readable while the answer is still being written, so
-    /// the excerpts go out as their own event before the first token.
     #[tokio::test]
     async fn the_citations_event_precedes_the_first_token() {
         let (app, cookie, _core) = app_session_and_core_with_an_embedded_base().await;
@@ -6666,14 +6349,6 @@ mod tests {
         );
     }
 
-    /// A reader who leaves before `done` records nothing: the recorded id only
-    /// reaches the page in `done`, so an abandoned ask has no verdict bar and
-    /// nothing anyone could judge, and retention deletes an unjudged row anyway.
-    ///
-    /// The ask is genuinely under way when the reader leaves — the stream is
-    /// read past its excerpts and dropped between them and the answer. Dropping
-    /// the response unread would prove nothing: an `async_stream` that is never
-    /// polled never runs, so `ask_events` would not have been called at all.
     #[tokio::test]
     async fn an_ask_abandoned_mid_answer_is_not_recorded() {
         let (app, cookie, core) = app_session_and_core_with_an_embedded_base().await;
@@ -6707,8 +6382,6 @@ mod tests {
         );
     }
 
-    /// Reads SSE frames until `marker` has arrived, then drops the body — which
-    /// is what a closed tab does. Returns what was read.
     async fn read_until(res: Response, marker: &str) -> String {
         use tokio_stream::StreamExt as _;
         let mut frames = res.into_body().into_data_stream();
@@ -6725,8 +6398,6 @@ mod tests {
         seen
     }
 
-    /// An empty box is refused before anything is parked: it costs no entry in
-    /// the map, and no round trip to a stream to find out.
     #[tokio::test]
     async fn an_empty_question_is_refused_without_being_parked() {
         let mut core = crate::core::test_support::test_core().await;
@@ -6747,9 +6418,6 @@ mod tests {
         );
     }
 
-    /// Parking is the only thing that grows the map, so it is where the sweep
-    /// has to run: a page opened and never streamed would otherwise leave its
-    /// question behind forever.
     #[tokio::test]
     async fn parking_a_question_sweeps_out_one_that_expired() {
         let st = ask_state().await;
@@ -6773,8 +6441,6 @@ mod tests {
         assert!(held.contains_key(&fresh), "the sweep took the live entry");
     }
 
-    /// An id that outlived its window is as good as unknown: the tab it belongs
-    /// to is gone, and honouring it would spend a model call on nobody.
     #[tokio::test]
     async fn an_expired_handoff_id_is_refused_and_taken_out_of_the_map() {
         let st = ask_state().await;
@@ -6793,10 +6459,6 @@ mod tests {
         );
     }
 
-    /// A question is answered to the person who asked it. The id is not
-    /// guessable, but a URL travels — into a log, another tab, a referer — and
-    /// a second subject who arrives with it within the window must get the
-    /// same nothing an unknown id gets, while the asker's own stream still can.
     #[tokio::test]
     async fn a_parked_question_is_spent_only_by_the_subject_who_parked_it() {
         let st = ask_state().await;
@@ -6820,8 +6482,6 @@ mod tests {
         }
     }
 
-    /// Backdates a parked entry past its TTL. Reaching into the map rather than
-    /// sleeping a minute: the clock is the thing under test, not the wait.
     fn age_out(st: &AppState, id: &str) {
         let mut m = st
             .ask_handoff
@@ -6839,9 +6499,6 @@ mod tests {
         crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await
     }
 
-    /// A router and a session over a state the caller still holds, so a test
-    /// can look at the same handoff map the routes write to. `app_with_cookie`
-    /// builds its own state and cannot be asked what is in it.
     async fn app_over(st: &AppState) -> (axum::Router, String) {
         let cookie = crate::web::test_support::session_cookie(
             st.tenants.control(),
@@ -6852,8 +6509,6 @@ mod tests {
         (crate::web::router(st.clone()), cookie)
     }
 
-    /// The same markup, marked rather than linked: marking subtracts trust, and
-    /// a fabricated command is precisely what hides in a code span.
     #[test]
     fn marking_an_unsupported_literal_still_reaches_inside_a_code_span() {
         let out = crate::core::ask::check::mark_unsupported(
@@ -6922,9 +6577,6 @@ mod tests {
 
     // ── Judging at the moment of search ──────────────────────────────────────
 
-    /// The search just recorded, read off the table rather than off the deck.
-    /// A search that returned nothing is not a card the deck deals — see
-    /// `dealable!` — and the rail asks about one of those.
     async fn newest_event(handle: &crate::core::Core) -> String {
         sqlx::query_scalar!(
             r#"SELECT id AS "id!" FROM search_events ORDER BY created_at DESC, id DESC LIMIT 1"#
@@ -6934,12 +6586,6 @@ mod tests {
         .expect("the search the rail was filled by")
     }
 
-    /// A gap recorded against a capture that is still being read is a false
-    /// one: the answer may be in it.
-    ///
-    /// A real capture with its jobs still pending, not a job armed for a corpus
-    /// that does not exist: the state the rail has to read is the one a paste
-    /// leaves behind, and an orphan row is not that state.
     #[tokio::test]
     async fn a_search_while_a_capture_is_read_offers_no_gap() {
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
@@ -6949,8 +6595,6 @@ mod tests {
         assert!(!rail.contains("Nothing here has it"), "{rail}");
     }
 
-    /// The loose list carries its own gap button, and the same capture still
-    /// being read withholds it there too.
     #[test]
     fn a_loose_list_while_a_capture_is_read_offers_no_gap() {
         let rail = |reading: bool| {
@@ -6991,8 +6635,6 @@ mod tests {
         }
     }
 
-    /// A disagreement is a line under the row naming the other note and what
-    /// differs, a link of its own outside the row's link.
     #[test]
     fn a_row_names_the_note_that_disagrees_with_it() {
         let hit = hit_disagreeing();
@@ -7025,13 +6667,6 @@ mod tests {
         assert!(below.contains(r#"href="/ui/artifacts/b2""#), "{html}");
     }
 
-    /// The chips under the box fire a search on a base that holds nothing, and
-    /// "nothing here has it" is true of every one of those — a verdict about
-    /// the base being empty, recorded as a hole in its coverage.
-    ///
-    /// The event is still recorded. It is what the first capture closes: the
-    /// box carries the id forward, and `gaps::cover` closes the search a
-    /// capture was typed from.
     #[tokio::test]
     async fn an_empty_base_records_the_search_and_offers_no_gap() {
         let (app, cookie, handle) = app_session_and_core_with_feedback().await;
@@ -7092,9 +6727,6 @@ mod tests {
         );
     }
 
-    /// An answer that searched nothing takes back the id the last one handed
-    /// the box. Left standing, a Capture pressed over a long paste named that
-    /// earlier search as its first draft and closed its gap unmeasured.
     #[tokio::test]
     async fn an_answer_that_searched_nothing_forgets_the_search_the_box_was_folding_into() {
         let (app, cookie, _handle) = app_session_and_core_with_feedback().await;
@@ -7216,24 +6848,6 @@ mod tests {
         assert_eq!((s.gaps, s.hits, s.judged), (1, 0, 1), "{s:?}");
     }
 
-    /// A result row carrying every badge it can, in a rail dragged to its floor.
-    ///
-    /// This is the shape that broke: `.rail-head` could not wrap, a `.badge` is
-    /// `white-space: nowrap` and a `.rail-title` may break anywhere — so once
-    /// three chips filled the row the title was squeezed to one character and
-    /// set itself thirty lines tall in a box the rail clips. The card became a
-    /// chip, four hundred pixels of nothing, and a snippet.
-    ///
-    /// The page is the real workspace from the router with the real rail
-    /// fragment swapped into `#results`, which is the swap the box performs on
-    /// every keystroke. `--rail-w` is the floor `railHandle` in app.js clamps a
-    /// drag to, and `pane-open` is the class the same file adds once something
-    /// is open — both are states a person reaches by dragging the boundary and
-    /// opening a result, not shapes invented here.
-    ///
-    /// Badges rather than a search: `weak` needs a poor score, `primed` needs
-    /// activation and `due_in` needs a reminder, and no query produces all
-    /// three at once. The template is the one that ships either way.
     #[tokio::test]
     #[ignore = "needs node and a headless Chrome; see `test_support::measure`"]
     async fn a_result_wearing_every_badge_still_shows_its_title() {

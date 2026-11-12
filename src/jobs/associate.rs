@@ -572,8 +572,6 @@ mod tests {
     use crate::store::feedback::{Door, NewCandidate, NewEvent, Verdict};
     use crate::store::links::LinkState;
 
-    /// `n` artifacts, each in its own corpus, so every link between them is a
-    /// cross-corpus one.
     async fn seed(core: &Core, n: usize) -> Vec<String> {
         let mut ids = Vec::new();
         for i in 0..n {
@@ -599,7 +597,6 @@ mod tests {
         ids
     }
 
-    /// One recorded search, with `shown` deciding what the searcher saw.
     async fn record(core: &Core, query: &str, shown: &[&String], unshown: &[&String]) -> String {
         let candidates = shown
             .iter()
@@ -637,14 +634,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Age every recorded event past the coalescing window, so the sweep will
-    /// look at it: a folding event is still moving.
-    /// Age everything the sweep reads far enough back that both of its upper
-    /// bounds are cleared — `created_at` below `settled_cutoff`, and `judged_at`
-    /// below the sweep's own clock. A verdict recorded in the second the sweep
-    /// runs in is deliberately left for the next one (`replay_verdicts`), so a
-    /// test that judges and sweeps in the same breath has to say which second
-    /// it means. `judged_at` is NULL on an unjudged event and stays NULL here.
     async fn settle(core: &Core) {
         sqlx::query!(
             "UPDATE search_events
@@ -1360,8 +1349,6 @@ mod tests {
         assert!(l.reason.as_deref().unwrap().contains("consolidation"));
     }
 
-    /// Two passages, each in a corpus of its own, linked the way co-retrieval
-    /// links anything.
     async fn seed_passages(core: &Core, n: usize) -> Vec<String> {
         let mut ids = Vec::new();
         for i in 0..n {
@@ -1436,10 +1423,6 @@ mod tests {
         );
     }
 
-    /// The refusal is an `||`, so a passage beside a captured artifact takes
-    /// the same branch — and eleven of the live base's thirty-three pairs were
-    /// exactly that shape. The sentence is rendered verbatim beside the link,
-    /// so it must describe the two artifacts that are actually there.
     #[tokio::test]
     async fn a_duplicate_over_one_passage_does_not_call_the_other_one_source_text() {
         let mut core = test_core().await;

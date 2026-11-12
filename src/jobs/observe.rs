@@ -221,8 +221,6 @@ mod tests {
         (core, generation)
     }
 
-    /// A search recorded and then backdated, so a chain can be built without
-    /// waiting for one.
     async fn record_at(core: &Core, query: &str, ago: i64) -> String {
         let id = core
             .store
@@ -260,17 +258,6 @@ mod tests {
         id
     }
 
-    /// The first pass sets the watermark and writes nothing.
-    ///
-    /// It used to default to `0`, so on any base that existed before this rule
-    /// did the first pass walked the entire search history with no `LIMIT`
-    /// under it, and every historic search nobody happened to open became a
-    /// `-0.25` observation — stamped with the generation that is live *now*,
-    /// though not one of those searches was ever served by it. `eval::lived`
-    /// sums them into that generation's account and the next watch reverts a
-    /// generation that did nothing wrong, while `jobs::retract` replays the
-    /// same rows to exhume buried artifacts. Nothing expires them at the
-    /// shipped `feedback.retain_days = 0` either.
     #[tokio::test]
     async fn the_first_pass_does_not_backfill_the_history() {
         let core = crate::core::test_support::test_core().await;
@@ -411,10 +398,6 @@ mod tests {
         );
     }
 
-    /// `open_event` is reachable from the web UI and nowhere else, so an API
-    /// or MCP search is unopened by construction. Unscoped as well — a bearer
-    /// token is not a person — it used to match every other unscoped event as
-    /// "the same person", which made a negative out of an agent asking twice.
     #[tokio::test]
     async fn a_search_on_a_door_that_cannot_record_an_open_is_never_a_give_up() {
         let (core, generation) = base().await;
@@ -461,9 +444,6 @@ mod tests {
         );
     }
 
-    /// A window of zero is the rule switched off, and the watermark goes on
-    /// moving while it is. Left where it was, switching the rule back on read
-    /// every search made in between and wrote each unopened one down.
     #[tokio::test]
     async fn switching_the_rule_off_and_on_again_does_not_read_what_happened_while_it_was_off() {
         let (core, generation) = base().await;
@@ -488,9 +468,6 @@ mod tests {
         );
     }
 
-    /// Charged to the generation that drew the list. The sweep reads a search
-    /// a window after it at the earliest, and an adoption in between is
-    /// ordinary.
     #[tokio::test]
     async fn a_give_up_is_charged_to_the_generation_that_served_the_search() {
         let (core, served) = base().await;
@@ -529,8 +506,6 @@ mod tests {
         );
     }
 
-    /// The watermark moves only after the whole pass, so a pass that stopped
-    /// between its inserts and its stamp hands the next one the same searches.
     #[tokio::test]
     async fn a_search_already_written_down_is_not_written_down_twice() {
         let (core, generation) = base().await;

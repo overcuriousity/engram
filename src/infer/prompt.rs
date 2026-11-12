@@ -2774,10 +2774,6 @@ pub fn describe_context(metadata: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
 
-    /// The operator has judged; the model only writes. There is no relation to
-    /// parse and no verdict to downgrade — a reply with no usable text is a
-    /// failed call, because an empty draft would write an artifact that says
-    /// nothing and hide two that did.
     #[test]
     fn a_synthesis_reply_parses_into_a_draft() {
         let body = r#"{"merged":{"title":"Praxis","text":"Alles zusammen.","category":"reference","caveats":[]}}"#;
@@ -2803,8 +2799,6 @@ mod tests {
         );
     }
 
-    /// `strict` rejects a listed-but-optional property outright, which fails
-    /// the call rather than loosening the schema.
     #[test]
     fn the_synthesis_schema_requires_every_field_it_lists() {
         let s = synthesize_schema();
@@ -2843,8 +2837,6 @@ mod tests {
         }
     }
 
-    /// An empty list is the common answer and must be readable as "I have
-    /// enough", never as a query to run.
     #[test]
     fn an_empty_need_parses_as_nothing_further() {
         assert!(parse_plan(r#"{"need": []}"#).is_empty());
@@ -2853,9 +2845,6 @@ mod tests {
         assert!(parse_plan(r#"{"need": ["   ", ""]}"#).is_empty());
     }
 
-    /// The fan-out is retrieval on top of a round that already happened, so
-    /// anything that is not unambiguously a list of queries means "spend no
-    /// further retrieval on it" rather than "search for whatever this was".
     #[test]
     fn a_reply_that_is_not_the_shape_asked_for_is_nothing_further() {
         assert!(parse_plan("I think you need more on tickers").is_empty());
@@ -2881,8 +2870,6 @@ mod tests {
         );
     }
 
-    /// The commonest way a small model gets this shape wrong is answering with
-    /// the one query rather than a list of one, and that is a usable query.
     #[test]
     fn a_bare_string_reads_as_the_one_query_it_is() {
         assert_eq!(
@@ -2891,8 +2878,6 @@ mod tests {
         );
     }
 
-    /// The same search twice costs two rounds to learn what one already said,
-    /// and a plan longer than the cap would fan out wider than the cap allows.
     #[test]
     fn repeats_are_dropped_and_the_plan_is_capped() {
         assert_eq!(
@@ -2905,9 +2890,6 @@ mod tests {
         );
     }
 
-    /// The schemas are sent to the endpoint to constrain decoding, so a schema
-    /// that has drifted from its parser constrains the model into output the
-    /// parser then rejects — a failure that looks exactly like a bad model.
     #[test]
     fn a_reply_that_satisfies_the_plan_schema_parses() {
         let schema = plan_schema();
@@ -2932,7 +2914,6 @@ mod tests {
         );
     }
 
-    /// A captured artifact: one with nothing behind it to show as context.
     fn member<'a>(title: &'a str, text: &'a str) -> DedupeMember<'a> {
         DedupeMember {
             title,
@@ -3063,15 +3044,6 @@ mod tests {
         assert!(p.ends_with("----- END INPUT -----"));
     }
 
-    /// Ten translations of one prompt, and the half a parser reads must be
-    /// identical in all ten.
-    ///
-    /// The prose is what is translated. The JSON shape, the field names, the
-    /// `category` values, the `moment` intents and the block markers
-    /// `user_prompt` writes in English are the contract between this prompt
-    /// and the code that reads its reply — a translated key is a parse failure
-    /// that looks exactly like a bad model, and it would only show up for the
-    /// one language nobody on the project speaks.
     #[test]
     fn the_translations_carry_the_same_contract() {
         use crate::infer::lang::Lang;
@@ -3133,13 +3105,6 @@ mod tests {
         assert_eq!(synthesizer_system(Lang::En), SYNTHESIZER_SYSTEM);
     }
 
-    /// The hint is gone, in every language.
-    ///
-    /// It used to be one line inside a wall of English — "Always use the
-    /// language the input was written in" — which is a rule a 9B model grants
-    /// for a paragraph and then quietly stops granting, because everything
-    /// after it goes on being English right up to the token before it writes.
-    /// A prompt that *is* in the language has nothing to ask for.
     #[test]
     fn no_prompt_asks_for_a_language_any_more() {
         use crate::infer::lang::Lang;
@@ -3158,10 +3123,6 @@ mod tests {
         assert!(SYNTHESIZER_SYSTEM.contains("INPUT"));
     }
 
-    /// The schemas are sent to the endpoint to constrain decoding, so a schema
-    /// that has drifted from its parser constrains the model into output the
-    /// parser then rejects — a failure that looks exactly like a bad model and
-    /// cannot be fixed by retrying.
     #[test]
     fn a_reply_that_satisfies_the_artifact_schema_parses() {
         let required = artifacts_schema()["properties"]["artifacts"]["items"]["required"]
@@ -3186,9 +3147,6 @@ mod tests {
         assert_eq!(out[0].caveats, vec!["only on linux".to_string()]);
     }
 
-    /// The fifth verdict. Two artifacts can be alike because they say the same
-    /// thing, or alike because neither of them says anything — and only the
-    /// second is answered by discarding both rather than by keeping one.
     #[test]
     fn a_pair_where_neither_side_carries_a_claim_parses_as_vacuous() {
         let v = parse_dedupe(
@@ -3269,9 +3227,6 @@ mod tests {
         );
     }
 
-    /// The pairing the flat schema could not express. These are the two replies
-    /// that stalled real pairs for ten attempts each, and a union of per-relation
-    /// variants is what makes them ungrammatical rather than merely rejected.
     #[test]
     fn no_dedupe_variant_permits_a_duplicate_without_a_merge_or_a_distinct_with_one() {
         let schema = dedupe_schema();
@@ -3302,17 +3257,6 @@ mod tests {
         );
     }
 
-    /// What actually makes a variant exclude a field, as opposed to declining to
-    /// mention it. A JSON Schema object with no `additionalProperties: false`
-    /// accepts every property it never named, so the `distinct`-with-a-merge
-    /// reply above validates against the third variant and the union constrains
-    /// nothing. llama.cpp's grammar generator closes objects implicitly and hid
-    /// this; a validating gateway does not.
-    ///
-    /// And every property a strict schema names must also be required, which is
-    /// not a style rule: a hosted API answers a strict schema with an optional
-    /// property with a 400, so the judge would not be loosely constrained but
-    /// permanently broken.
     #[test]
     fn every_judge_schema_object_is_closed_and_rooted_in_an_object() {
         fn closed(v: &serde_json::Value, path: &str) {
@@ -3367,10 +3311,6 @@ mod tests {
         }
     }
 
-    /// `parse_dedupe` reads a direction only as a single letter and downgrades
-    /// anything else to a conflict — the outcome requiring `supersedes` exists
-    /// to avoid. An unconstrained `{"type":"string"}` lets a grammar satisfy the
-    /// field with "the second one" and land in exactly that case.
     #[test]
     fn the_supersedes_the_schema_permits_is_a_direction_the_parser_reads() {
         let schema = dedupe_schema();
@@ -3398,10 +3338,6 @@ mod tests {
         assert_eq!(verdict.supersedes, Some('b'));
     }
 
-    /// The link judge shares an endpoint with the dedupe judge and used to share
-    /// its response format, which no link verdict can satisfy: `related` and
-    /// `unrelated` are not in the dedupe enum, and `reason` is not one of its
-    /// properties.
     #[test]
     fn every_relation_the_link_schema_allows_is_one_its_parser_knows() {
         let schema = link_schema();
@@ -3460,9 +3396,6 @@ mod tests {
         );
     }
 
-    /// A merged member's own wording is what is being judged, and its captured
-    /// roots are there so the model can put back a detail the earlier merge
-    /// dropped. Both appear; only the member is lettered.
     #[test]
     fn a_merged_member_is_shown_with_its_sources_beneath_it() {
         let a = DedupeMember {
@@ -3490,9 +3423,6 @@ mod tests {
         assert!(!p.contains("ARTIFACT C"), "a source was lettered: {p}");
     }
 
-    /// The letters a verdict may name are exactly the two artifacts under
-    /// judgement, and the system prompt has to say so — otherwise a merged
-    /// member's sources are fair game for `supersedes`.
     #[test]
     fn the_system_prompt_rules_the_sources_out_of_the_verdict() {
         assert!(DEDUPE_SYSTEM.contains("SOURCES"));
@@ -3892,9 +3822,6 @@ mod tests {
         assert!(p.contains("{bad"));
     }
 
-    /// The note leads the vision prompt, so an unbounded one would swamp the
-    /// description or overrun the call. This is now the only place the cap
-    /// still earns its keep — nothing stored is truncated any more.
     #[test]
     fn describe_context_bounds_the_note_it_spends_on_a_model_call() {
         let long = "x".repeat(crate::core::ingest::MAX_NOTE_CHARS + 500);
@@ -3930,16 +3857,6 @@ mod tests {
         assert!(bare.contains("Read the image"), "{bare}");
     }
 
-    /// A described image *becomes* the corpus — its description is the
-    /// `raw_text` the operator reads as the source and passages are split from
-    /// — so a German account's photo read in English left the stamp governing
-    /// only what came after the source was already the wrong language.
-    ///
-    /// And the instruction has two halves, which is why it is a line in the
-    /// user turn rather than nine translations of the system prompt: the
-    /// transcription belongs to the image and must survive in whatever
-    /// language is written there, while the prose about it belongs to the
-    /// reader.
     #[test]
     fn a_description_is_written_in_the_language_the_capture_was_stamped_with() {
         let de = describe_context(&serde_json::json!({ "lang": "de" }));
@@ -4015,10 +3932,6 @@ mod tests {
         ));
     }
 
-    /// The page and the app read `$…$` and `$$…$$` only: `\(` and `\[` are
-    /// markdown escapes, so a formula written with them shows its source with
-    /// the backslashes gone. Every prompt whose text is drawn as markdown says
-    /// which delimiters to use.
     #[test]
     fn every_prompt_written_as_markdown_names_the_math_delimiters() {
         let mut prompts = vec![
@@ -4084,11 +3997,6 @@ mod tests {
         assert_eq!(p, "Question: q\n\nExcerpts:\n\n[1] t\na\n\n---\n\n[3] t\nc");
     }
 
-    /// The flag is a flag, not the reply. A model that answers `null` where a
-    /// boolean was asked for has still written the artifact, and the strict
-    /// field this used to be threw the whole window away over it — including
-    /// in `salvage_objects`, which deserializes the same struct per object and
-    /// so could rescue nothing.
     #[test]
     fn a_pinned_flag_of_the_wrong_shape_costs_no_artifact() {
         for v in ["null", "\"false\"", "0", "[]"] {
@@ -4192,15 +4100,6 @@ mod tests {
         assert!(parse_judged_response(r#"{"artifacts":[]}"#).is_err());
     }
 
-    /// A reminder stated perfectly, lost to a key that was not there.
-    ///
-    /// The empty-artifacts case is handled and documented: a note that is
-    /// nothing but a reminder leaves the model nothing it is allowed to write.
-    /// What was not handled is the model omitting `artifacts` altogether rather
-    /// than sending it empty, which is what comes back when the grammar is not
-    /// being enforced — `structured_output` off, or an endpoint that ignores
-    /// it. `missing field 'artifacts'`, and `salvage_objects` cannot help: it
-    /// looks for the substring and there is none.
     #[test]
     fn a_judged_reply_that_omits_the_artifact_key_is_still_a_judgement() {
         let body = r#"{"moment":{"intent":"remind","when":"2026-09-04T09:00","rule":null}}"#;
@@ -4224,13 +4123,6 @@ mod tests {
         assert!(!arts[0].pinned);
     }
 
-    /// The grammar and the parser, on the one call that destroys text.
-    ///
-    /// Reap ran under `dedupe_schema` for its whole first life: the endpoint
-    /// forced every reply into `{"verdict":{"relation":…}}`, `parse_reap` found
-    /// no verdict word, and the sweep paid for a call per nominee and acted on
-    /// none of them. This is that pairing written down — every word the schema
-    /// permits is a verdict the parser reads, in the shape the schema produces.
     #[test]
     fn every_verdict_the_reap_schema_allows_is_one_the_parser_knows() {
         let schema = reap_schema();

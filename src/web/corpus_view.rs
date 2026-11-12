@@ -184,10 +184,6 @@ mod tests {
         assert_eq!(marked, vec![3, 4]);
     }
 
-    /// The pane appends the passages that follow, and the source column beside
-    /// it has to grow with them. Recomputed over the whole run rather than
-    /// appended: each slice carries context lines at both edges, so appending
-    /// would print the lines between two adjacent passages twice.
     #[tokio::test]
     async fn a_run_of_spans_is_one_slice_with_no_line_printed_twice() {
         let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8").await;
@@ -199,10 +195,6 @@ mod tests {
         assert_eq!(numbers, vec![1, 2, 3, 4, 5, 6], "a line came back twice");
     }
 
-    /// Every line the run was written from is the claim; the lines around it
-    /// are context. A gap between two passages — a superseded row stepped over
-    /// — is context too, and must not be marked as though something on screen
-    /// was drawn from it.
     #[tokio::test]
     async fn a_run_marks_every_span_and_nothing_between_them() {
         let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8").await;
@@ -217,9 +209,6 @@ mod tests {
         assert_eq!(marked, vec![2, 5, 6]);
     }
 
-    /// The label names what is on screen. Over a run that is the union, and
-    /// saying only the first passage's range would describe a column the reader
-    /// can see is longer than that.
     #[tokio::test]
     async fn a_run_is_labelled_with_the_range_it_covers() {
         let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8").await;
@@ -227,9 +216,6 @@ mod tests {
         assert_eq!(slice.label, "lines 2–5");
     }
 
-    /// One span through the run-aware path is the single-passage pane, which is
-    /// every pane before the reader has appended anything. It must not drift
-    /// from what `slice` produces.
     #[tokio::test]
     async fn one_span_over_the_run_is_what_the_single_slice_already_was() {
         let src = a_corpus("l1\nl2\nl3\nl4\nl5\nl6").await;

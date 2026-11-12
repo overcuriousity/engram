@@ -229,8 +229,6 @@ mod tests {
         );
     }
 
-    /// The journal. A superseded artifact is the plainest row on it: the
-    /// base hid something, and the row is how it comes back.
     #[tokio::test]
     async fn the_set_aside_list_names_what_a_row_is_about_and_what_answers_it() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -261,8 +259,6 @@ mod tests {
         assert!(!text.contains("Restore"), "a button label crossed: {text}");
     }
 
-    /// The whole point of the undo half: what a decision did can be taken back
-    /// from the phone, not only from the desk it was not made at.
     #[tokio::test]
     async fn a_supersede_is_taken_back_again() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -282,14 +278,6 @@ mod tests {
         assert!(core.store.get_artifact(&ids[1]).await.unwrap().in_results());
     }
 
-    /// `reactivate` is the only answer the app draws for a `hidden` row, and
-    /// a supersession is one of the two things that word covers
-    /// (`insights::set_aside_rows`). Taking it back has to close the journal
-    /// row as well as clear the payload: `dedupe::taken_back_before` reads
-    /// that row to hand the pair to a person rather than ruling on it again,
-    /// and unstamped, the next consolidation tick re-applied the supersession
-    /// the press had just undone. The `/ui/ops` twin is
-    /// `ops::tests::restoring_a_superseded_artifact_stamps_the_supersession`.
     #[tokio::test]
     async fn reactivating_a_superseded_artifact_stamps_the_supersession() {
         use crate::store::actions::{Job, Kind, NewAction};
@@ -343,16 +331,6 @@ mod tests {
         );
     }
 
-    /// Hidden twice, returned once — the state a row filed before the two
-    /// guards existed can still be in.
-    ///
-    /// `reactivate` routes a superseded artifact through `unsupersede`, which
-    /// returns before the status write, so this reads like a press that clears
-    /// one hiding and leaves the other. It is not: `set_superseded_by` writes
-    /// `status` in the same UPDATE as `superseded_by`, so clearing the winner
-    /// *is* the status write and the row comes back active whatever it read
-    /// before. Asserted because nothing else says so, and the next reader of
-    /// that early return will draw the same wrong conclusion.
     #[tokio::test]
     async fn reactivating_an_artifact_hidden_both_ways_takes_one_press() {
         let (app, cookie, core) = app_session_and_core().await;

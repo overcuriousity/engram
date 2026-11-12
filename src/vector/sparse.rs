@@ -248,8 +248,6 @@ mod tests {
         assert!(!encode_query("ext4").is_empty());
     }
 
-    /// Queries a dense embedding is known to handle badly. Each pairs a query
-    /// with text that must match it on exact tokens alone.
     #[test]
     fn the_queries_dense_search_gets_wrong_share_terms_with_their_answer() {
         for (query, document) in [

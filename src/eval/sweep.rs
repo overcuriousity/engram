@@ -1064,7 +1064,6 @@ mod tests {
         observe_on(core, generation, artifact, source, None).await;
     }
 
-    /// The same, from the search `event` recorded — an open on that list.
     async fn observe_on(
         core: &crate::core::Core,
         generation: &str,
@@ -1195,14 +1194,6 @@ mod tests {
         assert_eq!(evidence_pairs(&core, &generation).await.unwrap().0.len(), 3);
     }
 
-    /// One budget over both kinds, and the verdicts served out of it first.
-    ///
-    /// The bound exists because the pass's work is pairs times candidates and
-    /// the pair count grows with the age of the base — see `OBSERVATION_LIMIT`.
-    /// Drawn per kind it was two bounds wearing one name: a pass could rank
-    /// twice what the constant promised, and where a reranker serves search
-    /// that is twice the inference, which is the only inference the pass ever
-    /// spends.
     #[tokio::test]
     async fn the_two_kinds_of_evidence_share_one_budget_and_a_verdict_is_served_first() {
         let (core, order) = seeded().await;
@@ -1298,12 +1289,6 @@ mod tests {
         assert!(priming.sitting.contains(&order[5]));
     }
 
-    /// `observations.rank` is 1-based and unbounded — `record_search` writes
-    /// one for every candidate in the pool — while everything it is compared
-    /// against is measured at `LIMIT`. Carried through raw, a hit at pool
-    /// position fifteen was `Some(14)` against a replay's `None`, which
-    /// `recommend` scored as the candidate having made it worse and `mrr`
-    /// credited with a fifteenth no replay could earn.
     #[test]
     fn a_served_place_outside_the_window_is_the_miss_it_is_to_everything_else() {
         assert_eq!(served_at(Some(1)), Some(0));
@@ -1316,12 +1301,6 @@ mod tests {
         assert_eq!(served_at(Some(0)), Some(0));
     }
 
-    /// Half the budget to what the window can measure. Every candidate is
-    /// scored by `rank_of` at `LIMIT`, so an observation that sat below ten is
-    /// `None` under the baseline and under every candidate alike: selecting
-    /// the worst five hundred selected precisely the rows the scorer cannot
-    /// tell apart, `recommend` never reached its net-two, and `score()`
-    /// answered `best: None` for the life of the base.
     #[tokio::test]
     async fn the_observation_budget_is_not_spent_wholly_on_places_the_window_cannot_see() {
         let (core, order) = seeded().await;
@@ -1350,7 +1329,6 @@ mod tests {
         );
     }
 
-    /// One observation naming `artifact` at `rank`, 1-based.
     async fn observed_at(core: &crate::core::Core, generation: &str, artifact: &str, rank: i64) {
         core.store
             .record_observation(&crate::store::observations::NewObservation {
@@ -1367,8 +1345,6 @@ mod tests {
             .unwrap();
     }
 
-    /// `served` is 0-based, the way the replay measures; the column it stands
-    /// for counts from one.
     fn served_pair(order: &[String], i: usize, served: usize) -> Pair {
         Pair {
             query: QUERY.into(),
@@ -1414,15 +1390,6 @@ mod tests {
         );
     }
 
-    /// A served place past `LIMIT` is a miss the base is charged with, not a
-    /// row to leave out of the sample.
-    ///
-    /// `served_at` maps every rank at or past `LIMIT` to `None`, so selecting
-    /// on the narrowed value could not tell "served, deep" from "never
-    /// served" — and threw away exactly the deep observations
-    /// `observation_pairs` spends half its budget going out of its way to
-    /// gather. With nothing left in the sample the axis could never
-    /// accumulate the evidence a flip needs.
     #[tokio::test]
     async fn the_rerank_axis_keeps_the_deep_observations_the_budget_went_after() {
         let (core, order, _) = super::test_support::seeded_with_reranker().await;
@@ -1477,9 +1444,6 @@ mod tests {
         ));
     }
 
-    /// "No flip" and "somebody came back" are opposite instructions, and the
-    /// pass that read both as `None` went on to adopt a generation and rewrite
-    /// the running ranking underneath the person who came back.
     #[tokio::test]
     async fn a_search_landing_mid_replay_stops_the_flip_rather_than_holding_it() {
         let (core, order, _) = super::test_support::seeded_with_reranker().await;

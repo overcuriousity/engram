@@ -134,34 +134,24 @@ mod tests {
         }
     }
 
-    /// The subject the model asked for and the base could not answer. The
-    /// planning call already paid for this; today it is discarded.
     #[test]
     fn a_subject_whose_every_hit_was_weak_is_uncovered() {
         let rounds = [round("job priority", vec![hit(true), hit(true)])];
         assert_eq!(super::uncovered(&rounds), vec!["job priority".to_string()]);
     }
 
-    /// One real match is coverage. The subject was named as missing and turned
-    /// out not to be, which is the fan-out working rather than a hole.
     #[test]
     fn a_subject_with_one_real_match_is_not_a_gap() {
         let rounds = [round("job priority", vec![hit(true), hit(false)])];
         assert!(super::uncovered(&rounds).is_empty());
     }
 
-    /// Nothing came back at all. Rare, because retrieval returns its best
-    /// candidates however bad they are — but when it happens it is the same
-    /// claim in its strongest form.
     #[test]
     fn a_subject_that_returned_nothing_is_uncovered() {
         let rounds = [round("job priority", vec![])];
         assert_eq!(super::uncovered(&rounds), vec!["job priority".to_string()]);
     }
 
-    /// What a round reached sideways is not a match. A neighbour is on the page
-    /// because it sits beside something, and letting it vouch for a subject
-    /// would close a gap on evidence about a different passage.
     #[test]
     fn a_neighbour_reached_sideways_does_not_cover_a_subject() {
         let mut r = round("job priority", vec![hit(true)]);

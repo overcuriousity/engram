@@ -386,9 +386,6 @@ mod tests {
         }
     }
 
-    /// A capture burst: another connection holds the write lock while the
-    /// split is written. On a file, because only there do two connections
-    /// contend, and a deferred `BEGIN` that read first could not wait for it.
     #[tokio::test]
     async fn the_split_waits_for_a_writer_instead_of_failing_busy() {
         let dir = tempfile::tempdir().unwrap();

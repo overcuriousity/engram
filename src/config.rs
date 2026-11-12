@@ -3016,16 +3016,6 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// The near-duplicate threshold sits in the gap the evidence shows rather
-    /// than above it.
-    ///
-    /// Measured over a live base's 3916 corpus pairs with
-    /// `store::shingle::similarity` itself: the one real duplicate — a news
-    /// article captured through the web door and again through the journal
-    /// door — scored 0.789, and the next-highest pair in the entire base
-    /// scored 0.036. Nothing lies between the two. It shipped at 0.90, above
-    /// the only duplicate the base actually had, which therefore stayed in it
-    /// twice.
     #[test]
     fn near_dupe_min_catches_a_recapture_and_not_a_related_document() {
         let c = ConsolidateConfig::default();
@@ -3074,14 +3064,6 @@ mod tests {
         assert_eq!(read(r#"autonomous = "true""#), Autonomy::Full);
     }
 
-    /// `#[serde(default)]` on the `Config` field covers an absent section and
-    /// nothing else: with it alone, an operator reacting to the `"ranking"`
-    /// default by writing the one key they came to change got
-    /// `missing field give_up_window_secs` and a base that would not boot.
-    /// `ENGRAM__EVOLVE__AUTONOMOUS` is the same shape — the `config` crate
-    /// synthesises a table of one key from it — and it is the likelier way to
-    /// hit this, because nothing about setting an environment variable
-    /// suggests the other four keys come with it.
     #[test]
     fn an_evolve_section_naming_one_key_leaves_the_other_four_at_their_defaults() {
         let parse = |s: &str| {
@@ -3150,9 +3132,6 @@ mod tests {
         assert_eq!(EvolveConfig::default().autonomous, Autonomy::Full);
     }
 
-    /// Environment variables are process-global, but `cargo test` runs tests on
-    /// parallel threads. Without this, the env-override test mutates `ENGRAM__*`
-    /// while another test is deserializing config and the two race.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
@@ -3285,9 +3264,6 @@ mod tests {
         assert_eq!(cfg.capture.min_extracted_chars, 200);
     }
 
-    /// The setting exists for the endpoint the guess gets wrong, so the value an
-    /// operator types has to be the value the wire carries. Unset stays unset —
-    /// that is what leaves the guess and its correction in charge.
     #[test]
     fn the_ceiling_parameter_is_named_in_config_the_way_it_is_named_on_the_wire() {
         for (typed, want) in [
@@ -3488,14 +3464,6 @@ mod tests {
         p
     }
 
-    /// The section is the consent, and its absence is the refusal.
-    ///
-    /// `ReapConfig::default()` is `enabled = true` under `#[serde(default)]`, so
-    /// every config file written before the sweep existed — which is every one
-    /// of them — deserialized into a base that would begin burying artifact
-    /// text ninety days later. It is the one stage that destroys captured text,
-    /// and a warning ninety days ahead in a boot log is not a decision anybody
-    /// made.
     #[test]
     fn a_config_that_never_mentions_reap_does_not_run_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -3558,10 +3526,6 @@ username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
 "#;
 
-    /// The smallest config that starts, one mode, and nothing else. The
-    /// synthesizer is in it because it is required — capture synthesizes —
-    /// but no ask, no vision, no learning: capture, hybrid search, and the
-    /// one model `[infer.synthesize]` names.
     const FIVE_SECTIONS: &str = r#"
 [server]
 bind = "127.0.0.1:8080"
@@ -3671,8 +3635,6 @@ mode = "off"
         );
     }
 
-    /// The same key, written: a mode fills in what was left unsaid and never
-    /// overrides an operator who asked for the loop by name.
     #[test]
     fn a_learning_base_told_full_by_name_is_full() {
         let _guard = env_guard();
@@ -4065,8 +4027,6 @@ mode = "off"
         assert_eq!(key, cfg.infer.synthesize.as_ref().unwrap().api_key);
     }
 
-    /// How a request is read is a property of the server reading it, so the
-    /// borrowed name travels exactly as far as the borrowed endpoint does.
     #[test]
     fn the_ceiling_name_is_inherited_only_by_a_vision_role_sharing_the_endpoint() {
         let _guard = env_guard();
@@ -4094,11 +4054,6 @@ mode = "off"
         );
     }
 
-    /// The setting is not the only thing a borrowed endpoint has to inherit.
-    /// With `ceiling_param` unset there is nothing explicit to carry, and the
-    /// name is inferred from `reasoning_effort` — so a role that borrows the
-    /// endpoint has to borrow the signal too, or the two guess differently about
-    /// one server.
     #[test]
     fn the_effort_the_name_is_guessed_from_travels_with_the_borrowed_endpoint() {
         let _guard = env_guard();
@@ -4124,13 +4079,6 @@ mode = "off"
         assert_eq!(v.inherited_reasoning_effort(Some(&synth)), None);
     }
 
-    /// The ceiling's name is guessed from `reasoning_effort`, and the two ways
-    /// of guessing wrong do not cost the same: a hosted endpoint refuses the
-    /// wrong name in a 400 the transport learns from, while a local one ignores
-    /// it silently and applies no ceiling at all. `"none"` is the value that
-    /// says nothing either way — both kinds accept it, and it is what this
-    /// project recommends for suppressing local thinking — so it has to fall to
-    /// the side that self-corrects.
     #[test]
     fn the_ambiguous_effort_is_guessed_the_way_that_corrects_itself() {
         assert_eq!(CeilingParam::inferred_from(None), CeilingParam::MaxTokens);
@@ -4214,9 +4162,6 @@ mode = "off"
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert_eq!(cfg.associate.spread_max, 3);
     }
-    /// The tier tests below say nothing about auth, but a `Config` cannot be
-    /// loaded without one; kept out of the fixtures so they read as the shapes
-    /// they are actually about.
     const AUTH_TAIL: &str = r#"
         [auth]
         mode = "local"
@@ -4230,7 +4175,6 @@ mode = "off"
         Config::load(Some(&write(&dir, &format!("{body}{AUTH_TAIL}"))))
     }
 
-    /// A role takes its endpoint from the tier it names.
     #[test]
     fn a_role_resolves_its_endpoint_from_its_tier() {
         let _guard = env_guard();
@@ -4281,8 +4225,6 @@ mode = "off"
         assert_eq!(cfg.infer.ask.as_ref().unwrap().model, "qwen");
     }
 
-    /// A role may override any field its tier defines. Without this the two tiers
-    /// would have to multiply by every ceiling an operator wants.
     #[test]
     fn a_role_field_overrides_the_tier_it_points_at() {
         let _guard = env_guard();
@@ -4330,8 +4272,6 @@ mode = "off"
         );
     }
 
-    /// A typo in a tier name must be a startup failure naming the typo, never a
-    /// silent fallback to some other model.
     #[test]
     fn a_role_pointing_at_a_tier_that_does_not_exist_is_refused() {
         let _guard = env_guard();
@@ -4370,8 +4310,6 @@ mode = "off"
         assert!(err.contains("efficient"), "and what was available: {err}");
     }
 
-    /// The example config is the documentation, so it has to be the shape the
-    /// parser accepts and resolve to what the roles expect.
     #[test]
     fn the_example_config_reaches_its_endpoints_through_tiers() {
         let text = std::fs::read_to_string("config.example.toml").unwrap();
@@ -4388,9 +4326,6 @@ mode = "off"
         assert_eq!(cfg.infer.ask.as_ref().unwrap().context_tokens, 32768);
         assert_eq!(cfg.infer.ask.as_ref().unwrap().max_output_tokens, 4096);
     }
-    /// A tiered config with one endpoint everything can point at, so the tests
-    /// below say only the thing they are about. `[infer.ask]` is last, which is
-    /// what lets a test append a key to it.
     const TIERED: &str = r#"
         [server]
         bind = "127.0.0.1:8080"
@@ -4419,13 +4354,6 @@ mode = "off"
         tier = "efficient"
     "#;
 
-    /// Vision is the one role folded by hand rather than through
-    /// `resolve_endpoint`, and the two halves of that are asymmetric on
-    /// purpose: a timeout describes the server, so it travels with the tier,
-    /// and an output ceiling describes what the reply is for, so it does not.
-    /// A later tidy-up that ran vision through the shared path would give it a
-    /// fifteen-minute timeout and the segmenter's ceiling with a green suite,
-    /// so the asymmetry is pinned here rather than left to a comment.
     #[test]
     fn a_vision_role_takes_its_endpoint_from_a_tier_but_not_its_output_ceiling() {
         let _guard = env_guard();
@@ -4454,8 +4382,6 @@ mode = "off"
         assert!(!cfg.redacted().contains("tier-key"), "tier key leaked");
     }
 
-    /// A vision block with no endpoint at all is the documented common case:
-    /// one server hosting a multimodal model too.
     #[test]
     fn a_vision_role_borrowing_the_synthesize_endpoint_is_the_common_case() {
         let _guard = env_guard();
@@ -4476,8 +4402,6 @@ mode = "off"
         );
     }
 
-    /// A vision block may name its own endpoint directly, for the case where a
-    /// separate server serves the images.
     #[test]
     fn a_vision_role_may_carry_its_own_endpoint() {
         let _guard = env_guard();
@@ -4493,9 +4417,6 @@ mode = "off"
         );
     }
 
-    /// The planning call's whole reason to name a tier is to run somewhere
-    /// cheaper than the answer it feeds, so the endpoint has to arrive resolved
-    /// and complete — the completer is handed this, not a role.
     #[test]
     fn a_plan_tier_resolves_to_a_complete_endpoint() {
         let _guard = env_guard();
@@ -4518,10 +4439,6 @@ mode = "off"
         );
     }
 
-    /// With no plan tier named, the call runs on the ask endpoint — the whole
-    /// of it, including whether that endpoint takes a response format.
-    /// Assuming it does sends a schema to a server configured not to want one,
-    /// which 400s every ask's planning call and wastes it, silently.
     #[test]
     fn the_plan_fallback_carries_the_ask_tiers_structured_output_flag() {
         let _guard = env_guard();
@@ -4540,10 +4457,6 @@ mode = "off"
         assert!(cfg.infer.ask.as_ref().unwrap().plan_on().structured_output);
     }
 
-    /// The fan-out is what asking means now, so the switch ships on. An
-    /// operator who wrote the old key meant to turn something on, and a rename
-    /// that silently reverted them to the default would be indistinguishable
-    /// from the feature never having worked.
     #[test]
     fn planning_ships_on_and_the_old_key_still_speaks() {
         let _guard = env_guard();
@@ -4556,9 +4469,6 @@ mode = "off"
         );
     }
 
-    /// A named plan tier infers its ceiling name the same way every role does,
-    /// and the warning that says so at startup has to cover it — that endpoint
-    /// is exactly the cheap local one that ignores an unknown name.
     #[test]
     fn a_plan_tier_guessing_its_ceiling_name_is_warned_about() {
         let _guard = env_guard();
@@ -4580,9 +4490,6 @@ mode = "off"
         );
     }
 
-    /// Resolved at startup for the same reason every other tier name is: a typo
-    /// must fail where the operator can see it, not on the first question
-    /// somebody asks.
     #[test]
     fn a_plan_tier_that_does_not_exist_is_refused_like_any_other() {
         let _guard = env_guard();
@@ -4675,8 +4582,6 @@ mode = "off"
         );
     }
 
-    /// The preamble every `[infer.embed]` test below shares: a valid config
-    /// with the embed block left for the test to write.
     const EMBED_PREAMBLE: &str = r#"
         [server]
         bind = "127.0.0.1:8080"
@@ -4749,7 +4654,6 @@ mode = "off"
         assert!(err.to_string().contains("query_template"), "got: {err}");
     }
 
-    /// Everything but `[infer.*]` roles: the tests below write those themselves.
     const BARE_PREAMBLE: &str = r#"
         [server]
         bind = "127.0.0.1:8080"
@@ -4770,8 +4674,6 @@ mode = "off"
         max_input_tokens = 2048
     "#;
 
-    /// `BARE_PREAMBLE` without its `[infer.embed]` table, for a test that
-    /// writes its own.
     const BARE_PREAMBLE_NO_EMBED: &str = r#"
         [server]
         bind = "127.0.0.1:8080"

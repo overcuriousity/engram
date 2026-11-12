@@ -132,9 +132,6 @@ impl IntoResponse for UiError {
 mod tests {
     use super::*;
 
-    /// The page marks the sentence that says what went wrong, which is what
-    /// a failed htmx swap shows in place of the fragment. Unmarked, the
-    /// driver had nothing to read out of a page and showed the status code.
     #[tokio::test]
     async fn the_error_page_marks_its_reason_for_a_failed_swap_to_show() {
         let res = UiError(Error::Validation("chunk text is empty".into())).into_response();

@@ -611,13 +611,6 @@ mod tests {
     use crate::store::jobs::{MAX_ATTEMPTS, backoff_secs};
     use std::sync::Arc;
 
-    /// A standing count claims no work, and a report that gains one keeps
-    /// working without being told about this.
-    ///
-    /// Asserted on the retention report itself rather than on a hand-written
-    /// JSON blob: the whole mechanism is that `did_work` reads the fields a
-    /// sweep already serializes, so a field moved into or out of `Standing` is
-    /// only correct if it is correct *there*.
     #[test]
     fn a_sweeps_standing_counts_are_not_work() {
         use crate::jobs::retention::{Report, Standing};
@@ -669,7 +662,6 @@ mod tests {
         }
     }
 
-    /// The row a sweep leaves behind, whatever state it left in.
     async fn pending_run_after(core: &Core, stage: Stage) -> Option<i64> {
         sqlx::query_scalar!(
             "SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'",
@@ -881,11 +873,6 @@ mod tests {
         );
     }
 
-    /// A window the endpoint *refuses* used to be requeued at a fixed 32
-    /// seconds forever, because the permanent arm passed the `MAX_ATTEMPTS`
-    /// constant rather than the unit's own attempt count. Work the endpoint
-    /// said no to would then poll it 675 times more often than work that
-    /// merely failed to reach it — the wrong way round.
     #[tokio::test]
     async fn a_refused_window_backs_off_further_every_time_it_is_refused() {
         let mut core = test_core().await;
@@ -956,13 +943,6 @@ mod tests {
         );
     }
 
-    /// The instance-wide claim, and the thing it has to get right: the unit
-    /// runs against the core belonging to whoever queued it.
-    ///
-    /// `Retention` because it leaves a trace in the tenant it ran for —
-    /// `run_accounted` writes a `sweep_runs` row into that tenant's own
-    /// database. A worker that resolved the wrong core would still complete
-    /// the job; the row is what says which base it touched.
     #[tokio::test]
     async fn a_unit_runs_against_the_core_of_whoever_queued_it() {
         let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
@@ -986,9 +966,6 @@ mod tests {
         assert_eq!(ran(&b).await, 0, "another tenant's base was touched");
     }
 
-    /// A row can outlive its user: the cascade takes the queue with the row,
-    /// but a unit claimed a moment before the delete is already in a worker's
-    /// hand. Retrying it can never succeed, so it is closed rather than failed.
     #[tokio::test]
     async fn a_job_for_a_deleted_user_is_dropped_rather_than_retried() {
         let (tenants, a, _b, _dir) = crate::tenants::test_support::two_tenants().await;
@@ -1023,12 +1000,6 @@ mod tests {
         );
     }
 
-    /// The claim happens before the tenant is resolved, so a base that will
-    /// not open leaves a row somebody has already taken. Left there, it is
-    /// `running` with nobody holding it: no backoff, no `last_error`, one
-    /// attempt spent, and nothing until the hourly `reclaim_stuck` — which
-    /// during an outage is every unit in the queue, drained into a state a
-    /// worker cannot see.
     #[tokio::test]
     async fn a_unit_whose_base_will_not_open_goes_back_on_the_queue() {
         let (tenants, _dir) = crate::tenants::test_support::unopenable_tenants().await;
@@ -1064,8 +1035,6 @@ mod tests {
         );
     }
 
-    /// The `jobs` row a sweep left behind: when it next runs, and how many
-    /// consecutive runs before this one found nothing.
     async fn pending_row(core: &Core, stage: Stage) -> (i64, i64) {
         sqlx::query_as(
             "SELECT run_after, empty_runs FROM jobs WHERE stage = ? AND state = 'pending'",
@@ -1076,12 +1045,6 @@ mod tests {
         .unwrap()
     }
 
-    /// One sweep, as a worker runs it: the unit is closed, then re-armed.
-    ///
-    /// In that order and not the other, because the queue is keyed by
-    /// `(stage, target)` — a re-arm before the close would upsert the very row
-    /// the close then shuts, and the guard on the upsert says so by refusing to
-    /// touch anything that is not already finished.
     async fn sweep_finds(core: &Core, stage: Stage, did_work: bool) {
         let id: i64 = sqlx::query_scalar!("SELECT id FROM jobs WHERE stage = ?", stage.as_str())
             .fetch_optional(&core.store.control.pool)
@@ -1094,17 +1057,6 @@ mod tests {
         rearm_periodic_with(core, stage, "collection", did_work).await;
     }
 
-    /// How long a re-armed unit has to wait, in whole seconds.
-    ///
-    /// Not on tokio's paused clock, though the pacing gate's tests are: a
-    /// paused clock makes sqlx's pool time out acquiring its first connection,
-    /// because the acquire timeout fires before any real work can happen. These
-    /// tests never sleep, so a second of wall clock between arming and reading
-    /// is the only imprecision, and one second against a period of minutes is
-    /// not what any of them is about.
-    /// A core on which `Retention` is a periodic unit at all. `test_core` has
-    /// learning off and `retain_days` at zero, which is a base with nothing to
-    /// expire and so no unit to schedule.
     async fn sweeping_core() -> Core {
         let mut core = test_core().await;
         core.learn.enabled = true;
@@ -1116,9 +1068,6 @@ mod tests {
         (run_after - crate::store::now()).abs_diff(expected) <= 2
     }
 
-    /// A dormant tenant must not cost a wake-up an interval for ever. Nothing
-    /// here costs a model call — a sweep with nothing to do makes none — so the
-    /// backoff is proportionate to a wake-up, a file open and a few queries.
     #[tokio::test]
     async fn a_sweep_that_finds_nothing_waits_longer_each_time() {
         let core = sweeping_core().await;
@@ -1167,9 +1116,6 @@ mod tests {
         assert_eq!(empty, 0, "the count did not start over");
     }
 
-    /// The reset comes free, and it is what makes the backoff safe rather than
-    /// a firing rule: every producer already calls `arm_now`, so new data
-    /// cancels the wait with no producer changes at all.
     #[tokio::test]
     async fn new_data_cancels_the_backoff() {
         let core = sweeping_core().await;
@@ -1188,12 +1134,6 @@ mod tests {
         assert_eq!(empty, 0);
     }
 
-    /// The case the sentence above did not cover, and the one a busy base hits
-    /// most: the capture lands while the sweep it concerns is running. That row
-    /// is neither sleeping nor closed, so neither of `arm_now`'s guarded
-    /// statements matched it and the count it was meant to clear survived — the
-    /// sweep finished a moment later, read it, and re-armed at the doubled wait
-    /// with the new data already in the base.
     #[tokio::test]
     async fn data_arriving_mid_sweep_cancels_the_backoff_too() {
         let core = sweeping_core().await;

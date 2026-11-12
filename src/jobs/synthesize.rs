@@ -318,16 +318,6 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::store::corpora::CorpusStatus;
 
-    /// The window is what is left of the synthesizer's context once its system
-    /// prompt is in it, so the budget is not one number.
-    ///
-    /// The ten translations are comparable in bytes and not in tokens — the
-    /// tokenizer was trained on text that is mostly English, and a language
-    /// written in another script pays for it per character — so sizing every
-    /// corpus against `SYNTHESIZER_SYSTEM` built a Russian window larger than
-    /// the context it had to fit in. That failure is silent until the call,
-    /// and the repair turn, which re-sends the system prompt plus the user
-    /// prompt twice, hits the ceiling before the first call does.
     #[tokio::test]
     async fn the_window_is_measured_against_the_prompt_its_language_will_be_sent() {
         let core = test_core().await;
@@ -387,16 +377,6 @@ mod tests {
         );
     }
 
-    /// A budget with room for several windows and an output ceiling that never
-    /// binds, so the context blocks are what shape the windowing.
-    /// A synthesizer whose context carries the given opening and overlap.
-    ///
-    /// 4096 rather than the 2000 this used to say. The system prompt is about
-    /// 1564 tokens, so 2000 left 366 for input and output together — under the
-    /// smallest segment worth a call, and a configuration `segment_tokens` now
-    /// refuses outright. It used to be floored to 256 and these tests ran on
-    /// that: a budget no call could have honoured, which is exactly the state
-    /// the floor was hiding everywhere else.
     fn context_budget(opening: usize, overlap: usize) -> crate::infer::SynthesisBudget {
         crate::infer::SynthesisBudget {
             context_tokens: 4096,
@@ -410,7 +390,6 @@ mod tests {
         }
     }
 
-    /// (state, attempts, run_after, seq) of one job row.
     async fn job_row(core: &Core, stage: Stage, target: &str) -> (String, i64, i64, i64) {
         sqlx::query_as(
             "SELECT state, attempts, run_after, seq FROM jobs WHERE stage = ? AND target_id = ?",
@@ -422,7 +401,6 @@ mod tests {
         .unwrap()
     }
 
-    /// A corpus with its windows resolved and one embed job queued behind them.
     async fn segmented(core: &Core) -> String {
         let lines: Vec<String> = (0..40)
             .map(|i| format!("body line {i} with enough words to cost real tokens"))
@@ -709,16 +687,6 @@ mod tests {
         assert_eq!(got.title_hint.as_deref(), Some("My own label"));
     }
 
-    /// A body several windows long under the fake synthesizer's budget.
-    /// A context too small for its own prompt fails the corpus with the reason,
-    /// rather than cutting it into windows no call can honour.
-    ///
-    /// The floor made this invisible: `segment_tokens` handed back 256, the
-    /// splitter cut to it, `jobs::window`'s guard compared against it and
-    /// passed, and every call went out over the endpoint's real context to be
-    /// refused with a 400 that is not retryable. Every window of every such
-    /// capture failed and the corpus settled `partial`, with the cause named
-    /// nowhere — least of all next to the setting that caused it.
     #[tokio::test]
     async fn a_context_too_small_to_synthesize_says_so_instead_of_failing_every_window() {
         use crate::infer::fake::RecordingSynthesizer;
@@ -1206,11 +1174,6 @@ Then run sync.";
         );
     }
 
-    /// The retry is asked for over paraphrased *artifacts*, and the reply that
-    /// answers it need carry no JUDGE block: `parse_judged_response` gives
-    /// `judgement: None` for a reply it had to salvage or that arrived
-    /// truncated. Replacing the whole reply threw the first call's judgement
-    /// away with it, so a capture made for a reminder ended up with none.
     #[tokio::test]
     async fn a_re_segmentation_keeps_the_judgement_the_first_reply_gave() {
         let mut core = test_core().await;
@@ -1257,13 +1220,6 @@ Then run sync.";
         );
     }
 
-    /// And the same when the retry *parses* and merely says nothing. The merge
-    /// fell back only on a literal `None`, but `parse_judged_response` answers
-    /// `Some(..)` for every reply that parses and every field of the JUDGE
-    /// block is `#[serde(default)]` — so a retry that omits it yields
-    /// `Some(Judgement::default())`, an empty judgement that won against a full
-    /// one and took the reminder with it. `Judgement::says_something` is the
-    /// filter; `is_some` never was.
     #[tokio::test]
     async fn a_re_segmentation_that_says_nothing_does_not_retract_the_judgement() {
         let mut core = test_core().await;
@@ -1595,9 +1551,6 @@ Then run sync.";
         );
     }
 
-    /// A note is the operator's own sentence, not something read out of the
-    /// document. Counting it as a chunk tells a person a scan was read when
-    /// nothing of it was.
     #[tokio::test]
     async fn a_document_that_produced_only_its_note_still_parks_as_failed() {
         let core = test_core().await;
@@ -1636,10 +1589,6 @@ Then run sync.";
         );
     }
 
-    /// A corpus segmented before per-window segments existed is measured as one
-    /// window over all its chunks. The note is not one of them: it was not made
-    /// from the source, and one that quotes the document reports lines as
-    /// covered that no artifact holds.
     #[tokio::test]
     async fn the_windowless_coverage_fallback_does_not_count_the_note() {
         let core = test_core().await;

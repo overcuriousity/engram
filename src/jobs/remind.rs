@@ -562,9 +562,6 @@ mod tests {
         id
     }
 
-    /// A reminder on a passage has no name of its own, so the row's label *is*
-    /// the opening of its text — and the single-row push put that same opening
-    /// in the title and again on the first line of the body.
     #[test]
     fn a_push_over_a_nameless_reminder_does_not_say_its_text_twice() {
         let now = 1_787_320_320;
@@ -589,9 +586,6 @@ mod tests {
         assert!(body.contains("Send the invoice"), "{body}");
     }
 
-    /// A named artifact's title is not capped anywhere, and an opening is 120
-    /// characters, which in CJK is some 360 bytes. Eight of either runs past
-    /// the one record a push carries.
     #[test]
     fn a_due_payload_drops_moments_until_one_record_holds_it() {
         let now = 1_787_320_320;
@@ -620,9 +614,6 @@ mod tests {
         );
     }
 
-    /// `confirm_created` builds its title from the artifact's, which is capped
-    /// nowhere. A confirmation is sent once and never retried, so one that does
-    /// not fit is one nobody ever hears.
     #[test]
     fn a_notice_past_one_record_is_shortened_and_still_sent() {
         let now = 1_787_320_320;
@@ -647,7 +638,6 @@ mod tests {
         );
     }
 
-    /// One that fits is untouched: the trimming is a ceiling, not a policy.
     #[test]
     fn a_notice_that_fits_is_left_whole() {
         let msg = Message::notice("Reminder set: milk", "tomorrow at nine", 1_787_320_320);
@@ -661,8 +651,6 @@ mod tests {
         assert_eq!(b, "tomorrow at nine");
     }
 
-    /// One title alone past the record. Shortened rather than dropped: a
-    /// notification with no moment in it can be neither done nor snoozed.
     #[test]
     fn a_single_title_past_one_record_is_shortened_and_still_sent() {
         let now = 1_787_320_320;
@@ -684,7 +672,6 @@ mod tests {
         );
     }
 
-    /// A `DueRow` built by hand, so `compose` can be read on its own.
     fn row(at: Option<i64>, snoozed_until: Option<i64>) -> crate::store::moments::DueRow {
         crate::store::moments::DueRow {
             named: true,
@@ -712,11 +699,6 @@ mod tests {
         }
     }
 
-    /// The whole ladder is keyed on `snoozed_until.or(at)`, and so is the
-    /// band. The message was not: a reminder due at 09:00 and put aside until
-    /// 15:00 pushed at 15:00 saying "6 hours ago" — about an instant the
-    /// person had already moved away from — while the row it came from said
-    /// "now".
     #[test]
     fn a_snoozed_reminder_is_described_by_the_time_it_was_put_aside_until() {
         let due = 1_600_000_000;
@@ -743,13 +725,6 @@ mod tests {
         assert_eq!(many, many_unsnoozed);
     }
 
-    /// The endpoint is a URL the user saved and `points_inward` vets it once,
-    /// at save time. reqwest's default follows up to ten redirects and
-    /// re-checks nothing — so an allowed host answering 302 with
-    /// `Location: http://127.0.0.1:<port>` put the request on the server's own
-    /// loopback, and the Settings test button's two-valued "Sent." / "Could
-    /// not send." answer read back as a port scan needing no DNS control at
-    /// all.
     #[tokio::test]
     async fn a_push_endpoint_that_redirects_is_not_followed() {
         let inward = wiremock::MockServer::start().await;
@@ -789,7 +764,6 @@ mod tests {
         drop(inward);
     }
 
-    /// The pending Remind row's wake time, or none when nothing is armed.
     async fn run_after_of(core: &Core) -> Option<i64> {
         sqlx::query_scalar!(
             "SELECT run_after FROM jobs WHERE stage = ? AND target_id = ? AND state = 'pending'",
@@ -801,15 +775,6 @@ mod tests {
         .unwrap()
     }
 
-    /// Restoring an artifact from Ops has to re-arm the unit that its
-    /// disappearance disarmed.
-    ///
-    /// `uncovered` filters `a.status = 'active'`, so an artifact dedupe hides
-    /// takes its open reminder out of the unit's sight; where it was the only
-    /// one owed, the unit disarms itself. `unsupersede` cleared the row and
-    /// re-embedded the artifact and armed nothing, so that reminder was never
-    /// pushed at any rung again. Every other moment-moving write already called
-    /// `rearm_remind`; this path was the hole.
     #[tokio::test]
     async fn restoring_a_superseded_artifact_arms_its_reminder_again() {
         let server = wiremock::MockServer::start().await;
@@ -1022,7 +987,6 @@ mod tests {
         );
     }
 
-    /// The receiver's half of a registration, made in the test.
     fn a_receiver() -> (p256::SecretKey, [u8; 16], serde_json::Value) {
         use base64::Engine;
         use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
@@ -1283,16 +1247,6 @@ mod tests {
         );
     }
 
-    /// The second reminder, and the seam it fell through.
-    ///
-    /// The re-arm used to be the last line of `run`, where the unit's own row
-    /// is still `running` — and `arm_at` only moves a row that is `pending`,
-    /// `done` or `failed`. So the upsert did nothing, `complete_job` closed
-    /// the row with `run_after` at the instant that had just passed, and the
-    /// unit never woke again: two moments due at different times meant one
-    /// push and then silence, until some unrelated write happened to re-arm
-    /// it. Driven through `run_claimed` on purpose — calling `run` directly is
-    /// what hid this, because no running row exists there.
     #[tokio::test]
     async fn pushing_the_first_reminder_leaves_the_unit_waiting_for_the_second() {
         let server = wiremock::MockServer::start().await;
@@ -1425,8 +1379,6 @@ mod tests {
 mod ladder_tests {
     use super::*;
 
-    /// A moment that has existed longer than the ladder is deep: every rung is
-    /// one it could have stood on. The `created_at` most of these tests want.
     const LONG_AGO: i64 = 0;
 
     #[test]
@@ -1467,13 +1419,6 @@ mod ladder_tests {
         assert_eq!(owed_lead(due, false, Some(now), LONG_AGO, due), Some(0));
     }
 
-    /// The rungs a reminder was created too late to stand on.
-    ///
-    /// "erinnere mich morgen um 9", set this afternoon, is inside the 48-hour
-    /// first rung before it exists. The ladder read that rung as passed and
-    /// unpushed and owed it at once — while `confirm_created` was pushing
-    /// "reminder set" for the same act. Two buzzes seconds apart, for every
-    /// reminder under two days out.
     #[test]
     fn a_reminder_created_inside_the_band_owes_nothing_until_its_own_time() {
         let due = 1_000_000;

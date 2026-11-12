@@ -119,7 +119,6 @@ mod tests {
         }
     }
 
-    /// `(from, to, ids)` for each band, which is what every case below asserts.
     fn shape(bs: &[Band]) -> Vec<(i64, i64, Vec<&str>)> {
         bs.iter()
             .map(|b| {

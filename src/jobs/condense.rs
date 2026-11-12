@@ -277,12 +277,6 @@ mod tests {
         );
     }
 
-    /// A version in prose is not fenced, backticked or path-shaped, so
-    /// `merge::losses` — written for a merge, where the numbers of two
-    /// artifacts are being brought together across languages — sees nothing
-    /// wrong with a rewrite that drops it. This is the same artifact in the
-    /// same language, and "requires 1.22.0 or later" coming back as "requires
-    /// a recent version" is a silent change of meaning.
     #[tokio::test]
     async fn a_rewrite_that_drops_a_number_out_of_prose_is_refused_without_writing() {
         let (core, writer) = core_with(vec![reply(
@@ -345,17 +339,6 @@ mod tests {
         );
     }
 
-    /// One arming, one condensation. The enqueue after the commit lives in
-    /// another database, so a retryable failure there leaves this unit queued
-    /// with the rewrite already applied — and the retry used to write a second
-    /// version off the same nomination. The arming path's own check
-    /// (`sleep::condense_candidates`) stops a second *arming* and does nothing
-    /// about this.
-    ///
-    /// Two versions off one nomination is not merely redundant:
-    /// `undo_action_on` stamps every open row for a subject and kind, so
-    /// taking the newer one back marks the older undone too, and the original
-    /// text is hidden from `jobs::retract` for good.
     #[tokio::test]
     async fn an_artifact_that_is_already_condensed_is_not_condensed_again() {
         let (core, writer) = core_with(vec![
@@ -378,17 +361,6 @@ mod tests {
         );
     }
 
-    /// The same retry, against a condensation somebody has since taken back.
-    ///
-    /// The guard above reads open rows, and an undo leaves none — so in the
-    /// exact window these guards exist for (the rewrite committed, the
-    /// `enqueue` in the other database failed, the unit still queued) a retry
-    /// landing after the undo re-condensed the artifact and reversed it. The
-    /// operator pressed the button, watched the original come back, and it
-    /// went away again on the next tick with nothing to say why.
-    ///
-    /// `sleep::condense_candidates` has asked both questions since it was
-    /// written; this asked one of them.
     #[tokio::test]
     async fn a_condensation_that_was_taken_back_is_not_written_again_by_a_retry() {
         let (core, writer) = core_with(vec![
@@ -424,12 +396,6 @@ mod tests {
         );
     }
 
-    /// A condensation is a read-modify-write with a model call in the middle,
-    /// and that call takes as long as the endpoint feels like taking. An edit
-    /// through the API in that window has to win: it is a person's, it is
-    /// newer, and the `losses()` guard that is the whole safety argument of
-    /// this path was computed against the copy it replaced — so a value the
-    /// user had just added was covered by nothing at all.
     #[tokio::test]
     async fn an_edit_made_while_the_rewrite_was_being_written_is_not_reverted() {
         let (core, _) = core_with(vec![reply(
@@ -489,11 +455,6 @@ mod tests {
         assert!(core.store.versions_of(&id).await.unwrap().is_empty());
     }
 
-    /// A `Condense` row outlives the permission it was armed under: it is
-    /// persisted, so a core built below "full" that finds it still on the
-    /// queue must not rewrite the artifact — `jobs::retract`, the only way
-    /// back, is switched off at that same level. The base itself always runs
-    /// as "full"; this guards the gate, not a setting an operator can reach.
     #[tokio::test]
     async fn a_row_armed_under_full_writes_nothing_once_the_permission_is_gone() {
         for level in [

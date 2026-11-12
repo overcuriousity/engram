@@ -425,9 +425,6 @@ mod tests {
         }
     }
 
-    /// The column exists for one reason — drawing the lineage — so the query
-    /// that reads it is the only place the generation between a merge and its
-    /// roots survives.
     #[tokio::test]
     async fn a_source_row_names_the_parent_its_root_entered_through() {
         let s = Store::memory().await.unwrap();

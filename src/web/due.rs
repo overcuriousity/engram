@@ -626,10 +626,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A due row is a link and its time; there is no snippet beside it. So a
-    /// reminder set on a passage was listed under the heading of the section
-    /// the passage was cut from — a name for a chapter standing over a
-    /// reminder about three sentences of it.
     #[tokio::test]
     async fn a_reminder_on_a_passage_is_listed_by_how_its_text_opens() {
         let core = test_core().await;
@@ -696,10 +692,6 @@ mod tests {
         );
     }
 
-    /// The heading rides in the fragment, so the swap that empties the band
-    /// takes it with it. Rendered by the page around it — gated on a `has_due`
-    /// read taken once, which is what Insights used to do — pressing done on
-    /// the only open reminder left "Due" standing over nothing.
     #[tokio::test]
     async fn the_heading_leaves_with_the_last_row_it_was_a_heading_for() {
         let core = test_core().await;
@@ -753,9 +745,6 @@ mod tests {
         );
     }
 
-    /// And the column beside the capture box asks for no heading, so it gets
-    /// none: one fragment, two pages, and only one of them has a section to
-    /// name.
     #[tokio::test]
     async fn the_workspace_column_draws_no_heading() {
         let core = test_core().await;
@@ -1101,13 +1090,6 @@ mod tests {
         );
     }
 
-    /// `carry_moments` deliberately moves a root's open due row onto the
-    /// merge that folded it in, and a merge belongs to no corpus. Before this,
-    /// `set_reminder` returned at the corpus lookup having done nothing:
-    /// pressing "Not a reminder" gave no banner, no error, deleted nothing and
-    /// recorded no refusal, while the row went on pushing at every rung for
-    /// ever. It deletes now — and offers no undo, because nothing could
-    /// re-read a note that does not exist to derive the row again.
     #[tokio::test]
     async fn a_reminder_carried_onto_a_merge_can_still_be_told_it_is_not_one() {
         let core = test_core().await;
@@ -1354,7 +1336,6 @@ mod tests {
         );
     }
 
-    /// A recurring reminder on the 1st of each month, 09:00 Berlin.
     async fn artifact_with_rule(core: &Core, rule: &str) -> String {
         let out = core
             .ingest_capture(Capture::new("Pay rent", "ui"))
@@ -1611,7 +1592,6 @@ mod tests {
         }
     }
 
-    /// How many rows the band drew, counted the way a reader counts them.
     fn rows_in(html: &str) -> usize {
         html.matches("class=\"due-row").count()
     }
@@ -1788,15 +1768,6 @@ mod tests {
         );
     }
 
-    /// An idle band still polls, at the cap and no faster.
-    ///
-    /// It used to ship no `every` at all, which read as a saving and was a
-    /// defect: the interval comes from `next_due_change`, which filters
-    /// `kind = 'due'`, while the same fragment renders "Coming up" from the
-    /// event moments — so a page holding only events stopped asking and went
-    /// on naming a 09:00 event all afternoon. Reminders and events captured
-    /// from the CLI, the extension or a second window were invisible here
-    /// until something else forced a swap.
     #[tokio::test]
     async fn an_idle_band_polls_no_faster_than_the_cap() {
         let core = test_core().await;
@@ -1929,14 +1900,6 @@ mod tests {
         assert!(html.contains("in 3h 00m"), "and it counts down: {html}");
     }
 
-    /// A snooze re-keys the row, and the band is one of its readers.
-    ///
-    /// `open_due` selects and orders on `COALESCE(snoozed_until, at)`, the
-    /// push ladder is keyed on `snoozed_until.or(at)`, and so is the artifact
-    /// page. The band drew from `at` alone: a reminder due at nine, snoozed to
-    /// three and rendered at five past three came back "6h overdue" at full
-    /// heat, counting up from nine, while the push for the same second said
-    /// "now".
     #[tokio::test]
     async fn an_elapsed_snooze_is_the_rows_time_on_the_band_too() {
         let mut core = test_core().await;

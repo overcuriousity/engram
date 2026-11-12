@@ -443,10 +443,6 @@ mod tests {
         }
     }
 
-    /// A tag is a filing decision a person made, and the roots leave results
-    /// when the merge lands. Carrying only the draft's tags therefore unfiled
-    /// the knowledge: the text stayed stored and stopped answering the name it
-    /// was stored under.
     #[tokio::test]
     async fn a_merge_keeps_the_tags_its_sources_were_filed_under() {
         let core = crate::core::test_support::test_core().await;
@@ -473,21 +469,6 @@ mod tests {
         assert_eq!(m.tags, vec!["pinned", "shared", "runbook"]);
     }
 
-    /// A merge hidden behind a later one does not wedge the idle pass.
-    ///
-    /// It is not undone either — see
-    /// `undoing_a_merge_that_a_later_one_hides_does_nothing_and_says_so` for
-    /// what it reports instead. What this one holds is the older claim: that
-    /// meeting the state costs nothing, and leaves the base exactly as it was.
-    ///
-    /// `finish` supersedes an older merge onto the newer one that subsumes it,
-    /// while the older merge's own `corpus_actions` rows stay open — and
-    /// `retract`'s rules read open rows. So rule 1 replayed one of those
-    /// originals, reactivated the sources here, and died on `core.deprecate`,
-    /// which refuses a row that already carries `superseded_by`. The `?`
-    /// returned before the pass stamped its cursor, so every later pass read
-    /// the same row and died the same way: rule 2, interference, condense and
-    /// ranking adoption all sit behind rule 1 and none of them ran again.
     #[tokio::test]
     async fn a_merge_hidden_behind_a_later_one_does_not_wedge_the_idle_pass() {
         let core = crate::core::test_support::test_core().await;
@@ -542,7 +523,6 @@ mod tests {
         );
     }
 
-    /// A captured artifact carrying only the text the checks read.
     fn root(text: &str) -> Chunk {
         Chunk {
             id: "root".into(),
@@ -1019,11 +999,6 @@ mod tests {
         }
     }
 
-    /// `finish` hides each root through `Core::supersede`, which takes the
-    /// root's open questions with it — verdicts included. Without that, the
-    /// contradiction a root carried died with the root, and the disagreement
-    /// only came back if a later sweep happened to re-file the same pair
-    /// against the merge.
     #[tokio::test]
     async fn a_merge_takes_its_roots_verdicts_with_it() {
         use crate::store::pairs::PairState;
@@ -1372,9 +1347,6 @@ mod tests {
         );
     }
 
-    /// C was a duplicate of B; B is now inside M. Without this the question
-    /// dies with B and only comes back once M has embedded and a later
-    /// similarity sweep re-files it — a whole tick per generation of a cluster.
     #[tokio::test]
     async fn finishing_a_merge_moves_its_members_open_pairs_onto_it() {
         let core = crate::core::test_support::test_core().await;
@@ -1408,8 +1380,6 @@ mod tests {
         );
     }
 
-    /// `finish` is re-run by the sweep for as long as the merge stands, so a
-    /// second pass must not put back a question the first one already moved.
     #[tokio::test]
     async fn re_pointing_is_safe_to_run_twice() {
         let core = crate::core::test_support::test_core().await;
@@ -1448,17 +1418,6 @@ mod tests {
         );
     }
 
-    /// An undo that cannot happen says so, rather than reporting success for
-    /// having done nothing.
-    ///
-    /// `finish` repoints an older merge's roots onto the newer one that
-    /// subsumes it, so by the time anything asks to undo the older merge,
-    /// `artifacts_superseded_by` comes back empty and there is nothing to put
-    /// back. The old code read that as a completed undo: it restored nothing,
-    /// skipped the deprecate because the row was hidden, returned `Ok(())`,
-    /// and every caller then stamped the merge's journal rows undone — closing
-    /// them to rule 1 for good, and telling the operator on Insights that a
-    /// retraction had happened.
     #[tokio::test]
     async fn undoing_a_merge_that_a_later_one_hides_does_nothing_and_says_so() {
         let core = crate::core::test_support::test_core().await;

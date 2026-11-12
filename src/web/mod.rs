@@ -208,12 +208,6 @@ mod tests {
     use axum::body::Body;
     use tower::ServiceExt;
 
-    /// The one URL that answers with two different documents, and what has to
-    /// be said about it. Without `Vary` a browser is entitled to reuse the
-    /// fragment htmx fetched — and history navigation is exactly where it does
-    /// — so pressing Back after following a link out of the workspace rendered
-    /// the bare partial as a whole page: no `<head>`, no stylesheet, the app in
-    /// Times New Roman.
     #[tokio::test]
     async fn a_page_that_answers_two_ways_says_what_it_answers_to() {
         let core = crate::core::test_support::test_core().await;
@@ -553,13 +547,6 @@ mod tests {
         assert_eq!(MAX_BODY_BYTES, 8 * 1024 * 1024);
     }
 
-    /// No page is wider than the window it is read in, and nothing on one is
-    /// crushed to a column of single characters.
-    ///
-    /// 375 is the narrow half of what a phone is; 700 is the band above the tab
-    /// bar's breakpoint and below the one that puts two regions side by side;
-    /// 1500 is the first width at which the workspace is three-up, which is the
-    /// arrangement most of the layout exists for and none of it was measuring.
     #[tokio::test]
     #[ignore = "needs node and a headless Chrome; see the note above"]
     async fn no_page_runs_off_the_side_of_a_phone() {
@@ -570,10 +557,6 @@ mod tests {
         }
     }
 
-    /// The Web Share Target door is gone (engram#97): its POST could never
-    /// carry the `SameSite=Lax` session cookie, so every share was lost. The
-    /// Android app is the phone's door now, and even a signed-in POST here
-    /// must find nothing to store into.
     #[tokio::test]
     async fn the_retired_share_door_answers_nothing() {
         let core = crate::core::test_support::test_core().await;

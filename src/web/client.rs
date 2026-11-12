@@ -879,7 +879,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A learning core with one read capture, and its live artifact.
     async fn learning_base() -> (axum::Router, String, crate::core::Core, String) {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
@@ -1146,10 +1145,6 @@ mod tests {
         assert!(core.store.moment(&mid).await.unwrap().is_some());
     }
 
-    /// The two cases #133 names, through the app's door. A reminder read as
-    /// `FREQ=DAILY;INTERVAL=1;BYDAY=TU` from "heute Abend", saved as a
-    /// one-off: done arms nothing. An entry made a weekly reminder and then
-    /// removed: no open row, and `about` says so.
     #[tokio::test]
     async fn the_app_edits_a_reminder_and_turns_an_entry_into_one_and_back() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -1345,10 +1340,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NO_CONTENT);
     }
 
-    /// The phone's Undo is offered on exactly the windows the browser offers
-    /// it on. A window whose synthesis superseded nothing is not promoted, and
-    /// listing it here would put an Undo under a model's only copy of the text
-    /// — `undo_promotion` would deprecate it and restore nothing.
     #[tokio::test]
     async fn only_a_window_that_superseded_a_passage_is_promoted() {
         use crate::store::artifacts::{CorpusSpan, NewArtifact, Provenance, SpanSource};

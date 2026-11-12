@@ -24,7 +24,6 @@ fn files(dir: &str, ext: &str) -> Vec<(String, String)> {
     out
 }
 
-/// The Rust source up to its `#[cfg(test)]` tests module.
 fn non_test(src: &str) -> &str {
     let mut from = 0;
     while let Some(i) = src[from..].find("#[cfg(test)]\n") {
@@ -38,7 +37,6 @@ fn non_test(src: &str) -> &str {
     src
 }
 
-/// Askama comments blanked out, newlines kept so line numbers still point at the source.
 fn without_template_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut rest = src;
@@ -336,7 +334,6 @@ fn no_literal_colour_outside_the_token_file() {
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
 
-/// Files whose runtime queries are not yet converted to the checked macros; shrinks to empty.
 const NOT_YET_CHECKED: &[&str] = &[
     "src/backup/sqlite.rs",
     "src/core/ingest.rs",
@@ -417,4 +414,113 @@ fn every_runtime_query_says_why() {
         }
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}
+
+fn comment_line(ext: &str, line: &str) -> bool {
+    let t = line.trim_start();
+    match ext {
+        "rs" | "js" | "kt" => t.starts_with("//"),
+        "toml" | "yml" | "sh" => t.starts_with('#') && !t.starts_with("#!") && !t.starts_with("#["),
+        _ => false,
+    }
+}
+
+fn long_blocks(name: &str, src: &str, max: usize) -> Vec<String> {
+    let ext = name.rsplit('.').next().unwrap_or("");
+    let mut out = Vec::new();
+    let mut run = 0;
+    let mut start = 0;
+    for (n, line) in src.lines().chain(std::iter::once("")).enumerate() {
+        if comment_line(ext, line) {
+            if run == 0 {
+                start = n + 1;
+            }
+            run += 1;
+        } else {
+            if run > max {
+                out.push(format!("{name}:{start}: {run} lines"));
+            }
+            run = 0;
+        }
+    }
+    for (open, close) in [("{#", "#}"), ("/*", "*/")] {
+        if (open == "{#" && ext != "html") || (open == "/*" && !matches!(ext, "css" | "js")) {
+            continue;
+        }
+        let mut rest = src;
+        let mut offset = 0;
+        while let Some(i) = rest.find(open) {
+            let end = rest[i..]
+                .find(close)
+                .map_or(rest.len(), |j| i + j + close.len());
+            let lines = rest[i..end].lines().count();
+            if lines > max {
+                let at = src[..offset + i].lines().count() + 1;
+                out.push(format!("{name}:{at}: {lines} lines"));
+            }
+            offset += end;
+            rest = &rest[end..];
+        }
+    }
+    out
+}
+
+fn commented_files() -> Vec<(String, String)> {
+    let mut all = Vec::new();
+    for (dir, ext) in [
+        ("src", "rs"),
+        ("tests", "rs"),
+        ("examples", "rs"),
+        ("src/web/templates", "html"),
+        ("assets/css", "css"),
+        ("assets/js", "js"),
+        ("extension/shared", "js"),
+        ("extension/shared", "css"),
+        ("extension/shared", "html"),
+        (".github/workflows", "yml"),
+        ("scripts", "sh"),
+    ] {
+        all.extend(
+            files(dir, ext)
+                .into_iter()
+                .filter(|(n, _)| !n.contains("-oc-") && !n.ends_with("00-tokens.css")),
+        );
+    }
+    for f in ["build.rs", "Cargo.toml", "install.sh", "assets/app.js"] {
+        all.push((f.to_string(), fs::read_to_string(root().join(f)).unwrap()));
+    }
+    all.sort();
+    all.dedup();
+    all
+}
+
+#[test]
+#[ignore = "until the comment pass lands"]
+fn no_comment_block_is_longer_than_three_lines() {
+    let offenders: Vec<String> = commented_files()
+        .iter()
+        .flat_map(|(n, s)| long_blocks(n, s, 3))
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "{} comment blocks over three lines:\n{}",
+        offenders.len(),
+        offenders.join("\n")
+    );
+}
+
+#[test]
+#[ignore = "until the comment pass lands"]
+fn comment_lines_are_under_8_percent_of_src() {
+    let (mut comments, mut lines) = (0usize, 0usize);
+    for (_, src) in files("src", "rs") {
+        lines += src.lines().count();
+        comments += src.lines().filter(|l| comment_line("rs", l)).count();
+    }
+    let share = comments as f64 / lines as f64;
+    assert!(
+        share < 0.08,
+        "{comments} of {lines} lines are comments ({:.1} %)",
+        share * 100.0
+    );
 }

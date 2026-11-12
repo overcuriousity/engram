@@ -440,7 +440,6 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
 
-    /// A core at `earned`, recording, with one verbatim corpus of one passage.
     async fn earned_with_one_passage() -> (crate::core::Core, String, String) {
         let mut core = test_core().await;
         core.learn.enabled = true;
@@ -474,12 +473,6 @@ mod tests {
         (core, out.id, p)
     }
 
-    /// The live half of what the pursuit sweep used to re-check hours later.
-    ///
-    /// A citation is the one signal `/ask` honestly gives about an artifact,
-    /// and it arrives at the bump — against an activation that has not decayed
-    /// yet, which is the whole reason the sweep's copy of this check could only
-    /// ever decline where this one declined.
     #[tokio::test]
     async fn an_artifact_an_answer_cited_can_promote_its_window() {
         let (mut core, corpus, p) = earned_with_one_passage().await;
@@ -643,16 +636,6 @@ mod tests {
         );
     }
 
-    /// A promotion is the base acting on the corpus unasked, and it is counted
-    /// against the day's budget — so it has to read the budget, which is the
-    /// one thing it never did.
-    ///
-    /// The row it writes is a `Kind::Promote`, counted against `Job::Promote`
-    /// and nothing else. It reads its own day because these arrive on
-    /// ordinary reading rather than on a sweep — ten in a day is a person
-    /// going carefully through their own base — and, before the count was
-    /// split per job, that also stood dedupe, reap, condense and `arm_dedupe`
-    /// down for the rest of the day without a word.
     #[tokio::test]
     async fn a_spent_budget_arms_no_promotion() {
         let (mut core, corpus, p) = earned_with_one_passage().await;
@@ -795,28 +778,18 @@ mod tests {
 
     use crate::store::artifacts::CorpusSpan;
 
-    /// A span the splitter found: the ordinary case, and what a passage always
-    /// has.
     fn sp(a: i64, b: i64) -> CorpusSpan {
         CorpusSpan::located(a, b)
     }
 
-    /// The paraphrase's ordinary case: the model named lines, nothing checked
-    /// them.
     fn claimed(a: i64, b: i64) -> CorpusSpan {
         CorpusSpan::claimed(a, b)
     }
 
-    /// Nothing placed it — the whole-window fallback.
     fn unplaced(a: i64, b: i64) -> CorpusSpan {
         CorpusSpan::unplaced(a, b)
     }
 
-    /// Two passages of one document, as an embedder actually places them:
-    /// close, because they share a subject and its vocabulary — nowhere near
-    /// the orthogonal pair a synthetic `[1,0]` / `[0,1]` suggests. `cos` here
-    /// is 0.8, over `traceable_min`'s 0.75 and under anything a real
-    /// paraphrase of the passage itself would score.
     fn same_document() -> (Vec<f32>, Vec<f32>) {
         let t: f32 = 0.8f32.acos();
         (vec![1.0, 0.0], vec![t.cos(), t.sin()])
@@ -866,9 +839,6 @@ mod tests {
         assert_eq!(covered_by(&passages, &arts), vec![("p", "x")]);
     }
 
-    /// A verbatim corpus of three passages (lines 1–2, 3–4, 5–6 of one
-    /// window) with activation and a link on the middle one; then a
-    /// promotion whose artifact A claims lines 1–4 and B claims line 6.
     async fn promoted_fixture() -> (
         crate::core::Core,
         String,
@@ -1003,13 +973,6 @@ mod tests {
         assert!(a_val > 1.0);
     }
 
-    /// What crosses is the engagement, not the raw stored sum. The winner was
-    /// written moments ago, so its baseline stands at a full `1.0`, while an
-    /// old passage's baseline has almost decayed away under whatever it
-    /// earned: comparing the two raw numbers read one against the other. A
-    /// passage six weeks old with `1.9` of earned access carried a raw `0.36`,
-    /// lost the `max` to the winner's own `1.0`, and the artifact that was
-    /// supposed to inherit the access it earned came out at nothing.
     #[tokio::test]
     async fn the_artifact_inherits_what_the_passage_earned_and_not_its_raw_sum() {
         let now = crate::store::now();
@@ -1103,11 +1066,6 @@ mod tests {
         assert!(from_passage.is_empty());
     }
 
-    /// `all_superseded` is what actually went dark, not what was nominated.
-    /// Built from the candidate pairs, it named passages `try_supersede`
-    /// *refused* too — and a link to one of those, a passage still standing
-    /// and still reachable, was dropped as "about to go dark": carried
-    /// nowhere, and gone from the loser's end the moment the loser was hidden.
     #[tokio::test]
     async fn a_link_to_a_sibling_the_supersession_was_refused_for_is_still_carried() {
         let (core, corpus, passages, mut written) = promoted_fixture().await;
@@ -1228,9 +1186,6 @@ mod tests {
         );
     }
 
-    /// A point for one artifact, so a test can say what the store already
-    /// holds by the time supersession runs: the passages were embedded at
-    /// capture and `embed_written` embedded the artifacts.
     async fn embed_as(core: &crate::core::Core, id: &str, corpus: &str, v: Vec<f32>) {
         core.vectors
             .upsert(vec![crate::vector::VectorPoint {
@@ -1246,14 +1201,6 @@ mod tests {
             .unwrap();
     }
 
-    /// One artifact over the passage it was written from, sharing not one line
-    /// with it.
-    ///
-    /// This is the ordinary case, not an exotic one: synthesis resolves
-    /// pronouns and completes fragments, so a capture of prose comes back with
-    /// nothing matching word for word. The verbatim rule alone left the
-    /// passage in results beside the artifact written from it — two hits for
-    /// one note, on every capture that was not code.
     #[tokio::test]
     async fn a_rewrite_that_copied_no_line_supersedes_the_passage_it_says() {
         let (core, corpus, passages, _written) = promoted_fixture().await;
@@ -1304,14 +1251,6 @@ mod tests {
         }
     }
 
-    /// The cosine's own floor: a span the model only claimed, over text the
-    /// artifact says nothing about and scores nothing against. The verbatim
-    /// rule caught this and so must the meaning.
-    ///
-    /// What this does *not* test is the floor being high enough, and no test
-    /// with two orthogonal vectors can: see
-    /// `a_whole_window_fallback_hides_nothing_however_similar` for the
-    /// similarity a real pair of passages out of one document reaches.
     #[tokio::test]
     async fn a_rewrite_about_something_else_leaves_the_passage_standing() {
         let (core, corpus, passages, _written) = promoted_fixture().await;
@@ -1341,17 +1280,6 @@ mod tests {
         }
     }
 
-    /// The fallback span, whole and entire: the failure a paraphrasing model
-    /// produces on its own.
-    ///
-    /// `resolve_span` found nothing of the artifact in the window and handed it
-    /// the window — so every passage in it is majority-covered by this one
-    /// artifact, and there is nothing left between the passages and being
-    /// hidden but the cosine. At the similarity passages of one document
-    /// actually score against each other, which is over the threshold and
-    /// nothing like the orthogonal pair a synthetic fixture suggests, all
-    /// three stay: the artifact was never placed, so the number is not about
-    /// them.
     #[tokio::test]
     async fn a_whole_window_fallback_hides_nothing_however_similar() {
         let (core, corpus, passages, _written) = promoted_fixture().await;
@@ -1401,12 +1329,6 @@ mod tests {
         }
     }
 
-    /// A passage whose point has not landed yet is not a passage that fails
-    /// the cosine — it is one nobody has measured. The corpus embed job and
-    /// this window's job share a class, an attempts count and a seq, so with
-    /// more than one worker they run at once; and nothing re-runs
-    /// `supersede_covered` for a `done` window, so "not yet embedded" used to
-    /// mean "left standing beside its replacement for good".
     #[tokio::test]
     async fn a_passage_with_no_point_yet_is_embedded_rather_than_written_off() {
         let (core, corpus, passages, _written) = promoted_fixture().await;
@@ -1448,8 +1370,6 @@ mod tests {
         );
     }
 
-    /// Above 1.0 is how the key says "verbatim only", and it has to reach the
-    /// path that would otherwise have superseded.
     #[tokio::test]
     async fn a_threshold_over_one_leaves_only_the_verbatim_rule() {
         let (mut core, corpus, passages, _written) = promoted_fixture().await;

@@ -221,8 +221,6 @@ mod tests {
         assert_eq!(cluster(&v, 0.6), vec![vec![0, 1, 2]]);
     }
 
-    /// Deterministic stand-in for an embedder's output: `spread` 1.0 is
-    /// well-distributed directions, 0.0 is every vector on top of one axis.
     fn pseudo(n: usize, dim: usize, spread: f32) -> Vec<Vec<f32>> {
         let mut state = 0x2545_f491u32;
         let mut next = move || {

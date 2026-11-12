@@ -562,10 +562,6 @@ mod tests {
         );
     }
 
-    /// engram#61. A run-on line longer than the budget — a PDF paragraph
-    /// reflowed onto one line — is cut at words, and the leftover words were a
-    /// passage of their own: `is needed.`, ten characters ranked first for a
-    /// query matching nothing.
     #[test]
     fn a_budget_cut_tail_is_folded_into_the_passage_it_was_cut_from() {
         let text = format!(
@@ -597,7 +593,6 @@ mod tests {
         }
     }
 
-    /// A short note is a note, not an orphan: nothing to fold it into.
     #[test]
     fn a_window_shorter_than_the_minimum_is_still_one_passage() {
         let w = window("short note", 3);
@@ -706,9 +701,6 @@ mod tests {
         );
     }
 
-    /// The embed-only floor. A capture small enough for one call is the one
-    /// that would arm synthesis at capture; with no synthesizer it stays the
-    /// passages it was written as, and no model unit is queued for it.
     #[tokio::test]
     async fn a_small_capture_with_no_synthesizer_stays_verbatim() {
         let core = crate::core::test_support::test_core_without_synthesizer().await;
@@ -854,10 +846,6 @@ mod tests {
         );
     }
 
-    /// The repair over a base written before the guard: orphans already
-    /// stored are folded into their neighbour, re-queued for embedding, and
-    /// their own rows and vectors removed. Dry-run first, then for real, then
-    /// once more to show it is idempotent.
     #[tokio::test]
     async fn stored_orphans_are_merged_into_their_neighbour_and_removed() {
         use crate::store::artifacts::EmbedState;
@@ -962,10 +950,6 @@ mod tests {
         );
     }
 
-    /// The note is written at capture and the passages arrive later, each
-    /// numbered from 0 within its own window. Renumbering has to put the note
-    /// first and push the document down by one — with no change to this
-    /// writer, which is the whole reason the note carries no `segment_idx`.
     #[tokio::test]
     async fn a_note_sorts_ahead_of_the_document_it_annotates() {
         let core = crate::core::test_support::test_core().await;

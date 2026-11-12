@@ -346,8 +346,6 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
 #[cfg(test)]
 mod tests {
 
-    /// The frames were being sent and dropped on the floor while a strand
-    /// animated over the gap. What they say is worth more than what it said.
     #[test]
     fn a_retrieved_frame_becomes_a_line_a_person_can_read() {
         let face = crate::cli::face::Face::decide(
@@ -392,8 +390,6 @@ mod tests {
         assert!(needs_line(&face, &serde_json::json!({"queries": []})).is_none());
     }
 
-    /// `show` erases one physical row, so a line that wraps leaves its head on
-    /// the screen and the answer is written under a note that was taken back.
     #[test]
     fn a_note_longer_than_the_terminal_is_clipped_rather_than_wrapped() {
         for width in [24usize, 40, 80] {
@@ -420,7 +416,6 @@ mod tests {
         }
     }
 
-    /// A redirected answer receives none of it.
     #[test]
     fn a_face_that_is_off_says_nothing_between_the_frames() {
         let face = crate::cli::face::Face::decide(&Default::default(), false, false, None);
@@ -433,9 +428,6 @@ mod tests {
         serde_json::json!({ "title": title, "artifact_id": id, "text": format!("the opening of {id}") })
     }
 
-    /// The answer cites `[9]`, and until now the list under it was 22 unnumbered
-    /// lines: there was no way to tell which one `[9]` meant. The number the
-    /// model used is the position in this list, and the list has to say so.
     #[test]
     fn every_source_carries_the_number_the_answer_cited_it_by() {
         let out = render_citations(
@@ -458,9 +450,6 @@ mod tests {
         assert!(!out.contains("untitled"), "{out}");
     }
 
-    /// A reading follows a citation: the numbers under an answer are a list
-    /// `--show` can name a rank out of, the same way the ones under a search
-    /// are.
     #[test]
     fn the_sources_are_a_list_show_can_read_a_rank_out_of() {
         let ids = citation_ids(&[cite(None, "id-a"), cite(None, "id-b")]);

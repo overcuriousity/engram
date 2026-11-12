@@ -2507,12 +2507,6 @@ mod tests {
         assert!(d.orphan_points.is_empty());
     }
 
-    /// The per-kind ceilings, imposed on the path rather than at each door.
-    ///
-    /// The doors are layered at `max(pdf_max_bytes, image_max_bytes)` because
-    /// one route serves both kinds, and a multipart part carries no ceiling of
-    /// its own — so `/capture` used to walk a 49 MB photo
-    /// through a full decode however small `image_max_bytes` was set.
     #[tokio::test]
     async fn a_file_over_its_kind_s_ceiling_is_refused() {
         let mut core = test_core().await;
@@ -2569,8 +2563,6 @@ mod tests {
         assert!(err.to_string().contains("8 MB limit"), "{err}");
     }
 
-    /// The two link doors share one path, and the path decides by what the
-    /// URL held: a page is extracted here, a PDF is stored for `Stage::Extract`.
     #[tokio::test]
     async fn a_url_holding_a_page_is_captured_with_its_provenance() {
         use wiremock::matchers::{method, path};
@@ -2764,10 +2756,6 @@ mod tests {
         }
     }
 
-    /// `MAX_IMAGE_EDGE` and `MAX_DECODE_BYTES` bound one image and say nothing
-    /// about ten at once. Decoding runs on a 512-thread blocking pool through
-    /// no gate at all, so without a permit the ceiling on resident pixels is
-    /// however many uploads a client cares to have in flight.
     #[tokio::test]
     async fn only_so_many_uploads_are_decoded_at_once() {
         let core = test_core().await;
@@ -2958,10 +2946,6 @@ mod tests {
         ));
     }
 
-    /// `describe` is guarded by origin, not by "has an attachment": a PDF has
-    /// one too, and letting it through would clear the extraction and every
-    /// artifact behind it before handing the vision model a preview a PDF is
-    /// stored without.
     #[tokio::test]
     async fn a_pdf_cannot_be_re_read_through_the_vision_stage() {
         let core = test_core().await;
@@ -3142,7 +3126,6 @@ mod tests {
         assert_eq!(src.source_url, None);
     }
 
-    /// A body long enough to have a stable shingle signature.
     fn manual(marker: &str) -> String {
         (0..200)
             .map(|i| format!("step {i}: run the {marker} command and read its output"))
@@ -3565,7 +3548,6 @@ mod tests {
         );
     }
 
-    /// One point for `artifact_id`, with nothing set beyond what a write needs.
     fn point(artifact_id: &str, corpus_id: &str) -> crate::vector::VectorPoint {
         crate::vector::VectorPoint {
             sparse: Default::default(),
@@ -3579,7 +3561,6 @@ mod tests {
         }
     }
 
-    /// A corpus with one artifact in it, and the ids of both.
     async fn one_artifact(core: &crate::core::Core) -> (String, String) {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -3837,10 +3818,6 @@ mod tests {
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 
-    /// A note is no longer truncated on the way into storage. It is an
-    /// artifact like any other, and `embed::run_with_limit` splits an oversize
-    /// chunk into siblings — so length is the embedder's problem, not a silent
-    /// amputation at the door.
     #[tokio::test]
     async fn a_long_note_is_stored_whole_and_a_blank_one_is_dropped() {
         let core = test_core().await;
@@ -3957,9 +3934,6 @@ mod tests {
         );
     }
 
-    /// The sentence most worth searching on must be an artifact, not a
-    /// caption. Embedding runs over artifact chunks and never over metadata,
-    /// so a note that stays in `metadata["note"]` cannot be found at all.
     #[tokio::test]
     async fn a_note_on_a_pdf_becomes_a_span_less_artifact_on_its_corpus() {
         let core = test_core().await;
@@ -3988,7 +3962,6 @@ mod tests {
         assert_eq!(n.title, None);
     }
 
-    /// One helper, three doors, so a fourth cannot forget it.
     #[tokio::test]
     async fn every_door_that_takes_a_note_writes_it_as_an_artifact() {
         let describer = std::sync::Arc::new(crate::infer::fake::FakeDescriber::default());
@@ -4049,9 +4022,6 @@ mod tests {
         );
     }
 
-    /// A scan with no text layer parks as `failed` and never reaches `settle`,
-    /// which is what normally arms the embed. Without arming it here, the one
-    /// thing a person typed about an unreadable document waits forever.
     #[tokio::test]
     async fn a_note_arms_the_embed_so_an_unread_capture_still_becomes_findable() {
         let core = test_core().await;
@@ -4078,7 +4048,6 @@ mod tests {
         );
     }
 
-    /// Re-uploading the same file must not stack a second note on it.
     #[tokio::test]
     async fn a_duplicate_upload_writes_no_second_note() {
         let core = test_core().await;
@@ -4115,9 +4084,6 @@ mod tests {
         );
     }
 
-    /// A note is not derived work. A reprocess replaces everything the pipeline
-    /// made from the document; the sentence a person typed about it is the one
-    /// thing in the corpus no rerun can produce again.
     #[tokio::test]
     async fn a_reprocess_keeps_the_note_and_queues_it_for_a_fresh_vector() {
         let core = test_core().await;
@@ -4182,11 +4148,6 @@ mod tests {
         );
     }
 
-    /// The band offers "Not a reminder — undo" on `can_be_a_reminder`, and it
-    /// used to decide on `corpus_id.is_some()` alone. `set_reminder(id, true)`
-    /// refuses on three more conditions, so the button appeared on captures it
-    /// could not honour, reported success and restored nothing — which is
-    /// precisely what the optional undo exists to prevent.
     #[tokio::test]
     async fn the_undo_is_offered_only_where_the_reminder_can_actually_come_back() {
         use crate::store::artifacts::NewArtifact;
@@ -4244,13 +4205,6 @@ mod tests {
         );
     }
 
-    /// A restore out of a merge is an operator overruling the merge for this
-    /// one source, and the lineage has to record it or `merge::finish`'s
-    /// unfinished-merge repair re-hides the source on the next sweep tick, and
-    /// the one after that. `unsupersede_locked` records it; `reactivate`'s
-    /// exhume branch returned before ever reaching that code, so an artifact
-    /// that was deprecated *and* merged *and* buried — the shape the Insights
-    /// restore button reaches — came back and was hidden again immediately.
     #[tokio::test]
     async fn a_buried_merge_source_restored_from_insights_stays_restored() {
         use crate::store::artifacts::{ArtifactStatus, NewMerged};
@@ -4481,12 +4435,6 @@ mod tests {
         );
     }
 
-    /// A reminder is read in one pass or not at all.
-    ///
-    /// Only a single-window corpus reaches the judged synthesis call
-    /// (`jobs::window`), so `engram -r` over a long note was synthesized window
-    /// by window, embedded whole, answered with a corpus id — and armed
-    /// nothing. Refused at the door instead, before anything is stored.
     #[tokio::test]
     async fn a_reminder_too_large_to_be_judged_is_refused_at_the_door() {
         let core = test_core().await;
@@ -4517,8 +4465,6 @@ mod tests {
             .unwrap();
     }
 
-    /// The embed-only floor turns a reminder away at the door and says why,
-    /// rather than storing a note nothing will ever remind.
     #[tokio::test]
     async fn a_reminder_with_no_synthesizer_is_refused_as_not_configured() {
         let core = crate::core::test_support::test_core_without_synthesizer().await;
@@ -4541,15 +4487,6 @@ mod tests {
         core.ingest_capture(Capture::new(text, "ui")).await.unwrap();
     }
 
-    /// A reminder read onto a passage, and the passage superseded under it.
-    ///
-    /// `supersede` says every other question about the loser now belongs to the
-    /// winner — the open pairs move, the links move, the engagement moves. Time
-    /// did not. A note that is nothing but a reminder leaves the model nothing
-    /// it is allowed to write, so the judgement anchors to the verbatim passage
-    /// itself; when a later promotion superseded that passage the row went
-    /// dark, because `uncovered` reads `a.status = 'active'`. No push at any
-    /// rung, nothing on the day page, and nothing anywhere saying it had gone.
     #[tokio::test]
     async fn superseding_an_artifact_carries_the_reminder_standing_on_it() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -4585,8 +4522,6 @@ mod tests {
         assert_eq!(open[0].moment.at, Some(at));
     }
 
-    /// And it never becomes a second row: a winner that already carries the
-    /// instant keeps the one it has.
     #[tokio::test]
     async fn a_carried_moment_never_doubles_an_instant_the_winner_holds() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -4661,8 +4596,6 @@ mod decode_text_tests {
         assert_eq!(decode_text(utf16(false, true)).as_deref(), Ok(LINE));
     }
 
-    /// The live artifact: `D.u...h.a.s.t...` — UTF-16LE with no mark, which is
-    /// valid UTF-8 and used to be stored that way.
     #[test]
     fn utf16_without_a_byte_order_mark_is_refused_not_stored() {
         let ascii: Vec<u8> = "Du hast"

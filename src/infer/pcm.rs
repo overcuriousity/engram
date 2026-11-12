@@ -127,7 +127,6 @@ mod tests {
             .collect()
     }
 
-    /// Upward zero crossings a second: a tone's frequency, without an FFT.
     fn hz(samples: &[f32], rate: u32) -> f32 {
         let crossings = samples
             .windows(2)

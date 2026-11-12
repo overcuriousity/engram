@@ -1052,8 +1052,6 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    /// Deterministic stand-in for an embedder that puts everything close
-    /// together, the way bge-m3 does.
     fn crowded(n: usize) -> Vec<Vec<f32>> {
         let mut state = 0x2545_f491u32;
         let mut next = move || {
@@ -1069,10 +1067,6 @@ mod tests {
             .collect()
     }
 
-    /// The weak line is measured, not configured: with enough recorded
-    /// queries the base says where unrelated stops, every clone of `Core`
-    /// reads the one measurement, and the next boot finds it in meta. With
-    /// too few, the configured floor stands.
     #[tokio::test]
     async fn the_weak_line_is_measured_from_the_base_and_shared() {
         let mut core = test_support::test_core().await;
@@ -1115,16 +1109,6 @@ mod tests {
         );
     }
 
-    /// A core built over a base that has already measured its line starts
-    /// with that line, rather than at the floor until some later pass gets
-    /// round to it.
-    ///
-    /// The bug this is against: `calibrate` runs on the hourly pass, which
-    /// opens a *transient* core to run it on, so the measurement was written
-    /// to meta and then dropped with the core that took it. Whatever core was
-    /// serving requests went on reading `weak_below` as the 0.35 floor, and a
-    /// capture landing in that window closed every gap it came within 0.40 of
-    /// — all of which the next pass then deleted as being under the line.
     #[tokio::test]
     async fn a_core_starts_from_the_line_the_base_last_measured() {
         let mut core = test_support::test_core().await;
@@ -1145,10 +1129,6 @@ mod tests {
         assert_eq!(core.weak_below(), 0.6);
     }
 
-    /// Two cores built for one subject read one line, whichever of them
-    /// measured it. `Working` is what carries it across the two, and the
-    /// hourly pass's transient core is the one that matters: see
-    /// `background::open_for_pass`.
     #[tokio::test]
     async fn one_subjects_cores_share_the_measurement_whichever_took_it() {
         let store = crate::store::Store::memory().await.unwrap();
@@ -1170,20 +1150,6 @@ mod tests {
         );
     }
 
-    /// Both halves of one decision, which is why they are asserted together.
-    ///
-    /// A new deployment is told to `cp config.example.toml config.toml`, so
-    /// this file is what a fresh base ranks by, and it ships primed: the
-    /// lowest rung of the lift, with the sitting taking part in it.
-    ///
-    /// The compiled lift is the same rung, so a base that never wrote the key
-    /// is primed too. What that costs is said in `boot_generation`: the file
-    /// params it compares are the *resolved* ones, so on the first boot after
-    /// the default moved, a base that never wrote `prime_lift` sees a changed
-    /// file and its live generation is restated to it — every knob the idle
-    /// pass had adopted on that base goes back to the file, once. The sitting
-    /// flip stays off in the binary: it is a second decision, taken in the
-    /// file.
     #[tokio::test]
     async fn the_example_config_and_the_compiled_default_ship_primed() {
         let cfg = Config::load(std::path::Path::new("config.example.toml").into()).unwrap();
@@ -1208,9 +1174,6 @@ mod tests {
         assert!(!crate::config::default_sitting_prime());
     }
 
-    /// The one wiring decision `from_config` makes that is not a straight
-    /// field copy: rerank is optional, and an absent block must leave search
-    /// in vector order rather than defaulting to an endpoint.
     #[tokio::test]
     async fn the_example_config_carries_the_consolidation_defaults() {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
@@ -1318,10 +1281,6 @@ mod tests {
         drop(held);
     }
 
-    /// The whole of the off switch. Planning costs one model call on every
-    /// question, so `plan = false` must not merely skip the call — there must
-    /// be nothing to call, which is what `None` here means. The example config
-    /// is the shipped default, and this asserts the default it ships.
     #[tokio::test]
     async fn the_planner_is_wired_by_default_and_unwired_when_switched_off() {
         let store = crate::store::Store::memory().await.unwrap();
@@ -1417,9 +1376,6 @@ mod contained_tests {
     use crate::store::feedback::Door;
     use crate::tenants::VectorFactory;
 
-    /// The whole of part 1 in one test: a capture goes in, the jobs run, and a
-    /// search finds it — with no Qdrant anywhere, and the base is still there
-    /// for a second store opened over the same file.
     #[tokio::test]
     async fn a_capture_is_found_again_with_only_a_file_for_a_vector_store() {
         let dir = tempfile::tempdir().unwrap();
@@ -1466,8 +1422,6 @@ mod contained_tests {
         );
     }
 
-    /// Part 1's test with the fake embedder gone: real vectors from a real
-    /// model, into a file, found by a query in another language.
     #[tokio::test]
     async fn a_german_capture_is_found_by_an_english_question_with_no_endpoint_anywhere() {
         let Some(dir) = std::env::var_os("ENGRAM_TEST_MODELS").map(std::path::PathBuf::from) else {

@@ -268,9 +268,6 @@ mod tests {
         assert!(path.exists(), "nothing was written to {}", path.display());
     }
 
-    /// What is written has to be a config this same reader accepts — a scaffold
-    /// that does not parse is worse than none — and it must not resolve, or the
-    /// placeholder token would be sent to the server as if it were real.
     #[test]
     fn the_written_example_parses_and_still_has_no_token_in_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -288,8 +285,6 @@ mod tests {
             .expect_err("the placeholder token resolved as a real one");
     }
 
-    /// The one thing this must never do. A config that is already there is the
-    /// user's, token and all, and a tokenless run is not a reason to touch it.
     #[test]
     fn a_config_that_is_already_there_is_never_overwritten() {
         let (_dir, path) = a_config("url = \"https://file.test\"\n");
@@ -305,9 +300,6 @@ mod tests {
         assert!(err.to_string().contains("ENGRAM_TOKEN"), "unhelpful: {err}");
     }
 
-    /// A scaffold that cannot be written is still an error about the token, not
-    /// one about the filesystem: the user asked to search, and the way forward
-    /// is the same either way.
     #[test]
     fn a_config_that_cannot_be_written_still_says_what_to_do() {
         let dir = tempfile::tempdir().unwrap();
@@ -322,8 +314,6 @@ mod tests {
         assert!(said.contains("/ui/settings"), "unhelpful: {said}");
     }
 
-    /// It is about to hold a bearer token, and the user pastes that in without
-    /// being told to fix the mode first.
     #[cfg(unix)]
     #[test]
     fn the_written_config_is_readable_only_by_its_owner() {

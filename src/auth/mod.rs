@@ -175,14 +175,6 @@ impl axum::extract::OptionalFromRequestParts<AppState> for Identity {
 mod tests {
     use super::*;
 
-    /// One authentication per request, however many extractors ask for one.
-    ///
-    /// Asserted by taking the session away between the two asks: a second ask
-    /// that still answers cannot have gone back to the store. What that saves
-    /// on the route this was found on — `Tenant` and `Identity` side by side on
-    /// incremental search — is a session read and a sliding-expiry write per
-    /// keystroke, and for a bearer caller a second argon2 walk of the token
-    /// table.
     #[tokio::test]
     async fn one_request_authenticates_once_however_many_extractors_ask() {
         let core = crate::core::test_support::test_core().await;

@@ -631,8 +631,6 @@ fn read_target(target: &str) -> Result<Read> {
 
 #[cfg(test)]
 mod tests {
-    /// A face with nothing drawn: every assertion in this module is about the
-    /// bytes a capture sends, and a track on stderr is not one of them.
     fn off() -> crate::cli::face::Face {
         crate::cli::face::Face::decide(&Default::default(), false, false, None)
     }
@@ -659,14 +657,6 @@ mod tests {
         assert!(stored.raw_text.contains("a procedure worth keeping"));
     }
 
-    /// The one case `off()` cannot reach: with the face on the body goes out in
-    /// pieces, and the length is set by hand so it is framed the same way the
-    /// single vector is. Bigger than `PIECE`, so several chunks actually go.
-    ///
-    /// What this guards is that the two forms are the same request. Before the
-    /// header was set, a streamed body went out chunked with no
-    /// `content-length` — so what the server and any proxy in front of it saw
-    /// depended on nothing but whether the operator's stdout was a terminal.
     #[tokio::test]
     async fn a_body_sent_in_pieces_arrives_whole() {
         let (e, core) = endpoint().await;
@@ -726,11 +716,6 @@ mod tests {
         }
     }
 
-    /// Only "there is nothing at this name" leaves room for the reading that
-    /// the argument was prose. Every other error says the target *is* a file
-    /// and could not be read, and swallowing those captured the word the
-    /// operator typed as a note and exited 0 — `engram -c archive` in a
-    /// directory holding one used to report `archive: Is a directory`.
     #[test]
     fn a_target_that_exists_but_cannot_be_read_is_an_error_not_a_note() {
         let dir = tempfile::tempdir().unwrap();
@@ -753,15 +738,6 @@ mod tests {
         assert_eq!(read.label, "text");
     }
 
-    /// The shell takes an unquoted note apart, and `-c` used to keep the
-    /// pieces.
-    ///
-    /// `num_args = 1..` is there so a glob is one invocation, and it is also
-    /// what an unquoted sentence arrives as: `engram -c buy milk` stored two
-    /// corpora holding the words "buy" and "milk", exit 0. Before `-c` took
-    /// prose at all the same command had failed loudly with `buy: No such file
-    /// or directory`, which is the worse failure to have replaced with a
-    /// quieter one.
     #[test]
     fn several_arguments_are_several_captures_only_when_each_addresses_something() {
         let dir = tempfile::tempdir().unwrap();
@@ -785,8 +761,6 @@ mod tests {
         }
     }
 
-    /// A plain word anywhere in the list makes the line a note; a path-shaped
-    /// miss beside a real path is still refused as the typo it is.
     #[test]
     fn a_plain_word_in_the_list_makes_the_whole_line_a_note() {
         let words = |w: &[&str]| w.iter().map(|s| s.to_string()).collect::<Vec<_>>();
@@ -812,10 +786,6 @@ mod tests {
         );
     }
 
-    /// A paragraph is longer than a file name may be, and the kernel says so
-    /// with `ENAMETOOLONG` rather than `ENOENT`. Keyed on `NotFound` alone,
-    /// the fallthrough missed it: a 265-byte sentence exited 2 with "File
-    /// name too long" and the whole paragraph echoed back as a path.
     #[test]
     fn a_sentence_longer_than_a_file_name_is_still_prose() {
         let prose = "eine Zeile, die sich wiederholt und wiederholt, ".repeat(6);
@@ -827,10 +797,6 @@ mod tests {
         assert_eq!(read.bytes, prose.as_bytes());
     }
 
-    /// A body that is one link is read by the server as a page to fetch, and a
-    /// fetched page carries none of the fields this path sets. The server said
-    /// so by naming `intent` — a field the operator never typed for a verb
-    /// they did.
     #[tokio::test]
     async fn a_bare_link_cannot_be_a_reminder() {
         let (e, _core) = endpoint().await;
@@ -999,11 +965,6 @@ mod tests {
         assert_eq!(stored.title_hint.as_deref(), Some("A title with spaces"));
     }
 
-    /// The five minutes this stops: an id the server will not talk about used
-    /// to be polled six hundred times, the pulse animating the whole way, and
-    /// then reported as "still being read". A revoked token, a wrong
-    /// `ENGRAM_URL` and a deleted corpus all landed there, and none of them is
-    /// something waiting fixes.
     #[tokio::test]
     async fn watching_gives_up_at_once_on_an_id_the_server_refuses() {
         let (e, _core) = endpoint().await;

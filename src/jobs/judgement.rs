@@ -629,10 +629,6 @@ mod tests {
     use crate::jobs::test_support::drain;
     use async_trait::async_trait;
 
-    /// `2026-09-04T09:00:00.000Z` is a spelling models hand back, and
-    /// `split_offset` takes the `Z` off before `naive` ever sees it. Without
-    /// the fractional format the remainder parsed as nothing at all and the
-    /// reminder was dropped with a `debug!` line for a record.
     #[test]
     fn a_when_with_fractional_seconds_is_a_date() {
         let utc = chrono_tz::UTC;
@@ -646,8 +642,6 @@ mod tests {
         );
     }
 
-    /// A synthesizer whose judged reply is set by the test after it knows the
-    /// ids it wants to link to.
     struct JudgedFake(std::sync::Mutex<Judgement>);
 
     #[async_trait]
@@ -689,8 +683,6 @@ mod tests {
         std::sync::Arc::new(JudgedFake(std::sync::Mutex::new(j)))
     }
 
-    /// A synthesizer that answers a bare reminder the way a model held to the
-    /// prompt does: the judgement, and no artifact at all.
     struct JudgementOnly(Judgement);
 
     #[async_trait]
@@ -904,11 +896,6 @@ mod tests {
         assert_eq!(after[0].moment.at, Some(moved_to));
     }
 
-    /// The delete used to happen at the top of `apply`, before any of the
-    /// decisions below it. A window retry whose second reply is vaguer than the
-    /// first walks straight into the "no date anywhere" arm, and that arm
-    /// returns — so the standing reminder was destroyed and nothing was put
-    /// back, with a `debug!` line for a record.
     #[tokio::test]
     async fn a_vaguer_re_reading_does_not_take_away_the_reminder_it_cannot_replace() {
         let mut core = test_core().await;
@@ -998,21 +985,6 @@ mod tests {
         assert_eq!(journal[0].detail.as_deref(), Some("due"));
     }
 
-    /// The JUDGE block's own clock, handed straight back as `when`.
-    ///
-    /// `synthesis_prompt` states `Current local time` so that "morgen um 9"
-    /// can be resolved against something, and a model that has nothing else
-    /// to say answers with that line. On the live base it did so twice: a
-    /// shopping note whose 18:00 went to `events` and whose `when` was the
-    /// prompt's clock, and a ticket page whose presale dates went to `events`
-    /// after its recurrence rule was thrown out. Both filed a due row at the
-    /// minute the reading was made, which the band draws as due at once and
-    /// the ladder's last rung pushes immediately — beside the correct future
-    /// row, which is what made it look like two reminders for one note.
-    ///
-    /// An instant that has already passed is not a date a note names for
-    /// future-self, whatever produced it, so it is no date at all and the
-    /// arms below decide what an undated reading means.
     #[tokio::test]
     async fn a_judged_reminder_already_in_the_past_is_not_a_date() {
         let mut core = test_core().await;
@@ -1038,15 +1010,6 @@ mod tests {
         );
     }
 
-    /// A `when` that names a day and no hour, on the day it was written.
-    ///
-    /// `DEFAULT_HOUR` is this module's reading of a bare date, not something
-    /// the note said, so measuring it against the clock asks whether nine in
-    /// the morning has been and gone. "Erinnere mich heute an X" written at
-    /// three in the afternoon was thrown out by that question and became an
-    /// ordinary capture with no reminder and no reason given. The echo the
-    /// comparison exists to catch always carries an hour with it, which is
-    /// what lets the two be told apart.
     #[tokio::test]
     async fn a_bare_date_is_past_only_when_the_day_is() {
         // 2026-09-15T15:00Z, and the same day at `DEFAULT_HOUR` is behind it.
@@ -1088,15 +1051,6 @@ mod tests {
         }
     }
 
-    /// A recurrence read off a capture the clock has long since left behind.
-    ///
-    /// `first_occurrence` anchors at `src.created_at`, so a re-read of an old
-    /// note — or a synthesis job running well after the paste — yields an
-    /// occurrence that is itself behind us. Dropping it left `at` unset while
-    /// `rule` stood, and that pair is a row that can never fire (`uncovered`
-    /// wants `m.at IS NOT NULL`) and can never arm its successor
-    /// (`complete_moment` wants both): a weekly reminder, silently dead, with
-    /// a "Reminder set" push already sent for it.
     #[tokio::test]
     async fn a_recurrence_older_than_the_clock_advances_instead_of_dying() {
         let mut core = test_core().await;
@@ -1198,11 +1152,6 @@ mod tests {
         );
     }
 
-    /// The door outranks the model. `engram -r` is a person saying "remind
-    /// me", and the forcing used to be consumed only *inside* the `remind`
-    /// arm — so a model answering `none` for an explicit reminder fell into
-    /// the catch-all, wrote no due row at all, and took the previous
-    /// reading's reminder with it.
     #[tokio::test]
     async fn a_door_that_says_remind_me_outranks_a_model_that_says_otherwise() {
         for answered in ["none", "anything else"] {
@@ -1228,11 +1177,6 @@ mod tests {
         }
     }
 
-    /// Metadata comes straight out of a column, and indexing a `Value` that
-    /// is not an object panics. `record_intent` runs at the very top of
-    /// `apply`, so a corpus whose metadata is a JSON scalar took the worker
-    /// down before any of the judgement was filed — the guard
-    /// `describe::park_failed` and `extract` both carry.
     #[tokio::test]
     async fn metadata_that_is_not_an_object_does_not_take_the_worker_down() {
         let mut core = test_core().await;
@@ -1275,12 +1219,6 @@ mod tests {
         assert_eq!(meta["intent_read"], "remind");
     }
 
-    /// Completing a reminder retires the note behind it, so it stops being one
-    /// of the last things you kept. A later reading that arms a *new* reminder
-    /// on that note has to take the retirement back: an open reminder whose
-    /// note is missing from the rail and demoted below the search cliff is a
-    /// reminder nobody can see the source of, and no undo anywhere offers to
-    /// bring it back.
     #[tokio::test]
     async fn a_note_read_as_a_reminder_again_comes_back_out_of_retirement() {
         let mut core = test_core().await;
@@ -1333,10 +1271,6 @@ mod tests {
         );
     }
 
-    /// `delete_read_due` keeps a row that has already been pushed — it has a
-    /// history, and a row with a history outlives the reading that made it.
-    /// The stage deleted anyway, found nothing to delete, and inserted: two
-    /// open rows for one reading of one note, both climbing the ladder.
     #[tokio::test]
     async fn a_re_read_adds_nothing_beside_a_reminder_that_already_pushed() {
         let mut core = test_core().await;
@@ -1382,10 +1316,6 @@ mod tests {
         assert_eq!(after[0].moment.at, rows[0].moment.at);
     }
 
-    /// A forced remind with no date is the band asking "when?", which is the
-    /// right question where there is no date and the wrong one where a date is
-    /// already standing: `uncovered` filters undated rows out, so the swap
-    /// stopped the reminder firing with nothing said anywhere.
     #[tokio::test]
     async fn a_forced_remind_with_no_date_leaves_a_standing_date_alone() {
         let mut core = test_core().await;
@@ -1427,9 +1357,6 @@ mod tests {
         assert_eq!(after[0].moment.at, dated, "the date survived the re-read");
     }
 
-    /// The instant guard compares instants and nothing else, which is right
-    /// for the duplicate it prevents and wrong for the one thing a second
-    /// reading can add: the same Friday, now read as every Friday.
     #[tokio::test]
     async fn a_re_read_that_recognises_the_recurrence_keeps_it() {
         let mut core = test_core().await;

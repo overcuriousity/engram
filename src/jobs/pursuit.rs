@@ -838,11 +838,6 @@ mod tests {
         }
     }
 
-    /// With `[learn]` on and no `[infer.generate]`, `generate` returned a bare
-    /// `Ok(())` and the pursuit stayed `open` with no artifact and no reason —
-    /// a row Ops shows for ever that nobody can act on. `periodic_units` no
-    /// longer arms the stage without a generator, but a unit queued before the
-    /// model was taken out of the config still arrives here.
     #[tokio::test]
     async fn a_pursuit_with_no_generator_closes_unsatisfied_rather_than_sitting_open() {
         let mut core = test_core().await;
@@ -872,10 +867,6 @@ mod tests {
         );
     }
 
-    /// A generation reads originals. A pursuit whose engaged source is itself
-    /// a synthesis hands the model that synthesis's roots, so the lineage of
-    /// what gets written stays one step deep and the prompt never carries a
-    /// paraphrase as an excerpt.
     #[tokio::test]
     async fn a_synthesized_source_contributes_its_roots_not_its_text() {
         let mut core = test_core().await;
@@ -1016,19 +1007,6 @@ mod tests {
         assert_eq!(p.state, "satisfied", "{p:?}");
     }
 
-    /// The order the live base actually does it in.
-    ///
-    /// `jobs::gaps::cover` runs once, from `settle_corpus`, the moment the
-    /// note is stored — and at that moment the pursuit those same keystrokes
-    /// become does not exist. Only the sweep, after `idle_secs` of quiet,
-    /// clusters the searches and closes the cluster `unsatisfied`, which is
-    /// what makes a gap of it. So the capture-side link resolved no pursuits
-    /// at all for the one sequence it was written for, and nothing came back
-    /// for it afterwards.
-    ///
-    /// Out of reach of the measurement on purpose: `weak_below` is 1.0, so a
-    /// distance could not close this gap and the link is the only thing that
-    /// can.
     #[tokio::test]
     async fn a_pursuit_swept_up_after_the_capture_is_still_closed_by_it() {
         let mut core = pursuing_core().await;
@@ -1201,7 +1179,6 @@ mod tests {
         assert!(why.contains('2'), "{why}");
     }
 
-    /// A core at earned with pursuits on, recording, and a tiny idle window.
     async fn pursuing_core() -> crate::core::Core {
         let mut core = test_core().await;
         core.learn.enabled = true;
@@ -1228,8 +1205,6 @@ mod tests {
         .await
     }
 
-    /// A recorded search, as a named door with a named scope makes it. The two
-    /// tests below turn on the scope alone.
     async fn event_from(
         core: &crate::core::Core,
         door: crate::store::feedback::Door,
@@ -1280,12 +1255,6 @@ mod tests {
         id
     }
 
-    /// The join the terminal door had never been able to make.
-    ///
-    /// A search typed at a shell records with a scope now, and the `--show`
-    /// that follows it records the open with the same one, so the sweep can see
-    /// that the two are one run. What it does with that run is the ordinary
-    /// decision; what matters here is that it has the run at all.
     #[tokio::test]
     async fn an_open_at_a_shell_attaches_to_the_search_that_led_to_it() {
         let core = pursuing_core().await;
@@ -1326,8 +1295,6 @@ mod tests {
         );
     }
 
-    /// The bug, kept as a witness. Unscoped — which is what every CLI search
-    /// recorded before this — the same run reads as a search nobody followed.
     #[tokio::test]
     async fn an_unscoped_search_cannot_be_joined_to_the_opens_after_it() {
         let core = pursuing_core().await;
@@ -1459,8 +1426,6 @@ mod tests {
         assert_eq!(run(&core).await.unwrap(), 0);
     }
 
-    /// Record a question at `at`, with `cited` naming each excerpt the model
-    /// was shown and whether the answer referenced it.
     async fn ask_event(
         core: &crate::core::Core,
         q: &str,
@@ -1615,9 +1580,6 @@ mod tests {
         assert_eq!(ids_before, ids_after);
     }
 
-    /// The clock is not attribution. A search that found nothing, followed by
-    /// nine minutes of reading something the search never showed, is a search
-    /// nobody followed — not a pursuit that engaged what was read.
     #[tokio::test]
     async fn an_open_the_search_never_showed_attaches_to_nothing() {
         let core = pursuing_core().await;
@@ -1644,8 +1606,6 @@ mod tests {
         assert!(p.sources.is_empty(), "{p:?}");
     }
 
-    /// A pivot lands where the search never showed, and is still the pursuit:
-    /// it was reached from something the search did show.
     #[tokio::test]
     async fn a_pivot_from_a_shown_hit_is_engagement_and_so_is_opening_where_it_landed() {
         let core = pursuing_core().await;
@@ -1672,9 +1632,6 @@ mod tests {
         assert_eq!(p.sources, vec![ids[1].clone()], "{p:?}");
     }
 
-    /// Grouping anchors on the lead. A joins B and B joins C, but A and C sit
-    /// apart: under single linkage that chained into one pursuit about
-    /// nothing in particular.
     #[tokio::test]
     async fn grouping_does_not_chain_through_a_bridge() {
         let mut core = pursuing_core().await;

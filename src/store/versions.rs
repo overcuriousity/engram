@@ -275,8 +275,6 @@ mod tests {
         );
     }
 
-    /// An edit made to the condensed text survives the condensation being
-    /// taken back. Nothing else had a copy of it.
     #[tokio::test]
     async fn restoring_a_version_keeps_the_text_it_replaces() {
         let store = Store::memory().await.unwrap();

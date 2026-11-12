@@ -850,10 +850,6 @@ mod tests {
         }
     }
 
-    /// The readout is drawn beside the character that triggered it, so the
-    /// newest cell has to hold that character. Cells computed as forward spans
-    /// left the newest one covering everything up to but not including `now`,
-    /// and the mark just pushed fell off the end of the strand it caused.
     #[test]
     fn the_token_that_triggered_the_redraw_is_in_the_strand() {
         let mut r = readout();
@@ -871,9 +867,6 @@ mod tests {
         );
     }
 
-    /// Inside the first second every cell's start saturated to zero, so several
-    /// of them counted the same marks and the strand drew one bucket over and
-    /// over. One mark can only ever light one cell.
     #[test]
     fn the_first_second_of_a_stream_draws_no_duplicate_cells() {
         let mut r = readout();
@@ -888,8 +881,6 @@ mod tests {
         }
     }
 
-    /// A mark older than the window is off the strand entirely, which is what
-    /// makes the readout fall away when a model stops to think.
     #[test]
     fn a_mark_older_than_the_window_is_not_drawn() {
         let mut r = readout();
@@ -898,7 +889,6 @@ mod tests {
         assert!(r.strand(window).chars().all(|c| c == ' '));
     }
 
-    /// Lit cells per bar, one entry per hit.
     fn lit_cells(drawn: &str) -> Vec<usize> {
         drawn
             .lines()
@@ -963,18 +953,6 @@ mod tests {
         );
     }
 
-    /// A score here is a fused rank, not a probability, and a whole list of
-    /// them is routinely negative — the shell that prompted this drew ten hits
-    /// between -3.57 and -5.45. Clamping to `0.0..=1.0` gave every one of them
-    /// the bottom rung, so the bar said nothing at all. The list is its own
-    /// scale: best full, worst empty, and the steps between them real.
-    /// The three background stages every other door only describes in a
-    /// sentence. The corpus status names exactly one of them as running, and
-    /// everything before it is finished by definition — a corpus cannot be
-    /// embedding without having been segmented first.
-    /// A face that is off draws no track at all — not an ASCII one, none.
-    /// `-c --watch` down a pipe prints one status line per corpus and nothing
-    /// else, which is what every script reading it was written against.
     #[test]
     fn a_track_is_not_drawn_where_the_face_is_off() {
         use crate::store::corpora::CorpusStatus as S;
@@ -998,8 +976,6 @@ mod tests {
         assert_eq!(Lamps::of(S::Ready).0, [Done, Done, Done]);
     }
 
-    /// A capture that stopped did not finish the stage it stopped in, and a
-    /// rendering that lit all three would say it did.
     #[test]
     fn a_capture_that_stopped_does_not_light_the_stage_it_never_reached() {
         use crate::store::corpora::CorpusStatus as S;
@@ -1017,8 +993,6 @@ mod tests {
         );
     }
 
-    /// Drawn and said, like every other claim this face makes: a lamp that is
-    /// only a glyph is a lamp nobody reading a screen reader sees.
     #[test]
     fn the_lamps_name_their_stages_in_words() {
         use crate::store::corpora::CorpusStatus as S;
@@ -1059,8 +1033,6 @@ mod tests {
         );
     }
 
-    /// One hit, or several that tied, have no spread to be drawn against.
-    /// Dividing by that spread is a division by zero.
     #[test]
     fn a_list_with_no_spread_still_draws() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
@@ -1093,7 +1065,6 @@ mod tests {
         assert!(drawn.contains("loose match"), "{drawn}");
     }
 
-    /// One hit is a list with nothing to fall off.
     #[test]
     fn a_list_that_does_not_fall_off_has_no_divider() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
@@ -1101,9 +1072,6 @@ mod tests {
         assert!(!drawn.contains("relevance falls off"), "{drawn}");
     }
 
-    /// The raw number was a fused rank printed to two decimals, and a whole
-    /// list of them is routinely negative. The bar says the only thing it
-    /// honestly said; `--json` still carries the float.
     #[test]
     fn the_raw_score_leaves_the_human_rendering() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
@@ -1112,8 +1080,6 @@ mod tests {
         assert!(drawn.contains('▇'), "{drawn}");
     }
 
-    /// Eight characters name the artifact and leave the title its line;
-    /// `last::resolve` has always accepted a prefix.
     #[test]
     fn the_id_is_cut_to_a_prefix_that_still_names_it() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
@@ -1127,7 +1093,6 @@ mod tests {
         );
     }
 
-    /// Both halves of the header are measurements. Nothing else belongs in it.
     #[test]
     fn the_header_says_what_was_counted_and_what_was_timed() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
@@ -1143,7 +1108,6 @@ mod tests {
         assert!(!untimed.contains(" ms"), "{untimed}");
     }
 
-    /// A sentence past the terminal's edge is wrapped, not thrown away.
     #[test]
     fn a_long_line_is_wrapped_onto_the_budget_rather_than_cut_at_the_edge() {
         let f = Face {
@@ -1167,15 +1131,6 @@ mod tests {
         }
     }
 
-    /// The title's own budget, at the width where being one column out shows.
-    ///
-    /// A row spends 26 fixed columns around the title; the clip allowed 25, so
-    /// a title of exactly that length drew `width + 1` and wrapped. Walked
-    /// Walked at widths a terminal
-    /// actually has. Below about thirty the rendering has floors that clipping
-    /// a title cannot lift — the row spends 26 columns on the rank, the bar and
-    /// the short id, and `excerpt` will not wrap under 24 — so asserting the
-    /// width there would be asserting a promise this file does not make.
     #[test]
     fn a_title_that_fills_the_row_is_clipped_rather_than_wrapped() {
         for width in [40usize, 60, 80, 120] {
@@ -1201,7 +1156,6 @@ mod tests {
         }
     }
 
-    /// The narrow end of `clip`, which used to hand back the whole string.
     #[test]
     fn clipping_into_no_room_at_all_still_clips() {
         assert_eq!(clip("Dienste", 7, true), "Dienste");
@@ -1213,8 +1167,6 @@ mod tests {
         assert_eq!(clip("", 0, true), "");
     }
 
-    /// The marker is a glyph like any other here, and the row it ends is
-    /// counted in columns either way.
     #[test]
     fn a_clip_on_an_ascii_terminal_ends_in_ascii() {
         for room in 0..8 {
@@ -1226,12 +1178,6 @@ mod tests {
         assert_eq!(clip("Dienste", 2, false), "..");
     }
 
-    /// The two lines a list spends are two lines that carry text.
-    ///
-    /// A passage opening with a heading and a blank line spent one of its two
-    /// on the blank, so a captured PDF drew a list where nearly every hit was
-    /// one line and a gap — the clip was working, it was just spending half
-    /// its budget on nothing.
     #[test]
     fn the_lines_a_hit_is_clipped_to_are_lines_with_something_on_them() {
         let f = Face::decide(&always(), true, false, Some("en_US.UTF-8"));
@@ -1256,12 +1202,6 @@ mod tests {
         );
     }
 
-    /// POSIX precedence, which is not what this used to read.
-    ///
-    /// macOS commonly ships `LC_CTYPE=UTF-8` with no `LANG` at all, and those
-    /// terminals were handed the ASCII understudies though they draw `▇` and
-    /// `┃` perfectly. The other direction was wrong too: `LC_ALL=C` alongside
-    /// a UTF-8 `LANG` got box-drawing it cannot render.
     #[test]
     fn the_locale_is_read_in_the_order_posix_says() {
         let env = |pairs: &[(&str, &str)]| {
@@ -1314,9 +1254,6 @@ mod tests {
         }
     }
 
-    /// The third rule of this file, as an assertion rather than a comment: a
-    /// claim made in colour is made in words as well, so the coloured
-    /// rendering and the bare one differ by escapes and by nothing else.
     #[test]
     fn colour_never_carries_a_claim_on_its_own() {
         let hits = [hit("a", 0.9, false, false), hit("b", 0.2, true, true)];
@@ -1332,7 +1269,6 @@ mod tests {
         assert_eq!(drawn(true).ink(CYAN, "x"), "\u{1b}[36mx\u{1b}[0m");
     }
 
-    /// The stage line is drawn and said, like every other lamp in this file.
     #[test]
     fn a_stage_line_names_every_stage_and_marks_the_one_that_is_running() {
         use crate::core::search::SearchStage::*;
@@ -1349,8 +1285,6 @@ mod tests {
         assert!(line.contains('·'), "the stage still to come: {line}");
     }
 
-    /// The client draws what it was told and nothing more: a search that named
-    /// two stages never grows a third.
     #[test]
     fn only_the_stages_the_server_named_are_drawn() {
         use crate::core::search::SearchStage::*;
@@ -1361,10 +1295,6 @@ mod tests {
         assert!(!line.contains("rerank"), "{line}");
     }
 
-    /// The first stage is drawn the moment it is reported. A floor on the
-    /// elapsed time, read at the instant of a frame, took the whole display
-    /// away from the search that most needed it: a cold embedder drew nothing
-    /// at all until `retrieve` started.
     #[test]
     fn the_first_stage_is_drawn_as_soon_as_it_is_reported() {
         use crate::core::search::SearchStage::*;
@@ -1374,9 +1304,6 @@ mod tests {
         assert!(s.at(Embed).is_some());
     }
 
-    /// `show` erases one physical row, so a stage line wider than the terminal
-    /// left its head above the results for good — the failure a note is
-    /// clipped to prevent, one type over.
     #[test]
     fn a_stage_line_wider_than_the_terminal_is_cut_down_rather_than_wrapped() {
         use crate::core::search::SearchStage::*;
@@ -1408,9 +1335,6 @@ mod tests {
         assert!(s.at(Embed).is_none());
     }
 
-    /// `NO_COLOR` is about ink. It used to take the lamps, the upload track and
-    /// the layout with it, so `NO_COLOR=1 engram -c big.pdf --watch` followed a
-    /// capture with no display of any kind.
     #[test]
     fn no_color_keeps_the_layout_and_drops_only_the_ink() {
         let f = Face::decide(&Default::default(), true, true, Some("en_US.UTF-8"));
@@ -1418,8 +1342,6 @@ mod tests {
         assert!(!f.color);
     }
 
-    /// The other direction, and the worse one: the flag that means "draw"
-    /// silently overrode a preference that was never about drawing.
     #[test]
     fn asking_for_the_drawn_form_does_not_override_no_color() {
         let f = Face::decide(&always(), false, true, Some("en_US.UTF-8"));
@@ -1427,8 +1349,6 @@ mod tests {
         assert!(!f.color, "--fancy always says draw, not colour");
     }
 
-    /// Everywhere the face is off there is no ink either: `color` can never be
-    /// the one thing left on when nothing is being drawn.
     #[test]
     fn nothing_is_drawn_and_nothing_is_coloured() {
         let plain = CliArgs {

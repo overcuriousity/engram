@@ -451,10 +451,6 @@ mod tests {
     use crate::core::context::{Clock, encoder_version};
     use crate::core::test_support::{phone_bundle, recommending_core, seed_artifact};
 
-    /// The offer card shows a snippet under what it is called, so a passage —
-    /// which has no name of its own, only the heading of the section it was
-    /// cut from — is offered by its text alone. See
-    /// `Provenance::names_its_own_text`.
     #[test]
     fn an_offer_over_a_passage_is_made_without_a_name() {
         let payload = |provenance: &str, title: Option<&str>| crate::vector::VectorPayload {
@@ -473,10 +469,8 @@ mod tests {
         );
     }
 
-    /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
     const FRIDAY: i64 = 1_787_320_320;
 
-    /// A desktop, agreeing with `phone_bundle()` about nothing.
     fn desk() -> Bundle {
         Bundle {
             tz: Some("Europe/Berlin".into()),
@@ -498,13 +492,10 @@ mod tests {
         }
     }
 
-    /// Give `aid` one established situation, at `at`, in both stores.
     async fn learn(core: &Core, aid: &str, scope: &str, at: i64, b: &Bundle) {
         learn_n(core, aid, scope, at, b, 6.0, 6).await;
     }
 
-    /// The same, with the weight and the count said explicitly — so a test can
-    /// build a situation that is real but thin.
     async fn learn_n(
         core: &Core,
         aid: &str,
@@ -538,10 +529,6 @@ mod tests {
             .unwrap();
     }
 
-    /// Give `aid` one cluster whose centroid is written by hand, so a test can
-    /// place a candidate at a chosen `context_score` — the one number the
-    /// ladder reads — without going through the encoder, which only ever
-    /// produces the scores some real bundle happens to land on.
     async fn learn_raw(
         core: &Core,
         aid: &str,
@@ -627,7 +614,6 @@ mod tests {
         );
     }
 
-    /// One page view and the open that followed it, at `at`.
     async fn seen_and_opened(core: &Core, aid: &str, at: i64, b: &Bundle) {
         let raw = serde_json::to_string(b).unwrap();
         let t = crate::core::context::local_time(at, b.tz.as_deref(), None);
@@ -687,17 +673,6 @@ mod tests {
         assert_eq!(offer.artifact_id, near);
     }
 
-    /// A deleted artifact is never offered: the next best that is still there
-    /// is, and it is reached through the ladder rather than off the floor.
-    ///
-    /// There is no liveness check in `offer` and there does not need to be,
-    /// which is the thing worth pinning. `context_clusters.artifact_id` is
-    /// `ON DELETE CASCADE`, so a row's clusters go with the row and the
-    /// candidate is dropped where the clusters are read — the vector point
-    /// outlives both, so without that cascade it would win the ranking and
-    /// make a card whose link 404s, and whose snippet is read from a row that
-    /// is not there. `web::ui::context_offer` guards the card it would make;
-    /// this guards the guarantee that it is never made.
     #[tokio::test]
     async fn a_deleted_artifact_is_not_offered_and_the_next_best_is() {
         let core = recommending_core(FRIDAY).await;

@@ -1082,7 +1082,6 @@ mod tests {
         );
     }
 
-    /// A corpus with `n` chunks, none of them embedded yet.
     async fn corpus_with_pending_chunks(core: &Core, n: usize) -> (String, Vec<String>) {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let new: Vec<_> = (0..n)
@@ -1118,7 +1117,6 @@ mod tests {
         crate::jobs::test_support::drain(&core).await;
     }
 
-    /// A merged artifact over two captured roots, indexed and nothing more.
     async fn merged_over(core: &Core, roots: &[String]) -> crate::store::artifacts::Chunk {
         core.store
             .insert_merged_artifact(
@@ -1663,7 +1661,6 @@ mod tests {
     use crate::store::artifacts::{EmbedState, NewArtifact};
     use crate::store::corpora::CorpusStatus;
 
-    /// A corpus with `n` chunks already written and none embedded.
     async fn corpus_with_chunks(core: &Core, n: usize) -> String {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = (0..n)

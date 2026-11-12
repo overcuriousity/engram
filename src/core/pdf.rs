@@ -222,17 +222,6 @@ fn is_markdown_structure(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// The reachability argument in `.cargo/audit.toml` rests on this file.
-    ///
-    /// Two `quick-xml` advisories are ignored there — RUSTSEC-2026-0194 and
-    /// -0195 — because the vulnerable copy belongs to `calamine`, which docling
-    /// reaches only from its spreadsheet backends, and this application asks
-    /// docling for exactly one format. `from_path` would pick the format from a
-    /// file extension and could therefore select one of those backends; the
-    /// declared `InputFormat::Pdf` cannot.
-    ///
-    /// If this fails, do not adjust it: the two entries in `.cargo/audit.toml`
-    /// have stopped being true and the advisories are live.
     #[test]
     fn docling_is_only_ever_asked_for_a_pdf() {
         let src = include_str!("pdf.rs");
@@ -256,22 +245,9 @@ mod tests {
     //   soffice --headless --convert-to pdf --outdir <dir> <a two-line .html>
     // Regenerate them that way rather than editing bytes.
     const ONE_HEADING: &[u8] = include_bytes!("../../tests/fixtures/one-heading.pdf");
-    /// A page holding a filled rectangle and no text at all — what a scanned
-    /// PDF looks like to a parser with no OCR behind it.
     const NO_TEXT: &[u8] = include_bytes!("../../tests/fixtures/no-text.pdf");
-    /// A bulleted list whose markers are a symbol font's bullet, mapped by the
-    /// PDF's own `ToUnicode` to U+F0B7 — what Word and LibreOffice emit, and
-    /// what the reading side cannot render. Built by
-    /// `tests/fixtures/bullet-list.py`; regenerate it with that, not by hand.
     const BULLET_LIST: &[u8] = include_bytes!("../../tests/fixtures/bullet-list.pdf");
-    /// A subset font drawing `fl` and `fi` as single ligature glyphs, mapped
-    /// back to their letters by a ToUnicode `bfrange` — the shape that lost
-    /// the `fl` of `Begrifflichkeiten` in a live base (engram#60). Built by
-    /// `tests/fixtures/ligature.py`.
     const LIGATURE: &[u8] = include_bytes!("../../tests/fixtures/ligature.pdf");
-    /// Every string two bytes per glyph: a Type0 font with `Identity-H`, how
-    /// Word, LibreOffice and browsers embed a TrueType subset. Built by
-    /// `tests/fixtures/identity-h.py`.
     const IDENTITY_H: &[u8] = include_bytes!("../../tests/fixtures/identity-h.pdf");
 
     #[test]
@@ -283,21 +259,6 @@ mod tests {
         );
     }
 
-    /// Pins a known limitation so that fixing it cannot pass unnoticed.
-    ///
-    /// The `pdf-text` rung recovers no document structure: measured on two
-    /// real documents it produced complete text in correct reading order and
-    /// zero headings. Heading detection is the layout model, which
-    /// `--features pdf-ml` gates, so this is a property of the build and not
-    /// something to fix here.
-    ///
-    /// It matters because `infer::split` prefers headings as window
-    /// boundaries and carries the last one into the next window. Without them
-    /// it falls back to blank lines and every window loses its section
-    /// context.
-    ///
-    /// **If this test fails, that is good news**: docling started recovering
-    /// structure. Delete it, and tell the splitter's boundary comment.
     #[test]
     fn the_text_rung_recovers_no_headings() {
         let md = to_markdown(ONE_HEADING).unwrap();
@@ -307,10 +268,6 @@ mod tests {
         );
     }
 
-    /// A ligature is stored as the letters it stands for. Anything else — the
-    /// glyph dropped, a presentation form like U+FB02, or an unrelated
-    /// codepoint such as U+0600 — makes the word unsearchable and is what
-    /// the vector gets built from.
     #[test]
     fn a_ligature_comes_out_as_its_letters() {
         let md = to_markdown(LIGATURE).unwrap();
@@ -327,8 +284,6 @@ mod tests {
         );
     }
 
-    /// Two-byte codes are read two bytes at a time: the words come out whole,
-    /// with no NULs and no letters spaced apart.
     #[test]
     fn two_byte_text_comes_out_as_whole_words() {
         let md = to_markdown(IDENTITY_H).unwrap();
@@ -342,8 +297,6 @@ mod tests {
         assert!(!md.contains('\0'), "a NUL reached the text: {md:?}");
     }
 
-    /// The fixture's raw export carries `\u{f0b7}` on lines of its own and
-    /// blank-line runs between every block; neither may reach a corpus.
     #[test]
     fn a_symbol_font_bullet_becomes_a_list_marker() {
         let md = to_markdown(BULLET_LIST).unwrap();
@@ -370,8 +323,6 @@ mod tests {
         );
     }
 
-    /// A list is one thing to read, and the splitter's fallback boundary is a
-    /// blank line — so items separated by one become a window each.
     #[test]
     fn a_list_stays_one_block() {
         let md = normalise("\u{f0b7}\n\nfirst\n\n\u{f0b7}\n\nsecond\n\nafter\n".into());
@@ -384,19 +335,11 @@ mod tests {
         assert_eq!(md, "- first\n- second\n", "{md:?}");
     }
 
-    /// Normalisation runs before the empty check, so a page holding nothing
-    /// but unrenderable glyphs answers with the scan message rather than
-    /// becoming a corpus of markers.
     #[test]
     fn a_page_of_nothing_but_glyphs_is_not_a_corpus() {
         assert_eq!(normalise("\u{f0b7}\n\n\u{e000}\n".into()), "\n");
     }
 
-    /// A glyph inside a sentence is not a marker and is not removed either.
-    /// Deleting it would be deleting text: the same block holds real hanzi in
-    /// a Big5 document and subset-mapped letters in a pdfTeX one, and neither
-    /// is distinguishable from an ornament here. A box in the corpus is a
-    /// visible defect; a missing character is a silent one.
     #[test]
     fn a_glyph_mid_sentence_is_left_where_it_is() {
         assert_eq!(
@@ -405,9 +348,6 @@ mod tests {
         );
     }
 
-    /// The marker is always its own text run, so it is always set off by a
-    /// space. A private-use codepoint that opens a word is part of the word —
-    /// this is what a Big5 line looks like, and it must survive whole.
     #[test]
     fn a_glyph_that_opens_a_word_is_not_a_marker() {
         assert_eq!(
@@ -416,18 +356,12 @@ mod tests {
         );
     }
 
-    /// A list in an ordinary font arrives with a real U+2022, detached the
-    /// same way. Markdown does not read that as a marker any more than it
-    /// reads U+F0B7 as one.
     #[test]
     fn a_real_bullet_is_a_marker_too() {
         let md = normalise("\u{2022} first\n\n\u{25aa}\n\nsecond\n".into());
         assert_eq!(md, "- first\n- second\n", "{md:?}");
     }
 
-    /// Word's second-level marker is a lowercase `o`, and a line of prose can
-    /// start with one. Reading it as a marker would eat a word, so it is not
-    /// one.
     #[test]
     fn a_lowercase_o_is_not_a_marker() {
         assert_eq!(
@@ -436,33 +370,24 @@ mod tests {
         );
     }
 
-    /// An ornament closing a section is a glyph on a line of its own, exactly
-    /// like a detached marker. It must not bullet the next heading: `- ## Two`
-    /// is not a heading to `infer::split`, so the boundary would be lost.
     #[test]
     fn an_orphan_glyph_does_not_bullet_a_heading() {
         let md = normalise("one\n\n\u{f0b7}\n\n## Two\n\nunder it\n".into());
         assert_eq!(md, "one\n\n## Two\n\nunder it\n", "{md:?}");
     }
 
-    /// Nor does it reach across a break the document itself drew.
     #[test]
     fn an_orphan_glyph_does_not_reach_across_a_block_break() {
         let md = normalise("\u{f0b7}\n\n\n\na new paragraph\n".into());
         assert_eq!(md, "a new paragraph\n", "{md:?}");
     }
 
-    /// Dropping the blank line between two items keeps one list together; it
-    /// must not weld two lists into one when the document separated them.
     #[test]
     fn two_lists_with_a_break_between_them_stay_apart() {
         let md = normalise("\u{f0b7} one\n\n\n\n\u{f0b7} two\n".into());
         assert_eq!(md, "- one\n\n- two\n", "{md:?}");
     }
 
-    /// With `--features pdf-ml` the export is structured markdown and leading
-    /// whitespace is the nesting. Trimming it flattens a two-level list and
-    /// unindents a code block, which changes what the corpus says.
     #[test]
     fn indentation_survives_because_it_carries_structure() {
         let md = normalise("- one\n  - nested\n\n    code line  \n".into());

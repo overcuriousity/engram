@@ -331,12 +331,6 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::jobs::consolidate::tests::seed;
 
-    /// A merge is not an anchor, and the guard has to be here and not only in
-    /// `embed::mark_indexed`. The embed path withholds the arming; the sweep's
-    /// repair pass arms a unit for anything that has none, which after that
-    /// withholding is every merge on the base. Without this the merge is an
-    /// anchor again one tick later, and files the pair that becomes the next
-    /// merge.
     #[tokio::test]
     async fn a_merge_armed_by_the_repair_pass_still_files_nothing() {
         let core = test_core().await;
@@ -555,8 +549,6 @@ mod tests {
         )
     }
 
-    /// One passage under a corpus of its own. `seed_rows` writes `captured`
-    /// rows, and the case under test is two passages from two documents.
     async fn seed_passage(core: &Core, corpus: &str, text: &str) -> String {
         let src = core.store.insert_corpus(corpus, "web", None).await.unwrap();
         core.store

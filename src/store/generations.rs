@@ -731,10 +731,6 @@ mod tests {
         );
     }
 
-    /// A refusal is about the corpus it was measured on, and stops being
-    /// about the one the base has once that corpus has more than doubled.
-    /// Without this a cap refused at two hundred artifacts stayed refused at
-    /// twenty thousand, for the life of an era nothing ever ends.
     #[tokio::test]
     async fn a_candidate_refused_on_a_much_smaller_corpus_is_asked_again() {
         let store = Store::memory().await.unwrap();
@@ -773,7 +769,6 @@ mod tests {
         );
     }
 
-    /// `n` artifacts stamped as having arrived at `at`.
     async fn grow(store: &Store, corpus_id: &str, n: usize, at: i64) {
         let rows: Vec<crate::store::artifacts::NewArtifact> = (0..n)
             .map(|i| crate::store::artifacts::NewArtifact {
@@ -827,8 +822,6 @@ mod tests {
         }
     }
 
-    /// A base the loop has moved: the file says 0.05/3, the live generation
-    /// was adopted at 0.25/3.
     async fn moved_by_the_loop(autonomous: bool) -> (Store, String) {
         let store = Store::memory().await.unwrap();
         let file = p(0.05, Some(3));
@@ -897,15 +890,6 @@ mod tests {
         );
     }
 
-    /// The loop adopts two ways, and only one of them names a run.
-    ///
-    /// `tune::adopt_lived` adopts on what the band actually earned rather than
-    /// on a replay, so there is no `eval_runs` row to point at and
-    /// `adopt_generation_lived` writes `run_id = NULL`. Read as `run_id`
-    /// alone, a `spread_max` or a `review_min` the loop had chosen was
-    /// indistinguishable from one somebody typed, and switching autonomy off —
-    /// which is documented as the way back to the file, exactly — left those
-    /// knobs where the loop had put them.
     #[tokio::test]
     async fn switching_autonomy_off_returns_the_base_to_the_file_after_a_lived_adoption() {
         let store = Store::memory().await.unwrap();
@@ -945,7 +929,6 @@ mod tests {
         );
     }
 
-    /// And it still survives while autonomy is on, like any other adoption.
     #[tokio::test]
     async fn a_lived_adoption_survives_a_restart_with_autonomy_on() {
         let store = Store::memory().await.unwrap();
@@ -1016,9 +999,6 @@ mod tests {
         assert_eq!(store.live_generation().await.unwrap().unwrap().id, adopted);
     }
 
-    /// The era a model change starts copies the loop's knobs and names no run
-    /// and no prediction. Switching autonomy off still has to find who moved
-    /// them, or the way back to the file stops at the first embedder change.
     #[tokio::test]
     async fn switching_autonomy_off_after_a_model_change_still_returns_the_base_to_the_file() {
         let (store, _) = moved_by_the_loop(true).await;
@@ -1038,7 +1018,6 @@ mod tests {
         );
     }
 
-    /// And a person's setting carried across a model change is still theirs.
     #[tokio::test]
     async fn a_persons_setting_carried_across_a_model_change_survives_autonomy_off() {
         let store = Store::memory().await.unwrap();
@@ -1056,10 +1035,6 @@ mod tests {
         assert_eq!(g.params, p(0.25, Some(3)));
     }
 
-    /// The idle pass reads the live generation when it starts and writes when
-    /// it ends. A restatement in between is the newer fact, and neither a
-    /// revert nor an adoption measured against the generation it replaced may
-    /// write over it.
     #[tokio::test]
     async fn a_revert_or_an_adoption_over_a_generation_no_longer_live_changes_nothing() {
         let (store, adopted) = moved_by_the_loop(true).await;

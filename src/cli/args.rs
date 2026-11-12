@@ -295,8 +295,6 @@ mod tests {
         );
     }
 
-    /// Answered before the pipe is looked at, exactly as `--show` is:
-    /// `engram --status | grep failed` is an ordinary thing to type.
     #[test]
     fn status_down_a_pipe_is_still_status_and_not_a_capture() {
         let a = CliArgs {
@@ -394,10 +392,6 @@ mod tests {
         );
     }
 
-    /// The conflict rules themselves, which every other test here walks past:
-    /// `verb` is handed a built `CliArgs`, so nothing in this file exercised
-    /// what clap does with a command line. `--status` named none of the five
-    /// flags it drops, and `engram --status --watch` parsed cleanly.
     #[test]
     fn status_refuses_every_flag_it_does_not_honour() {
         #[derive(clap::Parser)]
@@ -447,8 +441,6 @@ mod tests {
         assert!(matches!(v, Verb::Show(ref which) if which == "3"));
     }
 
-    /// A reading is its own verb, so it is refused alongside another one for
-    /// the same reason `-s` and `-a` are: quietly picking one loses the other.
     #[test]
     fn show_alongside_another_verb_is_refused() {
         let a = CliArgs {
@@ -459,9 +451,6 @@ mod tests {
         assert!(verb(&a, false, false, piped("")).is_err());
     }
 
-    /// And `engram --show 3 | less` must stay a reading. Without `show` in the
-    /// count, the pipe would be read as the capture gesture and the id would
-    /// be stored as a note.
     #[test]
     fn show_down_a_pipe_is_still_a_reading_and_not_a_capture() {
         let a = CliArgs {
@@ -472,10 +461,6 @@ mod tests {
         assert!(matches!(v, Verb::Show(ref which) if which == "3"));
     }
 
-    /// The gesture this guards: `--delete-user` prints a prompt, and the
-    /// obvious way to script past it is to pipe the answer in. Without the
-    /// guard the pipe was read as a capture, "yes" became a corpus, the
-    /// process exited 0 and the account was still there.
     #[test]
     fn a_piped_answer_to_a_prompt_is_not_a_capture() {
         assert!(
@@ -484,8 +469,6 @@ mod tests {
         );
     }
 
-    /// And stdin is not touched on the way to finding that out, or the prompt
-    /// the pipe was answering would be handed EOF.
     #[test]
     fn stdin_is_left_alone_when_the_server_was_asked_for() {
         let read = std::cell::Cell::new(false);
@@ -498,8 +481,6 @@ mod tests {
         assert!(!read.get(), "stdin was drained out from under the prompt");
     }
 
-    /// A verb flag *and* a server command is neither one thing nor the other,
-    /// and quietly picking the server would lose the capture in silence.
     #[test]
     fn a_verb_flag_alongside_a_server_command_is_refused() {
         let a = CliArgs {

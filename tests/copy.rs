@@ -50,7 +50,6 @@ fn tag_name(tag: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Text runs a reader sees as one piece: inline elements join, everything else splits.
 fn text_runs(src: &str) -> Vec<String> {
     let mut s = cut_between(src, "{#", "#}", "\n");
     s = cut_between(&s, "{%", "%}", "\u{1}");

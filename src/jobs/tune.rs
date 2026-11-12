@@ -978,7 +978,6 @@ mod tests {
     use crate::eval::sweep::test_support::{QUERY, seeded};
     use crate::store::observations::{NewObservation, Source};
 
-    /// Name the running configuration as the live generation.
     async fn generation_for(core: &Core) -> String {
         let params = *core
             .ranking
@@ -998,11 +997,6 @@ mod tests {
         generation
     }
 
-    /// One probe, for whatever leads the list, with a result under
-    /// `generation`: the base has rehearsed something, so the anchor has a
-    /// side to read. One probe cannot refuse or revert anything — its noise
-    /// term is 2.0 — so nothing here moves a test's outcome; it only keeps
-    /// the pass from returning on no evidence.
     pub(crate) async fn rehearsed_once(core: &Core, generation: &str) {
         let order = crate::eval::sweep::test_support::ranks_order(core).await;
         let Some(lead) = order.first() else {
@@ -1062,12 +1056,6 @@ mod tests {
         );
     }
 
-    /// Thirty probes for the third chunk of the leading source, worded as
-    /// the query, each with a result under `generation`. Uncapped it stands
-    /// at rank 3; under any cap the ladder proposes it is displaced and
-    /// refilled behind the other source, at rank 6 or worse. Thirty, because
-    /// the noise term is `2/n` and a fall from a third to a sixth has to
-    /// clear it.
     async fn probes_the_cap_buries(core: &Core, generation: &str, buried: &str) -> usize {
         let buried = buried.to_string();
         let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
@@ -1178,8 +1166,6 @@ mod tests {
         );
     }
 
-    /// A used excerpt, at the rank the uncapped list gave it, carrying the
-    /// vector a real search of `QUERY` would have used.
     pub(crate) async fn observe(core: &Core, generation: &str, artifact: &str, rank: i64) {
         let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
         core.store
@@ -1197,9 +1183,6 @@ mod tests {
             .unwrap();
     }
 
-    /// A base whose second source's first two chunks were the ones an answer
-    /// drew on — buried behind the leading source uncapped, and promoted the
-    /// moment a cap displaces its tail. Autonomy as shipped: "ranking".
     pub(crate) async fn seeded_with_observations() -> (Core, String) {
         let (core, order) = seeded().await;
         let generation = generation_for(&core).await;
@@ -1218,7 +1201,6 @@ mod tests {
         (core, generation)
     }
 
-    /// The same base, with the observations already at the top of the list.
     async fn seeded_with_nothing_to_gain() -> (Core, String) {
         let (core, order) = seeded().await;
         let generation = generation_for(&core).await;
@@ -1227,10 +1209,6 @@ mod tests {
         (core, generation)
     }
 
-    /// A base whose reranker buries what an answer drew on: the two top hits
-    /// of the vector order, served reversed at the bottom of six. Nothing on
-    /// the ladder can lift them — the replay without the reranker already has
-    /// them at the top — so only the flip has anything to say.
     async fn seeded_with_a_burying_reranker() -> (Core, String) {
         let (core, order, _) = crate::eval::sweep::test_support::seeded_with_reranker().await;
         assert!(
@@ -1271,11 +1249,6 @@ mod tests {
         assert!(!run.best_params.rerank);
     }
 
-    /// The rerank axis has to reach the replay, and only when the caller says
-    /// so. Hard-coded `false` made the field inert: the flip candidate
-    /// `tune::propose` emits differs from `current` in that field alone, so
-    /// both sides replayed identically, `loses_to` was never true, and the flip
-    /// cleared the refusal gate whatever it would actually have done.
     #[tokio::test]
     async fn the_rerank_flag_reaches_the_replay_and_only_when_it_is_asked_for() {
         use crate::eval::rehearsed::{probe_set, rehearsed_under};
@@ -1383,9 +1356,6 @@ mod tests {
         );
     }
 
-    /// One captured search under `generation` with `ranked` shown hits and
-    /// `band` appended ones, opened on the artifact at `open`, which names a
-    /// row of either kind.
     async fn captured_and_opened(core: &Core, ranked: &[&str], band: &[&str], open: &str) {
         use crate::store::feedback::{Door, NewCandidate, NewEvent};
         let candidates = ranked
@@ -1488,8 +1458,6 @@ mod tests {
         );
     }
 
-    /// `judged` pairs in a score band, `acted` of them with a dedupe action
-    /// naming the pair — which is what `band_record` counts.
     async fn judged_band(core: &Core, score: f32, judged: usize, acted: usize) {
         use crate::store::actions::{Job, Kind, NewAction};
         use crate::store::pairs::{DecidedBy, PairState};
@@ -1535,19 +1503,6 @@ mod tests {
         }
     }
 
-    /// The review threshold's rule does not read observations, and is no longer
-    /// gated on them.
-    ///
-    /// `propose` returned as soon as `observation_pairs` came back empty, which
-    /// is right for the ladder and the flip — both rank the positives, and
-    /// there are none. This rule reads the judged bands off `artifact_pairs`
-    /// and `corpus_actions`: how often the lowest band it admits leads
-    /// anywhere, against the band above it. Nothing in that is an observation.
-    ///
-    /// So a base worked through the dedupe queue but whose searching produced
-    /// no `Cited` or `Opened` rows under the live generation could never move
-    /// `review_min` — held behind evidence the rule does not use, which is also
-    /// why nothing but `next_review_min`'s arithmetic was ever tested.
     #[tokio::test]
     async fn the_review_threshold_moves_with_no_observations_under_the_live_generation() {
         let (core, order) = seeded().await;
@@ -1588,16 +1543,6 @@ mod tests {
         );
     }
 
-    /// The first spread rung is offered once, and a revert is what remembers
-    /// it — not the rule, which would hand it back every time it is asked.
-    ///
-    /// From `spread_max = 0` there is no band to measure, so `next_spread`
-    /// reads the tail alone and offers the first rung for as long as the last
-    /// hit shown goes on being opened. What stops that becoming a cycle — adopt, watch, revert, adopt again,
-    /// with `pass` returning early for the whole of every watch and no other
-    /// axis ever getting a turn — is `tried_candidates`, which reads the
-    /// `reverted` state off the row. This test is that claim, exercised through
-    /// an actual revert rather than a fabricated list.
     #[tokio::test]
     async fn the_first_spread_rung_is_not_offered_again_once_it_has_been_taken_back() {
         let (mut core, _) = seeded_with_nothing_to_gain().await;
@@ -1755,8 +1700,6 @@ mod tests {
         assert_eq!(next_review_min(0.88, 0.95, b(1, 1, 1), b(1, 1, 0)), None);
     }
 
-    /// `n` pairs in `[lo, hi)` settled by the judge, `acted` of them with a
-    /// journal row, `undone` of those taken back.
     async fn band(core: &Core, lo: f32, n: usize, acted: usize, undone: usize) {
         use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
         use crate::store::pairs::{DecidedBy, PairState};
@@ -1935,7 +1878,6 @@ mod tests {
         );
     }
 
-    /// A base that has just adopted a generation, with the one it replaced.
     pub(crate) async fn adopted_and_watching() -> (Core, String) {
         let (mut core, parent) = seeded_with_observations().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
@@ -1943,8 +1885,6 @@ mod tests {
         (core, parent)
     }
 
-    /// `n` searches given up on under the live generation: the weak negative,
-    /// which may take a setting back and may never bring one about.
     pub(crate) async fn observe_badly_under_live(core: &Core, n: usize) {
         let live = core.store.live_generation().await.unwrap().unwrap().id;
         for i in 0..n {
@@ -1971,9 +1911,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A file restated while the pass was measuring — a tenant reopened after
-    /// an edit to `config.toml` — is not written over by what the pass decided
-    /// from that measurement.
     #[tokio::test]
     async fn a_restatement_that_lands_while_the_pass_measures_is_not_written_over() {
         let (core, parent) = adopted_and_watching().await;
@@ -2043,10 +1980,6 @@ mod tests {
         );
     }
 
-    /// A move the probes cannot see is not settled by them. The band is not
-    /// replayed on `Door::Judge`, so a `spread_max` move replays identically on
-    /// both sides, and identical replays over enough probes used to end the
-    /// watch on the first pass — before anything had been observed under it.
     #[tokio::test]
     async fn a_band_move_is_not_settled_by_probes_that_replay_without_the_band() {
         let (mut core, parent) = seeded_with_observations().await;
@@ -2211,9 +2144,6 @@ mod tests {
         );
     }
 
-    /// `n` searches judged gaps whose queries nonetheless carry a positive
-    /// observation: the evidence saying "answered" where the person said
-    /// "nothing here", over and over.
     pub(crate) async fn disagree_loudly(core: &Core, n: usize) {
         use crate::store::feedback::{Door, Labeller, NewEvent, Verdict};
         let live = core.store.live_generation().await.unwrap().unwrap().id;
@@ -2299,8 +2229,6 @@ mod tests {
         );
     }
 
-    /// A search stamped a moment *after* now: what a search landing mid-pass
-    /// looks like to a check that reads a timestamp.
     async fn somebody_returns(core: &Core) -> String {
         let id = core
             .store
@@ -2398,8 +2326,6 @@ mod tests {
         assert_eq!(embedder.calls(), before, "the pass embedded a query");
     }
 
-    /// The bar is evidence the pass reads. A base with nothing under its live
-    /// generation but the answers people confirmed still moves on them.
     #[tokio::test]
     async fn judged_answers_alone_can_move_the_base() {
         let (mut core, order) = seeded().await;

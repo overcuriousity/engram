@@ -277,9 +277,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
-    /// Memory stores by alias; any other alias fails to open, the way an
-    /// absent Qdrant alias fails to export. Records, per open, whether a
-    /// manifest was already in the archive.
     struct Fixture {
         stores: HashMap<String, Arc<dyn VectorStore>>,
         archive: PathBuf,
@@ -308,7 +305,6 @@ mod tests {
         _stores: Vec<crate::store::Store>,
     }
 
-    /// Two tenants with three artifacts each, the control database on disk.
     async fn two_tenants() -> Base {
         let tmp = tempfile::tempdir().unwrap();
         let store_dir = tmp.path().join("store");

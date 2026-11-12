@@ -2304,7 +2304,6 @@ impl Store {
 mod tests {
     use super::*;
 
-    /// The journal row a burial writes; the tests here are about the burial.
     fn reap_row(id: &str) -> crate::store::actions::NewAction {
         crate::store::actions::NewAction {
             job: crate::store::actions::Job::Reap,
@@ -2358,7 +2357,6 @@ mod tests {
         );
     }
 
-    /// One passage in a corpus of its own, for the root-provenance cases.
     async fn a_passage(s: &Store) -> String {
         let src = s.insert_corpus("skript", "web", None).await.unwrap();
         let mut p = nc(0, "Spuren sind materielle Veraenderungen.");
@@ -2420,9 +2418,6 @@ mod tests {
         assert!(made.is_ok(), "synthesis over passages is what synthesis is");
     }
 
-    /// One query for every hit's caveats: each id maps to its own list, an id
-    /// with no row is absent rather than an error, and nothing asked for is
-    /// confused with anything else in the table.
     #[tokio::test]
     async fn caveats_for_reads_many_artifacts_in_one_query() {
         let s = Store::memory().await.unwrap();
@@ -2451,9 +2446,6 @@ mod tests {
         assert!(s.caveats_for(&[]).await.unwrap().is_empty());
     }
 
-    /// The answer is often in the artifact next to the one that matched, and
-    /// `ordinal` is already a continuous per-corpus sequence, so this is a
-    /// lookup rather than a search.
     #[tokio::test]
     async fn adjacent_artifacts_returns_the_ordinals_either_side() {
         let s = Store::memory().await.unwrap();
@@ -2466,8 +2458,6 @@ mod tests {
         assert_eq!(ordinals, vec![1, 3]);
     }
 
-    /// The first artifact has no left neighbour, and asking for ordinal -1 must
-    /// return the one row that exists rather than an error or nothing.
     #[tokio::test]
     async fn adjacent_artifacts_at_the_edge_returns_only_the_side_that_exists() {
         let s = Store::memory().await.unwrap();
@@ -2480,8 +2470,6 @@ mod tests {
         assert_eq!(got[0].ordinal, 1);
     }
 
-    /// Reaching sideways must not resurrect what the lifecycle took out of
-    /// results: a deprecated neighbour is not an answer.
     #[tokio::test]
     async fn adjacent_artifacts_skips_a_neighbour_that_is_not_active() {
         let s = Store::memory().await.unwrap();
@@ -2518,22 +2506,6 @@ mod tests {
         assert_eq!(left[0].text, "window zero");
     }
 
-    /// A chunk with no window is swept with whichever window is being
-    /// replaced; a note with no window is not.
-    ///
-    /// The `OR segment_idx IS NULL` half of `artifact_ids_for_segment`, which
-    /// had no test of its own. It was covered only by a pipeline test that
-    /// manufactured a pre-window database by nulling the column and deleting
-    /// the segment rows, and that test rotted with the 2026-09 capture
-    /// reshape and was permanently ignored. The rule it was guarding is a
-    /// property of this one query, so it is asked of the query directly and
-    /// cannot rot with a pipeline again.
-    ///
-    /// Both halves matter and they pull opposite ways. Without the sweep a
-    /// re-segmentation appends a second copy of every window-less chunk beside
-    /// the first. With it and no note exemption, the first window sees the
-    /// corpus as already written and skips every passage, so a captured file
-    /// carrying an annotation is never chunked at all.
     #[tokio::test]
     async fn a_windowless_chunk_is_swept_with_the_window_and_a_note_is_not() {
         let s = Store::memory().await.unwrap();
@@ -2927,10 +2899,6 @@ mod tests {
         assert_eq!(texts, vec!["a", "c"]);
     }
 
-    /// One `?` per id, and the callers hand this whatever their own walk
-    /// produced: `dedupe::run` flattens every root of both members together,
-    /// which repeats a shared source and is capped by nothing. Past
-    /// SQLITE_MAX_VARIABLE_NUMBER that is a prepare error, not a slow query.
     #[tokio::test]
     async fn a_long_repetitive_list_of_ids_is_still_one_answer() {
         let s = Store::memory().await.unwrap();
@@ -2967,12 +2935,6 @@ mod tests {
         assert_eq!(ids, vec![c[0].id.clone()]);
     }
 
-    /// Nor a merge, and for a reason the passage case does not carry: a merge
-    /// is *never* armed by the embed path (`embed::mark_indexed`), so the
-    /// backstop's own test — no relate row means the arming was lost — is true
-    /// of every merge on the base. Filtering passages alone therefore hands one
-    /// back on the very next repair tick and makes each merge an anchor again,
-    /// which is exactly the walk the withholding was added to stop.
     #[tokio::test]
     async fn the_relate_backstop_never_lists_a_merge_either() {
         let s = Store::memory().await.unwrap();
@@ -3005,12 +2967,6 @@ mod tests {
         assert_eq!(ids.len(), 2, "it should still list the two captured rows");
     }
 
-    /// The backstop has to be able to see past its own window.
-    ///
-    /// A relate row survives its completion — that is the whole mechanism, "no
-    /// job at all" meaning "never asked" — so on a base with any history the
-    /// oldest artifacts are all armed. A fixed window over them comes back
-    /// empty every pass, for ever, and everything behind it is out of reach.
     #[tokio::test]
     async fn the_relate_backstop_walks_past_a_window_that_is_already_armed() {
         let s = Store::memory().await.unwrap();
@@ -3045,8 +3001,6 @@ mod tests {
         );
     }
 
-    /// And the walk wraps: an artifact that loses its unit while the cursor is
-    /// already past it is found on the next lap rather than never.
     #[tokio::test]
     async fn the_relate_backstop_starts_over_when_it_runs_out() {
         let s = Store::memory().await.unwrap();
@@ -3081,8 +3035,6 @@ mod tests {
         );
     }
 
-    /// The rail says a hit continues, and the whole list has to be answered in
-    /// one read rather than one per row.
     #[tokio::test]
     async fn continuations_of_names_the_next_active_artifact_for_a_whole_list() {
         let s = Store::memory().await.unwrap();
@@ -3098,8 +3050,6 @@ mod tests {
         assert_eq!(got.get(&made[1].id), Some(&made[2].id));
     }
 
-    /// The last passage of a document continues nowhere, and the rail must say
-    /// nothing rather than offer a link to the end of the list.
     #[tokio::test]
     async fn continuations_of_omits_the_last_artifact_of_a_document() {
         let s = Store::memory().await.unwrap();
@@ -3116,8 +3066,6 @@ mod tests {
         );
     }
 
-    /// The same lifecycle rule as everywhere else on this path: what results
-    /// hide is not what the document continues into.
     #[tokio::test]
     async fn continuations_of_steps_over_a_row_that_is_not_active() {
         let s = Store::memory().await.unwrap();
@@ -3134,8 +3082,6 @@ mod tests {
         assert_eq!(got.get(&made[0].id), Some(&made[2].id));
     }
 
-    /// A merged artifact belongs to no corpus, so it has no reading order to
-    /// continue in. Asking must not invent one out of another document's rows.
     #[tokio::test]
     async fn continuations_of_says_nothing_about_a_merged_artifact() {
         let s = Store::memory().await.unwrap();
@@ -3362,7 +3308,6 @@ mod tests {
         );
     }
 
-    /// Push an artifact's retirement into the past, as if it happened then.
     async fn backdate_retired_at(s: &Store, id: &str, secs_ago: i64) {
         sqlx::query!(
             "UPDATE artifacts SET retired_at = ? WHERE id = ?",
@@ -3374,7 +3319,6 @@ mod tests {
         .unwrap();
     }
 
-    /// An open reminder on the artifact, the shape the reap rules must respect.
     async fn insert_open_moment(s: &Store, artifact_id: &str) {
         sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
@@ -3443,13 +3387,6 @@ mod tests {
         );
     }
 
-    /// The reminder guard asks `has_open_reminder_for_corpus`' question in
-    /// SQL, so it has to ask it the same way: the moment's note is
-    /// `COALESCE(m.origin_corpus_id, live.corpus_id)`. Reading `live.corpus_id`
-    /// alone meant a merge — which carries an open moment onto a merged
-    /// artifact, whose `corpus_id` is NULL — made the comparison answer NULL,
-    /// the guard pass, and reap wipe the text a reminder still being pushed
-    /// had been read out of.
     #[tokio::test]
     async fn a_reminder_carried_onto_a_merged_artifact_still_holds_its_note_back() {
         let s = Store::memory().await.unwrap();
@@ -3525,14 +3462,6 @@ mod tests {
         assert_eq!(s.get_artifact(&made[1].id).await.unwrap().text, "retired");
     }
 
-    /// And the candidate's side of that comparison is a set, not a column.
-    ///
-    /// `artifacts.corpus_id` is NULL for every merged row — the schema says so
-    /// and says why — so `= art.corpus_id` answered NULL for exactly the
-    /// candidates a merge produces. The `NOT EXISTS` was vacuously true, and a
-    /// superseded merge past `min_age_secs` was nominated and buried with a
-    /// live root still carrying the open reminder its text had been read out
-    /// of. What a merged candidate belongs to is its captured roots' corpora.
     #[tokio::test]
     async fn a_superseded_merge_is_held_back_by_the_reminder_on_the_note_it_was_made_from() {
         let s = Store::memory().await.unwrap();
@@ -3631,10 +3560,6 @@ mod tests {
         );
     }
 
-    /// The two clauses `bury`'s re-check used to be missing. `nominees` reads a
-    /// page up front and the sweep spends a model call per row, so minutes pass
-    /// between the nomination and the burial — long enough for a reminder to be
-    /// set on the note, and the burial went ahead anyway.
     #[tokio::test]
     async fn a_reminder_set_while_the_judgement_was_in_flight_stops_the_burial() {
         let s = Store::memory().await.unwrap();
@@ -3674,10 +3599,6 @@ mod tests {
         assert_eq!(s.get_artifact(&made[1].id).await.unwrap().text, "retired");
     }
 
-    /// A reaped row says `embedded` while its point is deleted, by design —
-    /// nothing about a burial is an embed. Read as drift, that queued an
-    /// `Embed` per pass, and the stub still has a title, so the embed succeeded
-    /// and wrote a point for text that is in the graveyard.
     #[tokio::test]
     async fn a_reaped_row_is_not_drift_for_the_heal_to_re_embed() {
         let s = Store::memory().await.unwrap();
@@ -3714,12 +3635,6 @@ mod tests {
         );
     }
 
-    /// The Insights undo list folds seven queries into one list of rows, and
-    /// two of them draw hidden artifacts. `deprecate` and a supersession are
-    /// independent, so an artifact can carry both — and both rows came back
-    /// under the one `kind` the list gives them, about one subject. A client
-    /// that reads `subject_id` as the row's identity answered one and lost the
-    /// other; the page showed the same artifact twice.
     #[tokio::test]
     async fn a_deprecated_artifact_that_is_also_superseded_is_listed_once() {
         let s = Store::memory().await.unwrap();
@@ -3794,12 +3709,6 @@ mod tests {
         ));
     }
 
-    /// A buried stub keeps `superseded_by` on purpose, which made it look
-    /// exactly like an artifact hidden in favour of nothing once the winner was
-    /// deleted. Healing it set `status = 'active'` and cleared `retired_at`,
-    /// putting a permanently active *empty* artifact into the base that
-    /// `reap_candidates` — which requires `reaped_at IS NULL` — could never
-    /// take back.
     #[tokio::test]
     async fn a_buried_stub_is_not_resurrected_by_the_dangling_heal() {
         let s = Store::memory().await.unwrap();
@@ -3826,9 +3735,6 @@ mod tests {
         assert_ne!(row.status, ArtifactStatus::Active);
     }
 
-    /// Undoing a burial is a decision somebody makes, and it has to bring the
-    /// text back with it — an empty row returned to search is the loss the
-    /// graveyard exists to prevent.
     #[tokio::test]
     async fn exhuming_restores_the_text_and_asks_for_a_fresh_embedding() {
         let s = Store::memory().await.unwrap();

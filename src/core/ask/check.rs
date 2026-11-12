@@ -255,9 +255,6 @@ mod tests {
         );
     }
 
-    /// A fenced block is `<pre><code>`, so the two do nest. A flag cleared at
-    /// the inner `</code>` would call whatever follows it prose, which is what
-    /// a citation linker would then happily link.
     #[test]
     fn text_between_a_closing_code_and_its_closing_pre_is_still_inside_code() {
         let mut runs: Vec<(String, bool)> = Vec::new();
@@ -277,8 +274,6 @@ mod tests {
         );
     }
 
-    /// More closes than opens is markup this never produces, but underflowing
-    /// would panic in debug and wrap in release. Outside code is the safe read.
     #[test]
     fn an_unbalanced_close_leaves_the_walker_outside_code() {
         let mut seen = None;
@@ -293,8 +288,6 @@ mod tests {
 
     use super::*;
 
-    /// The fidelity thesis extended to generation: an answer cannot carry a
-    /// literal the excerpts did not.
     #[test]
     fn a_command_in_no_excerpt_is_unsupported() {
         let excerpts = vec!["Run `systemctl restart engram` to apply it.".to_string()];
@@ -310,8 +303,6 @@ mod tests {
         );
     }
 
-    /// Nothing invented, nothing flagged — the common case, and the one that
-    /// must not produce a badge on every answer.
     #[test]
     fn an_answer_drawn_entirely_from_its_excerpts_flags_nothing() {
         let excerpts = vec!["Set `fetch_max_bytes = 8388608` in config.toml.".to_string()];
@@ -319,17 +310,11 @@ mod tests {
         assert!(unsupported_literals(answer, &excerpts).is_empty());
     }
 
-    /// Nothing was shown, so nothing can be checked against it. Flagging every
-    /// literal in that case would badge exactly the answers the abstention
-    /// paths already explain.
     #[test]
     fn an_answer_with_no_excerpts_at_all_is_not_checked() {
         assert!(unsupported_literals("Run `rm -rf /`.", &[]).is_empty());
     }
 
-    /// A bullet list nested four spaces deep is markdown, not code, however
-    /// `extract_literals` reads it. Flagging three sentences of ordinary prose
-    /// on one answer is what teaches a reader to ignore the badge.
     #[test]
     fn a_bullet_list_nested_four_spaces_deep_is_formatting_not_invention() {
         let excerpts =
@@ -343,7 +328,6 @@ mod tests {
         );
     }
 
-    /// A numbered list is the same shape with a different marker.
     #[test]
     fn a_numbered_list_nested_four_spaces_deep_is_formatting_too() {
         let excerpts = vec!["Stop the service, then start it again.".to_string()];
@@ -351,9 +335,6 @@ mod tests {
         assert!(unsupported_literals(answer, &excerpts).is_empty());
     }
 
-    /// The case the list rule must not break: a flag has no space after its
-    /// dashes, and an invented one in prose is exactly what is being looked
-    /// for.
     #[test]
     fn an_invented_flag_is_still_caught_beside_the_list_rule() {
         let excerpts = vec!["Run `engram reindex` to rebuild.".to_string()];
@@ -364,8 +345,6 @@ mod tests {
         );
     }
 
-    /// And the other half: an invented command indented as code is still
-    /// caught. The rule drops bullets, not indented lines.
     #[test]
     fn an_invented_command_in_an_indented_block_survives_the_list_rule() {
         let excerpts = vec!["Unmount the device first.".to_string()];
@@ -376,9 +355,6 @@ mod tests {
         );
     }
 
-    /// Marking happens inside code fences too. A fabricated command is exactly
-    /// the case this exists for, and exempting the place literals actually live
-    /// would make the check decorative.
     #[test]
     fn marking_reaches_inside_a_code_block() {
         let html = "<pre><code>rm -rf /var/lib/engram</code></pre>";
@@ -386,11 +362,6 @@ mod tests {
         assert!(marked.contains(r#"<mark class="unsupported">"#), "{marked}");
     }
 
-    /// The needle has to be escaped exactly as the serializer wrote the
-    /// document, and the serializer escapes a non-breaking space. Models emit
-    /// them; without this arm such a literal is badged and never marked, and a
-    /// badge pointing at nothing is how a reader learns to stop believing the
-    /// badge.
     #[test]
     fn a_literal_holding_a_non_breaking_space_is_still_marked() {
         let html = "<p>run engram&nbsp;reindex now</p>";
@@ -401,8 +372,6 @@ mod tests {
         );
     }
 
-    /// The marker must never be able to inject markup: a literal is model
-    /// output, and model output is untrusted.
     #[test]
     fn a_literal_containing_markup_cannot_break_out() {
         let html = "<p>&lt;script&gt;x&lt;/script&gt;</p>";
@@ -413,8 +382,6 @@ mod tests {
         );
     }
 
-    /// The escaped needle is what is looked for, so the marking actually lands
-    /// on the escaped text rather than silently finding nothing.
     #[test]
     fn a_literal_containing_markup_is_still_marked_where_the_reader_sees_it() {
         let html = "<p>&lt;script&gt;x&lt;/script&gt;</p>";
@@ -425,9 +392,6 @@ mod tests {
         );
     }
 
-    /// A literal that is also a path must not be marked inside an attribute:
-    /// a `<mark>` opened in the middle of an `href` is markup nothing
-    /// sanitized.
     #[test]
     fn a_literal_inside_an_attribute_value_is_left_alone() {
         let html = r#"<p><a href="/docs/setup.md">setup</a> lives at /docs/setup.md</p>"#;
@@ -443,11 +407,6 @@ mod tests {
         );
     }
 
-    /// A literal that starts where a shorter one does is marked whole. Two
-    /// candidates at the same position is the only case ordering decides — a
-    /// shorter one further along is swallowed by the longer match anyway — and
-    /// the shorter winning would leave half a command marked, which reads as
-    /// though the other half were supported.
     #[test]
     fn the_longest_literal_is_marked_whole() {
         let html = "<p>dd if=a.iso of=/dev/sdX</p>";
@@ -464,8 +423,6 @@ mod tests {
         );
     }
 
-    /// A single pass, so a literal cannot match inside the marker a previous
-    /// one wrote. `mark` is an ordinary word in a code span.
     #[test]
     fn a_literal_cannot_match_inside_the_marker_itself() {
         let html = "<p>set mark and unsupported</p>";
@@ -477,16 +434,12 @@ mod tests {
         );
     }
 
-    /// Nothing to mark leaves the document byte-for-byte alone.
     #[test]
     fn an_answer_with_nothing_unsupported_is_returned_unchanged() {
         let html = "<p>ordinary prose</p>";
         assert_eq!(mark_unsupported(html, &[]), html);
     }
 
-    /// The escaping has to match the renderer that actually produced the page,
-    /// not HTML escaping in the abstract: `ammonia` leaves quotes raw in text,
-    /// so escaping them here would make the literal unfindable.
     #[test]
     fn a_literal_containing_quotes_is_marked_in_really_rendered_html() {
         let answer = "Run `grep -r \"it's here\" .` to find it.";
@@ -498,7 +451,6 @@ mod tests {
         );
     }
 
-    /// Multi-byte text is walked by character, never by byte.
     #[test]
     fn a_literal_beside_multibyte_prose_does_not_panic() {
         let html = "<p>Die Größe ist /etc/fstab — prüfen.</p>";

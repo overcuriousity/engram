@@ -272,7 +272,6 @@ pub async fn run(core: &Core) -> Result<Report> {
 mod tests {
     use super::*;
 
-    /// One search, old enough to be past any window.
     async fn seed_old_event(core: &Core) {
         let id = core
             .store

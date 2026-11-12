@@ -945,9 +945,6 @@ pub(crate) fn proposed_to_new(
 #[cfg(test)]
 mod tests {
 
-    /// A window unit left queued from before `[infer.synthesize]` was removed
-    /// closes without a call and leaves its window `verbatim`, so reconcile
-    /// does not re-arm it on every sweep.
     #[tokio::test]
     async fn a_leftover_window_unit_on_the_embed_only_floor_settles_verbatim() {
         let core = crate::core::test_support::test_core_without_synthesizer().await;
@@ -969,11 +966,6 @@ mod tests {
         );
     }
 
-    /// A neighbour under the weak line is not shown. The capture that made
-    /// this necessary: one sentence about working hours, whose five nearest
-    /// artifacts were five unrelated ones, one of which the model restated —
-    /// and `from_context_only` dropped it, leaving the capture with no
-    /// artifact at all.
     #[test]
     fn a_neighbour_below_the_line_is_not_put_in_front_of_the_model() {
         assert!(super::worth_showing(Some(0.71), 0.6));
@@ -990,10 +982,6 @@ mod tests {
         assert!(super::worth_showing(Some(0.0), 0.0));
     }
 
-    /// The reservation is a ceiling, and the count is what gives way to the
-    /// floor under each share. `clamp(1, 5)` raised the count instead, so a
-    /// budget under the floor bought one neighbour worth twice what was
-    /// reserved for all of them.
     #[test]
     fn the_neighbour_shares_never_add_up_to_more_than_was_reserved() {
         for budget in 0..2_000usize {
@@ -1281,8 +1269,6 @@ mod tests {
         );
     }
 
-    /// A window fixture for the span tests: the text is irrelevant to them,
-    /// the line range is the whole point.
     fn window(start_line: i64, end_line: i64) -> crate::store::segments::Segment {
         crate::store::segments::Segment {
             corpus_id: "c".into(),
@@ -1417,9 +1403,6 @@ mod tests {
         );
     }
 
-    /// The NEIGHBORS block is on the prompt and was on no guard. A neighbour is
-    /// an artifact the base already holds, so restating one is a duplicate of
-    /// something already stored — the exact outcome this check exists to stop.
     #[test]
     fn an_artifact_restating_a_neighbour_is_recognised() {
         use crate::infer::context::WindowContext;

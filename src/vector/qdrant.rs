@@ -2910,8 +2910,6 @@ mod tests {
         );
     }
 
-    /// A store pointed at a mock, for the arms that turn an HTTP status into a
-    /// decision rather than a value.
     #[tokio::test]
     async fn dense_of_reads_one_point_by_id_and_none_when_it_is_absent() {
         use wiremock::matchers::{body_partial_json, method, path};

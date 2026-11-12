@@ -759,9 +759,6 @@ mod tests {
     use super::*;
     use crate::infer::Embedder;
 
-    /// The model a gated test needs, or `None` with a line saying it was
-    /// skipped. Gated rather than `#[ignore]`d so that one variable turns on
-    /// exactly the tests whose files are there.
     pub(super) fn model(name: &str) -> Option<std::path::PathBuf> {
         let path = std::env::var_os("ENGRAM_TEST_MODELS")
             .map(|d| std::path::PathBuf::from(d).join(name))
@@ -931,7 +928,6 @@ mod tests {
         assert_eq!(streamed, done.text);
     }
 
-    /// Passes over a model that does not think, which has nothing to part.
     #[tokio::test]
     async fn a_model_that_thinks_aloud_answers_without_its_thinking() {
         let Some(path) = model("ask.gguf") else {

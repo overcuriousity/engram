@@ -815,9 +815,6 @@ mod tests {
         ids
     }
 
-    /// Two corpora, the first integrated before the second exists — a day
-    /// apart, as it were. The second's artifact says what the first's says,
-    /// so it lands on it; a same-corpus twin is discarded as structure.
     pub(crate) async fn two_corpora() -> (crate::core::Core, String, String, String) {
         let core = crate::core::test_support::test_core().await;
         let first = corpus_of(
@@ -913,9 +910,6 @@ mod tests {
         );
     }
 
-    /// Two probes on one owner: two questions that both landed on it, which is
-    /// what `MIN_AGREEING_PROBES` asks for. One probe replayed twice is one
-    /// observation however many rows the wrapping lap leaves behind it.
     async fn two_probes_on(core: &crate::core::Core, owner: &str) -> Vec<String> {
         let mut out = Vec::new();
         for q in ["q", "and another"] {
@@ -937,8 +931,6 @@ mod tests {
         out
     }
 
-    /// One result per probe, all naming the same ids above the owner.
-    /// Hand-written, so the fake embedder's ordering stays out of it.
     async fn outranked(
         core: &crate::core::Core,
         pids: &[String],
@@ -1069,17 +1061,6 @@ mod tests {
         );
     }
 
-    /// A probe the fragile half already took is not walked over again by the
-    /// lap.
-    ///
-    /// A fragile probe is a live probe like any other, so `rehearsals_after`
-    /// returns it too — and on any base whose probes fit in one lap, that is
-    /// every one of them. `rehearsal_results` has no uniqueness, so measured
-    /// twice in one pass a probe writes two rows off a single reading: a
-    /// second search spent to learn nothing, and a pair of rows
-    /// `fragile_rehearsals` reads as its last two results agreeing. What the
-    /// rules downstream make of a duplicate is `MIN_AGREEING_PROBES`'s
-    /// question now, but the search is spent either way.
     #[tokio::test]
     async fn a_probe_the_fragile_half_took_is_not_measured_a_second_time_by_the_lap() {
         let (core, a1, _a2, _b) = two_corpora().await;
@@ -1113,9 +1094,6 @@ mod tests {
         assert_eq!(after - before, 1, "one pass is one measurement");
     }
 
-    /// The cursor moves past what the fragile half took out of the lap. Every
-    /// probe past it being fragile used to leave it where it was for good, and
-    /// the probes behind it were never walked again.
     #[tokio::test]
     async fn a_lap_the_fragile_half_emptied_still_moves_the_cursor_on() {
         let (core, _a1, _a2, _b) = two_corpora().await;
@@ -1163,15 +1141,6 @@ mod tests {
         );
     }
 
-    /// A capture probe whose artifact has not been re-embedded yet is left
-    /// alone, not retired.
-    ///
-    /// The pass right after an embedder changes is exactly when the re-embeds
-    /// are still queued, and `remint` cannot mint a capture probe until the
-    /// artifact its query *is* carries the live model. Retired first and
-    /// re-minted after, that probe was thrown away for the reason it was being
-    /// kept — every reader filters `retired_at IS NULL`, and nothing else ever
-    /// mints one again.
     #[tokio::test]
     async fn a_capture_probe_waits_for_its_artifact_to_be_re_embedded_rather_than_being_lost() {
         let (core, a1, _a2, b) = two_corpora().await;
@@ -1226,15 +1195,6 @@ mod tests {
         assert_eq!(live_probes[0].embed_model, core.embedder.model());
     }
 
-    /// An outranker the base no longer has costs one skipped id, not the
-    /// sweep.
-    ///
-    /// `outranked_by` is free-form JSON written when the rehearsal ran, and a
-    /// burial or a merge can take the artifact it names away afterwards.
-    /// `artifact_pairs` carries foreign keys on both members and
-    /// `INSERT OR IGNORE` does not suppress a foreign-key violation, so filing
-    /// against a since-deleted id failed the whole retention sweep — every
-    /// rule after this one included.
     #[tokio::test]
     async fn an_outranker_the_base_no_longer_has_is_skipped_rather_than_failing_the_sweep() {
         let (mut core, a1, _a2, b) = two_corpora().await;
@@ -1259,10 +1219,6 @@ mod tests {
         assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
     }
 
-    /// Retrieval competition is a fact about ranking, not about meaning. It is
-    /// counted for Ops and it files nothing: the decide card renders a pair as
-    /// "these two disagree", and two documents sharing a template outrank each
-    /// other constantly while agreeing about everything.
     #[tokio::test]
     async fn interference_counts_what_it_sees_and_files_no_pair() {
         let (mut core, a1, _a2, b) = two_corpora().await;
@@ -1291,10 +1247,6 @@ mod tests {
         );
     }
 
-    /// `web::ops` reads an exact zero score as "found by co-retrieval, never
-    /// measured". Interference manufactured one out of a missed neighbour
-    /// lookup — `unwrap_or(0.0)` over a `find` that returned nothing — which
-    /// put two meanings on one value. It writes no score at all now.
     #[tokio::test]
     async fn interference_writes_no_pair_carrying_a_zero_score() {
         let (mut core, a1, _a2, b) = two_corpora().await;
@@ -1318,11 +1270,6 @@ mod tests {
         }
     }
 
-    /// The day's budget is about acting, and observing is not acting. It used
-    /// to gate this rule because the rule filed pairs, and filing is what leads
-    /// to a merge; with nothing written there is nothing to withhold, and a
-    /// count that went to zero when the budget ran out would have Ops report
-    /// that the competition stopped rather than that the spending did.
     #[tokio::test]
     async fn interference_keeps_counting_when_the_day_is_spent() {
         let (mut core, a1, _a2, b) = two_corpora().await;
@@ -1342,16 +1289,6 @@ mod tests {
         assert!(core.store.pair_between(&a1, &b).await.unwrap().is_none());
     }
 
-    /// A miss recorded under a generation the base no longer runs must not
-    /// answer for the one it does.
-    ///
-    /// `condense_candidates` refuses an owner any of whose results missed, and
-    /// `results_of` bound no generation and no window — with nothing expiring
-    /// at the shipped `retain_days = 0`, that is the artifact's whole history
-    /// for ever. Self-inflicted, too: `condense_artifact` sets `embed_state =
-    /// 'pending'`, so the first rehearsal after any condensation records
-    /// exactly such a miss, and one of them disabled condense *and*
-    /// interference for that owner permanently.
     #[tokio::test]
     async fn a_miss_under_an_older_generation_does_not_disable_condense_for_ever() {
         let (mut core, a1, _a2, b) = two_corpora().await;
@@ -1393,13 +1330,6 @@ mod tests {
         );
     }
 
-    /// What the pass learned, as opposed to how many measurements it repeated.
-    ///
-    /// The lap wraps, so `rehearsed` is non-zero on every pass for ever on any
-    /// base that has ever captured anything — and a count that is never zero
-    /// is an empty-run backoff that never engages. Replaying a probe to the
-    /// rank it already had, under the parameters it already had, is the same
-    /// measurement again; `moved` is the part that is news.
     #[tokio::test]
     async fn only_a_probe_that_landed_somewhere_new_counts_as_work() {
         let (core, _a1, _a2, _b) = two_corpora().await;
@@ -1425,10 +1355,6 @@ mod tests {
         );
     }
 
-    /// A capture probe exists or the artifact is not integrated. The other
-    /// order marked the artifact done and *then* minted them behind two `?`s,
-    /// so a vector-store hiccup left it skipped as already integrated on every
-    /// later pass — and nothing else mints a capture probe.
     #[tokio::test]
     async fn an_integrated_artifact_always_has_the_probes_its_integration_implies() {
         let (core, a1, a2, b) = two_corpora().await;
@@ -1447,13 +1373,6 @@ mod tests {
         );
     }
 
-    /// Not replayed — the vector is from another era and is not comparable
-    /// with the live index — and not lost either. The question is as good as
-    /// it ever was, so it is asked again at the live embedder. Nothing else
-    /// would: `integrate` files an artifact once and never revisits it, and a
-    /// cue is minted at `embed::mark_indexed`, so a base that changed
-    /// embedder used to lose every probe it had and with them the anchor that
-    /// refuses a candidate and reverts a generation.
     #[tokio::test]
     async fn a_probe_under_another_embedder_is_retired_and_asked_again() {
         let (core, a1, _, _) = two_corpora().await;
@@ -1484,9 +1403,6 @@ mod tests {
         assert_eq!(r.retired, 0);
     }
 
-    /// The other retirement, and it is not the same event: an owner that left
-    /// results is a question with nothing left to answer it, and it stays
-    /// retired.
     #[tokio::test]
     async fn a_probe_whose_owner_left_results_is_retired_for_good() {
         let (core, a1, _, _) = two_corpora().await;

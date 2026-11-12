@@ -1231,12 +1231,6 @@ mod tests {
         assert_eq!(backoff_secs(100), 21_600, "must cap, not grow unbounded");
     }
 
-    /// Spread upward only, and never far enough to overtake the next rung.
-    ///
-    /// The floor matters: `a_refused_window_backs_off_further_each_time` reads
-    /// the gaps out of the queue and asserts none is below
-    /// `backoff_secs(MAX_ATTEMPTS)`, because a refusal must never be cheaper to
-    /// retry than a failure to connect.
     #[test]
     fn a_spread_gap_never_falls_below_its_rung_or_reaches_the_next() {
         for attempts in 1..=MAX_ATTEMPTS {
@@ -1626,10 +1620,6 @@ mod tests {
         assert_eq!(a.unwrap().attempts, 1, "claiming must count the attempt");
     }
 
-    /// The sequential test above cannot prove atomicity: `Store::memory()` is
-    /// pinned to a single connection. This one uses a file-backed pool so real
-    /// connections contend, which is the only way to catch a claim that is not
-    /// actually atomic.
     #[tokio::test]
     async fn concurrent_workers_never_claim_the_same_job_twice() {
         use std::collections::HashSet;

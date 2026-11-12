@@ -2309,12 +2309,6 @@ mod tests {
     use crate::store::artifacts::NewArtifact;
     use crate::store::feedback::Door;
 
-    /// An empty vector is the *absence* of one, spelled `unwrap_or_default()`
-    /// upstream — and this cache is not the sweep's own. `search_inner` reads
-    /// it verbatim for every door, so one replay of an observation recorded
-    /// without a vector left a zero-dimension entry under a query people
-    /// actually type, and the next real search of that wording ranked on
-    /// nothing at all: `cosine` refuses a width it does not share.
     #[tokio::test]
     async fn an_empty_query_vector_is_never_remembered() {
         let core = test_core().await;
@@ -2342,7 +2336,6 @@ mod tests {
         seed_from(core, "raw", texts).await
     }
 
-    /// `raw` has to differ per source: sources are deduplicated by a hash of it.
     async fn seed_from(
         core: &crate::core::Core,
         raw: &str,
@@ -2368,7 +2361,6 @@ mod tests {
         src.id
     }
 
-    /// Every event one search emitted, in order.
     async fn events_of(core: &crate::core::Core, text: &str, origin: Origin) -> Vec<SearchEvent> {
         use tokio_stream::StreamExt as _;
         let s = core.search_events(q(text), None, origin);
@@ -2380,9 +2372,6 @@ mod tests {
         seen
     }
 
-    /// A lamp drawn for work that is not going to happen is the one thing a
-    /// progress display must not do, so the client is told the stages up front
-    /// rather than left to assume the pipeline's shape.
     #[tokio::test]
     async fn a_search_names_the_stages_it_will_run_before_it_runs_them() {
         let core = test_core().await;
@@ -2423,8 +2412,6 @@ mod tests {
         );
     }
 
-    /// The other half of the same rule: a stage promised and never started is
-    /// as much an invention as one drawn that never ran.
     #[tokio::test]
     async fn every_named_stage_is_also_announced_as_it_starts() {
         let (core, _calls) = test_core_counting_reranked_docs().await;
@@ -2442,10 +2429,6 @@ mod tests {
         assert_eq!(named, started, "{seen:?}");
     }
 
-    /// The case the rule was broken on: a rerank was promised whenever one was
-    /// configured, but the call itself was also guarded on there being
-    /// something to order, so a search that retrieved nothing named a stage it
-    /// never entered.
     #[tokio::test]
     async fn a_search_that_retrieves_nothing_still_runs_every_stage_it_named() {
         let (core, _calls) = test_core_counting_reranked_docs().await;
@@ -2511,11 +2494,6 @@ mod tests {
         assert!(after.iter().position(|r| r.corpus_id == cid).unwrap() >= pos);
     }
 
-    /// The recorded `rank` is the enumerate index of the list the searcher saw,
-    /// so the retired sink has to happen before the capture. It used to run
-    /// after, and the judge and the tuning pipeline were then trained on an
-    /// ordering nobody was ever shown: a retired hit recorded at rank 1 and
-    /// read at the tail.
     #[tokio::test]
     async fn the_recorded_ranks_are_the_order_the_searcher_was_handed() {
         let mut core = test_core().await;
@@ -2611,7 +2589,6 @@ mod tests {
         );
     }
 
-    /// The stream is the same search, so it has to answer with the same hits.
     #[tokio::test]
     async fn the_streamed_search_returns_what_the_blocking_one_returns() {
         let core = test_core().await;
@@ -2638,7 +2615,6 @@ mod tests {
         );
     }
 
-    /// Rewrite every vector payload from the current chunk rows.
     async fn reembed_all(core: &crate::core::Core) {
         for src in core.store.list_corpora(100, 0).await.unwrap() {
             for c in core.store.artifacts_for_corpus(&src.id).await.unwrap() {
@@ -2647,8 +2623,6 @@ mod tests {
         }
     }
 
-    /// An embedder that stops inside the call, so a test can look at what the
-    /// rest of the system is doing while a search waits on the endpoint.
     struct BlockingEmbedder {
         inner: crate::infer::fake::FakeEmbedder,
         started: std::sync::Arc<tokio::sync::Notify>,
@@ -2717,16 +2691,6 @@ mod tests {
         worker.await.unwrap();
     }
 
-    /// Typing is one embedding call per debounced keystroke, so a burst is a
-    /// burst of calls and a shared endpoint sheds part of it. One 429 in the
-    /// middle of a word used to be a failed search and a wiped rail.
-    ///
-    /// Real time rather than `start_paused`, for the reason the lane test
-    /// above gives: the pool's own timeouts are timers too. One refusal, so
-    /// the test pays at most one jittered gap.
-    /// Search reads the vector store, and a capture's passages have no vector
-    /// until their embed lands — seconds normally, for ever if the embedder
-    /// refuses them. Found by their words meanwhile.
     #[tokio::test]
     async fn text_with_no_vector_yet_is_found_by_its_words() {
         let core = test_core().await;
@@ -2771,8 +2735,6 @@ mod tests {
         assert!(!got.iter().any(|r| r.text.contains("Signal-Gruppe")));
     }
 
-    /// With the embedder down a search used to fail outright. A person gets
-    /// what the words find, and the answer says it is keywords only.
     #[tokio::test]
     async fn with_the_embedder_down_a_person_still_gets_what_the_words_find() {
         let mut core = test_core().await;
@@ -2820,10 +2782,6 @@ mod tests {
         assert_eq!(embedder.calls(), 2, "the keystroke was not asked again");
     }
 
-    /// And the other road. A sweep is twenty-one searches per judged pair over
-    /// hundreds of pairs with nobody watching; the job layer owns its backoff,
-    /// and a budget spent per search would turn a rate-limited minute into a
-    /// run that never ends.
     #[tokio::test]
     async fn a_sweep_does_not_wait_out_a_limiter() {
         let mut core = test_core().await;
@@ -2888,18 +2846,6 @@ mod tests {
         }
     }
 
-    /// The replay fetches exactly what the live path fetches.
-    ///
-    /// The idle pass ranks its candidate generations on the Judge door so that
-    /// measurement and serving are one pipeline. `feedback.candidates` is a
-    /// floor under the over-fetch that only the captured doors applied, so the
-    /// replay was a second pipeline in the one place it must not be — and the
-    /// gap fell exactly on an axis the pass sweeps.
-    ///
-    /// At `LIMIT = 10` and the shipped floor of 20, a `candidate_multiplier`
-    /// of 1 and of 2 are the same setting in production: both fetch 20. The
-    /// replay fetched 10 against 20 and could adopt on the difference — a
-    /// change to a number that would not change a single search anyone made.
     #[tokio::test]
     async fn the_replay_door_fetches_the_pool_the_captured_doors_do() {
         let mut core = test_core().await;
@@ -3474,7 +3420,6 @@ mod tests {
         );
     }
 
-    /// A ranked hit from one corpus, for the cap's own tests.
     fn hit(chunk: &str, src: &str, score: f32) -> crate::vector::SearchHit {
         crate::vector::SearchHit {
             payload: crate::vector::VectorPayload {
@@ -3487,7 +3432,6 @@ mod tests {
         }
     }
 
-    /// The ids of a capped list, in order.
     fn ids(hits: Vec<crate::vector::SearchHit>) -> Vec<String> {
         hits.iter().map(|h| h.payload.artifact_id.clone()).collect()
     }
@@ -4900,10 +4844,6 @@ mod tests {
         );
     }
 
-    /// A passage *with* a heading is the harder half. `fill_titles` never
-    /// touches it — it has a title — so nothing said the title was borrowed,
-    /// and the rail printed the section's name over the slice as if the slice
-    /// owned it.
     #[tokio::test]
     async fn a_passage_carrying_its_sections_heading_says_the_name_is_borrowed() {
         let core = test_core().await;
@@ -5086,10 +5026,6 @@ mod tests {
         assert_eq!(captured_events(&core).await, 0);
     }
 
-    /// The id of the artifact whose text is exactly this. Ordering from
-    /// `list_all_artifact_ids` is not promised, and a test that assumed one
-    /// would pass or fail on which row SQLite happened to return first.
-    /// A base of `n` artifacts, learning on, everything embedded.
     async fn explorable(explore: f32, n: usize) -> crate::core::Core {
         let mut core = test_core().await;
         core.learn.enabled = true;
@@ -5103,8 +5039,6 @@ mod tests {
         core
     }
 
-    /// Every candidate the last search recorded, in pool order: the artifact,
-    /// whether it was shown, and the rank it would have held.
     async fn pool_with_exploration(core: &crate::core::Core) -> Vec<(String, i64, Option<i64>)> {
         sqlx::query_as(
             "SELECT artifact_id, shown, explored_from
@@ -5115,9 +5049,6 @@ mod tests {
         .unwrap()
     }
 
-    /// The hole the whole feature exists to close: without exploration nothing
-    /// below the window is ever shown, so nothing below the window can ever be
-    /// opened, so the tuner can only ever learn about rows it already chose.
     #[tokio::test]
     async fn an_exploring_search_shows_one_row_the_ranking_hid() {
         let core = explorable(1.0, 8).await;
@@ -5362,10 +5293,6 @@ mod tests {
         assert_eq!(seen.len(), out.len(), "an artifact was returned twice");
     }
 
-    /// The captured pool, as `(role, shown)` ordered by rank — `role` is `"a"`
-    /// or `"b"` depending on which of the two seeded ids the row names, so two
-    /// separately-seeded cores (whose artifact ids are fresh UUIDs and so never
-    /// equal) can still be compared for shape.
     async fn captured_pool(core: &crate::core::Core, a: &str, b: &str) -> Vec<(&'static str, i64)> {
         // The ranked pool. The band is recorded beside it, flagged, so the
         // spread rule can read it — and every reader that learns from the
@@ -5530,8 +5457,6 @@ mod tests {
         assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
     }
 
-    /// A contradiction is shown, not settled: both notes stay where the
-    /// ranking put them, and each names the other.
     #[tokio::test]
     async fn a_hit_says_which_note_disagrees_with_it_and_keeps_its_rank() {
         use crate::store::pairs::{DecidedBy, PairState};
@@ -5578,16 +5503,6 @@ mod tests {
         }
     }
 
-    /// A passage recalled by association shows no name, exactly as a ranked
-    /// one does.
-    ///
-    /// The rail puts the two lists one under the other, so a heading that the
-    /// ranked rows no longer carry reappearing three rows down does not read
-    /// as a different rule — it reads as the same rule applied wrongly. Both
-    /// answers come off the row's own provenance, which is why this also pins
-    /// `model_written`: a merge reached by association is as model-written as
-    /// one that was ranked, and `false` there is how a paraphrase is handed
-    /// back as its own root.
     #[tokio::test]
     async fn a_recalled_hit_is_named_and_attributed_by_its_own_provenance() {
         let mut core = test_core().await;
@@ -5744,8 +5659,6 @@ mod tests {
 
     // ── The cliff ────────────────────────────────────────────────────────────
 
-    /// Hybrid RRF as Qdrant fuses it: two hits both branches agreed on, then
-    /// hits only the dense branch found. The step between them is the cliff.
     #[test]
     fn a_hybrid_list_falls_off_where_only_one_branch_still_matches() {
         let both = |r: f32| 1.0 / (60.0 + r) + 1.0 / (60.0 + r);
@@ -5754,8 +5667,6 @@ mod tests {
         assert_eq!(cliff(&scores), Some(2));
     }
 
-    /// Dense-only RRF falls evenly, `1/(60+r)`: no step stands out, so the
-    /// list makes no claim about where its answers stop.
     #[test]
     fn an_evenly_falling_list_has_no_cliff() {
         let scores: Vec<f32> = (1..=10).map(|r| 1.0 / (60.0 + r as f32)).collect();
@@ -5767,14 +5678,11 @@ mod tests {
         assert_eq!(cliff(&[0.95, 0.90, 0.30, 0.28, 0.10]), Some(2));
     }
 
-    /// Two comparable drops: the list is ambiguous and says nothing, rather
-    /// than picking one of them and calling the rest noise.
     #[test]
     fn an_ambiguous_list_says_nothing() {
         assert_eq!(cliff(&[0.9, 0.5, 0.1, 0.05]), None);
     }
 
-    /// One gap has nothing to be compared against.
     #[test]
     fn fewer_than_three_hits_have_no_cliff() {
         assert_eq!(cliff(&[]), None);
@@ -5782,8 +5690,6 @@ mod tests {
         assert_eq!(cliff(&[1.0, 0.1]), None);
     }
 
-    /// A plateau and then a drop is the clearest cliff there is; the mean of
-    /// the other gaps being zero must not turn it into a division that says no.
     #[test]
     fn a_plateau_followed_by_a_drop_is_a_cliff() {
         assert_eq!(cliff(&[1.0, 1.0, 1.0, 0.2, 0.2]), Some(3));
@@ -5791,11 +5697,6 @@ mod tests {
         assert_eq!(cliff(&[0.5, 0.5, 0.5, 0.5]), None);
     }
 
-    /// The same plateau, with a drop too small to mean anything: three hits a
-    /// reranker scored alike and a fourth a rounding error below them. The mean
-    /// of the other gaps is zero here too, so without a floor every positive
-    /// number cleared three times zero and the page drew its line between two
-    /// hits that were tied.
     #[test]
     fn a_tie_at_the_foot_of_a_plateau_is_not_a_cliff() {
         assert_eq!(cliff(&[1.0, 1.0, 1.0, 0.9999]), None);
@@ -5807,11 +5708,6 @@ mod tests {
         assert_eq!(cliff(&[0.016, 0.016, 0.016, 0.004]), Some(3));
     }
 
-    /// Priming may lift a near-tie past its neighbour. Read position by
-    /// position that was a negative gap, and clamping it to zero manufactured
-    /// a fall at the position before it; `mark_past_cliff` sorts instead, and
-    /// the four near-tied hits are then one plateau with one fall after it —
-    /// which is what the list is.
     #[test]
     fn a_primed_inversion_is_not_a_cliff() {
         assert_eq!(cliff(&[0.90, 0.89, 0.88, 0.87, 0.30]), Some(4));
@@ -5852,14 +5748,6 @@ mod tests {
         assert!(flat.iter().all(|r| !r.past_cliff));
     }
 
-    /// One retired row used to switch the cliff off for the whole list.
-    ///
-    /// A retired hit is demoted to the tail, not dropped, and it keeps its
-    /// score. With a high one it made the *last* position satisfy `score >=
-    /// cut`, so the mark started at the end of the list and the genuinely weak
-    /// rows above it lost the mark — in `ask`, they were no longer truncated
-    /// out of the answer. The cliff is read over the live prefix now, and the
-    /// retired tail is marked whatever the cliff said.
     #[test]
     fn a_retired_hit_at_the_tail_does_not_take_the_cliff_with_it() {
         let dummy = |id: &str, score: f32, retired: bool| SearchResult {
@@ -5896,12 +5784,6 @@ mod tests {
         assert!(results[first..].iter().all(|r| r.past_cliff));
     }
 
-    /// The default configuration has no reranker, and the scores are then
-    /// RRF fusions: a harmonic curve whose first gap is always its largest.
-    /// The list reproduced here is the `loop device` query from the report —
-    /// three relevant notes, and a cliff drawn after the first of them on the
-    /// fused scores. Read on the cosine similarity instead, the divider lands
-    /// where the relevance actually falls, and not at all when it does not.
     #[test]
     fn without_a_reranker_the_cliff_is_read_from_similarity_and_never_from_the_fused_rank() {
         let dummy = |id: &str, score: f32, similarity: Option<f32>| SearchResult {

@@ -620,9 +620,6 @@ mod tests {
 
     use crate::store::artifacts::{ArtifactStatus, NewArtifact, NewMerged};
 
-    /// One corpus holding one artifact per text. The corpus text is the texts
-    /// themselves: `insert_corpus` deduplicates on content, so two seeds with a
-    /// fixed string would be one note and not two.
     async fn seed(core: &Core, texts: &[&str]) -> Vec<String> {
         let src = core
             .store
@@ -667,12 +664,6 @@ mod tests {
         backdate_retired_at(core, id, 100 * 86_400).await;
     }
 
-    /// A burial taken back is a permanent answer about that row, and
-    /// `reap_candidates` orders by `retired_at ASC`. Skipped without a fresh
-    /// stamp it is the oldest retirement in the base for ever: one nominee
-    /// slot on every sweep, and the candidates behind it never reached — the
-    /// starvation `step_aside`'s own doc comment describes, arriving through
-    /// the one branch that never spends a model call.
     #[tokio::test]
     async fn a_burial_taken_back_stands_down_instead_of_holding_its_slot() {
         use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
@@ -762,7 +753,6 @@ mod tests {
         );
     }
 
-    /// A due moment nobody has completed, on this artifact.
     async fn open_reminder(core: &Core, moment_id: &str, artifact_id: &str) {
         sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
@@ -842,10 +832,6 @@ mod tests {
         );
     }
 
-    /// Switching the sweep off has to stop the sweep, not merely stop arming
-    /// it. `periodic_units` gates arming and nothing disarms an already-pending
-    /// row, so a unit that was waiting when the setting changed still ran once
-    /// — one more full destructive pass, up to `max_judged_per_run` burials.
     #[tokio::test]
     async fn a_disabled_sweep_does_not_run_a_unit_that_was_already_pending() {
         let mut core = test_core().await;
@@ -986,12 +972,6 @@ mod tests {
         );
     }
 
-    /// `reactivate` has always routed a reaped artifact through `exhume`;
-    /// `unsupersede` did not, and it is what the Ops restore button and
-    /// `undo_promotion` call. The ordinary path published an *active, empty*
-    /// artifact — text wiped, point deleted — that `reap_candidates` could
-    /// never take back, and whose absent point `repair_lifecycle_drift` went on
-    /// deleting once a pass.
     #[tokio::test]
     async fn restoring_a_buried_superseded_artifact_brings_its_text_back() {
         let mut core = test_core().await;
@@ -1053,12 +1033,6 @@ mod tests {
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
     }
 
-    /// A candidate the judge will never rule on must not hold the queue.
-    /// `reap_candidates` is ordered `retired_at ASC` and the sweep judges
-    /// `max_judged_per_run` rows a run, so the oldest retirement in the base
-    /// is judged first every time — and if that call is refused rather than
-    /// merely failed, it is refused again on the next sweep, and the row
-    /// behind it is never reached.
     #[tokio::test]
     async fn a_candidate_the_judge_refuses_stands_down_and_lets_the_queue_move() {
         let mut core = test_core().await;
@@ -1090,10 +1064,6 @@ mod tests {
         );
     }
 
-    /// And a call that merely failed is not that. No model configured is a
-    /// role that has not arrived, and standing every candidate in the base
-    /// down on it would push every `retired_at` forward on every sweep — with
-    /// nothing reapable left once a model finally was configured.
     #[tokio::test]
     async fn a_sweep_with_no_judge_leaves_every_candidate_where_it_was() {
         let mut core = test_core().await;

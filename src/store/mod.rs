@@ -1000,10 +1000,6 @@ mod tests {
         assert!(err.contains("segments.carry_lines"), "{err}");
     }
 
-    /// A corpus filed as a journal entry by a binary that still had them is
-    /// an ordinary capture once this one connects: the channel it came
-    /// through is back, the keys only the filing read are gone, and a second
-    /// connect finds nothing left to change.
     #[tokio::test]
     async fn a_journal_entry_from_before_comes_back_as_the_capture_it_was() {
         let store = Store::memory().await.unwrap();

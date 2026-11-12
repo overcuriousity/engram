@@ -656,7 +656,6 @@ mod tests {
     use crate::store::generations::NewGeneration;
     use crate::store::observations::{NewObservation, Source};
 
-    /// Name the running configuration as the live generation, under `recipe`.
     async fn generation_under(core: &Core, recipe: &str) -> Generation {
         let params = *core
             .ranking
@@ -678,8 +677,6 @@ mod tests {
         generation_under(core, "recipe-a").await
     }
 
-    /// A used excerpt at the rank it was served, carrying the vector a real
-    /// search of `QUERY` would have used.
     async fn observed(core: &Core, generation: &str, artifact: &str, rank: i64) {
         let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
         core.store
@@ -744,14 +741,6 @@ mod tests {
         );
     }
 
-    /// `recommend` zips its two lists positionally and reads index *i* on
-    /// either side as the same query replayed. Flattening every probe's
-    /// results into two heaps and splitting them on the clock does not hold
-    /// that: a probe retired before the condensation lands only in `before`,
-    /// one minted after it only in `after`, and the comparison then puts an
-    /// easy old query against a hard new one. Four such places apart was
-    /// enough to revert a condensation that had lost nothing — and the mirror
-    /// case hid a real regression.
     #[tokio::test]
     async fn a_condensation_is_judged_on_probes_that_span_it_and_no_others() {
         let (mut core, order) = seeded().await;
@@ -799,9 +788,6 @@ mod tests {
         );
     }
 
-    /// Before and after under one generation. Across an adoption the two
-    /// sides are measured at two sets of parameters, and a miss after it says
-    /// what the new settings did, not what the condensation lost.
     #[tokio::test]
     async fn a_condensation_is_not_judged_across_a_generation_boundary() {
         let (mut core, order) = seeded().await;
@@ -841,9 +827,6 @@ mod tests {
         );
     }
 
-    /// `n` probes on one artifact, each a distinct question. Distinct because
-    /// `idx_rehearsals_live` is keyed on the query, and because a pair is a
-    /// query.
     async fn probes_on(core: &Core, artifact: &str, g: &Generation, n: usize) -> Vec<String> {
         let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
         let mut out = Vec::new();
@@ -866,7 +849,6 @@ mod tests {
         out
     }
 
-    /// One result on one probe, with its clock set by hand.
     async fn result_at(core: &Core, probe: &str, g: &Generation, rank: Option<i64>, at: i64) {
         let rid = core
             .store
@@ -884,9 +866,6 @@ mod tests {
             .unwrap();
     }
 
-    /// The seeded base, with the top hit of the second source (`order[3]`)
-    /// hidden in favour of the last hit of the first (`order[2]`) on the
-    /// judge's word, after use had named `order[3]` at rank 1 twice.
     async fn superseded_after_use() -> (Core, Generation, String, String) {
         let (core, order) = seeded().await;
         let g = generation_for(&core).await;
@@ -1089,10 +1068,6 @@ mod tests {
         );
     }
 
-    /// A supersession after use on a base that is already in some state, so
-    /// the pass-level tests can ask what the corpus half does there. Three
-    /// observations rather than two: the watching base already holds one of
-    /// this artifact at its old rank, and the record has to clear that too.
     async fn superseded_after_use_on(core: &Core) -> String {
         let order = crate::eval::sweep::test_support::ranks_order(core).await;
         let live = core.store.live_generation().await.unwrap().unwrap();
@@ -1175,7 +1150,6 @@ mod tests {
         );
     }
 
-    /// A give-up on `QUERY` under `generation`.
     async fn gave_up(core: &Core, generation: &str) {
         let query_vec = core.embedder.embed_query(QUERY).await.unwrap();
         core.store
@@ -1193,11 +1167,6 @@ mod tests {
             .unwrap();
     }
 
-    /// One note that is the answer to `QUERY` and one that is not, each its
-    /// own source: the answer has no twin, so hiding it is a loss the base can
-    /// see. `seeded()` cannot serve here — its three chunks of one source are
-    /// identical, and a hidden hit with a live twin at the same similarity is
-    /// no loss at all.
     async fn one_answer() -> (Core, String, String) {
         let core = crate::core::test_support::test_core().await;
         let mut ids = Vec::new();
@@ -1334,17 +1303,6 @@ mod tests {
         assert!(!core.store.get_artifact(&answer).await.unwrap().in_results());
     }
 
-    /// And it stays not the base's to restore once it has been buried.
-    ///
-    /// The rule above holds because a hand-hidden artifact has no journal row,
-    /// and rule 2 works from rows. Burial writes one — every grave has a
-    /// `Kind::Reap` — so the graveyard branch found a row where the live
-    /// branch had found none, and `reactivate` forces `Active`: a search going
-    /// unanswered republished, at full visibility, something a person had
-    /// deliberately taken out of results however long ago.
-    ///
-    /// The Reap row is still there and still open. What changes is that
-    /// nothing is restored on the strength of it, and no undo is stamped.
     #[tokio::test]
     async fn an_artifact_a_person_hid_stays_hidden_after_it_is_buried() {
         let (core, answer, _) = one_answer().await;
@@ -1402,14 +1360,6 @@ mod tests {
         );
     }
 
-    /// Bury `id` the way reap does: a judged discard, then a burial with its
-    /// vector and a journal row — the ordinary road into the graveyard,
-    /// stated through the calls that actually take it.
-    ///
-    /// The discard is journaled rather than stamped straight onto the row,
-    /// because the journal is what says a corpus job hid this and not a
-    /// person: rule 2 reads exactly that before it puts anything back. A bare
-    /// `set_artifact_status` here described a state the app has no path to.
     async fn buried(core: &Core, id: &str, embed_model: &str) {
         core.deprecate_with(id, Some(discard_row(id)))
             .await
@@ -1440,16 +1390,6 @@ mod tests {
             .unwrap();
     }
 
-    /// A grave whose artifact was deleted with its corpus must not be able to
-    /// stop the rule.
-    ///
-    /// Nothing cascades into `graveyard` and nothing sweeps it — a grave is
-    /// permanent so that no reap verdict is ever wrong invisibly — so the row
-    /// and its open `Reap` row outlive the artifact. Picked as the best hidden
-    /// candidate, `reactivate` answered `NotFound` and the `?` took the pass
-    /// down before `meta_set` ever ran: the cursor never moved, so the same
-    /// give-up was re-read and re-failed on every lap afterwards and no
-    /// give-up recorded after it was ever acted on again.
     #[tokio::test]
     async fn a_grave_whose_artifact_is_gone_neither_stops_the_rule_nor_moves_the_cursor_back() {
         let (core, answer, _) = one_answer().await;

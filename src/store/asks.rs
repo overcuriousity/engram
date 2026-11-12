@@ -465,8 +465,6 @@ mod tests {
         }
     }
 
-    /// A store with one generation live, so an observation has something to be
-    /// evidence about.
     async fn base() -> (Store, String) {
         use crate::store::generations::{GenerationParams, NewGeneration};
         let store = Store::memory().await.unwrap();

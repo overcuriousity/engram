@@ -534,8 +534,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// A link stored because its page could not be read says so, and says
-    /// whether it is still being tried.
     #[tokio::test]
     async fn deleting_a_source_needs_its_name_typed() {
         let (app, cookie, core) = crate::web::test_support::app_session_and_core().await;
@@ -586,9 +584,6 @@ mod tests {
         assert!(metadata_rows(&read).is_empty());
     }
 
-    /// A band echo is a link and nothing else — "↑ ⟨label⟩", pointing up at
-    /// the card in the band that owns it. A passage there was pointed at by
-    /// the heading of the section it was cut from.
     #[tokio::test]
     async fn a_band_echo_for_a_passage_points_at_it_by_how_its_text_opens() {
         let core = crate::core::test_support::test_core().await;
@@ -927,9 +922,6 @@ mod tests {
         );
     }
 
-    /// `enqueue` re-arms a conflicting row whatever state it is in, running
-    /// included. Pressing the button twice therefore handed one window to two
-    /// workers: two paid model calls and two sets of artifacts for one loss.
     #[tokio::test]
     async fn a_window_already_queued_is_not_re_read_a_second_time() {
         use crate::store::segments::{NewSegment, SegmentState};
@@ -1321,9 +1313,6 @@ mod tests {
         assert!(!page.contains("band-gap"), "{page}");
     }
 
-    /// Only a photo waits on the vision model. Any other capture with no text
-    /// is a fetch that came back empty or a paste that was, and the fallback
-    /// told the operator a job was queued that nobody had started.
     #[tokio::test]
     async fn an_empty_capture_that_is_not_a_photo_names_no_vision_job() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1334,8 +1323,6 @@ mod tests {
         assert!(page.contains("has no text"), "{page}");
     }
 
-    /// Not banded is not the same as not shown. A placeholder's artifacts are
-    /// the only thing it holds, and banding alone left them off their own page.
     #[tokio::test]
     async fn a_restored_corpus_still_shows_its_artifacts() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1366,9 +1353,6 @@ mod tests {
         );
     }
 
-    /// Rendering bands alone dropped it: banding places an artifact by its
-    /// span, and an artifact without one was placed nowhere and shown nowhere
-    /// — off the only page that can edit or delete it.
     #[tokio::test]
     async fn an_artifact_naming_no_lines_still_has_its_card() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1410,9 +1394,6 @@ mod tests {
         );
     }
 
-    /// It may well have been written from exactly the lines about to be painted
-    /// red, and the page would be offering a paid re-read on the strength of a
-    /// claim it cannot make.
     #[tokio::test]
     async fn nothing_is_a_loss_while_an_artifact_names_no_lines() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1459,9 +1440,6 @@ mod tests {
         );
     }
 
-    /// The form carries no token and the range is a claim, not a fact. Taking
-    /// it at its word, one POST reset and re-enqueued every window of the
-    /// capture — a paid model call each, for lines nothing was missing from.
     #[tokio::test]
     async fn a_re_read_of_a_range_that_lost_nothing_queues_nothing() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1501,10 +1479,6 @@ mod tests {
         );
     }
 
-    /// Rendered in each band it touches, one artifact appeared three times
-    /// under one set of element ids: "edit" on the second copy opened the
-    /// editor of the first, and delete swapped the first away and left the
-    /// others pointing at a row that no longer exists.
     #[tokio::test]
     async fn an_overlapping_artifact_has_exactly_one_card() {
         use crate::store::artifacts::{CorpusSpan, NewArtifact};

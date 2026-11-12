@@ -33,8 +33,6 @@ fn url() -> String {
     std::env::var("ENGRAM_TEST_QDRANT").unwrap_or_else(|_| "http://localhost:6333".into())
 }
 
-/// Raw REST, for setting up states engram itself will no longer create — such
-/// as a pre-alias collection left behind by an older deployment.
 async fn raw(method: reqwest::Method, path: &str, body: Option<serde_json::Value>) -> String {
     let mut req = reqwest::Client::new().request(method, format!("{}{path}", url()));
     if let Some(b) = body {
@@ -66,8 +64,6 @@ fn point(id: &str, src: &str, v: Vec<f32>, tags: &[&str], cat: &str) -> VectorPo
     }
 }
 
-/// Each test owns its own collection and drops it first, so a rerun is never
-/// polluted by the previous one.
 async fn fresh(name: &str, dim: usize) -> QdrantVectors {
     let v = QdrantVectors::connect(&cfg(name)).await.unwrap();
     v.drop_collection().await.unwrap();
@@ -741,9 +737,6 @@ async fn set_payload_rewrites_metadata_without_touching_the_vector() {
 
 // ── Hybrid retrieval ────────────────────────────────────────────────────────
 
-/// A point whose sparse half is computed from real text, the way the embed job
-/// builds one. The dense vector is supplied separately so a test can make the
-/// semantic half deliberately unhelpful.
 fn hybrid_point(id: &str, text: &str, dense: Vec<f32>) -> VectorPoint {
     VectorPoint {
         vector: dense,
@@ -2062,13 +2055,6 @@ async fn a_sample_returns_artifact_ids_with_their_dense_vectors() {
     v.drop_collection().await.unwrap();
 }
 
-/// Alias per tenant, against a real Qdrant.
-///
-/// The one part of tenancy `MemoryVectors` cannot cover: `tests/multi_tenant.rs`
-/// hands each tenant its own in-memory store by construction, so it proves the
-/// registry asks for a different collection per tenant but never that Qdrant
-/// keeps them apart. Here the two aliases are real names in one server, and
-/// each has to resolve to a different collection and answer with its own points.
 #[tokio::test]
 #[ignore]
 async fn two_tenants_get_two_collections_behind_two_aliases() {
@@ -2124,12 +2110,6 @@ async fn two_tenants_get_two_collections_behind_two_aliases() {
     b.drop_collection().await.unwrap();
 }
 
-/// The explanation reconstructs two terms Qdrant computed and never returned.
-///
-/// A unit test over `scoring_terms` pins our own arithmetic. Only this one
-/// pins that our arithmetic is Qdrant's. If `exp_decay` ever stops meaning
-/// what the reconstruction believes, this fails — and it has to, because an
-/// explanation that contradicts the ranking it explains is worse than silence.
 #[tokio::test]
 #[ignore]
 async fn the_reconstructed_recency_term_matches_what_qdrant_scored() {
@@ -2236,7 +2216,6 @@ async fn sleeping_core(name: &str) -> (engram::core::Core, engram::vector::qdran
     (core, v)
 }
 
-/// One artifact in `corpus`, in SQLite as embedded and in Qdrant at `vector`.
 async fn sleeping_artifact(
     core: &engram::core::Core,
     v: &engram::vector::qdrant::QdrantVectors,
@@ -2588,7 +2567,6 @@ async fn qdrant_export_streams_hashes_and_cleans_up() {
     assert!(!dir.path().join("absent.snapshot").exists());
 }
 
-/// Export one alias' generation into a file, for the import tests.
 async fn exported(v: &QdrantVectors, dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let file = dir.join(format!("{name}.snapshot"));
     v.export_snapshot(&file).await.unwrap();
@@ -2705,8 +2683,6 @@ async fn qdrant_import_of_another_width_is_refused_before_the_alias_moves() {
     v.drop_collection().await.unwrap();
 }
 
-/// Plan slice 3: the whole instance through `--backup`, a wipe of both
-/// stores, and `--restore`, against a real Qdrant.
 #[tokio::test]
 #[ignore]
 async fn backup_wipe_restore_round_trip() {

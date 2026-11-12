@@ -418,8 +418,6 @@ mod tests {
         }
     }
 
-    /// A corpus and one artifact in it, because `context_clusters.artifact_id`
-    /// is a foreign key and SQLite enforces it.
     async fn seed_artifact(store: &Store) -> String {
         let src = store.insert_corpus("raw", "web", None).await.unwrap();
         store

@@ -406,14 +406,6 @@ mod tests {
         assert_eq!(store.actions_since(Job::Sleep, i64::MAX).await.unwrap(), 0);
     }
 
-    /// Each job carries its own week, so none of them can stand another down.
-    ///
-    /// One shared count over every row but `moment` is what this replaces.
-    /// Ten of anything reached the default cap: ten promotions is a person
-    /// reading their own base attentively, and it silently stopped dedupe,
-    /// reap and condense for the rest of the week. Condense, which runs last
-    /// in the idle pass, therefore found the week already spent in every week
-    /// the base had been used at all.
     #[tokio::test]
     async fn one_job_s_writes_never_spend_another_job_s_week() {
         let store = Store::memory().await.unwrap();

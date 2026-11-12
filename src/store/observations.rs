@@ -469,10 +469,6 @@ mod tests {
         assert_eq!(n, 1, "excluded is not deleted");
     }
 
-    /// `artifact_id` carries no foreign key, so a corpus deletion takes the
-    /// artifacts and leaves every observation naming them behind — counted by
-    /// `lived` as a hit for the generation that earned it, on a thing nothing
-    /// can retrieve any more.
     #[tokio::test]
     async fn an_observation_whose_artifact_left_stops_being_read_back() {
         let (store, generation) = base().await;
@@ -514,9 +510,6 @@ mod tests {
         assert_eq!(store.exclude_orphaned_observations().await.unwrap(), 0);
     }
 
-    /// The query text and its vector live here as well as in `search_events`,
-    /// with nothing cascading between them — so the retention window and the
-    /// erase button both have to reach this table by name.
     #[tokio::test]
     async fn the_queries_kept_here_age_and_erase_with_the_searches() {
         let (store, generation) = base().await;

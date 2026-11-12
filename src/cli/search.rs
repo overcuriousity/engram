@@ -401,9 +401,6 @@ mod tests {
     use super::*;
     use fixture::hit;
 
-    /// A CLI from this branch against a server that predates the envelope.
-    /// `body["items"]` panicked there — `cannot access key "items" in JSON …`
-    /// — instead of failing as a shape this door does not understand.
     #[test]
     fn an_older_servers_bare_array_is_not_a_panic() {
         let mut bare = serde_json::json!([{ "id": "a" }]);
@@ -412,7 +409,6 @@ mod tests {
         assert_eq!(items_of(&mut enveloped), serde_json::json!([{ "id": "a" }]));
     }
 
-    /// Same budget, same rule, in the form a pipe sees.
     #[test]
     fn the_plain_form_clips_to_lines_that_carry_text() {
         let mut h = hit("a", -4.18, false, false);
@@ -477,9 +473,6 @@ mod tests {
         );
     }
 
-    /// The streaming door is the same search, so it has to answer with the
-    /// same hits in the same order — and the fallback has to be reachable
-    /// without either of them saying anything different.
     #[tokio::test]
     async fn both_doors_answer_one_search_the_same_way() {
         let (url, token, core) = crate::cli::test_support::serve_test_app().await;
@@ -517,8 +510,6 @@ mod tests {
         );
     }
 
-    /// A server that has never heard of the streaming route is answered by
-    /// falling back, not by failing.
     #[tokio::test]
     async fn a_door_that_is_not_there_falls_back_rather_than_failing() {
         let (url, token, _core) = crate::cli::test_support::serve_test_app().await;
@@ -540,13 +531,6 @@ mod tests {
         );
     }
 
-    /// A stream that reported a stage and then died is not run again.
-    ///
-    /// The server spawns `record_search` onto its own background before the
-    /// `results` frame is yielded, and that spawn outlives the client hanging
-    /// up. Falling back here asked the plain door for the same query, which
-    /// records a second time — and `record_search` coalesces the two typing
-    /// doors and not the shell, so the duplicate is permanent.
     #[tokio::test]
     async fn a_stream_that_dies_after_a_stage_is_not_run_a_second_time() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

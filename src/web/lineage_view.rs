@@ -442,14 +442,6 @@ mod tests {
         }
     }
 
-    /// A lineage node is a link and nothing else — no snippet beside it — so
-    /// a passage emptied of its name is a node nobody can see or click. It is
-    /// named by how its text opens, and marked so the tree does not read the
-    /// opening as a name.
-    ///
-    /// Promotion is where a passage lands here: the window job supersedes the
-    /// passages it rewrote, and they show up under "Replaced without being
-    /// merged" on the artifact that replaced them.
     #[tokio::test]
     async fn a_passage_in_the_tree_is_named_by_how_its_text_opens() {
         let s = Store::memory().await.unwrap();
@@ -486,9 +478,6 @@ mod tests {
         assert!(!node.named, "the opening of a text is not a name");
     }
 
-    /// And the tree has to *look* like it is not a name: a node styled exactly
-    /// like the merge above it says the opening of a passage is what somebody
-    /// called it.
     #[tokio::test]
     async fn a_node_named_by_its_opening_is_set_as_text() {
         let core = crate::core::test_support::test_core().await;
@@ -528,8 +517,6 @@ mod tests {
         assert!(css.contains(".name-opening"), "the class has no rule");
     }
 
-    /// The whole point: the generation between a merge and its captured roots
-    /// is on the page. A flat list of roots cannot say it.
     #[tokio::test]
     async fn a_merge_of_a_merge_is_two_generations_deep() {
         let s = Store::memory().await.unwrap();
@@ -572,8 +559,6 @@ mod tests {
         assert!(!l.truncated);
     }
 
-    /// A first-generation merge has no intermediate to show, and must not
-    /// invent one: `via == root` there, and every root hangs off the artifact.
     #[tokio::test]
     async fn a_first_generation_merge_is_one_level() {
         let s = Store::memory().await.unwrap();
@@ -590,8 +575,6 @@ mod tests {
         assert!(l.roots.iter().all(|n| n.kind == "captured"));
     }
 
-    /// A level read top to bottom is a history. Ordered by id it is a history
-    /// in no order at all.
     #[tokio::test]
     async fn a_level_is_ordered_oldest_first() {
         let s = Store::memory().await.unwrap();
@@ -618,8 +601,6 @@ mod tests {
         );
     }
 
-    /// Depth first, with the depth: the template draws indentation from it, so
-    /// a child arriving before its parent would draw the history backwards.
     #[tokio::test]
     async fn flattening_keeps_each_node_under_its_parent() {
         let s = Store::memory().await.unwrap();
@@ -651,8 +632,6 @@ mod tests {
         assert!(flat.last().unwrap().last, "the last node closes its level");
     }
 
-    /// A captured artifact was written from a document, not from artifacts.
-    /// The pane keeps showing it the document; an empty tree is what says so.
     #[tokio::test]
     async fn a_captured_artifact_has_no_tree() {
         let s = Store::memory().await.unwrap();
@@ -661,8 +640,6 @@ mod tests {
         assert!(l.is_empty());
     }
 
-    /// The merge superseded its roots, and the tree says so on the nodes
-    /// themselves rather than leaving the reader to infer it.
     #[tokio::test]
     async fn a_root_the_merge_replaced_is_marked_on_its_node() {
         let s = Store::memory().await.unwrap();
@@ -684,9 +661,6 @@ mod tests {
         );
     }
 
-    /// Superseding a near-duplicate is not merging: nothing checked that the
-    /// winner's text carries the loser's. Listing them together would make
-    /// that claim.
     #[tokio::test]
     async fn a_near_duplicate_it_replaced_is_kept_out_of_the_tree() {
         let s = Store::memory().await.unwrap();
@@ -704,8 +678,6 @@ mod tests {
         assert_eq!(l.also_replaced[0].id, ids[2]);
     }
 
-    /// The text still carries what the deleted source said. A branch that
-    /// simply vanished would claim less provenance than the artifact has.
     #[tokio::test]
     async fn a_source_deleted_since_is_named_rather_than_dropped() {
         let s = Store::memory().await.unwrap();

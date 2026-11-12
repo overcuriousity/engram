@@ -285,14 +285,6 @@ mod tests {
         );
     }
 
-    /// One query is one piece of evidence, however many times it was judged.
-    ///
-    /// The evidence side is looked up by query *text* — every positive
-    /// observation ever recorded for that query — so a query somebody judged
-    /// thirty times contributed thirty identical comparisons to a sample of
-    /// five hundred. That is one piece of evidence weighted thirty times, and
-    /// one stray verdict on such a query could carry the anchor and suspend
-    /// the autonomous loop on its own.
     #[tokio::test]
     async fn a_query_judged_many_times_is_still_one_piece_of_evidence() {
         let (core, g) = base().await;
@@ -313,9 +305,6 @@ mod tests {
         );
     }
 
-    /// And the newest verdict is the one that counts: a query re-judged is
-    /// somebody correcting themselves, and the question this asks is whether
-    /// agreement holds now.
     #[tokio::test]
     async fn the_newest_verdict_on_a_query_is_the_one_that_counts() {
         let (core, g) = base().await;
@@ -348,11 +337,6 @@ mod tests {
         );
     }
 
-    /// A verdict is only weighed against observations a comparable
-    /// configuration produced. Looked up by query text alone, the positives
-    /// answering it could come from before an embedder change — a ranking this
-    /// era's parameters had nothing to do with — and the anchor would suspend
-    /// the loop over a disagreement between two different systems.
     #[tokio::test]
     async fn an_observation_from_another_era_is_not_what_a_verdict_is_weighed_against() {
         let (core, g) = base().await;
@@ -385,9 +369,6 @@ mod tests {
         );
     }
 
-    /// An old disagreement stops suspending a base eventually. Without a
-    /// window the sample is every verdict ever given, and two from years ago
-    /// held the loop suspended for the life of the base.
     #[tokio::test]
     async fn a_verdict_older_than_the_window_is_not_read() {
         let (core, g) = base().await;

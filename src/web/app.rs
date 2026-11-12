@@ -263,7 +263,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Press the button and read the code out of the page.
     async fn press_and_read_code(app: &axum::Router, cookie: &str) -> String {
         let res = app
             .clone()

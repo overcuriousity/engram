@@ -489,8 +489,6 @@ mod tests {
         }
     }
 
-    /// The JSON door, for what the page is held to: a lenient spelling names
-    /// the same day, and a day that is not a date is a 404.
     #[tokio::test]
     async fn the_json_day_holds_to_what_the_page_holds_to() {
         let core = test_core().await;
@@ -519,9 +517,6 @@ mod tests {
         assert_eq!(err["error"], "not found", "one error vocabulary");
     }
 
-    /// Rule 2 of `docs/api.md`: a list carries no bodies. A captured row once
-    /// carried `raw_text` — for a captured book, the book — down a link that
-    /// draws it nowhere, and it landed in the phone's cache all the same.
     #[tokio::test]
     async fn a_captured_row_on_a_day_carries_no_body() {
         let mut core = test_core().await;
@@ -568,9 +563,6 @@ mod tests {
         );
     }
 
-    /// A sitting names what it opened, and nothing else: the row is a comma
-    /// list of links. A passage there was listed under the heading of the
-    /// section it was cut from, and a note under the word "untitled".
     #[tokio::test]
     async fn a_sitting_names_a_passage_it_opened_by_how_its_text_opens() {
         let mut core = test_core().await;

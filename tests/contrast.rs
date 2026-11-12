@@ -18,7 +18,6 @@ fn strip_comments(css: &str) -> String {
     out + rest
 }
 
-/// Every innermost `selector { … }` block, in order.
 fn blocks(css: &str) -> Vec<(String, String)> {
     let css = strip_comments(css);
     let mut out = Vec::new();

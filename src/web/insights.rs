@@ -1331,10 +1331,6 @@ mod tests {
         body_of(res).await
     }
 
-    /// Housekeeping's tables are anchors and nothing else: the label is the
-    /// whole cell. Emptied for a passage they are links nobody can see or
-    /// click, so a passage is listed by how its text opens — set as text, and
-    /// without the subtitle repeating that same opening underneath it.
     #[tokio::test]
     async fn a_superseded_passage_is_listed_by_how_its_text_opens() {
         let core = crate::core::test_support::test_core().await;
@@ -1387,9 +1383,6 @@ mod tests {
         );
     }
 
-    /// Five headings answered with a zero make a base with nothing wrong with
-    /// it look like a backlog — the same reasoning the housekeeping summary
-    /// already gives for collapsing its own empties into one sentence.
     #[tokio::test]
     async fn insights_over_an_empty_base_is_one_line_and_a_way_back() {
         let core = crate::core::test_support::test_core().await;
@@ -1416,12 +1409,6 @@ mod tests {
         );
     }
 
-    /// A heading over a band that loads in empty is a claim that something is
-    /// being measured when nothing is — the same reasoning `offer_rates`
-    /// already follows on this page. It is the band that draws it, because the
-    /// band is what swaps: gated from this side, on a read taken once at page
-    /// render, the heading outlived the rows it was a heading for. See
-    /// `_due.html` and `due::render`.
     #[tokio::test]
     async fn the_due_heading_is_the_bands_to_draw_and_not_this_pages() {
         let core = crate::core::test_support::test_core().await;
@@ -1447,11 +1434,6 @@ mod tests {
         );
     }
 
-    /// A closed disclosure with a neutral summary is not a report. The sweep
-    /// failures and the last-error column are the only surfaces that say a
-    /// background pipeline has fallen over, and once they moved in here an
-    /// instance whose every embed job had failed for a week looked from the
-    /// fold exactly like one with nothing to say.
     #[tokio::test]
     async fn a_failing_pipeline_is_not_something_the_page_keeps_to_itself() {
         let core = crate::core::test_support::test_core().await;
@@ -1490,9 +1472,6 @@ mod tests {
         );
     }
 
-    /// Two questions, one page: what is in my memory and what needs me, versus
-    /// what is the machine doing. The second is operator-grade — stage ids,
-    /// target ids, raw error strings — and every user sees this page now.
     #[tokio::test]
     async fn the_machines_own_readout_is_behind_a_disclosure() {
         let core = crate::core::test_support::test_core().await;
@@ -1523,7 +1502,6 @@ mod tests {
         );
     }
 
-    /// The measures read what the base already recorded.
     #[tokio::test]
     async fn the_measures_read_what_the_base_already_recorded() {
         let core = crate::core::test_support::test_core().await;
@@ -1541,11 +1519,6 @@ mod tests {
         );
     }
 
-    /// Nothing judged is not a score of zero.
-    ///
-    /// `0.00` beside "recall@10" reads as a measurement, and a base nobody has
-    /// judged has not scored badly — it has not been measured. This is the one
-    /// figure on the page whose absence must not look like a result.
     #[tokio::test]
     async fn an_unjudged_base_says_so_rather_than_reporting_zero() {
         let mut core = crate::core::test_support::test_core().await;
@@ -1565,10 +1538,6 @@ mod tests {
         );
     }
 
-    /// Read, never computed at request time.
-    ///
-    /// The first of the README's three rules holds here too: no embedding
-    /// and no model call on a page you open to look at numbers.
     #[tokio::test]
     async fn the_measures_embed_nothing() {
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
@@ -1580,12 +1549,6 @@ mod tests {
         assert_eq!(embedder.calls(), before, "the page embeds something");
     }
 
-    /// Every decision the base used to wait on a person for is one it now
-    /// makes itself, so the page that listed them lists what it did instead.
-    /// Seeded with one of each thing that used to put a question here: a
-    /// disagreement, a capture that resembles another, an artifact nobody has
-    /// confirmed in a year, a question nothing answered — and a merge, which
-    /// is the base's own work and keeps its undo.
     #[tokio::test]
     async fn insights_asks_nothing_of_anyone() {
         use crate::store::actions::{Job, Kind, NewAction};
@@ -1708,10 +1671,6 @@ mod tests {
         );
     }
 
-    /// No door is left that asks for a decision. Every one of these answered
-    /// a question the base now settles itself, so each is a path nobody
-    /// routed — whichever of 404 or 405 the router gives a path it half
-    /// knows.
     #[tokio::test]
     async fn the_decision_routes_are_gone() {
         let core = crate::core::test_support::test_core().await;
@@ -1762,9 +1721,6 @@ mod tests {
         }
     }
 
-    /// The deck is gone: pairs are made at the moment of the search — a result
-    /// read, a bar answered, a gap pressed on the rail — and its page answers
-    /// like any other path nobody routed.
     #[tokio::test]
     async fn every_judge_route_is_gone() {
         let core = crate::core::test_support::test_core().await;

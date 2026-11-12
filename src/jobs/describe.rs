@@ -273,7 +273,6 @@ mod tests {
         assert!(!core.store.live_job(Stage::Describe, &id).await.unwrap());
     }
 
-    /// A stored image corpus with `metadata`, one pixel big, no reading yet.
     async fn image_corpus(
         core: &Core,
         metadata: serde_json::Value,

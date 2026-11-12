@@ -394,9 +394,6 @@ mod tests {
     use super::*;
     use crate::infer::SynthesisBudget;
 
-    /// The defect `cut` replaced: 3.5 characters per token is the estimator's
-    /// ratio, and against a real tokenizer on a non-Latin script it let a
-    /// context block run several times over the reservation subtracted for it.
     #[test]
     fn cutting_holds_a_token_budget_on_a_script_the_ratio_does_not_describe() {
         let real = TokenCounter::load(None, std::path::Path::new("/nonexistent-cache"));
@@ -497,16 +494,11 @@ mod tests {
         }
     }
 
-    /// A prompt small against the window costs the caller nothing: it still gets
-    /// everything the role was configured to allow.
     #[test]
     fn a_small_prompt_keeps_the_whole_configured_ceiling() {
         assert_eq!(ceiling_for_prompt(8192, 100, 2048), 2048);
     }
 
-    /// The invariant the endpoint enforces, and the one a judge whose prompt is
-    /// not budgeted against the window was breaking: prompt plus ceiling has to
-    /// fit, and the ceiling is the half that gives.
     #[test]
     fn a_prompt_that_fills_the_window_takes_the_ceiling_down_with_it() {
         let ceiling = ceiling_for_prompt(8192, 7000, 2048);
@@ -514,9 +506,6 @@ mod tests {
         assert!(7000 + ceiling < 8192, "prompt plus ceiling still overflows");
     }
 
-    /// `estimate` is `chars / 3.5`, which undercounts CJK and dense markup, so a
-    /// ceiling that fills the remainder of the window *by estimate* overflows it
-    /// in fact — turning the server's soft cap on the reply into a hard 400.
     #[test]
     fn the_ceiling_leaves_the_estimate_room_to_be_wrong() {
         let prompt = 4000;
@@ -528,17 +517,11 @@ mod tests {
         assert_eq!(ceiling, 8192 - prompt - prompt / HEADROOM_DIVISOR);
     }
 
-    /// A prompt that alone exceeds the window is a lost call whatever ceiling
-    /// goes with it, but it must not be a ceiling of zero — an endpoint reads
-    /// that as "no output at all" rather than as the mistake it is.
     #[test]
     fn an_impossible_prompt_still_asks_for_a_positive_ceiling() {
         assert_eq!(ceiling_for_prompt(4096, 99_999, 2048), 1);
     }
 
-    /// ...and a caller that can refuse is told to, rather than being handed a
-    /// ceiling that guarantees an empty 200 — which reads as a transient
-    /// failure and gets retried on every later sweep.
     #[test]
     fn an_impossible_prompt_has_no_checked_ceiling() {
         assert_eq!(checked_ceiling_for_prompt(4096, 99_999, 2048), None);
@@ -546,11 +529,6 @@ mod tests {
         assert_eq!(checked_ceiling_for_prompt(8192, 100, 2048), Some(2048));
     }
 
-    /// The margin comes out of the reply, so it cannot grow without bound. A
-    /// caller that packs its prompt up against the room it reserved — `ask` —
-    /// otherwise loses the whole reply to the margin: at this shape,
-    /// `prompt / 8` is 3840 and the remaining window is 2048, so the ceiling
-    /// saturated to 1 and the model returned nothing at all.
     #[test]
     fn the_margin_cannot_eat_the_whole_reply() {
         let prompt = 32768 - 2048 - MAX_HEADROOM_TOKENS;
@@ -615,15 +593,6 @@ mod tests {
         assert_eq!(w, 5851);
     }
 
-    /// Overhead larger than the whole context does not wrap around — and does
-    /// not come back as a window either.
-    ///
-    /// It used to be floored to `MIN_SEGMENT_TOKENS`, which reads as a small
-    /// budget and is not one: nothing downstream could tell that 256 from a
-    /// real one, so the splitter cut to it, `jobs::window`'s guard compared
-    /// against it, and every call went out over the endpoint's real context to
-    /// be refused with a 400 that is not retryable. A budget that does not
-    /// exist has to say so.
     #[test]
     fn a_context_too_small_for_its_own_prompt_is_no_window_at_all() {
         assert_eq!(segment_tokens(budget(1000, 8192, 1.4), 5000), None);

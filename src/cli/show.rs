@@ -126,8 +126,6 @@ pub async fn fetch(e: &Endpoint, id: &str) -> Result<Option<Detail>> {
 mod tests {
     use super::*;
 
-    /// End to end against the real router: the rank the list printed reaches
-    /// the right artifact, and its body arrives whole.
     #[tokio::test]
     async fn a_rank_from_the_last_search_reads_the_artifact_it_named() {
         let (url, token, core) = crate::cli::test_support::serve_test_app().await;
@@ -175,8 +173,6 @@ mod tests {
         );
     }
 
-    /// The same code `-s` answers with when it found nothing, so a shell
-    /// branches on it the same way.
     #[tokio::test]
     async fn an_id_that_is_not_there_exits_one() {
         let (url, token, _core) = crate::cli::test_support::serve_test_app().await;
@@ -204,8 +200,6 @@ mod tests {
         }
     }
 
-    /// The whole reason this door exists. A rendering that clips is the
-    /// rendering `-s` already has.
     #[test]
     fn the_body_is_printed_whole_however_long_it_is() {
         let long: String = (1..=40).map(|n| format!("line {n}\n")).collect();
@@ -227,8 +221,6 @@ mod tests {
         assert!(out.contains("forensik"), "{out}");
     }
 
-    /// A merged artifact belongs to no corpus, and a corpus deleted since
-    /// leaves its artifacts readable. Neither is a reason to print nothing.
     #[test]
     fn an_artifact_with_no_document_behind_it_still_reads() {
         let mut d = detail("body");

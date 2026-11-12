@@ -177,9 +177,6 @@ mod tests {
         }
     }
 
-    /// The rule that keeps a script from overwriting the list a person is
-    /// working from. A search in a pipeline is not a search anyone will name a
-    /// rank out of, and `--json` is read by a machine even on a terminal.
     #[test]
     fn only_a_search_a_person_watched_is_remembered() {
         assert!(worth_remembering(true, false));
@@ -235,8 +232,6 @@ mod tests {
         assert!(said.contains('2'), "{said}");
     }
 
-    /// Zero is off the end in the other direction, and `ids[0 - 1]` is the
-    /// panic that would be.
     #[test]
     fn rank_zero_is_off_the_list_rather_than_a_panic() {
         assert!(resolve("0", Some(&last(&["id-a"]))).is_err());
@@ -248,11 +243,6 @@ mod tests {
         assert!(said.contains("no search"), "{said}");
     }
 
-    /// An answer can cite a source the API named no artifact for. The rank
-    /// still has to line up with the printed list, so the place is kept empty
-    /// (`ask::citation_ids`) — and an empty place sent on as an id asked the
-    /// server for `/artifacts/`, which answers with a bare 404 that says
-    /// nothing about the rank the operator typed.
     #[test]
     fn a_rank_naming_a_source_with_no_id_says_so_rather_than_asking_the_server() {
         let held = last(&["id-a", "", "id-c"]);
@@ -265,8 +255,6 @@ mod tests {
         );
     }
 
-    /// And it is not a prefix of anything either: every needle starts with the
-    /// empty string, so the empty place matched the first thing typed.
     #[test]
     fn a_source_with_no_id_is_not_a_prefix_of_what_was_typed() {
         let held = last(&["", "id-c"]);
@@ -286,7 +274,6 @@ mod tests {
         assert!(said.contains("2 hits"), "{said}");
     }
 
-    /// The id pasted from a citation list, in a shell that has never searched.
     #[test]
     fn a_whole_id_needs_no_remembered_search() {
         let id = "01a04209-3b06-7af1-aead-4fbf5dd0a4b4";

@@ -1072,7 +1072,6 @@ mod tests {
     use super::*;
     use crate::store::artifacts::NewArtifact;
 
-    /// Two artifacts in one corpus, returned as their ids.
     async fn two(store: &Store) -> (String, String) {
         let src = store.insert_corpus("raw", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = ["alpha", "beta"]
@@ -1215,8 +1214,6 @@ mod tests {
         );
     }
 
-    /// Two artifacts in two different corpora, so a link between them is a
-    /// cross-corpus one — the only kind the judge is ever asked about.
     async fn two_corpora(store: &Store) -> (String, String) {
         let mut ids = Vec::new();
         for (raw, text) in [("raw one", "alpha"), ("raw two", "beta")] {
@@ -1523,13 +1520,6 @@ mod tests {
         assert_eq!(l.reason, None, "the judge read text that no longer exists");
     }
 
-    /// A relation the model asserted must survive the very next sweep.
-    ///
-    /// `relate_synthesized` left `judged_rev_a`/`judged_rev_b` NULL, and
-    /// `embed_rev` is `NOT NULL DEFAULT 0`, so `0 IS NOT NULL` matched every
-    /// row: every synthesized link was demoted to `learning` with its reason
-    /// erased on the first `associate` sweep after it was written, then decayed
-    /// until it was pruned — and spent a judge call on the way past.
     #[tokio::test]
     async fn a_synthesized_relation_is_not_reopened_by_the_next_sweep() {
         let store = Store::memory().await.unwrap();
@@ -1560,8 +1550,6 @@ mod tests {
         assert_eq!(store.reopen_stale_judged_links(100).await.unwrap(), 1);
     }
 
-    /// An operator's dismissal outranks the model, and the stamp must not be
-    /// the hole that lets a re-assertion in through the back.
     #[tokio::test]
     async fn a_dismissed_pair_keeps_its_dismissal_and_its_stamp() {
         let store = Store::memory().await.unwrap();
@@ -1584,12 +1572,6 @@ mod tests {
         );
     }
 
-    /// A relation the model asserted has to be visible to the readers that
-    /// apply `associate.show_min`. Written flat at `1.0` against the shipped
-    /// floor of `2.0` it was invisible in the association band, the artifact
-    /// pane and `ask`'s reach from the moment it was written — and never
-    /// pruned either, because `prune_learning_links` only takes `learning`
-    /// rows. A row nothing showed and nothing removed.
     #[tokio::test]
     async fn a_synthesized_relation_clears_the_floor_it_has_to_be_shown_over() {
         let store = Store::memory().await.unwrap();
@@ -1640,9 +1622,6 @@ mod tests {
         assert_eq!(shown.len(), 1, "it fell under the floor within the month");
     }
 
-    /// Re-asserting folds the decay in rather than restoring weight that time
-    /// took off, the way `bump_one` does — and never lowers a link that use
-    /// has carried above what an assertion is worth.
     #[tokio::test]
     async fn re_asserting_folds_the_decay_in_and_never_lowers_an_earned_link() {
         let store = Store::memory().await.unwrap();
@@ -1759,7 +1738,6 @@ mod tests {
         assert!(store.activation_of(&[]).await.unwrap().is_empty());
     }
 
-    /// An artifact in a corpus of its own, for a link to be carried onto.
     async fn third(store: &Store) -> String {
         let src = store.insert_corpus("raw2", "web", None).await.unwrap();
         store

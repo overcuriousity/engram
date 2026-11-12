@@ -17,11 +17,6 @@ use engram::store::control::Control;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// A vector factory that hands every tenant its own in-memory store.
-///
-/// One per alias, kept, so that reopening a tenant does not silently hand it an
-/// empty collection — which would make isolation look perfect for the wrong
-/// reason.
 struct MemoryFactory {
     made: std::sync::Mutex<
         std::collections::HashMap<String, Arc<engram::vector::memory::MemoryVectors>>,
@@ -44,20 +39,12 @@ impl engram::tenants::VectorFactory for MemoryFactory {
     }
 }
 
-/// One signed-in user: who they are, the bearer token that says so, and the id
-/// of the row behind it — which is what the token routes are addressed by, and
-/// so what a cross-tenant press would have to name.
 struct Signed {
     subject: String,
     token: String,
     token_id: String,
 }
 
-/// The real router over a real two-tenant registry, and a token each.
-///
-/// Bearer tokens rather than session cookies: both go through the same
-/// `Identity` extractor and the same `Tenant` behind it, and a token is one
-/// header rather than a login round trip.
 async fn two_tenant_app() -> (axum::Router, Signed, Signed, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("scratch tenant dir");
     let mut cfg = engram::config::Config::test_default();
@@ -134,7 +121,6 @@ async fn json(res: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
-/// Capture `text` as `who`, and return the corpus id.
 async fn capture(app: &axum::Router, who: &Signed, text: &str) -> String {
     let res = send(
         app,
@@ -192,9 +178,6 @@ async fn neither_tenant_can_see_the_others_corpus() {
     assert!(!b_list.contains(&a_id));
 }
 
-/// A 404 and not a 403. A 403 confirms the id exists, which is itself a leak
-/// across a boundary that is supposed to be total: it turns a guess into an
-/// answer.
 #[tokio::test]
 async fn fetching_the_other_tenants_id_is_a_404_and_not_a_403() {
     let (app, a, b, _dir) = two_tenant_app().await;
@@ -246,12 +229,6 @@ async fn a_capture_by_one_tenant_queues_work_only_for_them() {
     );
 }
 
-/// A tenant evicted from the registry and reopened is the same tenant.
-///
-/// The cap is what bounds an instance's memory, so eviction has to be
-/// transparent — and the way it would not be is a reopened tenant getting a
-/// fresh database or a fresh collection, which reads as a base that lost
-/// everything.
 #[tokio::test]
 async fn a_tenant_that_was_evicted_comes_back_with_its_data() {
     let dir = tempfile::tempdir().unwrap();
@@ -288,7 +265,6 @@ async fn a_tenant_that_was_evicted_comes_back_with_its_data() {
     );
 }
 
-/// Read a response body as text, for the pages that answer in HTML.
 async fn text(res: axum::response::Response) -> String {
     let bytes = axum::body::to_bytes(res.into_body(), 1 << 22)
         .await

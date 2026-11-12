@@ -1610,8 +1610,6 @@ mod tests {
         assert!(!permanent_upstream_status(S::BAD_GATEWAY));
     }
 
-    /// The empty context every one of these tests wants: they exercise the
-    /// transport and the parser, not the windowing.
     static EMPTY_CONTEXT: crate::infer::context::WindowContext =
         crate::infer::context::WindowContext {
             opening: None,
@@ -1632,13 +1630,6 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// A model name no other test shares.
-    ///
-    /// [`LEARNED_CEILING`] is keyed by `(base_url, model)` and outlives every
-    /// test in the process, while a `MockServer`'s ephemeral port does not: a
-    /// later test can bind the port a finished one used, and would then inherit
-    /// what that test's endpoint had resolved or learned. Varying the model
-    /// keeps each test's cell its own.
     fn test_model() -> String {
         static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         format!("m{}", N.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
@@ -1724,8 +1715,6 @@ mod tests {
         assert_eq!(out[0].title.as_deref(), Some("A"));
     }
 
-    /// The captured request body of a single call, so a test can assert on what
-    /// was sent rather than only on what came back.
     async fn sent_body(server: &MockServer) -> serde_json::Value {
         let reqs = server.received_requests().await.expect("recording is on");
         assert_eq!(reqs.len(), 1, "expected exactly one call");
@@ -1880,10 +1869,6 @@ mod tests {
         assert_eq!(out[0].text, "ok");
     }
 
-    /// The repair call carries the whole first reply on top of the prompt that
-    /// produced it, so asking for the full configured ceiling again breaks the
-    /// one invariant the endpoint enforces — prompt plus ceiling fits the window
-    /// — and it breaks it on precisely the windows that needed repairing.
     #[tokio::test]
     async fn the_repair_call_still_fits_the_window_it_is_repairing() {
         let server = MockServer::start().await;
@@ -1946,9 +1931,6 @@ mod tests {
         );
     }
 
-    /// And where the repair prompt cannot fit at all, the call is not made:
-    /// there is no ceiling that answers it, so spending the call only delays
-    /// the structural split the caller falls back to anyway.
     #[tokio::test]
     async fn a_repair_that_cannot_fit_the_window_is_not_attempted() {
         let server = echoing_server(&"sorry, here is prose ".repeat(2000)).await;
@@ -1987,9 +1969,6 @@ mod tests {
         ));
     }
 
-    /// A 500 is the endpoint breaking, which is not the same claim as the
-    /// endpoint being busy — nothing promises that waiting fixes it, only that
-    /// trying again is allowed to.
     #[tokio::test]
     async fn upstream_5xx_is_a_retryable_inference_error() {
         let server = MockServer::start().await;
@@ -2007,10 +1986,6 @@ mod tests {
         assert!(e.retryable());
     }
 
-    /// The two ways an endpoint says "not now", against the one way it says
-    /// "not ever" and the one way it says "I broke". A cold model answers 503
-    /// while it loads and a limiter in front of a shared server answers 429,
-    /// and neither is a bad gateway — which is what both used to become.
     #[tokio::test]
     async fn a_limiter_and_a_loading_model_are_busy_rather_than_broken() {
         for status in [429u16, 503] {
@@ -2251,13 +2226,6 @@ mod tests {
         );
     }
 
-    /// A judge reply is grammar-constrained, and a grammar masks out the
-    /// end-of-sequence token everywhere it would not be valid JSON — inside a
-    /// string most of all. The model therefore cannot end a reply it has
-    /// wandered into, and the only ceiling left is whatever the endpoint applies
-    /// when asked for none. One such call ran to ~190KB and was thrown away
-    /// whole, so this asserts the ceiling is on the wire rather than merely
-    /// configured.
     #[tokio::test]
     async fn every_completion_carries_its_output_ceiling() {
         for label in ["ask", "judge"] {
@@ -2291,9 +2259,6 @@ mod tests {
         }
     }
 
-    /// A reasoning model answers a `max_tokens` with a 400 naming
-    /// `max_completion_tokens`, so sending the ceiling under the wrong name
-    /// against one is not a loose constraint — it is every call failing.
     #[tokio::test]
     async fn a_reasoning_endpoint_gets_the_ceiling_under_the_name_it_accepts() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
@@ -2313,12 +2278,6 @@ mod tests {
         assert_eq!(body["reasoning_effort"].as_str(), Some("low"));
     }
 
-    /// `reasoning_effort` is a guess at which name the endpoint takes, and the
-    /// configuration this project recommends for a local model — suppressing
-    /// thinking with `reasoning_effort = "none"` — is exactly where the guess is
-    /// wrong. A llama.cpp build reads `max_tokens` and ignores what it does not
-    /// know, so guessing wrong there is not a 400 to learn from: it is no
-    /// ceiling at all, which is the unbounded reply this all exists to prevent.
     #[tokio::test]
     async fn the_configured_ceiling_name_beats_the_guess() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
@@ -2340,13 +2299,6 @@ mod tests {
         assert_eq!(body["reasoning_effort"].as_str(), Some("none"));
     }
 
-    /// The other half of the same argument, without the operator having said
-    /// anything. `reasoning_effort = "none"` is what this project's own example
-    /// config recommends for suppressing a local model's thinking, so reading it
-    /// as evidence of a hosted reasoning endpoint sends `max_completion_tokens`
-    /// to a llama.cpp build — which ignores the field it does not know, applies
-    /// no ceiling, and returns no error saying so. The guess has to fall the
-    /// safe way, because only the other direction has a 400 to learn from.
     #[tokio::test]
     async fn suppressed_thinking_is_not_mistaken_for_a_reasoning_endpoint() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
@@ -2366,11 +2318,6 @@ mod tests {
         );
     }
 
-    /// Neither judge's prompt is small — `dedupe_prompt` carries two whole
-    /// artifacts and the captured sources behind a merged one — so asking for
-    /// the configured ceiling regardless is a request the endpoint refuses
-    /// outright. That 400 is permanent, the pair is re-armed at the same size on
-    /// every later sweep, and it never gets judged at all.
     #[tokio::test]
     async fn a_judge_prompt_that_fills_the_window_shrinks_its_own_ceiling() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
@@ -2398,10 +2345,6 @@ mod tests {
         );
     }
 
-    /// The half of the guess the endpoint can correct. An endpoint that names
-    /// the other parameter in its refusal is telling us which one it takes, and
-    /// re-learning that on every call would mean one wasted 400 per judge call
-    /// forever.
     #[tokio::test]
     async fn a_ceiling_refused_by_name_is_retried_under_the_other_and_remembered() {
         let server = MockServer::start().await;
@@ -2443,10 +2386,6 @@ mod tests {
         assert_eq!(second["max_completion_tokens"].as_u64(), Some(2048));
     }
 
-    /// What the 400 taught belongs to the server, not to the role that paid for
-    /// it. `ask`, `judge`, `link_judge`, `vision` and `synthesize` are five
-    /// endpoints that may all be one address, and the two judges always are — so
-    /// a name learned per endpoint means the same refusal bought over and over.
     #[tokio::test]
     async fn the_name_a_400_teaches_is_shared_by_every_role_on_that_server() {
         let server = MockServer::start().await;
@@ -2486,14 +2425,6 @@ mod tests {
         assert!(last.get("max_tokens").is_none(), "{last}");
     }
 
-    /// The cell is shared per server, so a role that only *guessed* a name must
-    /// not overwrite one the operator gave. The shipped example config puts
-    /// `infer.ask` and `infer.synthesize` on one URL and one model, and the core
-    /// builds ask before the judges — so an explicit `ask.ceiling_param` used to
-    /// be replaced by synthesize's guess. Against an endpoint that ignores the
-    /// field it does not know, that leaves ask with no ceiling at all.
-    ///
-    /// Both orders, because "whichever was built last" is exactly the bug.
     #[tokio::test]
     async fn an_explicit_ceiling_name_is_not_overwritten_by_another_role_s_guess() {
         for ask_first in [true, false] {
@@ -2529,10 +2460,6 @@ mod tests {
         }
     }
 
-    /// A prompt too large for its window is a permanent failure and has to
-    /// settle as one. Clamping the ceiling to 1 instead turns it into a 200
-    /// carrying an empty reply — indistinguishable from a transient failure, so
-    /// the sweep re-sends the same impossible request forever.
     #[tokio::test]
     async fn a_prompt_that_cannot_fit_its_window_is_refused_rather_than_clamped() {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
@@ -2556,8 +2483,6 @@ mod tests {
         );
     }
 
-    /// A 400 about anything else is not a ceiling-name problem, and retrying it
-    /// under the other name would turn one permanent rejection into two.
     #[tokio::test]
     async fn a_refusal_that_is_not_about_the_ceiling_is_not_retried() {
         let server = MockServer::start().await;
@@ -2579,10 +2504,6 @@ mod tests {
         );
     }
 
-    /// A reasoning model bills its thinking against the ceiling, so a low
-    /// ceiling and a high effort can be spent before the message content starts.
-    /// That comes back as an empty reply, which read as a transport fault and
-    /// sent the operator looking at the wrong thing.
     #[tokio::test]
     async fn an_empty_reply_at_the_ceiling_says_the_ceiling_was_spent() {
         let server = MockServer::start().await;
@@ -2604,8 +2525,6 @@ mod tests {
         );
     }
 
-    /// What `finish_reason` is for: a reply the ceiling stopped is not a reply
-    /// the model finished, and only the caller knows what that costs.
     #[tokio::test]
     async fn a_reply_stopped_by_the_ceiling_is_reported_as_truncated() {
         for (reason, want) in [("length", true), ("stop", false)] {
@@ -2626,9 +2545,6 @@ mod tests {
         }
     }
 
-    /// The ceiling a caller asks for is a maximum, not an instruction: `ask`
-    /// derives it from what its prompt actually cost, and the role's own
-    /// configured ceiling still bounds it.
     #[tokio::test]
     async fn a_call_may_ask_for_less_room_than_the_role_allows_but_not_more() {
         for (asked, want) in [(256_usize, 256_u64), (99_999, 1024)] {
@@ -2645,8 +2561,6 @@ mod tests {
         }
     }
 
-    /// The link judge shares an endpoint with the duplicate judge and used to
-    /// share its response format too, which no link verdict can satisfy.
     #[tokio::test]
     async fn each_judge_sends_the_schema_of_the_question_it_is_asking() {
         for (label, schema_name) in [("dedupe", "verdict"), ("link", "link")] {
@@ -2735,11 +2649,6 @@ mod tests {
         assert_eq!(decoded, b"\xFF\xD8jpegbytes");
     }
 
-    /// A vision role without a `base_url` *is* the synthesize endpoint, so it has
-    /// to guess the ceiling's name the same way that role does. Inheriting only
-    /// the explicit `ceiling_param` left the two disagreeing whenever synthesize
-    /// set `reasoning_effort` and nothing else — and against the silent endpoint
-    /// that matters on, the describer's ceiling is the one that gets dropped.
     #[tokio::test]
     async fn a_borrowed_vision_endpoint_inherits_the_guess_and_not_only_the_setting() {
         let server = echoing_server("# Whiteboard").await;
@@ -2760,9 +2669,6 @@ mod tests {
         );
     }
 
-    /// The condition on that inheritance: a role with its own address is a
-    /// different server, and how one server reads a request says nothing about
-    /// how another does.
     #[tokio::test]
     async fn a_vision_role_with_its_own_endpoint_inherits_neither() {
         let server = echoing_server("# Whiteboard").await;
@@ -2779,10 +2685,6 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none(), "{body}");
     }
 
-    /// 500 rather than 503: this is about which role a failure is reported
-    /// under, so it wants the status whose meaning is unambiguously "the
-    /// endpoint broke". A 503 is the endpoint asking to be asked again, and
-    /// `a_limiter_and_a_loading_model_are_busy_rather_than_broken` owns it.
     #[tokio::test]
     async fn a_describer_error_is_an_inference_error_for_the_vision_role() {
         let server = MockServer::start().await;
@@ -2804,8 +2706,6 @@ mod tests {
         HttpCompleter::new(&ask_cfg(uri.to_string()))
     }
 
-    /// An SSE server that hands the whole body over at once. The frames are
-    /// what is under test here; [`SseBuffer`] owns the split-read case.
     async fn streaming_server(body: &str) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -2820,9 +2720,6 @@ mod tests {
         server
     }
 
-    /// Endpoints disagree on the field name for reasoning tokens: llama.cpp and
-    /// vLLM send `reasoning_content`, others send `reasoning`. Both must land in
-    /// the same place or the thinking silently vanishes on half of them.
     #[test]
     fn a_delta_carries_reasoning_under_either_field_name() {
         let a =
@@ -2832,7 +2729,6 @@ mod tests {
         assert_eq!(b.reasoning.as_deref(), Some("hm"));
     }
 
-    /// The sentinel ends the stream and is not a chunk.
     #[test]
     fn the_done_sentinel_is_not_a_chunk() {
         assert!(parse_sse_line("data: [DONE]").is_none());
@@ -2840,9 +2736,6 @@ mod tests {
         assert!(parse_sse_line(": keep-alive").is_none());
     }
 
-    /// Truncation is still detectable, now from the final chunk rather than the
-    /// whole response. Without it an answer cut off mid-sentence is
-    /// indistinguishable from a complete one.
     #[test]
     fn a_finish_reason_of_length_is_read_from_the_last_chunk() {
         let c =
@@ -2850,10 +2743,6 @@ mod tests {
         assert_eq!(c.finish_reason.as_deref(), Some("length"));
     }
 
-    /// A JSON object can be split across two TCP reads. A parser that assumes
-    /// one read is one line loses tokens on exactly the long answers streaming
-    /// exists for, and does it intermittently. The split is placed mid-object
-    /// so a per-read parser cannot recover it.
     #[test]
     fn a_data_line_split_across_two_reads_is_reassembled() {
         let mut b = SseBuffer::default();
@@ -2866,9 +2755,6 @@ mod tests {
         assert_eq!(got[0].content.as_deref(), Some("hello"));
     }
 
-    /// The buffer holds bytes rather than text because a multi-byte character
-    /// splits across reads too, and decoding each read on its own turns it into
-    /// replacement characters — silent corruption of every non-English answer.
     #[test]
     fn a_character_split_across_two_reads_survives_whole() {
         let mut b = SseBuffer::default();
@@ -2880,8 +2766,6 @@ mod tests {
         assert_eq!(got[0].content.as_deref(), Some("Größe"));
     }
 
-    /// The whole point: the caller sees the answer in pieces, and the pieces
-    /// are the answer.
     #[tokio::test]
     async fn a_streamed_answer_arrives_as_deltas_and_as_a_completion() {
         let server = streaming_server(
@@ -2904,8 +2788,6 @@ mod tests {
         assert_eq!(sent_body(&server).await["stream"], serde_json::json!(true));
     }
 
-    /// Reasoning is delivered apart from the answer and is no part of it: the
-    /// page dims it, and nothing downstream reads it as text the model wrote.
     #[tokio::test]
     async fn streamed_reasoning_is_delivered_apart_from_the_answer() {
         let server = streaming_server(
@@ -2931,8 +2813,6 @@ mod tests {
         assert_eq!(done.text, "said");
     }
 
-    /// The ceiling still stops the model, and the caller still has to be told:
-    /// on a stream the only place that says so is the last frame.
     #[tokio::test]
     async fn a_streamed_reply_stopped_by_the_ceiling_is_reported_as_truncated() {
         for (reason, want) in [("length", true), ("stop", false)] {
@@ -2951,8 +2831,6 @@ mod tests {
         }
     }
 
-    /// A reader that closed its tab must not fail a call whose answer is still
-    /// being recorded, and must not shorten it either.
     #[tokio::test]
     async fn a_receiver_dropped_mid_stream_neither_fails_nor_shortens_the_call() {
         let server = streaming_server(
@@ -2970,9 +2848,6 @@ mod tests {
         assert_eq!(done.text, "hello");
     }
 
-    /// A reasoning model can spend the whole ceiling before the answer starts.
-    /// An empty stream is a failed call, and the message has to say which of
-    /// the two it was — the buffered path draws the same distinction.
     #[tokio::test]
     async fn a_stream_that_carried_no_content_is_an_error_that_says_why() {
         let server = streaming_server(
@@ -2990,10 +2865,6 @@ mod tests {
         assert!(format!("{e}").contains("output ceiling was spent"), "{e}");
     }
 
-    /// An endpoint or proxy that ignores `stream: true` answers with the plain
-    /// completion object. Every door goes through the streaming call now, so
-    /// treating that as a broken stream would break the API and MCP doors on
-    /// exactly the servers they used to work against.
     #[tokio::test]
     async fn a_whole_completion_sent_back_to_a_streaming_call_is_still_the_answer() {
         let server = MockServer::start().await;
@@ -3015,10 +2886,6 @@ mod tests {
         assert!(matches!(rx.recv().await, Some(Delta::Token(t)) if t == "whole"));
     }
 
-    /// A server that fails after the headers went out says so in a frame of
-    /// its own — llama.cpp on a prompt past the context, most proxies on an
-    /// upstream fault. That frame has no `choices`; dropping it leaves the
-    /// operator with "no message content" and the log with no reason.
     #[tokio::test]
     async fn an_error_frame_mid_stream_is_the_reason_the_call_reports() {
         let server = streaming_server(
@@ -3035,7 +2902,6 @@ mod tests {
         assert!(format!("{e}").contains("context size exceeded"), "{e}");
     }
 
-    /// The two shapes an error frame comes in.
     #[test]
     fn an_error_frame_parses_under_either_shape() {
         let a = parse_sse_line(r#"data: {"error":{"message":"boom"}}"#).unwrap();
@@ -3046,8 +2912,6 @@ mod tests {
         assert!(c.error.is_none());
     }
 
-    /// The streamed body is the buffered one plus `stream`: the ceiling under
-    /// the name this endpoint takes it under, and nothing else changed.
     #[tokio::test]
     async fn a_streaming_call_sends_the_same_body_the_buffered_one_does() {
         let server =
@@ -3073,10 +2937,6 @@ mod tests {
         }
     }
 
-    /// The one role that posts a form. What the endpoint has to receive is the
-    /// audio under `file`, the model beside it, and the key in the header —
-    /// and the part has to carry a filename with the container's extension, or
-    /// the local servers refuse it before a model is loaded.
     #[tokio::test]
     async fn the_transcriber_posts_the_recording_as_a_file_part() {
         let server = MockServer::start().await;
@@ -3132,9 +2992,6 @@ mod tests {
         assert!(body.contains("de"), "{body}");
     }
 
-    /// A reply this is not the client for is an error, and an empty one is not:
-    /// a button pressed with nothing said transcribes to nothing, and the box
-    /// is simply left as it was.
     #[tokio::test]
     async fn silence_is_an_answer_and_a_foreign_reply_is_not() {
         let server = MockServer::start().await;

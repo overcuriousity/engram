@@ -229,10 +229,6 @@ mod tests {
         );
     }
 
-    /// An endpoint answering "too many requests" in two milliseconds is not a
-    /// bad gateway, and a search box that meets one must be able to tell that
-    /// apart from an endpoint that is down — the first is worth waiting out on
-    /// the next keystroke, the second is worth saying out loud.
     #[test]
     fn a_busy_endpoint_is_not_a_bad_gateway() {
         let busy = Error::InferenceBusy {

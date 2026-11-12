@@ -1220,9 +1220,6 @@ mod tests {
     use crate::store::artifacts::NewArtifact;
     use crate::store::feedback::Door;
 
-    /// A completer that asks, from inside the model call, whether background
-    /// work could start right now. That is the question the lane exists to
-    /// answer, and the only place it can be asked honestly.
     struct LaneProbe {
         gate: std::sync::Arc<crate::infer::gate::InferenceGate>,
         background_was_held: std::sync::atomic::AtomicBool,
@@ -1305,11 +1302,6 @@ mod tests {
             .expect("the interactive lane was never released");
     }
 
-    /// Answers with one reply however often it is asked, and counts the
-    /// asking. `ScriptedCompleter` runs out of replies, which would turn a
-    /// second call into an error the ask swallows; this one would happily
-    /// answer a third round, so a test that sees only one saw a bound in the
-    /// code rather than a fake refusing to play along.
     struct Counting {
         reply: String,
         calls: std::sync::atomic::AtomicUsize,
@@ -1341,8 +1333,6 @@ mod tests {
         }
     }
 
-    /// A seeded core whose planning model answers `reply`, plus the handle to
-    /// count what it was asked. `None` wires no planner at all.
     async fn core_with_planner(reply: Option<&str>) -> (Core, std::sync::Arc<Counting>) {
         let mut core = test_core().await;
         let model = Counting::saying(reply.unwrap_or_default());
@@ -1351,8 +1341,6 @@ mod tests {
         (core, model)
     }
 
-    /// Every `Retrieved` round and every query any `Needs` named, in the order
-    /// they were emitted.
     async fn rounds_and_needs(core: &Core) -> (Vec<u8>, Vec<String>) {
         let (mut rounds, mut needs) = (vec![], vec![]);
         let s = core.ask_events(&req("chunk"), Door::Api);
@@ -1367,14 +1355,6 @@ mod tests {
         (rounds, needs)
     }
 
-    /// "Off" must mean no call at all — asserted on a counting fake rather than
-    /// inferred from the answer looking the same.
-    ///
-    /// The counting model is the *answer* model here, which is the tempting
-    /// wrong implementation: `plan_tier` falls back to the ask role's own
-    /// endpoint, and a fallback read at call time rather than at config time
-    /// would spend an ask-endpoint call on every question with the feature
-    /// switched off.
     #[tokio::test]
     async fn planning_off_makes_no_extra_call() {
         let mut core = test_core().await;
@@ -1392,7 +1372,6 @@ mod tests {
         );
     }
 
-    /// On, and the model says it has enough: still exactly one retrieval.
     #[tokio::test]
     async fn an_empty_plan_skips_the_fan_out() {
         let (core, model) = core_with_planner(Some(r#"{"need": []}"#)).await;
@@ -1402,10 +1381,6 @@ mod tests {
         assert_eq!(model.calls(), 1, "asked once, and once is the whole budget");
     }
 
-    /// On, and the model names something: one fan-out and never a second.
-    /// Bounded means bounded — and this fake answers with a need every time it
-    /// is asked, so a loop would run until the base ran out of patience rather
-    /// than stopping itself.
     #[tokio::test]
     async fn a_plan_is_asked_for_once_and_never_planned_again() {
         let (core, model) = core_with_planner(Some(r#"{"need": ["ticker interval"]}"#)).await;
@@ -1419,10 +1394,6 @@ mod tests {
         );
     }
 
-    /// The plan says out loud what the base does not hold, in the model's own
-    /// words, for a question a person asked in earnest — and the call was
-    /// already paid for. The subject that came back with nothing becomes a gap
-    /// rather than being discarded with the round.
     #[tokio::test]
     async fn a_planned_subject_the_base_could_not_cover_becomes_a_gap() {
         let (mut core, _) = core_with_planner(Some(r#"{"need": ["mounting an E01"]}"#)).await;
@@ -1446,10 +1417,6 @@ mod tests {
         assert_eq!(subjects, vec!["mounting an E01"]);
     }
 
-    /// The same rule `record_ask` already draws, and for the same reason: a
-    /// subject is derived from a question, a question is personal data of the
-    /// same kind as a query, and API and MCP callers asked for the smallest
-    /// footprint. The bump rides with the recording rather than around it.
     #[tokio::test]
     async fn the_api_door_names_no_subjects() {
         let (mut core, _) = core_with_planner(Some(r#"{"need": ["mounting an E01"]}"#)).await;
@@ -1470,9 +1437,6 @@ mod tests {
         );
     }
 
-    /// A plan naming several subjects is one round of retrieval per subject and
-    /// still one plan. The cap belongs to the parser, so a model that names
-    /// more subjects than the fan-out may run cannot widen it from the wire.
     #[tokio::test]
     async fn a_plan_naming_several_subjects_fans_out_to_all_of_them_at_once() {
         let (core, model) =
@@ -1491,10 +1455,6 @@ mod tests {
         assert_eq!(model.calls(), 1);
     }
 
-    /// The excerpts the model sees are one list, not several concatenated: an
-    /// artifact already in front of it is a wasted excerpt, not a stronger one.
-    /// Every round retrieves the same small base here, so everything the
-    /// planned ones found is a duplicate of something the first did.
     #[tokio::test]
     async fn the_fan_out_merges_deduped_by_artifact() {
         let (core, _) = core_with_planner(Some(r#"{"need": ["filler", "chunk filler"]}"#)).await;
@@ -1510,10 +1470,6 @@ mod tests {
         assert_eq!(ids.len(), seen, "an artifact was shown to the model twice");
     }
 
-    /// The prompt forbids repeating the question back; nothing but this
-    /// enforces it. An echo is a search whose results the first round already
-    /// holds, followed by a re-pack that can take its neighbours out of the
-    /// prompt in exchange for nothing.
     #[tokio::test]
     async fn a_planned_query_that_is_the_question_back_is_not_worth_a_round() {
         let (core, model) = core_with_planner(Some(r#"{"need": ["CHUNK "]}"#)).await;
@@ -1527,9 +1483,6 @@ mod tests {
         );
     }
 
-    /// One echoed query beside a useful one is one useful round. Refusing the
-    /// whole plan over its first entry would throw away retrieval the model
-    /// asked for and was right to ask for.
     #[tokio::test]
     async fn an_echoed_query_is_dropped_without_taking_the_rest_of_the_plan_with_it() {
         let (core, _) = core_with_planner(Some(r#"{"need": ["chunk", "filler"]}"#)).await;
@@ -1538,13 +1491,6 @@ mod tests {
         assert_eq!(needs, vec!["filler".to_string()]);
     }
 
-    /// Embeds on one word each way, so two queries can retrieve two disjoint
-    /// halves of one corpus.
-    ///
-    /// The hashing fake cannot do this: every artifact is some arbitrary
-    /// distance from every query, so both rounds retrieve the same small base
-    /// and the second one is never asked to contribute anything. That is the
-    /// gap that let the merge's ordering be pinned only on hand-built lists.
     struct Keyed;
 
     #[async_trait::async_trait]
@@ -1580,10 +1526,6 @@ mod tests {
         }
     }
 
-    /// One corpus of `topics.len()` × 3 artifacts, each topic's three adjacent
-    /// and the topics in the order given — so a search for one term ranks that
-    /// topic's three, the cliff cuts the rest, and the reach sideways from the
-    /// last hit pulls in a neighbour from whatever follows.
     async fn seed_topics(core: &Core, topics: &[&str]) {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = (0..topics.len() as i64 * 3)
@@ -1601,19 +1543,6 @@ mod tests {
         }
     }
 
-    /// The whole mechanism, end to end: a question the base answers by halves.
-    ///
-    /// Round one ranks the three `alpha` artifacts, the cliff cuts the three
-    /// `beta` ones, and adjacency reaches exactly one of them back as a
-    /// neighbour. The plan then asks for `beta`, and that round ranks all
-    /// three — including the one round one had only reached.
-    ///
-    /// `dropped` is the assertion that matters. Every artifact retrieved is in
-    /// front of the model by the end, so nothing was dropped; a merge that let
-    /// round one's `via` keep that artifact in the speculative tail would leave
-    /// it below the seam, counted as a hit the ranking lost while it sat in the
-    /// prompt — and packed as the first thing a tighter window would throw
-    /// away.
     #[tokio::test]
     async fn a_planned_round_shows_what_the_first_rounds_cliff_cut() {
         let mut core = test_core().await;
@@ -1652,13 +1581,6 @@ mod tests {
         );
     }
 
-    /// The reason the fan-out exists, end to end. A question whose subject the
-    /// base holds three separate halves of: round one ranks `alpha`, the cliff
-    /// cuts `beta` and `gamma`, and one plan names both of them. Two rounds run
-    /// at once and their hits interleave, so the model ends up seeing all three
-    /// subjects rather than whichever one the single ranked list favoured.
-    ///
-    /// A `Some(query)` follow-up could only ever have recovered one of the two.
     #[tokio::test]
     async fn a_plan_naming_two_subjects_puts_both_of_them_in_front_of_the_model() {
         let mut core = test_core().await;
@@ -1680,15 +1602,6 @@ mod tests {
         );
     }
 
-    /// One planned round failing does not take the others with it: the fan-out
-    /// returns what came back and the ask answers from it. Failing the whole
-    /// question because one of several extra searches failed would trade an
-    /// answer for a strictly better answer's absence.
-    ///
-    /// Driven through `fan_out` rather than through a plan, because the empty
-    /// query that makes `search_with` fail is one `parse_plan` drops before it
-    /// ever reaches a round — going in through the planner would assert nothing
-    /// but the parser's filtering.
     #[tokio::test]
     async fn a_planned_round_that_fails_leaves_the_rest_of_the_fan_out_standing() {
         let mut core = test_core().await;
@@ -1703,8 +1616,6 @@ mod tests {
         assert!(seen.contains("beta"), "the wrong round survived");
     }
 
-    /// A planning call that fails must never fail the ask: the operator asked
-    /// a question, not for a retrieval strategy.
     #[tokio::test]
     async fn a_failed_plan_leaves_the_ask_a_single_round() {
         struct Failing;
@@ -1737,8 +1648,6 @@ mod tests {
         );
     }
 
-    /// Prose where JSON was asked for means "no fan-out" rather than "search
-    /// for whatever that was".
     #[tokio::test]
     async fn an_unparsable_plan_leaves_the_ask_a_single_round() {
         let (core, _) = core_with_planner(Some("I would look for the ticker interval")).await;
@@ -1773,9 +1682,6 @@ mod tests {
         }
     }
 
-    /// A question typed at a shell is the strongest statement of a need engram
-    /// can receive, and it was written down nowhere at all: `record_ask`
-    /// admitted `Door::Ui` alone.
     #[tokio::test]
     async fn a_question_asked_at_a_shell_is_recorded() {
         let mut core = test_core().await;
@@ -1797,7 +1703,6 @@ mod tests {
         );
     }
 
-    /// And the doors that are not a person, which must stay out of the log.
     #[tokio::test]
     async fn a_question_from_an_agent_is_still_not_recorded() {
         let mut core = test_core().await;
@@ -1885,8 +1790,6 @@ mod tests {
         assert!(out.citations.len() < 20);
     }
 
-    /// Echoes its prompt back and records the ceiling it was handed, which
-    /// together are the whole request the endpoint would have measured.
     struct Ceilinged {
         context: usize,
         max_output: usize,
@@ -1932,15 +1835,6 @@ mod tests {
         }
     }
 
-    /// The prompt and the reply are counted against one window by the endpoint,
-    /// so packing excerpts up to a constant reserve while the call demands
-    /// `max_output_tokens` of reply is a request the server refuses — and it
-    /// refuses it on exactly the questions that retrieved enough to be worth
-    /// answering. What is packed has to leave room for what is asked for.
-    ///
-    /// Both directions, in the two shapes an operator actually configures: a
-    /// ceiling that fits comfortably inside its window, and one that eats most
-    /// of it.
     #[tokio::test]
     async fn what_is_packed_leaves_room_for_the_reply_that_was_asked_for() {
         use crate::infer::budget::MAX_HEADROOM_TOKENS;
@@ -1987,12 +1881,6 @@ mod tests {
         }
     }
 
-    /// The reserve is configuration and the window is configuration, and nothing
-    /// makes the two agree. A role whose ceiling is its whole window — 4096 and
-    /// 4096, an ordinary local shape, and what every default lands on — reserved
-    /// everything and packed nothing, so every question ever asked was answered
-    /// "too large for the configured context window" without the model being
-    /// called at all.
     #[tokio::test]
     async fn a_ceiling_as_wide_as_its_window_still_answers() {
         let mut core = test_core().await;
@@ -2006,9 +1894,6 @@ mod tests {
         );
     }
 
-    /// An answer that stops because it ran out of room reads exactly like one
-    /// that stopped because it was finished, and the difference is the reader's
-    /// to act on.
     #[tokio::test]
     async fn an_answer_cut_off_by_its_ceiling_says_so() {
         struct Truncating;
@@ -2046,11 +1931,6 @@ mod tests {
         );
     }
 
-    /// A reranker whose scores fall off a cliff after the third document, so
-    /// what `ask` does with a relevance cliff can be asserted rather than
-    /// inferred. The fused scores a search produces on their own are smooth by
-    /// construction — no gap in them stands out — so a cliff has to be put
-    /// there deliberately for this to be about `ask` at all.
     struct Cliffed;
 
     #[async_trait::async_trait]
@@ -2105,19 +1985,10 @@ mod tests {
         );
     }
 
-    /// Citations that placed in the ranking, as opposed to ones reached
-    /// sideways from those that did.
     fn ranked(out: &AskResponse) -> usize {
         out.citations.iter().filter(|c| c.via.is_none()).count()
     }
 
-    /// The answer is often in the artifact next to the one that matched, and
-    /// retrieval cannot find it: it does not carry the question's terms and
-    /// does not sit near it in the embedding space. Only structure reaches it.
-    ///
-    /// The same cliff as the test above, so the artifact at ordinal 3 is one
-    /// the ranking cut and adjacency puts back — reached, not retrieved, and
-    /// marked as such.
     #[tokio::test]
     async fn the_artifact_beside_a_hit_is_reached_even_though_the_cliff_cut_it() {
         let mut core = test_core().await;
@@ -2159,10 +2030,6 @@ mod tests {
         }
     }
 
-    /// The ordering is the safety property: a reached artifact carries no score
-    /// comparable to a retrieved one, so anything that reads this list as
-    /// ranked — the cliff, the packing order, `record_ask` — must find every
-    /// ranked hit ahead of every neighbour.
     #[tokio::test]
     async fn every_reached_artifact_sits_after_every_ranked_one_and_carries_no_score() {
         let mut core = test_core().await;
@@ -2211,9 +2078,6 @@ mod tests {
         );
     }
 
-    /// A reach that found nothing new must not report anything as lost. The
-    /// question asked for the retrieved hits, and `dropped` answers only for
-    /// those — otherwise it would grow every time the reach worked.
     #[tokio::test]
     async fn a_reached_neighbour_is_never_counted_as_a_dropped_citation() {
         let mut core = test_core().await;
@@ -2243,15 +2107,6 @@ mod tests {
         );
     }
 
-    /// The other half of the reach, and the half adjacency cannot do: an
-    /// artifact linked to a hit by having been retrieved beside it before.
-    ///
-    /// The linked artifact is in a second corpus, so it shares its `ordinal`
-    /// sequence with nothing that was retrieved and adjacency provably cannot
-    /// be what brought it in. And `search_with` refuses to associate for
-    /// `Door::Ask` — text that never matched the question must not become
-    /// source material for the answer — so `via` on a citation here can only
-    /// have been set by `reach_sideways`.
     #[tokio::test]
     async fn an_artifact_linked_to_a_hit_is_reached_where_adjacency_cannot_go() {
         let mut core = test_core().await;
@@ -2583,9 +2438,6 @@ mod tests {
         assert!(out.unsupported.is_empty(), "{:?}", out.unsupported);
     }
 
-    /// The two doors must never drift. `/api/v1/ask` and MCP collect; the page
-    /// streams; both must describe the same ask. This is the test that keeps
-    /// them honest as the code changes.
     #[tokio::test]
     async fn the_collected_answer_equals_the_streamed_one() {
         let mut core = test_core().await;
@@ -2627,8 +2479,6 @@ mod tests {
         );
     }
 
-    /// The rail must be readable while the model is still writing, which means
-    /// the excerpts have to arrive before the first token.
     #[tokio::test]
     async fn citations_arrive_before_the_first_token_and_done_is_last() {
         let mut core = test_core().await;
@@ -2675,8 +2525,6 @@ mod tests {
         );
     }
 
-    /// An ask is recorded once, whichever door it came through — the harness
-    /// reads these rows and would double-count otherwise.
     #[tokio::test]
     async fn a_streamed_ask_is_recorded_exactly_once() {
         let mut core = test_core().await;
@@ -2701,11 +2549,6 @@ mod tests {
         );
     }
 
-    /// The sink the completer writes into is bounded, and `send` waits when it
-    /// is full. A producer that awaited the call before draining would stall
-    /// the endpoint's read loop on the first answer longer than the channel —
-    /// which is every answer worth reading — while still passing every test
-    /// whose fake reply fits in one delta.
     #[tokio::test]
     async fn an_answer_longer_than_the_sink_can_hold_still_finishes() {
         let mut core = test_core().await;
@@ -2734,9 +2577,6 @@ mod tests {
         assert_eq!(out.1.answer.split_whitespace().count(), PARTS);
     }
 
-    /// A completer that stops mid-answer and waits to be let go, so a test can
-    /// observe the world at the one instant that matters: the reader has gone
-    /// and the model call has not.
     struct Stalling {
         release: std::sync::Arc<tokio::sync::Notify>,
     }
@@ -2771,12 +2611,6 @@ mod tests {
         }
     }
 
-    /// Closing the tab is the streaming door's ordinary ending, not an edge
-    /// case, and dropping the stream does not stop the call: it is detached and
-    /// the GPU stays busy until it returns. A lane that ended with the reader
-    /// would let the worker start a seventy-second window against hardware an
-    /// interactive call still occupies — the interleaving the lane exists to
-    /// prevent, inverted rather than merely leaked.
     #[tokio::test]
     async fn a_reader_who_leaves_mid_answer_does_not_hand_the_gpu_to_the_worker() {
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -2825,8 +2659,6 @@ mod tests {
         assert_eq!(core.store.ask_stats().await.unwrap().asked, 0);
     }
 
-    /// Streams its answer in more pieces than the sink holds, which is the
-    /// shape every real answer has and the one a one-delta fake never has.
     struct Chatty {
         parts: usize,
     }
@@ -3028,8 +2860,6 @@ mod tests {
         );
     }
 
-    /// File `a` and `b` as a contradiction the base has not settled, the way
-    /// consolidation leaves one: both live, neither picked.
     async fn disagree(core: &Core, a: &str, b: &str, detail: &str) {
         use crate::store::pairs::{DecidedBy, PairState};
         core.store.record_pair(a, b, 0.9).await.unwrap();
@@ -3040,10 +2870,6 @@ mod tests {
             .unwrap();
     }
 
-    /// One note in a corpus of its own, never embedded. Without a vector,
-    /// retrieval provably cannot return it, and alone in its corpus nothing is
-    /// adjacent to it — so if it reaches the prompt, the disagreement is what
-    /// brought it.
     async fn unreachable_note(core: &Core, doc: &str, title: &str, text: &str) -> String {
         let src = core.store.insert_corpus(doc, "web", None).await.unwrap();
         let made = core
@@ -3148,8 +2974,6 @@ mod tests {
         assert_eq!(out.disagreements[0].other_id, b);
     }
 
-    /// Two hits that disagree with each other, built by hand: the numbering is
-    /// a fact about the prompt, not the store.
     fn disagreeing_hits() -> Vec<SearchResult> {
         let side =
             |id: &str, other: &str, title: &str, other_title: &str, text: &str| SearchResult {
@@ -3223,8 +3047,6 @@ mod tests {
         );
     }
 
-    /// Ties every hit, so no cliff is drawn and the anchors are exactly the
-    /// first three ranked hits.
     struct Flat;
 
     #[async_trait::async_trait]

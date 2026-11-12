@@ -223,7 +223,6 @@ mod tests {
         })
     }
 
-    /// A faculty that was never switched on is not a faculty at zero.
     #[test]
     fn nothing_is_said_about_learning_while_the_layer_is_off() {
         let out = render(&face(), &endpoint(), &body(serde_json::Value::Null));
@@ -232,9 +231,6 @@ mod tests {
         assert!(out.contains("engram.mikoshi.de"), "{out}");
     }
 
-    /// The reap line: what the last sweep did, and how many retired rows
-    /// still wait with their text. Absent from an older server's JSON, so
-    /// absent from the render too.
     #[test]
     fn the_reap_line_says_what_was_done_and_what_waits() {
         let mut b = body(serde_json::Value::Null);
@@ -250,8 +246,6 @@ mod tests {
         assert!(!without.contains("reap"), "{without}");
     }
 
-    /// The half that was invisible from a shell: a pursuit closed unsatisfied
-    /// is a hole somebody went looking through and did not fill.
     #[test]
     fn the_learning_half_is_counted_and_named() {
         let out = render(
@@ -270,9 +264,6 @@ mod tests {
         assert!(out.contains("3 artifacts written from pursuits"), "{out}");
     }
 
-    /// Serialised from the struct the server actually sends, not from a
-    /// hand-written object: the keys drifted once already, and a fixture that
-    /// spells them itself cannot notice.
     fn failed(target_id: &str, last_error: Option<&str>) -> serde_json::Value {
         serde_json::to_value(crate::store::jobs::FailedJob {
             id: 1,
@@ -284,7 +275,6 @@ mod tests {
         .expect("a failed job serialises")
     }
 
-    /// A failed job nobody can name is a failed job nobody can retry.
     #[test]
     fn a_failed_job_is_named_and_not_only_counted() {
         let mut b = body(serde_json::Value::Null);
@@ -295,7 +285,6 @@ mod tests {
         assert!(out.contains("connection refused"), "{out}");
     }
 
-    /// Everything colour says here is said in words as well.
     #[test]
     fn the_screen_survives_having_every_escape_stripped() {
         let bare = Face {

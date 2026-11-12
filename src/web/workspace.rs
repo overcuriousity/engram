@@ -1276,11 +1276,6 @@ mod tests {
         body_of(res).await
     }
 
-    /// The same, over a base holding one source.
-    ///
-    /// The ask door only opens where something is held: with nothing stored
-    /// the workspace renders no Ask verb, so the door redirects rather than
-    /// answer with a question in a box that has no way to send it.
     async fn workspace_held(uri: &str) -> String {
         let core = crate::core::test_support::test_core().await;
         core.ingest_capture(crate::core::ingest::Capture::new(
@@ -1304,10 +1299,6 @@ mod tests {
         body_of(res).await
     }
 
-    /// Two of the three verbs cannot work on a base with nothing in it, and a
-    /// list with nothing in it has nothing to move through. A disabled button
-    /// is a promise the page cannot keep and seven shortcuts are a wall; both
-    /// are absent until there is something for them to act on.
     #[tokio::test]
     async fn an_empty_base_offers_only_the_verb_that_can_work() {
         let core = crate::core::test_support::test_core().await;
@@ -1372,9 +1363,6 @@ mod tests {
         );
     }
 
-    /// An OIDC user never sees the login card, so the tagline and the privacy
-    /// boundary have to be said where the eye already is — under the box, not
-    /// on a settings page nobody opens before pasting.
     #[tokio::test]
     async fn an_empty_base_says_what_this_is_and_whose_it_is() {
         let html = workspace("/ui").await;
@@ -1397,8 +1385,6 @@ mod tests {
         );
     }
 
-    /// Nothing on an empty base shows a capture becoming a reminder or an
-    /// entry, so the list says it.
     #[tokio::test]
     async fn an_empty_base_shows_what_a_paste_becomes() {
         let html = workspace("/ui").await;
@@ -1472,19 +1458,12 @@ mod tests {
         );
     }
 
-    /// Everything the queue holds, closed. Through `Store::complete_job`, the
-    /// forwarder every other drain loop uses, rather than reaching past it into
-    /// the control pool.
     async fn drain(core: &crate::core::Core) {
         while let Some(j) = core.store.claim_job().await.unwrap() {
             core.store.complete_job(j.id).await.unwrap();
         }
     }
 
-    /// The poll's own door, on a base with a capture actually in flight. The
-    /// line is the whole answer: the rail's heading and the fold it is holding
-    /// belong to whatever the person is doing, and a tick that lands while they
-    /// type must not touch either.
     #[tokio::test]
     async fn the_polled_line_says_reading_and_clears_nothing() {
         let core = crate::core::test_support::test_core().await;
@@ -1529,9 +1508,6 @@ mod tests {
         assert!(!done.contains("every 3s"), "the poll stops: {done}");
     }
 
-    /// The poll lands while someone may be typing, so it carries the line and
-    /// nothing else: the full idle fragment also empties the echo and the
-    /// rail's heading.
     #[tokio::test]
     async fn the_idle_line_refreshes_alone() {
         let core = crate::core::test_support::test_core().await;
@@ -1557,19 +1533,6 @@ mod tests {
         );
     }
 
-    /// An ordinary capture answers with nothing to render.
-    ///
-    /// It used to answer with three blocks: a receipt line, a sentence saying
-    /// what "segmenting 3/7" counts towards, and `_queue.html` polling itself.
-    /// They landed in `#capture-result`, a child of `.region-bar` — and on a
-    /// phone that bar is fixed to the bottom of the viewport with no height
-    /// bound, so it grew past the top of the screen and took the textarea with
-    /// it. Nothing scrolls a fixed element back.
-    ///
-    /// The acknowledgment is the "last kept" line in `_idle_foot.html`, which
-    /// the same `submit` that refreshes the rail swaps out of band. It names
-    /// the capture and links to it; a second line directly above the box was
-    /// never carrying anything it did not.
     #[tokio::test]
     async fn an_ordinary_capture_writes_nothing_over_the_box() {
         let core = crate::core::test_support::test_core().await;
@@ -1594,12 +1557,6 @@ mod tests {
         );
     }
 
-    /// The box searches while it is typed, so the sentence on its way into the
-    /// base is already a recorded query that found nothing — and `unmatched`
-    /// reads a search with nothing near it as a hole in the base. Left alone,
-    /// the capture page filled with the operator's own half-written captures
-    /// asked back at them. The press carries the id the results fragment
-    /// already put on the page, and the capture answers its own first draft.
     #[tokio::test]
     async fn a_capture_names_the_search_it_was_typed_from() {
         let mut core = crate::core::test_support::test_core().await;
@@ -1649,9 +1606,6 @@ mod tests {
         );
     }
 
-    /// An id off a page is not a capability. Another person's search is not
-    /// this person's first draft, and a capture that could stamp one would
-    /// close a hole in a base its writer cannot even read.
     #[tokio::test]
     async fn a_capture_cannot_name_somebody_elses_search() {
         let mut core = crate::core::test_support::test_core().await;
@@ -1699,11 +1653,6 @@ mod tests {
         assert_eq!(crate::core::ingest::typed_from(&stored.metadata), None);
     }
 
-    /// The two things that are not receipts still answer.
-    ///
-    /// A duplicate and a parked near-duplicate are states the operator cannot
-    /// learn any other way — a phone has no other surface that would say it —
-    /// and they are the reason this fragment still exists at all.
     #[tokio::test]
     async fn a_capture_nothing_processed_still_says_so() {
         let core = crate::core::test_support::test_core().await;
@@ -1736,13 +1685,6 @@ mod tests {
         assert!(!again.contains(r#"hx-get="/ui/queue""#));
     }
 
-    /// The whole of the language path, from the browser to the corpus.
-    ///
-    /// The setting is stamped at the door and never read at the job, because a
-    /// job holds a `Core` cached per tenant in a fixed-size LRU that knows no
-    /// subject: a setting that only took effect on eviction would be a setting
-    /// nobody could trust. So what the reading is instructed in is on the
-    /// corpus, and this is where it gets there.
     #[tokio::test]
     async fn a_capture_is_stamped_with_the_language_it_will_be_read_in() {
         let core = crate::core::test_support::test_core().await;
@@ -1810,10 +1752,6 @@ mod tests {
         );
     }
 
-    /// The page is rendered once. Nothing re-renders it after a capture — the
-    /// receipt swaps into the pane and the rail refreshes — so the paste that
-    /// ended an empty base left the whole workspace still arranged for one.
-    /// `/ui/held` is what app.js swaps over that.
     #[tokio::test]
     async fn the_first_capture_can_redress_a_page_built_for_an_empty_base() {
         let core = crate::core::test_support::test_core().await;
@@ -1887,10 +1825,6 @@ mod tests {
         );
     }
 
-    /// A question in a box with no way to send it. `held = false` renders no
-    /// Ask verb, so this door used to answer 200 with the question prefilled,
-    /// no button, and no word about why — reachable from any link carrying
-    /// a question, which outlives a purge of what it was asked about.
     #[tokio::test]
     async fn the_ask_door_over_an_empty_base_sends_the_question_somewhere_it_works() {
         let core = crate::core::test_support::test_core().await;
@@ -1917,8 +1851,6 @@ mod tests {
         );
     }
 
-    /// A button that is dead on arrival and says nothing about why reads as a
-    /// broken application rather than as a control waiting for its input.
     #[tokio::test]
     async fn a_disabled_verb_says_what_it_is_waiting_for() {
         let html = workspace("/ui").await;
@@ -1941,9 +1873,6 @@ mod tests {
         );
     }
 
-    /// Results appear beside a person who pressed nothing. The old hint
-    /// explained how to phrase a query, which is true and is not the thing
-    /// they do not know.
     #[tokio::test]
     async fn the_box_says_that_typing_is_already_searching() {
         let core = crate::core::test_support::test_core().await;
@@ -2026,8 +1955,6 @@ mod tests {
         .unwrap()
     }
 
-    /// An answer written across a disagreement says so on its face, naming the
-    /// other note and what differs, and picks neither.
     #[test]
     fn an_answer_across_a_disagreement_names_the_other_note() {
         let html = askama::Template::render(&AnswerTemplate {
@@ -2061,11 +1988,6 @@ mod tests {
         );
     }
 
-    /// The rail's why-line is reachable only if the flag survives three
-    /// filters: the page's own query string, the hidden field, and the
-    /// `hx-params` allowlist. It shipped past the first two and died at the
-    /// third, so the line no operator could turn on was rendered by nothing
-    /// but its unit tests.
     #[tokio::test]
     async fn the_explain_flag_reaches_the_search_form_from_the_url() {
         let plain = workspace("/ui").await;
@@ -2084,11 +2006,6 @@ mod tests {
         );
     }
 
-    /// The refining pass is a second request per settled query, and app.js
-    /// decides whether to fire it by reading the form. A box with no search
-    /// reranker must not advertise one: every pause would buy a second search
-    /// that answers in the same order, and the rail would claim "refined" over
-    /// an order nothing confirmed.
     #[tokio::test]
     async fn the_form_says_whether_a_refining_pass_is_worth_firing() {
         let html = workspace("/ui").await;
@@ -2126,11 +2043,6 @@ mod tests {
         );
     }
 
-    /// The refining pass, pinned at the seams that keep it honest: it arms
-    /// only off the form's `data-rerank`, it fires `rerank=true` rather than
-    /// re-running the fast search, and it never schedules itself off its own
-    /// swap — which is the loop that would turn one settled query into a
-    /// rerank call every half second forever.
     #[test]
     fn the_refining_pass_is_armed_by_the_form_and_never_by_itself() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2157,9 +2069,6 @@ mod tests {
         );
     }
 
-    /// Three destinations, because there are three places. Capture and Ask
-    /// were destinations while they were pages; they are verbs on the box now,
-    /// and the box is on this screen.
     #[tokio::test]
     async fn the_tab_bar_points_at_the_three_places_there_are() {
         let html = workspace("/ui").await;
@@ -2189,13 +2098,6 @@ mod tests {
         assert!(!top.contains(r#"href="/ui/ask""#), "{top}");
     }
 
-    /// A door that fails silently is worse than one that fails.
-    ///
-    /// htmx swaps nothing on an error of any kind, so before this the rail
-    /// stayed exactly as empty on a failed search as it was before the
-    /// keystroke — and the only reading left was that the base holds nothing.
-    /// 401 was handled because a dead session is the case that was noticed;
-    /// every other status was not.
     #[test]
     fn a_failed_swap_says_so_where_the_answer_was_going_to_be() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2245,10 +2147,6 @@ mod tests {
         assert!(r.contains("[data-error-detail]"), "{r}");
     }
 
-    /// A result click must never swap away the ask and capture targets: they
-    /// exist nowhere but the workspace's first paint, so a fragment that
-    /// replaced the whole pane left Ask streaming into detached nodes and
-    /// Capture with nowhere to answer, until a full reload.
     #[tokio::test]
     async fn opening_a_result_leaves_the_ask_and_capture_targets_standing() {
         let html = workspace("/ui").await;
@@ -2269,12 +2167,6 @@ mod tests {
         );
     }
 
-    /// The provenance of a kept answer belongs to the text that was kept, and
-    /// the box does not close behind a capture. Left standing, the hidden
-    /// `from_ask` was read again by the next press: something the operator
-    /// typed themselves went into the base as `origin = "ask"`, carrying a
-    /// question and citations it had nothing to do with — a corpus asserting
-    /// model authorship for hand-written words.
     #[test]
     fn the_kept_from_provenance_is_retired_by_the_capture_it_belongs_to() {
         let tpl = include_str!("templates/workspace.html");
@@ -2295,11 +2187,6 @@ mod tests {
         );
     }
 
-    /// Emptying the box is not a statement that the answer is over. The box
-    /// keeps the question after an Ask on purpose, so select-all and Delete
-    /// went through `showIdle`, which hides `#pane` and `#rail` — taking the
-    /// streaming answer and the way back to the results with them, with
-    /// nothing to bring them back until another keystroke or a reload.
     #[test]
     fn emptying_the_box_does_not_take_away_an_answer_being_written() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2320,12 +2207,6 @@ mod tests {
         );
     }
 
-    /// And the one caller that *is* a statement. A capture empties the box
-    /// itself, and the column it leaves is where the due band lives — so an
-    /// answer standing in the pane from an earlier Ask must not keep the band
-    /// hidden. `paneIsBusy` stayed true for the rest of the session once
-    /// `#ask-result` held anything, and a reminder captured after any
-    /// completed Ask appeared only after a full reload.
     #[test]
     fn a_capture_brings_the_column_back_over_an_answer_that_is_finished() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2350,12 +2231,6 @@ mod tests {
         );
     }
 
-    /// A press was once two captures — a staged file and the text above it —
-    /// and both answered in `#capture-result`, so whichever request landed
-    /// last wiped the other's line. The text above a file is that file's note
-    /// now, so one press is one capture and writes one receipt. What is
-    /// guarded here is that it stayed one: a second sender reaching this node
-    /// is the bug the appending swap was added for.
     #[test]
     fn a_press_with_a_file_is_one_capture_carrying_the_box_as_its_note() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2379,14 +2254,6 @@ mod tests {
         );
     }
 
-    /// An answer is not swapped into `#pane-content`, so it gained none of the
-    /// room a result click does: wide, the rail kept the 40rem it is allowed
-    /// while nothing is open and the answer streamed into the remainder;
-    /// narrow, the rail comes first in the DOM and every excerpt sat above the
-    /// answer.
-    ///
-    /// Its own class rather than `has-selection`, which narrow reads as "hide
-    /// the rail" — and the rail is where this answer's own `[n]` links point.
     #[test]
     fn an_ask_claims_the_pane_without_hiding_what_it_was_written_from() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2428,14 +2295,6 @@ mod tests {
         );
     }
 
-    /// One class was answering two questions. Narrow asks "should the rail
-    /// still be on screen", which a fresh list answers yes to — the results
-    /// have changed under whatever is open. Wide asks "does the pane hold
-    /// something that needs its width", which a fresh list does not change at
-    /// all. `has-selection` was both, so a capture — which empties the box, and
-    /// an empty box comes back as the idle rail through the same `#results`
-    /// swap — handed the rail 40rem while an artifact was open beside it, and
-    /// the artifact finished in a 24rem strip setting one word per line.
     #[test]
     fn a_fresh_list_shows_the_rail_again_without_taking_the_open_artifact_s_width() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2469,11 +2328,6 @@ mod tests {
         );
     }
 
-    /// The split decides its columns from the window, which is the right
-    /// question only where the window *is* the pane. Inside the focus pane its
-    /// width is whatever the rail leaves, and no width of window says what that
-    /// is — so a narrowed pane kept two columns of eleven rem and set German
-    /// compounds one word to the line.
     #[test]
     fn the_split_stacks_when_the_pane_it_landed_in_is_too_narrow_for_two() {
         let css = include_str!("../../assets/css/74-workspace.css");
@@ -2502,8 +2356,6 @@ mod tests {
         );
     }
 
-    /// The command overlay was a second text surface for the problem the first
-    /// one now solves. `/` focuses the real box instead.
     #[tokio::test]
     async fn the_second_text_surface_is_gone() {
         let html = workspace("/ui").await;
@@ -2518,23 +2370,6 @@ mod tests {
         assert!(!js.contains("cmdk"), "and so did everything it looked up");
     }
 
-    /// One act in flight. Pressing Ask makes the box read-only, and that is
-    /// what disables search-while-type: nothing can be typed or pasted into a
-    /// read-only box, so it fires no `input` and the form's `hx-trigger` goes
-    /// quiet with no second mechanism and no flag to keep in sync.
-    ///
-    /// Read-only and not `disabled`, which is what it was. `disabled` also
-    /// makes text unselectable and hands focus back to the body, so the
-    /// question being answered could not be copied out of the box holding it —
-    /// while `.box[readonly]` in the CSS goes to the trouble of keeping that
-    /// text legible, on the grounds that a box someone is waiting on is still
-    /// a box someone is reading.
-    ///
-    /// The re-enable belongs in `stop()` and nowhere else. Every exit already
-    /// runs through it — the answer completing, the Stop button, and the
-    /// transport error that `fail()` funnels into it. Put it on the `done`
-    /// handler instead and a dropped connection leaves the box read-only
-    /// forever, with no way back but a reload.
     #[test]
     fn the_ask_disables_the_surface_and_only_stop_gives_it_back() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2574,19 +2409,6 @@ mod tests {
         );
     }
 
-    /// Both verbs, without a pointer. `/` reaches the box and nothing reached
-    /// back out of it: a hand that never left the keys had to find the mouse
-    /// to press the button it had just finished typing into.
-    ///
-    /// This is not the box inferring a verb from a newline, which is the rule
-    /// it is built on — Enter puts in a line break here and always will. The
-    /// chord is a second deliberate gesture, the same act as the button.
-    ///
-    /// Routed through the button and not the handler behind it, so everything
-    /// the button already knows stays true: an empty box or an ask in flight
-    /// leaves it disabled, and a disabled verb does nothing here either. Where
-    /// the install has no Ask there is no button, and the unshifted chord is
-    /// simply not a key.
     #[test]
     fn the_two_verbs_are_reachable_from_the_keys() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2607,17 +2429,6 @@ mod tests {
         );
     }
 
-    /// The box is `border-box` and `scrollHeight` is not: it measures the
-    /// content and the padding, never the 1px border on each edge. Set the
-    /// height straight from it and the box ends two pixels shorter than the
-    /// text it was measured from, every time — which with `overflow-y: auto`
-    /// is a live scrollbar on a box that has nothing to scroll. The cap is the
-    /// same mistake: ten lines of text *plus* the padding they sit in, or the
-    /// tenth line is the one the padding eats.
-    ///
-    /// And the height is a measurement of wrapped text, so it is wrong the
-    /// moment the box changes width. Bound to `input` alone it was only ever
-    /// correct at the width the last keystroke was typed at.
     #[test]
     fn the_box_measures_its_own_padding_and_remeasures_on_a_resize() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2681,14 +2492,6 @@ mod tests {
         );
     }
 
-    /// The driver listens for every frame the server sends.
-    ///
-    /// A frame nobody handles fails silently and only on the asks that send it:
-    /// the fan-out's frames fire only when a plan named something, so an ask
-    /// page that drops them would look perfect on every question the base
-    /// already covered. The names are pulled from `sse_event`'s own source
-    /// rather than listed here, so adding an event without a handler fails this
-    /// test instead of shipping.
     #[tokio::test]
     async fn the_stream_driver_handles_every_event_the_server_names() {
         let src = include_str!("workspace.rs");
@@ -2759,8 +2562,6 @@ mod tests {
         assert!(html.contains("data-day-at="), "{html}");
     }
 
-    /// The two halves the server cannot check for itself: the zone the box
-    /// posts, and the day a stamp links to.
     #[test]
     fn the_box_sends_its_zone_and_a_day_link_is_rebuilt_locally() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2844,8 +2645,6 @@ mod tests {
         assert!(core.store.get_corpus(&cid).await.unwrap().metadata["tz"].is_null());
     }
 
-    /// One `audio` part, with a cookie rather than the bearer token
-    /// `test_support::multipart` sends: this is a page's own fetch.
     fn dictation(cookie: &str, mime: Option<&str>, body: &[u8]) -> Request<Body> {
         const B: &str = "engramtestboundary";
         let typed = match mime {
@@ -2868,9 +2667,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A configured speech model puts the button on the box, and nothing else
-    /// about the page moves. Absent, there is no control at all — the rule the
-    /// image door follows.
     #[tokio::test]
     async fn the_microphone_is_on_the_box_only_where_a_speech_model_is_configured() {
         let html = workspace("/ui").await;
@@ -2933,20 +2729,6 @@ mod tests {
         assert!(core.store.recent_captures(5).await.unwrap().is_empty());
     }
 
-    /// A press and a release with nothing said. Answered as the empty
-    /// transcript it is, without a call to spend on it.
-    /// `MediaRecorder` has no WAV to give: Chrome and Firefox record
-    /// `audio/webm;codecs=opus`, Safari `audio/mp4`. whisper.cpp built without
-    /// `WHISPER_FFMPEG` reads WAV and nothing else, and answers HTTP 200
-    /// carrying `{"error": "failed to read audio data as wav"}` — so every
-    /// recording this page sent came back as a transcription failure. The
-    /// browser holds the decoder for its own output; the conversion is one
-    /// `decodeAudioData` on the client and costs the server nothing.
-    ///
-    /// Asserted over the source because the behaviour is a browser's. The
-    /// route itself still passes through whatever it is handed — the API and
-    /// the extension are other callers, and a whisper with ffmpeg behind it
-    /// takes any of it.
     #[test]
     fn the_recording_is_converted_to_wav_before_it_is_uploaded() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
@@ -2995,8 +2777,6 @@ mod tests {
         assert_eq!(heard.calls(), 0);
     }
 
-    /// No speech model, no route: the same answer the ask door gives when
-    /// there is no ask model behind it.
     #[tokio::test]
     async fn there_is_no_transcription_route_without_a_speech_model() {
         let core = crate::core::test_support::test_core().await;
@@ -3008,7 +2788,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    /// A dead speech endpoint is the endpoint's failure, reported as one.
     #[tokio::test]
     async fn a_failing_speech_endpoint_is_a_bad_gateway() {
         let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::failing(

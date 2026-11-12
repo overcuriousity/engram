@@ -23,11 +23,6 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The headless browser to drive, or `None` when the machine has none.
-///
-/// `ENGRAM_CHROME` first, so a machine with a browser in an unusual place can
-/// say where. Playwright's download is checked next because a developer working
-/// on this repo's front end is likely to have it already.
 fn chrome() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ENGRAM_CHROME") {
         return Some(PathBuf::from(p));
@@ -81,7 +76,6 @@ fn chrome() -> Option<PathBuf> {
     None
 }
 
-/// One run of the harness, as JSON.
 fn drive(scenario: &str) -> serde_json::Value {
     let root = env!("CARGO_MANIFEST_DIR");
     let chrome = chrome().expect(
@@ -103,11 +97,6 @@ fn drive(scenario: &str) -> serde_json::Value {
     serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"))
 }
 
-/// The stream is opened once and closed when the answer is done.
-///
-/// The count is the assertion. A driver that forgets to close would still show
-/// the right answer on the page — and then quietly ask the question a second
-/// time about three seconds later, which is why the harness waits six.
 #[test]
 #[ignore = "needs node and a headless Chrome; see the module comment"]
 fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
@@ -169,12 +158,6 @@ fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
     assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
 }
 
-/// A double-tap on Ask leaves exactly one stream, and the answer survives it.
-///
-/// Two submits made before the first POST resolves used to open two streams,
-/// the second overwriting the only reference to the first. The orphan could not
-/// be closed, and its error — which arrives the moment its stream ends — ran
-/// the failure path, wiping the answer the second ask was still writing.
 #[test]
 #[ignore = "needs node and a headless Chrome; see the module comment"]
 fn a_second_ask_supersedes_the_first_rather_than_racing_it() {

@@ -571,11 +571,6 @@ mod tests {
         assert_eq!(store.live_rehearsal_count().await.unwrap(), 0);
     }
 
-    /// Retirement is history, not a bar. The uniqueness used to be total, so
-    /// a probe retired for its embedder blocked the fresh one minted at the
-    /// new model, and an artifact that had lost its probes never got them
-    /// back — which is the rehearsal anchor switched off for good on any base
-    /// that changed embedder.
     #[tokio::test]
     async fn a_retired_probe_does_not_block_the_same_question_being_asked_again() {
         let store = Store::memory().await.unwrap();

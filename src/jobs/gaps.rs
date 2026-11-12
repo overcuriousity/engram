@@ -491,7 +491,6 @@ mod tests {
         id
     }
 
-    /// A recorded search judged a gap, with a vector chosen by the caller.
     async fn gap_search(core: &Core, q: &str, vec: Vec<f32>) -> String {
         let id = core
             .store
@@ -523,13 +522,6 @@ mod tests {
         id
     }
 
-    /// A document, embedded, with the queue drained and the coverage check
-    /// that reaching `ready` fires already finished.
-    ///
-    /// Every caller sets `weak_below = 1.0` first, so that pass closes nothing:
-    /// what a document actually scores is only knowable once it is embedded,
-    /// and a test that wants to sit either side of that line has to capture
-    /// before it can choose one.
     async fn captured(core: &Core, text: &str) -> String {
         let src = core.ingest(text, "web", None).await.unwrap();
         while crate::jobs::run_one(core).await.unwrap() {}
@@ -537,9 +529,6 @@ mod tests {
         src.id
     }
 
-    /// A search the box recorded on its way to a capture, with nothing near it:
-    /// the shape of every sentence typed into the box before Capture is
-    /// pressed.
     async fn unmatched_search(core: &Core, q: &str, vec: Vec<f32>) -> String {
         core.store
             .record_search(
@@ -563,8 +552,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A capture typed into the box the query was typed into, driven the whole
-    /// way through the queue.
     async fn captured_from(core: &Core, text: &str, event_id: &str) -> String {
         let src = core
             .ingest_capture(crate::core::ingest::Capture::new(text, "web").with_search(event_id))
@@ -621,21 +608,6 @@ mod tests {
         );
     }
 
-    /// And the pursuit that same typing became.
-    ///
-    /// The link closed the search row and stopped there, because
-    /// `is_typed_from` named two kinds and the sweep had meanwhile clustered
-    /// those very keystrokes into a pursuit. Nobody opened a result — nobody
-    /// was searching — so `unsatisfied` read `engagement.is_empty()` and
-    /// closed it "nothing engaged", and `pursuit_gaps_from!` admits any
-    /// unsatisfied pursuit carrying a vector. The live base's capture page was
-    /// led by four of these: a netcat answer, an ice-cream shop's opening
-    /// hours, a ticket presale page and a shopping reminder, each shown whole
-    /// as a hole in the base.
-    ///
-    /// The lead here is a half-typed prefix and the finished sentence is the
-    /// second member, which is the shape the coalescer actually leaves behind:
-    /// matching the pursuit's leading query alone would miss it.
     #[tokio::test]
     async fn a_capture_closes_the_pursuit_its_own_typing_became() {
         let mut core = test_core().await;
@@ -684,14 +656,6 @@ mod tests {
         );
     }
 
-    /// And a capture whose text the base already held closes its hole too.
-    ///
-    /// `ingest` answers a duplicate with the stored corpus and stores nothing
-    /// — no artifacts, no embed job, so no `settle_corpus` and no `cover` —
-    /// while the page that sent it has already swapped the hole's row away on
-    /// the 2xx. The hole stayed open and came back on the next load. The link
-    /// is a claim about what somebody wrote, not a measurement, and it holds
-    /// whether or not this call stored anything.
     #[tokio::test]
     async fn a_capture_the_base_already_had_still_closes_the_hole_it_was_typed_into() {
         let mut core = test_core().await;
@@ -747,9 +711,6 @@ mod tests {
         );
     }
 
-    /// How close this vector gets to anything in that document. What the
-    /// coverage line is compared against, asked of the store directly so the
-    /// test does not have to predict the fake embedder's geometry.
     async fn best_similarity(core: &Core, v: &[f32], corpus_id: &str) -> f32 {
         core.vectors
             .search(

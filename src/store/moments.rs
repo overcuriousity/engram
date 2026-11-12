@@ -1298,13 +1298,6 @@ mod tests {
         (s, made[0].id.clone())
     }
 
-    /// A reminder set on a merged artifact used to record no note at all:
-    /// `artifacts.corpus_id` is NULL for a merge, so `corpus_of_moment`
-    /// answered NULL, completing the reminder retired nothing, and
-    /// `has_open_reminder_for_corpus` answered `false` for the notes behind it
-    /// — which is `REAPABLE`'s guard letting go of text a live reminder was
-    /// read out of. The lineage is where the note is, when the lineage names
-    /// one.
     #[tokio::test]
     async fn a_reminder_born_on_a_merge_of_one_note_still_names_that_note() {
         let s = Store::memory().await.unwrap();
@@ -1336,9 +1329,6 @@ mod tests {
         assert!(s.has_open_reminder_for_corpus(&c.id).await.unwrap());
     }
 
-    /// And where the merge spans two notes there is no one note it was read
-    /// out of. Naming either would be the dishonesty the NULL `corpus_id`
-    /// exists to avoid, so the column stays empty.
     #[tokio::test]
     async fn a_reminder_born_on_a_merge_of_two_notes_names_neither() {
         let s = Store::memory().await.unwrap();
@@ -1385,8 +1375,6 @@ mod tests {
         }
     }
 
-    /// A second note with one artifact, so a carry can cross corpora the way a
-    /// merge does.
     async fn other_artifact(s: &Store, text: &str) -> String {
         let c = s.insert_corpus(text, "ui", None).await.unwrap();
         let made = s
@@ -1402,12 +1390,6 @@ mod tests {
         made[0].id.clone()
     }
 
-    /// A done reminder belongs to the day it was due, whatever later became of
-    /// the artifact it hung off. `carry_moments` moves only *open* rows, so an
-    /// ordinary promotion superseding the artifact underneath a completed
-    /// reminder left that row with nothing active to stand on — and the status
-    /// filter, added to stop one reminder being listed twice, took its "was
-    /// due / done" line off the day page for good.
     #[tokio::test]
     async fn a_completed_reminder_keeps_its_day_after_its_artifact_is_superseded() {
         let (s, aid) = store_with_artifact().await;
@@ -1459,11 +1441,6 @@ mod tests {
         );
     }
 
-    /// There is nothing to put an undated reminder aside *until*: it is the
-    /// band's question "when?", and `open_due` lists it whatever any snooze
-    /// says. A snooze accepted on one hid nothing at all — the API answered
-    /// 204, the band drew "Snoozed — undo", and the row went on standing
-    /// directly underneath it.
     #[tokio::test]
     async fn a_reminder_with_no_date_cannot_be_put_aside() {
         let (s, aid) = store_with_artifact().await;
@@ -1519,10 +1496,6 @@ mod tests {
         assert!(s.snooze(&dated, 10_000).await.unwrap());
     }
 
-    /// `carry_moments` moves the *open* row of a recurrence to the winner and
-    /// leaves the done ones behind, so counting the rows on one artifact
-    /// restarted the count at every supersession: a `COUNT=3` that had fired
-    /// twice arrived counting one and re-armed for ever.
     #[tokio::test]
     async fn a_counted_recurrence_is_counted_by_its_series_not_its_artifact() {
         let (s, aid) = store_with_artifact().await;
@@ -1596,11 +1569,6 @@ mod tests {
         );
     }
 
-    /// A *completed* row on the winner at the same instant is not the winner
-    /// already carrying that reminder — it is the history of something that
-    /// happened. Matching it left the loser's open row behind on an artifact
-    /// about to go non-active, and the band filters on `a.status = 'active'`,
-    /// so the reminder went dark with nothing saying so.
     #[tokio::test]
     async fn a_done_row_on_the_winner_at_the_same_instant_does_not_block_the_carry() {
         let (s, aid) = store_with_artifact().await;
@@ -1632,9 +1600,6 @@ mod tests {
         );
     }
 
-    /// The other half of the same rule: an *open* row the winner already
-    /// carries at that instant is the duplicate the guard is for, and the
-    /// loser's copy stays where it is.
     #[tokio::test]
     async fn an_open_row_on_the_winner_at_the_same_instant_still_blocks_the_carry() {
         let (s, aid) = store_with_artifact().await;
@@ -1661,11 +1626,6 @@ mod tests {
         );
     }
 
-    /// And the half the instant alone could not tell apart: a recurrence and a
-    /// one-shot standing at the same moment are two reminders. Matching on
-    /// `(kind, at)` dropped the recurring row whenever the winner happened to
-    /// hold a one-shot there — and the loser is about to go non-active, so the
-    /// series left the band with nothing arming a successor.
     #[tokio::test]
     async fn a_recurrence_is_carried_past_a_one_shot_standing_at_the_same_instant() {
         let (s, aid) = store_with_artifact().await;
@@ -1695,11 +1655,6 @@ mod tests {
         );
     }
 
-    /// The horizon reads the *effective* instant, which is what the ordering
-    /// beside it and every push already read. Against `at`, a reminder three
-    /// days out and snoozed to an hour from now sat outside a 48-hour window
-    /// on the strength of a date the operator had just put aside: the push
-    /// fired at the hour and the Due page had nothing on it.
     #[tokio::test]
     async fn a_reminder_snoozed_into_the_horizon_from_beyond_it_is_on_the_band() {
         let (s, aid) = store_with_artifact().await;
@@ -1744,9 +1699,6 @@ mod tests {
         );
     }
 
-    /// Completing a reminder retires the note it was read out of. Resolved
-    /// through the row's current artifact, a carry across notes made that the
-    /// wrong note — one nobody had set a reminder on.
     #[tokio::test]
     async fn a_carried_reminder_still_names_the_note_it_was_read_from() {
         let (s, aid) = store_with_artifact().await;
@@ -1779,14 +1731,6 @@ mod tests {
         assert!(s.corpus_was_read_as_reminder(&origin).await.unwrap());
     }
 
-    /// Push a row's `created_at` back before the ladder it is being read
-    /// against.
-    ///
-    /// The ladder only offers a rung the moment was alive for — see
-    /// `remind::reachable` — and these tests date their moments in synthetic
-    /// seconds well below the wall clock `insert_moment` stamps, so every row
-    /// would be one created after its own due time. Backdating is what makes
-    /// them the long-standing reminders they are written about.
     async fn existed_since(s: &Store, id: &str, created_at: i64) {
         sqlx::query!(
             "UPDATE moments SET created_at = ? WHERE id = ?",
@@ -1811,8 +1755,6 @@ mod tests {
         }
     }
 
-    /// The search lift and the "1 h ago" badge read this, and it was the one
-    /// band read taking `at` raw while every other coalesces the snooze.
     #[tokio::test]
     async fn due_for_reads_the_effective_instant_like_every_other_band_read() {
         let (s, aid) = store_with_artifact().await;
@@ -1827,9 +1769,6 @@ mod tests {
         );
     }
 
-    /// `complete_moment` arms a successor only where the artifact does not
-    /// already carry that instant, so on an artifact with two same-rule due
-    /// rows it arms nothing — and the undo, unfiltered, deleted the other row.
     #[tokio::test]
     async fn undoing_a_completion_takes_only_the_row_it_armed() {
         let (s, aid) = store_with_artifact().await;
@@ -2074,9 +2013,6 @@ mod tests {
         assert_eq!(hit.get(&aid), Some(&1_000), "overdue still lifts");
     }
 
-    /// Unlike `due_for`, no horizon: an artifact's own pane asks whether it
-    /// carries a reminder at all, not whether one is close enough to belong
-    /// on a list.
     #[tokio::test]
     async fn open_due_for_artifact_reads_a_snooze_as_the_rows_own_instant() {
         // The pane renders `snoozed_until.or(at)`, so ordering on the raw `at`

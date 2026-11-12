@@ -613,8 +613,6 @@ Use the whole device (/dev/sdX), never a partition, and pass --dry-run first.";
         assert_eq!(found, (106, 106));
     }
 
-    /// A lecture handout, PDF-extracted: hard-wrapped at about eighty columns,
-    /// so one sentence of prose is three lines of source.
     const WRAPPED: &str = "\
 Die Verzeichniseinträge enthalten die Meta-Daten, wie Namen,
 Dateigrößen, Attribute und Zeitstempel zu den gespeicherten

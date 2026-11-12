@@ -1024,9 +1024,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// A session manager per entry, so a map that only ever grows holds one for
-    /// every person who has ever opened `/mcp`, whatever
-    /// `store.max_open_tenants` says an instance holds open.
     #[tokio::test]
     async fn the_service_map_holds_no_more_tenants_than_the_registry_does() {
         let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
@@ -1044,9 +1041,6 @@ mod tests {
         );
     }
 
-    /// The tools carry a subject, not a core, so a call goes to whoever the
-    /// service was built for — resolved when the call arrives, through the one
-    /// registry whose cap decides what an instance holds open.
     #[tokio::test]
     async fn a_tool_call_reaches_the_subjects_own_base() {
         let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
@@ -1111,9 +1105,6 @@ mod tests {
         }
     }
 
-    /// MCP is the door with no page. An agent gets this string and nothing
-    /// else, so a literal the base does not hold has to be named in it — and
-    /// named, not counted, because an agent may run what it reads.
     #[test]
     fn the_mcp_answer_names_the_literals_the_base_does_not_hold() {
         let out = format_answer(&answer(&["wipefs --all /dev/sdX"]));
@@ -1121,8 +1112,6 @@ mod tests {
         assert!(out.contains("no cited excerpt"), "{out}");
     }
 
-    /// And says nothing when there is nothing to say: a caveat on every answer
-    /// is a caveat nobody reads.
     #[test]
     fn an_answer_drawn_from_its_excerpts_carries_no_warning() {
         let out = format_answer(&answer(&[]));
@@ -1142,8 +1131,6 @@ mod tests {
         }
     }
 
-    /// An agent has no rail to see a badge on: the disagreement is said in the
-    /// hit's own lines, with the other note's name, day and what differs.
     #[test]
     fn a_hit_says_in_words_which_note_disagrees_with_it() {
         let mut h = search_hit(Some("Backup schedule"), "Backups run nightly.");
@@ -1188,10 +1175,6 @@ mod tests {
         assert!(!format_answer(&answer(&[])).contains("disagree"));
     }
 
-    /// A modern client opens with a bare `tools/list` and no handshake, so the
-    /// door has to be stateless: with `legacy_session_mode` on, rmcp routes that
-    /// first message through the session path and answers it 422, asking for an
-    /// `initialize` the client never sends.
     #[test]
     fn the_mcp_door_is_stateless_so_a_handshakeless_probe_is_served() {
         assert!(!service_config(None).legacy_session_mode);
@@ -1348,7 +1331,6 @@ mod tests {
         }
     }
 
-    /// A hit that carries an explanation, for the two tests below.
     fn explained(id: &str) -> SearchResult {
         let mut r = hit(id, None);
         r.explanation = Some(crate::core::explain::HitExplanation {
@@ -1428,9 +1410,6 @@ mod tests {
         );
     }
 
-    /// The ordinary case reads as ordinary. A cap that displaced hits and then
-    /// actually kept them out of the answer is the rule working, and a line
-    /// that cries failure over it is one an agent learns to skip.
     #[test]
     fn a_cap_that_kept_its_hits_out_of_the_answer_names_no_failure() {
         let summary = crate::core::explain::SearchExplanation {
@@ -1450,8 +1429,6 @@ mod tests {
         );
     }
 
-    /// An agent reading a numbered list has no grey to see; a hit past the
-    /// cliff has to say so in words, and one above it must not.
     #[test]
     fn a_result_past_the_cliff_says_so_and_keeps_its_number() {
         let mut past = hit("tail", None);
@@ -1483,8 +1460,6 @@ mod tests {
         assert!(!out.contains("### 2"), "{out}");
     }
 
-    /// The rail greys a weak hit; an agent has no grey to see, so the meta
-    /// line says it in words.
     #[test]
     fn a_weak_result_says_so() {
         let mut w = hit("thin", None);
@@ -1494,9 +1469,6 @@ mod tests {
         assert!(!format_search_results(&[hit("firm", None)], None).contains("loosely"));
     }
 
-    /// Text a model wrote is never silently indistinguishable from captured
-    /// text — that is the field's own contract, and it held on every door but
-    /// this one.
     #[test]
     fn model_written_text_is_marked_as_such() {
         let mut m = hit("merged", None);
@@ -1531,8 +1503,6 @@ mod tests {
         assert!(format_search_results(&[dep], None).contains("deprecated"));
     }
 
-    /// Two different reasons to be higher up the list, and neither is
-    /// relevance; an agent trusting the order should be told.
     #[test]
     fn a_lifted_result_says_why_it_moved_up() {
         let mut p = hit("often", None);
@@ -1553,9 +1523,6 @@ mod tests {
         assert!(format_search_results(&[d], None).contains("due in 2 h"));
     }
 
-    /// Search is a dead end without this: it hands back one passage and the
-    /// corpus id, and the answer is often the paragraph after the one that
-    /// matched. `read` hands back the document, verbatim.
     #[tokio::test]
     async fn read_returns_the_whole_document_by_corpus_id() {
         let core = crate::core::test_support::test_core().await;
@@ -1606,8 +1573,6 @@ mod tests {
         assert!(text.contains("Nothing stored under `nope`"), "{text}");
     }
 
-    /// A 50 MB PDF read whole would fill an agent's context with one call.
-    /// The document arrives in pages, each saying where the next begins.
     #[tokio::test]
     async fn read_pages_a_long_document_and_says_where_it_goes_on() {
         let core = crate::core::test_support::test_core().await;
@@ -1686,8 +1651,6 @@ mod tests {
         assert!(none.contains("exactly one of"), "{none}");
     }
 
-    /// An agent that holds bytes hands them over as base64; a PDF is known
-    /// by its bytes, and stored for extraction under the name it came with.
     #[tokio::test]
     async fn ingest_takes_a_pdf_as_base64_and_says_extraction_is_queued() {
         use base64::Engine;
@@ -1709,9 +1672,6 @@ mod tests {
         assert_eq!(c.metadata["file"]["name"], "plan.pdf");
     }
 
-    /// Plain text as a file is a text capture that remembers its file facts,
-    /// as the upload door records them; bytes that are neither a document
-    /// nor text are refused by name rather than stored as mojibake.
     #[tokio::test]
     async fn ingest_takes_a_text_file_and_refuses_bytes_it_cannot_read() {
         use base64::Engine;

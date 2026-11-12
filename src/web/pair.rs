@@ -314,7 +314,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// The inverse of `urlencode`, for the one value a test has to read back.
     fn percent_decode(s: &str) -> String {
         let b = s.as_bytes();
         let mut out = String::with_capacity(s.len());

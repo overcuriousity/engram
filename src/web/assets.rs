@@ -197,13 +197,6 @@ mod tests {
         }
     }
 
-    /// The tokenizer is not an asset and is not served.
-    ///
-    /// It lived in `assets/` and `rust_embed` takes that folder whole, so
-    /// 11 MB of vocabulary was embedded in the binary twice — once by
-    /// `budget.rs`'s `include_bytes!` and once by the asset table — and the
-    /// second copy answered anonymously at `/assets/tokenizer.json` under a
-    /// year-long `max-age`. It is in `vendor/` now, which nothing embeds.
     #[tokio::test]
     async fn the_tokenizer_is_not_reachable_through_assets() {
         let res = app()

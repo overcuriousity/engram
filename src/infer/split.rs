@@ -184,18 +184,6 @@ mod tests {
         }
     }
 
-    /// Leading blank lines used to buy the document one wasted window and its
-    /// successor two chunks' worth of text.
-    ///
-    /// The first window claims the head of the document from byte zero, so its
-    /// recorded start is not where the splitter's first chunk begins. The
-    /// snapping guard compared the second boundary against that zero, found it
-    /// clear, and snapped the boundary onto the very line the first chunk
-    /// opens on — leaving window zero holding nothing but the blank lines and
-    /// window one holding both chunks. Four newlines out of a PDF extraction
-    /// are enough, and what came back was a window at twice the budget: past
-    /// what the context reservation is sized for, with a synthesis call spent
-    /// on the whitespace beside it.
     #[test]
     fn leading_blank_lines_do_not_collapse_the_first_window() {
         let counter = TokenCounter::default();
@@ -220,15 +208,6 @@ mod tests {
         }
     }
 
-    /// The invariant the module doc states, asserted where it used to break:
-    /// a window's text is exactly the source its line range holds.
-    ///
-    /// The boundary the crate hands back can land mid-line, and it is snapped
-    /// to the start of that line — but only the predecessor was snapped, so the
-    /// head of the straddled line fell into the gap between the two windows.
-    /// Markdown is where it shows: a blockquote arrived without its `> `, an
-    /// indented code block without its indentation, and the model was shown
-    /// text that is not the text that was stored.
     #[test]
     fn a_straddled_line_reaches_the_window_that_claims_it() {
         // Short structural lines between long paragraphs: the splitter opens a

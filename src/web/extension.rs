@@ -172,7 +172,6 @@ mod tests {
         }
     }
 
-    /// The install page, and the render that follows the mint press.
     async fn press_the_phone_button(app: &axum::Router, cookie: &str) -> String {
         let res = app
             .clone()

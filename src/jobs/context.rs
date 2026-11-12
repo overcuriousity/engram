@@ -470,15 +470,12 @@ mod tests {
     use crate::core::context::{Bundle, CTX_DIM, device_key, encoder_version, parse_bundle};
     use crate::core::test_support::{phone_bundle, recommending_core, seed_artifact};
 
-    /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
     const FRIDAY_SEVENTH: i64 = 1_787_320_320;
 
-    /// A Friday at ~15:00 Berlin time, `weeks_back` weeks before the seventh.
     fn friday(weeks_back: i64) -> i64 {
         FRIDAY_SEVENTH - weeks_back * 7 * 86_400 - 52 * 60
     }
 
-    /// One page view and the open that followed it.
     async fn seen_and_opened(core: &Core, aid: &str, at: i64, bundle: &Bundle, kind: &str) {
         let raw = serde_json::to_string(bundle).unwrap();
         let t = crate::core::context::local_time(at, bundle.tz.as_deref(), None);

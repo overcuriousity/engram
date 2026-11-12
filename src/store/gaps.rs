@@ -1169,7 +1169,6 @@ mod tests {
         id
     }
 
-    /// A question whose plan named a subject the base could not cover.
     async fn uncovered_subject(store: &Store, q: &str, subject: &str, vec: Vec<f32>) -> String {
         let ask = store
             .record_ask(NewAsk {
@@ -1188,10 +1187,6 @@ mod tests {
             .unwrap()
     }
 
-    /// The plan says out loud what the excerpts miss, and a subject whose
-    /// fan-out came back with nothing is a hole in the base named by the model,
-    /// for a question a person actually asked. It cost nothing to find — the
-    /// planning call was already paid for.
     #[tokio::test]
     async fn an_uncovered_subject_is_an_open_gap() {
         let store = Store::memory().await.unwrap();
@@ -1206,9 +1201,6 @@ mod tests {
         assert_eq!(subjects, vec!["job priority"]);
     }
 
-    /// The same closing rule the other four use: a capture that covers it takes
-    /// it off the list, and what an automatic score decided never overwrites
-    /// what a person judged.
     #[tokio::test]
     async fn a_covered_subject_leaves_the_list() {
         let store = Store::memory().await.unwrap();
@@ -1247,11 +1239,6 @@ mod tests {
         );
     }
 
-    /// The repair pass collects coverage whose gap is gone, and a subject is a
-    /// gap like the others: its row survives, and the capture that closed it
-    /// still says which subject it closed. Both were once true of four kinds
-    /// and not of the fifth — the pass swept every `subject` row on sight, and
-    /// the covered-by list dropped what it could not name.
     #[tokio::test]
     async fn a_covered_subject_survives_the_repair_pass() {
         let store = Store::memory().await.unwrap();
@@ -1303,8 +1290,6 @@ mod tests {
         assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 1);
     }
 
-    /// The line a capture had to reach moves up once it is measured, and a
-    /// coverage recorded under the old one is wrong by the rule that wrote it.
     #[tokio::test]
     async fn coverage_under_the_line_is_collected_by_the_repair_pass() {
         let store = Store::memory().await.unwrap();
@@ -1336,8 +1321,6 @@ mod tests {
         assert_eq!(store.trim_gap_coverage(0.6).await.unwrap(), 1);
     }
 
-    /// The rule every kind here already applies: no vector, no grouping, so it
-    /// is not a gap this list can do anything with.
     #[tokio::test]
     async fn a_subject_with_no_vector_is_not_a_gap() {
         let store = Store::memory().await.unwrap();
@@ -1347,9 +1330,6 @@ mod tests {
         assert!(!gaps.iter().any(|g| g.gap.kind == GapKind::Subject));
     }
 
-    /// A subject is a fact about one question. The question going means the
-    /// subject goes: it was never a hole anybody reported on its own, and left
-    /// behind it would name a plan whose ask no longer exists.
     #[tokio::test]
     async fn a_subject_dies_with_the_question_it_came_from() {
         let store = Store::memory().await.unwrap();
@@ -1389,8 +1369,6 @@ mod tests {
         id
     }
 
-    /// A recorded search with candidates at the given similarities. No verdict:
-    /// nobody judged it, which is the case `Unmatched` exists for.
     async fn search_with(store: &Store, q: &str, sims: &[f32]) -> String {
         store
             .record_search(
@@ -1838,10 +1816,6 @@ mod tests {
         assert_eq!(mine, vec![(id.as_str(), "how do I mount an E01")]);
     }
 
-    /// The count and the page are one predicate, and the count is not the page.
-    ///
-    /// `--status` read the length of a fifty-row page and printed it as a
-    /// total, so a base with more than fifty pursuits reported fifty for ever.
     #[tokio::test]
     async fn the_pursuit_gap_count_is_a_total_and_not_the_length_of_a_page() {
         let store = Store::memory().await.unwrap();
@@ -1971,9 +1945,6 @@ mod tests {
         );
     }
 
-    /// The sweep compares every pair of open gaps and the capture page walks
-    /// the same list on every load, so the number of them has to be bounded
-    /// somewhere. Newest first, so what a cap drops is the oldest.
     #[tokio::test]
     async fn one_pass_reads_at_most_the_newest_cap_worth_of_gaps() {
         let store = Store::memory().await.unwrap();
@@ -2005,8 +1976,6 @@ mod tests {
         );
     }
 
-    /// The count and the list are the same five predicates, so `--status` and
-    /// the capture page cannot disagree about what is open.
     #[tokio::test]
     async fn the_count_of_open_gaps_is_the_length_of_the_list_it_is_under_the_cap() {
         let store = Store::memory().await.unwrap();

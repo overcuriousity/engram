@@ -19,7 +19,6 @@ pub use rate::{RateLayer, rate_limit};
 
 const LOOPBACK_NAMES: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
 
-/// Where this instance is reached from, as the security layer needs to know it.
 #[derive(Debug, Clone)]
 pub struct Deployment {
     pub public_url: Option<Url>,
@@ -45,7 +44,6 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 impl Deployment {
-    /// Reached only on loopback, with no public address.
     pub fn loopback(bind: SocketAddr) -> Self {
         Self {
             public_url: None,
@@ -92,14 +90,12 @@ impl Deployment {
             .is_some_and(|u| u.scheme() == "https")
     }
 
-    /// Served over http to something other than this machine, where browsers send no fetch metadata.
     pub fn plain_http_remote(&self) -> bool {
         self.public_url.as_ref().is_some_and(|u| {
             u.scheme() == "http" && !is_loopback_host(u.host_str().unwrap_or_default())
         })
     }
 
-    /// The origin clients reach, without a trailing slash: the public URL's, or the loopback bind's.
     pub fn base(&self) -> String {
         if let Some(u) = &self.public_url {
             return u.origin().ascii_serialization();
@@ -112,7 +108,6 @@ impl Deployment {
         format!("http://{host}:{}", self.bind.port())
     }
 
-    /// `host[:port]` as clients address this instance.
     pub fn authority(&self) -> String {
         let base = self.base();
         base.split_once("://")
@@ -124,7 +119,6 @@ pub(crate) struct Ctx {
     pub dep: Deployment,
 }
 
-/// Wraps the whole app: response headers, the host check and the origin check.
 pub fn secure(router: Router, dep: &Deployment) -> Router {
     let ctx = Arc::new(Ctx { dep: dep.clone() });
     router

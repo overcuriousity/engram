@@ -1015,7 +1015,6 @@ mod tests {
     use crate::store::artifacts::ArtifactStatus;
     use std::sync::Arc;
 
-    /// Record a pair for two artifacts and hand back its row id.
     async fn queue_pair(core: &Core, a: &str, b: &str) -> i64 {
         core.store.record_pair(a, b, 0.91).await.unwrap();
         core.store
@@ -1028,7 +1027,6 @@ mod tests {
             .id
     }
 
-    /// A passage, and a synthesis drawn from it, under a corpus of their own.
     async fn a_passage_and_a_synthesis_over_it(core: &Core) -> (String, String) {
         let src = core
             .store
@@ -1069,14 +1067,6 @@ mod tests {
         (passage, synth)
     }
 
-    /// A synthesis is made of passages, by design — so `roots_of` resolves it
-    /// to source text, and `insert_merged_artifact` refuses to merge it.
-    ///
-    /// The refusal has to happen before the model call. Leaving it to the merge
-    /// path means `apply` propagates `Validation`, the pair stays `Pending`, and
-    /// `arm_dedupe` arms it again on the next tick — the same pair buying the
-    /// same refusal at full price, forever. Both stay as they are, and the
-    /// question is closed rather than handed to anyone.
     #[tokio::test]
     async fn a_pair_a_merge_could_not_write_is_left_as_it_is_before_the_call() {
         let mut core = test_core().await;
@@ -1106,9 +1096,6 @@ mod tests {
         }
     }
 
-    /// The same, for a passage on one side. A passage is its own root, so it
-    /// reaches the merge path's refusal by a different route and must be
-    /// declined by the same rule.
     #[tokio::test]
     async fn a_pair_naming_a_passage_is_left_as_it_is_before_the_call() {
         let mut core = test_core().await;
@@ -1129,8 +1116,6 @@ mod tests {
         );
     }
 
-    /// The button and the judge reach one helper, and the row has to say which
-    /// of them pressed it — the whole point of the column.
     #[tokio::test]
     async fn discarding_both_records_whoever_asked_for_it() {
         let core = test_core().await;
@@ -1176,16 +1161,6 @@ mod tests {
         assert_eq!(asker.calls(), 0, "the sweep called the ask model");
     }
 
-    /// A verdict that neither side states anything is acted on where it is
-    /// found, as `replaced` and `duplicate` already are. The queue's other
-    /// answers each assume something — keeping one side assumes one is worth
-    /// keeping, Dismiss assumes the question was not worth asking — and neither
-    /// fits two artifacts that say nothing. Filing it as a recommendation left
-    /// the one answer that clears them waiting on a person holding no more
-    /// evidence than the judge had.
-    ///
-    /// Deprecation, not deletion: both sides are one press from active and
-    /// still readable under `include_deprecated`. That undo is the review.
     #[tokio::test]
     async fn a_vacuous_verdict_retires_both_sides_without_waiting_for_an_operator() {
         let mut core = test_core().await;
@@ -1251,17 +1226,6 @@ mod tests {
         );
     }
 
-    /// `Core::deprecate` refuses an artifact already hidden in favour of
-    /// another, so retiring the two sides in sequence would hide the first and
-    /// then fail on the second — leaving the pair recorded as unanswered with
-    /// half of it already gone, and every later attempt repeating the same
-    /// error. A side already out of results is what a discard is asking for, so
-    /// it is skipped rather than treated as a failure.
-    ///
-    /// Against `discard_both` directly, because `run` settles a pair whose
-    /// member is already hidden before it ever reaches the judge. The window
-    /// this closes is the model call itself: a neighbouring pair's unit can
-    /// supersede a side while this one waits for its answer.
     #[tokio::test]
     async fn discarding_a_pair_skips_a_side_that_is_already_hidden() {
         let core = test_core().await;
@@ -1308,16 +1272,6 @@ mod tests {
         );
     }
 
-    /// The mirror of the case above, and the one `core.deprecate` has no rule
-    /// for: not a side that is hidden, but a side that others are hidden
-    /// *behind*. Retiring it would leave the artifacts pointing at it out of
-    /// results with a winner that is out of results too — the dead end
-    /// `Core::supersede` refuses to create from the other direction.
-    ///
-    /// It should not be reachable: a winner is an artifact some earlier
-    /// judgement preferred, so a later one calling it empty disagrees with
-    /// that. Which is why nothing is retired and nothing is skipped — both stay
-    /// as they are and the question is closed with the reason on it.
     #[tokio::test]
     async fn discarding_a_pair_leaves_both_when_others_are_hidden_behind_a_side() {
         let core = test_core().await;
@@ -1377,9 +1331,6 @@ mod tests {
         .await
     }
 
-    /// The same shape, but what the two differ in is a command rather than a
-    /// version. `losses` checks machine literals only, so this is what a merge
-    /// that drops something now looks like.
     async fn disagreeing_commands(core: &Core) -> Vec<String> {
         seed(
             core,
@@ -1449,12 +1400,6 @@ mod tests {
         }
     }
 
-    /// The obsolete side is re-read before the verdict is applied; the winner
-    /// was not. A supersession landing on the winner while the unit waited for
-    /// the model — the sweep hiding it, an operator deprecating it — then made
-    /// `Core::supersede` refuse, and the refusal came back as a failing job that
-    /// retried the same call until its attempts ran out, rather than as a pair
-    /// settled with a reason.
     #[tokio::test]
     async fn a_replacement_whose_survivor_left_results_settles_rather_than_failing() {
         let core = test_core().await;
@@ -1518,8 +1463,6 @@ mod tests {
         );
     }
 
-    /// A synthesis asked for and then overtaken: the pair was answered while
-    /// the unit waited. The press is not a standing order.
     #[tokio::test]
     async fn a_synthesis_asked_for_a_pair_answered_since_writes_nothing() {
         let core = test_core().await;
@@ -1958,8 +1901,6 @@ mod tests {
         );
     }
 
-    /// A merged artifact, written straight to the store, for the cases where
-    /// "a member is itself a merge" is the thing under test.
     async fn merged_from(core: &Core, title: &str, text: &str, sources: &[String]) -> String {
         let m = crate::jobs::merge::write(
             core,
@@ -2259,9 +2200,6 @@ mod tests {
         );
     }
 
-    /// The press is the judgement. The verdict prompt is not asked, so a model
-    /// that would have said `distinct` — as the live judge does about this
-    /// shape of pair, nine times in twelve — cannot overturn the operator.
     #[tokio::test]
     async fn a_pair_a_person_asked_about_is_written_without_being_judged_again() {
         use crate::store::actions::Kind;
@@ -2312,18 +2250,6 @@ mod tests {
         assert_eq!(rows.len(), 2, "one row per original, as any merge journals");
     }
 
-    /// The press has to work on the card it was offered on.
-    ///
-    /// `Relation::Duplicate` used to settle the pair `PairState::Duplicate` and
-    /// wait for a person; the "Write one" button was drawn on that card, and by
-    /// then the pair was not `Pending`. Old bases still hold such rows with the
-    /// ask set, so the path stays. The unit's opening guard sent every one of those
-    /// presses home having done nothing — and the review card had already
-    /// replaced all four answer buttons, so the card was frozen for good on the
-    /// one press that resolves it.
-    ///
-    /// Every other test here seeds a `Pending` pair, which is exactly why the
-    /// suite stayed green through it.
     #[tokio::test]
     async fn a_settled_duplicate_is_written_when_a_person_presses_synthese() {
         let mut core = test_core().await;
@@ -2363,8 +2289,6 @@ mod tests {
         assert_eq!(p.decided_by, Some(DecidedBy::Operator));
     }
 
-    /// A pair settled any other way is still left alone without a press. The
-    /// guard is widened by `synthesis_asked`, not removed.
     #[tokio::test]
     async fn a_settled_pair_nobody_pressed_is_still_left_alone() {
         let mut core = test_core().await;
@@ -2394,13 +2318,6 @@ mod tests {
         assert_eq!(p.state, PairState::Duplicate, "and nothing was resettled");
     }
 
-    /// The loss check is the requirement rather than a style, on the synthesis
-    /// path as on the judge's own: `interpret` checks the judge's draft, and
-    /// this one is checked here.
-    ///
-    /// Two artifacts differing only in `mount -o ro` against `mount -o rw`. The
-    /// draft keeps one, `merge::finish` would supersede both sources on embed,
-    /// and the other command would be gone with no warning.
     #[tokio::test]
     async fn a_synthesis_that_would_drop_a_literal_is_refused_and_both_stay() {
         let mut core = test_core().await;
@@ -2440,9 +2357,6 @@ mod tests {
         }
     }
 
-    /// A reply that will not parse has to cost the pair something, or the sweep
-    /// re-arms it and buys another call every tick for ever — unbounded at the
-    /// shipped default, where `may_act()` answers `true` below "full".
     #[tokio::test]
     async fn an_unreadable_synthesis_reply_is_counted_against_the_pair() {
         let mut core = test_core().await;
@@ -2469,7 +2383,6 @@ mod tests {
         assert!(p.synthesis_asked, "the press is not lost to one bad reply");
     }
 
-    /// And past the ceiling the sweep stops offering it, so the calls end.
     #[tokio::test]
     async fn a_pair_whose_replies_never_parse_leaves_the_synthesis_queue() {
         let core = test_core().await;
@@ -2500,9 +2413,6 @@ mod tests {
         );
     }
 
-    /// A person asking does not make stored source text mergeable. When the
-    /// merge path refuses, the ask is cleared so the card stops promising a
-    /// synthesis that will not arrive.
     #[tokio::test]
     async fn a_refused_synthesis_clears_the_ask() {
         let core = test_core().await;
@@ -2544,10 +2454,6 @@ mod tests {
         assert_eq!(p.state, PairState::NoConflict, "both stay as they are");
     }
 
-    /// A duplicate verdict writes the merge where it is found. The verdict is
-    /// not steady on every pair — see `PairState::Duplicate` — and what makes
-    /// acting on it safe is the loss check, the journal and the undo, which
-    /// `jobs::retract` reads against later searches.
     #[tokio::test]
     async fn a_duplicate_verdict_writes_the_merge_and_journals_it() {
         use crate::store::actions::Kind;
@@ -2631,8 +2537,6 @@ mod tests {
         );
     }
 
-    /// The same memory for a merge. A merge of these two that was undone is
-    /// not written again on the next duplicate verdict about them.
     #[tokio::test]
     async fn a_merge_taken_back_is_not_written_again() {
         use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
@@ -2733,10 +2637,6 @@ mod tests {
         }
     }
 
-    /// A duplicate settlement with no draft to write — `parse_dedupe` refuses
-    /// such a reply, so only a caller building a `Settlement` by hand reaches
-    /// it — leaves both as they are. It does not arm a synthesis: that ask is
-    /// an operator's press, and the merge it wrote would be recorded as theirs.
     #[tokio::test]
     async fn a_duplicate_without_a_draft_leaves_both_and_arms_nothing() {
         let core = test_core().await;
@@ -2786,14 +2686,6 @@ mod tests {
         }
     }
 
-    /// A merge's journal line says what happened.
-    ///
-    /// It used to carry the judge's sentence as the reason the base acted —
-    /// one field in two roles, and only the first can contradict the second.
-    /// The live base holds a merge journalled "Both artifacts describe the same
-    /// veterinary practice … so they are distinct". Reconciling a label against
-    /// free prose after the fact is not a question token comparison can answer,
-    /// so the roles are kept apart instead.
     #[tokio::test]
     async fn a_merge_action_records_the_act_and_not_a_verdict() {
         use crate::store::actions::Kind;

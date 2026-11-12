@@ -181,9 +181,6 @@ mod tests {
         assert_eq!(of_corpus(&serde_json::json!({"lang": 7})), Lang::En);
     }
 
-    /// The ten are the ten the capture box already teaches in. They drift
-    /// apart the moment one list is edited alone, and what that looks like is
-    /// a German shown a German example and handed English artifacts.
     #[test]
     fn the_ten_are_the_ten_the_example_table_carries() {
         let taught: std::collections::BTreeSet<&str> = crate::core::moments::PROTOTYPES

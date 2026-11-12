@@ -973,10 +973,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// A passage carries the document heading it happened to sit under —
-    /// `split_passages` copies it down, so one heading ends up over twenty
-    /// passages. That is a name for the section, never for this text, and the
-    /// two surfaces that print a name above the text must not print it.
     #[tokio::test]
     async fn deleting_answers_with_an_undo_notice_and_no_dialog() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1055,11 +1051,6 @@ mod tests {
         assert_eq!(d.title, "", "the detail pane named a passage");
     }
 
-    /// `d.title` is empty for a passage, but the pane still wrote the element
-    /// that holds it: an empty `card-title` before the Edit button, taking the
-    /// head row's gap and the heading's line-height over a card whose text
-    /// starts at the top. And the browser tab needs a word, so the page title
-    /// falls to the opening of the text.
     #[tokio::test]
     async fn the_pane_writes_no_heading_element_over_a_passage() {
         let core = crate::core::test_support::test_core().await;
@@ -1096,9 +1087,6 @@ mod tests {
         );
     }
 
-    /// The full page still needs a word: a browser tab and a history entry
-    /// are a list of names, and `{{ d.title }} — engram` over a passage left
-    /// every one of them reading " — engram".
     #[tokio::test]
     async fn the_page_title_of_a_passage_is_how_its_text_opens() {
         let core = crate::core::test_support::test_core().await;
@@ -1135,11 +1123,6 @@ mod tests {
         assert!(!tab.contains("Kapitel 3"), "the tab read {tab:?}");
     }
 
-    /// The Related list is built off vector payloads rather than rows, so it
-    /// has its own reading of the same question — and it answered it
-    /// differently: `payload.title` straight through, which put the section
-    /// heading over a neighbouring passage while the rail beside it showed
-    /// none.
     #[test]
     fn a_neighbouring_passage_is_listed_without_a_name() {
         let payload = |provenance: &str, title: Option<&str>| crate::vector::VectorPayload {
@@ -1159,9 +1142,6 @@ mod tests {
         );
     }
 
-    /// Related and Seen together are rows with a snippet under the name. With
-    /// no name the element was still written, so each row opened with an empty
-    /// line where the other rows carry a heading.
     #[tokio::test]
     async fn a_related_row_with_no_name_writes_no_heading_element() {
         let core = crate::core::test_support::test_core().await;
@@ -1548,9 +1528,6 @@ mod tests {
         assert!(rows.iter().any(|r| r.kind == "opened"));
     }
 
-    /// One merge written from an earlier merge and one fresh capture. A flat
-    /// list of roots reads as three equal siblings; the generation between them
-    /// is the whole reason the tree exists.
     #[tokio::test]
     async fn the_pane_draws_the_generations_a_merge_came_through() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1613,8 +1590,6 @@ mod tests {
         assert!(page.contains("replaced by this"), "{page}");
     }
 
-    /// A captured artifact was written from a document, not from artifacts. Its
-    /// column is the document, and a tree there would be an empty claim.
     #[tokio::test]
     async fn the_pane_of_a_capture_still_shows_its_lines() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1633,11 +1608,6 @@ mod tests {
         assert!(!page.contains(r#"class="lineage""#), "{page}");
     }
 
-    /// The reported gap: a reminder was captured and nothing on the artifact
-    /// itself ever said so. Unlike the same badge in the result list, this
-    /// one is not bounded to `time.horizon_hours` — the pane is where an
-    /// operator checks one specific note, and a reminder set for next week
-    /// is exactly the kind `due_for`'s horizon leaves out of that list.
     #[tokio::test]
     async fn the_pane_marks_an_open_reminder_however_far_out_it_is() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1687,8 +1657,6 @@ mod tests {
         assert!(!page.contains("oc-status--due"), "{page}");
     }
 
-    /// The corpus page could edit an artifact and the pane could not, on the
-    /// screen whose whole subject is one artifact.
     #[tokio::test]
     async fn the_pane_edits_the_artifact_and_comes_back_a_pane() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1724,7 +1692,6 @@ mod tests {
         );
     }
 
-    /// And the corpus page, which swaps one card in a list, still gets a card.
     #[tokio::test]
     async fn the_corpus_card_edit_still_answers_with_a_card() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -2163,8 +2130,6 @@ mod tests {
         assert!(d.html.contains("<pre"), "{}", d.html);
     }
 
-    /// The editor under the text, end to end: an entry made a weekly
-    /// reminder, shown as one, made custom, and taken off again.
     #[tokio::test]
     async fn the_pane_edits_the_reminder_and_turns_it_back_into_an_entry() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -2488,16 +2453,6 @@ mod tests {
         }
     }
 
-    /// A citation link and the rail item it lands on are the two halves of one
-    /// claim, and they are numbered by two separate passes over two separate
-    /// templates: `link_citations` writes the hrefs into the answer, and
-    /// `_ask_rail.html` writes the ids into the excerpts. Nothing but this
-    /// assertion makes them agree, and a `[1]` that scrolls nowhere reads to a
-    /// reader as provenance the base cannot actually show.
-    ///
-    /// The reply cites `[01]` as well as `[1]`, because the linker anchors on
-    /// the parsed number rather than the digits it found: an id of `cite-01`
-    /// would satisfy a lazier reading of this and still be a dead link.
     #[tokio::test]
     async fn every_citation_link_in_the_answer_points_at_an_excerpt_the_rail_carries() {
         let mut core = crate::core::test_support::test_core().await;
@@ -2559,9 +2514,6 @@ mod tests {
         );
     }
 
-    /// The model cites more excerpts than it was shown often enough that a link
-    /// to a rail item which does not exist is a real outcome; it reads as a
-    /// citation and scrolls nowhere.
     #[test]
     fn only_a_bracket_naming_an_excerpt_that_exists_becomes_a_link() {
         let out = super::link_citations("<p>see [1] and [2] but not [9] or [x]</p>", 2);
@@ -2578,10 +2530,6 @@ mod tests {
         assert!(out.contains("[x]"), "{out}");
     }
 
-    /// A citation link asserts that an excerpt supports the token it wraps.
-    /// `argv[1]` is an array index on a base whose answers are full of code,
-    /// and the citable range is exactly the range of common indices — so a link
-    /// there is provenance the answer never claimed.
     #[test]
     fn an_array_index_inside_a_code_span_is_not_turned_into_a_citation() {
         let out = super::link_citations("<p>see [1]</p><pre><code>argv[1]</code></pre>", 2);
@@ -2596,8 +2544,6 @@ mod tests {
         assert_eq!(out.matches("cite-1").count(), 1, "{out}");
     }
 
-    /// `[01]` cites excerpt one; an anchor of `#cite-01` points at nothing the
-    /// rail emits.
     #[test]
     fn a_zero_padded_citation_links_to_the_anchor_the_rail_will_carry() {
         let out = super::link_citations("<p>see [01]</p>", 2);
@@ -2605,8 +2551,6 @@ mod tests {
         assert!(!out.contains("cite-01"), "{out}");
     }
 
-    /// It runs over sanitized HTML, where a bracket inside a tag is an
-    /// attribute rather than prose.
     #[test]
     fn citation_linking_leaves_the_inside_of_a_tag_alone() {
         let out = super::link_citations(r#"<a href="/x?q=[1]">[1]</a>"#, 1);

@@ -286,8 +286,6 @@ mod tests {
     use image::{ImageBuffer, Rgb};
     use std::io::Cursor;
 
-    /// PNG's CRC-32, spelled out because no crate in the tree exposes it
-    /// directly and the header the test patches must still verify.
     fn crc32(bytes: &[u8]) -> u32 {
         let mut crc = 0xFFFF_FFFFu32;
         for &b in bytes {
@@ -303,12 +301,6 @@ mod tests {
         !crc
     }
 
-    /// The preview is both what the vision model reads and what the UI shows,
-    /// and `PREVIEW_QUALITY` is chosen so small print in a photographed page
-    /// survives it. That only holds while the downscale in front of it
-    /// *averages*: a point-sampling filter keeps every nth column and discards
-    /// the rest, so a hairline falling in a discarded column is not blurred but
-    /// gone, and no quality setting downstream can bring it back.
     #[test]
     fn a_hairline_survives_the_downscale_wherever_it_falls() {
         // 2000 px wide, a 2 px black line every 20 px: 99 lines, and a preview
@@ -360,10 +352,6 @@ mod tests {
         );
     }
 
-    /// JPEG has no alpha, so the preview has to put something behind it.
-    /// Discarding the channel is not that: the RGB stored under a fully
-    /// transparent pixel is zero in most encoders, so a screenshot with a
-    /// transparent margin or rounded corners reached the model as black.
     #[test]
     fn transparency_is_flattened_onto_white_rather_than_onto_black() {
         // Dark text on a transparent ground — a window capture's shape.
@@ -435,8 +423,6 @@ mod tests {
         out.into_inner()
     }
 
-    /// A JPEG carrying the given EXIF fields in an APP1 segment, spliced in
-    /// right after SOI — which is where every camera puts it.
     fn jpeg_with_exif(w: u32, h: u32, fields: &[exif::Field]) -> Vec<u8> {
         let mut writer = exif::experimental::Writer::new();
         for f in fields {

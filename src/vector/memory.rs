@@ -694,8 +694,6 @@ mod tests {
         }
     }
 
-    /// Superseded and deprecated included, so a test asserting the ordinary
-    /// path is not silently asserting the filter instead.
     fn wide() -> SearchFilter {
         SearchFilter {
             include_superseded: true,

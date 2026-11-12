@@ -969,10 +969,6 @@ mod tests {
             .id
     }
 
-    /// The live base's failure: "heute Abend" read as
-    /// `FREQ=DAILY;INTERVAL=1;BYDAY=TU`, and every "done" armed next Tuesday.
-    /// Restated as a one-off in the editor, done is done — and the re-read's
-    /// upgrade at the same instant cannot put the rule back.
     #[tokio::test]
     async fn an_invented_rule_taken_off_by_hand_stays_off_and_done_retires() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -1031,9 +1027,6 @@ mod tests {
         );
     }
 
-    /// An ordinary entry made a reminder, restated, and made an entry again —
-    /// the operator's own row included, which the band's "not a reminder"
-    /// never removes.
     #[tokio::test]
     async fn an_entry_becomes_a_reminder_and_back() {
         use crate::store::moments::Source;
@@ -1159,20 +1152,6 @@ mod tests {
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
     }
 
-    /// The same count, on a base that predates the column that keeps it.
-    ///
-    /// `series_id` is migration-added, so every recurring row written before it
-    /// carries NULL — and `insert_moment` reads `(None, Some(rule))` as the
-    /// head of a new series and stamps the successor with its own id. Each
-    /// completion therefore started a fresh series, `occurrences_in_series`
-    /// counted one, and the count never arrived: a `COUNT=2` reminder went on
-    /// firing for as long as anyone kept answering it.
-    ///
-    /// The NULL is written directly here because nothing in the app can
-    /// produce one any more, which is exactly why the case needs a test.
-    /// The same, with more than one row from before the column. Every one of
-    /// them carries NULL, and adopting only the row being completed left the
-    /// occurrences already done outside the series the count now reads.
     #[tokio::test]
     async fn a_counted_recurrence_with_several_rows_from_before_the_column_stops_on_its_count() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -1297,17 +1276,6 @@ mod tests {
         );
     }
 
-    /// The recurrence that died on its first completion.
-    ///
-    /// A daily reminder, moved by hand off the occurrence it was about to reach
-    /// — which is the ordinary thing to do with a recurring row that lands
-    /// badly one week. Completing the moved row computes the next occurrence,
-    /// and that instant is exactly what the row was moved *away from*, which
-    /// `has_moment_at` answers "yes" to by design: it is the re-read's
-    /// question, and a re-read must not put a row back on a corrected-away-from
-    /// date. Used as the gate for arming, it declined to arm the successor —
-    /// and `has_operator_moment` then refused every re-read that might have put
-    /// one back, so the recurrence was over, silently and for good.
     #[tokio::test]
     async fn a_recurrence_moved_off_its_next_occurrence_still_arms_one() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -1360,8 +1328,6 @@ mod tests {
         assert_eq!(open[0].moment.rule.as_deref(), Some(rule));
     }
 
-    /// And the guard the one above must not undo: an instant the artifact
-    /// really does carry is still not armed a second time.
     #[tokio::test]
     async fn a_recurrence_does_not_arm_an_occurrence_that_is_already_there() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -1424,10 +1390,6 @@ mod tests {
         );
     }
 
-    /// The table is read by index and by language, so its shape is a contract
-    /// rather than a convention: every language carries its reminders, no
-    /// sentence is written twice, and nothing is left in a language
-    /// `examples_for` cannot reach.
     #[test]
     fn every_language_carries_reminders_and_no_sentence_twice() {
         let langs: std::collections::BTreeSet<&str> =
@@ -1482,13 +1444,6 @@ mod tests {
         chrono_tz::Tz::Europe__Berlin
     }
 
-    /// A wall-clock time no calendar can spell is not a date, and asking for
-    /// one must not take the connection down with it.
-    ///
-    /// `%Y` parses a signed six-digit year, so the due band's own form carried
-    /// `when=+262142-12-31T23:59` straight here. The zone had no such instant,
-    /// the gap recovery added quarter-hours to a `NaiveDateTime` already at
-    /// chrono's ceiling, and `+` on that panics inside the handler.
     #[test]
     fn a_year_no_calendar_can_spell_is_refused_rather_than_panicked_over() {
         let ceiling = chrono::NaiveDateTime::MAX;
@@ -1578,11 +1533,6 @@ mod tests {
         );
     }
 
-    /// A daily 02:30 in Berlin meets the Sunday the zone has no 02:30. That
-    /// occurrence is rolled to 03:00, which is right — and then every later
-    /// one read its wall-clock off the rolled instant and the reminder was a
-    /// 03:00 reminder from that day on, permanently, with no DTSTART to
-    /// re-anchor to.
     #[test]
     fn a_spring_forward_does_not_move_a_daily_reminder_for_good() {
         let anchor = berlin()
@@ -1626,12 +1576,6 @@ mod tests {
         );
     }
 
-    /// `INTERVAL` is capped because `next_after` walks the calendar a day at
-    /// a time, and `BYDAY` is read on every one of those days — so an
-    /// unbounded, un-deduped list was the same denial of service one field
-    /// over: a megabytes-long `BYDAY=MO,MO,MO,…` was parsed whole and then
-    /// scanned once per step, blocking a worker every time the row was read.
-    /// Seven weekdays exist; naming one twice means it once.
     #[test]
     fn a_byday_list_is_bounded_by_the_days_that_exist() {
         assert_eq!(
@@ -1678,16 +1622,6 @@ mod tests {
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T235959Z", at, berlin()).is_some());
     }
 
-    /// A date-only `UNTIL` names a day, and the day is the reader's.
-    ///
-    /// Read as 23:59:59 UTC and compared against occurrences resolved in the
-    /// reader's zone, every zone west of Greenwich lost the last day the
-    /// operator named: an 18:00 reminder on 1 September in Los Angeles is
-    /// 2026-09-02T01:00Z, which is past a UTC end-of-day for the 1st. The
-    /// reminder simply stopped a day early, silently.
-    ///
-    /// East of Greenwich the same arithmetic granted a day it should not have,
-    /// which is the other half of the same reading.
     #[test]
     fn a_date_only_until_is_the_readers_day_not_a_utc_instant() {
         let la: Tz = "America/Los_Angeles".parse().unwrap();
@@ -1712,22 +1646,6 @@ mod tests {
         assert!(next_after("FREQ=DAILY;UNTIL=20260901T000000Z", at, la).is_none());
     }
 
-    /// `UNTIL=20260916T090000`: a DATE-TIME with no `Z` and no offset.
-    ///
-    /// RFC 5545 allows it, and it is what a model writes when the prompt has
-    /// spent a paragraph asking it for local wall-clock times without a zone —
-    /// so of the three spellings this is the one the configured model reaches
-    /// for. Neither format matched it, `parse_rule` failed the whole rule, and
-    /// the reminder lost the only date its answer carried. The live base did
-    /// exactly that to a ticket presale page:
-    ///
-    ///   WARN rule outside the subset; the reminder is single
-    ///     rule=FREQ=WEEKLY;BYDAY=MO;UNTIL=20260916T090000
-    ///     error=UNTIL=20260916T090000 is not a date
-    ///
-    /// Floating means the reader's clock, which is the same reading the
-    /// date-only form already gets and for the same reason — so it is compared
-    /// as a wall clock, never turned into a UTC instant at parse time.
     #[test]
     fn a_floating_until_is_a_wall_clock_in_the_readers_zone() {
         let la: Tz = "America/Los_Angeles".parse().unwrap();

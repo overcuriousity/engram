@@ -689,16 +689,6 @@ mod tests {
         assert_eq!(t.open_count(), 1, "the second request reused the open core");
     }
 
-    /// Every `Core` is built from the config file, so every one of them starts
-    /// out ranking by what the file says. Deciding the generation once per
-    /// process — which is what `on_first_open` does — left that standing on
-    /// every core built afterwards: the base went on writing observations
-    /// under the adopted generation while the core served the file's
-    /// parameters, and nothing ever corrected it, because `FILE_PARAMS_SEEN`
-    /// had already recorded that this file was seen.
-    ///
-    /// The claim is spent by whoever opens first, and at boot that is the
-    /// repair ticker, on a transient core it drops immediately.
     #[tokio::test]
     async fn a_reopened_tenant_serves_what_the_base_adopted_and_not_the_file() {
         use crate::store::generations::{GenerationParams, NewGeneration};
@@ -812,9 +802,6 @@ mod tests {
         assert_eq!(t.control().users().await.unwrap().len(), 3);
     }
 
-    /// The sitting is what "eviction is transparent" has to mean to be worth
-    /// saying: stored data was never at risk, and the working memory search and
-    /// ask carry was, because `open` built a fresh `Core` on every cache miss.
     #[tokio::test]
     async fn an_evicted_tenant_comes_back_mid_sitting() {
         let (t, _dir) = test_tenants(1).await;
@@ -833,14 +820,6 @@ mod tests {
         );
     }
 
-    /// And the bound on that, so holding working memory across eviction is not
-    /// a row per subject the process has ever served.
-    ///
-    /// A subject is dropped one open later than it becomes idle, and that is
-    /// deliberate rather than missed: `working_for` runs while the registry
-    /// still holds the tenant it is about to evict, so the first open after an
-    /// eviction still sees the outgoing `Core` holding its own state. The next
-    /// one sweeps it. The map is bounded either way, which is all this is for.
     #[tokio::test]
     async fn a_subject_with_nothing_warm_left_is_dropped_from_the_working_map() {
         let (t, _dir) = test_tenants(1).await;
@@ -872,9 +851,6 @@ mod tests {
         assert_eq!(t.working_count(), 2);
     }
 
-    /// `open` is a cache miss, not a first sight. Past the cap it runs again
-    /// for a tenant this process has already opened — and what rides along
-    /// with it is a scroll of the whole collection.
     #[tokio::test]
     async fn the_first_open_work_is_claimed_once_per_process_however_often_a_tenant_reopens() {
         let (t, _dir) = test_tenants(1).await;
@@ -908,17 +884,6 @@ mod tests {
     }
 }
 
-/// Name the settings this tenant is retrieving under, so that what use leaves
-/// behind has something to be evidence *about*.
-///
-/// Beside `embed_recipe_check` and for the same reason: per tenant, answered
-/// from the config and the base together, and asked once when a base opens
-/// rather than on every request.
-///
-/// Both models are pinned, as one string. The ask model writes the citations
-/// and the synthesize model writes the artifacts they cite, so either changing
-/// shifts what the evidence means — and a composite says that without a second
-/// column to keep in step.
 pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
     let params = crate::store::generations::GenerationParams::from(
         *core
@@ -952,24 +917,6 @@ pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Say it out loud when the embedding recipe changed under a base that already
-/// has vectors in it.
-///
-/// `model`, `dim` and the three templates together decide what a stored vector
-/// means (`EmbedRole::fingerprint`). Change any of them and the vectors already
-/// in the collection describe the old recipe while every new query is rendered
-/// through the new one — a base that answers worse for no visible reason, with
-/// nothing in any log tying it to the config edit that caused it.
-///
-/// A warning and not a refusal: the operator may be mid-migration, and a base
-/// that will not open is worse than one that says what is wrong with it. The
-/// fingerprint is stored either way, so the warning is printed once rather than
-/// on every open.
-///
-/// Here rather than at startup because `meta` is per tenant, which is the whole
-/// reason it stayed out of the control database: it also holds the sweep
-/// cursors, and one shared row would have one tenant's recipe describing
-/// everybody's collection.
 pub async fn embed_recipe_check(core: &Core, cfg: &Config) -> Result<()> {
     const KEY: &str = "embed.recipe";
     let now = cfg.infer.embed.fingerprint();

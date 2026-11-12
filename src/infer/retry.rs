@@ -111,8 +111,6 @@ mod tests {
         }
     }
 
-    /// The case this module exists for: the endpoint said "not now", and by the
-    /// second ask it was ready.
     #[tokio::test(start_paused = true)]
     async fn a_busy_endpoint_is_asked_again() {
         let calls = AtomicUsize::new(0);
@@ -127,8 +125,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 2, "the retry never happened");
     }
 
-    /// A refusal is the same answer however many times it is asked, and asking
-    /// again spends a person's second on a foregone conclusion.
     #[tokio::test(start_paused = true)]
     async fn a_rejection_is_not_retried() {
         let calls = AtomicUsize::new(0);
@@ -144,9 +140,6 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1, "a refusal was re-asked");
     }
 
-    /// The backstop. Nothing is coming back, and the loop still has to end
-    /// inside the budget — the person who typed and then stopped is waiting on
-    /// this, with a spinner.
     #[tokio::test(start_paused = true)]
     async fn the_budget_bounds_the_whole_call() {
         let started = tokio::time::Instant::now();
@@ -170,8 +163,6 @@ mod tests {
         assert!((2..=32).contains(&n), "{n} attempts inside the budget");
     }
 
-    /// The last word is the endpoint's, not a summary of the attempts: an
-    /// operator reading the log needs what it actually said.
     #[tokio::test(start_paused = true)]
     async fn the_error_returned_is_the_last_one() {
         let calls = AtomicUsize::new(0);
@@ -190,8 +181,6 @@ mod tests {
         assert_eq!(detail, format!("attempt {last}"));
     }
 
-    /// A budget too small to spend is not a licence to skip the call — the
-    /// first attempt is not a retry, and it always happens.
     #[tokio::test(start_paused = true)]
     async fn the_first_attempt_is_never_the_one_that_is_skipped() {
         let calls = AtomicUsize::new(0);

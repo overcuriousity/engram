@@ -174,9 +174,6 @@ mod tests {
         }
     }
 
-    /// "Written by a model" is the thesis of the application as a number, and
-    /// a passage is the document's own words. Counting by negation put every
-    /// passage on the model's side of that line.
     #[tokio::test]
     async fn a_passage_is_not_something_a_model_wrote() {
         let store = Store::memory().await.unwrap();
@@ -210,10 +207,6 @@ mod tests {
         );
     }
 
-    /// `half_life_days <= 0` is how this project spells "decay off", and the
-    /// query path acts on it (`links::decayed`). Clamping it to one second
-    /// said the opposite: a base search treats as fully activated reported as
-    /// entirely out of reach.
     #[tokio::test]
     async fn decay_turned_off_leaves_everything_where_it_was() {
         let store = Store::memory().await.unwrap();
@@ -253,11 +246,6 @@ mod tests {
         assert_eq!(on[3].count, 0);
     }
 
-    /// The failure this column was rebanded to stop: read raw, an artifact
-    /// nobody has ever opened slid down the bands as the calendar moved,
-    /// because with `retrieved` at zero nothing tops it back up. Read as
-    /// engagement it stays where it belongs — at nothing — however old it is,
-    /// and an artifact that *was* opened stays distinguishable from it.
     #[tokio::test]
     async fn an_untouched_artifact_never_leaves_the_bottom_band() {
         let store = Store::memory().await.unwrap();

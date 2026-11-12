@@ -1463,8 +1463,6 @@ impl Store {
 #[cfg(test)]
 mod tests {
 
-    /// A store with one generation live, and a helper that lists artifacts in
-    /// the order given so a rank is a known quantity.
     async fn observed_base() -> (Store, String) {
         use crate::store::generations::{GenerationParams, NewGeneration};
         let store = Store::memory().await.unwrap();
@@ -1553,13 +1551,6 @@ mod tests {
         assert!(store.search_context(&id).await.unwrap().is_none());
     }
 
-    /// The band is recorded after the whole *pool*, which is
-    /// `feedback.candidates` wide, while the window a person reads is `limit`.
-    /// Reading `search_candidates.rank` straight through gave a band hit at
-    /// screen position eleven an `observations.rank` of twenty-one, and
-    /// `eval::sweep` and `jobs::retract` both take `rank - 1` as the place
-    /// that was served — so every band open pushed the served baseline ten
-    /// places down and made a replay look better than it was.
     #[tokio::test]
     async fn an_open_in_the_band_is_recorded_at_the_place_it_was_on_screen() {
         let (store, generation) = observed_base().await;
@@ -1595,13 +1586,6 @@ mod tests {
         );
     }
 
-    /// The field value counted a confirmed band hit as a miss.
-    ///
-    /// `feedback_stats` resolved `expect_id` to a rank through a join that
-    /// excluded band rows, so an artifact the association appended, opened,
-    /// and then confirmed as the answer joined to nothing: counted in `finds`
-    /// ("never returned"), dropped out of recall@10, scored 0.0 MRR. Displayed
-    /// quality fell every time the band did what it is for.
     #[tokio::test]
     async fn a_confirmed_hit_in_the_band_is_a_find_at_the_place_it_was_on_screen() {
         let (store, _) = observed_base().await;
@@ -1629,8 +1613,6 @@ mod tests {
         assert!((s.mrr - 1.0 / 3.0).abs() < 1e-9, "{}", s.mrr);
     }
 
-    /// The same read, from the other side: a shown ranked hit's pool position
-    /// *is* its screen position, and nothing about the band may move it.
     #[tokio::test]
     async fn a_ranked_open_keeps_its_place_whatever_is_appended_under_it() {
         let (store, generation) = observed_base().await;
@@ -1652,15 +1634,6 @@ mod tests {
         assert_eq!(obs[0].rank, Some(3));
     }
 
-    /// The half of exploration that makes the evidence worth gathering.
-    ///
-    /// An exploring search lends its last visible row to the top candidate the
-    /// ranking cut. If the open were then credited to that row, the ranking
-    /// would be recorded as having surfaced at rank three something it had in
-    /// fact hidden at rank six — and the tuner would read its own intervention
-    /// back as proof that the current settings were right. Charged to
-    /// `explored_from`, the same open says the opposite, which is what it
-    /// actually means.
     #[tokio::test]
     async fn an_open_on_an_explored_row_is_charged_to_the_rank_the_ranking_chose() {
         use crate::store::observations::Source;
@@ -1908,8 +1881,6 @@ mod tests {
         }
     }
 
-    /// The next keystroke from a page already holding `prev` — what the box
-    /// sends once an answer has named the event it was recorded under.
     fn after(prev: &str, query: &str, door: Door) -> NewEvent {
         NewEvent {
             fold_onto: Some(prev.to_string()),
@@ -2163,12 +2134,6 @@ mod tests {
         assert!(!store.open_event(&id, "a1").await.unwrap());
     }
 
-    /// A skip is a statement about the question that was on screen. The fold
-    /// replaces every part of the row except its id — query, vector, pool,
-    /// filters, moment — so the statement no longer has a subject, and
-    /// `dealable!` excluding skipped events made a brand-new question
-    /// permanently invisible to `pending_count`. Nothing else ever clears the
-    /// flag: `unjudge` was fixed for this; the fold is the other door in.
     #[tokio::test]
     async fn a_fold_onto_a_skipped_event_is_a_new_question_and_waits_again() {
         let (store, _) = observed_base().await;
@@ -2437,8 +2402,6 @@ mod tests {
         assert_eq!(store.pending_count(0.3).await.unwrap(), 1);
     }
 
-    /// A stored capture and something of it to point a coverage row at.
-    /// `gap_coverage` carries foreign keys onto both.
     async fn answering_capture(store: &Store) -> (String, String) {
         let src = store
             .insert_corpus("The ID photo is on Wednesday at 09:00.", "web", None)

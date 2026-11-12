@@ -161,8 +161,6 @@ fn take_lines<'a>(
 mod tests {
     use super::*;
 
-    /// Three windows as the splitter would hand them over: the first opens the
-    /// document, the rest are body.
     fn windows() -> Vec<String> {
         let body = |from: usize, to: usize| {
             (from..to)

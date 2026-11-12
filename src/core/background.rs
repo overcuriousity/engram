@@ -588,14 +588,6 @@ pub const ASSOCIATE_TARGET: &str = "collection";
 #[cfg(test)]
 mod tests {
 
-    /// Nothing that needs a judge is armed without one.
-    ///
-    /// Finding the pairs needs no model and is worth doing regardless — they
-    /// wait on the pair queue for a person. Arming the *judging* without one
-    /// is a treadmill: `dedupe::run` finds no judge and returns `Ok(())`,
-    /// `run_claimed` closes the unit as done work, the pair is still
-    /// `Pending`, and the next tick arms the same pairs again — for ever,
-    /// while `did_work` reports progress the whole time.
     #[tokio::test]
     async fn dedupe_judging_is_not_armed_on_a_base_with_no_judge() {
         use crate::store::jobs::Stage;
@@ -627,8 +619,6 @@ mod tests {
         assert!(super::periodic_period(&core, Stage::ArmDedupe).is_none());
     }
 
-    /// The instance-wide half of a repair tick: one control database, one pass,
-    /// covering every tenant's stuck work rather than the caller's alone.
     #[tokio::test]
     async fn a_repair_tick_requeues_stuck_work_for_every_tenant() {
         let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
@@ -658,12 +648,6 @@ mod tests {
         assert_eq!(pending, 2, "one tenant's stuck work was left running");
     }
 
-    /// Ageing is a per-tenant budget, not one budget the instance shares out.
-    ///
-    /// Shared, `AGE_PER_TICK` was the same twenty however many people used the
-    /// instance — ten users past the threshold got two promotions an hour each
-    /// — and oldest-first over the whole table meant the tenant with the
-    /// deepest backlog took all of it and the others got none.
     #[tokio::test]
     async fn every_tenant_gets_its_own_ageing_budget() {
         let (tenants, a, b, _dir) = crate::tenants::test_support::two_tenants().await;
@@ -710,10 +694,6 @@ mod tests {
         }
     }
 
-    /// A walk over every registered user must not decide what the registry
-    /// holds. Opening each tenant through `get` did: the pass ended with the
-    /// last `max_open_tenants` users it happened to reach resident and whoever
-    /// was actually being served evicted behind them.
     #[tokio::test]
     async fn a_repair_pass_does_not_evict_the_tenant_somebody_is_using() {
         let (tenants, _dir) = crate::tenants::test_support::test_tenants(1).await;

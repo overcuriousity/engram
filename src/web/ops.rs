@@ -242,14 +242,6 @@ pub(crate) fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    /// Every button in the artifact pane that posts to `/ui/ops` must carry an
-    /// `hx-post` and a `to`, or pressing it from a search result navigates the
-    /// whole window away and the results being worked through are gone — the
-    /// failure `ReturnTo` exists to prevent. "Restore the last version" was a
-    /// bare `<form method="post">` for exactly as long as nothing checked, and
-    /// `uncondense_ui` redirected to /ui/insights whatever page it was pressed
-    /// from. Asserted over the template rather than on that one button, so the
-    /// next button added is held to it too.
     #[test]
     fn every_ops_button_in_the_artifact_pane_returns_to_where_it_was_pressed() {
         let tpl = include_str!("templates/_artifact_detail.html");
@@ -488,18 +480,6 @@ mod tests {
         );
     }
 
-    /// Restore has to stamp whichever row was hiding the artifact, and a
-    /// supersession is one of them.
-    ///
-    /// A *buried* artifact can also be superseded — `graveyard_list` filters
-    /// on neither — so such a row appears under Restore, and
-    /// `Core::reactivate` falls straight through to `unsupersede_locked` for
-    /// it. (A deprecated one no longer reaches here: `artifacts_by_status`
-    /// leaves the superseded to `superseded_artifacts`, which is the row that
-    /// can name the winner.) Unstamped, the supersession's journal row stayed
-    /// open, which is what `dedupe::taken_back_before` reads to hand a pair to
-    /// a person rather than ruling on it again: the sweep simply re-applied
-    /// the supersession the operator had just undone.
     #[tokio::test]
     async fn restoring_a_superseded_artifact_stamps_the_supersession() {
         use crate::store::actions::{Job, Kind, NewAction};

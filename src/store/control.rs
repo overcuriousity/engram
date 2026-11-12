@@ -575,12 +575,6 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// The mirror of the tenant side's "must not have applied half the file".
-    ///
-    /// A drop is the one irreversible step in `migrate`, so a control database
-    /// that is refused has to come out of it exactly as it went in — otherwise
-    /// the operator cannot put the previous binary back either, and both
-    /// directions are broken at once.
     #[tokio::test]
     async fn a_refused_migration_must_not_have_dropped_a_column() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -623,12 +617,6 @@ mod tests {
         );
     }
 
-    /// The relate backstop hands over `limit * 8` ids — four thousand for its
-    /// one production call — and `pending_artifacts_are_isolated` hands over
-    /// however many chunks a source has. Unchunked, both fail with `too many
-    /// SQL variables` on a SQLite older than 3.32, and the backstop fails
-    /// silently: it is a repair pass that only logs, so it would simply stop
-    /// running.
     #[tokio::test]
     async fn asking_about_more_targets_than_sqlite_takes_parameters_for() {
         let c = Control::memory().await.unwrap();
@@ -737,7 +725,6 @@ mod tests {
         assert_eq!(before.created_at, after.created_at);
     }
 
-    /// A pool with nothing in it, so a test can put an older schema there.
     async fn empty_pool() -> sqlx::SqlitePool {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
@@ -749,10 +736,6 @@ mod tests {
             .unwrap()
     }
 
-    /// `CREATE TABLE IF NOT EXISTS` leaves an existing table's columns alone,
-    /// so without this the first query naming the new column is where an
-    /// upgraded instance finds out — a bare `no such column`, from the middle
-    /// of somebody's request.
     #[tokio::test]
     async fn a_control_database_older_than_the_schema_refuses_at_boot() {
         let pool = empty_pool().await;
@@ -770,13 +753,6 @@ mod tests {
         assert!(e.contains("users.slug"), "{e}");
     }
 
-    /// The exception, and the same one `Store::migrate` makes: a column added
-    /// beside the others with a default no existing row needs to have been
-    /// written with is added, not refused.
-    /// The mirror of the additive case: a column the schema used to have and no
-    /// longer does has to go, or the `INSERT` in `provision` that stopped naming
-    /// it fails against a leftover `NOT NULL` with no default — which presents
-    /// as a 500 at the door for the next person to sign in after an upgrade.
     #[tokio::test]
     async fn an_instance_has_one_vapid_keypair_that_survives_a_reread() {
         use base64::Engine;

@@ -643,9 +643,6 @@ mod tests {
         .unwrap()
     }
 
-    /// The server POSTs to whatever is stored here — once for the test button,
-    /// and on a timer thereafter — from its own network position. The two-way
-    /// answer over loopback is a port scan of the machine one entry at a time.
     #[tokio::test]
     async fn revoking_a_token_can_be_undone() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -744,9 +741,6 @@ mod tests {
         assert!(push_url("gotify_url", "not a url").is_err());
     }
 
-    /// After #52 every user has their own base, and nothing anywhere said
-    /// which account was looking at one. Settings is where account things
-    /// live; it was also the one page a phone could not reach.
     #[tokio::test]
     async fn an_unconfigured_subsystem_shows_no_entry_point() {
         let (app, cookie) =
@@ -784,10 +778,6 @@ mod tests {
         );
     }
 
-    /// `/ui/app` draws the pairing code, and the app's own screen says to
-    /// come to Settings for it. Nothing here linked it: the page was reachable
-    /// by typing its URL, or by finding the sentence about it on the
-    /// extension's install page.
     #[tokio::test]
     async fn settings_links_the_page_that_pairs_a_phone() {
         let (app, cookie) = app_with_cookie(crate::core::test_support::test_core().await).await;

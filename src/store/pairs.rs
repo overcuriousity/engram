@@ -1746,9 +1746,6 @@ impl Store {
 mod tests {
     use super::*;
 
-    /// The operator's judgement, kept beside the judge's rather than on top of
-    /// it. `state` says what the model found; this says what a person decided
-    /// to do about it, and both are worth having.
     #[tokio::test]
     async fn a_pair_remembers_that_a_person_asked_for_a_synthesis() {
         let s = Store::memory().await.unwrap();
@@ -1837,7 +1834,6 @@ mod tests {
         );
     }
 
-    /// One set of pairs under all three counts, whoever touched a pair last.
     #[tokio::test]
     async fn a_band_record_counts_an_operators_undo_and_not_an_operators_press() {
         use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
@@ -1903,7 +1899,6 @@ mod tests {
     use crate::store::Store;
     use crate::store::artifacts::NewArtifact;
 
-    /// `n` artifacts under one corpus, for the cases that need more than a pair.
     async fn n_artifacts(s: &Store, n: usize) -> Vec<String> {
         let src = s.insert_corpus("x", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = (0..n)
@@ -2126,13 +2121,6 @@ mod tests {
         );
     }
 
-    /// Reopening is the other half of that column meaning anything: a row put
-    /// back on the queue has been decided by nobody again.
-    ///
-    /// The case that makes it concrete is an operator's. They dismiss a pair,
-    /// the loser is later restored, `reopen_stale_pairs` puts the row back to
-    /// `pending` — and with `decided_by` left standing the row reads "pending,
-    /// decided by operator": a person's name on a question still being asked.
     #[tokio::test]
     async fn reopening_a_pair_takes_the_old_decider_off_it() {
         let s = Store::memory().await.unwrap();
@@ -2158,8 +2146,6 @@ mod tests {
         );
     }
 
-    /// The same for the sweep's own reopening, which has no operator in it but
-    /// the identical failure: a `pending` row asserting an author.
     #[tokio::test]
     async fn reopening_an_oversized_pair_takes_the_old_decider_off_it() {
         let s = Store::memory().await.unwrap();
@@ -2175,7 +2161,6 @@ mod tests {
         assert_eq!(s.get_pair(p).await.unwrap().decided_by, None);
     }
 
-    /// And for the unsettle a failed side effect leaves behind.
     #[tokio::test]
     async fn unsettling_a_pair_takes_the_old_decider_off_it() {
         let s = Store::memory().await.unwrap();
@@ -2270,7 +2255,6 @@ mod tests {
         }
     }
 
-    /// Four artifacts under one corpus, for the component tests.
     async fn four_artifacts(s: &Store) -> Vec<String> {
         let src = s.insert_corpus("four", "web", None).await.unwrap();
         let new: Vec<NewArtifact> = (0..4)
@@ -2699,11 +2683,6 @@ mod tests {
         assert_eq!(s.get_pair(id).await.unwrap().merged_into, None);
     }
 
-    /// The settlement this whole column exists for. A merge the judge applied
-    /// unattended is the most attributable answer the queue has, and it was the
-    /// one row landing with `decided_by` unset — which the column defines as
-    /// "still open, or written before this existed". The review surface could
-    /// not tell an applied merge from a legacy row.
     #[tokio::test]
     async fn an_applied_merge_says_who_applied_it() {
         let s = Store::memory().await.unwrap();
@@ -2729,11 +2708,6 @@ mod tests {
         );
     }
 
-    /// One button, one attribution. `merge::undo` settles the pairs it finds
-    /// through `pairs_among` as the operator who pressed it and reaches this
-    /// for the rest — which before `finish` runs is *every* pair the merge
-    /// settled. Recording those two halves differently made how an undo is
-    /// remembered depend on whether the embed had landed yet.
     #[tokio::test]
     async fn dismissing_a_merge_s_pairs_carries_the_name_the_undo_gives_it() {
         let s = Store::memory().await.unwrap();
@@ -2788,8 +2762,6 @@ mod tests {
         );
     }
 
-    /// The whole point of re-pointing: C was a duplicate of B, B is now inside
-    /// M, so C is a duplicate of M and the question survives the merge.
     #[tokio::test]
     async fn an_open_pair_follows_its_member_into_the_merge() {
         let s = Store::memory().await.unwrap();
@@ -2815,8 +2787,6 @@ mod tests {
         );
     }
 
-    /// A pair between the merge's two own sources becomes a pair of the merge
-    /// with itself. There is no question left in it.
     #[tokio::test]
     async fn a_pair_between_two_sources_of_the_same_merge_is_dismissed() {
         let s = Store::memory().await.unwrap();
@@ -2836,9 +2806,6 @@ mod tests {
         );
     }
 
-    /// An operator's decision outlives the merge. Re-pointing onto a pair
-    /// someone already dismissed must not put that question back, which is the
-    /// same property `record_pair`'s `INSERT OR IGNORE` provides.
     #[tokio::test]
     async fn re_pointing_onto_an_existing_pair_leaves_the_existing_row_alone() {
         let s = Store::memory().await.unwrap();
@@ -2873,9 +2840,6 @@ mod tests {
         );
     }
 
-    /// The re-pointed row asks a different question than the one that earned
-    /// the counters, so it must not inherit a backoff from artifacts it no
-    /// longer names.
     #[tokio::test]
     async fn a_re_pointed_pair_starts_its_attempts_over() {
         let s = Store::memory().await.unwrap();
@@ -2899,9 +2863,6 @@ mod tests {
         assert_eq!(moved.judge_unreadable, 0);
     }
 
-    /// Only pending rows move. A settled pair is an answered question, and
-    /// moving it would re-file someone's verdict against an artifact it was
-    /// never about.
     #[tokio::test]
     async fn a_settled_pair_is_not_re_pointed() {
         let s = Store::memory().await.unwrap();
@@ -2925,9 +2886,6 @@ mod tests {
         );
     }
 
-    /// The state was terminal and reached without a call: the component
-    /// flattened past the cap and every pair in it was settled before the model
-    /// saw anything. Sixteen of these exist in the field.
     #[tokio::test]
     async fn an_oversized_pair_goes_back_into_the_queue() {
         let s = Store::memory().await.unwrap();
@@ -2956,12 +2914,6 @@ mod tests {
         assert_eq!(s.reopen_oversized().await.unwrap(), 0);
     }
 
-    /// "A refused row never spent a call" holds for most of them and not for
-    /// all: the sweep recorded an attempt against every pair of a component, so
-    /// a pair could take an unreadable reply, stay pending, and be settled
-    /// `Oversized` only later when its component grew past the cap. Reopened
-    /// with that count intact it comes back at the ceiling — pending, held back
-    /// by `pairs_to_judge`, and so never judged and never surfaced again.
     #[tokio::test]
     async fn an_oversized_pair_that_spent_calls_is_judgeable_again() {
         let s = Store::memory().await.unwrap();
@@ -2993,10 +2945,6 @@ mod tests {
         );
     }
 
-    /// A pair naming an artifact that has just been superseded is a question
-    /// about something no longer in results. The merge path already moves those
-    /// onto the artifact that replaced them; a supersession has exactly the same
-    /// shape, and left them behind.
     #[tokio::test]
     async fn an_open_pair_follows_its_member_into_a_supersession() {
         let s = Store::memory().await.unwrap();
@@ -3015,8 +2963,6 @@ mod tests {
         assert_eq!(sides, want, "the pair still names the artifact that lost");
     }
 
-    /// The two sides of the supersession are the pair. Nothing is left to ask:
-    /// re-pointing it would make the winner a pair with itself.
     #[tokio::test]
     async fn a_pair_between_the_two_sides_of_a_supersession_is_settled() {
         let s = Store::memory().await.unwrap();
@@ -3045,10 +2991,6 @@ mod tests {
         );
     }
 
-    /// A verdict is carried over rather than thrown away or re-asked. The judge
-    /// found two artifacts that disagree; the one that survived the supersession
-    /// still disagrees with the other side, and re-filing it as pending would
-    /// spend a model call to learn what is already known.
     #[tokio::test]
     async fn a_verdict_keeps_its_state_when_it_follows_a_supersession() {
         let s = Store::memory().await.unwrap();
@@ -3093,11 +3035,6 @@ mod tests {
         );
     }
 
-    /// The sweep files pairs by cosine, so a supersession's winner usually
-    /// already has a row against the same neighbour the loser did. The moving
-    /// verdict cannot land on top of it — and dropping it silently left the
-    /// surviving row saying there was nothing to look at, which is the opposite
-    /// of what the judge found.
     #[tokio::test]
     async fn a_verdict_with_nowhere_to_land_reopens_the_row_standing_in_its_place() {
         let s = Store::memory().await.unwrap();
@@ -3144,9 +3081,6 @@ mod tests {
         );
     }
 
-    /// A person decided there was nothing here, and `record_pair`'s
-    /// `INSERT OR IGNORE` is built so that decision holds forever. A
-    /// supersession is not a reason to ask them again.
     #[tokio::test]
     async fn a_collision_leaves_a_dismissal_alone() {
         let s = Store::memory().await.unwrap();
@@ -3182,11 +3116,6 @@ mod tests {
         );
     }
 
-    /// `vacuous` is a ruling about the two bodies the judge read: it holds only
-    /// if *neither* states anything. Carried onto the winner it would assert
-    /// that of an artifact no judge ever saw — and the press it arms retires
-    /// both sides, so it would arm a destructive one against the artifact the
-    /// sweep had just picked as its cluster's keeper.
     #[tokio::test]
     async fn a_vacuous_verdict_does_not_follow_a_supersession() {
         let s = Store::memory().await.unwrap();
@@ -3213,10 +3142,6 @@ mod tests {
         );
     }
 
-    /// `A -> B -> C` is a state the merge path can reach, and reading only the
-    /// first hop meant A's questions were re-pointed onto an artifact that is
-    /// itself out of results — or, with a liveness test on that hop, left where
-    /// no queue lists them and no pass repairs them.
     #[tokio::test]
     async fn the_repair_follows_a_supersession_chain_to_its_end() {
         let s = Store::memory().await.unwrap();
@@ -3235,16 +3160,6 @@ mod tests {
         );
     }
 
-    /// Every state a person still owes an answer to is carried, listed and
-    /// repaired — including the one that waits on a press rather than a sweep.
-    ///
-    /// `Duplicate` is the judge's proposal that one artifact should hold what
-    /// both say, and it sits in the queue until somebody presses Synthese. It
-    /// was in none of the three open-state lists, so when a member was later
-    /// superseded the pair was carried nowhere and listed nowhere — and could
-    /// not be filed again either, because `record_pair` is `INSERT OR IGNORE`
-    /// over `UNIQUE(a_id, b_id)` and the row that already exists is the only
-    /// one there will ever be. The question was simply gone.
     #[tokio::test]
     async fn a_duplicate_pair_is_carried_onto_the_winner_like_any_other_open_one() {
         let s = Store::memory().await.unwrap();
@@ -3275,9 +3190,6 @@ mod tests {
         );
     }
 
-    /// The end of the chain is where a reader lands, and if that is out of
-    /// results too there is nothing to move the question to. The row is taken
-    /// off the queue instead, reversibly.
     #[tokio::test]
     async fn a_chain_that_ends_out_of_results_offers_nothing_to_repair() {
         let s = Store::memory().await.unwrap();
@@ -3298,10 +3210,6 @@ mod tests {
         assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
     }
 
-    /// `Stale` is not the operator's answer even when the row it lands on was
-    /// theirs. A contradiction a person escalated carries their name; leaving
-    /// it standing beside `'stale'` reads "an operator decided this went
-    /// stale", which is a lifecycle event nobody decided.
     #[tokio::test]
     async fn going_stale_does_not_leave_an_operator_s_name_on_the_row() {
         let s = Store::memory().await.unwrap();
@@ -3321,13 +3229,6 @@ mod tests {
         assert_eq!(p.decided_by, Some(DecidedBy::Model));
     }
 
-    /// The stale pass ran unbounded straight after a repair pass that takes 200
-    /// supersessions a sweep, so it reached everything the repair had not got to
-    /// yet and settled it `Stale` first. That is a one-way door:
-    /// `supersessions_with_open_pairs` does not select stale rows, and
-    /// `reopen_stale_pairs` needs both sides back in results, which a superseded
-    /// loser never is. The verdict was never carried onto the winner and no
-    /// later tick could carry it.
     #[tokio::test]
     async fn a_question_the_repair_still_owes_a_move_is_not_settled_first() {
         let s = Store::memory().await.unwrap();
@@ -3365,9 +3266,6 @@ mod tests {
         );
     }
 
-    /// The bound is on what the repair can still reach, and nothing else: a
-    /// deprecated side has no supersession to follow, so it settles the tick it
-    /// is found on, exactly as before.
     #[tokio::test]
     async fn a_deprecated_side_still_comes_off_the_queue_at_once() {
         let s = Store::memory().await.unwrap();
@@ -3379,10 +3277,6 @@ mod tests {
         assert_eq!(s.stale_unreachable_pairs().await.unwrap(), 1);
     }
 
-    /// The queue does not show a pair whose member has left results, which also
-    /// takes away the Dismiss button that would have settled it. A verdict has
-    /// no other drain — `arm_dedupe` only ever settles pending rows — so those
-    /// piled up where nobody could see or reach them.
     #[tokio::test]
     async fn a_verdict_nobody_can_act_on_comes_off_the_queue_and_back_again() {
         let s = Store::memory().await.unwrap();
@@ -3411,8 +3305,6 @@ mod tests {
         assert_eq!(s.get_pair(id).await.unwrap().state, PairState::Pending);
     }
 
-    /// One artifact coming back does not make a question answerable if the
-    /// other side is still away — every button on the card would still refuse.
     #[tokio::test]
     async fn a_restore_leaves_a_pair_whose_other_side_is_still_away() {
         let s = Store::memory().await.unwrap();
@@ -3436,9 +3328,6 @@ mod tests {
         assert_eq!(s.get_pair(id).await.unwrap().state, PairState::Stale);
     }
 
-    /// The judge proposed hiding the very artifact that has since been hidden.
-    /// Applying it now would supersede an artifact that already points at a
-    /// winner, which `Core::supersede` refuses — so the proposal is spent.
     #[tokio::test]
     async fn a_proposal_to_hide_the_side_that_lost_is_settled() {
         let s = Store::memory().await.unwrap();
@@ -3461,9 +3350,6 @@ mod tests {
         );
     }
 
-    /// Re-pointing onto a pair that already exists must leave the existing row
-    /// alone, whatever state it carries — the same rule the merge path keeps,
-    /// and what makes an operator's dismissal binding.
     #[tokio::test]
     async fn following_a_supersession_leaves_an_existing_pair_alone() {
         let s = Store::memory().await.unwrap();
@@ -3500,8 +3386,6 @@ mod tests {
         );
     }
 
-    /// A settled pair carries a decision about artifacts it was really about.
-    /// Moving it would re-file that decision against an artifact nobody judged.
     #[tokio::test]
     async fn a_settled_pair_is_not_dragged_into_a_supersession() {
         let s = Store::memory().await.unwrap();
@@ -3531,10 +3415,6 @@ mod tests {
         assert!(kept.a_id == *loser || kept.b_id == *loser);
     }
 
-    /// `Core::supersede` refuses a side that is not active, and search and Ask
-    /// read a disagreement only between two notes still in results. A pair
-    /// naming an artifact that has left results is therefore something
-    /// nothing can act on or show — it must not be listed.
     #[tokio::test]
     async fn a_pair_whose_member_left_results_is_not_awaiting_review() {
         let s = Store::memory().await.unwrap();
@@ -3553,8 +3433,6 @@ mod tests {
         assert_eq!(open[0].a_id, ids[2]);
     }
 
-    /// Superseded, not deprecated: the other half of `in_results`, and the one
-    /// that produced the error this was found by.
     #[tokio::test]
     async fn a_pair_naming_a_superseded_artifact_is_not_awaiting_review() {
         let s = Store::memory().await.unwrap();
