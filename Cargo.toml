@@ -20,7 +20,7 @@ required-features = ["contained"]
 axum = { version = "0.8.9", features = ["macros", "multipart"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.7", features = ["trace"] }
+tower-http = { version = "0.7", features = ["trace", "sensitive-headers"] }
 # No `migrate` feature: the schema is applied by `Store::migrate` and
 # `Control::migrate`, which read the columns a base has before they touch it.
 # `sqlx::migrate!` was never used, and the feature only compiled its machinery.

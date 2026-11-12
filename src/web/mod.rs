@@ -179,6 +179,17 @@ pub fn router(state: AppState) -> Router {
         ))
         .layer(sessions)
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::sensitive_headers::SetSensitiveResponseHeadersLayer::new([
+                axum::http::header::SET_COOKIE,
+            ]),
+        )
+        .layer(
+            tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::COOKIE,
+            ]),
+        )
         .with_state(state)
 }
 
@@ -491,6 +502,44 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
+    }
+
+    #[tokio::test]
+    async fn authorization_and_cookie_headers_are_marked_sensitive() {
+        let inner = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::get(|h: axum::http::HeaderMap| async move {
+                    format!(
+                        "{} {}",
+                        h["authorization"].is_sensitive(),
+                        h["cookie"].is_sensitive()
+                    )
+                }),
+            )
+            .layer(
+                tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::COOKIE,
+                ]),
+            );
+        let res = inner
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header("authorization", "Bearer x")
+                    .header("cookie", "a=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 100).await.unwrap();
+        assert_eq!(&body[..], b"true true");
+        let src = include_str!("mod.rs");
+        let code = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert!(code.contains("SetSensitiveRequestHeadersLayer::new(["));
+        assert!(code.contains("SetSensitiveResponseHeadersLayer::new(["));
     }
 
     #[test]

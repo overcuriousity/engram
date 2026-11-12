@@ -130,6 +130,53 @@ mod tests {
     use axum::http::StatusCode;
 
     #[test]
+    fn every_variant_maps_to_a_status_and_one_sentence() {
+        let all = [
+            Error::NotFound,
+            Error::Validation("q: empty".into()),
+            Error::Unauthorized,
+            Error::Forbidden,
+            Error::Inference {
+                role: "embed",
+                detail: "timeout".into(),
+            },
+            Error::InferenceRejected {
+                role: "embed",
+                detail: "too large".into(),
+            },
+            Error::InferenceBusy {
+                role: "embed",
+                detail: "429".into(),
+            },
+            Error::Vector("down".into()),
+            Error::Store("schema".into()),
+            Error::MalformedLlmOutput("json".into()),
+            Error::Internal("bug".into()),
+        ];
+        for e in all {
+            let status = e.status();
+            assert!(
+                status.is_client_error() || status.is_server_error(),
+                "{e:?}"
+            );
+            let m = e.client_message();
+            assert!(!m.is_empty(), "{e:?}");
+            assert!(m.trim_end_matches('.').matches(". ").count() == 0, "{m}");
+            if status.is_server_error()
+                && !matches!(
+                    e,
+                    Error::Inference { .. }
+                        | Error::InferenceRejected { .. }
+                        | Error::InferenceBusy { .. }
+                        | Error::Vector(_)
+                )
+            {
+                assert_eq!(m, "internal error", "{e:?} leaks its detail");
+            }
+        }
+    }
+
+    #[test]
     fn retryable_only_for_transient_failures() {
         assert!(
             Error::Inference {
