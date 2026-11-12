@@ -25,8 +25,7 @@
            wider, which is what lets the model read the passage in context, and
            it is what actually happens — including to any other red band inside
            the same window. #}
-        <form method="post" action="/ui/corpora/{{ id }}/reread"
-              onsubmit="return confirm('Read this passage again? One model call. Nothing already written from this capture is replaced — what comes back is added to it, and anything it repeats is folded by the dedupe sweep.')">
+        <form method="post" action="/ui/corpora/{{ id }}/reread">
           <input type="hidden" name="from" value="{{ b.from }}">
           {# Both ends: a passage nothing was written from does not stop at a
              window boundary, and naming only its first line re-read the window

@@ -75,7 +75,7 @@
    rather than however old the last tick left it. #}
 <p id="idle-foot" class="idle-foot muted" hx-swap-oob="true"
    {%- if reading %} hx-get="/ui/idle-foot" hx-swap="none"
-   hx-trigger="refresh, every 3s [!document.hidden && !this.closest('#idle')?.hidden]"{% endif %}>
+   hx-trigger="refresh, every 3s" data-poll-while-visible="#idle"{% endif %}>
 {%- if !held %}
   {# Nothing. No counts to print and no last capture to name, and the sentence
      that used to stand here was the third copy of one thought: the placeholder

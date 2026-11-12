@@ -1551,7 +1551,7 @@ mod tests {
             assert!(page.contains(t), "{t} is missing from the lineage: {page}");
         }
         assert!(
-            page.contains("--d:1"),
+            page.contains(r#"data-var-d="1""#),
             "the earlier merge's own sources are drawn under it: {page}"
         );
         assert!(

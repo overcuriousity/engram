@@ -27,16 +27,11 @@
 
 <h2>On a phone</h2>
 <p>Android: <a href="/ui/app">pair the app</a>.</p>
-<p>iOS: a bookmarklet or a Shortcut, each with its own token.</p>
+<p>iOS: a Shortcut with its own token.</p>
 
 {% match device_token %}
 {% when Some with (token) %}
 <p class="muted">Shown once. Copy it now.</p>
-<p><b>Bookmarklet.</b> Save as a bookmark; captures the selection or the address.</p>
-<p><a class="btn"
-      href="javascript:(function()&#123;fetch('{{ origin }}/api/v1/capture?title='+encodeURIComponent(document.title),&#123;method:'POST',headers:&#123;'content-type':'text/plain','authorization':'Bearer {{ token }}'&#125;,body:(window.getSelection().toString()||location.href)&#125;).then(function(r)&#123;alert(r.ok?'Captured.':'engram refused it: '+r.status)&#125;)&#125;)()">Capture
-to engram</a></p>
-
 <p><b>Shortcut.</b> Show in Share Sheet; one <em>Get Contents of URL</em> action:</p>
 <dl class="recipe">
   <dt>URL</dt><dd><code>{{ origin }}/api/v1/capture</code></dd>

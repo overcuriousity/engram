@@ -48,8 +48,7 @@
     <span class="gloss">split again, artifacts replaced</span>
     {% endif %}
     {% if image %}
-    <form method="post" action="/ui/corpora/{{ id }}/reprocess"
-          onsubmit="return confirm('Read the photo again? The current reading and its artifacts are replaced.')">
+    <form method="post" action="/ui/corpora/{{ id }}/reprocess">
       <input type="hidden" name="stage" value="describe">
       <button class="btn btn-sm" type="submit">Re-read</button>
     </form>
@@ -57,8 +56,7 @@
     {% endif %}
     {% if pdf %}
     <a class="btn btn-sm" href="/api/v1/corpora/{{ id }}/file">Original PDF</a>
-    <form method="post" action="/ui/corpora/{{ id }}/reprocess"
-          onsubmit="return confirm('Read the PDF again? The current extraction and its artifacts are replaced.')">
+    <form method="post" action="/ui/corpora/{{ id }}/reprocess">
       <input type="hidden" name="stage" value="extract">
       <button class="btn btn-sm" type="submit">Re-extract</button>
     </form>
@@ -69,8 +67,7 @@
       <button class="btn btn-sm" type="submit">Fetch again</button>
     </form>
     {% endif %}
-    <form method="post" action="/ui/corpora/{{ id }}/delete"
-          onsubmit="return confirm('Delete this source and all its artifacts?')">
+    <form method="post" action="/ui/corpora/{{ id }}/delete" data-pending-task-11>
       <button class="btn btn-sm btn-danger" type="submit">Delete</button>
     </form>
   </div>
@@ -99,8 +96,7 @@
     <a class="quiet-link" href="/api/v1/corpora/{{ id }}/image?original=1">original</a>
   </div>
   <a href="/api/v1/corpora/{{ id }}/image?original=1">
-    <img src="/api/v1/corpora/{{ id }}/image" alt="captured image"
-         style="max-width:100%;height:auto;border-radius:.4rem">
+    <img class="capture-photo" src="/api/v1/corpora/{{ id }}/image" alt="captured image">
   </a>
   {% if let Some(n) = note %}<p><b>Note:</b> {{ n }}</p>{% endif %}
   {% if !meta_rows.is_empty() %}
@@ -185,7 +181,7 @@
   <p class="muted">Nothing was captured here — this source has no text.</p>
   {% endif %}
   {% else %}
-  <div class="raw" style="max-height:none"><pre class="raw-flat">{{ raw_text }}</pre></div>
+  <div class="raw raw-unbounded"><pre class="raw-flat">{{ raw_text }}</pre></div>
   {% endif %}
 </div>
 {% else %}
@@ -205,7 +201,7 @@
      the verbatim text back in results and retires what was written. #}
   Promoted:
   {% for w in promoted %}
-  <form method="post" action="/ui/corpora/{{ id }}/segments/{{ w.idx }}/unpromote" style="display:inline">
+  <form method="post" action="/ui/corpora/{{ id }}/segments/{{ w.idx }}/unpromote" class="inline-form">
     lines {{ w.from }}–{{ w.to }}
     <button class="btn btn-ghost btn-sm" type="submit">Undo</button>
   </form>

@@ -94,7 +94,7 @@
    Nothing is drawn until the band lands, which is the honest state for a
    region whose contents are not known yet. #}
 <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
-     hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "", head: "1"}' hx-swap="outerHTML"></div>
+     hx-vals='{"head": "1"}' data-send-tz hx-swap="outerHTML"></div>
 
 {# Pursuits had a heading and a section of its own, below seven tables, to say
    one sentence. No table: a run that ended unsatisfied is a hole the base

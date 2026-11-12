@@ -8,7 +8,7 @@
    this card to line up with, so an off-centre card just reads as a mistake. #}
 {% block regions %}regions-center{% endblock %}
 {% block content %}
-<div class="card" style="max-width:22rem;margin:6rem auto">
+<div class="card login-card">
   {# The lockup below is a mark and a wordmark, not a heading. This is the
      page's top level, for the outline and for anything reading it aloud. #}
   <h1 class="sr-only">Sign in to engram</h1>
@@ -19,7 +19,7 @@
   <p class="muted brand-tag">A trace of everything worth keeping.</p>
   {% if oidc %}
     <p class="muted">Authentication is handled by your identity provider.</p>
-    <a class="btn btn-accent" href="/auth/login?go=1" style="width:100%">Continue</a>
+    <a class="btn btn-accent btn-block" href="/auth/login?go=1">Continue</a>
   {% else %}
     <p class="muted">Local development mode.</p>
     <form method="post" action="/auth/login" class="stack">
@@ -33,6 +33,6 @@
       <button class="btn btn-accent" type="submit">Sign in</button>
     </form>
   {% endif %}
-  {% if let Some(e) = error %}<p style="color:var(--color-danger)">{{ e }}</p>{% endif %}
+  {% if let Some(e) = error %}<p class="error-line">{{ e }}</p>{% endif %}
 </div>
 {% endblock %}

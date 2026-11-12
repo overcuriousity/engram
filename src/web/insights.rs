@@ -1447,7 +1447,7 @@ mod tests {
             "the same band the workspace column shows: {html}"
         );
         assert!(
-            html.contains(r#"head: "1""#),
+            html.contains(r#""head": "1""#),
             "and it is asked for with its heading: {html}"
         );
     }

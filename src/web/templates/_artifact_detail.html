@@ -17,11 +17,7 @@
      and the plain href never ran — the link swallowed the click and popped a
      history entry that was not there. What tells the two apart is whether
      there is a list to go back to. #}
-  <a class="back" href="/ui/search"
-     onclick="var r = document.querySelector('.region-rail');
-              if (!r) return true;
-              r.closest('.regions').classList.remove('has-selection');
-              history.back(); return false;">← Results</a>
+  <a class="back" href="/ui/search" data-back-to-results>← Results</a>
 
   {% if let Some(winner) = d.superseded_by %}
   <div class="flag" role="status">
@@ -115,8 +111,7 @@
     {# Deprecating hides an artifact and keeps it; this removes it from both
        stores and cannot be undone. Nothing else deletes an artifact — see
        `Core::heal_store_drift`. #}
-    <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
-          onsubmit="return confirm('Delete this artifact for good? It goes from both stores, anything written from it loses it as a source, and none of that can be undone. Hide keeps the artifact and only takes it out of results.')">
+    <form method="post" action="/ui/artifacts/{{ d.id }}/delete" data-pending-task-11>
       <button class="btn-icon btn-icon-danger" type="submit"
               title="Delete permanently" aria-label="Delete artifact permanently">
         {% include "_icon_trash.html" %}<span>Delete</span>
@@ -161,10 +156,7 @@
           {# The corpus page could edit an artifact and this one could not, on
              the screen whose whole subject is one artifact. Same box, same
              route; what differs is which shape comes back. #}
-          <button class="btn btn-ghost btn-sm" type="button"
-                  onclick="var f=document.getElementById('edit-{{ d.id }}');
-                           f.style.display='block';this.style.display='none';
-                           f.querySelector('textarea').focus()">Edit</button>
+          <button class="btn btn-ghost btn-sm" type="button" data-show="#edit-{{ d.id }}">Edit</button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
         {# Under the text, once it has been read: was it the one? Only where
@@ -248,19 +240,15 @@
            this pane with a pane. Without it the save would swap this whole
            screen for a card and lose the source, the lineage and the
            neighbours. `terms` rides along so the highlight survives the save. #}
-        <form id="edit-{{ d.id }}" style="display:none;margin-top:0.75rem"
+        <form id="edit-{{ d.id }}" class="edit-form" hidden
               hx-put="/ui/artifacts/{{ d.id }}"
               hx-target="closest [data-terms]" hx-swap="outerHTML">
           <input type="hidden" name="view" value="detail">
           <input type="hidden" name="terms" value="{{ d.terms }}">
-          <textarea class="textarea" name="text" style="min-height:12rem">{{ d.text }}</textarea>
-          <div class="row" style="margin-top:0.5rem">
+          <textarea class="textarea textarea-tall" name="text">{{ d.text }}</textarea>
+          <div class="row edit-actions">
             <button class="btn btn-accent btn-sm" type="submit">Save and re-embed</button>
-            <button class="btn btn-ghost btn-sm" type="button"
-                    onclick="var f=this.closest('form');f.style.display='none';
-                             f.parentElement.querySelector('.card-head button').style.display=''">
-              Cancel
-            </button>
+            <button class="btn btn-ghost btn-sm" type="button" data-hide="#edit-{{ d.id }}">Cancel</button>
           </div>
         </form>
         {# The reminder, by hand: when, how it repeats, and the way back to an
@@ -272,11 +260,11 @@
           <summary>{% if r.exists %}reminder{% if r.repeat != "once" %} · {{ r.repeat }}{% endif %}{% else %}+ reminder{% endif %}</summary>
           <form class="row" hx-post="/ui/artifacts/{{ d.id }}/reminder"
                 hx-target="closest [data-terms]" hx-swap="outerHTML"
-                {%~ if !r.exists %} hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}'{% endif %}>
+                {%~ if !r.exists %} data-send-tz{% endif %}>
             <input type="hidden" name="terms" value="{{ d.terms }}">
             {% if r.exists %}<input type="hidden" name="tz" value="{{ r.tz }}">{% endif %}
             <input type="datetime-local" name="when" class="input" value="{{ r.when }}" required>
-            <select name="repeat" class="input" onchange="this.form.rule.hidden = this.value !== 'custom'">
+            <select name="repeat" class="input" data-shows-rule>
               {% for n in ["once", "daily", "weekly", "monthly", "yearly", "custom"] %}
               <option value="{{ n }}"{% if r.repeat == *n %} selected{% endif %}>{{ n }}</option>
               {% endfor %}

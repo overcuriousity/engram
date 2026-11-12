@@ -1920,7 +1920,7 @@ mod tests {
             "the instant: {html}"
         );
         assert!(
-            html.contains("--heat: 0.500"),
+            html.contains(r#"data-var-heat="0.500""#),
             "halfway up the ramp: {html}"
         );
         assert!(html.contains("in 3h 00m"), "and it counts down: {html}");

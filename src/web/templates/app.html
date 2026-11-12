@@ -7,8 +7,8 @@
 <p>Server <strong>{{ origin }}</strong> · in the app, choose <em>Scan to pair</em></p>
 {% match code %}
 {% when Some with ((uri, svg)) %}
-<div class="qr" style="max-width:256px">{{ svg|safe }}</div>
-<p class="mono muted" style="word-break:break-all">{{ uri }}</p>
+<div class="qr">{{ svg|safe }}</div>
+<p class="mono muted break-all">{{ uri }}</p>
 <p class="muted">Valid two minutes, for one phone.</p>
 {% when None %}
 {% endmatch %}

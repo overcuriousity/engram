@@ -69,10 +69,10 @@
       var button = nudge.querySelector('[data-install]');
       button.hidden = false;
       button.addEventListener('click', function () {
-        var p = installPrompt;
+        var installEvent = installPrompt;
         installPrompt = null;
         stamp();
-        if (p) p.prompt();
+        if (installEvent) installEvent.prompt();
       });
     } else {
       nudge.querySelector('[data-install-how]').hidden = false;
@@ -2058,8 +2058,7 @@
 
     function unstage() {
       staged = null;
-      // The object URL holds the picture in memory until it is let go.
-      if (stagedUrl) { URL.revokeObjectURL(stagedUrl); stagedUrl = null; }
+      stagedUrl = null;
       stagedThumb.removeAttribute('src');
       stagedThumb.hidden = true;
       stagedName.hidden = true;
@@ -2112,9 +2111,16 @@
       stagedName.textContent = (file.name || 'photo.jpg') +
         ' — ready. Press Capture.';
       if (file.type.indexOf('image/') === 0) {
-        stagedUrl = URL.createObjectURL(file);
-        stagedThumb.src = stagedUrl;
-        stagedThumb.hidden = false;
+        // A data: URL, because the CSP's img-src allows data: and not blob:.
+        var reader = new FileReader();
+        var mine = file;
+        reader.onload = function () {
+          if (staged !== mine) return;
+          stagedUrl = reader.result;
+          stagedThumb.src = stagedUrl;
+          stagedThumb.hidden = false;
+        };
+        reader.readAsDataURL(file);
       }
       stagedName.hidden = false;
       stagedClear.hidden = false;
@@ -3369,4 +3375,88 @@
     }
   });
 
+})();
+
+// Behaviour the templates declare in data attributes; the CSP allows no inline code.
+(function () {
+  'use strict';
+  var VARS = ['heat', 'd'];
+
+  function applyVars(root) {
+    if (!root.querySelectorAll) return;
+    VARS.forEach(function (name) {
+      var attr = 'data-var-' + name;
+      var els = root.querySelectorAll('[' + attr + ']');
+      if (root.hasAttribute && root.hasAttribute(attr)) els = [root].concat(Array.prototype.slice.call(els));
+      Array.prototype.forEach.call(els, function (el) {
+        el.style.setProperty('--' + name, el.getAttribute(attr));
+      });
+    });
+  }
+
+  function zone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { return ''; }
+  }
+
+  document.addEventListener('click', function (e) {
+    var show = e.target.closest && e.target.closest('[data-show]');
+    if (show) {
+      var target = document.querySelector(show.getAttribute('data-show'));
+      if (target) {
+        target.hidden = false;
+        show.hidden = true;
+        var field = target.querySelector('textarea, input:not([type=hidden])');
+        if (field) field.focus();
+      }
+      return;
+    }
+    var hide = e.target.closest && e.target.closest('[data-hide]');
+    if (hide) {
+      var sel = hide.getAttribute('data-hide');
+      var t = document.querySelector(sel);
+      if (t) t.hidden = true;
+      document.querySelectorAll('[data-show="' + sel + '"]').forEach(function (b) { b.hidden = false; });
+      return;
+    }
+    var back = e.target.closest && e.target.closest('[data-back-to-results]');
+    if (back) {
+      var rail = document.querySelector('.region-rail');
+      if (!rail) return;
+      e.preventDefault();
+      rail.closest('.regions').classList.remove('has-selection');
+      history.back();
+    }
+  });
+
+  document.addEventListener('change', function (e) {
+    var select = e.target.closest && e.target.closest('[data-shows-rule]');
+    if (select && select.form && select.form.rule) {
+      select.form.rule.hidden = select.value !== 'custom';
+    }
+  });
+
+  document.addEventListener('htmx:configRequest', function (e) {
+    var elt = e.detail.elt;
+    if (!elt || !elt.closest) return;
+    if (elt.closest('[data-send-tz]')) e.detail.parameters.tz = zone();
+    if (elt.closest('[data-send-context]') && window.engramContext) {
+      e.detail.parameters.bundle = window.engramContext();
+    }
+  });
+
+  document.addEventListener('htmx:beforeRequest', function (e) {
+    var elt = e.detail.elt;
+    var scope = elt && elt.getAttribute && elt.getAttribute('data-poll-while-visible');
+    if (!scope) return;
+    var region = elt.closest(scope);
+    if (document.hidden || (region && region.hidden)) e.preventDefault();
+  });
+
+  document.addEventListener('htmx:afterSwap', function (e) { applyVars(e.detail.target || document); });
+  document.addEventListener('htmx:oobAfterSwap', function (e) { applyVars(e.detail.target || document); });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { applyVars(document); });
+  } else {
+    applyVars(document);
+  }
 })();

@@ -325,7 +325,7 @@
      the column, and comes back with it when the box is emptied. #}
   {% if recommend && idle_state %}
   <div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
-       hx-vals='js:{bundle: engramContext()}' hx-swap="outerHTML"></div>
+       data-send-context hx-swap="outerHTML"></div>
   {% endif %}
   {# In the document whatever state the page arrived in, unlike the offer: it
      records nothing by being fetched, and clearing a deep-link search has to
@@ -335,7 +335,7 @@
      of a three-column page, and `intersect` never fires for an element inside
      a hidden parent that is revealed later. #}
   <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
-       hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || ""}' hx-swap="outerHTML"></div>
+       data-send-tz hx-swap="outerHTML"></div>
   {# The list of what a paste becomes comes with the idle fragment below — see
      `_idle_foot.html`. It used to be rendered here, with the page, and a page
      is built once: the fifth capture left it standing until a reload. #}

@@ -47,7 +47,7 @@
      moving between polls — the band re-reads at most every five minutes, and a
      gradient that only steps five times an hour is not a gradient. #}
   <div class="due-row{% if r.overdue %} due-overdue{% endif %}{% if r.undated %} due-undated{% endif %}{% if r.fresh %} due-new{% endif %}"
-       {% if !r.undated %}style="--heat: {{ r.heat }}" data-due-at="{{ r.at }}"{% endif %}>
+       {% if !r.undated %}data-var-heat="{{ r.heat }}" data-due-at="{{ r.at }}"{% endif %}>
     {# A label that is the artifact's own opening rather than a name it was
        given is set as text — see `ui::RowLabel`. #}
     <a class="due-title{% if !r.named %} name-opening{% endif %}" href="/ui/artifacts/{{ r.artifact_id }}" title="{{ r.title }}">{{ r.title }}</a>

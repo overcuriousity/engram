@@ -40,7 +40,7 @@
 {% if !d.lineage.roots.is_empty() %}
 <ul class="lineage">
   {% for f in d.lineage.flat_roots() %}
-  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" style="--d:{{ f.depth }}">
+  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" data-var-d="{{ f.depth }}">
     {% if f.depth > 0 %}<span class="lin-tick" aria-hidden="true">{% if f.last %}└{% else %}├{% endif %}─</span>{% endif %}
     <div class="lin-body">
       <div class="lin-head">
@@ -78,7 +78,7 @@
 <div class="label pane-label">Replaced without being merged</div>
 <ul class="lineage">
   {% for f in d.lineage.flat_replaced() %}
-  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" style="--d:{{ f.depth }}">
+  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" data-var-d="{{ f.depth }}">
     <div class="lin-body">
       <div class="lin-head">
         {% if f.n.missing %}

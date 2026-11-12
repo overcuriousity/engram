@@ -7,24 +7,20 @@
   </div>
   <div class="md">{{ c.html|safe }}</div>
   <div class="chips">
-    <button class="btn btn-ghost btn-sm"
-            onclick="document.getElementById('edit-{{ c.id }}').style.display='block';this.style.display='none'">
-      Edit
-    </button>
+    <button class="btn btn-ghost btn-sm" type="button" data-show="#edit-{{ c.id }}">Edit</button>
     {# This page could delete the whole source but not one artifact out of it.
        Swaps its own card away and leaves the rest of the list alone. #}
     <button class="btn-icon btn-icon-danger" title="Delete artifact"
             aria-label="Delete artifact"
             hx-post="/ui/artifacts/{{ c.id }}/delete"
-            hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML"
-            hx-confirm="Delete this artifact for good? Deprecating hides it instead and can be undone.">
+            hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML" data-pending-task-11>
       {% include "_icon_trash.html" %}
     </button>
   </div>
-  <form id="edit-{{ c.id }}" style="display:none;margin-top:0.75rem"
+  <form id="edit-{{ c.id }}" class="edit-form" hidden
         hx-put="/ui/artifacts/{{ c.id }}" hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML">
-    <textarea class="textarea" name="text" style="min-height:8rem">{{ c.text }}</textarea>
-    <div class="row" style="margin-top:0.5rem">
+    <textarea class="textarea textarea-mid" name="text">{{ c.text }}</textarea>
+    <div class="row edit-actions">
       <button class="btn btn-accent btn-sm" type="submit">Save and re-embed</button>
     </div>
   </form>

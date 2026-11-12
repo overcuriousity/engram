@@ -3347,7 +3347,7 @@ mod tests {
         let page = get(&app, "/ui/search", &cookie).await;
         assert!(page.contains(r#"id="context-offer""#));
         assert!(page.contains(r#"hx-post="/ui/context""#));
-        assert!(page.contains("engramContext()"));
+        assert!(page.contains("data-send-context"));
         // The class the reserved height hangs off.
         assert!(page.contains(r#"class="offer""#));
     }
