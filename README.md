@@ -58,8 +58,9 @@ Open <http://127.0.0.1:8080/auth/login>. `--config` takes a path; otherwise
 `config.toml` in the working directory is read if present. `--print-config`
 prints the resolved configuration, redacted.
 
-`auth.mode = "local"` binds to loopback only; anything reachable from another
-machine wants `oidc`.
+Behind a proxy, set `server.public_url` to the https address users reach; it is
+required when `bind` is not loopback. `auth.mode = "local"` binds to loopback
+only.
 
 ### As a service
 

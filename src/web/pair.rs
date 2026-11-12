@@ -14,7 +14,7 @@ use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Form;
 use axum::Router;
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
@@ -45,47 +45,6 @@ pub fn is_extension_redirect(raw: &str) -> bool {
     EXTENSION_REDIRECT_HOSTS
         .iter()
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
-}
-
-/// The origin this deployment is being reached at.
-///
-/// Learned from the request rather than configured, because the signed
-/// extension is one artifact serving every deployment: an XPI is signed over
-/// its contents, so a manifest rewritten per host would invalidate the
-/// signature that makes one-click install work. The download and pairing pages
-/// carry the origin instead, and the extension asks for host permission for
-/// that one origin.
-pub fn request_origin(headers: &HeaderMap) -> Option<String> {
-    let host = headers.get(header::HOST)?.to_str().ok()?;
-    if host.is_empty() {
-        return None;
-    }
-    // `https` when the proxy did not say, because the proxy not saying is the
-    // common case — nginx forwards no `X-Forwarded-Proto` unless told to — and
-    // guessing wrong in that direction is the expensive one. This origin is
-    // shown to the operator as the address to pair with, and a deployment
-    // named `http://` there is a bearer token sent in cleartext. Loopback is
-    // the exception, and the one deployment genuinely reached without TLS.
-    let scheme = match headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(s) => s,
-        None if is_loopback(host) => "http",
-        None => "https",
-    };
-    Some(format!("{scheme}://{host}"))
-}
-
-/// Whether a `Host` names this machine, port and all.
-fn is_loopback(host: &str) -> bool {
-    // An IPv6 literal is bracketed and full of colons of its own, so the port
-    // separator is the one after the bracket rather than the first one.
-    let name = match host.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or(rest),
-        None => host.split(':').next().unwrap_or(host),
-    };
-    name == "localhost" || name == "::1" || name.starts_with("127.")
 }
 
 #[derive(Template)]
@@ -135,7 +94,7 @@ pub struct PairParams {
 /// the POST.
 async fn pair_page(
     tenant: Option<Tenant>,
-    headers: HeaderMap,
+    State(st): State<AppState>,
     Query(p): Query<PairParams>,
 ) -> UiResult<Response> {
     if !is_extension_redirect(&p.redirect_uri) {
@@ -145,7 +104,7 @@ async fn pair_page(
         .into());
     }
     Ok(HtmlTemplate(PairTemplate {
-        origin: request_origin(&headers).unwrap_or_default(),
+        origin: st.auth.deployment.base(),
         redirect_uri: p.redirect_uri,
         state: p.state,
         signed_in: tenant.is_some(),
@@ -155,6 +114,7 @@ async fn pair_page(
 
 async fn pair_submit(
     tenant: Tenant,
+    State(st): State<AppState>,
     headers: HeaderMap,
     Form(p): Form<PairParams>,
 ) -> UiResult<Response> {
@@ -164,7 +124,7 @@ async fn pair_submit(
         )
         .into());
     }
-    let origin = request_origin(&headers).unwrap_or_default();
+    let origin = st.auth.deployment.base();
     // The browser that asked, recorded with the token: every extension token
     // carries the same name, so this is the only thing telling one row from
     // another on the settings page.
@@ -214,7 +174,7 @@ pub fn pair_router() -> Router<AppState> {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{HeaderValue, Request};
+    use axum::http::Request;
     use tower::ServiceExt;
 
     #[test]
@@ -236,55 +196,6 @@ mod tests {
         ] {
             assert!(!is_extension_redirect(bad), "accepted {bad}");
         }
-    }
-
-    #[test]
-    fn the_pairing_page_carries_its_own_origin() {
-        // The extension must learn which origin to request host permission
-        // for without the operator typing it. The deployment knows it; the
-        // static, signed manifest cannot.
-        let mut h = HeaderMap::new();
-        h.insert("host", HeaderValue::from_static("engram.example"));
-        h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        assert_eq!(
-            request_origin(&h).as_deref(),
-            Some("https://engram.example")
-        );
-
-        // No `X-Forwarded-Proto`, which is what nginx sends unless it has been
-        // told otherwise. Guessing `http` there names the deployment by a
-        // scheme it does not answer on, and this origin is the address the
-        // operator is shown to pair with — a bearer token in cleartext.
-        let mut unforwarded = HeaderMap::new();
-        unforwarded.insert("host", HeaderValue::from_static("engram.example"));
-        assert_eq!(
-            request_origin(&unforwarded).as_deref(),
-            Some("https://engram.example")
-        );
-
-        // Loopback is the exception: the one deployment genuinely reached
-        // without TLS, and telling an operator to pair with `https://localhost`
-        // would send them somewhere nothing is listening.
-        for host in ["localhost:8080", "127.0.0.1:8080", "[::1]:8080"] {
-            let mut plain = HeaderMap::new();
-            plain.insert("host", HeaderValue::from_str(host).unwrap());
-            assert_eq!(
-                request_origin(&plain).as_deref(),
-                Some(format!("http://{host}").as_str()),
-                "{host}"
-            );
-        }
-
-        // An explicit header still wins in both directions.
-        let mut forwarded_plain = HeaderMap::new();
-        forwarded_plain.insert("host", HeaderValue::from_static("engram.example"));
-        forwarded_plain.insert("x-forwarded-proto", HeaderValue::from_static("http"));
-        assert_eq!(
-            request_origin(&forwarded_plain).as_deref(),
-            Some("http://engram.example")
-        );
-
-        assert_eq!(request_origin(&HeaderMap::new()), None);
     }
 
     #[tokio::test]
@@ -319,7 +230,7 @@ mod tests {
             .find_map(|kv| kv.strip_prefix("token="))
             .unwrap();
         assert!(fragment.contains("state=nonce123"));
-        assert!(fragment.contains("origin=https%3A%2F%2Fengram.example"));
+        assert!(fragment.contains("origin=http%3A%2F%2F127.0.0.1%3A8080"));
 
         let id = crate::auth::tokens::verify(&core.store.control, &percent_decode(token))
             .await

@@ -92,7 +92,11 @@ fn no_template_paragraph_is_longer_than_a_gloss() {
             }
         }
     }
-    assert!(offenders.is_empty(), "copy longer than a gloss:\n{}", offenders.join("\n"));
+    assert!(
+        offenders.is_empty(),
+        "copy longer than a gloss:\n{}",
+        offenders.join("\n")
+    );
 }
 
 #[test]
@@ -104,7 +108,9 @@ fn every_ui_error_is_one_sentence() {
     let mut offenders = Vec::new();
     let mut rest = body;
     while let Some(i) = rest.find('"') {
-        let Some(j) = rest[i + 1..].find('"') else { break };
+        let Some(j) = rest[i + 1..].find('"') else {
+            break;
+        };
         let lit = &rest[i + 1..i + 1 + j];
         rest = &rest[i + j + 2..];
         if !lit.contains(' ') {
@@ -115,5 +121,9 @@ fn every_ui_error_is_one_sentence() {
             offenders.push(lit.to_string());
         }
     }
-    assert!(offenders.is_empty(), "errors longer than a sentence:\n{}", offenders.join("\n"));
+    assert!(
+        offenders.is_empty(),
+        "errors longer than a sentence:\n{}",
+        offenders.join("\n")
+    );
 }

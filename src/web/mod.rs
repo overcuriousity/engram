@@ -20,6 +20,7 @@ pub mod ops;
 pub mod page;
 pub mod pair;
 pub mod push;
+pub mod security;
 pub mod settings;
 pub mod state;
 pub mod tenant;
@@ -161,6 +162,11 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// The router behind the security layer, as the server runs it.
+pub fn app(state: AppState, dep: &security::Deployment) -> Router {
+    security::secure(router(state), dep)
 }
 
 #[cfg(test)]

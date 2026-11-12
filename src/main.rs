@@ -16,9 +16,6 @@ struct Args {
     /// Print the effective config with secrets redacted, then exit.
     #[arg(long)]
     print_config: bool,
-    /// Permit auth.mode = "local" on a non-loopback bind address.
-    #[arg(long)]
-    i_know_this_is_insecure: bool,
     /// Print an argon2id hash for a password, for auth.local.password_hash.
     #[arg(long)]
     hash_password: Option<String>,
@@ -99,7 +96,7 @@ struct Args {
     cli: engram::cli::args::CliArgs,
 }
 
-fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
+fn validate_auth(cfg: &Config) -> Result<()> {
     match cfg.auth.mode {
         AuthMode::Oidc => {
             let Some(oidc) = &cfg.auth.oidc else {
@@ -143,7 +140,7 @@ fn validate_auth(cfg: &Config, insecure_ok: bool) -> Result<()> {
                     "auth.mode = \"local\" but no [auth.local] block".into(),
                 ));
             }
-            engram::auth::local::assert_bind_is_safe(&cfg.server.bind, insecure_ok)?;
+            engram::auth::local::assert_bind_is_safe(&cfg.server.bind)?;
         }
     }
     Ok(())
@@ -618,7 +615,10 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    validate_auth(&cfg, args.i_know_this_is_insecure)?;
+    validate_auth(&cfg)?;
+    let deployment = cfg
+        .deployment()
+        .map_err(|e| Error::Validation(e.to_string()))?;
 
     let cfg_arc = Arc::new(cfg.clone());
     let tenants = Arc::new(engram::tenants::Tenants::new(
@@ -634,16 +634,13 @@ async fn main() -> anyhow::Result<()> {
 
     let oidc = match cfg.auth.mode {
         AuthMode::Oidc => {
-            Some(engram::auth::oidc::OidcClient::discover(cfg.auth.oidc.as_ref().unwrap()).await?)
+            let oidc_cfg = cfg.auth.oidc.as_ref().ok_or_else(|| {
+                Error::Validation("auth.mode = \"oidc\" but no [auth.oidc] block".into())
+            })?;
+            Some(engram::auth::oidc::OidcClient::discover(oidc_cfg, &deployment.base()).await?)
         }
         AuthMode::Local => None,
     };
-    let secure_cookies = cfg
-        .auth
-        .oidc
-        .as_ref()
-        .map(|o| o.redirect_url.starts_with("https://"))
-        .unwrap_or(false);
 
     let state = engram::web::state::AppState {
         tenants: tenants.clone(),
@@ -653,7 +650,7 @@ async fn main() -> anyhow::Result<()> {
             local: cfg.auth.local.clone(),
             oidc,
             pending: engram::auth::oidc::PendingStore::new(),
-            secure_cookies,
+            deployment: deployment.clone(),
         }),
         ask_handoff: Default::default(),
     };
@@ -675,12 +672,16 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&cfg.server.bind).await?;
     tracing::info!(bind = %cfg.server.bind, mode = ?cfg.auth.mode, "engram listening");
 
-    axum::serve(listener, engram::web::router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
-        .await?;
+    axum::serve(
+        listener,
+        engram::web::app(state, &deployment)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("shutting down");
+    })
+    .await?;
 
     // Let in-flight jobs finish rather than orphaning `running` rows.
     let _ = shutdown_tx.send(true);
@@ -814,7 +815,7 @@ mod startup_tests {
         let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Oidc;
         cfg.auth.oidc = None;
-        assert!(validate_auth(&cfg, false).is_err());
+        assert!(validate_auth(&cfg).is_err());
     }
 
     #[test]
@@ -827,7 +828,7 @@ mod startup_tests {
         let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Oidc;
         cfg.auth.oidc = Some(oidc_cfg());
-        assert!(validate_auth(&cfg, false).is_err());
+        assert!(validate_auth(&cfg).is_err());
     }
 
     #[test]
@@ -837,7 +838,7 @@ mod startup_tests {
         let mut oidc = oidc_cfg();
         oidc.allowed_emails = vec!["me@example.com".into()];
         cfg.auth.oidc = Some(oidc);
-        assert!(validate_auth(&cfg, false).is_ok());
+        assert!(validate_auth(&cfg).is_ok());
     }
 
     #[test]
@@ -847,7 +848,7 @@ mod startup_tests {
         let mut oidc = oidc_cfg();
         oidc.open_registration = true;
         cfg.auth.oidc = Some(oidc);
-        assert!(validate_auth(&cfg, false).is_ok());
+        assert!(validate_auth(&cfg).is_ok());
     }
 
     fn oidc_cfg() -> engram::config::OidcConfig {
@@ -855,7 +856,6 @@ mod startup_tests {
             issuer_url: "https://idp.example".into(),
             client_id: "engram".into(),
             client_secret: Some("s".into()),
-            redirect_url: "https://engram.example/auth/callback".into(),
             scopes: vec!["openid".into()],
             open_registration: false,
             allowed_subs: vec![],
@@ -869,22 +869,18 @@ mod startup_tests {
         let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Local;
         cfg.auth.local = None;
-        assert!(validate_auth(&cfg, false).is_err());
+        assert!(validate_auth(&cfg).is_err());
     }
 
     #[test]
     fn local_mode_on_a_public_bind_is_refused() {
         let mut cfg = Config::test_default();
         cfg.server.bind = "0.0.0.0:8080".into();
-        assert!(validate_auth(&cfg, false).is_err());
-        assert!(
-            validate_auth(&cfg, true).is_ok(),
-            "explicit override must be honoured"
-        );
+        assert!(validate_auth(&cfg).is_err());
     }
 
     #[test]
     fn a_valid_local_config_passes() {
-        assert!(validate_auth(&Config::test_default(), false).is_ok());
+        assert!(validate_auth(&Config::test_default()).is_ok());
     }
 }

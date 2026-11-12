@@ -1896,6 +1896,7 @@ dependencies = [
  "htmd",
  "iana-time-zone",
  "image",
+ "ipnet",
  "kamadak-exif",
  "libsqlite3-sys",
  "llama-cpp-2",

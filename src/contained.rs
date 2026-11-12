@@ -223,6 +223,13 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
     }
     let (_, token) = crate::auth::tokens::mint(&control, TOKEN_NAME, SUBJECT, None).await?;
 
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(internal)?;
+    let addr = listener.local_addr().map_err(internal)?;
+    let port = addr.port();
+    let deployment = crate::web::security::Deployment::loopback(addr);
+
     let state = crate::web::state::AppState {
         tenants: tenants.clone(),
         config: cfg.clone(),
@@ -231,7 +238,7 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
             local: cfg.auth.local.clone(),
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: false,
+            deployment: deployment.clone(),
         }),
         ask_handoff: Default::default(),
     };
@@ -244,17 +251,17 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
         shutdown_rx.clone(),
     ));
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(internal)?;
-    let port = listener.local_addr().map_err(internal)?.port();
     let mut stop = shutdown_rx;
     let server = tokio::spawn(async move {
-        let served = axum::serve(listener, crate::web::router(state))
-            .with_graceful_shutdown(async move {
-                let _ = stop.wait_for(|s| *s).await;
-            })
-            .await;
+        let served = axum::serve(
+            listener,
+            crate::web::app(state, &deployment)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = stop.wait_for(|s| *s).await;
+        })
+        .await;
         if let Err(e) = served {
             tracing::error!(error = %e, "the contained listener stopped");
         }

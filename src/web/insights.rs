@@ -1194,8 +1194,7 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
                 )
             }
         }
-        _ => "set by hand or at boot."
-            .to_string(),
+        _ => "set by hand or at boot.".to_string(),
     };
     // Said in every mode, including the default. The block only ever spoke
     // when autonomy was *not* moving the ranking, so the one setting a reader

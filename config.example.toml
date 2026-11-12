@@ -9,6 +9,12 @@ mode = "full"
 
 [server]
 bind = "127.0.0.1:8080"
+# The https address users reach; required unless bind is loopback.
+# public_url = "https://engram.example"
+# Proxies whose X-Forwarded-For is trusted.
+# trusted_proxies = ["127.0.0.1/32", "::1/128"]
+# Permit an http public_url on a non-loopback host.
+# allow_plain_http = false
 # Job-queue workers; one is right when every role shares one GPU.
 workers = 1
 # base64 SHA-256 of the certificate's SPKI, carried in the pairing code; unset pins on first sight.

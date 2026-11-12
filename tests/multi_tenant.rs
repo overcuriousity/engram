@@ -95,7 +95,10 @@ async fn two_tenant_app() -> (axum::Router, Signed, Signed, tempfile::TempDir) {
             local: None,
             oidc: None,
             pending: engram::auth::oidc::PendingStore::new(),
-            secure_cookies: false,
+            deployment: engram::web::security::Deployment::loopback(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))),
         }),
         ask_handoff: Default::default(),
     };

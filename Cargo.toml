@@ -96,6 +96,7 @@ encoding_rs = "0.8.35"
 docling = { version = "=1.53.0", default-features = false, features = ["pdf-text"] }
 
 url = "2"
+ipnet = "2"
 
 # The pairing QR, drawn on the server as inline SVG so the page needs no
 # script and no image route. Pure Rust. Default features off: `image` pulls

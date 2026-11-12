@@ -190,7 +190,7 @@ async fn start_session(
         [
             (
                 header::SET_COOKIE,
-                set_session_cookie(&sid, st.auth.secure_cookies),
+                set_session_cookie(&sid, st.auth.deployment.secure_cookies()),
             ),
             (
                 header::LOCATION,

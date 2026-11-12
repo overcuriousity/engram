@@ -796,8 +796,7 @@ async fn mcp_guard(
 /// rmcp's DNS-rebinding guard accepts loopback hosts only, which is right for
 /// a laptop and wrong behind a reverse proxy: there the Host header is the
 /// deployment's public name, and a guard that does not know it answers 403 to
-/// every remote client. The public host comes from the OIDC redirect URL, the
-/// one place the configuration already states its own address.
+/// every remote client. The public host comes from `server.public_url`.
 fn service_config(
     public_host: Option<String>,
 ) -> rmcp::transport::streamable_http_server::StreamableHttpServerConfig {
@@ -932,7 +931,12 @@ fn service_for(
 }
 
 pub fn mcp_router(state: AppState) -> Router<AppState> {
-    let public_host = state.auth.oidc.as_ref().and_then(|o| o.public_host());
+    let public_host = state
+        .auth
+        .deployment
+        .public_url
+        .as_ref()
+        .and_then(|u| u.host_str().map(str::to_string));
     let cap = state.config.store.max_open_tenants;
     let tenants = state.tenants.clone();
     let services: std::sync::Arc<TenantServices> = Default::default();

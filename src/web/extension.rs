@@ -8,10 +8,10 @@
 use crate::tenants::Tenant;
 use crate::web::assets::Assets;
 use crate::web::auth_routes::HtmlTemplate;
-use crate::web::pair::request_origin;
 use crate::web::state::AppState;
 use askama::Template;
 use axum::Router;
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -54,9 +54,9 @@ impl InstallTemplate {
 /// The download page. Authenticated like everything else, and it carries this
 /// deployment's origin into the pairing link — the static, signed manifest
 /// cannot know it, so the page is where it is learned.
-async fn install_page(_tenant: Tenant, headers: HeaderMap) -> Response {
+async fn install_page(_tenant: Tenant, State(st): State<AppState>) -> Response {
     HtmlTemplate(InstallTemplate {
-        origin: request_origin(&headers).unwrap_or_default(),
+        origin: st.auth.deployment.base(),
         xpi_signed: Assets::get("extension/firefox.signed").is_some(),
         device_token: None,
     })
@@ -71,7 +71,7 @@ async fn install_page(_tenant: Tenant, headers: HeaderMap) -> Response {
 /// plaintext is shown on this one render and never again — the store keeps only
 /// its argon2id hash — so a second phone presses the button again rather than
 /// sharing the first one's credential.
-async fn phone_token(tenant: Tenant, headers: HeaderMap) -> Response {
+async fn phone_token(tenant: Tenant, State(st): State<AppState>, headers: HeaderMap) -> Response {
     let minted = crate::auth::tokens::mint(
         &tenant.core.store.control,
         "phone",
@@ -89,7 +89,7 @@ async fn phone_token(tenant: Tenant, headers: HeaderMap) -> Response {
         }
     };
     HtmlTemplate(InstallTemplate {
-        origin: request_origin(&headers).unwrap_or_default(),
+        origin: st.auth.deployment.base(),
         xpi_signed: Assets::get("extension/firefox.signed").is_some(),
         device_token,
     })
@@ -313,9 +313,6 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8(body.to_vec()).unwrap();
-        // `https`, with no `X-Forwarded-Proto` to go on. A deployment on a
-        // real host name is behind TLS, and a proxy that forwards without
-        // setting the header is the ordinary case rather than the exotic one.
-        assert!(html.contains("https://engram.example"), "got: {html}");
+        assert!(html.contains("http://127.0.0.1:8080"), "got: {html}");
     }
 }

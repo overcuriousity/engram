@@ -7,7 +7,7 @@
 use crate::error::Error;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
-use crate::web::pair::{request_origin, urlencode};
+use crate::web::pair::urlencode;
 use crate::web::state::AppState;
 use crate::web::ui_error::UiResult;
 use askama::Template;
@@ -66,20 +66,16 @@ impl AppTemplate {
     }
 }
 
-async fn app_page(_tenant: Tenant, headers: HeaderMap) -> Response {
+async fn app_page(_tenant: Tenant, State(st): State<AppState>) -> Response {
     HtmlTemplate(AppTemplate {
-        origin: request_origin(&headers).unwrap_or_default(),
+        origin: st.auth.deployment.base(),
         code: None,
     })
     .into_response()
 }
 
-async fn app_grant(
-    tenant: Tenant,
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> UiResult<Response> {
-    let origin = request_origin(&headers).unwrap_or_default();
+async fn app_grant(tenant: Tenant, State(st): State<AppState>) -> UiResult<Response> {
+    let origin = st.auth.deployment.base();
     let code = crate::auth::grants::mint(&tenant.core.store.control, &tenant.user.subject).await?;
     // Validated at load, so `Err` here is unreachable; `ok().flatten()`
     // rather than an unwrap because a page must not panic over config.
@@ -219,7 +215,7 @@ mod tests {
         let body = crate::web::test_support::body_of(res).await;
         assert!(!body.contains("engram://"), "a GET drew a code");
         assert!(
-            body.contains("https://engram.test"),
+            body.contains("http://127.0.0.1:8080"),
             "the page says where the phone will point"
         );
         let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pair_grants")
@@ -242,7 +238,7 @@ mod tests {
         // Askama escapes the query's `&` as `&#38;` in the text form; the
         // browser shows the URI with plain ampersands.
         assert!(
-            body.contains("engram://pair?o=https%3A%2F%2Fengram.test&#38;c="),
+            body.contains("engram://pair?o=http%3A%2F%2F127.0.0.1%3A8080&#38;c="),
             "no URI for this origin in: {body}"
         );
         assert!(body.contains("<svg"), "no picture");

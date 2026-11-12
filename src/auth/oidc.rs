@@ -165,19 +165,16 @@ pub struct OidcClient {
     /// for discovery is deliberately not kept — see `discover`.
     http: openidconnect::reqwest::Client,
     cfg: OidcConfig,
+    redirect_url: String,
 }
 
-/// The host this deployment is publicly reachable under, taken from the
-/// redirect URL — the one place the configuration already states its own
-/// public address. The MCP door's Host guard names it explicitly.
-pub(crate) fn host_of(url: &str) -> Option<String> {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_string))
+pub fn callback_url(base: &str) -> String {
+    format!("{}/auth/callback", base.trim_end_matches('/'))
 }
 
 impl OidcClient {
-    pub async fn discover(cfg: &OidcConfig) -> Result<OidcClient> {
+    /// `base` is the deployment's public origin; the callback is derived from it.
+    pub async fn discover(cfg: &OidcConfig, base: &str) -> Result<OidcClient> {
         use openidconnect::IssuerUrl;
         use openidconnect::core::CoreProviderMetadata;
 
@@ -216,12 +213,8 @@ impl OidcClient {
             metadata,
             http,
             cfg: cfg.clone(),
+            redirect_url: callback_url(base),
         })
-    }
-
-    /// The public host of this deployment, parsed from the redirect URL.
-    pub fn public_host(&self) -> Option<String> {
-        host_of(&self.cfg.redirect_url)
     }
 
     pub fn authorize_url(&self) -> Result<(String, PendingAuth)> {
@@ -237,7 +230,7 @@ impl OidcClient {
             self.cfg.client_secret.clone().map(ClientSecret::new),
         )
         .set_redirect_uri(
-            RedirectUrl::new(self.cfg.redirect_url.clone())
+            RedirectUrl::new(self.redirect_url.clone())
                 .map_err(|e| Error::Validation(format!("redirect_url: {e}")))?,
         );
 
@@ -290,7 +283,7 @@ impl OidcClient {
             self.cfg.client_secret.clone().map(ClientSecret::new),
         )
         .set_redirect_uri(
-            RedirectUrl::new(self.cfg.redirect_url.clone())
+            RedirectUrl::new(self.redirect_url.clone())
                 .map_err(|e| Error::Validation(format!("redirect_url: {e}")))?,
         );
 
@@ -383,7 +376,6 @@ mod tests {
             issuer_url: "https://idp.example".into(),
             client_id: "engram".into(),
             client_secret: Some("s".into()),
-            redirect_url: "https://engram.example/auth/callback".into(),
             scopes: vec!["openid".into()],
             open_registration: false,
             allowed_subs: subs.iter().map(|s| s.to_string()).collect(),
@@ -393,18 +385,15 @@ mod tests {
     }
 
     #[test]
-    fn the_public_host_is_parsed_out_of_the_redirect_url() {
+    fn the_oidc_callback_is_derived_from_public_url() {
         assert_eq!(
-            host_of("https://engram.example/auth/callback").as_deref(),
-            Some("engram.example")
+            callback_url("https://engram.example"),
+            "https://engram.example/auth/callback"
         );
-        // An explicit port is the proxy's business, not the Host guard's: the
-        // entry matches with or without one.
         assert_eq!(
-            host_of("https://engram.example:8443/auth/callback").as_deref(),
-            Some("engram.example")
+            callback_url("https://engram.example/"),
+            "https://engram.example/auth/callback"
         );
-        assert_eq!(host_of("not a url"), None);
     }
 
     #[test]

@@ -114,7 +114,14 @@ fn every_documented_pair_meets_its_floor_in_both_themes() {
     for (name, theme) in [("light", &light), ("dark", &dark)] {
         for bg in BACKGROUNDS {
             check(theme, name, "fg-primary", bg, 7.0, &mut failures);
-            for fg in ["fg-secondary", "fg-muted", "accent", "danger", "warning", "success"] {
+            for fg in [
+                "fg-secondary",
+                "fg-muted",
+                "accent",
+                "danger",
+                "warning",
+                "success",
+            ] {
                 check(theme, name, fg, bg, 4.5, &mut failures);
             }
             check(theme, name, "border-control", bg, 3.0, &mut failures);
@@ -132,7 +139,11 @@ fn every_documented_pair_meets_its_floor_in_both_themes() {
 fn no_background_or_body_text_is_pure_black_or_white() {
     let (light, dark) = themes();
     for theme in [&light, &dark] {
-        for token in ["--color-bg-base", "--color-bg-surface", "--color-fg-primary"] {
+        for token in [
+            "--color-bg-base",
+            "--color-bg-surface",
+            "--color-fg-primary",
+        ] {
             assert!(
                 !["#000000", "#ffffff"].contains(&theme[token].as_str()),
                 "{token} is {}",

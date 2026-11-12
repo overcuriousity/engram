@@ -967,6 +967,18 @@ pub struct ServerConfig {
     /// this process, which the process cannot see.
     #[serde(default)]
     pub tls_fingerprint: Option<String>,
+    /// The https address users reach; required unless `bind` is loopback.
+    #[serde(default)]
+    pub public_url: Option<String>,
+    #[serde(default = "default_trusted_proxies")]
+    pub trusted_proxies: Vec<String>,
+    /// Permits an http `public_url` on a non-loopback host.
+    #[serde(default)]
+    pub allow_plain_http: bool,
+}
+
+fn default_trusted_proxies() -> Vec<String> {
+    vec!["127.0.0.1/32".into(), "::1/128".into()]
 }
 
 impl ServerConfig {
@@ -2097,7 +2109,6 @@ pub struct OidcConfig {
     pub client_id: String,
     #[serde(default)]
     pub client_secret: Option<String>,
-    pub redirect_url: String,
     #[serde(default = "default_scopes")]
     pub scopes: Vec<String>,
     /// Admit everyone the identity provider authenticates, with no list to
@@ -2163,6 +2174,7 @@ impl Config {
                     .list_separator(","),
             )
             .build()?;
+        let raw = Self::read_secret_files(raw)?;
         Self::refuse_removed_keys(&raw)?;
         let mut cfg: Config = raw.clone().try_deserialize()?;
         cfg.apply_learn_mode(&raw);
@@ -2175,6 +2187,116 @@ impl Config {
         cfg.warn_on_inferred_ceiling_param();
         cfg.warn_on_unplaced_plan_cost();
         Ok(cfg)
+    }
+
+    /// `ENGRAM__A__B_FILE=/path` sets `a.b` to that file's contents, and any
+    /// string value `file:///path` is replaced by the contents of `/path`.
+    fn read_secret_files(raw: config::Config) -> Result<config::Config, ConfigError> {
+        fn read(path: &str, key: &str) -> Result<String, ConfigError> {
+            std::fs::read_to_string(path)
+                .map(|s| s.trim_end_matches(['\n', '\r']).to_string())
+                .map_err(|e| ConfigError::Invalid(format!("cannot read {key} from {path}: {e}")))
+        }
+        fn walk(
+            prefix: &str,
+            v: &serde_json::Value,
+            out: &mut Vec<(String, String)>,
+        ) -> Result<(), ConfigError> {
+            match v {
+                serde_json::Value::Object(m) => {
+                    for (k, v) in m {
+                        let key = if prefix.is_empty() {
+                            k.clone()
+                        } else {
+                            format!("{prefix}.{k}")
+                        };
+                        walk(&key, v, out)?;
+                    }
+                }
+                serde_json::Value::String(s) => {
+                    if let Some(path) = s.strip_prefix("file://") {
+                        out.push((prefix.to_string(), read(path, prefix)?));
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        let mut overrides = Vec::new();
+        for (name, path) in std::env::vars() {
+            let Some(rest) = name.strip_prefix("ENGRAM__") else {
+                continue;
+            };
+            let Some(key) = rest.strip_suffix("_FILE") else {
+                continue;
+            };
+            let key = key.to_ascii_lowercase().replace("__", ".");
+            overrides.push((key.clone(), read(&path, &key)?));
+        }
+        let tree: serde_json::Value = raw.clone().try_deserialize()?;
+        walk("", &tree, &mut overrides)?;
+        if overrides.is_empty() {
+            return Ok(raw);
+        }
+        let mut b = config::Config::builder().add_source(raw);
+        for (k, v) in overrides {
+            b = b.set_override(k, v)?;
+        }
+        Ok(b.build()?)
+    }
+
+    /// Where this instance is reached from, validated.
+    pub fn deployment(&self) -> Result<crate::web::security::Deployment, ConfigError> {
+        use std::net::ToSocketAddrs;
+        let bind = self
+            .server
+            .bind
+            .to_socket_addrs()
+            .ok()
+            .and_then(|mut a| a.next())
+            .ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "server.bind {:?} is not an address",
+                    self.server.bind
+                ))
+            })?;
+        let trusted_proxies = self
+            .server
+            .trusted_proxies
+            .iter()
+            .map(|p| {
+                p.parse().map_err(|_| {
+                    ConfigError::Invalid(format!("server.trusted_proxies: {p:?} is not a network"))
+                })
+            })
+            .collect::<Result<Vec<ipnet::IpNet>, _>>()?;
+        let public_url = match self.server.public_url.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(u) => Some(url::Url::parse(u).map_err(|_| {
+                ConfigError::Invalid(format!("server.public_url {u:?} is not a URL"))
+            })?),
+        };
+        let dep = crate::web::security::Deployment {
+            public_url,
+            trusted_proxies,
+            allow_plain_http: self.server.allow_plain_http,
+            bind,
+        };
+        match &dep.public_url {
+            None if !bind.ip().is_loopback() => Err(ConfigError::Invalid(
+                "server.public_url is required when server.bind is not loopback.".into(),
+            )),
+            Some(u) if !matches!(u.scheme(), "https" | "http") => Err(ConfigError::Invalid(
+                "server.public_url must be an http(s) URL.".into(),
+            )),
+            Some(_) if dep.plain_http_remote() && !dep.allow_plain_http => {
+                Err(ConfigError::Invalid(
+                    "server.public_url is plain http; use https or set server.allow_plain_http."
+                        .into(),
+                ))
+            }
+            _ => Ok(dep),
+        }
     }
 
     /// Keys that used to mean something, and no longer exist.
@@ -2219,6 +2341,12 @@ impl Config {
                  capture then stays verbatim. config.example.toml has both shapes.",
                 found.join("\n")
             )));
+        }
+
+        if raw.get::<config::Value>("auth.oidc.redirect_url").is_ok() {
+            return Err(ConfigError::Invalid(
+                "auth.oidc.redirect_url is gone; set server.public_url.".into(),
+            ));
         }
 
         const REMOVED: [(&str, &str); 3] = [
@@ -2790,6 +2918,9 @@ impl Config {
                 bind: "127.0.0.1:8080".into(),
                 workers: 2,
                 tls_fingerprint: None,
+                public_url: None,
+                trusted_proxies: default_trusted_proxies(),
+                allow_plain_http: false,
             },
             store: StoreConfig::default(),
             vector: VectorConfig {
@@ -3689,6 +3820,89 @@ mode = "off"
     }
 
     #[test]
+    fn a_public_url_is_required_off_loopback() {
+        let mut cfg = Config::test_default();
+        cfg.server.bind = "0.0.0.0:8080".into();
+        let err = cfg.deployment().unwrap_err().to_string();
+        assert!(err.contains("server.public_url"), "{err}");
+        cfg.server.public_url = Some("https://engram.example".into());
+        assert!(cfg.deployment().is_ok());
+        let loopback = Config::test_default();
+        assert!(loopback.deployment().unwrap().public_url.is_none());
+    }
+
+    #[test]
+    fn plain_http_off_loopback_needs_allow_plain_http() {
+        let mut cfg = Config::test_default();
+        cfg.server.public_url = Some("http://engram.lan".into());
+        let err = cfg.deployment().unwrap_err().to_string();
+        assert!(err.contains("allow_plain_http"), "{err}");
+        cfg.server.allow_plain_http = true;
+        let dep = cfg.deployment().unwrap();
+        assert!(!dep.secure_cookies());
+        cfg.server.allow_plain_http = false;
+        cfg.server.public_url = Some("http://localhost:8080".into());
+        assert!(cfg.deployment().is_ok(), "loopback http needs no opt-in");
+    }
+
+    #[test]
+    fn a_config_with_redirect_url_is_refused_and_names_public_url() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let p = write(
+            &dir,
+            &format!(
+                "{MINIMAL}\n[auth.oidc]\nissuer_url = \"https://idp.example\"\nclient_id = \"engram\"\nredirect_url = \"https://engram.example/auth/callback\"\n"
+            ),
+        );
+        let err = Config::load(Some(&p)).unwrap_err().to_string();
+        assert!(
+            err.contains("auth.oidc.redirect_url is gone; set server.public_url."),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_secret_can_come_from_a_file_env_or_a_file_url() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("key");
+        std::fs::write(&secret, "s3cret\n").unwrap();
+        let p = write(&dir, MINIMAL);
+        temp_env::with_var(
+            "ENGRAM__VECTOR__API_KEY_FILE",
+            Some(secret.to_str().unwrap()),
+            || {
+                let cfg = Config::load(Some(&p)).unwrap();
+                assert_eq!(cfg.vector.api_key.as_deref(), Some("s3cret"));
+            },
+        );
+        let p = write(
+            &dir,
+            &MINIMAL.replace(
+                "collection = \"chunks\"",
+                &format!(
+                    "collection = \"chunks\"\napi_key = \"file://{}\"",
+                    secret.display()
+                ),
+            ),
+        );
+        let cfg = Config::load(Some(&p)).unwrap();
+        assert_eq!(cfg.vector.api_key.as_deref(), Some("s3cret"));
+    }
+
+    #[test]
+    fn the_oidc_callback_is_derived_from_public_url() {
+        let mut cfg = Config::test_default();
+        cfg.server.public_url = Some("https://engram.example/".into());
+        let dep = cfg.deployment().unwrap();
+        assert_eq!(
+            crate::auth::oidc::callback_url(&dep.base()),
+            "https://engram.example/auth/callback"
+        );
+    }
+
+    #[test]
     fn env_overrides_file() {
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -3765,6 +3979,9 @@ mode = "off"
             bind: "127.0.0.1:8080".into(),
             workers: 1,
             tls_fingerprint: Some(padded),
+            public_url: None,
+            trusted_proxies: default_trusted_proxies(),
+            allow_plain_http: false,
         };
         let got = cfg.fingerprint().unwrap().unwrap();
         assert_eq!(got.len(), 43);
@@ -3775,6 +3992,9 @@ mode = "off"
             bind: "127.0.0.1:8080".into(),
             workers: 1,
             tls_fingerprint: None,
+            public_url: None,
+            trusted_proxies: default_trusted_proxies(),
+            allow_plain_http: false,
         };
         assert_eq!(unset.fingerprint().unwrap(), None);
     }

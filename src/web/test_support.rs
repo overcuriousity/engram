@@ -26,7 +26,10 @@ pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> ax
             local,
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: false,
+            deployment: crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))),
         }),
         ask_handoff: Default::default(),
     })
@@ -58,7 +61,7 @@ pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web
             local: None,
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: mode == crate::config::AuthMode::Oidc,
+            deployment: crate::web::test_support::deployment_for(mode),
         }),
         ask_handoff: Default::default(),
     }
@@ -82,7 +85,10 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
             local: None,
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: false,
+            deployment: crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))),
         }),
         ask_handoff: Default::default(),
     };
@@ -792,4 +798,16 @@ pub(crate) fn chunk_fixture(title: Option<&str>, text: &str) -> crate::store::ar
         retired_at: None,
         reaped_at: None,
     }
+}
+
+/// Loopback for local mode, an https public URL for OIDC.
+pub fn deployment_for(mode: crate::config::AuthMode) -> crate::web::security::Deployment {
+    let mut d = crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8080,
+    )));
+    if mode == crate::config::AuthMode::Oidc {
+        d.public_url = url::Url::parse("https://engram.test").ok();
+    }
+    d
 }
