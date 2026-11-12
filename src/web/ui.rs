@@ -2371,7 +2371,7 @@ mod tests {
             "and it is retirable in one piece: {html}"
         );
         assert!(
-            html.contains("Kept from"),
+            html.contains("Answer to"),
             "the question it answered is named"
         );
 
@@ -2688,7 +2688,7 @@ mod tests {
         // box, where the eye already is. The foot below it says nothing at all.
         let html = get(&app, "/ui", &cookie).await;
         assert!(
-            html.contains("Paste anything worth keeping"),
+            html.contains("Paste a note"),
             "the empty base says what to do"
         );
         assert!(
@@ -4830,7 +4830,7 @@ mod tests {
             "the flagged capture rendered as an ordinary one: {html}"
         );
         assert!(
-            html.contains("searchable like any other capture"),
+            html.contains("stored and searchable"),
             "it must say the capture is not held: {html}"
         );
         assert!(
@@ -7082,7 +7082,7 @@ mod tests {
         let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.gaps, s.pending), (1, 0), "{s:?}");
         assert!(
-            body_of(res).await.contains("recorded as a gap"),
+            body_of(res).await.contains("Recorded as a gap"),
             "the button did not say what it did"
         );
     }

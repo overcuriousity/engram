@@ -38,7 +38,7 @@ globalThis.engramApi = {
       // Unreachable is its own case, and it is not queued: the capture is
       // lost and the operator is told, rather than silently held in a queue
       // that may never drain.
-      throw new Error('engram is unreachable.');
+      throw new Error('Server unreachable.');
     }
 
     if (res.status === 401) {
@@ -47,7 +47,7 @@ globalThis.engramApi = {
       // is not a failed call — it is a panel that can never be used again
       // short of reinstalling the extension.
       await this.forget();
-      throw new Error('That token no longer works — pair again.');
+      throw new Error('Token no longer works; pair again.');
     }
     return res;
   },

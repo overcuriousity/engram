@@ -61,7 +61,7 @@ async function reflectPairing() {
 /// move on from: it is a state with one way out, so it shows the way out.
 async function requirePaired() {
   if (await reflectPairing()) return true;
-  say('Not paired yet — enter the address engram is reached at.', 'error');
+  say('Not paired. Enter the engram address.', 'error');
   $('origin').focus();
   return false;
 }
@@ -77,7 +77,7 @@ async function fail(e) {
 $('pair').addEventListener('click', async () => {
   const origin = cleanOrigin($('origin').value);
   if (!origin) {
-    say('That is not an address — try https://engram.example.', 'error');
+    say('Not an address; try https://engram.example.', 'error');
     return;
   }
 
@@ -127,7 +127,7 @@ $('forget').addEventListener('click', async () => {
   hasAllHosts = false;
   clearResults();
   $('recent-list').textContent = '';
-  say('Forgotten. The token is still listed under Housekeeping until revoked.');
+  say('Forgotten; revoke the token in Settings.');
   await reflectPairing();
 });
 
@@ -191,8 +191,7 @@ async function grab(scope) {
     // browser settings page, an add-on listing, a PDF viewer. "Cannot access
     // contents of the page" is true and useless; this says what to do.
     throw new Error(
-      'engram cannot read this tab. Right-click the page and choose ' +
-      '“Capture this page”, or allow engram to read pages when it asks.');
+      'Cannot read this tab; right-click it and choose “Capture this page”.');
   }
 }
 
@@ -200,8 +199,8 @@ async function grab(scope) {
 /// second set of words for the same three cases.
 function verdict(out) {
   if (out.duplicate) say('Already captured.');
-  else if (out.link_unread) say('Saved the link — the page could not be read (' + out.link_unread + '), so it is tried again later.');
-  else if (out.near_duplicate) say('Captured. It looks like something you already have — compare on Insights.');
+  else if (out.link_unread) say('Link saved; reading again later (' + out.link_unread + ').');
+  else if (out.near_duplicate) say('Captured; similar to a stored source.');
   else say('Captured.', 'good');
 }
 
@@ -394,7 +393,7 @@ async function runSearch() {
   if (q.length > MAX_QUERY) {
     // No turn taken and nothing cleared: what is on screen stays, and the hint
     // is there to say why it stopped moving.
-    hint('Longer than a query, so searching stopped. Ask and Capture still act on it.');
+    hint('Too long to search; Ask or Capture it.');
     return;
   }
   hint('');
@@ -560,7 +559,7 @@ $('ask').addEventListener('click', async () => {
     });
     if (mine === turn && !ended) {
       thinking('');
-      say('The connection closed before the answer finished.', 'error');
+      say('Connection closed before the answer finished.', 'error');
     }
   } catch (e) {
     // An abandoned ask throws where it was aborted, and that is this panel's

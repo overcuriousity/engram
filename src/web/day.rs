@@ -413,7 +413,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(html.contains("not configured on this base"), "{html}");
+        assert!(html.contains("Reminders off"), "{html}");
     }
 
     #[tokio::test]

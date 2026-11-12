@@ -481,7 +481,7 @@ pub(crate) async fn test_channel(
             Ok(()) => Ok(()),
             Err(e) => {
                 tracing::warn!(error = %e, channel, "the test push could not be delivered");
-                Err("Could not send — the endpoint did not take it. The server log has the transport detail.".into())
+                Err("Not delivered; see the server log.".into())
             }
         },
     )
@@ -910,6 +910,6 @@ mod tests {
         // like a backlog.
         let html = settings_fixture(vec![]);
         assert!(!html.contains("Minted by"), "{html}");
-        assert!(html.contains("No tokens yet"), "{html}");
+        assert!(html.contains("No tokens."), "{html}");
     }
 }

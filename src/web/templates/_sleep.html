@@ -15,7 +15,7 @@
 <div id="sleep" class="judge-tune">
   <h3>Last night</h3>
   {% if s.runs.is_empty() %}
-  <p class="muted hint">The base has not slept yet: it sleeps after {{ s.idle_mins }} quiet minutes, on the retention sweep's tick.</p>
+  <p class="muted hint">Not slept yet · after {{ s.idle_mins }} quiet minutes</p>
   {% else %}
   {# Not `mono`. These are sentences now that the ids are gone, and a
      proportional face is what a sentence is read in. #}

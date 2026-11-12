@@ -351,7 +351,7 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8_lossy(&body);
-        assert!(html.contains("not signed in"), "got {html}");
+        assert!(html.contains("Not signed in"), "got {html}");
         // The state carries through, so continuing after sign-in resumes this
         // flow rather than starting a new one.
         assert!(html.contains("value=\"n1\""), "got {html}");

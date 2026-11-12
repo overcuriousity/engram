@@ -1495,7 +1495,7 @@
 
   function failedSwap(target, xhr) {
     if (!target || !target.id) return;
-    var reason = 'engram is unreachable.';
+    var reason = 'Server unreachable.';
     if (xhr) reason = reasonOf(xhr) || ('engram answered ' + xhr.status + '.');
     var box = document.createElement('div');
     box.className = 'flag';
@@ -2154,7 +2154,7 @@
             .catch(function () { return { error: 'engram answered ' + r.status + '.' }; })
             .then(function (j) { return [r.ok, j]; });
         })
-        .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
+        .catch(function () { return [false, { error: 'Server unreachable.' }]; })
         .then(function (pair) {
           // Lifted before the branches: `refreshRail` below submits the form,
           // and a guard still standing would cancel the very refresh the

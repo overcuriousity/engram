@@ -1127,8 +1127,8 @@ async fn search_gap(
     axum::extract::Query(p): axum::extract::Query<GapParams>,
 ) -> UiResult<Response> {
     let line = match gap_search(&tenant, &id, &p.q).await? {
-        true => "recorded as a gap: your base doesn't know this yet.",
-        false => "nothing to record — that search was already judged.",
+        true => "Recorded as a gap.",
+        false => "Already judged.",
     };
     Ok(axum::response::Html(format!(r#"<span class="muted">{line}</span>"#)).into_response())
 }
@@ -1335,7 +1335,7 @@ mod tests {
             "seven shortcuts for moving through a list with nothing in it"
         );
         assert!(
-            empty.contains("Paste anything worth keeping"),
+            empty.contains("Paste a note"),
             "the placeholder names the one verb that can work"
         );
 
@@ -1379,11 +1379,11 @@ mod tests {
     async fn an_empty_base_says_what_this_is_and_whose_it_is() {
         let html = workspace("/ui").await;
         assert!(
-            html.contains("finds it again by meaning"),
+            html.contains("only you can search it"),
             "what the application does, in one clause"
         );
         assert!(
-            html.contains("nobody else can search this base"),
+            html.contains("Paste a note"),
             "and the boundary, which is what a person wants before pasting \
              their own notes onto someone else's server"
         );
@@ -1392,7 +1392,7 @@ mod tests {
             "the held pane's line, on a base that holds nothing"
         );
         assert!(
-            html.contains("kept exactly as you wrote it"),
+            html.contains("beside the original text"),
             "the pane says what will happen to the first thing pasted"
         );
     }
@@ -1728,7 +1728,7 @@ mod tests {
         assert!(post(app.clone(), cookie.clone()).await.trim().is_empty());
         let again = post(app, cookie).await;
         assert!(
-            again.contains("nothing was processed a second time"),
+            again.contains("not processed again"),
             "the second paste of the same text is a duplicate: {again}"
         );
         // And it still never promises reading it is not doing.

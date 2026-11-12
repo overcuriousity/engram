@@ -232,7 +232,7 @@ mod tests {
             !body.contains("engram_"),
             "the download page handed out a live token"
         );
-        assert!(body.contains("Mint a token for this phone"));
+        assert!(body.contains("Create a phone token"));
     }
 
     #[tokio::test]

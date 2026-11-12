@@ -29,16 +29,14 @@
   </div>
   {% if duplicate %}
   <p class="muted">
-    This text is already in the base, so nothing was processed a second time.
+    Already in the base; not processed again.
   </p>
   {% endif %}
   {% if let Some(other) = near_dupe_of %}
   <p class="muted">
-    This looks {{ near_dupe_percent }}% like
-    <a href="/ui/corpora/{{ other }}">an existing source</a>. It is stored and
-    searchable like any other capture; what the two repeat, the base merges or
-    hides on its own, with an undo <a href="/ui/insights">on Insights</a>.
+    Stored and searchable · {{ near_dupe_percent }}% like <a href="/ui/corpora/{{ other }}">an existing source</a>
   </p>
+  <p class="muted">Overlap is merged; undo on <a href="/ui/insights">Insights</a>.</p>
   {% endif %}
   <a href="/ui/corpora/{{ id }}">View source</a>
 </div>

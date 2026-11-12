@@ -61,9 +61,7 @@
     <div aria-hidden="true">⚠</div>
     <div>
       <b>Hidden as stale</b>
-      <div>Flagged stale, with no specific replacement. Search will not return
-        it and Ask will not read from it; it is still stored, and this link
-        still works. Reactivate puts it back in results.</div>
+      <div class="muted">Not in search or ask results.</div>
       <div class="chips">
         <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate"
           hx-post="/ui/ops/artifacts/{{ d.id }}/reactivate?terms={{ d.terms|urlencode }}"
@@ -131,11 +129,7 @@
     <div aria-hidden="true">⚠</div>
     <div>
       <b>Source not stored</b>
-      <div>This artifact was restored from the vector store after its row went
-        missing, and the document it came from was not in the database to
-        restore. The source shown beside it is the restored artifacts joined
-        together, not the original — line numbers and the highlighted span mean
-        nothing here, and re-segmenting would not reproduce this artifact.</div>
+      <div class="muted">Restored from the vector store; source text is a reconstruction.</div>
     </div>
   </div>
   {% endif %}

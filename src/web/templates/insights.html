@@ -11,8 +11,7 @@
 {% if held.corpora == 0 %}
 <div class="empty">
   <h2>Nothing is held yet</h2>
-  <p class="muted">This page measures what the base holds and says what it did
-    on its own. The measures wait on there being something in it.</p>
+  
   <p><a class="btn btn-ghost btn-sm" href="/ui">Back to the box</a></p>
 </div>
 {% else %}
@@ -153,8 +152,7 @@
    did, why, and the button that takes it back. #}
 {% if !set_aside.is_empty() %}
 <h2>What the base did</h2>
-<p class="muted">What it merged, wrote, hid and buried, and anything hidden by
-  hand. Nothing is deleted, and every row can be taken back.</p>
+<p class="muted">Merged, written, hidden, buried · every row can be undone</p>
 <table class="grid set-aside">
   <thead><tr><th>What</th><th>Why it is here</th><th>Beside it</th><th></th></tr></thead>
   <tbody>
@@ -203,7 +201,7 @@
   </tbody>
 </table>
 {% if set_aside_capped %}
-<p class="muted">Some of these lists are capped — the rest appear as these are cleared.</p>
+<p class="muted">Capped · more appear as these clear</p>
 {% endif %}
 {% endif %}
 
@@ -293,8 +291,7 @@
    this is here so the same thing does not happen twice. #}
 {% if !offer_rates.is_empty() %}
 <h3>What was offered</h3>
-<p class="muted">The last thirty days. A weekly pattern needs weeks, so a rate
-  measured over a day would be a number nobody could act on.</p>
+<p class="muted">Last 30 days</p>
 <table class="grid">
   <thead><tr><th>Rung</th><th>Shown</th><th>Opened</th></tr></thead>
   <tbody>
@@ -307,7 +304,7 @@
 
 {% if !retrying.is_empty() %}
 <h3>Retrying</h3>
-<p class="muted">Work that hit something and is waiting to try again. Nothing here needs you.</p>
+<p class="muted">Waiting to retry · nothing to do</p>
 <table class="grid">
   <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Next</th><th>Last error</th></tr></thead>
   <tbody>

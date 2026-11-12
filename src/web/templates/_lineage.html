@@ -29,14 +29,11 @@
 
 {% if d.merged && d.lineage.roots.is_empty() %}
 <p class="muted">
-  Every artifact this was written from has since been deleted. Its content is
-  still in the text above; what is gone is the record of where that content
-  came from.
+  Its sources were deleted; their content is kept above.
 </p>
 {% else if d.merged && d.orphaned_source %}
 <p class="muted">
-  One of the artifacts this was written from has since been deleted. Its
-  content is still in the text above; only the link to it is gone.
+  One source was deleted; its content is kept above.
 </p>
 {% endif %}
 
@@ -108,7 +105,6 @@
 
 {% if d.lineage.truncated %}
 <p class="muted">
-  This history is deeper or wider than the page will draw; what is shown is the
-  most recent part of it.
+  Showing the most recent part of this history.
 </p>
 {% endif %}

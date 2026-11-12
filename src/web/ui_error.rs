@@ -60,23 +60,20 @@ impl UiError {
         match &self.0 {
             Error::NotFound => (
                 "Nothing at this address".into(),
-                "The page you asked for is not one this base has.".into(),
+                "This page does not exist.".into(),
             ),
             Error::Validation(what) => ("That request did not make sense".into(), what.clone()),
             Error::Unauthorized => (
                 "You are not signed in".into(),
-                "Sign in and try that again.".into(),
+                "Sign in, then try again.".into(),
             ),
             Error::Forbidden => (
                 "Not yours to open".into(),
-                "This account is not allowed to do that.".into(),
+                "This account may not do that.".into(),
             ),
             Error::Inference { role, .. } => (
                 "The model endpoint is not answering".into(),
-                format!(
-                    "The {role} role could not be reached. Nothing was lost — what is \
-                     stored is stored, and this can be tried again."
-                ),
+                format!("The {role} role could not be reached; nothing was lost, so try again."),
             ),
             Error::InferenceRejected { role, detail } => (
                 "The model endpoint refused that".into(),
@@ -84,23 +81,18 @@ impl UiError {
             ),
             Error::InferenceBusy { role, .. } => (
                 "The model endpoint is busy".into(),
-                format!(
-                    "The {role} role asked us to come back — it is rate limited, or still \
-                     loading. Nothing was lost, and the next try is likely to land."
-                ),
+                format!("The {role} role is rate limited or loading; try again shortly."),
             ),
             Error::Vector(_) => (
                 "The vector store is not answering".into(),
-                "Search and capture need it; what is already stored is untouched. \
-                 Check that Qdrant is running at the address in the config."
-                    .into(),
+                "Check that Qdrant is running at the configured address.".into(),
             ),
             // The detail on these carries schema fragments and prompt text —
             // `client_message` already refuses to send it, and a page is no
             // more entitled to it than the API is.
             Error::Store(_) | Error::MalformedLlmOutput(_) | Error::Internal(_) => (
                 "Something went wrong here".into(),
-                "The detail is in this instance's log.".into(),
+                "The detail is in the server log.".into(),
             ),
         }
     }

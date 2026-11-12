@@ -1129,7 +1129,7 @@ async fn rules_str(core: &crate::core::Core) -> Result<Option<String>> {
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
     let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     Ok(Some(format!(
-        "Last quiet period, {}, the base reconsidered {} of what it hid, took {} back, and restored {} for a search given up on.",
+        "Last quiet period, {}: {} reconsidered, {} taken back, {} restored.",
         ago(n("at")),
         n("reconsidered"),
         n("undone"),
@@ -1164,7 +1164,7 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
     };
     let suspended = match crate::eval::anchor::agreement(core).await? {
         Some(a) if !crate::eval::anchor::trustworthy(&a) => Some(format!(
-            "Over the judged searches that also left an observation, the base's own evidence agreed with your verdicts {} time{} and disagreed {} — no better than chance. It adopts nothing and takes nothing back until that changes; it keeps recording.",
+            "Suspended: its evidence agreed with your verdicts {} time{} and disagreed {}, no better than chance.",
             a.agreed,
             if a.agreed == 1 { "" } else { "s" },
             a.disagreed
@@ -1184,17 +1184,17 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
             };
             if crate::eval::lived::settled(&new, &old) {
                 format!(
-                    "adopted by the base and held: {} positive of {} observations, against {} of {} for the generation before it.",
+                    "adopted and held: {} positive of {} observations, against {} of {} before.",
                     new.positives, new.observations, old.positives, old.observations
                 )
             } else {
                 format!(
-                    "under watch — it promised MRR {:+.3} over the replay and has earned {} positive of {} observations so far, against {} of {} for the generation before it. Nothing else is proposed until this is decided.",
+                    "under watch: promised MRR {:+.3}; {} positive of {} observations, against {} of {} before.",
                     predicted, new.positives, new.observations, old.positives, old.observations
                 )
             }
         }
-        _ => "set by hand or at boot; the base may propose a change when it has been quiet."
+        _ => "set by hand or at boot."
             .to_string(),
     };
     // Said in every mode, including the default. The block only ever spoke
@@ -1205,8 +1205,8 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
         "Autonomy is {}: {}",
         core.evolve.autonomous.as_str(),
         match core.evolve.autonomous.moves_ranking() {
-            true => "the base may propose a ranking of its own and adopt it once it has earned it.",
-            false => "the file is in force, and the base proposes nothing on its own.",
+            true => "the base may propose and adopt a ranking.",
+            false => "the config file is in force.",
         }
     );
     // Three modes, and the difference between the last two is the one an
@@ -1218,8 +1218,8 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
         core.evolve.autonomous.acts_on_corpus(),
     ) {
         (true, true) => format!(
-            "{mode} It may also merge, hide and shorten artifacts, and move the review \
-             threshold. Those are not undone by taking a generation back."
+            "{mode} It may also merge, hide, shorten and move the review threshold; \
+             taking a generation back does not undo those."
         ),
         (true, false) => format!("{mode} It changes nothing in the corpus."),
         _ => mode,
@@ -1229,7 +1229,7 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
         "No probe has been rehearsed under this generation yet.".to_string()
     } else {
         format!(
-            "On the base's own probes: {} of {} found, MRR {:.3}. A comparison between generations, not a score — a probe is the wording of a later capture, not a question anyone asked.",
+            "Own probes: {} of {} found, MRR {:.3}.",
             rehearsed.found, rehearsed.probes, rehearsed.mrr
         )
     };
@@ -1875,7 +1875,7 @@ mod tests {
             "{body}"
         );
         assert!(
-            body.contains("reconsidered 3 of what it hid, took 1 back, and restored 2"),
+            body.contains("3 reconsidered, 1 taken back, 2 restored"),
             "{body}"
         );
     }

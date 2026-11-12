@@ -280,9 +280,7 @@
    same model answer, with a question and citations it has nothing to do
    with. #}
 <div id="kept-from">
-  <p class="muted">Kept from: &ldquo;{{ prefill_question }}&rdquo; — an answer engram
-    wrote. Edit it as you like; saving is yours, and the capture records the
-    question it came from.</p>
+  <p class="muted">Answer to &ldquo;{{ prefill_question }}&rdquo; · edit, then capture</p>
   {# Outside every form on purpose: the box's own form is a GET that searches,
      and app.js reads this by name when Capture posts. #}
   <input type="hidden" name="from_ask" value="{{ prefill_ask }}">

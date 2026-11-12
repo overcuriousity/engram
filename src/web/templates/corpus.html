@@ -150,10 +150,7 @@
   <div aria-hidden="true">⚠</div>
   <div>
     <b>Placeholder source</b>
-    <div>This source was never captured here. Its artifacts were restored from
-      the vector store after their rows went missing, and every artifact needs a
-      source to belong to, so this row was written to hold them. The text below
-      is those artifacts joined together — not the original document.</div>
+    <div class="muted">Restored from the vector store; not the original text.</div>
   </div>
 </div>
 {% endif %}
@@ -225,13 +222,9 @@
 <h2>Not placed in the source</h2>
 <p class="muted">
   {% if restored %}
-  Restored from the vector store, so they name no lines of the text above —
-  the text above is these artifacts joined back together.
+  Restored; they name no lines.
   {% else %}
-  These artifacts name no lines of this capture, so they sit beside none of it:
-  written before spans were recorded, or by something other than a window read.
-  While one of them is here the source above cannot be marked for what nothing
-  was written from — any of these may have come from exactly those lines.
+  They name no lines of this capture.
   {% endif %}
 </p>
 <div class="unplaced">
@@ -244,10 +237,7 @@
    origins are its roots' corpora, derived from lineage, never stored — and
    this capture is one of them. #}
 <h2>Written from this source</h2>
-<p class="muted">
-  Model-written artifacts with a source here. Each lists what it was written
-  from on its own page.
-</p>
+
 <div class="unplaced">
   {% for c in written_from %}{% include "_artifact.html" %}{% endfor %}
 </div>
