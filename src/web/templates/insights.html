@@ -314,7 +314,7 @@
       <td class="mono">{{ j.target_id }}</td>
       <td class="mono">{{ j.attempts }}</td>
       <td class="mono">{{ j.due }}</td>
-      <td class="muted">{{ j.last_error }}</td>
+      <td class="muted">{{ crate::web::markdown::inert(j.last_error)|safe }}</td>
     </tr>
   {% endfor %}
   </tbody>

@@ -228,6 +228,23 @@ fn leading_enumerator(text: &str) -> Option<&str> {
     }
 }
 
+/// Escaped text in which a URL stays readable but is not a reference: `://` is spelled with entities.
+pub fn inert(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '/' => out.push_str("&#47;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

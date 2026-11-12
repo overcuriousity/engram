@@ -5,10 +5,11 @@
 {# The origin is stated because it is the one thing the operator can check:
    the extension will ask the browser for permission to reach exactly this
    host, and nothing else. #}
-<p>This gives the browser extension a token for <strong>{{ origin }}</strong>.</p>
+<p>Token for the browser extension · <strong>{{ origin }}
+</strong></p>
 {% if signed_in %}
 <form method="post" action="/ui/pair">
-  <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+  <input type="hidden" name="redirect_uri" value="{{ self.redirect_uri_attr()|safe }}">
   <input type="hidden" name="state" value="{{ state }}">
   <button class="btn btn-accent" type="submit">Pair</button>
 </form>
@@ -25,7 +26,7 @@
       in a new tab</a>, then come back here.</li>
   <li>
     <form method="get" action="/ui/pair">
-      <input type="hidden" name="redirect_uri" value="{{ redirect_uri }}">
+      <input type="hidden" name="redirect_uri" value="{{ self.redirect_uri_attr()|safe }}">
       <input type="hidden" name="state" value="{{ state }}">
       <button class="btn btn-accent" type="submit">I have signed in — continue</button>
     </form>

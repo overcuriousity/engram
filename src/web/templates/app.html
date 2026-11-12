@@ -4,7 +4,8 @@
 <h1>Pair the app</h1>
 {# The origin is stated because it is the one thing the operator can check:
    the phone will be pointed at exactly this address. #}
-<p>Server <strong>{{ origin }}</strong> · in the app, choose <em>Scan to pair</em></p>
+<p>Server <strong>{{ origin }}
+</strong>· in the app, choose <em>Scan to pair</em></p>
 {% match code %}
 {% when Some with ((uri, svg)) %}
 <div class="qr">{{ svg|safe }}</div>

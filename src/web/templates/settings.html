@@ -102,7 +102,7 @@
 <div id="notify-result"></div>
 <form method="post" action="/ui/settings/notify" class="col form-notify">
   <label>Gotify message URL
-    <input class="input" name="gotify_url" value="{{ gotify_url }}" placeholder="https://gotify.example/message"></label>
+    <input class="input" name="gotify_url" value="{{ gotify_url }}"></label>
   <label>Gotify app token
     <input class="input" name="gotify_token" type="password" autocomplete="off"
            placeholder="{% if gotify_token_set %}•••••••• (kept unless you type a new one){% else %}token{% endif %}"></label>
@@ -112,7 +112,7 @@
      distributor holds in its own name, whose pushes it shows as a plain
      notification. Made in the NextPush app, not here. #}
   <label>UnifiedPush endpoint
-    <input class="input" name="up_endpoint" value="{{ up_endpoint }}" placeholder="https://nextcloud.example/index.php/apps/uppush/push/…"></label>
+    <input class="input" name="up_endpoint" value="{{ up_endpoint }}"></label>
   {# The same row, two ways in: the app registers it with its keys over the
      API, a person pastes one here without them. The field cannot show the
      difference, so this line does. #}

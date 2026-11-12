@@ -47,6 +47,12 @@ pub fn is_extension_redirect(raw: &str) -> bool {
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
+impl PairTemplate {
+    fn redirect_uri_attr(&self) -> String {
+        crate::web::markdown::inert(&self.redirect_uri)
+    }
+}
+
 #[derive(Template)]
 #[template(path = "pair.html")]
 struct PairTemplate {

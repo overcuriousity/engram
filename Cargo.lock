@@ -2009,6 +2009,7 @@ dependencies = [
  "markup5ever_rcdom",
  "math-core",
  "mime_guess",
+ "oc-check",
  "openidconnect",
  "p256 0.14.0",
  "pulldown-cmark",
@@ -3993,6 +3994,15 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "url",
+]
+
+[[package]]
+name = "oc-check"
+version = "2026.11.1"
+source = "git+https://github.com/overcuriousity/overcuriousity-dev-manifest?tag=v2026.11.1#2fe09ea1f8beaf80c48747ac3562910e261275f3"
+dependencies = [
+ "regex",
+ "walkdir",
 ]
 
 [[package]]

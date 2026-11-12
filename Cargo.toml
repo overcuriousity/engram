@@ -169,6 +169,7 @@ tempfile = "3"
 temp-env = "0.3"
 wiremock = "0.6.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream"] }
+oc-check = { git = "https://github.com/overcuriousity/overcuriousity-dev-manifest", tag = "v2026.11.1" }
 
 [build-dependencies]
 # Packs the Chrome extension at compile time. A build dependency, not a
