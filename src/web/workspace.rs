@@ -2403,7 +2403,7 @@ mod tests {
             "and a fresh result list takes it back"
         );
 
-        let css = include_str!("../../assets/css/20-layout.css");
+        let css = include_str!("../../assets/css/72-layout.css");
         let idle = css
             .split_once(":not(.pane-open):not(.answering)")
             .expect("the idle 40rem rail is not held while an answer is being written")
@@ -2424,7 +2424,7 @@ mod tests {
             css.contains(".regions.answering .region-rail { order: 1; }"),
             "and narrow puts the excerpts under the answer rather than over it"
         );
-        let phone = include_str!("../../assets/css/50-phone.css");
+        let phone = include_str!("../../assets/css/78-phone.css");
         assert!(
             phone.contains(".regions.answering .region-rail { order: 1; }"),
             "including in the block that restates the narrow rules for a phone"
@@ -2461,7 +2461,7 @@ mod tests {
             "an ask empties the pane, so the pane is no longer open"
         );
 
-        let css = include_str!("../../assets/css/20-layout.css");
+        let css = include_str!("../../assets/css/72-layout.css");
         assert!(
             css.contains(":not(.pane-open):not(.answering)"),
             "the wide rail keys on what the pane holds, not on the narrow rule"
@@ -2479,7 +2479,7 @@ mod tests {
     /// compounds one word to the line.
     #[test]
     fn the_split_stacks_when_the_pane_it_landed_in_is_too_narrow_for_two() {
-        let css = include_str!("../../assets/css/40-workspace.css");
+        let css = include_str!("../../assets/css/74-workspace.css");
         assert!(
             css.contains(
                 "[data-artifact] { container-type: inline-size; container-name: artifact; }"

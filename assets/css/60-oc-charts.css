@@ -1,0 +1,8 @@
+.oc-hist { display: block; width: 100%; height: 2.5rem; }
+.oc-hist-labels { display: flex; justify-content: space-between; padding: var(--space-1) 0; }
+.oc-hist-bar { fill: var(--chart-seq-3); }
+.oc-hist-bar:hover { fill: var(--chart-seq-4); }
+.oc-hist-window { fill: var(--color-accent-dim); stroke: var(--color-accent); stroke-width: 1px; }
+.oc-hist-axis { stroke: var(--color-border-strong); stroke-width: 1px; }
+.oc-hist-grid { stroke: var(--color-border-subtle); stroke-width: 1px; }
+.oc-hist-label { fill: var(--color-fg-muted); font-size: var(--text-micro); font-family: var(--font-mono); }

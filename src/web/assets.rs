@@ -9,17 +9,15 @@ use axum::routing::get;
 #[folder = "assets/"]
 pub struct Assets;
 
-/// What `/assets/app.js?v=` carries, so a year-long cache stays safe.
-///
-/// Computed in `build.rs` from the bytes of the files themselves; see
-/// `stamp_assets` there for why the URL has to move at all. Read by
-/// `layout.html`, which is the one place the pages name these three files.
-///
-/// One stamp over all of them rather than one each: a change to any moves every
-/// URL, which costs a needless re-fetch of two small files and buys never
-/// serving a new script beside an old library.
-pub fn stamp() -> &'static str {
-    env!("ASSET_STAMP")
+/// `/assets/<path>?v=<hash of that file>`, so an immutable cache can never serve stale bytes.
+pub fn url(path: &str) -> String {
+    match Assets::get(path) {
+        Some(f) => format!(
+            "/assets/{path}?v={}",
+            hex::encode(&f.metadata.sha256_hash()[..6])
+        ),
+        None => format!("/assets/{path}"),
+    }
 }
 
 fn content_type(path: &str) -> String {
@@ -74,7 +72,7 @@ fn cache_control(path: &str) -> &'static str {
     if path.ends_with(".webmanifest") {
         "public, max-age=3600"
     } else {
-        "public, max-age=31536000"
+        "public, max-age=31536000, immutable"
     }
 }
 
@@ -151,7 +149,7 @@ mod tests {
         let res = app()
             .oneshot(
                 Request::builder()
-                    .uri("/assets/htmx.min.js")
+                    .uri("/assets/vendor/htmx.min.js")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -264,6 +262,29 @@ mod tests {
                 .starts_with("text/javascript")
         );
         assert_eq!(res.headers()["cache-control"], "no-cache");
+    }
+
+    #[tokio::test]
+    async fn every_asset_url_is_content_hashed_and_immutable() {
+        let u = url("js/theme.js");
+        let (path, v) = u.split_once("?v=").unwrap();
+        assert_eq!(path, "/assets/js/theme.js");
+        assert_eq!(v.len(), 12);
+        for uri in [u.clone(), format!("{path}?v=000000000000")] {
+            let res = app()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            assert!(
+                res.headers()["cache-control"]
+                    .to_str()
+                    .unwrap()
+                    .contains("immutable")
+            );
+        }
+        let hash = |p: &str| url(p).split_once("?v=").unwrap().1.to_string();
+        assert_ne!(hash("js/theme.js"), hash("js/prefs.js"));
     }
 
     #[tokio::test]

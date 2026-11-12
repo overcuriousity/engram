@@ -1,0 +1,232 @@
+/* Insights: what is true about this installation, and what needs a person.
+
+   The queue, the decisions and the gaps used to be styled beside the search
+   page because they used to sit on Capture. They live here now, with the
+   page that holds them. */
+
+/* Housekeeping: the tables that report the state of the memory. */
+
+/* Columns sized to their content rather than spread across the window. At
+   110rem the "written because" column sat a third of a screen from the
+   artifact it explained, and Deprecate ended up alone at the far edge with
+   nothing near it to act on. */
+.regions-table table.grid td:first-child,
+.regions-table table.grid th:first-child { width: 26%; }
+
+/* The last column is a control, not data: it takes the width of its button and
+   stops. `1%` with `white-space: nowrap` is the way a table is told that — any
+   larger share and the browser spends the slack on it. */
+.regions-table table.grid td:last-child,
+.regions-table table.grid th:last-child { width: 1%; white-space: nowrap; }
+
+/* Wide content scrolls in its own box rather than dragging the page sideways.
+   `body { overflow-x: hidden }` is the backstop; this is what stops a table
+   needing it. */
+.regions-table table.grid { display: block; overflow-x: auto; }
+.regions-table table.grid > thead,
+.regions-table table.grid > tbody { display: table; width: 100%; }
+
+/* ── What the base did ───────────────────────────────────────────────────── */
+
+/* One table where seven were, so the columns are now shared by rows that mean
+   quite different things. Two things make that readable: the reason column is
+   wide enough for a sentence, and the buttons stack rather than forcing a
+   width onto the column that a one-button row does not need. */
+.regions-table table.set-aside td:nth-child(2) { width: 34%; }
+.regions-table table.set-aside td { vertical-align: top; }
+.set-aside .badge { margin-bottom: 0.25rem; }
+.set-aside-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+
+/* On a phone, rows rather than a table. Four columns across 390px gave the
+   first one about sixty pixels and broke every title one word to a line —
+   which is what `.qrow` two sections down already exists to avoid, for the
+   same reason. No column headings once it stacks: the badge on each row is
+   the heading, which is the whole point of having folded the seven tables
+   into one. 40rem is the same breakpoint the phone sheet uses. */
+@media (width <= 40rem) {
+  .regions-table table.set-aside > thead { display: none; }
+  .regions-table table.set-aside > tbody { display: block; width: 100%; }
+  .regions-table table.set-aside tr {
+    display: block; padding: 0.75rem 0;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+  .regions-table table.set-aside tr:last-child { border-bottom: none; }
+  /* Beats `table.grid td:last-child { width: 1%; white-space: nowrap }`, which
+     is what holds a control column to its button on a wide screen. */
+  .regions-table table.set-aside td,
+  .regions-table table.set-aside td:first-child,
+  .regions-table table.set-aside td:nth-child(2),
+  .regions-table table.set-aside td:last-child {
+    display: block; width: auto; white-space: normal; padding: 0.125rem 0;
+    border: none;
+  }
+  .regions-table table.set-aside td:last-child { padding-top: 0.5rem; }
+  /* An empty cell is a blank line once the row is a stack. */
+  .regions-table table.set-aside td:empty { display: none; }
+}
+
+/* A heading with one link after it, on the same line and at the size of the
+   text rather than the heading. */
+.head-aside { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+.head-aside .quiet-link { font-size: var(--text-dense); font-weight: 400; }
+
+/* Capture: what is queued, and what is waiting on a person. */
+
+/* ── The capture queue ───────────────────────────────────────────────────── */
+
+/* Rows, not a table: five columns of mostly-empty cells collapse badly on a
+   phone, and only two facts per row are ever worth reading — what it is called
+   and whether it is done. */
+/* A container, because this list is the aside on Capture and not a page: it
+   has to answer the width it was actually given, which is a fraction of the
+   window and nothing the viewport knows. */
+.queue {
+  display: flex; flex-direction: column; margin-top: 0.25rem;
+  container-type: inline-size; container-name: queue;
+}
+/* Wrapping is not a nicety here. The row has a third child — what the capture
+   answered — and on one unwrapped line it was pushed past the right edge by
+   the `margin-left: auto` on the metadata beside it, taking the page's width
+   with it. It belongs under the name, and wrapping is what puts it there. */
+.qrow {
+  display: flex; flex-wrap: wrap; gap: 0.125rem 0.75rem; align-items: baseline;
+  min-width: 0;
+  padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--color-border-subtle);
+}
+.qrow:last-child { border-bottom: none; }
+.qrow:hover { background: var(--color-bg-hover); }
+/* Grows into whatever the metadata leaves and shrinks no further than a name
+   worth reading: below that the row wraps instead. */
+.qname { flex: 1 1 12rem; min-width: 0; text-decoration: none; display: block; }
+.qtitle {
+  display: block;
+  font-size: var(--text-prose); text-decoration: none; color: var(--color-fg-primary);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The label truncates; what tells this row from the one above it does not.
+   `disambiguate_labels` keeps the capture's opening words for a label shared
+   with another row, and a single `nowrap` line cut them off — so the repair
+   ran and six rows still read the same six words. Its own line, dimmer and
+   smaller, because it is a qualifier on the name rather than part of it. */
+.qtitle-opening {
+  display: block; white-space: normal; overflow: visible;
+  font-size: var(--text-dense); line-height: 1.35; color: var(--color-fg-muted);
+}
+.qrow:hover .qtitle { color: var(--color-accent); }
+/* A capture on its way to being named reads as a placeholder, because it is. */
+.qname.pending .qtitle { color: var(--color-fg-muted); font-style: italic; }
+/* A grid rather than a flex row, so the timestamp sits in a column of its own
+   width and stops sliding left and right as the text beside it changes. */
+.qmeta {
+  margin-left: auto; display: grid; grid-template-columns: auto 9.5rem;
+  gap: 0.75rem; align-items: baseline; flex: none;
+  font-size: var(--text-dense); color: var(--color-fg-muted); font-family: var(--font-mono);
+}
+.qtime { text-align: right; }
+/* What this capture answered, on its own line under the name. It carried
+   `.qmeta` before and inherited that class's `margin-left: auto` and its
+   9.5rem timestamp column — a sentence shoved right and padded with a column
+   reserved for a timestamp it does not have. It is a caption, not metadata in
+   a column. */
+.qanswers {
+  flex: 1 0 100%; margin-top: 0.125rem;
+  font-size: var(--text-dense); color: var(--color-fg-muted);
+}
+/* The one thing that says a reading is low: colour, not a different layout. */
+.qcov-low {
+  color: var(--color-warning); text-decoration: underline;
+  text-decoration-color: var(--color-border-strong);
+}
+.qcov-low:hover { text-decoration-color: currentColor; }
+/* Only work in flight announces itself. A finished capture is just a line. */
+.qdot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent);
+  flex: none; align-self: center; animation: qpulse 1.6s ease-in-out infinite;
+}
+@keyframes qpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+@media (prefers-reduced-motion: reduce) { .qdot { animation: none } }
+
+/* Narrow enough that a fixed metadata column and a name cannot share a line:
+   the name takes the line, the metadata takes the next one. Two columns of
+   grid at this width spend 9.5rem on when a capture arrived and leave the
+   name a letter and an ellipsis — and the name is the only thing on the row
+   anyone reads. Same reasoning as `.qtime { display: none }` on a phone,
+   applied to the width rather than to the device: the aside is this narrow on
+   a laptop too. */
+@container queue (width <= 30rem) {
+  .qname { flex: 1 0 100%; }
+  .qmeta {
+    margin-left: 0; display: flex; flex-wrap: wrap; gap: 0.5rem;
+    flex: 0 1 auto; min-width: 0;
+  }
+  .qtime { text-align: left; }
+}
+
+
+/* Reachable, not advertised.
+
+   The pair is wrapped in a row of its own because they are direct children of
+   the region grid otherwise, and a grid item is blockified whatever its
+   `display` says: two links written side by side came out stacked, each
+   holding its own 2rem top margin, and the `margin-left` that was meant to be
+   the gap between them read as a stray indent under the first. */
+.quiet-links { display: flex; gap: 1rem; margin-top: 2rem; }
+.quiet-link {
+  display: inline-block; font-size: var(--text-dense);
+  color: var(--color-fg-muted); text-decoration: none;
+}
+.quiet-link:hover { color: var(--color-fg-primary); text-decoration: underline; }
+
+
+/* ── What this memory is like ─────────────────────────────────────────────── */
+
+/* Three panels that answer three different questions, so they sit beside each
+   other rather than stacking into a scroll: how much is held, how much of it
+   is still reachable, and how well it is found. `auto-fit` rather than a fixed
+   three, because at a narrow window two is better than three squeezed and one
+   is better than two. */
+.measures {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem; margin-bottom: 2rem;
+}
+.measure {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 0.875rem 1rem;
+}
+/* The one number the panel is about, given the room to be read at a glance.
+   Mono, because a proportional face makes two measurements the same width by
+   accident and these are meant to be compared down the column. */
+.measure-figure {
+  font-family: var(--font-mono); font-size: var(--text-page);
+  line-height: 1.1; margin: 0 0 0.25rem; color: var(--color-fg-primary);
+}
+.measure-sub { font-size: var(--text-micro); color: var(--color-fg-muted); margin: 0.125rem 0 0; }
+/* A label and its figure, on one line, with the figure right-aligned so a
+   column of them reads as a column. */
+.measure-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 0.75rem; margin: 0.25rem 0; font-size: var(--text-dense);
+  color: var(--color-fg-secondary);
+}
+.measure-row .mono { color: var(--color-fg-primary); }
+
+/* The machine's own readout, closed. Everything above this line is about what
+   the base holds and can be acted on by whoever is reading; everything inside
+   is about the instance and is the same for every user of it. A rule and a
+   little air, because the boundary is the point — without them the summary
+   reads as one more heading in the list rather than as the lid on a different
+   kind of page.
+
+   The summary carries an <h2> so the heading level stays honest, which means
+   overriding its block display: a summary lays its marker out beside inline
+   content, and a block-level child pushes the text onto the next line and
+   leaves the triangle sitting on its own. */
+.machine {
+  margin-top: 2.5rem;
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.75rem;
+}
+.machine > summary { cursor: pointer; color: var(--color-fg-secondary); }
+.machine > summary > h2 { display: inline; }
+.machine > summary::marker { color: var(--color-fg-muted); }
+.machine[open] > summary { margin-bottom: 0.5rem; }

@@ -2001,7 +2001,7 @@ mod tests {
         // corner cost nothing. A passage kept as the document wrote it is one
         // `<pre>` from end to end, and there the button landed on the first
         // sentence of the artifact — at both widths.
-        let css = include_str!("../../assets/css/30-components.css");
+        let css = include_str!("../../assets/css/73-components.css");
         assert!(
             css.contains(".codewrap { position: relative; padding-top:"),
             "no room is reserved for the copy control"
@@ -3366,7 +3366,7 @@ mod tests {
     /// moment the screen above the bar is empty too.
     #[test]
     fn the_phone_does_not_hide_a_card_it_still_counts_as_seen() {
-        let phone = include_str!("../../assets/css/50-phone.css");
+        let phone = include_str!("../../assets/css/78-phone.css");
         assert!(
             !phone.contains(".regions-rail-focus-source .region-bar .offer"),
             "the phone bar hides the offer while app.js still confirms it seen"
@@ -4406,8 +4406,8 @@ mod tests {
         // load — on a phone, brightly. The inline script has to come before the
         // stylesheet it is correcting.
         let layout = include_str!("templates/layout.html");
-        let script = layout.find("engram.theme").expect("no pre-paint script");
-        let sheet = layout.find("/assets/app.css").expect("no stylesheet link");
+        let script = layout.find("js/theme.js").expect("no pre-paint script");
+        let sheet = layout.find("url(\"app.css\")").expect("no stylesheet link");
         assert!(
             script < sheet,
             "the theme is applied after the stylesheet loads, which is the flash"
@@ -4429,7 +4429,7 @@ mod tests {
             !css.contains("h3 { font-size: 0.8125rem"),
             "h3 is still restyled as a label"
         );
-        assert!(css.contains("--text-lg:"), "the type scale is missing");
+        assert!(css.contains("--text-section:"), "the type scale is missing");
 
         // The two classes that had independently reinvented the label style now
         // defer to it, so there is one label vocabulary rather than three.
@@ -6338,57 +6338,25 @@ mod tests {
         );
     }
 
-    /// The script the page cannot work without is stamped, and the stamp is
-    /// derived from the script.
-    ///
-    /// `/assets/app.js` is served with a year-long `max-age`, so a browser that
-    /// has been here before keeps its copy across an upgrade — and since this
-    /// page stopped working without JavaScript, an old copy is not a stale
-    /// stylesheet but an ask form that submits nothing, silently and per
-    /// browser. The query stamp is what moves the URL when the bytes move.
-    ///
-    /// Recomputed here from the files on disk rather than compared to a
-    /// constant, because the property is *content-derived*: a build stamp that
-    /// was a version string, a timestamp or a fixed value would satisfy a test
-    /// that only looked for `?v=` and would still ship the bug.
     #[tokio::test]
-    async fn the_page_stamps_its_script_with_a_hash_of_that_script() {
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for name in ["assets/app.js", "assets/app.css", "assets/htmx.min.js"] {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
-            for b in std::fs::read(&path).unwrap() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        }
-        let want = format!("{h:x}");
-        assert_eq!(
-            crate::web::assets::stamp(),
-            want,
-            "the stamp is not a hash of the assets it stamps"
-        );
-
+    async fn the_page_names_each_script_by_a_hash_of_that_script() {
+        use sha2::Digest;
         let (app, cookie) = app_holding_something().await;
         let page = get_body(&app, &cookie, "/ui/ask").await;
-        assert!(
-            page.contains(&format!("/assets/app.js?v={want}")),
-            "the page does not stamp its script: {page}"
-        );
-        // htmx too. It is vendored and changes only on a deliberate bump — which
-        // is exactly the moment a year-old cached copy would bite, on every page
-        // that still drives its interactions through it.
-        assert!(
-            page.contains(&format!("/assets/htmx.min.js?v={want}")),
-            "the page does not stamp htmx: {page}"
-        );
+        for name in ["app.js", "app.css", "vendor/htmx.min.js"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join(name);
+            let hash = sha2::Sha256::digest(std::fs::read(&path).unwrap());
+            let want = format!("/assets/{name}?v={}", hex::encode(&hash[..6]));
+            assert!(page.contains(&want), "{want} missing: {page}");
+        }
 
-        // The stamped URL still serves the file: the query is not part of the
-        // route, and a stamp that 404s would be worse than no stamp at all.
         let res = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .uri(format!("/assets/app.js?v={want}"))
+                    .uri(crate::web::assets::url("app.js"))
                     .body(Body::empty())
                     .unwrap(),
             )

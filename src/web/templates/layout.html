@@ -1,43 +1,28 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-prefs="local">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  {# Inline, and before the stylesheet. A stylesheet cannot know a stored
-     choice and a deferred script runs after the first paint, so either way the
-     wrong theme flashes on every load — on a phone, brightly. Small enough to
-     cost nothing, and wrapped because a browser with storage disabled must
-     still render a page. #}
-  <script>
-    try {
-      var t = localStorage.getItem('engram.theme');
-      if (t) document.documentElement.setAttribute('data-theme', t);
-    } catch (e) {}
-  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="htmx-config" content='{"allowEval":false,"allowScriptTags":false,"includeIndicatorStyles":false,"selfRequestsOnly":true,"attributesToSettle":["class","width","height"],"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true}]}'>
+  <script src="{{ crate::web::assets::url("js/theme.js") }}"></script>
   <title>{% block title %}engram{% endblock %}</title>
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  {# Installable as an app. iOS reads the touch icon and its own meta tags
-     rather than the manifest, so both are declared. #}
   <link rel="manifest" href="/assets/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="engram">
   <meta name="mobile-web-app-capable" content="yes">
-  {# `default`, so iOS draws the status bar over the page's own colour rather
-     than making it translucent and letting content run under the clock. #}
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  {# The colour behind the status bar, per theme, so an installed window does
-     not frame a light page in a dark bar or the reverse. #}
   <meta name="theme-color" content="#f8f6f1" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#0e1015" media="(prefers-color-scheme: dark)">
-  {# Stamped with a hash of the files' own bytes. All three are served with a
-     year-long `max-age` under a name that never changes, and the ask page
-     stopped working without its script — so a browser holding an old copy
-     across an upgrade would show a form that submits nothing. The stamp moves
-     only when the bytes do, so an unchanged deployment keeps its caches. #}
-  <link rel="stylesheet" href="/assets/app.css?v={{ crate::web::assets::stamp() }}">
-  <script src="/assets/htmx.min.js?v={{ crate::web::assets::stamp() }}" defer></script>
-  <script src="/assets/app.js?v={{ crate::web::assets::stamp() }}" defer></script>
+  <link rel="stylesheet" href="{{ crate::web::assets::url("app.css") }}">
+  <script src="{{ crate::web::assets::url("vendor/htmx.min.js") }}" defer></script>
+  <script src="{{ crate::web::assets::url("vendor/htmx-ext-sse.js") }}" defer></script>
+  {%- for m in ["prefs", "notices", "dialog", "menu", "keys", "copy", "busy", "live", "rows"] %}
+  <script type="module" src="{{ crate::web::assets::url(&format!("js/{m}.js")) }}"></script>
+  {%- endfor %}
+  <script src="{{ crate::web::assets::url("app.js") }}" defer></script>
 </head>
 <body>
   {# Chrome, not content. Inside `.shell` the nav took whichever measure the
@@ -131,5 +116,20 @@
     <button type="button" class="btn btn-ghost btn-sm" data-dismiss-install>Not now</button>
   </div>
   {% endblock %}
+  <div class="oc-notices" id="oc-notices" aria-live="polite"></div>
+  <div class="oc-sr-only" id="oc-live" aria-live="polite"></div>
+  <dialog id="oc-shortcuts" class="oc-dialog" aria-labelledby="oc-shortcuts-title">
+    <h2 class="oc-dialog__title" id="oc-shortcuts-title">Keyboard shortcuts</h2>
+    <dl class="oc-shortcuts">
+      <dt><kbd>/</kbd></dt><dd>Focus the box</dd>
+      <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Move through results</dd>
+      <dt><kbd>↵</kbd></dt><dd>Open</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>↵</kbd></dt><dd>Ask</dd>
+      <dt><kbd>Ctrl</kbd> <kbd>⇧</kbd> <kbd>↵</kbd></dt><dd>Capture</dd>
+      <dt><kbd>?</kbd></dt><dd>Show shortcuts</dd>
+      <dt><kbd>Esc</kbd></dt><dd>Close</dd>
+    </dl>
+    <div class="oc-dialog__actions"><button type="button" class="oc-btn" data-oc-dialog-close>Close</button></div>
+  </dialog>
 </body>
 </html>

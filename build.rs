@@ -37,7 +37,6 @@ fn main() {
         println!("cargo:rerun-if-changed={SIGNED}");
     }
 
-    stamp_assets();
     stamp_build();
 
     let out = Path::new("assets/extension");
@@ -67,9 +66,6 @@ fn main() {
 /// it there is what puts it in the binary. Concatenated in filename order,
 /// which is what the numeric prefixes are for — the cascade depends on the
 /// tokens arriving before the rules that name them.
-///
-/// Must run before `stamp_assets`, which hashes the bytes of the file this
-/// writes.
 fn build_stylesheet() {
     println!("cargo:rerun-if-changed=assets/css");
     let dir = Path::new("assets/css");
@@ -94,48 +90,11 @@ fn build_stylesheet() {
         out.push('\n');
     }
 
-    // Written only when the bytes differ. `stamp_assets` declares
-    // `rerun-if-changed=assets/app.css`, so writing an identical file on every
-    // build would touch an mtime cargo is watching and rebuild for ever.
+    // Written only when the bytes differ, so an unchanged sheet keeps its mtime.
     let dest = Path::new("assets/app.css");
     if std::fs::read_to_string(dest).ok().as_deref() != Some(out.as_str()) {
         std::fs::write(dest, &out).expect("assets/app.css");
     }
-}
-
-/// A stamp derived from the assets the pages reference by name.
-///
-/// `/assets/app.js` and `/assets/app.css` are served with a year-long
-/// `max-age` under a URL that never changes, so a browser that has been here
-/// before keeps its copy across an upgrade. That was cosmetic while the pages
-/// worked without JavaScript. It is not any more: the ask page is driven
-/// entirely by `app.js`, so a server serving a fresh `ask.html` to a browser
-/// holding last year's script gets a form that submits nothing at all —
-/// silently, per browser, and with nothing the operator can do about it from
-/// the server side. The service worker does not help; it returns early for
-/// anything that is not a navigation, so a script never passes through it.
-///
-/// So the URL moves when the bytes do. Content-derived rather than a build
-/// timestamp, because a rebuild that changed nothing must not throw away a
-/// cache that is still correct. FNV-1a rather than a cryptographic hash: this
-/// only has to differ when the file differs, and it costs no dependency.
-fn stamp_assets() {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    // htmx is here for the same reason the other two are, even though it is
-    // vendored and changes only when someone bumps it deliberately: a bump is
-    // exactly when a stale copy would bite, and every page but `ask` still
-    // drives its interactions through it. One stamp over all three, so a change
-    // to any of them moves every URL — cheaper than three stamps, and a
-    // needless re-fetch of two small files costs less than a subtle mismatch
-    // between a new htmx and an old app.js.
-    for name in ["assets/app.js", "assets/app.css", "assets/htmx.min.js"] {
-        println!("cargo:rerun-if-changed={name}");
-        for b in std::fs::read(name).unwrap_or_else(|e| panic!("{name}: {e}")) {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-    println!("cargo:rustc-env=ASSET_STAMP={h:x}");
 }
 
 /// The commit this binary was built from, so two builds of the same

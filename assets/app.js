@@ -970,6 +970,18 @@
   // then on. The pre-paint script in the head is what applies a stored choice
   // before anything is drawn — this only has to keep the button honest and
   // move the status-bar colour with it.
+  function migrateThemeKey() {
+    try {
+      var old = localStorage.getItem('engram.theme');
+      if (old === null) return;
+      if (old === 'light' || old === 'dark') {
+        localStorage.setItem('oc.theme', old);
+        document.documentElement.setAttribute('data-theme', old);
+      }
+      localStorage.removeItem('engram.theme');
+    } catch (e) {}
+  }
+
   function themeToggle() {
     var btn = document.querySelector('[data-theme-toggle]');
     if (!btn) return;
@@ -1002,7 +1014,7 @@
     btn.addEventListener('click', function () {
       var next = current() === 'dark' ? 'light' : 'dark';
       document.documentElement.setAttribute('data-theme', next);
-      try { localStorage.setItem('engram.theme', next); } catch (e) {}
+      try { localStorage.setItem('oc.theme', next); } catch (e) {}
       paint();
     });
     paint();
@@ -3081,6 +3093,7 @@
     setInterval(dueTick, 1000);
     syncIdle();
     railHandle();
+    migrateThemeKey();
     themeToggle();
     vectorBg();
     keyHint();

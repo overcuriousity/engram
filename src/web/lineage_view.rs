@@ -524,7 +524,7 @@ mod tests {
         assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
         assert!(html.contains("name-opening"), "{html}");
         // And the class has to do something, or the distinction lives nowhere.
-        let css = include_str!("../../assets/css/30-components.css");
+        let css = include_str!("../../assets/css/73-components.css");
         assert!(css.contains(".name-opening"), "the class has no rule");
     }
 
