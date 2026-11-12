@@ -72,6 +72,10 @@ struct SettingsTemplate {
     /// What the browser would choose, named beside the automatic row: "follow
     /// this browser" says nothing about what that would mean today.
     browser_lang: &'static str,
+    /// The capture language instructs the synthesizer; without one it means nothing.
+    synthesizes: bool,
+    /// The place only feeds the context offer.
+    recommends: bool,
 }
 
 impl SettingsTemplate {
@@ -204,6 +208,8 @@ async fn settings(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResult<Re
             .unwrap_or_else(|| tenant.user.subject.clone()),
         langs,
         browser_lang: browser.endonym(),
+        synthesizes: tenant.core.synthesizes(),
+        recommends: tenant.core.recommends(),
     })
     .into_response())
 }
@@ -631,6 +637,8 @@ mod tests {
                 selected: true,
             }],
             browser_lang: "English",
+            synthesizes: true,
+            recommends: true,
         })
         .unwrap()
     }
@@ -739,6 +747,23 @@ mod tests {
     /// After #52 every user has their own base, and nothing anywhere said
     /// which account was looking at one. Settings is where account things
     /// live; it was also the one page a phone could not reach.
+    #[tokio::test]
+    async fn an_unconfigured_subsystem_shows_no_entry_point() {
+        let (app, cookie) = app_with_cookie(
+            crate::core::test_support::test_core_without_synthesizer().await,
+        )
+        .await;
+        let settings = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(!settings.contains("/ui/settings/lang"), "{settings}");
+
+        let mut core = crate::core::test_support::test_core().await;
+        core.recommend.enabled = false;
+        let (app, cookie) = app_with_cookie(core).await;
+        let settings = get_body(&app, &cookie, "/ui/settings").await;
+        assert!(!settings.contains("place-switch"), "{settings}");
+        assert!(settings.contains("/ui/settings/lang"), "{settings}");
+    }
+
     #[tokio::test]
     async fn settings_is_reachable_and_names_the_account() {
         let (app, cookie) = app_with_cookie(crate::core::test_support::test_core().await).await;
@@ -883,7 +908,10 @@ mod tests {
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         let html = get_body(&app, &cookie, "/ui/settings").await;
         assert!(html.contains("https://g/message"));
-        assert!(html.contains("••••"), "a stored token is shown as stored");
+        assert!(
+            html.contains("kept unless you type a new one"),
+            "a stored token is shown as stored"
+        );
         assert!(!html.contains("abc"), "and never rendered");
         app.clone()
             .oneshot(form(
@@ -1032,6 +1060,6 @@ mod tests {
         // like a backlog.
         let html = settings_fixture(vec![]);
         assert!(!html.contains("Minted by"), "{html}");
-        assert!(html.contains("No tokens."), "{html}");
+        assert!(html.contains("No API tokens yet."), "{html}");
     }
 }

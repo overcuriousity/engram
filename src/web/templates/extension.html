@@ -1,9 +1,9 @@
 {% extends "layout.html" %}
 {% block title %}Browser extension — engram{% endblock %}
 {% block content %}
-<h1>Browser extension</h1>
+<div class="oc-page-head"><h1 class="oc-text-page">Browser extension</h1></div>
 
-<h2>Firefox</h2>
+<h2 class="oc-text-section">Firefox</h2>
 {% if xpi_signed %}
 <p><a href="/extension/firefox.xpi">Install</a> · signed</p>
 {% else %}
@@ -20,35 +20,41 @@
 {% endif %}
 <p class="muted">No auto-update.</p>
 
-<h2>Chrome</h2>
+<h2 class="oc-text-section">Chrome</h2>
 <p><a href="/extension/chrome.zip">Download</a>, unzip, then <code>chrome://extensions</code>
   · Developer mode · <em>Load unpacked</em>.</p>
 <p class="muted">No auto-update.</p>
 
-<h2>On a phone</h2>
+<h2 class="oc-text-section">On a phone</h2>
 <p>Android: <a href="/ui/app">pair the app</a>.</p>
 <p>iOS: a Shortcut with its own token.</p>
 
 {% match device_token %}
 {% when Some with (token) %}
-<p class="muted">Shown once. Copy it now.</p>
+<div class="oc-notice oc-notice--warning" role="status">{{ crate::web::icons::icon("triangle-alert", 16) }}<span class="oc-notice__text">Shown once. Copy it now.</span></div>
 <p><b>Shortcut.</b> Show in Share Sheet; one <em>Get Contents of URL</em> action:</p>
-<dl class="recipe">
-  <dt>URL</dt><dd><code>{{ origin }}/api/v1/capture</code></dd>
-  <dt>Method</dt><dd><code>POST</code></dd>
-  <dt>Header</dt><dd><code>Authorization: Bearer {{ token }}</code></dd>
-  <dt>Header</dt><dd><code>Content-Type: text/plain</code></dd>
-  <dt>Request Body</dt><dd>Shortcut Input</dd>
+{% let capture_url = format!("{}/api/v1/capture", self.origin) %}
+{% let auth_header = format!("Authorization: Bearer {}", token) %}
+<dl class="oc-facts">
+  <dt>URL</dt><dd><span class="oc-value oc-mono">{{ capture_url }}
+  </span>{% let copy_label = "capture URL" %}{% let copy_value = capture_url.as_str() %}{% include "_copy.html" %}</dd>
+  <dt>Method</dt><dd><span class="oc-value oc-mono">POST</span></dd>
+  <dt>Header</dt><dd><span class="oc-value oc-mono">{{ auth_header }}</span>{% let copy_label = "authorization header" %}{% let copy_value = auth_header.as_str() %}{% include "_copy.html" %}</dd>
+  <dt>Header</dt><dd><span class="oc-value oc-mono">Content-Type: text/plain</span></dd>
+  <dt>Request Body</dt><dd><span class="oc-value">Shortcut Input</span></dd>
 </dl>
 {% when None %}
-<form method="post" action="/extension/phone">
-  <button class="btn btn-accent" type="submit">Create a phone token</button>
+<form class="oc-form" method="post" action="/extension/phone">
+  <div class="oc-form__actions"><button class="oc-btn" type="submit">Create a phone token</button></div>
 </form>
 <p class="muted">Named <code>phone</code>.</p>
 {% endmatch %}
 
-<h2>Pairing</h2>
-<p>In the panel, enter <strong>{{ origin }}
-</strong>and press <em>Pair</em>.</p>
-<p class="muted">Listed under Settings → API tokens as “browser extension”.</p>
+<h2 class="oc-text-section">Pairing</h2>
+<dl class="oc-facts">
+  <dt>Server</dt>
+  <dd><span class="oc-value oc-mono">{{ origin }}
+  </span>{% let copy_label = "server address" %}{% let copy_value = origin.as_str() %}{% include "_copy.html" %}</dd>
+</dl>
+<p>Enter it in the panel and press <em>Pair</em>. Listed under <a href="/ui/settings#tokens">API tokens</a>.</p>
 {% endblock %}

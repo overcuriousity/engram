@@ -1,138 +1,89 @@
 {% extends "layout.html" %}
 {% block title %}Settings — engram{% endblock %}
 {% block content %}
-<h1>Settings</h1>
-
-{# Everything true about this installation rather than about what is in it.
-   The two were one page, which meant scrolling past every merge and every
-   hidden artifact to revoke a token.
-
-   A `engram › Settings` crumb stood here. The heading above names the page and
-   the top row now lights the entry you are in, so it was the third thing on
-   screen saying the same word. #}
-{# Said plainly, on the page where account things live. Every user has held
-   their own database and their own collection since #52, and no page said so
-   — which leaves the one question a person actually has before pasting their
-   own notes onto a server somebody else runs unanswered everywhere. #}
+<div class="oc-page-head"><h1 class="oc-text-page">Settings</h1></div>
 <p class="muted">Signed in as <span class="mono">{{ account }}</span> · private to this account</p>
 
-<h2>Language</h2>
-{# What the synthesizer is *instructed* in, not a translation of this page.
-   The whole system prompt has a version per language, because an English
-   instruction ending "and answer in German" is a rule a small model follows
-   for a paragraph and then quietly stops following. Ten languages, English
-   behind them.
-
-   It applies to the next capture and to nothing already stored: a corpus
-   carries the language it was captured in, so changing this never rewrites
-   artifacts somebody has already read. #}
-<p class="muted">For new captures · stored ones stay as they are</p>
-<form method="post" action="/ui/settings/lang" class="row form-gap">
-  <select class="input input-narrow" name="lang" aria-label="Capture language">
-    {% for l in langs %}
-    <option value="{{ l.value }}"{% if l.selected %} selected{% endif %}>{{ l.label }}</option>
-    {% endfor %}
-  </select>
-  <button class="btn btn-accent" type="submit">Save</button>
+{% if synthesizes %}
+<h2 class="oc-text-section">Language</h2>
+{# Instructs the synthesizer for new captures; a stored corpus keeps its language. #}
+<form class="oc-form" method="post" action="/ui/settings/lang">
+  <div class="oc-field">
+    <label for="sel-lang">Capture language</label>
+    <select class="oc-input" id="sel-lang" name="lang" data-oc-menu>
+      {% for l in langs %}
+      <option value="{{ l.value }}"{% if l.selected %} selected{% endif %}>{{ l.label }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <p class="muted">For new captures · this browser asks for <span class="mono">{{ browser_lang }}</span></p>
+  <div class="oc-form__actions"><button class="oc-btn oc-btn--primary" type="submit">Save language</button></div>
 </form>
-{# Named, because "follow this browser" says nothing about what that would
-   mean today — and on a phone the browser's language is not something the
-   operator set on this device. #}
-<p class="muted">This browser asks for <span class="mono">{{ browser_lang }}</span>.</p>
-
-<h2>Phone</h2>
-{# The page that draws the code is a door of its own and was linked from
-   nowhere: the app asks you to come here for it, so here is where it is. #}
-<p><a href="/ui/app">Pair the app</a></p>
-
-<h2>Browser extension</h2>
-{# The extension mints its own token through /ui/pair, so it needs nothing from
-   the form below. Listed here because this is where the tokens it creates show
-   up. #}
-<p><a href="/extension/install">Install the extension</a></p>
-
-<h2 id="tokens">API tokens</h2>
-<div id="token-result"></div>
-<form hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML"
-      class="row form-gap">
-  <input class="input input-narrow" name="name" placeholder="Token name, e.g. claude-code">
-  <button class="btn btn-accent" type="submit">Create</button>
-</form>
-
-{# Column headings over no rows is a table pretending to have some — the same
-   thing the decide list names at its top: five headings answered with "None."
-   made an empty base look like a backlog. #}
-{% if tokens.is_empty() %}
-<p class="muted">No tokens.</p>
-{% else %}
-<table class="grid">
-  <thead><tr><th>Name</th><th>Created by</th><th>Created</th><th>Last used</th><th>State</th><th></th></tr></thead>
-  <tbody>
-  {% for t in tokens %}{% include "_token_row.html" %}{% endfor %}
-  </tbody>
-</table>
 {% endif %}
-<h2>Trash</h2>
+
+<h2 class="oc-text-section">Devices</h2>
+<ul class="oc-list" role="list">
+  <li><div class="oc-list__main"><a class="oc-list__title" href="/ui/app">Pair the app</a></div></li>
+  {# The extension mints its own token through /ui/pair; its tokens appear below. #}
+  <li><div class="oc-list__main"><a class="oc-list__title" href="/extension/install">Install the browser extension</a></div></li>
+</ul>
+
+<h2 class="oc-text-section" id="tokens">API tokens</h2>
+<div id="token-result"></div>
+<form class="oc-form" hx-post="/ui/ops/tokens" hx-target="#token-result" hx-swap="innerHTML">
+  <div class="oc-field">
+    <label for="token-name">Token name</label>
+    <input class="oc-input" id="token-name" name="name" placeholder="claude-code" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+  </div>
+  <div class="oc-form__actions"><button class="oc-btn" type="submit">Create token</button></div>
+</form>
+{% if tokens.is_empty() %}
+<div class="oc-empty"><p>No API tokens yet.</p></div>
+{% else %}
+<ul class="oc-list" role="list">
+  {% for t in tokens %}{% include "_token_row.html" %}{% endfor %}
+</ul>
+{% endif %}
+
+<h2 class="oc-text-section">Trash</h2>
 <p><a href="/ui/trash">Open Trash</a></p>
-<h2>Notifications</h2>
+
+<h2 class="oc-text-section">Notifications</h2>
 <p class="muted">Where due reminders go · empty turns a channel off</p>
 <div id="notify-result"></div>
-<form method="post" action="/ui/settings/notify" class="col form-notify">
-  <label>Gotify message URL
-    <input class="input" name="gotify_url" value="{{ gotify_url }}"></label>
-  <label>Gotify app token
-    <input class="input" name="gotify_token" type="password" autocomplete="off"
-           placeholder="{% if gotify_token_set %}•••••••• (kept unless you type a new one){% else %}token{% endif %}"></label>
-  {# engram is a server, not an Android app: it cannot register with a
-     distributor itself, so it needs an endpoint someone else made for it. On
-     NextPush that is a *notification channel* — an app registration the
-     distributor holds in its own name, whose pushes it shows as a plain
-     notification. Made in the NextPush app, not here. #}
-  <label>UnifiedPush endpoint
-    <input class="input" name="up_endpoint" value="{{ up_endpoint }}"></label>
-  {# The same row, two ways in: the app registers it with its keys over the
-     API, a person pastes one here without them. The field cannot show the
-     difference, so this line does. #}
+<form class="oc-form" method="post" action="/ui/settings/notify">
+  <div class="oc-field"><label for="gotify-url">Gotify message URL</label>
+    <input class="oc-input" id="gotify-url" name="gotify_url" type="url" inputmode="url" autocomplete="off" value="{{ gotify_url }}"></div>
+  <div class="oc-field"><label for="gotify-token">Gotify app token{% if gotify_token_set %} · kept unless you type a new one{% endif %}</label>
+    <input class="oc-input" id="gotify-token" name="gotify_token" type="password" autocomplete="off"></div>
+  {# A NextPush notification channel's endpoint: engram cannot register with a distributor itself. #}
+  <div class="oc-field"><label for="up-endpoint">UnifiedPush endpoint</label>
+    <input class="oc-input" id="up-endpoint" name="up_endpoint" type="url" inputmode="url" autocomplete="off" value="{{ up_endpoint }}"></div>
   {% if up_legacy %}
-  <p class="muted flush">Legacy endpoint · plaintext. Pair the app to encrypt.</p>
+  <div class="oc-notice oc-notice--warning" role="status">{{ crate::web::icons::icon("triangle-alert", 16) }}<span class="oc-notice__text">Legacy endpoint · plaintext. Pair the app to encrypt.</span></div>
   {% else if up_device.is_some() %}
-  <p class="muted flush">Registered by {{ up_device.as_deref().unwrap_or_default() }} · encrypted</p>
+  <p class="muted">Registered by {{ up_device.as_deref().unwrap_or_default() }} · encrypted</p>
   {% else %}
-  <p class="muted flush">Takes the message as the body · NextPush: copy a channel's endpoint</p>
+  <p class="muted">Takes the message as the body · NextPush: copy a channel's endpoint</p>
   {% endif %}
-  <div class="row">
-    <button class="btn btn-accent" type="submit">Save</button>
-    <button class="btn btn-ghost" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"gotify"}' hx-target="#notify-result">Test Gotify</button>
-    <button class="btn btn-ghost" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"unifiedpush"}' hx-target="#notify-result">Test UnifiedPush</button>
+  <div class="oc-form__actions oc-row">
+    <button class="oc-btn oc-btn--primary" type="submit">Save notifications</button>
+    <button class="oc-btn" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"gotify"}' hx-target="#notify-result">Test Gotify</button>
+    <button class="oc-btn" type="button" hx-post="/ui/settings/notify/test" hx-vals='{"channel":"unifiedpush"}' hx-target="#notify-result">Test UnifiedPush</button>
   </div>
 </form>
-<h2>Place</h2>
-<p class="muted">A one-kilometre cell, never finer</p>
-<label class="row row-check form-gap">
-  <input type="checkbox" id="place-switch"> Send my place
-</label>
+
+{% if recommends %}
+<h2 class="oc-text-section">Place</h2>
+<div class="oc-field oc-row">
+  <input type="checkbox" id="place-switch"><label for="place-switch">Send my place · a one-kilometre cell, never finer</label>
+</div>
+{% endif %}
+
 {% match feedback %}
 {% when Some with (f) %}
-{# "Feedback" named this section, which on a settings page reads as a box for
-   telling the authors something. It is the opposite: what this installation
-   is keeping about how you use it, and the one button that destroys it. #}
-<h2>What is being recorded</h2>
-{# Said plainly and where the operator already looks. A recording indicator
-   beside the search box would be in view during every keystroke; this is the
-   page for things that are true about the installation.
-
-   One sentence, not two: "Questions too — 0 asked, 0 judged" standing as its
-   own paragraph under its own margin read as a second subject, and it is the
-   same subject and the same purge button.
-
-   "waiting" rather than "unjudged": not every search without a verdict — a
-   typo and a search nothing came close to are recorded and stay pending, and
-   neither is a question anyone can answer. The verdict bar under a result is
-   where one of these stops waiting.
-
-   The judged count is what the button below destroys and what nothing can
-   reproduce: a verdict on a question is a person's own work, and the only
-   material `--export-eval` builds questions.json from. #}
+<h2 class="oc-text-section">What is being recorded</h2>
+{# The judged count is what the purge destroys and nothing reproduces: `--export-eval` builds from it. #}
 <p class="muted">
   Searches — {{ f.captured }} captured, {{ f.pending }} waiting{% match asks %}{% when Some with (a) %};
   questions — {{ a.asked }} asked, {{ a.judged }} judged{% when None %}{% endmatch %}.

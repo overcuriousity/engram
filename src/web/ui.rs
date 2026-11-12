@@ -2901,7 +2901,7 @@ mod tests {
         let settings = get(&app, "/ui/settings", &cookie).await;
         assert!(!settings.contains(">Mint<"), "Mint is a word about coins");
         assert!(
-            settings.contains(">Create<"),
+            settings.contains(">Create token<"),
             "the button says what it does"
         );
 
@@ -2911,7 +2911,7 @@ mod tests {
             "Housekeeping is retired and tokens were never there anyway"
         );
         assert!(
-            ext.contains("Settings → API tokens"),
+            ext.contains(r#"<a href="/ui/settings#tokens">API tokens</a>"#),
             "named where they are"
         );
     }
@@ -5556,7 +5556,10 @@ mod tests {
 
         let settings = get_body(&app, &cookie, "/ui/settings").await;
         assert!(settings.contains("API tokens"), "{settings}");
-        assert!(settings.contains("Browser extension"), "{settings}");
+        assert!(
+            settings.contains("Install the browser extension"),
+            "{settings}"
+        );
 
         let ops = get_body(&app, &cookie, "/ui/insights").await;
         assert!(
