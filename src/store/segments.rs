@@ -1,12 +1,8 @@
 use super::Store;
 use crate::error::Result;
 
-/// Where one window of a source stands. `Failed` means the synthesizer never
-/// succeeded here and the lines are represented by no chunk at all — the model
-/// is a hard dependency, so an unsegmentable window leaves a hole that the
-/// source's coverage measures, and the reason it ends up `partial`. `Verbatim`
-/// means the window was captured as passages and never sent to the synthesizer
-/// — not work owed, and nothing re-arms it; promotion moves it to `pending`.
+/// `Failed`: never synthesized, so its lines are a coverage hole. `Verbatim`: captured as
+/// passages and owed nothing; promotion moves it to `pending`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SegmentState {
@@ -41,16 +37,13 @@ pub struct Segment {
     pub idx: i64,
     pub start_line: i64,
     pub end_line: i64,
-    /// The window's text, as the splitter produced it. Authoritative: the line
-    /// range describes where it came from, but cannot reproduce it when the
-    /// splitter had to cut inside a line.
+    /// Authoritative: the line range cannot reproduce it when the splitter cut inside a line.
     pub text: String,
     pub state: SegmentState,
     pub attempts: i64,
     pub last_error: Option<String>,
 }
 
-/// One window as the splitter produced it, on its way into the table.
 #[derive(Debug, Clone)]
 pub struct NewSegment<'a> {
     pub start_line: i64,
@@ -58,7 +51,6 @@ pub struct NewSegment<'a> {
     pub text: &'a str,
 }
 
-/// A `segments` row as stored, for `query_as!`.
 #[derive(sqlx::FromRow)]
 pub(crate) struct SegmentRow {
     pub corpus_id: String,
@@ -91,28 +83,11 @@ fn row_to_segment(r: SegmentRow) -> Segment {
 }
 
 impl Store {
-    /// Record the windowing of a source.
-    ///
-    /// A corpus that has finished any window keeps the split it started with,
-    /// whatever the current token budget would produce. The two cannot be
-    /// mixed: a window that finished holds the text its artifacts were written
-    /// from and cannot be re-derived without orphaning them, so a re-split
-    /// around it moves only the boundaries it does not own. Window 0 stays
-    /// `done` at lines 1-100 while window 1 is rewritten as 91-180, and the
-    /// overlap is synthesised twice — or, shifted the other way, the gap
-    /// between them is never synthesised at all. Neither is visible afterwards.
-    ///
-    /// So the split is settled by the first window to write anything. Until
-    /// then it is
-    /// rewritten freely, and windows the new split no longer reaches are
-    /// dropped — otherwise a corpus that never started carries stale text into
-    /// the model and queues surplus windows forever.
+    /// The split is settled by the first window to write anything: re-splitting around a done
+    /// window would duplicate or skip lines. Until then it is rewritten, surplus windows dropped.
     pub async fn upsert_segments(&self, corpus_id: &str, windows: &[NewSegment<'_>]) -> Result<()> {
-        // Immediate, because this reads and then writes. A deferred `BEGIN`
-        // holds only a read snapshot when the first insert asks for the write
-        // lock, and SQLite refuses that upgrade with `SQLITE_BUSY` at once
-        // rather than waiting out `busy_timeout` — which is how a burst of
-        // captures failed a `synthesize` job with "database is locked" (#86).
+        // Immediate, because this reads then writes: a deferred `BEGIN` gets `SQLITE_BUSY` at once
+        // on the lock upgrade instead of waiting out `busy_timeout`.
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
         let finished: i64 = sqlx::query_scalar!(
@@ -121,16 +96,8 @@ impl Store {
         )
         .fetch_one(&mut *tx)
         .await?;
-        // Owning artifacts settles the split too, not just being marked `done`.
-        // `write_segment_artifacts` commits the artifacts and only then sets the
-        // state, so a process killed between the two leaves a window that owns
-        // artifacts while still reading `pending` — and `done` alone would let
-        // the split move out from under it. A window that produced no chunks is
-        // why the state is still consulted: it owns nothing and has still
-        // finished.
-        // A `note` is excluded for the same reason the sweep excludes it: it
-        // owns no window, so counting it here would refuse to segment every
-        // document that arrived with an annotation.
+        // Owning artifacts settles the split too: artifacts commit before the state turns `done`.
+        // Notes own no window and are excluded.
         let owned: i64 = sqlx::query_scalar!(
             "SELECT count(*) FROM artifacts
               WHERE corpus_id = ? AND provenance != 'note' AND segment_idx IS NOT NULL",
@@ -144,9 +111,7 @@ impl Store {
 
         for (idx, w) in windows.iter().enumerate() {
             sqlx::query(
-                // The `carry_lines` column stays in the schema at a constant 0
-                // — heading carry retired with the hand-rolled splitter, and a
-                // column write is cheaper than a migration nothing needs.
+                // `carry_lines` stays in the schema at a constant 0.
                 "INSERT INTO segments (corpus_id, idx, start_line, end_line, text, carry_lines)
                  VALUES (?, ?, ?, ?, ?, 0)
                  ON CONFLICT(corpus_id, idx) DO UPDATE SET
@@ -165,9 +130,7 @@ impl Store {
             .await?;
         }
 
-        // Windows past the end of the new split. None of them owns an artifact:
-        // the early return above leaves only corpora where no window has written
-        // one, whatever state the rows are in.
+        // None of these owns an artifact: the early return above guarantees it.
         sqlx::query!(
             "DELETE FROM segments WHERE corpus_id = ? AND idx >= ?",
             corpus_id,
@@ -191,16 +154,8 @@ impl Store {
         Ok(rows.into_iter().map(row_to_segment).collect())
     }
 
-    /// Segments still owed a model call: never tried, or tried and refused.
-    ///
-    /// `failed` is included on purpose. It records what went wrong last time,
-    /// not a verdict — an endpoint that was loading a model, or a machine that
-    /// was asleep, says nothing about the text. Excluding it made the next run
-    /// see a finished corpus and close the job, which is how a quarter of a
-    /// document stayed missing while the endpoint sat there answering.
-    ///
-    /// `verbatim` is excluded: that window was captured as passages on purpose
-    /// and is owed nothing.
+    /// `failed` is included: it records a transient error, not a verdict on the text.
+    /// `verbatim` is owed nothing.
     pub async fn pending_segments(&self, corpus_id: &str) -> Result<Vec<Segment>> {
         let rows = sqlx::query_as!(
             crate::store::segments::SegmentRow,
@@ -219,15 +174,8 @@ impl Store {
         state: SegmentState,
         last_error: Option<&str>,
     ) -> Result<()> {
-        // Reaching `done` is also what spends `keep_artifacts`, in the same
-        // statement so there is no window between the two. The write that
-        // honoured the mark is not the end of the run — `flag_unverified`, this
-        // state change and `settle` all follow it, and `SQLITE_BUSY` is routine
-        // now that two workers can be in one corpus — so clearing at the write
-        // meant any of those failing retried the window with the mark already
-        // gone, and the retry deleted the curated originals the mark exists to
-        // protect. Spending it here costs at worst one duplicated set of
-        // artifacts, which the dedupe sweep folds.
+        // `keep_artifacts` is spent in the same statement as `done`: the steps after the write can
+        // fail and retry, and a retry with the mark gone would delete the curated originals.
         sqlx::query!(
             "UPDATE segments SET state = ?, last_error = ?,
                     keep_artifacts = CASE WHEN ? = 'done' THEN 0 ELSE keep_artifacts END
@@ -243,7 +191,6 @@ impl Store {
         Ok(())
     }
 
-    /// One window's state, or `None` for a window that does not exist.
     pub async fn segment_state(&self, corpus_id: &str, idx: i64) -> Result<Option<SegmentState>> {
         Ok(sqlx::query_scalar!(
             "SELECT state FROM segments WHERE corpus_id = ? AND idx = ?",
@@ -255,8 +202,7 @@ impl Store {
         .map(|s| SegmentState::parse(&s)))
     }
 
-    /// Whether this window may be promoted at all: an operator who undid its
-    /// promotion said no, and nothing but a re-split says otherwise.
+    /// An operator who undid its promotion said no; only a re-split resets it.
     pub async fn segment_no_promote(&self, corpus_id: &str, idx: i64) -> Result<bool> {
         Ok(sqlx::query_scalar!(
             "SELECT no_promote FROM segments WHERE corpus_id = ? AND idx = ?",
@@ -280,9 +226,7 @@ impl Store {
         Ok(())
     }
 
-    /// Mark every window of a corpus that was never synthesized — and is not
-    /// going to be, at this mode — as captured verbatim. Only `pending` rows:
-    /// a window that is `done` or `failed` has a history this must not erase.
+    /// Only `pending` rows: a `done` or `failed` window has a history this must not erase.
     pub async fn mark_segments_verbatim(&self, corpus_id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE segments SET state = 'verbatim' WHERE corpus_id = ? AND state = 'pending'",
@@ -293,16 +237,8 @@ impl Store {
         Ok(())
     }
 
-    /// Put a window back in the queue's path, and say whether what it has
-    /// already produced survives the second read.
-    ///
-    /// `keep_artifacts` is the whole difference between the two reasons to run a
-    /// window twice. A window whose read was *wrong* is being replaced, and the
-    /// artifacts it wrote go with it. A window that was read correctly but
-    /// missed lines — the uncovered-lines button — is being *added to*, and
-    /// deleting what it already produced would throw away artifacts an operator
-    /// may have edited, tagged or verified since, for lines that were never the
-    /// problem. See `window::write_segment_artifacts`.
+    /// `keep_artifacts`: a wrong read replaces its artifacts; a re-read for missed lines adds to
+    /// them, keeping what an operator may have edited. See `window::write_segment_artifacts`.
     pub async fn reset_segment(
         &self,
         corpus_id: &str,
@@ -322,19 +258,13 @@ impl Store {
         Ok(())
     }
 
-    /// Does a write to this window append rather than replace?
-    ///
-    /// The re-read mark or a verbatim state, and both readers must agree.
-    /// `jobs::window::run` read the two together while `write_segment_artifacts`
-    /// read only the mark, so a verbatim window whose mark was unset took the
-    /// replacing branch and deleted the passages the promotion exists to keep —
-    /// while the caller went on to embed and supersede as if they stood.
+    /// The re-read mark or a verbatim state; every writer must use this, or a verbatim window
+    /// takes the replacing branch and deletes its passages.
     pub async fn segment_write_appends(&self, corpus_id: &str, idx: i64) -> Result<bool> {
         Ok(self.segment_keeps_artifacts(corpus_id, idx).await?
             || self.segment_state(corpus_id, idx).await? == Some(SegmentState::Verbatim))
     }
 
-    /// Is this window mid-re-read, so that a write appends rather than replaces?
     pub async fn segment_keeps_artifacts(&self, corpus_id: &str, idx: i64) -> Result<bool> {
         Ok(sqlx::query_scalar!(
             "SELECT keep_artifacts FROM segments WHERE corpus_id = ? AND idx = ?",
@@ -347,8 +277,7 @@ impl Store {
             != 0)
     }
 
-    /// `(resolved, total)`, where resolved counts both a clean window and one
-    /// the model gave up on. Both are settled; neither is still owed work.
+    /// Resolved counts both clean and given-up windows.
     pub async fn segment_progress(&self, corpus_id: &str) -> Result<(i64, i64)> {
         let row = sqlx::query!(
             "SELECT COUNT(*) AS total,
@@ -363,8 +292,7 @@ impl Store {
         Ok((resolved.unwrap_or(0), total))
     }
 
-    /// Drop the windowing entirely. Re-segmenting a source from scratch has to
-    /// re-window it, because the text or the model's budget may have changed.
+    /// Re-segmenting has to re-window: the text or the model's budget may have changed.
     pub async fn clear_segments(&self, corpus_id: &str) -> Result<()> {
         sqlx::query!("DELETE FROM segments WHERE corpus_id = ?", corpus_id)
             .execute(&self.pool)
@@ -446,7 +374,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A second call must not reset the window that already finished.
         s.upsert_segments(
             &src.id,
             &[
@@ -466,10 +393,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_corpus_that_never_started_is_re_split_and_the_surplus_dropped() {
-        // The token budget can change under a corpus — the context blocks now
-        // subtract from it — and the old windowing then survived as text no
-        // splitter would produce, sent to the model as though it were current,
-        // with the windows past the new end queued forever.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         s.upsert_segments(
@@ -498,12 +421,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_split_is_settled_by_the_first_window_to_finish() {
-        // Re-splitting around a done window moves only the boundaries it does
-        // not own. Here the budget shrank: window 0 stays done at 1-10, and a
-        // re-split would leave window 1 starting at 16 — so source lines 11-15
-        // would be synthesised by nothing, silently and unrecoverably. The
-        // opposite drift duplicates instead. Neither is visible afterwards, so
-        // the split stops moving once any of it has been acted on.
+        // Window 0 stays done at 1-10; a re-split starting window 1 at 16 would skip lines 11-15.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         s.upsert_segments(
@@ -540,8 +458,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_window_does_not_settle_the_split() {
-        // Failure leaves no artifacts behind, so there is nothing for a new
-        // split to orphan. Only a window that produced something settles it.
+        // A failed window leaves no artifacts, so it does not settle the split.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         s.upsert_segments(&src.id, &[seg(1, 10, "window 0"), seg(11, 20, "window 1")])
@@ -609,8 +526,6 @@ mod tests {
             "a plain reset replaces what the window produced"
         );
 
-        // The uncovered-lines re-read asks for the opposite, and the mark is
-        // spent by the window reaching `done` so a later retry replaces again.
         s.reset_segment(&src.id, 0, true).await.unwrap();
         assert!(s.segment_keeps_artifacts(&src.id, 0).await.unwrap());
         s.set_segment_state(&src.id, 0, SegmentState::Failed, Some("boom"))
@@ -628,13 +543,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_window_that_wrote_artifacts_settles_the_split_before_it_is_done() {
-        // `write_segment_artifacts` commits the artifacts and only then marks
-        // the window `done`, so a process killed between the two leaves a
-        // window that owns artifacts while still reading `pending`. Judged on
-        // state alone, the resume re-split that follows would rewrite the
-        // boundaries under it — and, if the new split were shorter, delete the
-        // row while leaving its artifacts in the base with no window that will
-        // ever replace them.
+        // A kill between artifact commit and `done` leaves a `pending` window that owns artifacts;
+        // re-splitting under it would orphan them.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         s.upsert_segments(&src.id, &[seg(1, 10, "window 0"), seg(11, 20, "window 1")])
@@ -699,7 +609,6 @@ mod tests {
         assert!(rows.iter().all(|w| w.state == SegmentState::Verbatim));
         assert_eq!(SegmentState::parse("verbatim"), SegmentState::Verbatim);
         assert_eq!(SegmentState::Verbatim.as_str(), "verbatim");
-        // Resolved, for the progress count: neither is still owed a call.
         assert_eq!(s.segment_progress(&src.id).await.unwrap(), (2, 2));
     }
 

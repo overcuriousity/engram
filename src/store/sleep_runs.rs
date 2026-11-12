@@ -69,7 +69,6 @@ impl Store {
         Ok(())
     }
 
-    /// Newest first.
     pub async fn sleep_runs(&self, limit: usize) -> Result<Vec<SleepRun>> {
         let rows = sqlx::query!(
             r#"SELECT id AS "id!", started, ended, stopped, generation_id, integrated, novel, known, conflicts, rehearsed, found, adopted, reverted, refused, undone, restored, interference, condensed, budget_used, budget, detail FROM sleep_runs ORDER BY started DESC, id DESC LIMIT ?"#,

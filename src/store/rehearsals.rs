@@ -1,42 +1,17 @@
-//! Probes: questions the base can ask itself about one artifact.
-//!
-//! Two classes and a rule. A `capture` probe is the text of a later capture
-//! that landed near this artifact at integration — a query written by a
-//! person who was not looking at the answer, which is the standard verdicts
-//! are held to. A `cue` probe is a question a model-written artifact was
-//! written for. The rule: nothing is ever minted from an artifact's own
-//! title, body or tags, because a query written while looking at the answer
-//! passes on every system ever built.
+//! Probes: questions the base asks itself about one artifact, from later captures or a
+//! model-written artifact's cues. Never minted from the artifact's own text.
 
 use super::feedback::{blob_to_vec, vec_to_blob};
 use super::{Cursor, Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
-/// Distinct probes an owner's retained results have to come from before they
-/// are an agreement rather than one observation counted twice.
-///
-/// The rehearsal lap wraps, so on an unchanged base the same probe is replayed
-/// on consecutive nights and writes identical rows. Two rows off one probe is
-/// one reading repeated; two probes is two questions somebody asked that both
-/// landed on the artifact, which is what `sleep::interferers` and
-/// `sleep::condense_candidates` claim to have when they act.
+/// The rehearsal lap wraps, so one probe replayed nightly writes identical rows; only
+/// distinct probes count as agreement.
 pub const MIN_AGREEING_PROBES: usize = 2;
 
-/// Results kept per probe, the oldest dropped as newer ones are written.
-///
-/// Rows per probe rather than days is the bound this table needs: storage
-/// becomes a function of how many probes exist instead of how long the base
-/// has been running. A pass writes up to `OBSERVATION_LIMIT` rows, each
-/// carrying a JSON list of ids, and every pass runs window functions
-/// (`fragile_rehearsals`, `latest_results_under`) over all of them.
-///
-/// Ten, from what reads back further than the last row. `fragile_rehearsals`
-/// compares the last two under a generation; `retract::spanning` pairs a
-/// probe's last result before a condensation against its first after, so the
-/// older side has to survive the passes between one lap and the next. Past
-/// that nothing looks, and `MIN_AGREEING_PROBES` counts probes rather than
-/// rows, so keeping more history buys it nothing at all.
+/// Bounds storage by probe count rather than age. `retract::spanning` needs results to
+/// survive between laps; nothing reads further back.
 const KEEP_PER_PROBE: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +61,6 @@ pub struct Rehearsal {
 
 const COLUMNS: &str =
     "id, created_at, class, query, query_vec, embed_model, artifact_id, source_id, retired_at";
-/// The same columns off an aliased `rehearsals r`, for the joined reads.
 const QUALIFIED: &str = "r.id, r.created_at, r.class, r.query, r.query_vec, r.embed_model, r.artifact_id, r.source_id, r.retired_at";
 
 #[derive(Debug, Clone)]
@@ -138,12 +112,7 @@ fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Rehearsal> {
 }
 
 impl Store {
-    /// `None` when the same (artifact, class, query) is already *live*: a
-    /// probe is written once, however often the unit that mints it runs.
-    ///
-    /// Live, and not ever: a retired row is history and does not stand in the
-    /// way of the question being asked again under a new embedder. See
-    /// `idx_rehearsals_live`.
+    /// Live, not ever: a retired row does not block the same question under a new embedder.
     pub async fn record_rehearsal(&self, r: &NewRehearsal) -> Result<Option<String>> {
         let id = new_id();
         let res = sqlx::query!(
@@ -177,9 +146,7 @@ impl Store {
         .transpose()
     }
 
-    /// Live probes after `cursor`, in `(created_at, id)` order. The pair and
-    /// not a bare stamp: the clock is seconds, and a limit that cuts inside
-    /// one second would otherwise lose the rest of it.
+    /// `(created_at, id)`: the clock is seconds, and a limit cutting inside one would lose rows.
     pub async fn rehearsals_after(&self, cursor: &Cursor, limit: usize) -> Result<Vec<Rehearsal>> {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM rehearsals
@@ -199,7 +166,6 @@ impl Store {
         .collect()
     }
 
-    /// Live probes for one artifact, oldest first.
     pub async fn rehearsals_of(&self, artifact_id: &str) -> Result<Vec<Rehearsal>> {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT {COLUMNS} FROM rehearsals
@@ -225,7 +191,6 @@ impl Store {
         Ok(())
     }
 
-    /// Retire every live probe of this artifact. Rows stamped.
     pub async fn retire_rehearsals_of(&self, artifact_id: &str, at: i64) -> Result<u64> {
         Ok(sqlx::query!(
             "UPDATE rehearsals SET retired_at = ? WHERE artifact_id = ? AND retired_at IS NULL",
@@ -259,12 +224,7 @@ impl Store {
         )
         .execute(&self.pool)
         .await?;
-        // And everything this probe has past `KEEP_PER_PROBE`, here rather
-        // than on a sweep. Retention only runs on `feedback.retain_days`,
-        // which ships at "keep for ever" — so the table grew by up to
-        // `OBSERVATION_LIMIT` JSON-carrying rows a pass with nothing ever
-        // taking any of them out, and every pass ran window functions over
-        // the lot.
+        // Trimmed here, not by a sweep: retention ships at "keep for ever".
         sqlx::query!(
             "DELETE FROM rehearsal_results
               WHERE rehearsal_id = ? AND id NOT IN (
@@ -279,7 +239,6 @@ impl Store {
         Ok(id)
     }
 
-    /// Newest first, at most `limit`.
     pub async fn results_of(
         &self,
         rehearsal_id: &str,
@@ -299,22 +258,8 @@ impl Store {
         .collect()
     }
 
-    /// The same, bounded to one generation.
-    ///
-    /// What every *rule* reading retained results wants, and `results_of` is
-    /// not it. A rehearsal result is a rank measured under one set of ranking
-    /// parameters, so results from two generations are two different
-    /// measurements and comparing them across the boundary compares the knobs
-    /// rather than the base. Nothing expires them either at the default
-    /// `retain_days = 0`, so an unscoped read is the whole history of the
-    /// artifact for ever.
-    ///
-    /// That is not academic. `sleep::condense_candidates` refuses an owner any
-    /// of whose results missed (`rank IS NULL`), and `condense_artifact` sets
-    /// `embed_state = 'pending'` — so the first rehearsal after a condensation
-    /// records exactly such a miss, and unscoped it disabled condense *and*
-    /// interference for that owner permanently, on evidence the base itself
-    /// had manufactured one generation ago.
+    /// Results from two generations measure different knobs. Unscoped, the miss after a
+    /// condensation (`embed_state = 'pending'`) disabled condense for that owner permanently.
     pub async fn results_of_under(
         &self,
         rehearsal_id: &str,
@@ -336,14 +281,7 @@ impl Store {
         .collect()
     }
 
-    /// The most recent rank each of these probes was measured at under this
-    /// generation. Absent from the map where the probe has no result yet.
-    ///
-    /// One query for a whole batch, because the caller has the batch in hand
-    /// and the alternative is a point lookup per probe on a pass that already
-    /// runs `OBSERVATION_LIMIT` searches. The value is nested `Option`
-    /// deliberately: absent means never measured, `Some(None)` means measured
-    /// and missed, and those are different facts.
+    /// `Some(None)` means measured and missed; absent means never measured.
     pub async fn latest_ranks_under(
         &self,
         rehearsal_ids: &[String],
@@ -372,9 +310,7 @@ impl Store {
             .collect())
     }
 
-    /// Live probes whose last two results under `generation_id` disagree —
-    /// found then not, or a different rank, NULL counted as its own value.
-    /// What wobbles is what needs rehearsing. Oldest result first.
+    /// NULL counts as its own value. Oldest result first.
     pub async fn fragile_rehearsals(
         &self,
         generation_id: &str,
@@ -406,8 +342,6 @@ impl Store {
         .collect()
     }
 
-    /// The latest result per live probe under `generation_id`, with the
-    /// probe. Newest results first, at most `limit`.
     pub async fn latest_results_under(
         &self,
         generation_id: &str,
@@ -445,9 +379,7 @@ impl Store {
             .collect()
     }
 
-    /// Artifacts in results that nothing has ever asked for: no live probe,
-    /// and no positive observation naming them. The count, and the oldest
-    /// `limit` as `(id, title)`.
+    /// No live probe and no positive observation. The count, and the oldest `limit`.
     pub async fn unrehearsed(&self, limit: usize) -> Result<(i64, Vec<(String, Option<String>)>)> {
         const WHERE: &str = "a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
                 AND a.embed_state = 'embedded'
@@ -470,13 +402,7 @@ impl Store {
         ))
     }
 
-    /// Results older than `retain_days`. Zero keeps for ever, as it does for
-    /// the observations this shares a clock with.
-    ///
-    /// Not the bound on this table — `KEEP_PER_PROBE` is, and it holds at the
-    /// shipped zero. This is the operator's separate wish that nothing older
-    /// than a window be kept anywhere, and the rehearsal results are part of
-    /// "anywhere".
+    /// Zero keeps for ever. `KEEP_PER_PROBE` is the table's real bound.
     pub async fn expire_rehearsal_results(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);
@@ -597,7 +523,6 @@ mod tests {
         assert_eq!(live[0].id, again);
         assert_eq!(live[0].embed_model, "another-embedder");
 
-        // And the bar still stands between two live rows.
         assert!(
             store
                 .record_rehearsal(&probe(&o, "why won't it mount"))

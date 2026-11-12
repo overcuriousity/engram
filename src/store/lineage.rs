@@ -1,18 +1,5 @@
-//! Which captured artifacts a merged artifact is made of.
-//!
-//! Stored as the resolved closure rather than as parent edges. The re-merge
-//! rule needs the *captured* roots of every candidate on every decision — a
-//! merge is always written from originals, never from text an earlier merge
-//! produced, which is what keeps information loss one generation deep however
-//! many times a group is merged. Walking edges with a recursive CTE would put a
-//! graph traversal on the sweep's hot path for an answer that never changes
-//! once written.
-//!
-//! The cost of the denormalisation is that a deleted root removes closure rows
-//! an edge table could have recomputed. `source_count` on the artifact is what
-//! notices: it records how many sources the merge was written from, so a merge
-//! that has lost one can be flagged rather than quietly claiming less
-//! provenance than its text carries.
+//! Which captured artifacts a merged artifact is made of, stored as the resolved closure:
+//! a merge is always written from originals, and the sweep must not traverse a graph.
 
 use super::Store;
 use crate::error::Result;
@@ -20,8 +7,7 @@ use crate::store::artifacts::{Chunk, CorpusSpan};
 use crate::store::pairs::ArtifactPair;
 use std::collections::BTreeMap;
 
-/// Where an artifact comes from, as corpus and lines. Derived from lineage,
-/// never stored: membership *is* lineage projected, so it cannot drift.
+/// Derived from lineage, never stored, so it cannot drift.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Origin {
     pub corpus_id: String,
@@ -29,22 +15,8 @@ pub struct Origin {
 }
 
 impl Store {
-    /// The captured roots of each of `artifact_ids`, keyed by the input id.
-    ///
-    /// A captured artifact is its own root — the dedupe pass asks for the roots
-    /// of every component member without caring which kind it is, and answering
-    /// "none" for a captured one would silently drop it from the very prompt it
-    /// is supposed to be in.
-    ///
-    /// A merged artifact resolves through `artifact_sources`, which already
-    /// holds the closure, so this is one query per id and not a traversal.
-    ///
-    /// A merged or synthesized artifact with no lineage rows — every root
-    /// deleted out from under it — resolves to the *empty* list, never to itself. Its text is a
-    /// synthesis, and handing it back as a root is how a paraphrase of a
-    /// paraphrase ends up in a prompt as an original, or recorded as another
-    /// merge's `root_id`. The empty answer makes that state visible to the
-    /// caller instead; the dedupe unit leaves both sides of such a component as they are.
+    /// A captured artifact is its own root. A merged one with no lineage rows resolves to the
+    /// empty list, never to itself, so a synthesis is never passed off as an original.
     pub async fn roots_of(&self, artifact_ids: &[String]) -> Result<BTreeMap<String, Vec<String>>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for id in artifact_ids {
@@ -74,12 +46,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Mirror of `roots_of`, one step further: every root's corpus and span.
-    /// A passage or captured artifact is its own origin; a merged or
-    /// synthesized one has one origin per root. Non-empty for every active
-    /// artifact — an empty answer is the same broken state `roots_of` reports.
-    /// Derived, never stored: membership *is* lineage projected, so it cannot
-    /// drift.
+    /// Every root's corpus and span. Empty only in the broken state `roots_of` reports.
     pub async fn origins_of(&self, ids: &[String]) -> Result<BTreeMap<String, Vec<Origin>>> {
         let roots = self.roots_of(ids).await?;
         let mut all: Vec<String> = roots.values().flatten().cloned().collect();
@@ -109,8 +76,6 @@ impl Store {
         Ok(out)
     }
 
-    /// Model-written artifacts with a root in this corpus: what the corpus
-    /// page lists as written from it.
     pub async fn artifacts_originating_in(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
         let rows = sqlx::query_as!(
             crate::store::artifacts::ArtifactRow,
@@ -126,15 +91,8 @@ impl Store {
         Ok(rows.into_iter().map(Chunk::from).collect())
     }
 
-    /// Merged artifacts still standing, newest first. What Ops lists.
-    ///
-    /// Standing is the whole of the filter, and it is not cosmetic: every row
-    /// here is rendered with an "Undo merge" button, and undoing is defined as
-    /// restoring what the merge hid and then deprecating it. A merge that was
-    /// already undone is deprecated and hid nothing that is still hidden; one
-    /// subsumed by a later merge is superseded, and its sources belong to that
-    /// later merge now. Pressing undo on either finds nothing to restore and
-    /// deprecates an artifact that is already gone from results.
+    /// Only standing merges: each row gets an "Undo merge" button, which would do nothing on
+    /// an undone or subsumed merge.
     pub async fn merged_artifacts(
         &self,
         limit: i64,
@@ -153,17 +111,8 @@ impl Store {
         Ok(rows.into_iter().map(Chunk::from).collect())
     }
 
-    /// Merged artifacts at least one of whose roots is still active.
-    ///
-    /// The write path indexes a merged artifact before superseding its roots,
-    /// so this is precisely the state a crash between those two steps leaves
-    /// behind. Nothing else would see it: the merge looks finished from the
-    /// artifact side and absent from the pair side, and only a join across the
-    /// lineage says otherwise.
-    ///
-    /// A root an operator explicitly restored (`restored = 1`) is not an
-    /// unfinished merge, and the repair must not see it — re-hiding it undid
-    /// the operator's decision on every sweep.
+    /// Exactly the state a crash between indexing and superseding leaves. Roots an operator
+    /// restored (`restored = 1`) are excluded, or the repair re-hides them every sweep.
     pub async fn merged_with_active_roots(&self, limit: i64) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar!(
             "SELECT DISTINCT s.child_id FROM artifact_sources s
@@ -183,12 +132,7 @@ impl Store {
         .await?)
     }
 
-    /// Record that an operator explicitly restored this captured root: no
-    /// repair may hide it behind a merge again. Every merge naming it, not
-    /// one — the operator's decision is about the root, not about a lineage
-    /// edge. A *new* merge decision may still hide it: `insert_merged_artifact`
-    /// writes fresh rows with `restored = 0`, and that is new evidence rather
-    /// than a repair of old state.
+    /// Every merge naming the root. A new merge writes `restored = 0` and may still hide it.
     pub async fn mark_source_restored(&self, root_id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE artifact_sources SET restored = 1 WHERE root_id = ?",
@@ -199,10 +143,7 @@ impl Store {
         Ok(())
     }
 
-    /// The roots `merge::finish` is allowed to hide: the lineage minus every
-    /// root an operator explicitly restored. Distinct from `roots_of`, which
-    /// answers "what was this written from" and must keep seeing the true
-    /// closure.
+    /// Unlike `roots_of`, excludes roots an operator restored.
     pub async fn roots_to_hide(&self, child_id: &str) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar!(
             "SELECT root_id FROM artifact_sources
@@ -213,26 +154,8 @@ impl Store {
         .await?)
     }
 
-    /// Active merged artifacts whose embedding can no longer arrive: no live
-    /// embed job below the retry ceiling. The write path settles the pairs the
-    /// moment the merge is written, so a merge stuck here is invisible to
-    /// search, its roots were never superseded, and nothing else would notice
-    /// — the only signal was a forever-retrying job.
-    ///
-    /// "Stranded" means no embed unit that is still going to get to it, and
-    /// that half of the question lives in the other database now — so the
-    /// `LIMIT` cannot be applied with the `WHERE`, and a single over-fetched
-    /// window would answer nothing at all whenever the merges waiting on an
-    /// embedder outnumber it. Paged instead, until the caller has what it asked
-    /// for or the candidates run out. The set being walked is merges that are
-    /// not embedded *yet*, which empties itself as they embed, so the loop is
-    /// bounded by work in flight rather than by the size of the base.
-    ///
-    /// Only merges that have hidden nothing. One whose roots are already
-    /// superseded onto it landed once, and an embed it is waiting on now is a
-    /// later one: `jobs::condense` rewrites a merged artifact like any other
-    /// and queues it again. Retiring that merge took what it replaced out of
-    /// results with it, behind a deprecated row nothing restores.
+    /// The embed-job half lives in the control database, so the `LIMIT` cannot apply with the
+    /// `WHERE`: paged instead. Only merges that hid nothing: a later re-embed is not stranding.
     pub async fn stranded_merges(&self, limit: i64) -> Result<Vec<String>> {
         const PAGE: i64 = 500;
         let want = limit.max(0) as usize;
@@ -278,21 +201,10 @@ impl Store {
         Ok(out)
     }
 
-    /// Active merged artifacts, other than `child_id`, every root of which is
-    /// also a root of `child_id`.
-    ///
-    /// A merge written from everything an earlier merge was made of subsumes
-    /// it. Superseding only the roots would leave that earlier merge active and
-    /// near-identical to the new one, so the relate unit would file the pair
-    /// again on the next sweep and the two would churn against each other for
-    /// as long as they both existed.
+    /// Otherwise the earlier merge stays active beside the new one and relate churns the pair.
     pub async fn subsumed_merges(&self, child_id: &str) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar!(
-            // The EXISTS guard is load-bearing. A merged artifact whose roots
-            // have all been deleted has no lineage rows left, and without it the
-            // NOT EXISTS below would call the empty set a subset of everything
-            // and hide it behind an unrelated merge. That artifact is
-            // `merged_missing_a_source`'s business, not this function's.
+            // The EXISTS guard stops NOT EXISTS calling an empty root set a subset of everything.
             r#"SELECT other.id AS "id!" FROM artifacts other
               WHERE other.provenance = 'merged'
                 AND other.status = 'active'
@@ -310,15 +222,7 @@ impl Store {
         .await?)
     }
 
-    /// Merged artifacts holding fewer lineage rows than the number of sources
-    /// they were written from — and not yet flagged for it. The exclusion is
-    /// in the SQL, not the caller: membership in this set is permanent
-    /// (deletes are hard), so without it the oldest flagged rows fill the
-    /// LIMIT forever and a newly orphaned merge past the five-hundredth is
-    /// never seen. Newest first for the same reason.
-    ///
-    /// A comparison rather than a guess, which is what `source_count` is for:
-    /// without it, "lost a source" cannot be told from "only ever had two".
+    /// Flagged rows are excluded in SQL: membership is permanent, so they would fill the LIMIT.
     pub async fn merged_missing_a_source(&self, limit: i64) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar!(
             r#"SELECT a.id AS "id!" FROM artifacts a
@@ -334,7 +238,6 @@ impl Store {
         .await?)
     }
 
-    /// Artifacts carrying `flag`, for sweeps that retire a flag they used to set.
     pub async fn artifacts_flagged(&self, flag: &str, limit: i64) -> Result<Vec<String>> {
         let pattern = format!("%\"{flag}\"%");
         Ok(sqlx::query_scalar!(
@@ -346,18 +249,7 @@ impl Store {
         .await?)
     }
 
-    /// Every pair, in any state, both of whose artifacts are in this set.
-    ///
-    /// Each captured root of `child_id`, with the direct parent it entered
-    /// through.
-    ///
-    /// `roots_of` answers what a merge is *made of*, which is what every
-    /// decision needs. This answers how it got there, which is what a picture
-    /// of the lineage needs and nothing else does: `via_id` is the column the
-    /// schema marks "rendering only". Equal to the root for a first-generation
-    /// merge, `None` for a row whose intermediate has since been deleted —
-    /// `ON DELETE SET NULL`, because losing the middle of the path does not
-    /// invalidate its end.
+    /// `None` where the intermediate was deleted (`ON DELETE SET NULL`); for rendering only.
     pub async fn sources_with_via(&self, child_id: &str) -> Result<Vec<(String, Option<String>)>> {
         let rows = sqlx::query!(
             "SELECT root_id, via_id FROM artifact_sources
@@ -369,16 +261,14 @@ impl Store {
         Ok(rows.into_iter().map(|r| (r.root_id, r.via_id)).collect())
     }
 
-    /// What undoing a merge has to dismiss. Reactivating the roots alone
-    /// accomplishes nothing: the sweep re-finds them and reaches the same
-    /// verdict, so the operator's decision lasts until the next tick.
+    /// Every pair, in any state, both of whose artifacts are in this set: what undoing a merge
+    /// has to dismiss, or the sweep re-finds the same verdict.
     pub async fn pairs_among(&self, ids: &[String]) -> Result<Vec<ArtifactPair>> {
         if ids.len() < 2 {
             return Ok(vec![]);
         }
         let mut out = Vec::new();
-        // A handful of ids at most — the fan-in cap bounds it — so the pairwise
-        // loop is cheaper than building a variadic IN clause for sqlx.
+        // The fan-in cap bounds the ids, so the pairwise loop beats a variadic IN clause.
         for (i, a) in ids.iter().enumerate() {
             for b in &ids[i + 1..] {
                 let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
@@ -465,9 +355,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_captured_artifact_is_its_own_root() {
-        // The dedupe pass asks for the roots of every component member without
-        // caring which kind it is. Answering "none" for a captured artifact
-        // would silently drop it from the prompt it is supposed to be in.
         let s = Store::memory().await.unwrap();
         let (a, b, _) = three(&s).await;
         let roots = s.roots_of(&[a.clone(), b.clone()]).await.unwrap();
@@ -497,9 +384,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_of_a_merge_records_only_captured_roots() {
-        // The anti-drift invariant, at the storage layer: `root_id` never names
-        // a merged artifact, so a re-merge is always written from originals and
-        // never from text an earlier merge produced.
         let s = Store::memory().await.unwrap();
         let (a, b, c) = three(&s).await;
         let m1 = s
@@ -539,18 +423,12 @@ mod tests {
 
         let roots = s.roots_of(std::slice::from_ref(&m.id)).await.unwrap();
         assert_eq!(roots[&m.id], vec![b], "the cascade left a dangling root");
-        // And the loss is visible rather than silent: the merge still claims
-        // two sources while only one row survives.
+        // The merge still claims two sources while only one row survives.
         assert_eq!(s.merged_missing_a_source(10).await.unwrap(), vec![m.id]);
     }
 
     #[tokio::test]
     async fn a_merge_that_is_no_longer_standing_leaves_the_ops_list() {
-        // Every row Ops renders carries an "Undo merge" button, and undo means
-        // restore what this hid, then deprecate it. A merge already deprecated
-        // hid nothing that is still hidden, and one superseded by a later merge
-        // has handed its sources over — so the button would restore nothing and
-        // deprecate an artifact that is already gone from results.
         let s = Store::memory().await.unwrap();
         let (a, b, c) = three(&s).await;
         let live = s
@@ -588,12 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_of_a_merge_notices_a_lost_root_too() {
-        // `source_count` counted the arguments the call was given, which for a
-        // merge of a merge is fewer than the roots it wrote: M2 = merge(M1(a,b),
-        // c) recorded two against three lineage rows. `merged_missing_a_source`
-        // asks whether the count exceeds the surviving rows, so losing a root
-        // left 2 > 2 — false — and the orphan flag never fired for a merge of a
-        // merge at all. That is the case the counter was added for.
+        // M2 = merge(M1(a,b), c) must count three sources, its lineage rows, not two arguments.
         let s = Store::memory().await.unwrap();
         let (a, b, c) = three(&s).await;
         let m1 = s
@@ -619,10 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_sources_sharing_a_root_are_counted_once() {
-        // Merging M(a,b) with `a` itself is a component the sweep can build, and
-        // it names `a` twice. `artifact_sources` is keyed on (child_id, root_id)
-        // so it writes one row — and a count of three against two rows would
-        // report a lost source that was never there.
+        // `artifact_sources` is keyed on (child_id, root_id), so `a` named twice writes one row.
         let s = Store::memory().await.unwrap();
         let (a, b, _) = three(&s).await;
         let m1 = s
@@ -643,9 +513,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_whose_roots_are_still_active_is_findable() {
-        // The write path indexes a merged artifact before superseding its
-        // roots, so a crash in between leaves exactly this state. Nothing else
-        // in the system would ever notice it.
         let s = Store::memory().await.unwrap();
         let (a, b, _) = three(&s).await;
         let m = s
@@ -653,8 +520,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Not yet: an unindexed merge has not reached the step that hides its
-        // roots, so it is not unfinished — it is unstarted.
+        // An unindexed merge is unstarted, not unfinished.
         assert!(
             s.merged_with_active_roots(10).await.unwrap().is_empty(),
             "a merge that is not indexed yet was reported as unfinished"
@@ -691,15 +557,11 @@ mod tests {
             s.subsumed_merges(&m2.id).await.unwrap(),
             vec![m1.id.clone()]
         );
-        // Not the other way round: m2 draws on a root m1 never had.
         assert!(s.subsumed_merges(&m1.id).await.unwrap().is_empty());
     }
 
     #[tokio::test]
     async fn a_merge_that_lost_every_root_is_not_subsumed_by_an_unrelated_one() {
-        // Without the EXISTS guard the empty root set reads as a subset of
-        // everything, and an artifact whose sources were deleted would be
-        // hidden behind a merge it has nothing to do with.
         let s = Store::memory().await.unwrap();
         let (a, b, c) = three(&s).await;
         let _orphan = s
@@ -734,8 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn roots_of_a_model_written_artifact_with_no_lineage_is_empty_not_itself() {
-        // The §9 hazard: a synthesized artifact read as captured would hand its
-        // own model-written text to a merge prompt as an original.
+        // A synthesized artifact read as captured would hand model text to a merge as an original.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let na = |ordinal: i64, text: &str| crate::store::artifacts::NewArtifact {
@@ -753,7 +614,6 @@ mod tests {
             .unwrap();
         let roots = s.roots_of(std::slice::from_ref(&made[0].id)).await.unwrap();
         assert!(roots[&made[0].id].is_empty(), "{roots:?}");
-        // A passage is its own root, like a captured artifact.
         let p = s
             .insert_artifacts_with_provenance(
                 &src.id,
@@ -811,9 +671,7 @@ mod tests {
                 })
             }]
         );
-        // Every active artifact has at least one origin.
         assert!(o.values().all(|v| !v.is_empty()));
-        // And the corpus page can find the merge from either corpus.
         let from_c2 = s.artifacts_originating_in(&c2.id).await.unwrap();
         assert_eq!(
             from_c2.iter().map(|c| c.id.clone()).collect::<Vec<_>>(),

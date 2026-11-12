@@ -1,9 +1,4 @@
-//! Pairing grants: the short-lived, single-use codes a QR carries.
-//!
-//! A grant is not a token. It lives two minutes, is spent by one claim, and
-//! is exchanged for the real credential over TLS — see `auth::grants`. The
-//! table holds only a hash of the code, so a reader of the database learns
-//! nothing a scanner of the screen did not.
+//! Pairing grants: two-minute, single-use codes; only a hash of the code is stored.
 
 use super::control::Control;
 use super::now;
@@ -31,14 +26,8 @@ impl Control {
         Ok(())
     }
 
-    /// Spend a grant, and say whose it was.
-    ///
-    /// One statement, so two claims racing on the same code cannot both win:
-    /// the row is marked claimed only if it is unclaimed and unexpired, and
-    /// `RETURNING` hands back the subject of the row this call changed —
-    /// nothing, if some other call or the clock got there first. The three
-    /// ways to get `None` are deliberately one answer; the route above turns
-    /// them into one status, so a guesser learns nothing from the difference.
+    /// One statement, so two racing claims cannot both win. The three `None` cases are
+    /// deliberately indistinguishable, so a guesser learns nothing.
     pub async fn claim_grant(&self, code_hash: &str) -> Result<Option<String>> {
         let t = now();
         let row = sqlx::query!(
@@ -76,7 +65,6 @@ mod tests {
             c.claim_grant("hash-1").await.unwrap().as_deref(),
             Some("alice")
         );
-        // The same code again is nobody's: the row is spent.
         assert_eq!(c.claim_grant("hash-1").await.unwrap(), None);
     }
 

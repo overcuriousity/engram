@@ -4,14 +4,6 @@ use super::Store;
 use super::artifacts::Chunk;
 use crate::error::{Error, Result};
 
-/// Two answers, not three. There used to be a `conflict`: two artifacts at or
-/// above the supersede line whose value-shaped tokens differed, filed as a
-/// contradiction without a model reading either. In a base of lecture slides
-/// the tokens that differed were footer dates, and 130 near-identical pairs
-/// settled into a state no sweep reopened. Whether two artifacts disagree is
-/// a question about what they say, and nothing that splits on whitespace can
-/// be asked it. The rows it wrote still read — as `Known`, which is what they
-/// were: something near, at or above the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tag {
     Novel,
@@ -28,8 +20,7 @@ impl Tag {
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
             "novel" => Tag::Novel,
-            // A row from before the detector was retired. It was near
-            // something, which is all the tag can honestly say now.
+            // `conflict` rows predate the retired detector; they read as `Known`.
             "known" | "conflict" => Tag::Known,
             other => return Err(Error::Store(format!("integrations: unknown tag {other}"))),
         })
@@ -86,11 +77,7 @@ impl Store {
         .transpose()
     }
 
-    /// The work list: embedded, in results, and without a row — oldest first.
-    /// In results, because a hidden artifact has no neighbours worth recording
-    /// and would be re-scanned every pass; when it comes back it is integrated
-    /// then, which is when the question is live. The table is the memory, so
-    /// there is no cursor to lose an artifact embedded late.
+    /// Only artifacts in results: a hidden one would be re-scanned every pass for nothing.
     pub async fn artifacts_to_integrate(&self, limit: usize) -> Result<Vec<Chunk>> {
         let ids: Vec<String> = sqlx::query_scalar!(
             r#"SELECT a.id AS "id!" FROM artifacts a
@@ -148,7 +135,6 @@ mod tests {
             .into_iter()
             .map(|c| c.id)
             .collect();
-        // Not embedded: nothing to integrate yet.
         assert!(store.artifacts_to_integrate(10).await.unwrap().is_empty());
         for id in &ids {
             assert!(store.mark_embedded(id, "fake", 0).await.unwrap());

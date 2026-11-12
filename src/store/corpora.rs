@@ -4,14 +4,9 @@ use crate::error::{Error, Result};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
-/// Which side of the `content_hash` constraint an insert came down on.
-///
-/// The distinction is the caller's to act on: capture reports a duplicate
-/// rather than creating a second source, and must not queue synthesis for a
-/// corpus somebody else already queued.
+/// Capture reports a duplicate rather than queueing synthesis a second time.
 #[derive(Debug, Clone)]
 pub enum Insertion {
-    /// The row this call wrote.
     Created(Corpus),
     /// The same bytes were already stored; this is the row that won.
     Existing(Corpus),
@@ -25,15 +20,9 @@ impl Insertion {
     }
 }
 
-/// How a capture that arrived as bytes waits to be read: the status the row
-/// sits in, and the unit that will move it on.
-///
-/// One value rather than two arguments, because they are never chosen
-/// independently. A row parked in `extracting` with a `Describe` unit behind it
-/// would wait for a stage that skips it, and the corpus would sit in flight for
-/// ever with nothing wrong that any one line would show.
-// Not `Copy`: `CorpusStatus` is not, and making a fieldless enum copyable to
-// suit one struct is a change to every place that holds one.
+/// One value, because status and unit are never chosen independently: a mismatch would
+/// leave the corpus in flight for ever.
+// Not `Copy`: `CorpusStatus` is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reading {
     pub status: CorpusStatus,
@@ -41,35 +30,26 @@ pub struct Reading {
 }
 
 impl Reading {
-    /// A photo, read by the vision model.
     pub const VISION: Reading = Reading {
         status: CorpusStatus::Describing,
         stage: Stage::Describe,
     };
-    /// A PDF, read by the local extractor. No model, so no role gates it.
+    /// No model, so no role gates it.
     pub const EXTRACTION: Reading = Reading {
         status: CorpusStatus::Extracting,
         stage: Stage::Extract,
     };
 }
 
-/// Deserialised as well as serialised, so a client can match on the variant
-/// rather than on the spelling. The two spellings in this file do not agree —
-/// `as_str` writes `needs_review` for the database and serde writes
-/// `needsreview` for a response — and a client comparing strings would pick the
-/// wrong one and silently never match.
+/// Deserialised too, so clients match on the variant: `as_str` writes `needs_review` for
+/// the database while serde writes `needsreview`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CorpusStatus {
-    /// An image whose text has not been read yet. Only image corpora hold it.
     Describing,
-    /// A PDF whose text has not been extracted yet. Only PDF corpora hold it.
     Extracting,
     Raw,
-    /// Captured, stored, and deliberately not queued for synthesis: something
-    /// near-identical is already in the base, and segmenting it would pay a
-    /// model to produce artifacts that compete with ones that already exist.
-    /// An operator resolves it on Ops.
+    /// Not queued for synthesis: something near-identical is already in the base. Resolved on Ops.
     NeedsReview,
     Segmenting,
     Segmented,
@@ -110,7 +90,6 @@ impl CorpusStatus {
     }
 }
 
-/// The four columns that say where a corpus came from. See `corpus_origin`.
 #[derive(Debug, Clone)]
 pub struct CorpusOrigin {
     pub id: String,
@@ -129,38 +108,25 @@ pub struct Corpus {
     pub status: CorpusStatus,
     pub created_at: i64,
     pub updated_at: i64,
-    /// Fraction of this source's non-blank lines that ended up inside some
-    /// chunk. `None` for sources segmented before the check existed.
+    /// `None` for sources segmented before the check existed.
     pub coverage: Option<f64>,
-    /// Bottom-k shingle hashes of `raw_text`. Empty for corpora captured before
-    /// the signature existed, which simply are not compared.
+    /// Empty for corpora captured before the signature existed, which are not compared.
     #[serde(skip)]
     pub shingles: Vec<u64>,
-    /// The corpus this one looked like at capture, and how alike they were.
     /// Both cleared when an operator chooses to keep both.
     pub near_dupe_of: Option<String>,
     pub near_dupe_score: Option<f64>,
-    /// The page this was captured from, for the two doors that know one.
-    /// `None` for a paste, an upload or an MCP capture.
     pub source_url: Option<String>,
-    /// Set when this row is a placeholder for a corpus that was never captured
-    /// here — its artifacts came back from the vector store and needed a parent
-    /// to hang from. `raw_text` is then those artifacts joined, not the source
-    /// document, so nothing that reasons about the original text should trust
-    /// it. `None` for every ordinary capture.
+    /// Set on a placeholder for artifacts restored from the vector store: `raw_text` is then
+    /// those artifacts joined, not the source document.
     pub restored_at: Option<i64>,
-    /// When the reconcile sweep read this capture's uncovered lines a second
-    /// time on its own. Set once, before the read, so that a read which fails
-    /// cannot be retried on every sweep. `None` until then. Not part of the
-    /// API shape: it is the sweep's own bookkeeping.
+    /// Set once, before the read, so a failing read is not retried every sweep.
     #[serde(skip)]
     pub auto_reread_at: Option<i64>,
-    /// What the door knew about the capture beyond the text: a `note`, `file`
-    /// facts, `exif`. Namespaced JSON; `{}` when nothing was recorded.
+    /// Namespaced JSON; `{}` when nothing was recorded.
     pub metadata: serde_json::Value,
 }
 
-/// A corpus as a list shows it: every fact of the row except its text.
 #[derive(Debug, Clone)]
 pub struct CorpusSummary {
     pub id: String,
@@ -179,7 +145,6 @@ pub struct CorpusSummary {
     pub metadata: serde_json::Value,
 }
 
-/// A stored corpus that a new capture looks like.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct NearDuplicate {
     pub corpus_id: String,
@@ -187,25 +152,19 @@ pub struct NearDuplicate {
     pub similarity: f64,
 }
 
-/// The dedupe key of a corpus: text for a capture, the file's bytes for an
-/// image. One function, so the two doors can never drift onto different keys
-/// for the same column.
-/// What a capture wants done in the same transaction as its row.
 #[derive(Debug, Clone)]
 pub enum Followup {
-    /// Just the row. Tests and tools that drive the queue themselves.
     Nothing,
-    /// Queue this stage. Text captures queue Synthesize; images queue Describe.
     Queue(Stage),
-    /// Queue Synthesize like any capture, and flag the row beside the
-    /// near-duplicate it resembles: `near_dupe_of` and its score, for a person
-    /// to look at later. Never a wait — see `Core::park_or_queue`.
-    Flag { of: String, similarity: f64 },
+    /// Never a wait: see `Core::park_or_queue`.
+    Flag {
+        of: String,
+        similarity: f64,
+    },
 }
 
 impl Followup {
-    /// The stage this followup arms, if any. A flagged capture is read like
-    /// any other: the flag is a note for a person, not a gate.
+    /// A flagged capture is read like any other: the flag is a note for a person, not a gate.
     fn stage(&self) -> Option<Stage> {
         match self {
             Followup::Nothing => None,
@@ -215,9 +174,7 @@ impl Followup {
     }
 }
 
-/// The one INSERT every captured corpus row goes through, on whatever executor
-/// the caller is inside. `ON CONFLICT(content_hash) DO NOTHING`; answers
-/// whether the row was written.
+/// `ON CONFLICT(content_hash) DO NOTHING`; answers whether the row was written.
 async fn insert_corpus_row<'e>(
     exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     src: &Corpus,
@@ -250,7 +207,6 @@ pub fn content_hash(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
 
-/// A `corpora` row as stored, for `query_as!`.
 #[derive(sqlx::FromRow)]
 pub(crate) struct CorpusRow {
     pub id: Option<String>,
@@ -319,23 +275,8 @@ impl Store {
             .into_corpus())
     }
 
-    /// Insert a capture whose shingle signature the caller already computed.
-    ///
-    /// Ingest needs the signature before the row exists, to ask whether this is
-    /// a near-duplicate of something already stored. Handing it over rather
-    /// than recomputing it here is what makes that one pass over the document
-    /// instead of two.
-    ///
-    /// Answers whether the row is ours because the check for an existing
-    /// `content_hash` happens in the caller, before the near-duplicate scan —
-    /// and that scan decodes every stored signature, so the window between the
-    /// check and this insert grows with the base. Two identical captures in
-    /// flight (a double-submitted form, an agent retrying) both pass the check.
-    /// The loser must get the winner's row back, not a UNIQUE-constraint 500.
-    ///
-    /// The follow-up — the job, or the park — is written in the same
-    /// transaction as the row: a process that dies between the two would
-    /// otherwise leave a `raw` corpus nothing will ever pick up.
+    /// The caller checks `content_hash` before a slow near-duplicate scan, so two identical
+    /// captures can race: the loser gets the winner's row. The follow-up shares the transaction.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_corpus_with_signature(
         &self,
@@ -374,25 +315,15 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         if !insert_corpus_row(&mut *tx, &src).await? {
             tx.rollback().await?;
-            // Somebody else got there between the caller's hash check and this
-            // statement. Their row is as good as ours would have been — same
-            // bytes, by definition of the constraint that rejected us.
             let existing = self.find_by_hash(&src.content_hash).await?.ok_or_else(|| {
-                // Only reachable if the winning row was deleted in the moment
-                // between the conflict and this read.
+                // Only reachable if the winning row was deleted between the conflict and this read.
                 Error::Store("capture conflicted with a corpus that then vanished".into())
             })?;
             return Ok(Insertion::Existing(existing));
         }
         tx.commit().await?;
-        // After the commit and never before it. The queue is a second database
-        // and takes no part in this transaction, so a unit armed first is
-        // claimable first: a worker that gets there inside the window reads a
-        // corpus that is not visible yet, and `Error::NotFound` on a claimed
-        // job means "the target was deleted" — which closes the unit for good
-        // and leaves the capture at `raw` with nothing that will ever pick it
-        // up. See `jobs::enqueue_with` for the failure this order leaves
-        // instead, which is the recoverable one.
+        // After the commit: the queue is another database, and a worker claiming a unit for an
+        // invisible corpus closes it as deleted. See `jobs::enqueue_with`.
         if let Some(stage) = followup.stage() {
             super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", &src.id)
                 .await?;
@@ -400,16 +331,8 @@ impl Store {
         Ok(Insertion::Created(src))
     }
 
-    /// Where a corpus came from, without its text.
-    ///
-    /// `get_corpus` is `SELECT *`, and `raw_text` on a captured book is the
-    /// whole book. The single-artifact read needs four columns of it to name a
-    /// source, and reading the row to get them made the cheapest door in the
-    /// API load tens of megabytes per request — the cost `web::api::SourceRef`
-    /// was shaped to avoid on the wire and still paid in the query.
-    ///
-    /// `Ok(None)` and not `NotFound` for a corpus that is gone: a reading is
-    /// not refused because the document behind it was deleted.
+    /// Four columns, not `SELECT *`: `raw_text` can be a whole book. `Ok(None)` for a gone
+    /// corpus: a reading is not refused because its document was deleted.
     pub async fn corpus_origin(&self, id: &str) -> Result<Option<CorpusOrigin>> {
         let row =
             sqlx::query("SELECT id, title_hint, origin, source_url FROM corpora WHERE id = ?")
@@ -424,10 +347,7 @@ impl Store {
         }))
     }
 
-    /// The hash a corpus was captured under, and nothing else of the row.
-    ///
-    /// What the byte routes tag their answer with, so a revalidation is
-    /// answered before the blob is read rather than after.
+    /// Lets byte routes answer a revalidation before reading the blob.
     pub async fn content_hash_of(&self, id: &str) -> Result<Option<String>> {
         Ok(
             sqlx::query_scalar!("SELECT content_hash FROM corpora WHERE id = ?", id)
@@ -436,10 +356,6 @@ impl Store {
         )
     }
 
-    /// The title hints of these corpora, by id, for the ones that have one.
-    ///
-    /// What a passage with no heading of its own is shown under: the note it
-    /// came from is one join away and is exactly what a person would call it.
     pub async fn corpus_titles(
         &self,
         ids: &[String],
@@ -486,19 +402,8 @@ impl Store {
         Ok(row.map(row_to_corpus))
     }
 
-    /// Write a follow-up onto a corpus that already has a row — the same three
-    /// outcomes `insert_corpus_with_signature` writes beside a new one, and in
-    /// the same order: the status commits, then the unit is armed.
-    ///
-    /// The path here is the one an image takes. Its row is written at capture
-    /// and its text only exists once the vision stage has read it, so the fork
-    /// between "queue this for synthesis" and "park it beside what it looks
-    /// like" happens long after the insert. The two writes were once one
-    /// transaction, which the queue moving to a second database ended: SQLite
-    /// promises nothing across two of them, so what is left is a choice of
-    /// which way round to be interrupted. Status first is the recoverable one
-    /// — a corpus with no unit is what `jobs/reconcile.rs` looks for, while a
-    /// unit with no visible corpus is one a worker closes as deleted.
+    /// Status commits first, then the unit is armed: the two databases share no transaction, and
+    /// a corpus with no unit is what `jobs/reconcile.rs` recovers.
     pub async fn apply_followup(&self, corpus_id: &str, followup: Followup) -> Result<()> {
         let (status, near_dupe_of, near_dupe_score) = match &followup {
             Followup::Flag { of, similarity } => {
@@ -519,9 +424,7 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
-        // The commit first, for the reason `insert_corpus_with_signature`
-        // gives: a claim that lands before the status write is visible is a
-        // unit closed against a corpus the worker cannot see.
+        // Commit first: see `insert_corpus_with_signature`.
         if let Some(stage) = followup.stage() {
             super::jobs::enqueue_with(&self.control, &self.subject, stage, "corpus", corpus_id)
                 .await?;
@@ -541,9 +444,7 @@ impl Store {
         Ok(())
     }
 
-    /// Names a corpus after the fact. Capture makes no inference call by
-    /// design, so the name arrives later — once synthesis has read the document
-    /// and knows what it is about.
+    /// Capture makes no inference call, so the name arrives once synthesis has read the document.
     pub async fn set_title_hint(&self, id: &str, title: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?",
@@ -556,11 +457,7 @@ impl Store {
         Ok(())
     }
 
-    /// How much of this source ended up inside a chunk. Written once every
-    /// window has resolved; a low number means the segmenter dropped part of
-    /// the document. `None` forgets what the last run measured, so the next
-    /// one is measured against its own windows — and is what the
-    /// reconciliation sweep reads as "this document never finished".
+    /// `None` forgets the last measurement; the reconcile sweep reads it as unfinished.
     pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: Option<f64>) -> Result<()> {
         sqlx::query!(
             "UPDATE corpora SET coverage = ?, updated_at = ? WHERE id = ?",
@@ -573,13 +470,8 @@ impl Store {
         Ok(())
     }
 
-    /// The stored corpus most like this signature, if any clears `min`.
-    ///
-    /// A full scan of the signature column. A single-operator base holds
-    /// hundreds of corpora, each with a signature of a couple of kilobytes, so
-    /// this is a few milliseconds of memory bandwidth on a path that already
-    /// writes the whole document to disk. An index over MinHash bands is the
-    /// answer at a scale this design does not target.
+    /// A full scan: hundreds of corpora at a few KB each is milliseconds; MinHash band indexes
+    /// are for a scale this design does not target.
     pub async fn find_near_duplicate(
         &self,
         sig: &[u64],
@@ -629,8 +521,6 @@ impl Store {
         Ok(())
     }
 
-    /// Record that the sweep has read this capture's lost lines again, so it
-    /// does so once.
     pub async fn mark_auto_reread(&self, corpus_id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE corpora SET auto_reread_at = ? WHERE id = ?",
@@ -642,8 +532,7 @@ impl Store {
         Ok(())
     }
 
-    /// The last reminder read out of this note is done, so the note stops
-    /// being *recent*. Not a delete and not a hide: see `schema.sql`.
+    /// Not a delete and not a hide: see `schema.sql`.
     pub async fn retire_corpus(&self, corpus_id: &str, at: i64) -> Result<()> {
         sqlx::query!(
             "UPDATE corpora SET retired_at = ? WHERE id = ?",
@@ -655,7 +544,6 @@ impl Store {
         Ok(())
     }
 
-    /// The undo already on screen beside a completed reminder.
     pub async fn unretire_corpus(&self, corpus_id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE corpora SET retired_at = NULL WHERE id = ?",
@@ -674,8 +562,6 @@ impl Store {
         Ok(matches!(at, Some(Some(_))))
     }
 
-    /// Which of these notes are retired, in one read. A result list asks once
-    /// for the whole page, the way `due_for` does.
     pub async fn retired_among(
         &self,
         corpus_ids: &[String],
@@ -686,9 +572,7 @@ impl Store {
         let marks = std::iter::repeat_n("?", corpus_ids.len())
             .collect::<Vec<_>>()
             .join(",");
-        // `AssertSqlSafe` because the string is assembled here — the values are
-        // bound, and the only thing spliced in is a run of `?` this function
-        // counted itself. Same idiom as `due_for`.
+        // Only a counted run of `?` is spliced; values are bound.
         let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(format!(
             "SELECT id FROM corpora WHERE retired_at IS NOT NULL AND id IN ({marks})"
         )));
@@ -698,16 +582,8 @@ impl Store {
         Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
     }
 
-    /// The captures somebody typed while one of these searches was on screen.
-    ///
-    /// `(corpus_id, event_id)`, the pair `jobs::gaps::cover_answering` needs:
-    /// the note, and the search its link names. The link is written by the box
-    /// into `metadata.search.event_id` — see `core::ingest::typed_from`, which
-    /// is the one reader of that path and the shape this mirrors.
-    ///
-    /// Retired notes included on purpose. A reminder that is done is still the
-    /// answer somebody wrote to the query they were typing, and the hole it
-    /// filled did not re-open when they ticked it off.
+    /// Retired notes included: a done reminder still answered the query it was typed from.
+    /// The link is `metadata.search.event_id`; see `core::ingest::typed_from`.
     pub async fn captures_typed_from(&self, event_ids: &[String]) -> Result<Vec<(String, String)>> {
         if event_ids.is_empty() {
             return Ok(vec![]);
@@ -715,9 +591,7 @@ impl Store {
         let marks = std::iter::repeat_n("?", event_ids.len())
             .collect::<Vec<_>>()
             .join(",");
-        // `AssertSqlSafe` because the only thing spliced in is a run of `?`
-        // this function counted itself; every value is bound. Same idiom as
-        // `retired_among`.
+        // Only a counted run of `?` is spliced; values are bound.
         let mut q = sqlx::query_as::<_, (String, String)>(sqlx::AssertSqlSafe(format!(
             "SELECT id, json_extract(metadata, '$.search.event_id') AS event_id
                FROM corpora
@@ -730,16 +604,8 @@ impl Store {
         Ok(q.fetch_all(&self.pool).await?)
     }
 
-    /// The newest few captures, by the columns a list row shows. This is the
-    /// idle rail's read, and the idle rail renders on every box-clear:
-    /// `list_corpora` is `SELECT *`, and `raw_text` there is the whole
-    /// document, pulled to render a 60-character label. The prefix is chars,
-    /// not bytes — SQLite's `substr` on text counts characters — and 400 of
-    /// them is more than any label survives `markdown::snippet` with.
-    ///
-    /// Newest first, retired notes excluded — a reminder that is done is not
-    /// one of the last things you kept. The day page is where it stays
-    /// visible, because a day is a record of what actually happened.
+    /// Avoids `SELECT *` (the idle rail renders on every box-clear). `substr` counts characters.
+    /// Retired notes are excluded.
     pub async fn recent_captures(
         &self,
         limit: i64,
@@ -766,14 +632,7 @@ impl Store {
         Ok(rows.into_iter().map(row_to_corpus).collect())
     }
 
-    /// One page of the list, newest first, without the text.
-    ///
-    /// `raw_text` is never selected: for a captured book it is the book, and a
-    /// list of two hundred rows was two hundred books to say their names.
-    /// `opening` is enough of it to label a row that has no title.
-    ///
-    /// `before` is the last row of the previous page. A keyset rather than an
-    /// offset because this list grows at its head — see `web::page::Cursor`.
+    /// Never selects `raw_text`. A keyset: the list grows at its head (`web::page::Cursor`).
     pub async fn list_corpus_summaries(
         &self,
         before: Option<&(i64, String)>,
@@ -820,8 +679,6 @@ impl Store {
             .collect())
     }
 
-    /// Everything captured in a span of time, oldest first — a day, read in
-    /// the viewer's zone.
     pub async fn corpora_between(&self, from: i64, to: i64) -> Result<Vec<Corpus>> {
         let rows = sqlx::query_as!(
             crate::store::corpora::CorpusRow,
@@ -833,14 +690,8 @@ impl Store {
         Ok(rows.into_iter().map(row_to_corpus).collect())
     }
 
-    /// A page for a sweep that has to see every corpus exactly once: oldest
-    /// first, resumed from the last row of the previous page.
-    ///
-    /// `list_corpora` cannot do this job. It orders newest-first, so a capture
-    /// landing mid-sweep shifts every later page down by one and exactly one
-    /// corpus is stepped over — by the sweep whose entire purpose is to pick up
-    /// what was left unfinished. A cursor over (created_at, id) is stable under
-    /// inserts and deletes alike; the pair is unique because ids are uuid v7.
+    /// Newest-first offset paging skips a corpus per mid-sweep insert; the (created_at, id)
+    /// cursor is stable, and unique because ids are uuid v7.
     pub async fn list_corpora_after(
         &self,
         after: Option<&(i64, String)>,
@@ -865,16 +716,9 @@ impl Store {
         Ok(rows.into_iter().map(row_to_corpus).collect())
     }
 
-    /// The row for a capture whose source is bytes rather than text. There is
-    /// no text yet — a reading stage writes it — so the hash is the caller's,
-    /// over those bytes. Same conflict handling as a text capture: the same
-    /// file twice is one row. Row, attachment and the reading unit land in one
-    /// transaction: a capture with no attachment, or one no job will ever
-    /// read, is a row that lies about what it holds.
-    ///
-    /// `reading` is the caller's because it is what differs between the doors.
-    // Eight arguments: one per fact about the file, each of which some door
-    // has and another has not. A builder here would be eight setters.
+    /// The hash is the caller's, over the bytes. Row, attachment and reading unit land in one
+    /// transaction, or the row lies about what it holds.
+    // One argument per fact about the file, each known to some doors only.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_attached_corpus(
         &self,
@@ -916,8 +760,7 @@ impl Store {
         super::attachments::insert_attachment_with(&mut *tx, &attachment.for_corpus(&src.id))
             .await?;
         tx.commit().await?;
-        // The commit first: the corpus and its attachment have to be visible
-        // before anything can claim the unit that reads them.
+        // Commit first: the corpus and attachment must be visible before the unit is claimable.
         super::jobs::enqueue_with(
             &self.control,
             &self.subject,
@@ -929,9 +772,6 @@ impl Store {
         Ok(Insertion::Created(src))
     }
 
-    /// The reverse of `set_read_text`, for a re-read: no text and no
-    /// signature, so the row is comparable to nothing until the stage that
-    /// reads it speaks again.
     pub async fn clear_read_text(&self, id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE corpora SET raw_text = '', shingles = '', updated_at = ? WHERE id = ?",
@@ -943,10 +783,8 @@ impl Store {
         Ok(())
     }
 
-    /// What a reading stage made of the bytes — vision for a photo, extraction
-    /// for a PDF. Text and signature together, so the row is never
-    /// comparable-by-shingle to something it does not say. Status is left to
-    /// the caller, who knows whether this parks or proceeds.
+    /// Text and signature together, so shingle comparison matches what the row says. Status is
+    /// left to the caller.
     pub async fn set_read_text(&self, id: &str, text: &str, shingles: Vec<u64>) -> Result<()> {
         let res = sqlx::query!(
             "UPDATE corpora SET raw_text = ?, shingles = ?, updated_at = ? WHERE id = ?",
@@ -1006,8 +844,6 @@ mod tests {
         assert_eq!(got.title_hint.as_deref(), Some("Handbuch"));
         assert_eq!(got.origin, "web");
 
-        // A corpus deleted since is not a refusal: the artifact is still there
-        // to read, it just no longer says where it came from.
         assert!(s.corpus_origin("gone").await.unwrap().is_none());
     }
 
@@ -1053,10 +889,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_insert_of_the_same_bytes_yields_the_stored_row() {
-        // The caller's duplicate check and this insert are two statements, and
-        // between them sits a scan over every stored signature. Losing that
-        // race must hand back the winner's row, not a UNIQUE-constraint error
-        // dressed up as a server fault.
+        // The duplicate check and the insert are separated by a scan; losing the race must not 500.
         let s = Store::memory().await.unwrap();
         let sig = super::super::shingle::signature("the same text");
         let first = s
@@ -1094,9 +927,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_page_survives_a_capture_landing_between_pages() {
-        // Offset paging over a newest-first list steps over exactly one corpus
-        // per insertion, and the sweep that pages this way exists to find what
-        // was left unfinished.
+        // Offset paging over a newest-first list skips one corpus per insertion.
         let s = Store::memory().await.unwrap();
         let mut expected = vec![];
         for i in 0..6 {
@@ -1115,7 +946,6 @@ mod tests {
             let Some(last) = page.last() else { break };
             cursor = Some((last.created_at, last.id.clone()));
             seen.extend(page.iter().map(|c| c.id.clone()));
-            // A capture arriving mid-sweep, once.
             if seen.len() == 3 {
                 s.insert_corpus("a capture mid-sweep", "web", None)
                     .await
@@ -1130,8 +960,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_title_can_be_written_after_the_fact() {
-        // Capture no longer asks for a label, so the only way a corpus gets a
-        // name is a write once synthesis has read the document.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("some text", "web", None).await.unwrap();
         assert!(src.title_hint.is_none());
@@ -1169,9 +997,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_followup_writes_the_status_and_the_job_it_implies_together() {
-        // An image reaches this fork after its read, long after its row. Two
-        // statements left a window where the corpus was `raw` with nothing
-        // queued, and nothing in the system looks for that state.
+        // Two statements left a window where the corpus was `raw` with nothing queued.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("x", "image", None).await.unwrap();
         s.set_corpus_status(&src.id, CorpusStatus::Describing)
@@ -1252,7 +1078,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_consolidation_schema_is_present() {
-        // Migrations run on connect, so this failing means 0009 did not apply.
         let s = Store::memory().await.unwrap();
         for sql in [
             "SELECT shingles, near_dupe_of, near_dupe_score FROM corpora LIMIT 1",
@@ -1268,8 +1093,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_is_recorded_once_whichever_order_it_is_found_in() {
-        // The sweep sees (a,b) on one run and (b,a) on the next. Without a
-        // canonical order the review queue fills with the same pair twice.
+        // Without a canonical order the review queue gets the same pair twice.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("x", "web", None).await.unwrap();
         let made = s
@@ -1365,7 +1189,6 @@ mod tests {
         assert_eq!(got.near_dupe_of.as_deref(), Some("other-id"));
         assert!((got.near_dupe_score.unwrap() - 0.94).abs() < 1e-9);
 
-        // Clearing it is what "keep both" does, and it must actually clear.
         s.set_near_dupe(&src.id, None, None).await.unwrap();
         assert!(s.get_corpus(&src.id).await.unwrap().near_dupe_of.is_none());
     }
@@ -1449,7 +1272,6 @@ mod tests {
         assert_eq!(src.status, CorpusStatus::Describing);
         assert!(s.attachment_for_corpus(&src.id).await.unwrap().is_some());
         assert!(s.live_job(Stage::Describe, &src.id).await.unwrap());
-        // The same hash again: Existing, and nothing new written.
         assert!(matches!(
             s.insert_attached_corpus("hash-1", "image", None, None, &serde_json::json!({}), Reading::VISION, &a_test_image())
                 .await
@@ -1487,7 +1309,6 @@ mod tests {
         assert_eq!(back.metadata["note"], "whiteboard");
         assert_eq!(back.status, CorpusStatus::Describing);
 
-        // The same photo again is the same row.
         assert!(matches!(
             s.insert_attached_corpus("hash-1", "image", None, None, &meta, Reading::VISION, &a_test_image())
                 .await

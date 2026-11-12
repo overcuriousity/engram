@@ -1,34 +1,18 @@
-//! What use left behind.
-//!
-//! A retrieval attempt that ended in something is evidence about the list that
-//! produced it: an excerpt an answer actually drew on, a result somebody
-//! opened, an answer asserting what none of its excerpts held, a search given
-//! up on. Each is written once, at the moment it happens, and read by nothing
-//! a person waits on.
-//!
-//! Silence is not here, deliberately. A search nobody acted on may be one that
-//! failed or one whose answer was read straight off the rail, and those are
-//! indistinguishable — so neither is recorded rather than one being guessed.
+//! Evidence about retrieval left by use, written once when it happens. Silence is not
+//! recorded: a search nobody acted on may have failed or been answered by the rail.
 
 use super::feedback::{blob_to_vec, vec_to_blob};
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
-/// Where an observation came from. The variant decides the weight; see
-/// `strength`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
-    /// An answer drew on this excerpt — `ask_citations.used`.
     Cited,
-    /// A person opened this result from the list it was in.
     Opened,
-    /// The answer asserted a literal none of its excerpts held. About the
-    /// retrieval as a whole; names no artifact.
+    /// About the retrieval as a whole; names no artifact.
     Unsupported,
-    /// A search nobody opened, followed by another search from the same
-    /// person. Weak: the rail shows snippets, so a search read and walked away
-    /// from satisfied looks exactly like one given up on.
+    /// Weak: a search read off the rail and left satisfied looks the same.
     GaveUp,
 }
 
@@ -56,12 +40,8 @@ impl Source {
         })
     }
 
-    /// The weight class this source carries.
-    ///
-    /// Derived here rather than passed in, so that no caller can invent one and
-    /// the asymmetry the whole design rests on stays legible in one place: the
-    /// give-up is a quarter of the others because it is the only source that
-    /// cannot tell success from silence.
+    /// Derived here so no caller can invent a weight: the give-up is a quarter of the others
+    /// because it alone cannot tell success from silence.
     pub fn strength(self) -> f32 {
         match self {
             Source::Cited | Source::Opened => 1.0,
@@ -80,8 +60,7 @@ pub struct NewObservation {
     pub artifact_id: Option<String>,
     pub rank: Option<i64>,
     pub source: Source,
-    /// The search event this came from: an open or a give-up. `None` for a
-    /// citation, which comes from an ask.
+    /// `None` for a citation, which comes from an ask.
     pub event_id: Option<String>,
 }
 
@@ -97,8 +76,7 @@ pub struct Observation {
     pub source: Source,
     pub strength: f32,
     pub event_id: Option<String>,
-    /// The model the query vector came from: what a buried vector has to
-    /// match before the two are compared.
+    /// What a buried vector has to match before the two are compared.
     pub embed_model: String,
 }
 
@@ -120,12 +98,7 @@ fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Observation> {
     })
 }
 
-/// Write one observation through whatever executor the caller has.
-///
-/// Generic over the executor rather than taking `&Store`, because the writes
-/// that matter happen inside a transaction somebody else opened: an ask
-/// records its citations and its observations together or neither, or an
-/// answer exists that the evidence has no record of.
+/// Takes any executor: an ask writes its citations and observations in one transaction.
 pub(crate) async fn insert<'e, E>(ex: E, o: &NewObservation) -> Result<String>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -159,11 +132,7 @@ impl Store {
         insert(&self.pool, o).await
     }
 
-    /// What was observed under one generation, newest first.
-    ///
-    /// Excluded rows are left out rather than removed: the row is kept because
-    /// nothing here is deleted, and it is not returned because an observation
-    /// whose artifact is gone is not a statement about ranking any more.
+    /// Excluded rows are kept but not returned: their artifact is gone.
     pub async fn observations_for_generation(
         &self,
         generation_id: &str,
@@ -184,12 +153,8 @@ impl Store {
         .collect()
     }
 
-    /// Positive observations naming `artifact_id`, made at or before `before`,
-    /// under any generation of the era `(embed_recipe, chat_model)`. Newest
-    /// first, at most `limit`. What rule 1 replays: the record of a subject
-    /// being found, from before it was hidden. At-or-before, because the clock
-    /// is seconds and an observation in the same second as the hiding was
-    /// still made of a subject that was live.
+    /// At-or-before: the clock is seconds, and an observation in the same second as the
+    /// hiding was still of a live subject.
     pub async fn observations_naming(
         &self,
         artifact_id: &str,
@@ -221,12 +186,8 @@ impl Store {
         .collect()
     }
 
-    /// Give-ups recorded after `after`, oldest first, at most `limit`. What
-    /// rule 2 reads, behind a cursor it keeps in `meta`.
-    ///
-    /// `(created_at, id)` and not `created_at` alone: the clock is seconds, so
-    /// a bare `created_at > ?` loses whatever else shares the cursor's second
-    /// when `limit` cuts inside it. See `Cursor`.
+    /// `(created_at, id)`: the clock is seconds, so a bare `created_at > ?` loses rows when
+    /// `limit` cuts inside a second. See `Cursor`.
     pub async fn gave_ups_since(
         &self,
         after: &crate::store::Cursor,
@@ -250,21 +211,8 @@ impl Store {
         .collect()
     }
 
-    /// Stamp every observation whose artifact is gone.
-    ///
-    /// `artifact_id` carries no foreign key on purpose — an observation is a
-    /// record of what happened, and a deletion must not erase the fact that a
-    /// search once landed on the thing. But a *positive* observation naming an
-    /// artifact nothing can retrieve any more is not evidence about ordering:
-    /// `eval::lived::lived` goes on counting it as a hit for the generation
-    /// that earned it, so a watched child is measured against a parent whose
-    /// rate is propped up by artifacts that left with a corpus.
-    ///
-    /// A sweep rather than a call beside each delete, because artifacts leave
-    /// by more than one door — `delete_artifact`, `delete_corpus` cascading
-    /// through them, the context path — and a sweep cannot be forgotten at a
-    /// door added later. One statement, run where the rest of the quiet-period
-    /// bookkeeping runs.
+    /// `artifact_id` has no foreign key on purpose, but a positive observation of a gone
+    /// artifact props up its generation's rate. A sweep, because artifacts leave by many doors.
     pub async fn exclude_orphaned_observations(&self) -> Result<u64> {
         Ok(sqlx::query!(
             "UPDATE observations SET excluded_at = ?
@@ -278,15 +226,7 @@ impl Store {
         .rows_affected())
     }
 
-    /// Observations older than `retain_days`. Zero keeps them for ever, as it
-    /// does for the searches and the rehearsal results they share a clock with.
-    ///
-    /// They belong to the window for the same reason the search events do:
-    /// `query` is the person's own words and `query_vec` is those words in
-    /// another form. Nothing here is exempt the way a judged search is — a
-    /// verdict is the operator's considered work, while an observation is the
-    /// base's own note about itself, and the schema has said since it was
-    /// written that the rehearsal results age "with the observations".
+    /// Zero keeps them for ever. `query` and `query_vec` are the person's words, so they age.
     pub async fn expire_observations(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);
@@ -300,10 +240,7 @@ impl Store {
         .rows_affected())
     }
 
-    /// Every observation, gone. What "erase captured feedback" has to reach:
-    /// there is no cascade from `search_events` to here, so the button that
-    /// emptied the searches out from under the UI left a complete log of the
-    /// queries — text and embedding — standing behind it.
+    /// No cascade reaches here from `search_events`: "erase captured feedback" must call this.
     pub async fn purge_observations(&self) -> Result<u64> {
         Ok(sqlx::query!("DELETE FROM observations")
             .execute(&self.pool)
@@ -311,7 +248,6 @@ impl Store {
             .rows_affected())
     }
 
-    /// Stop reading one observation back without losing it.
     pub async fn exclude_observation(&self, id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE observations SET excluded_at = ? WHERE id = ? AND excluded_at IS NULL",
@@ -421,8 +357,7 @@ mod tests {
     #[tokio::test]
     async fn the_give_up_cursor_does_not_lose_the_rest_of_its_own_second() {
         let (store, generation) = base().await;
-        // Three give-ups, all in one second — which is the whole resolution of
-        // the clock, so this is what a busy moment looks like.
+        // One second is the clock's whole resolution.
         for _ in 0..3 {
             store
                 .record_observation(&obs(&generation, None, None, Source::GaveUp))
@@ -489,8 +424,7 @@ mod tests {
             .record_observation(&obs(&generation, Some(&artifact), Some(1), Source::Cited))
             .await
             .unwrap();
-        // One about the retrieval as a whole. It names nothing and must
-        // survive: it is not a claim about an artifact at all.
+        // It names no artifact, so it must survive.
         store
             .record_observation(&obs(&generation, None, None, Source::Unsupported))
             .await
@@ -506,7 +440,6 @@ mod tests {
             .unwrap();
         assert_eq!(back.len(), 1, "only the one about the whole retrieval");
         assert_eq!(back[0].artifact_id, None);
-        // Idempotent: a second sweep finds nothing left to stamp.
         assert_eq!(store.exclude_orphaned_observations().await.unwrap(), 0);
     }
 

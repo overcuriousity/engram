@@ -1,131 +1,51 @@
-//! Group the open gaps and name the new groups.
-//!
-//! Runs on the retention ticker. Clustering is free; naming costs one
-//! efficient-tier call per group of two or more that did not exist before —
-//! membership is identity, so the same members are never named twice — and a
-//! group named by terms because the model was unavailable is offered to the
-//! model again next pass.
+//! Group the open gaps and name the new groups: one efficient-tier call per new group of two or
+//! more.
+//! Membership is identity, so the same members are never named twice.
 
 use crate::core::Core;
 use crate::core::gaps::{MIN_CLUSTER, cluster, cluster_key, terms_label};
 use crate::error::Result;
 use crate::store::gaps::{GapCluster, GapKind};
 
-/// How many coverage queries are in the air at once. Small enough that captures
-/// never become the load on the vector store, large enough that the wait is the
-/// slowest query and not the sum of them.
+/// Small enough that captures never load the vector store, large enough that the wait is the
+/// slowest query.
 const COVER_IN_FLIGHT: usize = 16;
 
-/// The budget above, held by the process rather than by one pass.
-///
-/// A per-pass bound is not a bound: `settle_corpus` starts a coverage check for
-/// every document that finishes embedding, so an ingest of fifty documents
-/// settling together is fifty passes of sixteen queries — eight hundred at once
-/// against the vector store the whole memory shares, which is the outage the
-/// bound exists to prevent, reached by a route the bound did not cover.
-/// A permit per query, taken from one pool, makes the number in the comment
-/// above the number that is actually true.
-///
-/// A pass that cannot get a permit waits for one. Permits are only ever held
-/// across a single search, so the wait is bounded by the slowest query in
-/// flight, and no pass holds one while it waits for another.
+/// Process-wide, not per pass: `settle_corpus` starts a check per document, so a fifty-document
+/// ingest would put eight hundred queries in the air. Permits are held for one search only.
 static COVER_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(COVER_IN_FLIGHT));
 
-/// How many gaps one capture is checked against.
-///
-/// `COVER_SLOTS` bounds how many queries are in the air, which is not a bound
-/// on how many there are. `open_gaps` caps each of five kinds at
-/// `MAX_OPEN_GAPS`, so one capture can ask two thousand questions of the vector
-/// store, and `settle_corpus` asks them once per document that reaches `ready`:
-/// an ingest of fifty documents is a hundred thousand round trips. Nothing
-/// bursts and nothing breaks — it is a couple of minutes of steady load on the
-/// store the search box queries, which is the one path with a person waiting on
-/// it, and it grows with the age of the base rather than with anything the
-/// operator did, because `unmatched` fills itself from the search log.
-///
-/// Taken off the front of a list `open_gaps` already sorted newest-first across
-/// the kinds, so what a capture is checked against is the holes someone is
-/// still trying to fill. A gap older than that is not checked by this capture —
-/// the honest cost of the ceiling, and the reason it is this high.
+/// `open_gaps` caps five kinds at `MAX_OPEN_GAPS` each, so one capture could ask thousands of
+/// queries of the store the search box uses. Taken newest-first, so older gaps go unchecked by this
+/// capture.
 const COVER_MAX_GAPS: usize = 200;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
-    /// Groups of `MIN_CLUSTER` or more: the ones that are stored and shown as
-    /// groups. A gap on its own is not one, and is left to the capture page's
-    /// ungrouped list.
+    /// Groups of `MIN_CLUSTER` or more; a lone gap is left to the ungrouped list.
     pub clusters: usize,
     pub named: usize,
     pub removed: usize,
 }
 
-/// How far past the weak line a capture has to reach to answer a gap. A gap
-/// is a question whose best hit sat *under* the line, and the line is where
-/// unrelated things stop; a hit that just clears it is the first thing that is
-/// not noise, not yet an answer. Read the other way round by `repair_once`,
-/// which drops coverage recorded under a line that has since moved up.
+/// A hit that just clears the weak line is not noise, not yet an answer. `repair_once` drops
+/// coverage recorded under a line that has since moved up.
 pub const COVER_MARGIN: f32 = 0.05;
 
 pub fn cover_line(core: &Core) -> f32 {
     core.weak_below() + COVER_MARGIN
 }
 
-/// Does this capture answer anything the base could not?
-///
-/// One filtered vector query per open gap, against this document's artifacts
-/// only, and no model call anywhere. A gap whose best new hit reaches
-/// `weak_below` is closed — the same line that decided the gap was a gap in the
-/// first place, read the other way round.
-///
-/// Bounded twice over, because the two bounds are different bounds. How many
-/// queries are in the air is `COVER_SLOTS`, held by the process so that
-/// concurrent captures share one budget: a round trip apiece in series is
-/// minutes of a capture sitting at its last step for work that is entirely
-/// waiting, and two thousand at once is not concurrency but an outage in the
-/// vector store the whole memory shares. How many there are at all is
-/// `COVER_MAX_GAPS`, because concurrency is not a ceiling on the total — there
-/// are five kinds of gap, each capped at `MAX_OPEN_GAPS`, and since the
-/// unmatched ones are derived from the search log without anybody judging
-/// anything, a base with capture on reaches those caps as a matter of course
-/// rather than as a worst case.
-///
-/// Filtered to this corpus on purpose: the question is whether *this capture*
-/// answered something. A hit from anywhere else answers a different question —
-/// the base held it all along, and the gap is open for a reason.
-///
-/// Closed silently and reversibly. The source row is untouched, so nothing an
-/// automatic score decided overwrites what a person judged, and an operator who
-/// disagrees reopens the gap. Silently, because a base with forty gaps would
-/// otherwise turn its own housekeeping into a review queue.
-///
-/// Every failure here is a warning and nothing more. A capture that is stored
-/// is stored; a coverage check that could not run is a line on the capture page
-/// that does not appear.
-/// What the box's link reaches: the search a capture was typed from, and the
-/// pursuit that same typing was clustered into.
+/// What the box's link reaches: the search a capture was typed from, and the pursuit it was
+/// clustered into.
 struct TypedFrom {
-    /// The search row itself. Both readings of it count: `unmatched` is a
-    /// search with nothing near it and `search` is one somebody judged a hole,
-    /// and one row is only ever one of the two at a time — but which one it is
-    /// can change under a capture that is still settling, and the link is
-    /// about the row.
+    /// Both readings count: whether the row is `unmatched` or `search` can change while a capture
+    /// settles.
     event: Option<String>,
-    /// The open pursuit gaps whose cluster included that search.
-    ///
-    /// Resolved here rather than matched on the gap, because a pursuit is
-    /// keyed on its cluster and carries no event ids — see
-    /// `Store::pursuit_gaps_of_query`, which is the only join there is.
-    ///
-    /// Without this the link stopped at the search row while the sweep had
-    /// already made a second gap out of the same keystrokes, and that one
-    /// nothing closed. It is the wider hole of the two: `unmatched` demands a
-    /// best similarity under `weak_below` and a query of three characters or
-    /// more, and `pursuit_gaps_from!` asks for neither — so a paste the
-    /// measurement says is emphatically *not* a hole is a pursuit gap anyway,
-    /// shown whole on the capture page. The live base's list was led by four
-    /// of them, and the netcat one had scored 0.799 against a `weak_below` of
-    /// 0.35.
+    /// Resolved here: a pursuit is keyed on its cluster and carries no event ids
+    /// (`Store::pursuit_gaps_of_query`). Pursuit gaps need no low similarity, so they are the wider
+    /// hole.
     pursuits: Vec<String>,
 }
 
@@ -137,8 +57,7 @@ impl TypedFrom {
                 pursuits: vec![],
             });
         };
-        // A search retention has taken away leaves the capture with nothing to
-        // reach through, which is a capture and not a failure.
+        // A search retention has taken leaves nothing to reach through: not a failure.
         let pursuits = match core.store.search_query(&event).await? {
             Some(q) => {
                 core.store
@@ -153,7 +72,6 @@ impl TypedFrom {
         })
     }
 
-    /// Whether this gap is one the capture's own typing produced.
     fn matches(&self, g: &crate::store::gaps::GapVec) -> bool {
         match g.gap.kind {
             GapKind::Search | GapKind::Unmatched => {
@@ -165,27 +83,18 @@ impl TypedFrom {
     }
 }
 
+/// Closes, silently and reversibly, each open gap this corpus's own artifacts answer at
+/// `weak_below` plus margin; no model call. Every failure is a warning: a stored capture is stored.
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
-    // The search this capture was typed from, where the box named one. Not a
-    // gap like the others: it is the query somebody typed on their way to
-    // writing this very text, so what closes it is the link and not a score —
-    // see `close_line` below.
+    // What closes the gap the capture was typed from is the link, not a score (`close_line`).
     let typed_from =
         crate::core::ingest::typed_from(&core.store.get_corpus(corpus_id).await?.metadata)
             .map(str::to_string);
     cover_answering(core, corpus_id, typed_from).await
 }
 
-/// The same check, against a corpus that is not where the link was recorded.
-///
-/// For the capture whose text the base already held byte for byte. `ingest`
-/// answers that one with the stored corpus and stores nothing — no artifacts,
-/// no embed job, so no `settle_corpus` and no `cover` — while the page that
-/// sent it swaps the gap's row away on the 2xx. The hole was still open, and
-/// came back on the next load. The link is a person's claim and not a
-/// measurement: they wrote this text in answer to that query, and it is no
-/// less true for the answer having already been in the base. What closes the
-/// hole is the artifact the stored corpus already has.
+/// For a capture whose text the base already held: `ingest` stores nothing, so `cover` never runs,
+/// yet the link is a person's claim and still closes the hole.
 pub async fn cover_answering(
     core: &Core,
     corpus_id: &str,
@@ -202,15 +111,8 @@ pub async fn cover_answering(
         return Ok(0);
     }
     let typed_from = TypedFrom::of(core, typed_from).await?;
-    // Moved to the front before the cap bites. Every other gap the cap leaves
-    // out is simply not checked by this capture, which is the accepted cost of
-    // the ceiling — but these are the reason the capture exists, and nothing
-    // comes back for them: `cover` runs once, from `settle_corpus`.
-    //
-    // All of them, not the first found: the link now names a search row *and*
-    // the pursuit its keystrokes were clustered into, and lifting one of the
-    // two left the other to the ceiling. Stable, so everything else keeps the
-    // order `open_gaps` sorted it into.
+    // Linked gaps first, all of them, before the cap bites: `cover` runs once. Stable, so the rest
+    // keep `open_gaps`' order.
     open.gaps.sort_by_key(|g| !typed_from.matches(g));
     if open.gaps.len() > COVER_MAX_GAPS {
         tracing::debug!(
@@ -228,10 +130,7 @@ pub async fn cover_answering(
         include_deprecated: false,
         corpus_id: Some(corpus_id.to_string()),
     };
-    // One hit per gap: the question is whether the best new artifact reaches
-    // the line, and the second-best cannot answer it. Kept by the gap's index
-    // so the concurrent answers land back in the order the gaps were read,
-    // which is what makes the writes below deterministic.
+    // Indexed by gap, so concurrent answers land in read order and the writes are deterministic.
     let mut best: Vec<Option<crate::vector::SearchHit>> = vec![None; open.gaps.len()];
     let mut failure: Option<crate::error::Error> = None;
     let mut inflight = tokio::task::JoinSet::new();
@@ -243,16 +142,14 @@ pub async fn cover_answering(
             let vectors = core.vectors.clone();
             let vec = open.gaps[at].vec.clone();
             let filter = filter.clone();
-            // Nothing ever closes a static semaphore, so the only way this
-            // fails is a bug in the standard library.
+            // A static semaphore is never closed.
             let permit = COVER_SLOTS
                 .acquire()
                 .await
                 .map_err(|_| crate::error::Error::Internal("the coverage budget closed".into()))?;
             inflight.spawn(async move {
                 let out = vectors.search(&vec, &Default::default(), 1, &filter).await;
-                // Held for exactly the query, and released before the answer is
-                // read back: what the budget limits is load on the store.
+                // Released before the answer is read: the budget limits load on the store.
                 drop(permit);
                 (at, out)
             });
@@ -265,11 +162,8 @@ pub async fn cover_answering(
             Ok((_, Err(e))) => {
                 failure.get_or_insert(e);
             }
-            // The task itself did not finish — a panic inside the vector
-            // client, or the runtime shutting down under us. Not this
-            // module's error, and not something a retry of the same search
-            // would answer, but it is still a search that did not happen and
-            // must not be reported as a gap that stayed open.
+            // A panic in the vector client or a shutdown: a search that did not happen, not a gap
+            // that stayed open.
             Err(e) => {
                 failure.get_or_insert(crate::error::Error::Internal(e.to_string()));
             }
@@ -278,15 +172,10 @@ pub async fn cover_answering(
     let mut closed = 0;
     for (g, hit) in open.gaps.iter().zip(best) {
         let typed = typed_from.matches(g);
-        // Something of this capture's to point the coverage row at. Even the
-        // linked gap needs one — `gap_coverage` names the artifact that
-        // answered, and a capture whose artifacts are not in the vector store
-        // has nothing to name.
+        // `gap_coverage` names the answering artifact, so even the linked gap needs a hit.
         let Some(hit) = hit else { continue };
-        // `None` is "no opinion" and not a low value — a lexical hit the dense
-        // half never returned. It cannot close a gap on distance, because
-        // closing one that way is a claim about distance. On the linked gap it
-        // decides nothing: the score there is recorded, not read.
+        // `None` is "no opinion", and closing by distance is a claim about distance. On the linked
+        // gap the score is recorded, not read.
         if !typed {
             let Some(sim) = hit.similarity else { continue };
             if sim < cover_line(core) {
@@ -299,12 +188,8 @@ pub async fn cover_answering(
         } else {
             crate::store::gaps::CoveredBy::Distance
         };
-        // Warned and skipped rather than returned: the vector store can hand
-        // back an `artifact_id` SQLite no longer has — the drift
-        // `reconcile_stores_once` exists to repair — and `gap_coverage`
-        // carries a foreign key onto it. One such row must not take the
-        // remaining gaps of this capture down with it, because nothing comes
-        // back for them: `cover` is called once, from `settle_corpus`.
+        // Skipped, not returned: the vector store can name an artifact SQLite no longer has, and
+        // `cover` runs only once.
         match core
             .store
             .cover_gap(
@@ -327,11 +212,7 @@ pub async fn cover_answering(
     if closed > 0 {
         tracing::info!(corpus_id, closed, "a capture answered open gaps");
     }
-    // Reported only once every gap the successful queries answered has been
-    // written. `cover` runs once, from `settle_corpus` when a corpus reaches
-    // `ready`, so there is no second pass: returning at the first failed query
-    // threw away the answers all the other queries had already found, and with
-    // forty open gaps and one flaky query it closed none of them.
+    // Reported only after every answered gap is written: `cover` gets no second pass.
     if let Some(e) = failure {
         return Err(e);
     }
@@ -352,11 +233,8 @@ pub async fn sweep(core: &Core) -> Result<SweepReport> {
     let mut live_keys = Vec::with_capacity(groups.len());
 
     for group in &groups {
-        // A group of one is a question, and asking the model to name it buys a
-        // restatement of it. It is not stored either: the capture page shows an
-        // ungrouped gap under its own words already, which is the truer thing to
-        // show — and storing it would mean every gap that later joins it re-keys
-        // a group that was never worth a name.
+        // A group of one is a question; naming it buys a restatement, and storing it would re-key
+        // whenever a gap joins.
         if group.len() < MIN_CLUSTER {
             continue;
         }
@@ -374,8 +252,7 @@ pub async fn sweep(core: &Core) -> Result<SweepReport> {
         if known == Some("model") {
             continue;
         }
-        // Newest first, the order `open_gaps` returned, which is the order
-        // `gap_label_prompt` keeps when it caps what one call is shown.
+        // Newest first, the order `gap_label_prompt` keeps when it caps a call.
         let texts: Vec<&str> = group
             .iter()
             .map(|&i| open.gaps[i].gap.text.as_str())
@@ -397,22 +274,9 @@ pub async fn sweep(core: &Core) -> Result<SweepReport> {
             .await?;
     }
 
-    // A key this pass did not see is stale — unless this pass did not see
-    // everything. Past the cap, the clusters covering the gaps that were left
-    // out look exactly like clusters whose members were dismissed, and deleting
-    // them took those gaps off the capture page altogether: not ungrouped,
-    // gone. The groups keep their last label until a pass reads them again.
-    //
-    // What cannot wait for that pass is a key this one *replaced*: when a
-    // member is dismissed, the survivors re-key, and `put_cluster` has already
-    // stored the new key by the time we get here. Leaving the old row too puts
-    // those survivors under both headings at once on the capture page, because
-    // `gap_rows` resolves every row it finds. So an unseen key that shares a
-    // member with a group this pass did store is superseded, not unread, and
-    // goes whether or not the pass was partial. A key with no overlap at all is
-    // either past the cap or wholly dismissed; only the second is stale, the two
-    // are indistinguishable from here, and a wholly dismissed row renders
-    // nothing in the meantime — `gap_rows` drops a row with no open members.
+    // Past the cap an unseen key may only be unread, so it keeps its label. An unseen key sharing a
+    // member with a group stored this pass was re-keyed by a dismissal and goes, or `gap_rows`
+    // renders its survivors twice.
     let clustered_now: std::collections::HashSet<(GapKind, &str)> = groups
         .iter()
         .filter(|g| g.len() >= MIN_CLUSTER)
@@ -442,10 +306,8 @@ pub async fn sweep(core: &Core) -> Result<SweepReport> {
     Ok(report)
 }
 
-/// One bounded call under the background lane. Any failure — endpoint down,
-/// unreadable reply — is `None`, and the caller falls back to terms.
+/// Bounded, background lane. Any failure is `None`, and the caller falls back to terms.
 async fn name(core: &Core, questions: &[&str]) -> Option<String> {
-    // No model, no name: the caller falls back to the cluster's terms.
     let namer = core.gap_namer.clone()?;
     let permit = core.gate.background().await;
     let reply = namer
@@ -540,8 +402,6 @@ mod tests {
                     filters: "{}".into(),
                     query_vec: vec,
                     embed_model: core.embedder.model().to_string(),
-                    // Nothing at all came back, which is the plainest hole
-                    // there is and what the empty box answers.
                     candidates: vec![],
                     answered: false,
                     context: None,
@@ -564,12 +424,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_capture_closes_the_search_it_was_typed_from() {
-        // The box searches while you type, so the sentence on its way into the
-        // base is recorded as a search that found nothing — a hole whose
-        // answer is the very capture being written. The distance check cannot
-        // see that: what is stored is a synthesized artifact and not the
-        // sentence, so the two need not land near each other at all. The link
-        // the box already holds says it outright.
+        // The box searches while you type, so the sentence being captured is recorded as a search
+        // that found nothing; the stored artifact need not land near it, so only the link closes
+        // it.
         let mut core = test_core().await;
         core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
@@ -579,8 +436,7 @@ mod tests {
             v.clone(),
         )
         .await;
-        // Out of reach of the measurement, so nothing here can close by
-        // distance and the link is the only thing that could have.
+        // Out of reach of the measurement: only the link can close it.
         core.set_weak_below(1.0);
 
         let corpus = captured_from(
@@ -629,8 +485,7 @@ mod tests {
             .close_pursuit(&pid, "unsatisfied", "nothing engaged", 1)
             .await
             .unwrap();
-        // Out of reach of the measurement, so the link is the only thing that
-        // could close either row.
+        // Out of reach of the measurement: only the link can close either row.
         core.set_weak_below(1.0);
 
         let corpus = captured_from(&core, q, &id).await;
@@ -663,12 +518,10 @@ mod tests {
         let text = "Erinnerung Termin Foto Dienstausweis Mittwoch 0900 Zimmer A323";
         let v = vec![1.0, 0.0, 0.0, 0.0];
         let first = unmatched_search(&core, text, v.clone()).await;
-        // Out of reach of the measurement, so the link is the only thing that
-        // could close anything.
+        // Out of reach of the measurement: only the link can close anything.
         core.set_weak_below(1.0);
         let corpus = captured_from(&core, text, &first).await;
 
-        // The same sentence written again, from a search of its own.
         let again = unmatched_search(&core, text, v).await;
         let same = captured_from(&core, text, &again).await;
         assert_eq!(same, corpus, "the stored corpus, and no second one");
@@ -686,11 +539,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_repair_pass_keeps_what_a_capture_answered() {
-        // Coverage is dropped when it scored under a line that has since moved
-        // up, because a measurement under the line was never an answer. A
-        // capture typed from the query is not a measurement, and the sweep
-        // that collects weak ones must not take it: the gap would come back
-        // the moment the base grew enough to measure itself.
+        // A capture typed from the query is not a measurement, so moving the line must not drop its
+        // coverage.
         let mut core = test_core().await;
         core.learn.enabled = true;
         let id = unmatched_search(&core, "when is the ID photo", vec![1.0, 0.0, 0.0, 0.0]).await;
@@ -737,8 +587,6 @@ mod tests {
         let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
         core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
-        // Just under whatever this document actually scores: the capture
-        // reaches the line.
         core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
 
         let closed = cover(&core, &corpus).await.unwrap();
@@ -767,7 +615,6 @@ mod tests {
         gap_search(&core, "how do I mount an E01", v.clone()).await;
         core.set_weak_below(1.0);
         let corpus = captured(&core, "Trimming a systemd journal.").await;
-        // Just over what this document scores: nothing here came close.
         core.set_weak_below(best_similarity(&core, &v, &corpus).await + 0.01);
 
         assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
@@ -782,15 +629,8 @@ mod tests {
 
     #[tokio::test]
     async fn one_gap_the_capture_cannot_record_does_not_cost_the_others() {
-        // `cover` runs once, from `settle_corpus` when a corpus reaches
-        // `ready`, so a gap it skips is a gap nothing comes back for. It used
-        // to return at the first refusal and leave every remaining gap of the
-        // capture open — with forty of them and one bad answer, none closed.
-        //
-        // The refusal here is the reachable one: the vector store hands back an
-        // `artifact_id` SQLite no longer has, which is exactly the drift
-        // `reconcile_stores_once` exists to repair, and `gap_coverage` carries
-        // a foreign key onto it.
+        // The vector store names an artifact SQLite no longer has, and `gap_coverage` has a foreign
+        // key onto it.
         let mut core = test_core().await;
         core.learn.enabled = true;
         let dangling = vec![0.0, 1.0, 0.0, 0.0];
@@ -803,8 +643,6 @@ mod tests {
             best_similarity(&core, &answerable, &corpus).await - 0.01 - COVER_MARGIN,
         );
 
-        // Closer to the first gap than anything the capture wrote, and pointing
-        // at a row that is not there.
         core.vectors
             .upsert(vec![crate::vector::VectorPoint {
                 vector: dangling.clone(),
@@ -820,10 +658,8 @@ mod tests {
             .await
             .unwrap();
 
-        // The pass still reports that something went wrong.
         assert!(cover(&core, &corpus).await.is_err());
 
-        // And the gap it could answer is answered.
         let covered = core.store.gaps_covered_by(&corpus).await.unwrap();
         assert!(
             covered.iter().any(|g| g.id == answerable_id),
@@ -833,8 +669,6 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_the_capture_that_closed_a_gap_reopens_it() {
-        // Reversible, and by the cascade rather than by a second mechanism.
-        // Nothing an automatic score decided overwrote what a person judged.
         let mut core = test_core().await;
         core.learn.enabled = true;
         let v = vec![1.0, 0.0, 0.0, 0.0];
@@ -860,10 +694,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_coverage_check_embeds_nothing() {
-        // The gap's vector is stored and the artifacts' are stored; the
-        // question is a distance between two things that already exist. An
-        // embedding call here would be paying for a vector twice, on every
-        // capture, once per open gap.
+        // An embedding call here would pay for a stored vector again, per open gap, per capture.
         let (mut core, embedder) =
             crate::core::test_support::test_core_counting_embed_calls().await;
         core.learn.enabled = true;
@@ -915,11 +746,8 @@ mod tests {
              bought for it"
         );
 
-        // Same members, no new call.
         assert_eq!(sweep(&core).await.unwrap().named, 0);
 
-        // Dismissing one member changes the cluster: the old key goes, the
-        // new one is named.
         core.store.dismiss_gap(GapKind::Ask, &a).await.unwrap();
         let r = sweep(&core).await.unwrap();
         assert_eq!((r.clusters, r.named, r.removed), (1, 1, 1));
@@ -975,19 +803,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_partial_pass_is_not_read_as_a_set_of_dismissals() {
-        // Past the cap, the clusters covering the gaps that were left out look
-        // exactly like clusters whose members were all dismissed. Deleting them
-        // took those gaps off the capture page altogether — not ungrouped, gone
-        // — and the next pass would drop the same oldest gaps again, so they
-        // never came back.
         let core = test_core().await;
         for i in 0..crate::store::gaps::MAX_OPEN_GAPS + 1 {
             nothing_here(&core, &format!("gap {i}"), vec![1.0, 0.0]).await;
         }
         sweep(&core).await.unwrap();
 
-        // A group over gaps the cap left out: its key cannot appear in any pass
-        // that does not read them, which is every pass while the cap bites.
         core.store
             .put_cluster(&GapCluster {
                 key: "beyond-the-cap".into(),
@@ -1013,11 +834,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_partial_pass_still_removes_the_key_it_replaced() {
-        // The other half of the rule above. Keeping every unseen key while the
-        // cap bites also kept the key a dismissal had just re-keyed, and
-        // `gap_rows` resolves every row it finds — so the members that survived
-        // the dismissal were rendered under the old heading and the new one at
-        // once.
         let core = test_core().await;
         let mut ids = Vec::new();
         for i in 0..crate::store::gaps::MAX_OPEN_GAPS + 2 {

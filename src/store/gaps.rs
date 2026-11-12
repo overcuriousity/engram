@@ -10,43 +10,13 @@ use sqlx::Row;
 pub enum GapKind {
     Ask,
     Search,
-    /// A recorded search where nothing came close: every candidate's similarity
-    /// under `vector.weak_below`, which is what the rail was already saying at
-    /// the time in as many words.
-    ///
-    /// Distance rather than behaviour. The first draft of this counted a search
-    /// after which nothing was opened, and that was wrong twice over: not
-    /// clicking a result can mean the list was useless or that the titles alone
-    /// told the operator what they needed, and the two readings are opposite;
-    /// and an open is only recorded when pursuits *and* feedback are on, so on
-    /// most installs every search in the log looks abandoned. A distance needs
-    /// no interaction data, works whatever else is switched on, and can be
-    /// computed over the existing log retroactively. It is also the more honest
-    /// claim: not *you gave up*, but *the base held nothing near this*.
+    /// Every candidate under `vector.weak_below`. Distance, not behaviour: an unopened result
+    /// is ambiguous, and opens are only recorded when pursuits and feedback are on.
     Unmatched,
-    /// A pursuit that closed `unsatisfied`: a run of searches on one subject
-    /// that the base did not answer. It landed on Ops and nowhere else, and its
-    /// clustered queries were already stored — what it lacked was a vector, so
-    /// the sweep now carries the leading query's forward when it writes the
-    /// row. A pursuit written before that has none and is not a gap, which is
-    /// the same rule `vec_dim > 0` already applies to everything else here.
+    /// A pursuit closed `unsatisfied`. One written without a vector is not a gap (`vec_dim > 0`).
     Pursuit,
-    /// A subject `[infer.ask] plan` named as missing from the excerpts, whose
-    /// own fan-out search then found nothing near it either.
-    ///
-    /// The measurement is `Unmatched`'s — every candidate under `weak_below` —
-    /// and that is deliberate: there is one definition of "the base held
-    /// nothing near this" and this reuses it rather than inventing a second.
-    /// What makes it a kind of its own is the *text*. `Unmatched` carries a
-    /// query somebody typed; this carries a subject a model named, in a
-    /// sentence written to describe a hole rather than to find a thing. A named
-    /// subject is the most specific thing on this list, and the badge says who
-    /// named it.
-    ///
-    /// Only at the web door. The subject is derived from a question, questions
-    /// are personal data of the same kind as a query, and `record_ask` already
-    /// draws that line — so this rides with the recording rather than around
-    /// it.
+    /// A subject `[infer.ask] plan` named as missing whose fan-out found nothing near it, by
+    /// `Unmatched`'s measure. Web door only: it rides with `record_ask`'s consent line.
     Subject,
 }
 
@@ -72,15 +42,8 @@ impl GapKind {
     }
 }
 
-/// How a hole came to be closed.
-///
-/// Two different claims, and the difference is what keeps one of them alive.
-/// `Distance` is the coverage check's own measurement — a new artifact landed
-/// near the gap's query — and it is only as good as the line it was measured
-/// against, so `trim_gap_coverage` drops it once that line has moved above it.
-/// `Capture` is not a measurement at all: the operator typed the query into
-/// the box and then wrote the answer into the same box, and the base was told
-/// so by the page. No line can be wrong about that one, so no line collects it.
+/// `Distance` is a measurement, dropped by `trim_gap_coverage` once the line moves above it;
+/// `Capture` is the operator answering in the same box, which no line can contradict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoveredBy {
     Distance,
@@ -96,8 +59,6 @@ impl CoveredBy {
     }
 }
 
-/// One open gap: a question the base could not answer, or a search judged to
-/// have no answer.
 #[derive(Debug, Clone)]
 pub struct Gap {
     pub kind: GapKind,
@@ -105,24 +66,14 @@ pub struct Gap {
     pub text: String,
 }
 
-/// A gap and the query vector it was found by.
-///
-/// Only the sweep needs the vector, and it is by far the expensive half of the
-/// row: at bge-m3's 1024 dimensions a full pass is four million floats to read
-/// out of SQLite and decode. The display path reads `Gap` alone — see
-/// `open_gap_refs` — because nothing on the capture page looks at a vector.
+/// The display path reads `Gap` alone: vectors are the expensive half of the row.
 #[derive(Debug, Clone)]
 pub struct GapVec {
     pub gap: Gap,
     pub vec: Vec<f32>,
 }
 
-/// What one bounded pass read, and whether the bound bit.
-///
-/// `capped` is not only for the log. `jobs::gaps::sweep` deletes every cluster
-/// whose key it did not see as stale, and a cluster whose members the cap left
-/// out was never seen — deleting it took those gaps off the capture page
-/// altogether rather than merely leaving them ungrouped.
+/// `capped` matters: the sweep deletes clusters it did not see, and a capped pass misses some.
 pub struct OpenGaps {
     pub gaps: Vec<GapVec>,
     pub capped: bool,
@@ -132,22 +83,17 @@ pub struct OpenGaps {
 pub struct GapCluster {
     pub key: String,
     pub label: String,
-    /// `model` or `terms`.
     pub labelled_by: String,
     pub members: Vec<(GapKind, String)>,
 }
 
-/// A stored cluster as `cluster_keys` reads it back: what it is keyed on and
-/// how it was named, without the label the page renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredCluster {
     pub key: String,
-    /// `model` or `terms`.
     pub labelled_by: String,
     pub members: Vec<(GapKind, String)>,
 }
 
-/// A cluster as the capture page shows it.
 #[derive(Debug, Clone)]
 pub struct GapRow {
     pub label: String,
@@ -155,50 +101,11 @@ pub struct GapRow {
     pub members: Vec<Gap>,
 }
 
-/// How many open gaps one pass reads, per kind.
-///
-/// A cap rather than the whole table, because both readers scale badly in this
-/// number and neither says so: `jobs::gaps::sweep` compares every pair of them
-/// on every retention tick, and `ui::capture_page` — the page the app opens on —
-/// walks the same list with its full query vectors on every load.
-///
-/// Per kind, and there are five of them, so what either reader actually gets is
-/// up to five times this — the fifth, `Subject`, widened a quadratic loop by a
-/// quarter, which is the price of the kind and is named here rather than
-/// discovered later. The sweep's clustering is quadratic in that total and
-/// the capture page renders one row of it apiece, which is two million cosines
-/// on a timer and two thousand `<li>` before the first sweep has grouped
-/// anything. Both are the accepted cost of showing every kind of gap rather
-/// than the newest few hundred whatever kind they are — see `core::gaps::cluster`.
-/// What is *not* accepted at that width is `jobs::gaps::cover`, which turns
-/// each of them into a network round trip on a path a capture waits on; it
-/// takes the newest `COVER_MAX_GAPS` and leaves the rest. `cluster`'s
-/// "N is tens, so the quadratic pass is fine" was an assumption about an
-/// operator's habits, not a property of the query; a few thousand searches
-/// judged `gap` made both costs real.
-///
-/// Newest first, so what is dropped is the oldest — a gap judged this week is
-/// the one someone is still trying to fill. `judged_at` is whole seconds, which
-/// on its own leaves everything judged inside one second in whatever order the
-/// table hands back; the id breaks the tie, and being uuid v7 it breaks it by
-/// creation, so the cap never cuts across a single second arbitrarily. `open_gaps` logs when the cap bites,
-/// because a grouping that quietly left half the gaps out would read on the page
-/// exactly like a grouping of all of them.
+/// Per kind (five kinds): the sweep's clustering is quadratic in the total and the capture
+/// page renders every row. Newest first, ties broken by uuid v7 id; `open_gaps` logs a bite.
 pub const MAX_OPEN_GAPS: i64 = 500;
 
-/// The predicate every reader of the open gaps shares, once.
-///
-/// Three projections over one `WHERE`: the sweep needs `query_vec`, the capture
-/// page needs only the words, and `count_open_gaps` needs neither. Written as a
-/// macro rather than as separate statements because the projections drifting
-/// apart would mean the page, the sweep and the count disagreeing about what is
-/// open — and because nothing from a request reaches the statement text either
-/// way, the `embed_model` being bound.
-///
-/// The `WHERE` is split out from the `SELECT` for the reason
-/// `pursuit_gaps_from!` is: a total is a count over the predicate, and reading
-/// a page of rows to take its length is how a page size came to be printed as
-/// a total.
+/// One `WHERE` for three projections, so page, sweep and count agree on what is open.
 macro_rules! ask_gaps_from {
     () => {
         " FROM ask_events
@@ -220,17 +127,7 @@ macro_rules! ask_gaps_sql {
     };
 }
 
-/// A search someone judged a hole in the base.
-///
-/// Coverage of *either* search kind closes it, for the same reason
-/// `dismiss_gap` writes one `dismissed_at` for both: `search` and `unmatched`
-/// are two readings of one row, not two rows. A search the base could not
-/// answer is picked up as `unmatched` on its own, a capture covers it as
-/// `unmatched`, and the operator then marks that same search a gap from the
-/// results bar — with only `kind = 'search'` excluded here, a stored capture
-/// that already answers it puts it back on the capture page as a fresh hole.
-/// The other direction cannot happen: `unmatched` is `verdict IS NULL`, so a
-/// judged search never enters by that door.
+/// `search` and `unmatched` are two readings of one row, so coverage of either closes it.
 macro_rules! search_gaps_from {
     () => {
         " FROM search_events
@@ -253,47 +150,9 @@ macro_rules! search_gaps_sql {
     };
 }
 
-/// A search nothing came close to answering.
-///
-/// The similarity is not a column on `search_events` — it is on the candidate
-/// rows, one per result — so the test is an aggregate rather than a read, and
-/// `MAX(...)` over no rows is `NULL`. Two different absences hide behind that
-/// one `NULL`, and only one of them is a gap.
-///
-/// A search that returned *nothing* is the plainest hole there is: the base was
-/// asked and had not one thing to offer. It is named here explicitly, because
-/// `NULL < ?` is not true and the aggregate alone would drop it — and nothing
-/// else picks it up. The deck will not deal it (see `dealable!`): a card with
-/// an empty list is unanswerable except by gap or discard, which is not a
-/// question worth a person's turn. So the sweep is where it lands.
-///
-/// Candidates that exist but were never *scored* are the other absence, and
-/// they are not a gap. That is the embedder down, or a query the lexical half
-/// answered on keywords alone — `search_inner` stores what the vector search
-/// returned, and it returned nothing. "Nothing came close" would be a claim
-/// about a measurement nobody took. `AND c.similarity IS NOT NULL` inside the
-/// aggregate keeps those out, the same reading `dealable!`'s inner `COALESCE`
-/// takes of them.
-///
-/// A search that has been judged at all is left out. `gap` for the obvious
-/// reason — it would be two gaps, the same row said twice in two different
-/// words — but `discard` and `hit` equally, and those are the ones worth
-/// naming. `discard` is the operator saying this was never a search: a typo, or
-/// poking at the box. A typo's candidates are exactly what scores below
-/// `weak_below`, so a rule that only skipped `gap` would take every dismissed
-/// typo and put it back on the capture page as a hole in the base. And a `hit`
-/// whose candidates all scored weakly is a search someone answered; the
-/// scores say the ranking was poor, not that the knowledge is missing.
-///
-/// Two guards keep the half-typed out of this. A typing burst folds into one
-/// event by `feedback.coalesce_secs`, so what is measured is the finished query
-/// and not its first two letters; and `length(e.query) >= 3`, which is
-/// `dealable!`'s own lower bound, for the burst that was never finished. That
-/// bound makes the two predicates exact complements, which is what the escape
-/// hatch above depends on: `discard` is only reachable through the deck, so a
-/// hole the deck will never deal is a hole nobody can ever discard. Without it
-/// a `qq` typed and walked away from sat on the capture page as a gap in the
-/// base until somebody dismissed it by hand.
+/// `MAX(similarity)` over no rows is NULL: a search with no candidates is named explicitly,
+/// unscored candidates (`similarity IS NULL`) are not a gap, judged searches are excluded,
+/// and `length >= 3` matches `dealable!` so the two predicates are exact complements.
 macro_rules! unmatched_gaps_from {
     () => {
         " FROM search_events e
@@ -318,12 +177,7 @@ macro_rules! unmatched_gaps_sql {
     };
 }
 
-/// A subject the plan named and the fan-out could not cover.
-///
-/// The join to `ask_events` is what makes the row die with its question — a
-/// `DELETE` cascades, and a base whose foreign keys are off still cannot return
-/// an orphan through this. `dismissed_at` and `gap_coverage` close it the same
-/// way they close the other four.
+/// The join to `ask_events` makes the row die with its question.
 macro_rules! subject_gaps_from {
     () => {
         " FROM ask_subjects s
@@ -346,8 +200,7 @@ macro_rules! subject_gaps_sql {
     };
 }
 
-/// Which pursuits are on the gap list, written once so that the page and the
-/// count of it cannot come to disagree about what "still unsatisfied" means.
+/// Written once so the page and its count agree on "still unsatisfied".
 macro_rules! pursuit_gaps_from {
     () => {
         " FROM pursuits
@@ -368,13 +221,7 @@ macro_rules! pursuit_gaps_sql {
     };
 }
 
-/// The words a pursuit gap shows — a run of searches the base did not
-/// answer — which is its leading clustered query.
-///
-/// The leading query rather than all of them joined: the naming prompt keeps
-/// the first twelve members, and a member that is itself a paragraph of
-/// queries would crowd out eleven other gaps. `queries` is JSON, so the first
-/// element is read out in Rust rather than in SQL.
+/// The leading query only: a member that is a paragraph would crowd out the naming prompt.
 fn pursuit_text(queries_json: &str) -> String {
     serde_json::from_str::<Vec<String>>(queries_json)
         .ok()
@@ -382,37 +229,13 @@ fn pursuit_text(queries_json: &str) -> String {
         .unwrap_or_default()
 }
 
-/// How many stored query vectors `Core::calibrate` reads, per table, and how
-/// many artifact vectors it samples against them.
-///
-/// Every recorded search and question counts, not only the gaps: what
-/// `core::gaps::unrelated_line` measures is what *unrelated* pairs score
-/// under this embedder, and a sample drawn from one topic's worth of holes is
-/// the one sample that cannot say. Two hundred a side is 79,800 pairs, well
-/// under what the sweep's own clustering already costs.
+/// Every recorded search and question, not only gaps: the unrelated line must be measured
+/// across topics. 200 a side is 79,800 pairs.
 pub const CALIBRATION_SAMPLE: i64 = 200;
 
 impl Store {
-    /// The open pursuit gaps that clustered this query.
-    ///
-    /// The join a capture needs to reach its own pursuit, and the only one
-    /// there is: a pursuit is keyed on its cluster, not on the events in it —
-    /// `interaction_events` says outright that the clustering decides what
-    /// belongs together and nothing stores a pursuit id — so what is on the
-    /// row is `queries`, the member events' query text as `need_of` collected
-    /// it. Matching on that text is therefore matching the pursuit's own
-    /// record of what was typed, not a guess about it, and
-    /// `normalize_query` is the comparison the clusterer already made when it
-    /// deduplicated those very strings.
-    ///
-    /// Every query, never the leading one alone: a typing burst that outruns
-    /// `feedback.coalesce_secs` leaves the half-typed prefix leading and the
-    /// finished sentence behind it, and the capture is made from the finished
-    /// sentence. The live base's exam-notes pursuit had exactly that shape.
-    ///
-    /// Held to the same rows `pursuit_gaps_sql!` would show and to the same
-    /// cap, so a pursuit this cannot name is one the capture page was never
-    /// going to draw.
+    /// Matches on `queries` with `normalize_query`, since pursuits store no event ids. Every
+    /// query, not only the leading one: a burst can leave a half-typed prefix leading.
     pub async fn pursuit_gaps_of_query(
         &self,
         embed_model: &str,
@@ -441,26 +264,11 @@ impl Store {
         Ok(out)
     }
 
-    /// Every open gap with a vector under `embed_model`, newest first, up to
-    /// `MAX_OPEN_GAPS` of each kind. A vector under another model is not
-    /// comparable and is left out; an empty one (the cache had evicted it)
-    /// likewise.
-    ///
-    /// Newest first across both kinds, not within each. The cap is per kind, so
-    /// the two are read separately, but appending one list after the other left
-    /// a cluster of mixed kinds ordered ask-then-search — and `sweep` hands that
-    /// order to `gap_label_prompt`, which keeps the first twelve. A group with a
-    /// dozen questions in it named itself from those and never saw a search gap,
-    /// however recent.
+    /// A vector under another model, or an empty one, is left out. Merged newest first across
+    /// kinds, because `gap_label_prompt` keeps only the first twelve.
     pub async fn open_gaps(&self, embed_model: &str, weak_below: f32) -> Result<OpenGaps> {
-        // `(judged_at, GapVec)`: the sort key is not part of what the caller
-        // gets, only of the order it gets it in.
         let mut out: Vec<(i64, GapVec)> = Vec::new();
-        // One row past the cap, and truncated below. Reading exactly the cap and
-        // calling that capped cannot tell a table with precisely `MAX_OPEN_GAPS`
-        // open gaps — nothing left out — from one that was truncated, and now
-        // that `sweep` changes what it does when capped, that false positive
-        // would leave a base at exactly the cap never cleaning up a group again.
+        // One row past the cap, so exactly `MAX_OPEN_GAPS` is not mistaken for truncation.
         for r in sqlx::query(ask_gaps_sql!(", query_vec, judged_at"))
             .bind(embed_model)
             .bind(MAX_OPEN_GAPS + 1)
@@ -577,9 +385,7 @@ impl Store {
             || unmatched_capped
             || pursuits_capped
             || subjects_capped;
-        // The same key each half was already read by, applied across both:
-        // whole-second `judged_at`, ties broken by a uuid v7 id, so a second's
-        // worth of gaps is still ordered by when they were recorded.
+        // Ties in whole-second `judged_at` broken by the uuid v7 id.
         out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.gap.id.cmp(&a.1.gap.id)));
         let out: Vec<GapVec> = out.into_iter().map(|(_, g)| g).collect();
         if capped {
@@ -596,23 +402,8 @@ impl Store {
         Ok(OpenGaps { gaps: out, capped })
     }
 
-    /// A subject the plan named and the fan-out could not cover.
-    ///
-    /// Written only for the uncovered ones. A subject the fan-out answered is
-    /// not a hole and leaves no row, which is what keeps this table a list of
-    /// what the base lacks rather than a log of everything a planning call ever
-    /// said.
-    ///
-    /// The vector is handed in rather than embedded here. The fan-out already
-    /// embedded this subject in order to search for it, so the caller reads it
-    /// back out of the query cache and this costs no model call at all — which
-    /// is the whole argument for the kind: the call was paid for, and today its
-    /// findings are thrown away.
-    ///
-    /// An empty vector is stored as one rather than refused. Every reader here
-    /// already gates on `vec_dim > 0`, and a subject whose embedding could not
-    /// be recovered is a subject that was still named — refusing the row would
-    /// lose the fact to save a few bytes.
+    /// Only uncovered subjects get a row. The vector comes from the fan-out's query cache, so
+    /// no model call; an empty one is stored, since every reader gates on `vec_dim > 0`.
     pub async fn record_uncovered_subject(
         &self,
         event_id: &str,
@@ -638,11 +429,7 @@ impl Store {
         Ok(id)
     }
 
-    /// The same open gaps, without their vectors: what the capture page renders.
-    ///
-    /// The page shows a gap's words, its kind and its id and nothing else, and
-    /// it is the page the app opens on. Reading the vectors for it decoded four
-    /// million floats per load to throw all of them away.
+    /// The capture page opens the app; it must not decode every gap's vector.
     pub async fn open_gap_refs(&self, embed_model: &str, weak_below: f32) -> Result<Vec<Gap>> {
         let mut out = Vec::new();
         for (sql, kind) in [
@@ -663,8 +450,7 @@ impl Store {
                 });
             }
         }
-        // One more bind than the other two, so it is read on its own rather
-        // than joining the loop above.
+        // One more bind than the other two, so it is read on its own.
         for r in sqlx::query(unmatched_gaps_sql!(""))
             .bind(embed_model)
             .bind(weak_below)
@@ -693,18 +479,8 @@ impl Store {
         Ok(out)
     }
 
-    /// The ids of the pursuits the capture page's gap list is showing.
-    ///
-    /// Insights says how many recent pursuits went unanswered and links that
-    /// sentence to the list. `state = 'unsatisfied'` on its own is not
-    /// that number: a pursuit a later capture answered keeps the state it ended
-    /// with — coverage never rewrites what happened — while the gap list drops
-    /// it. On a base where captures are answering pursuits the sentence sent
-    /// the operator to a list that did not hold what it promised.
-    ///
-    /// The same predicate the list itself is built from, so the two cannot
-    /// disagree about what is on it — including the embedder: a pursuit whose
-    /// vector is under another model is not on the page either.
+    /// Not `state = 'unsatisfied'` alone: a pursuit a capture answered keeps its state but
+    /// leaves the gap list. The same predicate as the list.
     pub async fn open_pursuit_gap_ids(
         &self,
         embed_model: &str,
@@ -719,17 +495,7 @@ impl Store {
             .collect())
     }
 
-    /// How many gaps are open, all five kinds, with no page over any of them.
-    ///
-    /// `open_gap_refs` answers the capture page's list and caps each kind at
-    /// `MAX_OPEN_GAPS`, so its length saturates at five times that and then
-    /// stops moving — on exactly the base whose operator opened `--status` to
-    /// find out whether the number is moving. It also decoded every gap's text
-    /// to throw all of it away.
-    ///
-    /// The same five predicates the list is built from, so the sentence in a
-    /// terminal and the page in a browser cannot come apart about what is being
-    /// counted; only the cap is gone.
+    /// Uncapped: `open_gap_refs` saturates at five times `MAX_OPEN_GAPS`.
     pub async fn count_open_gaps(&self, embed_model: &str, weak_below: f32) -> Result<i64> {
         use sqlx::Row;
         let mut n: i64 = 0;
@@ -745,8 +511,7 @@ impl Store {
                 .await?
                 .get::<i64, _>("n");
         }
-        // One more bind than the other four, so it is read on its own — the
-        // same reason `open_gap_refs` reads it outside its loop.
+        // One more bind than the other four, so it is read on its own.
         n += sqlx::query(concat!("SELECT COUNT(*) AS n", unmatched_gaps_from!()))
             .bind(embed_model)
             .bind(weak_below)
@@ -756,12 +521,7 @@ impl Store {
         Ok(n)
     }
 
-    /// How many pursuits are on the gap list, with no page over it.
-    ///
-    /// `open_pursuit_gap_ids` answers a page — `MAX_OPEN_GAPS` of them — because
-    /// its caller draws a list. A status line reports a total, and a total that
-    /// silently stops at the page size is a number that stops moving on exactly
-    /// the base whose operator most needs it to move.
+    /// Uncapped, unlike `open_pursuit_gap_ids`.
     pub async fn count_open_pursuit_gaps(&self, embed_model: &str) -> Result<i64> {
         use sqlx::Row;
         Ok(
@@ -773,10 +533,6 @@ impl Store {
         )
     }
 
-    /// Query vectors from every recorded search and question under this
-    /// embedder — gap or not, judged or not — newest first, `CALIBRATION_SAMPLE`
-    /// of each. What `Core::calibrate` measures the embedder's own geometry
-    /// from.
     pub async fn calibration_vecs(&self, embed_model: &str) -> Result<Vec<Vec<f32>>> {
         let mut out = Vec::new();
         for sql in [
@@ -800,12 +556,7 @@ impl Store {
         Ok(out)
     }
 
-    /// This capture answered this gap.
-    ///
-    /// Silent and reversible. The source row is untouched, so an operator who
-    /// disagrees reopens the gap by deleting this row — and nothing is deleted
-    /// on a score. Silent because a base with forty gaps would otherwise turn
-    /// its own housekeeping into a review queue.
+    /// Silent and reversible: the source row is untouched; deleting this row reopens the gap.
     pub async fn cover_gap(
         &self,
         kind: GapKind,
@@ -832,8 +583,6 @@ impl Store {
         Ok(())
     }
 
-    /// The gaps this capture answered, newest first: what the capture page says
-    /// it did beyond being stored.
     pub async fn gaps_covered_by(&self, corpus_id: &str) -> Result<Vec<Gap>> {
         let one = [corpus_id.to_string()];
         Ok(self
@@ -843,16 +592,8 @@ impl Store {
             .unwrap_or_default())
     }
 
-    /// The same, for a list of captures at once.
-    ///
-    /// One statement rather than one per capture. The queue fragment renders a
-    /// page of rows and the capture page polls it while anything is in flight,
-    /// so asking per row makes a three-way `LEFT JOIN` into a round of them on
-    /// a hot path — for an answer the same join gives in a single pass.
-    ///
-    /// Captures with nothing covered are absent from the map rather than
-    /// present and empty, which is the same thing to every caller: they ask for
-    /// a list and take `unwrap_or_default`.
+    /// One statement, not one per capture: the queue fragment is polled while work is in flight.
+    /// Captures with nothing covered are absent from the map.
     pub async fn gaps_covered_by_each(
         &self,
         corpus_ids: &[String],
@@ -861,8 +602,7 @@ impl Store {
         if corpus_ids.is_empty() {
             return Ok(out);
         }
-        // The ids are bound, never spliced; what is spliced is a count of
-        // placeholders.
+        // The ids are bound; only a count of placeholders is spliced.
         let holes = vec!["?"; corpus_ids.len()].join(", ");
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT c.corpus_id, c.kind, c.gap_id,
@@ -878,18 +618,12 @@ impl Store {
         for id in corpus_ids {
             q = q.bind(id);
         }
-        // One descending order over the whole set is still newest-first inside
-        // each capture, because a filter never reorders what it keeps.
         for r in q.fetch_all(&self.pool).await? {
             let Some(kind) = GapKind::parse(&r.get::<String, _>("kind")) else {
                 continue;
             };
             let text: Option<String> = r.get("text");
-            // The source row can be gone — a search expired by retention, a
-            // pursuit purged — and the coverage row outlives it until
-            // `trim_gap_coverage` collects it on the next repair pass. In that
-            // window it says nothing useful, so it is skipped rather than
-            // rendered blank.
+            // The source can be gone until `trim_gap_coverage` collects the row; skipped meanwhile.
             let Some(text) = text else { continue };
             out.entry(r.get::<String, _>("corpus_id"))
                 .or_default()
@@ -905,37 +639,8 @@ impl Store {
         Ok(out)
     }
 
-    /// Coverage rows whose gap no longer exists, dropped.
-    ///
-    /// `gap_id` names one of three tables, so it cannot be a foreign key and
-    /// nothing cascades from the row it points at — while the rows it points at
-    /// are deleted routinely: `expire_feedback` ages out searches and questions
-    /// on the retention promise, `purge_feedback` takes the lot on one press.
-    /// What was left behind was a row per gap ever covered, kept for the life
-    /// of the base, and `gaps_covered_by_each` quietly skipping every one of
-    /// them because the join came back with no text.
-    ///
-    /// A sweep rather than a delete beside each of those, because the same
-    /// orphan arrives by more routes than there are call sites — a purge, an
-    /// expiry, a pursuit deleted by hand — and one statement that asks what is
-    /// actually orphaned cannot be the one that forgets a route.
-    ///
-    /// The cascades on `corpus_id` and `artifact_id` are untouched and still do
-    /// their half: delete the capture that closed a gap and the gap comes back.
-    ///
-    /// Also dropped: coverage scored under `below`. The line a capture has to
-    /// reach is measured from the base and moves as it grows; a coverage
-    /// recorded when the line sat inside the embedder's noise band said a
-    /// shopping reminder was answered by a document on Windows versions, and
-    /// once the line is where it belongs that row is wrong by the same rule
-    /// that wrote it.
-    ///
-    /// Except a `capture` row, which no line ever wrote. A capture typed into
-    /// the box the query was typed into answers it because the page said so,
-    /// and its score is only what the two happened to measure — often nothing
-    /// at all, since what gets stored is a synthesized artifact rather than the
-    /// sentence. Collected on that score, the hole would come back the moment
-    /// the base grew enough to measure its own line.
+    /// `gap_id` names one of three tables, so no foreign key cascades. Also drops coverage
+    /// scored under `below`, except `capture` rows, which no line wrote.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
         Ok(sqlx::query!(
             "DELETE FROM gap_coverage
@@ -956,8 +661,6 @@ impl Store {
         .rows_affected())
     }
 
-    /// Undo a coverage: the gap is open again, and the judgement behind it was
-    /// never touched.
     pub async fn uncover_gap(&self, kind: GapKind, gap_id: &str) -> Result<()> {
         sqlx::query!(
             "DELETE FROM gap_coverage WHERE kind = ? AND gap_id = ?",
@@ -970,8 +673,7 @@ impl Store {
     }
 
     pub async fn dismiss_gap(&self, kind: GapKind, id: &str) -> Result<()> {
-        // Two literal statements rather than one built from the kind: nothing
-        // from a request reaches the statement text.
+        // Two literal statements: nothing from a request reaches the statement text.
         let res = match kind {
             GapKind::Ask => {
                 sqlx::query!(
@@ -982,10 +684,7 @@ impl Store {
                 .execute(&self.pool)
                 .await?
             }
-            // The same column `Search` writes, and correctly so: it is the same
-            // row, dismissed for the same reason. A search dismissed as
-            // unmatched is not offered again if it is later judged a gap
-            // either — the operator has already said this one is answered.
+            // The same row as `Search`, dismissed for the same reason.
             GapKind::Search | GapKind::Unmatched => {
                 sqlx::query!(
                     "UPDATE search_events SET dismissed_at = ? WHERE id = ?",
@@ -995,9 +694,7 @@ impl Store {
                 .execute(&self.pool)
                 .await?
             }
-            // A pursuit has a state rather than a dismissal column, and
-            // `dismissed` is already one of the states it can be in — set by
-            // the operator on Ops, meaning the same thing it means here.
+            // `dismissed` is already a pursuit state, meaning the same thing.
             GapKind::Pursuit => {
                 sqlx::query!(
                     "UPDATE pursuits SET state = 'dismissed', closed_at = ? WHERE id = ?",
@@ -1007,10 +704,7 @@ impl Store {
                 .execute(&self.pool)
                 .await?
             }
-            // Its own column, unlike `Search`/`Unmatched` above. A subject is
-            // not a second reading of some other row — it is a row of its own,
-            // written for one plan, and dismissing it says nothing about the
-            // question it came from.
+            // Its own column: a subject is a row of its own, not a reading of its question.
             GapKind::Subject => {
                 sqlx::query!(
                     "UPDATE ask_subjects SET dismissed_at = ? WHERE id = ?",
@@ -1027,11 +721,7 @@ impl Store {
         Ok(())
     }
 
-    /// Every stored cluster, with the members it was keyed on.
-    ///
-    /// The members are what lets `jobs::gaps::sweep` tell a key this pass has
-    /// replaced from one it merely did not reach, which is the difference
-    /// between removing a stale heading and taking a live gap off the page.
+    /// The members let the sweep tell a replaced key from one it merely did not reach.
     pub async fn cluster_keys(&self) -> Result<Vec<StoredCluster>> {
         let mut out = Vec::new();
         for r in sqlx::query!(r#"SELECT key AS "key!", labelled_by, members FROM gap_clusters"#)
@@ -1089,20 +779,14 @@ impl Store {
         Ok(())
     }
 
-    /// The clusters with their open members resolved, and the open gaps no
-    /// cluster names yet (judged since the last sweep). A member that has been
-    /// dismissed since the sweep is simply absent from its row; a row left with
-    /// no members is not returned.
+    /// Members dismissed since the sweep are absent; a row left with no members is not returned.
     pub async fn gap_rows(
         &self,
         embed_model: &str,
         weak_below: f32,
     ) -> Result<(Vec<GapRow>, Vec<Gap>)> {
         let open = self.open_gap_refs(embed_model, weak_below).await?;
-        // Indexed once, not scanned per member. Resolving with a linear `find`
-        // and then a `retain` over the whole list cost two passes over every
-        // open gap for every member of every cluster — a million moves at the
-        // cap, on the page the app opens on.
+        // Indexed once: a linear `find` per member was a million moves at the cap.
         let index: std::collections::HashMap<(GapKind, &str), &Gap> =
             open.iter().map(|g| ((g.kind, g.id.as_str()), g)).collect();
         let mut clustered: std::collections::HashSet<(GapKind, &str)> = Default::default();
@@ -1135,8 +819,7 @@ impl Store {
                 });
             }
         }
-        // Newest first, the order the query returned: a gap judged this morning
-        // is the one someone is still trying to fill.
+        // Newest first, the order the query returned.
         let unclustered = open
             .iter()
             .filter(|g| !clustered.contains(&(g.kind, g.id.as_str())))
@@ -1206,9 +889,7 @@ mod tests {
         let store = Store::memory().await.unwrap();
         let id =
             uncovered_subject(&store, "how do ticks work", "job priority", vec![0.0, 1.0]).await;
-        // Coverage points at a real capture: the row carries foreign keys, and
-        // a gap closed by an artifact nobody stored would be a claim with
-        // nothing behind it.
+        // Coverage carries foreign keys to a real capture.
         let src = store.insert_corpus("raw", "web", None).await.unwrap();
         let made = store
             .insert_artifacts(
@@ -1282,7 +963,6 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(named, vec!["job priority"]);
 
-        // And when the subject is gone, the row goes with it.
         sqlx::query!("DELETE FROM ask_subjects WHERE id = ?", &id)
             .execute(&store.pool)
             .await
@@ -1404,8 +1084,6 @@ mod tests {
     async fn a_search_nothing_came_close_to_is_a_gap() {
         let store = Store::memory().await.unwrap();
         let far = search_with(&store, "mount an E01", &[0.20, 0.11]).await;
-        // One hit above the line is enough: something came close, and the base
-        // is not being asked about a hole.
         search_with(&store, "grep a pcap", &[0.51, 0.10]).await;
 
         let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
@@ -1420,11 +1098,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_that_returned_nothing_is_an_unmatched_gap() {
-        // The plainest hole there is: the base was asked and had nothing at
-        // all. `MAX(...)` over no candidate rows is NULL and NULL is not under
-        // the line, so the aggregate alone would drop it — and the deck will
-        // not deal it either, because a card with an empty list has no question
-        // on it. Named explicitly here, or it falls between the two.
+        // NULL is not under the line, and the deck will not deal an empty list.
         let store = Store::memory().await.unwrap();
         let empty = search_with(&store, "mount an E01", &[]).await;
 
@@ -1442,13 +1116,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_query_too_short_for_the_deck_is_not_a_gap_either() {
-        // `dealable!` holds back anything under three characters, and `discard`
-        // — the operator saying this was never a search — is only reachable
-        // from the deck. So a hole the deck will never deal is a hole nobody
-        // can ever discard: the box searches as you type, somebody taps `qq`
-        // and walks away, and that sat on the capture page as a gap in the base
-        // for good. Both branches of the predicate, because the pool being
-        // empty is not what makes it not a search.
+        // `discard` is only reachable from the deck, which holds back anything under three chars.
         let store = Store::memory().await.unwrap();
         search_with(&store, "qq", &[]).await;
         search_with(&store, "qq", &[0.01]).await;
@@ -1467,11 +1135,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_whose_candidates_were_never_scored_is_not_a_gap() {
-        // The other absence behind the same NULL, and this one is not a hole.
-        // The embedder was down, or the query was answered on keywords alone:
-        // `search_inner` stores what the vector search returned, and it
-        // returned nothing. "Nothing came close" would be a claim about a
-        // measurement nobody took.
+        // Unscored candidates: the embedder was down or keywords answered alone.
         let store = Store::memory().await.unwrap();
         store
             .record_search(
@@ -1510,7 +1174,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_judged_a_gap_is_not_also_an_unmatched_one() {
-        // The same row, said twice, in two different words.
         let store = Store::memory().await.unwrap();
         let id = search_with(&store, "mount an E01", &[0.10]).await;
         store
@@ -1529,13 +1192,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_the_operator_settled_is_not_an_unmatched_one() {
-        // `discard` is the operator saying this was never a search — a typo, or
-        // poking at the box. A typo's candidates are exactly what scores below
-        // the line, so a rule that only skipped `gap` would take every judgement
-        // of "this was nothing" and put it straight back on the capture page as
-        // a hole in the base. A `hit` whose candidates all scored weakly is the
-        // other half of the same mistake: the ranking was poor, the knowledge
-        // was there.
+        // A typo scores below the line; a weak `hit` means poor ranking, not missing knowledge.
         let store = Store::memory().await.unwrap();
         let typo = search_with(&store, "mont an E01", &[0.10]).await;
         store
@@ -1567,11 +1224,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_gaps_a_page_of_captures_answered_come_back_grouped() {
-        // The queue fragment is polled while anything is in flight, and asking
-        // per row turns one three-way join into a round of them.
         let store = Store::memory().await.unwrap();
-        // `gap_coverage` names both a capture and the artifact of it that
-        // answered, and both are foreign keys.
+        // `gap_coverage` has foreign keys to both the capture and the artifact.
         for (c, a) in [("corpus-a", "art-1"), ("corpus-b", "art-2")] {
             sqlx::query!(
                 "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
@@ -1645,7 +1299,6 @@ mod tests {
             !by_corpus.contains_key("corpus-c"),
             "a capture that answered nothing is absent, not present and empty"
         );
-        // And the single-capture reader is the same answer.
         assert_eq!(
             store
                 .gaps_covered_by("corpus-a")
@@ -1660,10 +1313,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_covered_search_stays_covered_when_it_is_later_judged_a_gap() {
-        // One row, two readings. A capture answers the search while it is
-        // `unmatched`; the operator then marks that same search a gap from the
-        // results bar. It must not come back as a hole the base has already
-        // been given an answer to.
+        // One row, two readings: a search already answered as `unmatched` stays answered as a gap.
         let store = Store::memory().await.unwrap();
         sqlx::query!(
             "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
@@ -1703,8 +1353,6 @@ mod tests {
             store.open_gaps("fake", 0.35).await.unwrap().gaps.is_empty(),
             "a capture already answered this search; judging it reopened it"
         );
-        // And undoing the coverage still brings it back, under the kind it is
-        // now judged as.
         store.uncover_gap(GapKind::Unmatched, &id).await.unwrap();
         let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
         assert_eq!(gaps.len(), 1, "{gaps:?}");
@@ -1713,8 +1361,7 @@ mod tests {
 
     #[tokio::test]
     async fn coverage_of_a_gap_that_is_gone_is_collected() {
-        // Retention deletes the search; nothing deletes the row saying a
-        // capture answered it, because `gap_id` cannot be a foreign key.
+        // `gap_id` cannot be a foreign key, so nothing else deletes the coverage row.
         let store = Store::memory().await.unwrap();
         sqlx::query!(
             "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
@@ -1761,7 +1408,6 @@ mod tests {
             .map(|r| r.gap_id)
             .collect();
         assert_eq!(left, vec![kept], "the coverage of a gap that still exists");
-        // And a second pass has nothing left to do.
         assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 0);
     }
 
@@ -1792,7 +1438,6 @@ mod tests {
             .close_pursuit(&id, "unsatisfied", "nothing strong was engaged", 200)
             .await
             .unwrap();
-        // A pursuit that got its answer is not a hole in the base.
         let happy = store
             .insert_pursuit(
                 300,
@@ -1838,13 +1483,10 @@ mod tests {
         assert_eq!(store.count_open_pursuit_gaps("fake").await.unwrap(), 60);
         assert_eq!(store.count_pursuits("unsatisfied").await.unwrap(), 60);
         assert_eq!(store.count_pursuits("open").await.unwrap(), 0);
-        // Under the gap list's own cap the two agree exactly, which is what
-        // keeps the predicate from drifting away from the count of it.
         assert_eq!(
             store.open_pursuit_gap_ids("fake").await.unwrap().len() as i64,
             store.count_open_pursuit_gaps("fake").await.unwrap()
         );
-        // A pursuit that has been answered leaves both.
         store
             .dismiss_gap(
                 GapKind::Pursuit,
@@ -1863,9 +1505,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pursuit_written_before_the_vector_was_carried_is_not_a_gap() {
-        // Nothing to group it by. The same rule `vec_dim > 0` already applies
-        // to a search whose vector the cache had evicted: an uncomparable
-        // vector is left out rather than compared anyway.
+        // An uncomparable vector is left out rather than compared anyway.
         let store = Store::memory().await.unwrap();
         let id = store
             .insert_pursuit(100, &["how do I mount an E01".into()], &[], None)
@@ -1902,7 +1542,6 @@ mod tests {
         let store = Store::memory().await.unwrap();
         nothing_here(&store, "q1", vec![1.0, 0.0]).await;
         gap_search(&store, "s1", vec![0.0, 1.0]).await;
-        // Not gaps: a right answer, an unjudged search, an empty vector.
         let right = store
             .record_ask(NewAsk {
                 question: "ok".into(),
@@ -1917,9 +1556,7 @@ mod tests {
         store.judge_ask(&right, AskVerdict::Right).await.unwrap();
         nothing_here(&store, "no vector", vec![]).await;
         let gaps = store.open_gaps("fake", 0.35).await.unwrap().gaps;
-        // Newest first across both kinds. Judged inside the same second, so the
-        // uuid v7 ids break the tie — and being time-ordered they break it the
-        // same way the stamps would have: the search was recorded second.
+        // Same second, so the uuid v7 ids break the tie in recording order.
         assert_eq!(
             gaps.iter().map(|g| g.gap.text.as_str()).collect::<Vec<_>>(),
             vec!["s1", "q1"]
@@ -1937,7 +1574,6 @@ mod tests {
                 .is_empty()
         );
 
-        // The display path reads the same gaps and no vectors.
         let refs = store.open_gap_refs("fake", 0.35).await.unwrap();
         assert_eq!(
             refs.iter().map(|g| g.text.as_str()).collect::<Vec<_>>(),
@@ -1992,10 +1628,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_table_holding_exactly_the_cap_has_left_nothing_out() {
-        // Reading `MAX_OPEN_GAPS` rows and calling that capped cannot tell a
-        // full page from a truncated one, and `sweep` now keeps every group it
-        // could not reach when the pass was partial — so at exactly the cap a
-        // base would stop cleaning up stale groups altogether, for good.
+        // At exactly the cap a full page must not read as truncated.
         let store = Store::memory().await.unwrap();
         for i in 0..MAX_OPEN_GAPS {
             nothing_here(&store, &format!("q{i}"), vec![1.0, 0.0]).await;
@@ -2044,7 +1677,6 @@ mod tests {
             vec![later.as_str()]
         );
 
-        // Dismissing a member thins the row; dismissing both removes it.
         store.dismiss_gap(GapKind::Ask, &a).await.unwrap();
         assert_eq!(
             store.gap_rows("fake", 0.35).await.unwrap().0[0]

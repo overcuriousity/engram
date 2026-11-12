@@ -1,24 +1,12 @@
-//! What the memory did while nobody was looking.
-//!
-//! One row per completed run of a periodic unit. There is no "night" to group
-//! them by: units that reschedule themselves on their own periods do not line
-//! up into one cycle, and inventing a cycle identity to group them by would be
-//! inventing it. What Ops shows is the last day, and under it the history —
-//! which is the thing a single overwritten summary could never give, namely
-//! whether a sweep started going wrong yesterday or has been going wrong for a
-//! week.
+//! One row per completed run of a periodic unit. Units keep their own periods: no cycle id.
 
 use super::{Store, now};
 use crate::error::Result;
 use sqlx::Row;
 
-/// How many runs are kept. Trimmed by the repair pass, which is behind no
-/// setting: a trim that rode on the retention unit stopped whenever capture was
-/// switched off, and the sweeps that kept running kept writing rows.
-/// Housekeeping about housekeeping does not get a policy key.
+/// Trimmed by the repair pass, which no setting switches off: the sweeps keep writing regardless.
 pub const MAX_RUNS: i64 = 2000;
 
-/// One recorded run.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SweepRun {
     pub stage: String,
@@ -31,11 +19,7 @@ pub struct SweepRun {
 }
 
 impl Store {
-    /// Record what one run of a periodic unit did.
-    ///
-    /// A failed run is recorded like any other. It is exactly the run an
-    /// operator needs to see, and a history that only kept the successes would
-    /// show a sweep going quiet with nothing anywhere saying why.
+    /// Failed runs are recorded too: they are the ones an operator needs to see.
     pub async fn record_sweep_run(
         &self,
         stage: &str,
@@ -57,7 +41,6 @@ impl Store {
         Ok(())
     }
 
-    /// Every run since `since`, newest first.
     pub async fn sweep_runs_since(&self, since: i64, limit: i64) -> Result<Vec<SweepRun>> {
         let rows = sqlx::query(
             "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
@@ -70,7 +53,6 @@ impl Store {
         Ok(rows.iter().map(read_run).collect())
     }
 
-    /// The history: the most recent runs, newest first, whenever they were.
     pub async fn sweep_history(&self, limit: i64) -> Result<Vec<SweepRun>> {
         let rows = sqlx::query(
             "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
@@ -82,7 +64,6 @@ impl Store {
         Ok(rows.iter().map(read_run).collect())
     }
 
-    /// The most recent run of one sweep, if it has ever run.
     pub async fn last_sweep_run(&self, stage: &str) -> Result<Option<SweepRun>> {
         let row = sqlx::query(
             "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
@@ -94,7 +75,6 @@ impl Store {
         Ok(row.as_ref().map(read_run))
     }
 
-    /// Keep the newest `MAX_RUNS` and forget the rest.
     pub async fn trim_sweep_runs(&self) -> Result<u64> {
         let res = sqlx::query!(
             "DELETE FROM sweep_runs WHERE id NOT IN (

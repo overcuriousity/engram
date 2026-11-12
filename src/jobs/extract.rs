@@ -1,9 +1,5 @@
-//! The extraction stage: one captured PDF, no model call, and a corpus that
-//! from here on is text like any other.
-//!
-//! `jobs::describe` is the same shape for a photograph. The difference worth
-//! knowing is that this one needs nothing configured, so an exhausted attempt
-//! is always a real failure and never a wait for a role that has not arrived.
+//! The extraction stage: one captured PDF, no model call. Needs nothing configured, so exhaustion
+//! is always a real failure.
 
 use crate::core::Core;
 use crate::error::{Error, Result};
@@ -25,21 +21,16 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         )));
     };
 
-    // `to_markdown` walks the whole document without yielding. Held on a Tokio
-    // worker that is seconds during which search, health and the queue poll on
-    // that thread all wait; see `web::api::extract` for the same move.
+    // `to_markdown` never yields; on a Tokio worker it would stall everything polled on that
+    // thread.
     let read = tokio::task::spawn_blocking(move || crate::core::pdf::to_markdown(&bytes))
         .await
         .map_err(|e| Error::Internal(format!("extraction did not finish: {e}")))?;
 
     let text = match read {
         Ok(t) => t,
-        // A PDF that cannot be parsed will not parse better on the fourth
-        // attempt, and a scan will not grow a text layer. Park it now, with
-        // the reason on its page, rather than retrying to the ceiling.
-        // The reason is shown to a person on the corpus page, so it is the
-        // message and not the `Error`'s `Display` — which would put
-        // "validation: " in front of a sentence someone has to read.
+        // An unparseable PDF or a scan will not improve with retries: park it now. The reason is
+        // shown to a person, so it is the message, not the `Error`'s `Display`.
         Err(Error::Validation(reason)) => {
             park_failed(core, corpus_id, &reason).await?;
             return Ok(());
@@ -51,8 +42,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         Err(e) => return Err(e),
     };
 
-    // Before the text is written: the scan reads every stored signature, and
-    // this row's is still empty, so it cannot match itself.
+    // Before the text is written: this row's signature is still empty, so it cannot match itself.
     let sig = crate::store::shingle::signature(&text);
     let near = core
         .store
@@ -69,16 +59,11 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The extraction is not going to happen — the bytes are not a document this
-/// build can read. The file stays; the corpus says why it stopped, on its page
-/// and on Ops, and `reprocess(Extract)` is the way back once the build changes.
+/// The bytes are not a document this build can read; `reprocess(Extract)` is the way back.
 pub async fn park_failed(core: &Core, corpus_id: &str, reason: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     let mut meta = src.metadata.clone();
-    // Indexing a `Value` that is not an object panics, and this one comes
-    // straight out of a column. The reason is the whole point of the write —
-    // it is what the corpus page and Ops show — so a column holding something
-    // else is started over rather than left to take the worker down.
+    // Indexing a non-object `Value` panics, and a column can hold anything.
     if !meta.is_object() {
         meta = serde_json::json!({});
     }
@@ -157,8 +142,7 @@ mod tests {
     #[tokio::test]
     async fn a_pdf_that_cannot_be_read_is_parked_as_failed_with_the_reason() {
         let core = test_core().await;
-        // Through the door rather than around it: the door stores bytes and
-        // does not read them, so this is exactly what a corrupt upload does.
+        // The door stores bytes without reading them, so this is what a corrupt upload does.
         let id = captured(&core, b"%PDF-1.4 and then garbage".to_vec()).await;
         assert!(crate::jobs::run_one(&core).await.unwrap());
 
@@ -242,8 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pdf_with_no_extraction_yet_cannot_be_re_segmented() {
-        // Re-segmenting starts from `raw_text`, and there is none: the button
-        // that promised to process it would leave a PDF never read.
+        // Re-segmenting starts from `raw_text`, which a PDF never read does not have.
         let core = test_core().await;
         let id = captured(&core, a_pdf()).await;
         assert!(matches!(
@@ -254,9 +237,6 @@ mod tests {
 
     #[tokio::test]
     async fn parking_survives_a_metadata_column_that_is_not_an_object() {
-        // `meta["extract"] = ...` panics on anything but an object or null,
-        // and the value comes out of a column. A worker is the wrong place to
-        // find that out. Same hazard as `jobs::describe::park_failed`.
         let core = test_core().await;
         let id = captured(&core, a_pdf()).await;
         core.store

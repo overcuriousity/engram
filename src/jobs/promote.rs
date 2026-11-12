@@ -6,42 +6,20 @@ use crate::store::artifacts::{Chunk, CorpusSpan, Provenance};
 use crate::store::jobs::Stage;
 use crate::store::segments::SegmentState;
 
-/// Promote the windows of any of these passages that have earned it.
-///
-/// Called after an engagement bump — opened, or confirmed — and never after a
-/// retrieval bump: a passage that merely keeps appearing in result lists has
-/// helped nobody, and the condition "opened or confirmed at least once" is
-/// *where* this is called, not a stored flag. Checked at the bump, not on a
-/// sweep: a sweep reads decayed activation and the threshold would then mean
-/// something different depending on when it ran.
-///
-/// Arms a job; calls no model. The job queue and `[pacing]` bound the load.
-/// The journal's name for one window: the subject of a promotion, and what
-/// `undo_promotion` stamps.
+/// The journal's subject for one window, and what `undo_promotion` stamps.
 pub fn window_key(corpus_id: &str, idx: i64) -> String {
     format!("{corpus_id}#{idx}")
 }
 
+/// Called after an engagement bump, never a retrieval bump, and at the bump rather than on a
+/// sweep, whose decayed reading would depend on when it ran. Arms a job; calls no model.
 pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize> {
-    // The embed-only floor: there is no synthesizer to promote a window to,
-    // and a window job armed anyway would only close itself unread.
+    // The embed-only floor: no synthesizer to promote to.
     if core.synthesizer.is_none() {
         return Ok(0);
     }
-    // The day's budget, asked before anything is armed — as dedupe, reap,
-    // consolidate and sleep all ask it.
-    //
-    // Promotion's own day, and only its own. It is counted rather than
-    // exempt — a promotion is the base acting on the corpus unasked, which is
-    // what the cap bounds — but these arrive on ordinary use rather than on a
-    // sweep: `maybe_promote` runs from `mark_artifact_opened` and
-    // `mark_artifacts_cited`. Against one shared count, ten promotions in a
-    // week (a person reading their own base attentively) exhausted the default
-    // cap and stood dedupe, reap and condense down until the window moved,
-    // silently. Per job, it can only ever exhaust its own.
-    //
-    // Nothing is lost when it does: the window is read again once the day
-    // moves, and the passages keep the activation that armed this.
+    // Promotion's own daily cap: it runs on ordinary reading, and a shared count would stand
+    // dedupe, reap and condense down. Nothing is lost: the window is read again once the day moves.
     if !core.may_act(crate::store::actions::Job::Promote).await? {
         tracing::info!("a window is over the promotion line, but the day's budget is spent");
         return Ok(0);
@@ -52,14 +30,8 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
         let Some((value, stamp, created_at)) = activation.get(id) else {
             continue;
         };
-        // Above the capture baseline, decayed to the same instant — never the
-        // raw stored number. Both terms fall at the same rate, so a threshold
-        // read against the raw sum means something different at every age: with
-        // the baseline at `1.0` and a confirmation at `3.0`, a threshold of
-        // `4.0` was reachable only by a confirmation at essentially zero
-        // elapsed time, and one day after capture it already took two. What the
-        // threshold is meant to name is what use added, so that is what it is
-        // compared against.
+        // What use added above the capture baseline, both decayed to one instant: against the raw
+        // sum the threshold would mean something different at every age.
         let earned = crate::store::links::engagement_at(
             *value,
             *stamp,
@@ -79,24 +51,16 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
         let (Some(corpus_id), Some(idx)) = (c.corpus_id.as_deref(), c.segment_idx) else {
             continue;
         };
-        // The guard against re-promotion is the segment state: a window that
-        // is `done` — or already on its way — never promotes again, however
-        // many of its surviving passages cross the line afterwards.
+        // A window that is `done`, or on its way, never promotes again.
         if core.store.segment_state(corpus_id, idx).await? != Some(SegmentState::Verbatim) {
             continue;
         }
-        // And the second guard, for the one window that is `verbatim` *because*
-        // it was promoted: `undo_promotion` puts the state back so the window
-        // can be read again, but leaves the passages the activation they
-        // earned — which is the very number that armed the promotion. Without
-        // this the next open of any of those passages re-promotes the window
-        // and the operator's undo is undone, with the deprecated artifacts
-        // still lying behind it.
+        // A window `undo_promotion` reset keeps its passages' activation, so without this the next
+        // open would undo the undo.
         if core.store.segment_no_promote(corpus_id, idx).await? {
             continue;
         }
-        // `keep_artifacts`: the window job appends rather than replaces, so the
-        // passages survive to be superseded by what covers them.
+        // `keep_artifacts`: the window job appends, so the passages survive to be superseded.
         core.store.reset_segment(corpus_id, idx, true).await?;
         core.store
             .rearm_idle_seq(
@@ -133,13 +97,8 @@ fn overlap(a: &CorpusSpan, b: &CorpusSpan) -> i64 {
     (a.end_line.min(b.end_line) - a.start_line.max(b.start_line) + 1).max(0)
 }
 
-/// Which artifact, if any, supersedes each passage: the one whose span covers
-/// a **majority** of the passage's lines — per artifact, not cumulative,
-/// because `supersede` names one winner and a passage hidden behind an
-/// artifact holding a third of it sends the reader to the wrong text. Best
-/// overlap wins. Ties on overlap go to a placed span, then to the lowest
-/// ordinal. Everything else stays active, verbatim, in results: promotion can
-/// only ever improve coverage.
+/// Majority per artifact, not cumulative: `supersede` names one winner, and a passage hidden behind
+/// a third of it sends the reader to the wrong text. Everything else stays active.
 pub fn covered_by<'a>(
     passages: &'a [(String, CorpusSpan)],
     artifacts: &'a [(String, i64, CorpusSpan)],
@@ -147,10 +106,8 @@ pub fn covered_by<'a>(
     let mut out = Vec::new();
     for (pid, ps) in passages {
         let len = ps.end_line - ps.start_line + 1;
-        // Best overlap; among equals a placed span before an unplaced one,
-        // because an unplaced span is the whole-window fallback and says
-        // nothing about *which* passage — and `supersede_covered` will not
-        // read the vector for it. Then the lowest ordinal.
+        // A placed span before an unplaced one, which is the whole-window fallback; then the lowest
+        // ordinal.
         let best = artifacts
             .iter()
             .map(|(aid, ord, asp)| {
@@ -170,30 +127,9 @@ pub fn covered_by<'a>(
     out
 }
 
-/// Whether an artifact is traceable to a passage by meaning, for the rewrites
-/// that copied no line of it.
-///
-/// Read against `[promote] traceable_min`, and deliberately not against
-/// `[consolidate] auto_supersede`: that threshold compares two independent
-/// artifacts, where a cosine cannot tell "runs on ext4" from "does not run on
-/// ext4" and a judge stands behind every hide. The relation here is known by
-/// construction — this artifact is the output of synthesizing this window —
-/// and the only open question is which passage of that one window it came
-/// from. Separating passages of a single document is a far weaker claim than
-/// asserting two texts agree.
-///
-/// Reached only for an artifact whose span placed it in the window — see the
-/// comment in `supersede_covered`. Against the whole-window fallback this
-/// would be measuring something else entirely.
-///
-/// Free: both points are already in the store — the passages were embedded at
-/// capture, and `embed_written` embedded the artifacts before this was
-/// called — so this is two reads and an arithmetic mean. No model call.
-///
-/// Every way of not knowing answers `false`. A missing point, a store that
-/// cannot be reached, a threshold set above 1.0: each leaves the passage
-/// standing in results, which is the direction promotion is allowed to fail
-/// in. A vector outage must not hide verbatim text.
+/// Read against `[promote] traceable_min`, not `auto_supersede`: telling passages of one
+/// synthesized window apart is a weaker claim than two texts agreeing. Every way of not knowing
+/// answers `false`: an outage must not hide verbatim text.
 async fn corroborated_by_vector(core: &Core, artifact_id: &str, passage_id: &str) -> bool {
     let min = core.promote.traceable_min;
     if min > 1.0 {
@@ -202,15 +138,8 @@ async fn corroborated_by_vector(core: &Core, artifact_id: &str, passage_id: &str
     let dense = |id: String| async move {
         match core.vectors.dense_of(&id).await {
             Ok(Some(v)) => Some(v),
-            // Not "no vector, no claim": the passage's point is written by the
-            // corpus embed job, which sits at the same class, attempts and seq
-            // as the window job that reaches here — only rowid separates them,
-            // and with more than one worker they are claimed at once. The
-            // ordering that made this work was incidental, and nothing re-runs
-            // `supersede_covered` for a window already `done`, so a point that
-            // was merely late left the passage standing beside the artifact
-            // written from it for good. Embedded here, the way
-            // `neighbor_context` already embeds its seed passage inline.
+            // The passage's point may still be in flight from a concurrent embed job, and nothing
+            // re-runs this for a `done` window, so embed it inline.
             Ok(None) => {
                 if let Err(e) = crate::jobs::embed::run(core, &id).await {
                     tracing::warn!(
@@ -241,12 +170,8 @@ async fn corroborated_by_vector(core: &Core, artifact_id: &str, passage_id: &str
     crate::vector::cosine(&a, &p) >= min
 }
 
-/// After a promoted window's artifacts are written: supersede the passages
-/// they cover and carry the passages' access forward.
-///
-/// Activation first, links second, the supersede last — `supersede` refuses a
-/// side that is no longer active, and everything before it needs the passage
-/// readable. Returns how many passages were superseded.
+/// Activation, then links, then the supersede, which refuses a side no longer active. Returns how
+/// many passages were superseded.
 pub async fn supersede_covered(
     core: &Core,
     corpus_id: &str,
@@ -264,47 +189,9 @@ pub async fn supersede_covered(
         .iter()
         .filter_map(|c| Some((c.id.clone(), c.ordinal, c.corpus_span.clone()?)))
         .collect();
-    // A span is a claim the splitter can verify for a passage and only guess
-    // for a rewrite: `resolve_span` falls back to the model's hint or the
-    // whole window when nothing in the artifact locates verbatim, and a
-    // heavily paraphrasing model then hands every artifact the same span. So
-    // a majority by span is necessary, not sufficient: the artifact must also
-    // be *traceable* to the passage. Whatever is not traceable leaves the
-    // passage standing, which is the direction promotion is allowed to fail
-    // in.
-    //
-    // Traceable two ways, and the second one is why this reads as a loop
-    // rather than a filter. A line of the passage appearing verbatim in the
-    // artifact is the cheap way and stays first: it costs nothing and it is
-    // exact. But it is also the one thing synthesis is *for* not doing —
-    // "unstructured notes come out structured", pronouns resolved, fragments
-    // completed — so for a capture of prose no line ever matches, and the
-    // verbatim passage stood in results beside the artifact written from it.
-    // Two hits for one note, every time, on every capture that was not code.
-    // The second way is the meaning: the two vectors are both already stored
-    // by the time this runs, so corroboration is two reads and a cosine.
-    //
-    // And the meaning is only read where the span placed the artifact at all.
-    // That is what `SpanSource::Unplaced` marks and the whole of what it is
-    // for here. The two-part rule reads as one question asked twice — *which
-    // passage of this window is this artifact?* — and the cosine answers it
-    // only because the span already narrowed the window to a neighbourhood.
-    // Take that away, which is exactly what the fallback does, and the
-    // question the cosine is left answering is *are these two texts about the
-    // same subject?* — to which two passages of one document, sharing their
-    // topic and their vocabulary, answer yes at a similarity over any
-    // threshold worth setting. Then every passage of the window is
-    // majority-covered by the one sweeping artifact and every one of them is
-    // hidden by a number that was never about them. So an unplaced span keeps
-    // the verbatim rule and nothing else: a line of the passage has to appear
-    // in the artifact.
-    //
-    // `Claimed` is thin, and it stays: the model naming lines 3–4 out of a
-    // sixty-line window is a claim that can be wrong but is still *about*
-    // those lines, and it is the ordinary outcome for the paraphrase this path
-    // was built for — the rewrite that copies no line is precisely the one
-    // `locate_span` cannot place. Refusing it would leave the cosine reachable
-    // only where the verbatim rule had already answered.
+    // A span is only a guess for a rewrite, so the artifact must also be traceable: a verbatim
+    // line, or, for a placed span (`Claimed` included), a cosine. An unplaced span keeps the
+    // verbatim rule only: across one document every passage clears any cosine threshold.
     let text_of = |id: &str| rows.iter().find(|c| c.id == id).map(|c| c.text.as_str());
     let placed = |id: &str| {
         artifacts
@@ -332,30 +219,16 @@ pub async fn supersede_covered(
     let half_life = core.activation.half_life_days;
     let link_half_life = core.associate.half_life_days;
 
-    // Group by winner: one artifact may supersede several passages, and its
-    // activation is the max over all of them.
+    // One artifact may supersede several passages; its activation is the max over them.
     let mut by_winner: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
     for (p, a) in &pairs {
         by_winner.entry(a).or_default().push(p);
     }
     let mut n = 0;
 
-    // Every supersession first, across every winner, and only then what they
-    // earned. `supersede` refuses a side an operator has deprecated in the
-    // meantime, and `try_supersede` warns and carries on rather than failing
-    // the sweep — so carrying the engagement and the links up front meant a
-    // refusal left both artifacts active, the winner holding the passage's
-    // engagement twice over and the passage stripped of the links it still
-    // needed. Nothing moves off a passage that is still standing.
-    //
-    // And the pass is whole rather than per-winner because `all_superseded`
-    // below has to be the passages that actually went dark. Built from the
-    // candidate `pairs`, it named refused ones too, and a link to a *still
-    // live* sibling passage was then dropped as "about to go dark": carried
-    // nowhere, and gone from the loser's end when the loser was superseded.
-    // Per-winner it would still be wrong in one direction, because a passage
-    // a later winner is refused for is live while an earlier winner's links
-    // are being carried.
+    // Every supersession first, then what they earned: `try_supersede` may refuse, and nothing
+    // moves off a passage still standing. Whole rather than per winner, so `all_superseded` names
+    // only passages that actually went dark.
     let mut won: Vec<(&str, Vec<String>)> = Vec::new();
     for (winner, losers) in by_winner {
         let mut ids: Vec<String> = Vec::new();
@@ -379,17 +252,8 @@ pub async fn supersede_covered(
 
     for (winner, ids) in &won {
         let winner = *winner;
-        // What moves is the engagement the passages *earned*, never the raw
-        // stored sum. Activation is a capture baseline plus use, and the
-        // baseline is anchored to each artifact's own `created_at`: the winner
-        // was written moments ago, so its baseline stands at a full `1.0`,
-        // while a passage captured six weeks back carries a baseline of almost
-        // nothing under whatever it earned. Transferring the raw sum read one
-        // against the other. A passage with 1.9 earned came to a raw ~2.0, and
-        // the winner set to 2.0 reported 1.0 of use — half of it lost. Worse
-        // below the line: 0.5 earned carried ~0.6, lost the `max` to the
-        // winner's own 1.0, and the artifact that was supposed to inherit the
-        // access came out at zero.
+        // The earned part, not the raw sum: each baseline is anchored at its own `created_at`, so a
+        // fresh winner's baseline would swallow an old passage's use.
         let act = core.store.activation_of(ids).await?;
         let carried = act
             .values()
@@ -404,9 +268,7 @@ pub async fn supersede_covered(
         if let Some((v, s, c)) = own {
             let now = crate::store::links::decayed(v, s, at, half_life);
             let earned = crate::store::links::engagement_at(v, s, c, at, half_life);
-            // Only ever upwards, and the winner's own baseline is left under
-            // it: what is written back is the same number with the larger of
-            // the two engagements standing on it.
+            // Only ever upwards, on the winner's own baseline.
             if carried > earned {
                 core.store
                     .set_activation(winner, now + (carried - earned), at)
@@ -420,9 +282,8 @@ pub async fn supersede_covered(
                 } else {
                     &link.a_id
                 };
-                // A link between two passages of this same promotion would
-                // become the artifact linked to itself — or to a passage about
-                // to go dark. Neither carries anything.
+                // A link within this promotion would become a self-link or point at a passage going
+                // dark.
                 if all_superseded.contains(other.as_str()) {
                     continue;
                 }
@@ -443,9 +304,7 @@ mod tests {
     async fn earned_with_one_passage() -> (crate::core::Core, String, String) {
         let mut core = test_core().await;
         core.learn.enabled = true;
-        // Multi-window on purpose: a capture that fits one synthesis call is
-        // synthesized at capture now, so the corpus promotion exists for is
-        // one too large for that — verbatim windows, earning their call.
+        // Multi-window on purpose: a capture fitting one synthesis call is synthesized at capture.
         let body = format!(
             "the first window speaks of one thing {}\n\nthe second window of another {}",
             "alpha filler words for sizing ".repeat(120),
@@ -480,13 +339,10 @@ mod tests {
             reply: Some("the answer rests on this [1]".into()),
         }));
         crate::jobs::embed::run(&core, &p).await.unwrap();
-        // The searches an ask runs bump retrieval too, and enough of it to
-        // carry a passage over the line on its own — which would leave this
-        // test passing with the citation deleted. Retrieval is silenced so
-        // that the only thing left that can move activation is the citation.
+        // An ask's searches bump retrieval enough to carry a passage alone; silenced so only the
+        // citation counts.
         core.activation.retrieved = 0.0;
         let now = crate::store::now();
-        // Just under the line, so the citation is what carries it over.
         core.store
             .bump_activation(
                 std::slice::from_ref(&p),
@@ -548,7 +404,6 @@ mod tests {
                 .await
                 .unwrap()
         );
-        // And the journal says which window, on what.
         let rows = core
             .store
             .open_actions(&[crate::store::actions::Kind::Promote], 10)
@@ -567,7 +422,6 @@ mod tests {
                 .await
                 .unwrap()
         );
-        // A second trigger on a window that is no longer verbatim does nothing.
         core.store
             .set_segment_state(&corpus, 0, SegmentState::Done, None)
             .await
@@ -580,11 +434,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_undone_promotion_is_not_re_promoted_by_the_next_open() {
-        // Undo puts the window back to `verbatim` so it can be read again, and
-        // leaves the passage the activation it earned — which is the number
-        // that armed the promotion in the first place. Without the mark the
-        // next bump promotes it straight back and the operator's undo is
-        // undone, with the deprecated artifacts still lying behind it.
         let (core, corpus, p) = earned_with_one_passage().await;
         core.store
             .bump_activation(std::slice::from_ref(&p), 3.0, 14.0, 1_000)
@@ -603,7 +452,6 @@ mod tests {
             Some(SegmentState::Verbatim),
             "the window is readable again"
         );
-        // The passage still sits well over the line: nothing was decayed.
         assert_eq!(
             maybe_promote(&core, std::slice::from_ref(&p), 1_000)
                 .await
@@ -665,8 +513,8 @@ mod tests {
             "the window was reset for a promotion nobody could afford"
         );
 
-        // Below "full" the corpus units are under their own switch and the
-        // budget is not consulted — the same line `dedupe::run` draws.
+        // Below "full" the corpus units are under their own switch, and the budget is not
+        // consulted.
         core.evolve.autonomous = crate::config::Autonomy::Ranking;
         assert_eq!(
             maybe_promote(&core, std::slice::from_ref(&p), now)
@@ -678,15 +526,10 @@ mod tests {
 
     #[tokio::test]
     async fn twenty_listings_and_one_open_never_promote_but_a_confirmation_does() {
-        // "Rewritten once you have actually used it." Exposure must not fill
-        // the tank for one touch to pull the trigger: at `retrieved = 0.1`,
-        // twenty listings plus one open reached the threshold, and at `1.0`
-        // one listing did. Twenty retrievals and an open leave the window
-        // verbatim; a confirmation — the strong signal — promotes it.
         let (core, corpus, p) = earned_with_one_passage().await;
         let ids = vec![p.clone()];
-        // Stamped now: `mark_artifact_seen` reads the clock, and a bump from
-        // 1970 would have decayed to nothing by the time it looks.
+        // Stamped now: `mark_artifact_seen` reads the clock, and a 1970 bump would decay to
+        // nothing.
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -717,12 +560,6 @@ mod tests {
 
     #[tokio::test]
     async fn one_confirmation_promotes_however_long_ago_the_passage_was_captured() {
-        // The threshold names what use added, and a confirmation adds the same
-        // amount whenever it lands. Read against the raw stored number it did
-        // not: the capture baseline decays out from under the line, so `4.0`
-        // was reachable only by a confirmation at essentially zero elapsed
-        // time — one day after capture it already took two, and on a passage
-        // this old it would have taken two forever.
         let (core, corpus, p) = earned_with_one_passage().await;
         let ids = vec![p.clone()];
         let now = crate::store::now();
@@ -741,7 +578,6 @@ mod tests {
             .bump_activation(&ids, core.activation.confirmed, 14.0, now)
             .await
             .unwrap();
-        // What the old reading saw: a whole confirmation, and still short of 4.
         let raw = core.store.activation_of(&ids).await.unwrap()[&p].0;
         assert!(raw < 4.0, "the raw activation was {raw}");
 
@@ -754,8 +590,6 @@ mod tests {
 
     #[tokio::test]
     async fn age_alone_never_promotes_a_passage_nobody_touched() {
-        // The other direction: subtracting a decayed baseline must not turn a
-        // never-touched artifact into an engaged one at any age.
         let (core, corpus, p) = earned_with_one_passage().await;
         let ids = vec![p.clone()];
         let now = crate::store::now();
@@ -804,16 +638,13 @@ mod tests {
             ("a".to_string(), 0, sp(1, 11)),
         ];
         assert_eq!(covered_by(&passages, &arts), vec![("p", "a")]);
-        // 30% + 30% is not a majority: nobody claims it.
         let arts = vec![
             ("a".to_string(), 0, sp(1, 6)),
             ("b".to_string(), 1, sp(7, 12)),
         ];
         assert!(covered_by(&passages, &arts).is_empty());
-        // Exactly half is not a majority either.
         let arts = vec![("a".to_string(), 0, sp(1, 10))];
         assert!(covered_by(&passages, &arts).is_empty());
-        // A tie on overlap goes to the lowest ordinal.
         let arts = vec![
             ("z".to_string(), 5, sp(1, 20)),
             ("y".to_string(), 2, sp(1, 20)),
@@ -824,14 +655,12 @@ mod tests {
     #[test]
     fn on_equal_overlap_a_placed_artifact_beats_an_unplaced_one_whatever_its_ordinal() {
         let passages = vec![("p".to_string(), sp(1, 1))];
-        // Ordinal 1 is unplaced — the fallback span that covers the whole
-        // window and locates nothing. Ordinal 2 is a claim about line 1.
+        // Ordinal 1 is the unplaced whole-window fallback; ordinal 2 claims line 1.
         let arts = vec![
             ("u".to_string(), 1, CorpusSpan::unplaced(1, 1)),
             ("c".to_string(), 2, CorpusSpan::claimed(1, 1)),
         ];
         assert_eq!(covered_by(&passages, &arts), vec![("p", "c")]);
-        // Two placed: the lowest ordinal still wins.
         let arts = vec![
             ("y".to_string(), 3, CorpusSpan::claimed(1, 1)),
             ("x".to_string(), 2, CorpusSpan::claimed(1, 1)),
@@ -884,7 +713,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // Another corpus to link to.
         let other = core
             .store
             .insert_corpus("other", "web", None)
@@ -911,14 +739,12 @@ mod tests {
             )
             .await
             .unwrap();
-        // The promotion's artifacts, as `write_segment_artifacts` would write them.
         core.store.reset_segment(&src.id, 0, true).await.unwrap();
         let written = core
             .store
             .insert_artifacts(
                 &src.id,
                 &[
-                    // A's lines are traceable to passages 1 and 2; B's to 3.
                     na(
                         0,
                         "lines one and two of the text\nlines three and four of the text",
@@ -979,8 +805,7 @@ mod tests {
         let earned_after = |captured: i64, earned: f64, core: &crate::core::Core| {
             crate::store::links::decayed(earned, captured, now, core.activation.half_life_days)
         };
-        // Six weeks — three half-lives — with 1.9 of earned access on it. The
-        // raw sum by then is below the winner's own untouched baseline.
+        // Three half-lives: the raw sum is below the winner's own untouched baseline.
         for (age_days, earned) in [(42i64, 1.9f64), (14, 4.0)] {
             let (core, corpus, passages, written) = promoted_fixture().await;
             let captured = now - age_days * 86_400;
@@ -1012,7 +837,6 @@ mod tests {
                 (got - want).abs() < 1e-6,
                 "at {age_days} days the artifact inherited {got} of the {want} the passage earned"
             );
-            // And the baseline it is standing on is its own, still whole.
             assert!(
                 (v - (1.0 + want)).abs() < 1e-6,
                 "the winner's own baseline was overwritten: {v}"
@@ -1041,8 +865,6 @@ mod tests {
             .unwrap();
         assert_eq!(out.len(), 1, "{out:?}");
         assert!((out[0].weight - 2.0).abs() < 1e-6);
-        // The passage's own row is still there — dark, because its endpoint
-        // is superseded.
         assert_eq!(
             core.store
                 .links_touching(&passages[1].id)
@@ -1069,11 +891,7 @@ mod tests {
     #[tokio::test]
     async fn a_link_to_a_sibling_the_supersession_was_refused_for_is_still_carried() {
         let (core, corpus, passages, mut written) = promoted_fixture().await;
-        // B covers passage 3 outright rather than by half, so it is a
-        // candidate pair like the others. `supersede_covered` reads the span
-        // off what it is handed.
         written[1].corpus_span = Some(sp(5, 6));
-        // Passage 2 goes dark under A; passage 3 is linked to it and will not.
         core.store
             .bump_links(
                 &[(passages[1].id.as_str(), passages[2].id.as_str())],
@@ -1084,9 +902,7 @@ mod tests {
             )
             .await
             .unwrap();
-        // An operator deprecates B in the meantime. `supersede` refuses a
-        // deprecated *winner* — the loser would be hidden in favour of an
-        // artifact that is itself out of results — so passage 3 stays.
+        // `supersede` refuses a deprecated winner, so passage 3 stays.
         core.deprecate(&written[1].id).await.unwrap();
 
         let n = supersede_covered(&core, &corpus, 0, &written, 2_000)
@@ -1115,11 +931,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_verbatim_window_keeps_its_passages_without_the_mark() {
-        // `jobs::window::run` reads the mark *or* the verbatim state and goes
-        // on to embed and supersede on that answer; the writer used to read
-        // only the mark. With the mark spent — which is what `undo_promotion`
-        // leaves — the write took the replacing branch and deleted the
-        // passages the promotion exists to keep.
+        // With the mark spent, as `undo_promotion` leaves it, the writer must still keep the
+        // passages.
         let (core, corpus, passages, _written) = promoted_fixture().await;
         core.store.reset_segment(&corpus, 0, false).await.unwrap();
         core.store
@@ -1158,8 +971,6 @@ mod tests {
     #[tokio::test]
     async fn a_re_run_under_keep_artifacts_writes_nothing_twice() {
         let (core, corpus, _passages, written) = promoted_fixture().await;
-        // `write_segment_artifacts` with keep set and non-passage rows already
-        // present returns those rows and inserts none.
         let again = crate::jobs::window::write_segment_artifacts(
             &core,
             &corpus,
@@ -1218,8 +1029,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // What the embedder would have said: the rewrite lands on the passage
-        // it rewrote.
         embed_as(&core, &rewrite[0].id, &corpus, vec![1.0, 0.0]).await;
         embed_as(&core, &passages[1].id, &corpus, vec![1.0, 0.0]).await;
         embed_as(&core, &passages[0].id, &corpus, vec![0.0, 1.0]).await;
@@ -1235,10 +1044,7 @@ mod tests {
             hidden.superseded_by.as_deref(),
             Some(rewrite[0].id.as_str())
         );
-        // Hidden, never gone: the split pane still renders it, and the reaper
-        // is what decides its fate later.
         assert_eq!(hidden.text, passages[1].text);
-        // And only the one it covers.
         for other in [&passages[0], &passages[2]] {
             assert!(
                 core.store
@@ -1401,10 +1207,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_majority_span_without_a_traceable_line_does_not_supersede() {
-        // `resolve_span` can only guess a paraphrase's span — the model's hint,
-        // or the whole window — and a guess must not hide verbatim text. The
-        // artifact here claims the passage's lines by span but shares no line
-        // of text with it: the passage stays.
         let (core, corpus, passages, _written) = promoted_fixture().await;
         let na = |o: i64, t: &str, a: i64, b: i64| crate::store::artifacts::NewArtifact {
             ordinal: o,

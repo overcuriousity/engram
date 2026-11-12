@@ -1,48 +1,24 @@
-//! What was reached together.
-//!
-//! `artifact_pairs` is about two texts saying the same thing; this is about two
-//! texts being *needed* together — the config passage and the troubleshooting
-//! passage for one subsystem are strangers to the embedding and inseparable to
-//! the person who needed both to answer one question.
-//!
-//! Every strength here is stored as a value and the stamp it was true at, and
-//! read through `decayed`. Nothing is ever decayed in place: learning is one
-//! UPDATE and forgetting costs no writes, which is what lets a sweep run every
-//! half hour on a base of any size.
+//! Artifacts needed together, as opposed to `artifact_pairs` (saying the same thing).
+//! Strengths are stored with their stamp and read through `decayed`; nothing decays in place.
 
 use super::{Store, now};
 use crate::error::Result;
 use sqlx::Row;
 
-/// Binding queries kept per link. Three is what a person reads in the pane;
-/// the count of *distinct* ones is `queries`, which is not bounded by this.
+/// Three is what the pane shows; `queries` counts distinct cues beyond it.
 pub const MAX_CUES: usize = 3;
 
-/// How the two read-then-write transactions here open.
-///
-/// SQLite's default `BEGIN` is deferred: it takes no lock until the first
-/// statement, so a transaction that reads and *then* writes holds a read
-/// snapshot when it asks for the write lock. Under WAL, if another connection
-/// committed in between, that upgrade fails immediately with
-/// `SQLITE_BUSY_SNAPSHOT` — the one busy error `busy_timeout` does not retry,
-/// because waiting cannot make a stale snapshot fresh.
-///
-/// Both `bump_link` and `bump_activation` are exactly that shape — read the
-/// current weight, decay it, write it back — and both run from background
-/// tasks while a sweep is writing the same tables from another connection in
-/// the same pool. Taking the write lock up front makes the loser wait instead
-/// of fail, which is what `busy_timeout` is for.
+/// A deferred `BEGIN` that reads then writes fails with `SQLITE_BUSY_SNAPSHOT`, which
+/// `busy_timeout` does not retry; taking the write lock up front makes the loser wait.
 const IMMEDIATE: &str = "BEGIN IMMEDIATE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {
     /// Bound by use, nothing has ruled on it. Shown, prunable, judgeable.
     Learning,
-    /// The judge named the relation. Shown with its reason, and never pruned by
-    /// decay: a verified relation is about content, not use.
+    /// Never pruned by decay: a verified relation is about content, not use.
     Related,
-    /// A coincidence of retrieval. Kept so it is not asked again, hidden from
-    /// the pane, reopened only if either text changes.
+    /// Kept so it is not asked again; reopened only if either text changes.
     Unrelated,
     /// The operator said no. Never shown, never judged, never pruned.
     Dismissed,
@@ -67,7 +43,6 @@ impl LinkState {
     }
 }
 
-/// One binding query and how often it bound this pair.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cue {
     pub q: String,
@@ -92,38 +67,9 @@ pub struct Link {
 }
 
 impl Store {
-    /// A relation the capture-time synthesis call named, over both texts it
-    /// was shown. Lands `related` with the model's reason — the judged state,
-    /// not the learning one, because a model explicitly asserted it — and an
-    /// operator's `dismissed` stays unbeatable.
-    ///
-    /// The judged revisions are stamped here, exactly as `set_link_state`
-    /// stamps them, and they are not optional. `embed_rev` is `NOT NULL
-    /// DEFAULT 0`, so a NULL `judged_rev_a` makes `reopen_stale_judged_links`'
-    /// `a.embed_rev IS NOT l.judged_rev_a` read `0 IS NOT NULL` — true for
-    /// every row, forever. Left unstamped, every relation a model asserted was
-    /// demoted to `learning` with its reason erased on the very next associate
-    /// sweep, decayed under `prune_learning_links` until it was deleted, and
-    /// spent a judge call on the way past. The subselects read the same rows
-    /// the synthesis call was made against.
-    ///
-    /// `weight` is the caller's, because the number that decides whether a
-    /// link is worth showing lives in `[associate]` and the store does not
-    /// read config. It has to clear `associate.show_min`, and clear it by
-    /// enough to survive a decay: written flat at `1.0` against the shipped
-    /// floor of `2.0`, every relation the model asserted was invisible to
-    /// every reader that applies the floor — the association band
-    /// (`core::search::associated`), the artifact pane, and `ask`'s reach —
-    /// from the moment it was written, for ever, while `prune_learning_links`
-    /// never came for it either because it is `related` and not `learning`. A
-    /// row nothing shows and nothing removes.
-    ///
-    /// The conflict branch folds the decay in before taking the maximum, the
-    /// way `bump_one` does: `bumped_at` moves to now, so carrying the stored
-    /// number across unchanged would silently restore weight that thirty days
-    /// had taken off. A dismissal still outranks the model, and outranks it
-    /// here too — the weight of a dismissed row is left exactly as it was, so
-    /// the evidence behind the operator's decision stays readable.
+    /// Lands `related`; `dismissed` stays unbeatable and keeps its weight. Judged revisions must
+    /// be stamped or `reopen_stale_judged_links` demotes it next sweep. `weight` must clear
+    /// `associate.show_min` with room to decay; the conflict branch folds decay in before max.
     pub async fn relate_synthesized(
         &self,
         a: &str,
@@ -143,8 +89,7 @@ impl Store {
         )
         .fetch_optional(&mut *tx)
         .await?;
-        // Read inside the transaction the write happens in, so the decay is
-        // folded from the number the update is about to replace.
+        // Read inside the write's transaction, so the decay folds from the number being replaced.
         let dismissed = existing
             .as_ref()
             .is_some_and(|r| LinkState::parse(r.state.as_str()) == LinkState::Dismissed);
@@ -194,13 +139,11 @@ impl Store {
     }
 }
 
-/// The pair in the order the table stores it. `a_id < b_id` is a CHECK, so this
-/// is not a convention that can be forgotten at one call site.
+/// `a_id < b_id` is a CHECK, so the order cannot be forgotten at a call site.
 pub fn canonical<'a>(a: &'a str, b: &'a str) -> (&'a str, &'a str) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
-/// Two spellings of one question are one cue: lowercased, whitespace collapsed.
 pub fn normalize_query(q: &str) -> String {
     q.split_whitespace()
         .collect::<Vec<_>>()
@@ -208,9 +151,7 @@ pub fn normalize_query(q: &str) -> String {
         .to_lowercase()
 }
 
-/// Do two artifacts share no corpus? An artifact with no origins at all —
-/// lineage lost — is treated as its own document, which keeps such a link
-/// judgeable rather than silently shown-only.
+/// An artifact with no origins counts as its own document, so the link stays judgeable.
 fn origins_disjoint(
     origins: &std::collections::BTreeMap<String, Vec<crate::store::lineage::Origin>>,
     a: &str,
@@ -225,10 +166,8 @@ fn origins_disjoint(
     of(a).is_disjoint(&of(b))
 }
 
-/// Strength now, from strength then. `half_life_days <= 0` turns decay off.
-///
-/// A clock that moved backwards — a restored database, an NTP correction —
-/// must not *grow* a weight, so the elapsed time is floored at zero.
+/// `half_life_days <= 0` turns decay off. Elapsed time is floored at zero so a clock moving
+/// backwards cannot grow a weight.
 pub fn decayed(weight: f64, bumped_at: i64, at: i64, half_life_days: f64) -> f64 {
     if half_life_days <= 0.0 {
         return weight;
@@ -237,36 +176,17 @@ pub fn decayed(weight: f64, bumped_at: i64, at: i64, half_life_days: f64) -> f64
     weight * 2f64.powf(-elapsed / (half_life_days * 86_400.0))
 }
 
-/// What every artifact's activation starts at — `schema.sql`'s default — and
-/// decays from whether or not anything ever happens to it.
-///
-/// One definition, because three readings of "what use added" have to agree:
-/// priming subtracts it (`core::search::engagement`), promotion compares a
-/// threshold against it (`jobs::promote`), and the insights page buckets on it
-/// (`store::insights::used`). A second copy of the literal in any one of them
-/// desynchronises that reader from the other two without failing a test.
+/// One definition: priming, promotion and the insights page must agree on it.
 pub const ACTIVATION_BASELINE: f64 = 1.0;
 
-/// Activation above the capture baseline: what use has added, and nothing else.
-///
-/// The baseline is subtracted *decayed to now*, never as the flat `1.0` it
-/// started at. The stored number is a sum of two terms that fall at the same
-/// rate, and taking a whole baseline off a half-decayed sum is a subtraction of
-/// two different units: an artifact captured three half-lives ago and opened
-/// three times right after came to `4.0`, reads `0.5` today, and came out at
-/// nothing — indistinguishable from one nobody ever touched — while a single
-/// open on that same old artifact came out an eighth the size of the same open
-/// on a fresh one. Both are the baseline's decay leaking into the answer.
-///
-/// `created_at` is the baseline's own age; `stamp` is not, because a bump moves
-/// it and the baseline's age does not move with it.
+/// The baseline is subtracted decayed to now from `created_at`, not as a flat `1.0`: both
+/// terms decay at the same rate. `stamp` moves with bumps; the baseline's age does not.
 pub fn engagement_at(value: f64, stamp: i64, created_at: i64, at: i64, half_life_days: f64) -> f64 {
     let now = decayed(value, stamp, at, half_life_days);
     let baseline = decayed(ACTIVATION_BASELINE, created_at, at, half_life_days);
     (now - baseline).max(0.0)
 }
 
-/// A `artifact_links` row as stored, for `query_as!`.
 #[derive(sqlx::FromRow)]
 pub(crate) struct LinkRow {
     pub a_id: String,
@@ -300,12 +220,7 @@ pub(crate) fn row_to_link(r: LinkRow) -> Link {
     }
 }
 
-/// Fold one query into the cue list. Returns whether it was new to this link.
-///
-/// Only the busiest `MAX_CUES` survive, and a cue that falls off the end can be
-/// counted as new again later — so `queries` is a floor on the number of
-/// distinct questions that bound this pair rather than an exact count. Exactness
-/// would cost a second table for a number that only gates the judge.
+/// Only `MAX_CUES` survive, so `queries` is a floor on distinct cues, not an exact count.
 fn bump_cue(cues: &mut Vec<Cue>, q: &str) -> bool {
     let is_new = if let Some(c) = cues.iter_mut().find(|c| c.q == q) {
         c.n += 1;
@@ -322,10 +237,8 @@ fn bump_cue(cues: &mut Vec<Cue>, q: &str) -> bool {
     is_new
 }
 
-/// One end of a link, seen from an anchor that is already in the result list.
 #[derive(Debug, Clone)]
 pub struct LinkedTo {
-    /// The ranked hit that recalled it.
     pub via: String,
     pub other: String,
     /// Already decayed to the caller's clock. There is no stale number here.
@@ -333,8 +246,7 @@ pub struct LinkedTo {
     pub state: LinkState,
     pub reason: Option<String>,
     pub cues: Vec<Cue>,
-    /// The two sides come from different documents — or one of them is a merge,
-    /// which belongs to no document and always counts as differing.
+    /// A merge belongs to no document and always counts as differing.
     pub cross_corpus: bool,
 }
 
@@ -342,21 +254,12 @@ pub struct LinkedTo {
 pub struct LinkCounts {
     pub total: i64,
     pub related: i64,
-    /// Links whose judgement is queued or running.
     pub judge_queue: i64,
 }
 
 impl Store {
-    /// Strengthen the link between two artifacts, folding the decay in.
-    ///
-    /// `cue` is the normalised query that bound them, where there is one. A
-    /// bump with no cue — a confirmation replayed for an event whose
-    /// co-appearance was already folded in — strengthens without claiming a new
-    /// binding question.
-    ///
-    /// One transaction. Callers with a whole event's worth of pairs to bind
-    /// should use `bump_links` rather than a loop over this — see its note on
-    /// what a loop costs.
+    /// `cue: None` strengthens without claiming a new binding question. For many pairs use
+    /// `bump_links`.
     pub async fn bump_link(
         &self,
         a: &str,
@@ -366,8 +269,7 @@ impl Store {
         half_life_days: f64,
         at: i64,
     ) -> Result<()> {
-        // An artifact is not linked to itself, and the CHECK would refuse it
-        // anyway — caught here so a caller enumerating pairs need not.
+        // The CHECK would refuse it; caught here so callers enumerating pairs need not.
         if a == b {
             return Ok(());
         }
@@ -378,21 +280,8 @@ impl Store {
         Ok(())
     }
 
-    /// Every pair of one event's shown candidates, in a single transaction.
-    ///
-    /// The count is quadratic in what the searcher saw — ten shown candidates
-    /// are 45 pairs, and `search.limit` is capped at 50, which is 1225 — and
-    /// each of these transactions is an exclusive one (see `IMMEDIATE`). Bound
-    /// a pair at a time, a single catch-up sweep of `REPLAY_LIMIT` events could
-    /// take the write lock and give it back a million times over, with every
-    /// concurrent search's `bump_activation` queued behind it. Per event it is
-    /// one.
-    ///
-    /// A pair that cannot be written is warned about and stepped over rather
-    /// than failing the batch: one side deleted between the search and the
-    /// sweep is the ordinary cause, and it says nothing about the rest of what
-    /// that event showed. SQLite aborts the statement, not the transaction, so
-    /// the pairs around it still commit.
+    /// One exclusive transaction per event, not per pair: up to 1225 pairs each. A pair that
+    /// fails is warned and skipped; SQLite aborts the statement, not the transaction.
     pub async fn bump_links(
         &self,
         pairs: &[(&str, &str)],
@@ -411,12 +300,7 @@ impl Store {
             }
             let (a, b) = canonical(a, b);
             if let Err(err) = bump_one(&mut tx, a, b, delta, cue, half_life_days, at).await {
-                // Named as what it is and not as a guess: one side being gone
-                // is one cause, write contention under WAL is another, and an
-                // operator sent looking for a deleted artifact by a line that
-                // means "the database was busy" loses the afternoon. `warn`
-                // rather than `debug` because the bump is dropped, not retried
-                // — this is learning that did not happen.
+                // Not "deleted": WAL contention is another cause. `warn`: the bump is dropped.
                 tracing::warn!(error = %err, a, b, "could not bind a pair");
             }
         }
@@ -425,8 +309,7 @@ impl Store {
     }
 }
 
-/// One pair's bump, on a connection the caller has already opened a transaction
-/// on. Shared by `bump_link` and `bump_links` so the two can never drift.
+/// Shared by `bump_link` and `bump_links` so the two cannot drift.
 async fn bump_one(
     tx: &mut sqlx::SqliteConnection,
     a: &str,
@@ -490,7 +373,6 @@ async fn bump_one(
 }
 
 impl Store {
-    /// Every link naming `id` at either end, in any state.
     pub async fn links_touching(&self, id: &str) -> Result<Vec<Link>> {
         let rows = sqlx::query_as!(
             crate::store::links::LinkRow,
@@ -503,19 +385,8 @@ impl Store {
         Ok(rows.into_iter().map(row_to_link).collect())
     }
 
-    /// Copy a link that touches `old` onto `new` and the same other endpoint,
-    /// leaving the original row where it is.
-    ///
-    /// Learned access carries forward; recorded history does not. Weight comes
-    /// across decayed to `at` and stamped `at`; `queries` and `cues` come
-    /// across as they are. On collision with a link `new` already has: the
-    /// larger decayed weight (max, not sum — one search returning three
-    /// passages of one section is one piece of evidence), the larger
-    /// `queries`, the cues merged and cut to three, `dismissed` if either side
-    /// was (the operator's "not related" is final), otherwise `learning` — a
-    /// verdict passed on the passage's text does not transfer to a rewrite —
-    /// and `judged_rev_*` cleared. A link whose other end *is* `new`, or that
-    /// would pair `new` with itself, is skipped.
+    /// Weight carries decayed to `at`; on collision take the max (not sum), merge cues,
+    /// `dismissed` wins, otherwise `learning`, and `judged_rev_*` cleared. Self-pairs are skipped.
     pub async fn carry_link(
         &self,
         from: &Link,
@@ -605,7 +476,6 @@ impl Store {
         Ok(())
     }
 
-    /// One link, whichever way round it is named.
     pub async fn get_link(&self, a: &str, b: &str) -> Result<Option<Link>> {
         let (a, b) = canonical(a, b);
         Ok(sqlx::query_as!(
@@ -639,22 +509,8 @@ impl Store {
         Ok(())
     }
 
-    /// Every live link out of these anchors, strongest first, capped at
-    /// `limit`.
-    ///
-    /// One statement per anchor rather than one `IN` over all of them: the
-    /// anchor list is `spread_from` long (three), the repo builds no SQL
-    /// strings from data, and a link has to be found from either end — which is
-    /// an `OR` over two indexed columns, not a set membership test.
-    ///
-    /// The endpoint's status is joined rather than stored, so undoing a merge
-    /// brings its links back without a write.
-    ///
-    /// Same two-step as `links_to_judge`: SQL fetches four times `limit` so
-    /// that rows the exact decayed-weight test in Rust rejects do not eat the
-    /// budget, and the final truncate is what actually bounds a hub artifact
-    /// — one co-shown with many others — to a fixed, small read on every
-    /// search rather than every link above `show_min`.
+    /// One statement per anchor: a link is found from either end, an `OR` over two indexed
+    /// columns. Fetches four times `limit` so the exact decay test in Rust does not eat the budget.
     pub async fn links_from(
         &self,
         anchors: &[String],
@@ -668,10 +524,7 @@ impl Store {
         let mut out: Vec<LinkedTo> = Vec::new();
         for anchor in anchors {
             let rows = sqlx::query(
-                // `weight >= ?` is a necessary condition, not the answer: decay
-                // only ever lowers it, so this narrows the scan with the index
-                // and the exact test happens below in Rust. Doing it in SQL
-                // would need a `pow` that is not in every SQLite build.
+                // Necessary, not sufficient: decay lowers it, and not every SQLite build has `pow`.
                 "SELECT l.a_id AS a_id, l.b_id AS b_id, l.weight AS weight,
                         l.bumped_at AS bumped_at, l.state AS state, l.reason AS reason,
                         l.cues AS cues,
@@ -688,18 +541,14 @@ impl Store {
             .bind(anchor)
             .bind(anchor)
             .bind(min_weight)
-            // SQLite reads a negative LIMIT as unbounded, so the cap must be
-            // clamped at zero — a negative `limit` must still cap the fetch.
+            // SQLite reads a negative LIMIT as unbounded.
             .bind(limit.max(0).saturating_mul(4))
             .fetch_all(&self.pool)
             .await?;
 
             for r in &rows {
                 let state = LinkState::parse(r.get::<String, _>("state").as_str());
-                // The operator's "not related" is final. It does not depend on
-                // callers remembering to leave `Dismissed` out of `states` — a
-                // caller that could opt back into it would make the control a
-                // suggestion, not an invariant.
+                // Enforced here, not by callers' `states`: the operator's "not related" is final.
                 if state == LinkState::Dismissed || !allowed.contains(&state.as_str()) {
                     continue;
                 }
@@ -719,9 +568,7 @@ impl Store {
                     state,
                     reason: r.get("reason"),
                     cues: serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default(),
-                    // Decided below through origins where either side is a
-                    // merge; here only the case both rows answer for
-                    // themselves.
+                    // Merges are decided below through origins.
                     cross_corpus: match (a_corpus, b_corpus) {
                         (Some(x), Some(y)) => x != y,
                         _ => true,
@@ -731,9 +578,7 @@ impl Store {
         }
         out.sort_by(|x, y| y.weight.total_cmp(&x.weight));
         out.truncate(limit.max(0) as usize);
-        // A merged or synthesized artifact belongs to every corpus it drew
-        // from, so "the same document" is "the two origin sets intersect" —
-        // read through lineage, one batched query for the page of links.
+        // A merge belongs to every corpus it drew from: "same document" means origins intersect.
         let mut ids: Vec<String> = out
             .iter()
             .flat_map(|l| [l.via.clone(), l.other.clone()])
@@ -747,14 +592,7 @@ impl Store {
         Ok(out)
     }
 
-    /// Links strong enough, various enough, live enough and cross-corpus enough
-    /// to be worth one model call. Strongest first.
-    ///
-    /// Same two-step as `links_from`: the raw weight narrows with the index and
-    /// the decayed weight decides. Four times the caller's limit is fetched so
-    /// that rows failing the exact test do not eat the budget. Cross-corpus is
-    /// decided in Rust over origins rather than in SQL over `corpus_id`: a
-    /// merge has none of its own and belongs to every corpus it drew from.
+    /// Cross-corpus is decided over origins in Rust: a merge belongs to every corpus it drew from.
     pub async fn links_to_judge(
         &self,
         min_weight: f64,
@@ -763,7 +601,7 @@ impl Store {
         at: i64,
         limit: i64,
     ) -> Result<Vec<Link>> {
-        // SQLite reads a negative LIMIT as unbounded, so the cap is clamped at zero.
+        // SQLite reads a negative LIMIT as unbounded.
         let cap = limit.max(0).saturating_mul(4);
         let rows = sqlx::query_as!(
             LinkRow,
@@ -787,9 +625,7 @@ impl Store {
             .map(row_to_link)
             .filter(|l| decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
             .collect();
-        // Two passages of one document being related is not information, so a
-        // same-document link is shown and never judged — "same document" read
-        // through origins, so a merge is the documents it drew from.
+        // A same-document link is shown and never judged.
         let mut ids: Vec<String> = strong
             .iter()
             .flat_map(|l| [l.a_id.clone(), l.b_id.clone()])
@@ -804,12 +640,7 @@ impl Store {
             .collect())
     }
 
-    /// Delete `learning` links that have faded below the floor.
-    ///
-    /// The only write a quiet link ever costs. Rows whose *stored* weight is
-    /// already under the floor go in one statement; the rest are read back and
-    /// tested exactly, capped at `scan_limit` so one sweep cannot walk an
-    /// unbounded table. Whatever the cap leaves is pruned by the next sweep.
+    /// Exact tests are capped at `scan_limit` per sweep; the next sweep prunes the rest.
     pub async fn prune_learning_links(
         &self,
         below: f64,
@@ -854,16 +685,10 @@ impl Store {
         Ok(dropped)
     }
 
-    /// Put judged links back to `learning` where either side has been re-embedded
-    /// since. The judge read text that no longer exists.
+    /// The judge read text that no longer exists.
     pub async fn reopen_stale_judged_links(&self, limit: i64) -> Result<u64> {
         Ok(sqlx::query(
-            // `judge_attempts` is deliberately left alone here. A link shelved
-            // as `unrelated`/"unreadable" after three attempts and then
-            // reopened by a text change gets exactly one more call before
-            // `judge` (src/jobs/associate.rs) would shelve it again at the
-            // same ceiling — the model has already failed three times on this
-            // pair, and that history is not something a re-embed should erase.
+            // `judge_attempts` is kept: a re-embed gets one more call, not a fresh three.
             "UPDATE artifact_links
                 SET state = 'learning', reason = NULL,
                     judged_rev_a = NULL, judged_rev_b = NULL
@@ -882,9 +707,7 @@ impl Store {
         .rows_affected())
     }
 
-    /// Record a verdict. `judged_revs` is `(embed_rev of a, embed_rev of b)` as
-    /// read by whoever judged, which is what `reopen_stale_judged_links`
-    /// compares against later.
+    /// `judged_revs` is what `reopen_stale_judged_links` compares against later.
     pub async fn set_link_state(
         &self,
         a: &str,
@@ -914,15 +737,7 @@ impl Store {
         Ok(())
     }
 
-    /// The operator saying this pair does not belong together.
-    ///
-    /// Deliberately narrower than `set_link_state`: dismissal records a
-    /// decision, it does not erase what the decision was made about. Weight
-    /// stays so the decision is auditable against the evidence that produced
-    /// it, and the judge's `reason` — where there is one — stays too, because
-    /// it is part of that evidence: an operator overruling "the config and the
-    /// errors it produces" should leave a row that still says both what was
-    /// claimed and that a person overruled it. Only `state` moves.
+    /// Only `state` moves: weight and reason stay as the evidence the operator overruled.
     pub async fn dismiss_link(&self, a: &str, b: &str) -> Result<()> {
         let (a, b) = canonical(a, b);
         sqlx::query!(
@@ -936,12 +751,7 @@ impl Store {
         Ok(())
     }
 
-    /// Count one call against a link and report the new total.
-    ///
-    /// Counted only where the answer said something about the *link* — an
-    /// unreadable reply. A call an outage ate says something about the endpoint,
-    /// and shelving a link for that would empty the pane every time the model is
-    /// down.
+    /// Counted only for an unreadable reply: an outage says nothing about the link.
     pub async fn record_link_judge_attempt(&self, a: &str, b: &str) -> Result<i64> {
         let (a, b) = canonical(a, b);
         Ok(sqlx::query_scalar!(
@@ -955,21 +765,8 @@ impl Store {
         .unwrap_or(0))
     }
 
-    /// Each artifact's stored activation, the stamp it was true at, and when
-    /// the artifact arrived.
-    ///
-    /// `created_at` is here because the stored number is a sum of two things
-    /// that decay at the same rate: the capture baseline, which every artifact
-    /// carries from the moment it exists, and what use has added since. Telling
-    /// them apart at read time needs the baseline's own age, and `activated_at`
-    /// is not it — a bump moves that stamp forward and the baseline's age does
-    /// not move with it.
-    ///
-    /// One statement for the whole candidate list: this is on the query path,
-    /// and fifty round trips to answer one search is exactly the layer crossing
-    /// the design promises not to be. The SQL is built only from `?`
-    /// placeholders — one per id, never a value — so nothing from a request
-    /// reaches the statement text.
+    /// `created_at` gives the baseline's age, which `activated_at` does not. One statement for
+    /// the whole list (the query path); only `?` placeholders are generated.
     pub async fn activation_of(
         &self,
         ids: &[String],
@@ -1002,18 +799,8 @@ impl Store {
             .collect())
     }
 
-    /// Raise the accessibility of these artifacts, folding the decay in.
-    ///
-    /// Read-then-write per artifact rather than one arithmetic UPDATE, for the
-    /// same reason `bump_link` does it: the decay is an exponential, and not
-    /// every SQLite build ships the math functions to express one in SQL.
-    ///
-    /// One transaction per artifact, the same shape as `bump_link`: the
-    /// sweep's confirmed bump and a search's retrieval bump can interleave on
-    /// the same artifact, as can two concurrent searches sharing a hit, and
-    /// without a transaction the loser's read is stale by the time it writes,
-    /// silently dropping its delta. An id with no row is skipped, same as
-    /// before.
+    /// Read-then-write, since not every SQLite build has math functions, in one transaction
+    /// per artifact so interleaved bumps do not drop a delta.
     pub async fn bump_activation(
         &self,
         ids: &[String],
@@ -1048,7 +835,6 @@ impl Store {
         Ok(())
     }
 
-    /// The three numbers Ops shows.
     pub async fn link_counts(&self) -> Result<LinkCounts> {
         Ok(LinkCounts {
             total: sqlx::query_scalar!("SELECT COUNT(*) FROM artifact_links")
@@ -1090,9 +876,6 @@ mod tests {
 
     #[test]
     fn a_pair_is_filed_the_same_way_round_however_it_is_named() {
-        // The primary key is (a_id, b_id) with a CHECK that a < b, so a lookup
-        // by either side is two indexed reads and there is no "which way round"
-        // bug to have.
         assert_eq!(canonical("b", "a"), ("a", "b"));
         assert_eq!(canonical("a", "b"), ("a", "b"));
     }
@@ -1104,21 +887,17 @@ mod tests {
 
     #[test]
     fn weight_halves_over_one_half_life() {
-        // Lazy decay is what makes forgetting free: no sweep walks every row to
-        // subtract from it, so this function is the only place decay happens.
+        // Lazy decay is the only place decay happens: forgetting costs no writes.
         let day = 86_400;
         assert!((decayed(4.0, 0, 30 * day, 30.0) - 2.0).abs() < 1e-9);
         assert!((decayed(4.0, 0, 60 * day, 30.0) - 1.0).abs() < 1e-9);
-        // Not yet moved, and never grown by a clock running backwards.
         assert!((decayed(4.0, 100, 100, 30.0) - 4.0).abs() < 1e-9);
         assert!((decayed(4.0, 100, 0, 30.0) - 4.0).abs() < 1e-9);
     }
 
     #[tokio::test]
     async fn bumping_folds_the_decay_in_rather_than_adding_to_a_stale_number() {
-        // `weight` means "strength as of bumped_at". Adding to it without
-        // folding the decay in would make a link that was strong a year ago and
-        // used once today as strong as one used constantly.
+        // Without folding decay in, a link strong a year ago and used once today would read strong.
         let store = Store::memory().await.unwrap();
         let (a, b) = two(&store).await;
         let day = 86_400;
@@ -1134,14 +913,12 @@ mod tests {
         let l = store.get_link(&a, &b).await.unwrap().expect("the link");
         assert!((l.weight - 3.0).abs() < 1e-6, "weight was {}", l.weight);
         assert_eq!(l.bumped_at, 30 * day);
-        // Named the other way round the second time, and still one row.
         assert_eq!(l.a_id, a.min(b.clone()));
     }
 
     #[tokio::test]
     async fn the_same_query_twice_is_one_binding_query() {
-        // What separates a link from one search typed twice. The cue count
-        // still climbs, because that is how the top three are chosen.
+        // The cue count still climbs, because that is how the top three are chosen.
         let store = Store::memory().await.unwrap();
         let (a, b) = two(&store).await;
         for _ in 0..3 {
@@ -1263,8 +1040,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_link_below_the_threshold_once_decayed_is_not_shown() {
-        // The stored weight is strength as of `bumped_at`. Filtering on it
-        // directly would keep showing a link that has not been used in a year.
+        // Filtering on the stored weight would keep showing a link unused for a year.
         let store = Store::memory().await.unwrap();
         let (a, b) = two(&store).await;
         store
@@ -1300,8 +1076,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_link_whose_other_side_is_hidden_is_not_shown() {
-        // Superseded and deprecated endpoints are filtered at read time, so
-        // undoing a merge brings its links back without a write.
         let store = Store::memory().await.unwrap();
         let (a, b) = two(&store).await;
         store
@@ -1387,8 +1161,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_dismissed_link_stays_hidden_even_from_a_caller_that_asks_for_it() {
-        // The operator's decision is final, and an invariant that holds only
-        // while every call site remembers the right argument is not one.
         let store = Store::memory().await.unwrap();
         let (a, b) = two(&store).await;
         store
@@ -1418,8 +1190,6 @@ mod tests {
 
     #[tokio::test]
     async fn only_a_strong_cross_corpus_link_is_offered_to_the_judge() {
-        // Two passages of one document being related is not information, so a
-        // same-corpus link is shown and never judged.
         let store = Store::memory().await.unwrap();
         let (same_a, same_b) = two(&store).await;
         let (cross_a, cross_b) = two_corpora(&store).await;
@@ -1439,8 +1209,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_link_bound_by_too_few_questions_is_not_judged() {
-        // One question asked six times is one question. The judge is the only
-        // thing here that costs a model call, and this is what bounds it.
         let store = Store::memory().await.unwrap();
         let (a, b) = two_corpora(&store).await;
         for _ in 0..6 {
@@ -1482,7 +1250,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A year on, both have decayed to almost nothing.
         let dropped = store
             .prune_learning_links(0.5, 30.0, 365 * 86_400, 5_000)
             .await
@@ -1542,7 +1309,6 @@ mod tests {
         );
         assert_eq!((l.judged_rev_a, l.judged_rev_b), (Some(0), Some(0)));
 
-        // And it still reopens for the reason it should: the text moved.
         store
             .update_artifact_text(&a, "alpha, rewritten")
             .await
@@ -1606,8 +1372,7 @@ mod tests {
         );
         assert_eq!(shown[0].other, b);
 
-        // And a half-life later it is still above the floor, which is what
-        // separates this from writing the floor itself.
+        // Still above the floor a half-life later: the weight is not the floor itself.
         let shown = store
             .links_from(
                 std::slice::from_ref(&a),
@@ -1640,10 +1405,7 @@ mod tests {
             "an assertion must not lower what use has earned"
         );
 
-        // The other direction: a link last touched two half-lives ago is worth
-        // 2.25 now, not 9.0, so the assertion carries it — and `bumped_at`
-        // moving to now must not hand back the weight those sixty days took
-        // off, which is what carrying the stored number across would do.
+        // Two half-lives ago: worth 2.25 now, not 9.0.
         let (c, d) = two_corpora(&store).await;
         store
             .bump_link(&c, &d, 9.0, Some("q"), 30.0, now() - 60 * 86_400)
@@ -1693,8 +1455,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_fresh_artifact_starts_fully_activated_and_stamped() {
-        // Left unstamped, every artifact in the base reads as having decayed
-        // since 1970 — equally inaccessible, which is the opposite of true.
+        // Unstamped, every artifact reads as decayed since 1970.
         let store = Store::memory().await.unwrap();
         let (a, _) = two(&store).await;
         let act = store.activation_of(std::slice::from_ref(&a)).await.unwrap();
@@ -1704,8 +1465,6 @@ mod tests {
             .expect("an artifact carries activation");
         assert!((value - 1.0).abs() < 1e-9);
         assert!(stamp > 0, "activated_at was never set at insert");
-        // The baseline's own age, which a bump moves `activated_at` away from
-        // and must not move: at insert the two agree.
         assert_eq!(created_at, stamp);
     }
 
@@ -1775,14 +1534,12 @@ mod tests {
             .unwrap();
 
         let copied = s.get_link(&a, &x).await.unwrap().expect("the copy exists");
-        // Decayed to the carry moment: one half-life later, half the weight.
         assert!((copied.weight - 1.0).abs() < 1e-6, "{}", copied.weight);
         assert_eq!(copied.bumped_at, 1_000 + 14 * 86_400);
         assert_eq!(copied.queries, from.queries);
         assert_eq!(copied.cues.len(), 1);
         assert_eq!(copied.state, LinkState::Learning);
         assert!(copied.judged_rev_a.is_none() && copied.judged_rev_b.is_none());
-        // The original is still there, untouched.
         let orig = s.get_link(&p, &x).await.unwrap().unwrap();
         assert_eq!(orig.weight, from.weight);
     }
@@ -1799,7 +1556,6 @@ mod tests {
         s.bump_links(&[(a.as_str(), x.as_str())], 2.0, Some("q two"), 14.0, at)
             .await
             .unwrap();
-        // The operator dismissed the artifact's own link.
         s.set_link_state(&a, &x, LinkState::Dismissed, None, None)
             .await
             .unwrap();
@@ -1836,8 +1592,7 @@ mod tests {
 
     #[tokio::test]
     async fn cross_corpus_is_read_through_origins_for_a_merge() {
-        // A merge of two artifacts from corpus 1, linked to a third artifact of
-        // corpus 1: same document, however the merge's own `corpus_id` reads.
+        // Same document, however the merge's own `corpus_id` reads.
         let store = Store::memory().await.unwrap();
         let src = store.insert_corpus("one", "web", None).await.unwrap();
         let na = |o: i64, t: &str| NewArtifact {
@@ -1891,7 +1646,6 @@ mod tests {
         let cross = out.iter().find(|l| l.other == far).unwrap();
         assert!(!same.cross_corpus, "a merge of corpus-1 roots is corpus 1");
         assert!(cross.cross_corpus);
-        // And the judge is offered only the cross-corpus one.
         let armed = store.links_to_judge(4.0, 3, 30.0, 0, 10).await.unwrap();
         assert_eq!(armed.len(), 1, "{armed:?}");
         assert!(armed[0].a_id == far || armed[0].b_id == far);

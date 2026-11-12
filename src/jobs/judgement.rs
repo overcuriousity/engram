@@ -1,11 +1,5 @@
 //! What a judged synthesis reply becomes: moments and links.
-//!
-//! The one reader of time since the 2026-09 capture reshape. The synthesis
-//! call that rewrites a small capture also judges it — reminder or plain
-//! note, with the dates it names and the artifacts it relates to — and this
-//! module writes those judgements down. Everything here is
-//! best-effort against artifacts that already stand: a judgement that cannot
-//! be applied is a warning, never a lost capture.
+//! Best-effort throughout: a judgement that cannot be applied is a warning, never a lost capture.
 
 use crate::core::Core;
 use crate::core::moments::{
@@ -15,19 +9,7 @@ use crate::error::Result;
 use crate::infer::Judgement;
 use crate::store::moments::{Kind, NewMoment, Source};
 
-/// Apply one judgement to the capture it was made about.
-///
-/// `anchor_id` is the first live synthesized artifact — where the moments
-/// hang, the way the old stage hung them on the first artifact. `shown` is
-/// the neighbor ids the model was actually shown: a link to anything else is
-/// dropped, because the model can only relate what was on the table.
-///
-/// Idempotent per re-synthesis: read rows are replaced, done and set rows
-/// are kept, and an operator's refusal (`intent_refused`) outlives any
-/// number of re-reads.
-/// The corpus journal's row for a moment this reading filed. Best-effort,
-/// like everything on this path: a row that failed to write is a warning,
-/// never a lost reminder.
+/// Best-effort: a journal row that failed to write is a warning, never a lost reminder.
 async fn journal(core: &Core, moment_id: &str, anchor_id: &str, what: &str) {
     if let Err(err) = core
         .store
@@ -46,6 +28,8 @@ async fn journal(core: &Core, moment_id: &str, anchor_id: &str, what: &str) {
     }
 }
 
+/// Idempotent per re-read: read rows are replaced; done, set and refused rows are kept.
+/// `shown` bounds the links: the model can only relate what it was shown.
 pub async fn apply(
     core: &Core,
     corpus_id: &str,
@@ -60,58 +44,20 @@ pub async fn apply(
         .map(String::from)
         .unwrap_or_else(|| default_zone_name(&core.time.default_tz));
     let tz = zone(Some(&tz_name));
-    // The zone as the zone table spells it — see the due band, which reads
-    // the wall-clock back out of what is stored here.
+    // Spelled as the zone table spells it: the due band reads the wall clock back out of it.
     let tz_name = tz.name().to_string();
 
-    // The model's date is the note's date. There was a weekday witness here —
-    // the note's own weekday scanned out of the judged window, and any
-    // reminder inside a week of the capture that fell on another weekday moved
-    // onto the named one. It is gone, and the reason is worth keeping.
-    //
-    // What it was for was the model's calendar arithmetic: "Freitag" on a
-    // Wednesday coming back as the Saturday. But the JUDGE block already
-    // states the capture's weekday — `build_judge_ask` formats the local time
-    // as `%Y-%m-%d %H:%M (%A)` — so the step the witness corrected is one the
-    // model is handed the answer to. What was left was a heuristic correction
-    // reading a heuristic detector, and it had already produced this exact bug
-    // once: a Portuguese ordinal read as Monday, overriding a date the note
-    // stated outright. Narrowing the word list did not reach the case where
-    // the word really is a weekday — "Mittwoch Zahnarzt; Rechnung fällig
-    // 2026-09-11", captured on a Monday, had its 09-11 reminder silently moved
-    // to 09-09 and never fired on the day it was for.
-    //
-    // The two failures are not the same size. A model that gets a weekday
-    // wrong leaves a reminder a few days off, on the band, with a button that
-    // moves it. The witness getting it wrong rewrote a date nobody misread,
-    // silently, in the one direction that fires early and then never again.
-    // Recorded before anything is withdrawn, so a store error here costs
-    // nothing: `?` used to abort `apply` with the previous reading already
-    // deleted and no replacement written.
-    // Returns the metadata it wrote, and every read of an operator's word
-    // below is taken from *that* and not from `src`: `src` was read at the top
-    // of `apply`, and a "not a reminder" press landing in between was both
-    // clobbered by this write and then invisible to the `intent_refused`
-    // checks — so the arm went on to re-arm the very row the operator refused.
+    // No weekday correction: the JUDGE block states the capture's weekday. Recorded before anything
+    // is withdrawn; later reads of the operator's word use the returned `meta`, since a press can
+    // land after `src` was read.
     let meta = record_intent(core, corpus_id, j.intent.as_deref()).await?;
-    // Events only. The due rows are withdrawn where the new reading actually
-    // replaces them — see the `remind` arm below — because several paths
-    // through it decide the reading names no reminder they can file and
-    // `return`, and a delete up here meant each of those destroyed a standing
-    // reminder and put nothing back. A window retry whose second reply is
-    // vaguer than the first is enough to walk into one.
+    // Events only: due rows are withdrawn in the `remind` arm, where several paths return without a
+    // replacement.
     core.store.delete_read_events(anchor_id).await?;
 
     // Dates the note states without being the reminder: the day page's rows.
-    //
-    // Each of the three sections below is independent, and each one fails on
-    // its own. They used to fail on each other: `?` here aborted `apply`, and
-    // the reminder — the section this call is most often made for — sits last.
-    // `shown` comes out of vector payloads, which can name a row the reaper or
-    // a supersession has since taken away, so one foreign-key error on a link
-    // to a dead id silently cost the whole judgement. Best-effort is what the
-    // caller already assumes: it logs a failed `apply` and lets the artifacts
-    // stand.
+    // Each section below fails on its own: `shown` can name a row since reaped, and the reminder
+    // comes last.
     for e in &j.events {
         let Some(at) = parse_local(e, tz) else {
             continue;
@@ -149,19 +95,14 @@ pub async fn apply(
         }
     }
 
-    // Relations to what the model was shown. Dedup and supersession stay
-    // with the sweeps; the model proposes no merges.
+    // Dedup and supersession stay with the sweeps; the model proposes no merges.
     for l in &j.links {
         if l.artifact_id == anchor_id || !shown.iter().any(|s| s == &l.artifact_id) {
             continue;
         }
         if let Err(err) = core
             .store
-            // Twice the floor it has to clear, so an asserted relation is
-            // visible for a half-life on the model's word alone and then
-            // fades like anything else nothing uses. Derived from `show_min`
-            // rather than written flat, so a base that raises the floor
-            // raises this with it.
+            // Twice `show_min`: an asserted relation stays visible for one half-life, then fades.
             .relate_synthesized(
                 anchor_id,
                 &l.artifact_id,
@@ -176,12 +117,8 @@ pub async fn apply(
     }
 
     let forced = meta["intent"].as_str();
-    // The door outranks the model. `engram -r` is a person saying "remind
-    // me", and the forcing was only ever consumed *inside* the `remind` arm —
-    // so a model answering `none` for an explicit reminder fell
-    // into the catch-all below, wrote no due row at all, and took the previous
-    // reading's reminder with it. The operator's own refusal is still checked
-    // inside the arm; nothing else overrules the door.
+    // A forced `remind` (`engram -r`) outranks the model; only the operator's refusal, checked in
+    // the arm, overrules it.
     let read_as = match forced {
         Some("remind") => Some("remind"),
         _ => j.intent.as_deref(),
@@ -189,45 +126,12 @@ pub async fn apply(
     match read_as {
         Some("remind") => {
             if intent_refused(&meta, Intent::Remind) {
-                // The operator has said this is not a reminder. Their word,
-                // not the model's, and it takes the read rows with it.
                 core.store.delete_read_due(anchor_id).await?;
                 return Ok(());
             }
-            // A reminder is for future-self, so an instant that has already
-            // passed is not one — whichever of the two doors below produced
-            // it. Measured against the clock rather than against the capture,
-            // because the value this exists for is the *prompt's* clock: the
-            // JUDGE block states `Current local time` so that "morgen um 9"
-            // has something to resolve against, and a model with nothing else
-            // to say hands that line straight back as `when`. The block is
-            // built when synthesis runs, which is after the capture was
-            // written, so an echo sits *after* `src.created_at` whenever the
-            // job starts a minute or more behind the paste and a comparison
-            // against the capture would wave it through.
-            //
-            // The live base filed two of these. A shopping note put its 18:00
-            // in `events` and the prompt's clock in `when`; a ticket page put
-            // both presale dates in `events` after `validate_rule` threw out
-            // its recurrence, and answered `when` with the clock. Each got a
-            // due row at the minute it was read, which the band draws as due
-            // at once and the ladder's last rung pushes immediately — beside
-            // the correct future row, so one note looked like two reminders.
-            //
-            // No arm of its own: an instant that is no instant leaves `at`
-            // unset, and every reading of an undated judgement below already
-            // says what that means.
-            //
-            // Measured against the instant only when the answer named one. A
-            // `when` of `2026-09-15` names a day, and `DEFAULT_HOUR` is this
-            // module's reading of it rather than anything the note said — so
-            // "erinnere mich heute an X", written at three in the afternoon,
-            // became nine that morning and was thrown out as a reminder for
-            // the past. What it is is a reminder for today whose hour has
-            // gone by, and the band draws a past instant as due at once and
-            // the ladder's last rung pushes it: filed, and it fires. The
-            // echoes this arm exists to catch are untouched, because an echo
-            // of `Current local time` carries the hour with it.
+            // A past instant is no reminder, measured against the clock: an idle model echoes the
+            // prompt's `Current local time`, which postdates the capture. A day-only `when` is
+            // checked by day, as its `DEFAULT_HOUR` is ours.
             let now = core.clock.now();
             let at = j
                 .when
@@ -251,68 +155,33 @@ pub async fn apply(
                         false
                     }
                 });
-            // A date the rule carries and `when` does not. The rule below may
-            // be dropped as a single occurrence, and dropping it threw away
-            // the only date the answer had: `when: null` with
-            // `FREQ=WEEKLY;BYDAY=FR;COUNT=1` left `at` and `rule` both unset
-            // and the reminder was filed away as an ordinary capture.
-            // Anchored at the later of the capture and the clock, because a
-            // recurrence has a next occurrence whatever the date of the note
-            // it was read off. Anchoring at `src.created_at` alone and then
-            // holding the answer to the clock threw the date away instead:
-            // re-read an older capture, or run synthesis an hour behind the
-            // paste, and "every Friday" yielded a Friday already behind us,
-            // was filtered to `None`, and left a rule with no date — a row
-            // that can never fire (`uncovered` wants `m.at IS NOT NULL`) and
-            // can never arm its successor (`complete_moment` wants both).
+            // A date only the rule carries, anchored at the later of capture and clock: a rule with
+            // no date can never fire (`uncovered`) nor arm its successor (`complete_moment`).
             let at = at.or_else(|| {
                 valid_rule
                     .as_deref()
                     .and_then(|r| first_occurrence(r, src.created_at.max(now), tz))
             });
             let rule = valid_rule
-                // A rule that yields one occurrence is not a repetition, it is
-                // the date `when` already carries. Asked to judge "Freitag
-                // 13:45" the configured model answers
-                // `FREQ=WEEKLY;BYDAY=FR;COUNT=1`, and stored, that made the
-                // band offer to repeat a note that never said it repeats.
+                // A rule with one occurrence is the date `when` already carries, not a repetition.
                 .filter(|r| !single_occurrence(r));
-            // A judged reminder with no date anywhere stays an ordinary
-            // capture — a guess about a note that names no time used to
-            // become an undated row nagging for a date it never had. A
-            // *forced* remind is somebody saying "remind me" at the door,
-            // and an undated one is a question the band asks them.
+            // An undated judged reminder stays a plain capture; a forced one files undated and the
+            // band asks for the date.
             let forced_remind = forced == Some("remind");
-            // A rule with no date is no better: that pair is the dead row
-            // described above, and the reading that produced it is a reading
-            // with no date in it however much recurrence it also found. Only a
-            // *forced* remind still files undated, and the band asks that one
-            // for the date it is missing.
+            // A rule with no date is no better.
             if at.is_none() && !forced_remind {
-                // And the previous reading stands. This is the arm the window
-                // retry walks into when its second reply is vaguer than the
-                // first: "a reminder, but I cannot date it" is not a statement
-                // that the date already on the artifact was wrong, and taking
-                // the standing reminder away on the strength of it was a
-                // silent loss with a `debug!` line for a record.
+                // The previous reading stands: an undatable re-read does not say the standing date
+                // was wrong.
                 tracing::debug!(
                     corpus_id,
                     "a judged reminder with no date is left as a capture"
                 );
                 return Ok(());
             }
-            // Undated included: `None` is an instant the guard understands,
-            // and a finished undated reminder is exactly the row
-            // `delete_read_due` keeps and this must not read back fresh. It
-            // now also catches the previous reading landing on the same
-            // instant, which is the cheapest possible answer to a re-read that
-            // changes nothing: no delete, no insert, no churn.
+            // `None` included: a finished undated row is one `delete_read_due` keeps and must not
+            // be re-filed.
             if core.store.has_moment_at(anchor_id, Kind::Due, at).await? {
-                // One thing a second reading of the same prose can still add,
-                // and the instant comparison above cannot see: the same Friday
-                // now read as *every* Friday. Returning on the instant alone
-                // dropped the recurrence, and the reminder stayed a one-shot
-                // however plainly the note said it repeats.
+                // The instant guard cannot see a re-read that finds the same date now repeats.
                 if let Some(r) = rule.as_deref()
                     && core.store.set_rule_of_open_due(anchor_id, at, r).await?
                 {
@@ -325,11 +194,8 @@ pub async fn apply(
                 }
                 return Ok(());
             }
-            // A row this base has already spoken about — pushed, or put aside
-            // — is not a re-read's to replace. `delete_read_due` keeps such a
-            // row on purpose, so the delete below would find nothing and the
-            // insert would add a *second* open row beside it: two readings of
-            // one piece of prose, both on the ladder, both pushing.
+            // `delete_read_due` keeps a pushed or put-aside row, so filing here would add a second
+            // open row beside it.
             if core.store.has_acted_on_due(anchor_id).await? {
                 tracing::debug!(
                     corpus_id,
@@ -338,12 +204,8 @@ pub async fn apply(
                 );
                 return Ok(());
             }
-            // And an undated *forced* remind never outranks a date already
-            // standing here. The undated row is the band's question "when?",
-            // which is the right answer where there is no date to be had and
-            // the wrong one where there is: `uncovered` filters on
-            // `m.at IS NOT NULL`, so replacing a dated row with it stopped the
-            // reminder firing without saying so anywhere.
+            // An undated forced remind never replaces a dated row: `uncovered` needs `m.at IS NOT
+            // NULL`.
             if at.is_none()
                 && rule.is_none()
                 && let Some(open) = core.store.open_due_for_artifact(anchor_id).await?
@@ -355,11 +217,7 @@ pub async fn apply(
                 );
                 return Ok(());
             }
-            // And a date the operator moved outranks this reading of the prose
-            // it came from, whatever the reading is this time. `has_moment_at`
-            // only catches a re-read landing back on the instant they moved
-            // away from; a third reading put a second open row beside the
-            // correction, and both of them pushed.
+            // A date the operator moved outranks any re-reading of the prose.
             if core.store.has_operator_moment(anchor_id, Kind::Due).await? {
                 tracing::debug!(
                     corpus_id,
@@ -367,11 +225,7 @@ pub async fn apply(
                 );
                 return Ok(());
             }
-            // Every guard is past and this reading has a reminder to file, so
-            // now the previous one is genuinely replaced rather than merely
-            // discarded. Delete and insert, in that order, so no instant in
-            // between leaves the artifact with two open readings of the same
-            // prose.
+            // Delete, then insert: the artifact never holds two open readings of the same prose.
             core.store.delete_read_due(anchor_id).await?;
             let moment_id = core
                 .store
@@ -392,14 +246,8 @@ pub async fn apply(
                 .await?;
             journal(core, &moment_id, anchor_id, "due").await;
             core.store.rearm_remind().await?;
-            // A note a completed reminder retired, being read as a reminder
-            // again. `complete_moment` retires the corpus so a finished
-            // reminder stops being one of the last things you kept — but an
-            // open reminder standing on a note that is missing from the rail
-            // and demoted below the search cliff is a reminder nobody can see
-            // the source of, with no undo anywhere offering to bring it back.
-            // Arming takes the retirement back, and only arming does: this is
-            // past every guard above, so the row genuinely exists.
+            // Arming un-retires the note: an open reminder whose source is hidden from rail and
+            // search has no way back.
             if core.store.is_retired(corpus_id).await? {
                 core.store.unretire_corpus(corpus_id).await?;
                 tracing::info!(
@@ -409,14 +257,10 @@ pub async fn apply(
             }
             let art = core.store.get_artifact(anchor_id).await?;
             if let Err(e) = confirm_created(core, &art, at, tz).await {
-                // Best-effort: a note that failed to say "reminder set" is
-                // still a reminder that was set.
                 tracing::warn!(error = %e, "could not push the capture-time confirmation");
             }
         }
-        // Every other reading — an intent of `none`, or anything this binary
-        // does not know — says outright that this note is not a reminder, and
-        // the previous reading's rows go with it.
+        // Any other intent, known or not, says this note is not a reminder.
         _ => {
             core.store.delete_read_due(anchor_id).await?;
         }
@@ -424,23 +268,16 @@ pub async fn apply(
     Ok(())
 }
 
-/// Write down what was read. Cheap, and it makes every later argument about
-/// a filing a measurement instead of an opinion.
+/// Recorded so that a later argument about a filing is a measurement.
 async fn record_intent(
     core: &Core,
     corpus_id: &str,
     intent: Option<&str>,
 ) -> Result<serde_json::Value> {
-    // Read here rather than reusing `apply`'s snapshot from the top of the
-    // call: this is a read-modify-write of a column `set_reminder` also
-    // writes, and the further back the read is, the wider the
-    // window in which an operator's press is overwritten by a stale clone.
+    // Read fresh: `set_reminder` writes this column too, and a stale copy overwrites an operator's
+    // press.
     let mut meta = core.store.get_corpus(corpus_id).await?.metadata;
-    // Indexing a `Value` that is not an object panics, and this one comes
-    // straight out of a column — the guard `describe::park_failed` and
-    // `extract` both carry. This runs at the very top of `apply`, so a corpus
-    // whose metadata is a JSON scalar took the worker down before any of the
-    // judgement was filed.
+    // Indexing a non-object `Value` panics, and a column can hold a JSON scalar.
     if !meta.is_object() {
         meta = serde_json::json!({});
     }
@@ -453,13 +290,8 @@ async fn record_intent(
     Ok(meta)
 }
 
-/// The first instant a rule names after the capture, at `DEFAULT_HOUR`.
-///
-/// Only for a judgement whose `when` is null: the rule then carries the only
-/// date in the answer, and the time of day is the one the prompt names for a
-/// note that states none. `next_after` is strict, so a rule naming the
-/// capture's own weekday means the next one, which is what the word means:
-/// "every Monday", written on a Monday, starts with the Monday to come.
+/// For a null `when`. `next_after` is strict: "every Monday", written on a Monday, starts next
+/// Monday.
 fn first_occurrence(rule: &str, created_at: i64, tz: chrono_tz::Tz) -> Option<i64> {
     use chrono::TimeZone;
     let day = tz.timestamp_opt(created_at, 0).single()?.date_naive();
@@ -467,12 +299,7 @@ fn first_occurrence(rule: &str, created_at: i64, tz: chrono_tz::Tz) -> Option<i6
     crate::core::moments::next_after(rule, anchor, tz)
 }
 
-/// Does this RRULE describe exactly one occurrence?
-///
-/// `COUNT=1` says so outright, and it is the shape a model reaches for when it
-/// is asked for a rule and has only the one date to give. Nothing else is
-/// decided here: a rule whose `UNTIL` happens to leave one occurrence is still
-/// a note that says it repeats, and the recurrence code reads it.
+/// `COUNT=1` only: a rule whose `UNTIL` leaves one occurrence still says it repeats.
 fn single_occurrence(rule: &str) -> bool {
     rule.split(';').any(|part| {
         let (k, v) = part.split_once('=').unwrap_or((part, ""));
@@ -480,8 +307,7 @@ fn single_occurrence(rule: &str) -> bool {
     })
 }
 
-/// The push that says a reminder was just set, at capture time and
-/// independent of the due-time ladder.
+/// The "reminder set" push at capture time, independent of the due-time ladder.
 async fn confirm_created(
     core: &Core,
     art: &crate::store::artifacts::Chunk,
@@ -511,38 +337,16 @@ async fn confirm_created(
     crate::jobs::remind::notify_now(core, &format!("Reminder set: {title}"), &message).await
 }
 
-/// `2026-09-04T09:00` or `2026-09-04` in the reader's zone — and the same
-/// instants carrying an offset of their own.
-///
-/// The prompt asks for a local wall clock, and the schema puts no `pattern` on
-/// `when`, so it does not get one. A model that answers `2026-09-04T09:00Z` or
-/// `…+02:00` — which is what a model does the moment anything in its context
-/// looks like an ISO instant — parsed as nothing at all, and the reminder was
-/// dropped in silence. An offset that is stated is honoured rather than
-/// discarded: it says what instant was meant, and the reader's zone is then
-/// none of the answer's business.
+/// A local wall clock or date in `tz`. A stated offset is honoured: models append `Z` to anything
+/// ISO-shaped.
 pub(crate) fn parse_local(s: &str, tz: chrono_tz::Tz) -> Option<i64> {
     parse_stated(s, tz).map(|s| s.at)
 }
 
-/// An instant a judgement stated, and whether the words behind it named a
-/// time of day at all.
-///
-/// The distinction is the whole of what tells an answer that means *today*
-/// from an answer that means *now*. A bare date carries no time and is given
-/// `DEFAULT_HOUR`, so "erinnere mich heute" written at three in the afternoon
-/// resolves to nine that morning — an instant the note never named and that
-/// the clock has already passed. An echo of the prompt's own `Current local
-/// time`, which is the thing the comparison in the remind arm exists to
-/// catch, is always a full wall clock: a model handing that line back hands
-/// back the hour with it. Reading the two the same way meant either keeping
-/// the echoes or losing the same-day reminders, and `timed` is what separates
-/// them without guessing at the words.
+/// An instant a judgement stated, and whether it named a time of day.
 pub(crate) struct Stated {
     pub at: i64,
-    /// False for `2026-09-04`, true for `2026-09-04T09:00` — and read off
-    /// the wall clock in front of a stated offset, so `2026-09-04Z` is still
-    /// a day and `2026-09-04T09:00Z` is still an hour.
+    /// Read before any offset: `2026-09-04Z` is still a day.
     pub timed: bool,
 }
 
@@ -567,11 +371,7 @@ pub(crate) fn parse_stated(s: &str, tz: chrono_tz::Tz) -> Option<Stated> {
     }
 }
 
-/// Is `at` on `now`'s day, or a later one, in the reader's zone?
-///
-/// What "past" means for an answer that named a day and no hour. Comparing
-/// the instants instead asks whether `DEFAULT_HOUR` has been and gone, which
-/// is a question about the default and not about the note.
+/// "Past" for a day-only answer: whether the day, not `DEFAULT_HOUR`, has gone by.
 fn day_not_past(at: i64, now: i64, tz: chrono_tz::Tz) -> bool {
     use chrono::TimeZone;
     let day = |t: i64| Some(tz.timestamp_opt(t, 0).single()?.date_naive());
@@ -581,12 +381,7 @@ fn day_not_past(at: i64, now: i64, tz: chrono_tz::Tz) -> bool {
     }
 }
 
-/// The wall-clock spellings, with a bare date meaning `DEFAULT_HOUR`.
-///
-/// Fractional seconds included: `2026-09-04T09:00:00.000Z` is what a model
-/// hands back often enough, `split_offset` takes the `Z` off it, and the
-/// remaining `.000` matched none of the three formats — so the reminder was
-/// dropped on the floor with a `debug!` line for a record.
+/// A bare date means `DEFAULT_HOUR`. Fractional seconds are accepted: models send `09:00:00.000Z`.
 fn naive(s: &str) -> Option<(chrono::NaiveDateTime, bool)> {
     chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
@@ -604,9 +399,7 @@ fn naive(s: &str) -> Option<(chrono::NaiveDateTime, bool)> {
         .ok()
 }
 
-/// A trailing `Z`, `+02:00` or `-0500`, split from the wall clock in front of
-/// it. The sign is searched for after the `T` so that the date's own dashes
-/// cannot be mistaken for one.
+/// The sign is searched after the `T`, so the date's own dashes are not taken for one.
 fn split_offset(s: &str) -> Option<(&str, chrono::FixedOffset)> {
     if let Some(head) = s.strip_suffix('Z').or_else(|| s.strip_suffix('z')) {
         return Some((head, chrono::FixedOffset::east_opt(0)?));
@@ -709,11 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_note_that_is_only_a_reminder_still_gets_its_moment() {
-        // "erinnere mich an den Termin, Freitag 13:45" holds nothing the
-        // prompt lets the model write an artifact about — the intent and the
-        // date belong to `moment`. The window used to drop the reply on the
-        // floor for having no artifacts, retry the same call to exhaustion,
-        // and leave the corpus `partial` with no reminder anywhere.
+        // Such a note holds nothing to write an artifact about, yet the moment must be filed.
         let mut core = test_core().await;
         core.synthesizer = Some(std::sync::Arc::new(JudgementOnly(Judgement {
             intent: Some("remind".into()),
@@ -735,8 +524,7 @@ mod tests {
         let rows = core.store.open_due(0, i64::MAX).await.unwrap();
         assert_eq!(rows.len(), 1, "the reminder is the whole point: {rows:?}");
         assert!(rows[0].moment.at.is_some());
-        // The verbatim passage is the record, and it is what the moment hangs
-        // on: there is no artifact for it to hang on.
+        // No artifact exists, so the moment hangs on the verbatim passage.
         let held = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         assert!(
             held.iter().any(|c| c.id == rows[0].moment.artifact_id),
@@ -751,10 +539,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_recurrence_of_one_occurrence_is_not_a_recurrence() {
-        // Asked to judge "Freitag 13:45", the configured model answers
-        // `FREQ=WEEKLY;BYDAY=FR;COUNT=1;INTERVAL=1` — a rule that describes
-        // the single date it already gave in `when`. Stored, it makes the
-        // band offer to repeat a note that says nothing about repeating.
         let mut core = test_core().await;
         core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
@@ -777,9 +561,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_occurrence_rule_still_gives_the_reminder_its_date() {
-        // `when: null` with a COUNT=1 rule: dropping the rule as no
-        // repetition threw away the only date the answer carried, and the
-        // reminder was filed away as an ordinary capture.
         let mut core = test_core().await;
         core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
@@ -805,9 +586,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_event_the_note_dates_outright_keeps_its_date() {
-        // The weekday witness corrects the *reminder*. Applied to the events
-        // it moved every date the note states onto the same weekday, and a
-        // date already past was rewritten into the future.
         let mut core = test_core().await;
         core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
@@ -849,9 +627,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_reminder_the_operator_moved_is_not_doubled_by_a_third_reading() {
-        // Read Friday 14:00, corrected to 16:00 by hand, re-read as 15:00:
-        // the exact-instant guard misses both times and a second open row
-        // appeared beside the correction, with both of them pushing.
+        // Neither re-read lands on an exact instant, so only the operator guard stops a second open
+        // row.
         let mut core = test_core().await;
         core.synthesizer = Some(judged_core_reply(Judgement {
             intent: Some("remind".into()),
@@ -873,7 +650,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The same prose, read a third way.
         let anchor = rows[0].moment.artifact_id.clone();
         apply(
             &core,
@@ -915,7 +691,6 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         let (at, anchor) = (rows[0].moment.at, rows[0].moment.artifact_id.clone());
 
-        // The same prose, read again as a reminder it cannot date.
         apply(
             &core,
             &out.id,
@@ -936,8 +711,7 @@ mod tests {
         assert_eq!(after.len(), 1, "the reminder stands: {after:?}");
         assert_eq!(after[0].moment.at, at);
 
-        // And a reading that says outright it is *not* a reminder still
-        // withdraws it — the delete moved, it did not go away.
+        // A reading that says it is not a reminder still withdraws it.
         apply(
             &core,
             &out.id,
@@ -974,7 +748,6 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].moment.source, Source::Classified);
         assert!(rows[0].moment.at.is_some());
-        // The journal names the moment the reading filed.
         let journal = core
             .store
             .open_actions(&[crate::store::actions::Kind::Moment], 10)
@@ -1016,10 +789,8 @@ mod tests {
         const AFTERNOON: i64 = 1_789_484_400;
         for (when, filed) in [
             ("2026-09-15", true),
-            // The prompt's own clock, handed back: an hour was named, and it
-            // has passed.
+            // The prompt's own clock handed back: timed, and past.
             ("2026-09-15T14:00", false),
-            // And a day that is genuinely behind us stays no date at all.
             ("2026-09-14", false),
         ] {
             let mut core = test_core().await;
@@ -1054,7 +825,6 @@ mod tests {
     #[tokio::test]
     async fn a_recurrence_older_than_the_clock_advances_instead_of_dying() {
         let mut core = test_core().await;
-        // Ten years past the capture this reading is made of.
         let late = crate::store::now() + 10 * 365 * 24 * 3600;
         core.clock = crate::core::context::Clock::Fixed(late);
         core.synthesizer = Some(judged_core_reply(Judgement {
@@ -1134,7 +904,6 @@ mod tests {
         assert_eq!(rows.len(), 1, "a forced remind stands, even undated");
         assert_eq!(rows[0].moment.source, Source::Cue);
 
-        // The operator says no; a re-application must not put it back.
         let aid = rows[0].moment.artifact_id.clone();
         core.set_reminder(&aid, false).await.unwrap();
         let j = Judgement {
@@ -1243,7 +1012,6 @@ mod tests {
             "the fixture must actually retire the note"
         );
 
-        // A later reading of the same prose, landing on a different date.
         let j = Judgement {
             intent: Some("remind".into()),
             when: Some("2099-03-01T09:00".into()),
@@ -1409,7 +1177,6 @@ mod tests {
     #[tokio::test]
     async fn events_land_and_links_only_to_what_was_shown() {
         let core = test_core().await;
-        // A neighbor that exists and was "shown".
         let other = core
             .ingest("the invoice workflow notes", "web", None)
             .await

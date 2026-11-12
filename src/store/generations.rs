@@ -1,34 +1,23 @@
-//! The named, versioned settings a base is currently retrieving under.
-//!
-//! A number that moved has to have something to have moved from. This is that
-//! something: one immutable row per set of parameters the base has run under,
-//! with the models that computed alongside them, and exactly one of them live.
+//! The named, immutable parameter sets a base has retrieved under; exactly one is live.
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
-/// Same reason `links.rs` holds one: the read below decides what the write
-/// does, and a deferred transaction takes its snapshot before the upgrade.
+/// The read decides the write, and a deferred transaction snapshots before the upgrade.
 const IMMEDIATE: &str = "BEGIN IMMEDIATE";
 
-/// The knobs a generation holds: everything the idle pass may move. Stored as
-/// JSON so the set can widen without a migration — the retrieval knobs and the
-/// sitting flip all arrived after the first rows were written, and those rows
-/// still read.
+/// Stored as JSON so knobs can be added without a migration; old rows still decode.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GenerationParams {
     pub recency_weight: f32,
     pub per_source_cap: Option<usize>,
-    /// Absent in rows written before the retrieval knobs existed, which ran
-    /// under the shipped value. The default says so rather than a migration.
+    /// Absent in rows from before the retrieval knobs, which ran under the shipped value.
     #[serde(default = "crate::config::default_candidate_multiplier")]
     pub candidate_multiplier: usize,
     #[serde(default = "crate::config::default_recency_half_life_days")]
     pub recency_half_life_days: u32,
-    /// The three knobs stage 3a put on the ladder. Absent in rows written
-    /// before, which ran under the values shipped *then*: the lift was off,
-    /// and a row from that era must not decode as the one the file ships now.
+    /// Absent in older rows, which ran with the lift off: they must not decode as today's file.
     #[serde(default = "crate::config::legacy_prime_lift")]
     pub prime_lift: usize,
     #[serde(default = "crate::config::default_spread_max")]
@@ -37,8 +26,7 @@ pub struct GenerationParams {
     pub rerank: bool,
     #[serde(default = "crate::config::default_review_min")]
     pub review_min: f32,
-    /// On the ladder later than the rest, so a row from before it decodes as
-    /// the shipped `false`.
+    /// Absent in older rows, which decode as the shipped `false`.
     #[serde(default = "crate::config::default_sitting_prime")]
     pub sitting_prime: bool,
 }
@@ -89,9 +77,7 @@ pub struct NewGeneration {
     pub parent_id: Option<String>,
 }
 
-/// Test-only, for the reason `NewArtifact`'s is: in production every field
-/// here is a decision, and a field added later must break every call site
-/// until somebody answers for it. A fixture has no such duty.
+/// Test-only: in production every field is a decision, so a new field must break every call site.
 #[cfg(test)]
 impl Default for NewGeneration {
     fn default() -> Self {
@@ -112,14 +98,11 @@ pub struct Generation {
     pub embed_recipe: String,
     pub chat_model: String,
     pub parent_id: Option<String>,
-    /// The idle pass that proposed it. `None` for one minted at boot, or
-    /// restated from a `config.toml` a person edited.
+    /// `None` when minted at boot or restated from an edited `config.toml`.
     pub run_id: Option<String>,
-    /// What the pass said it would gain, as an MRR delta over the replay. A
-    /// generation with a parent and a prediction is one the base is watching.
+    /// An MRR delta over the replay. A generation with a parent and a prediction is watched.
     pub predicted: Option<f64>,
-    /// `live` | `superseded` | `reverted` | `refused` — the last never was
-    /// live: the ladder chose it and rehearsal refused it.
+    /// `refused` was never live: the ladder chose it and rehearsal refused it.
     pub state: String,
 }
 
@@ -138,21 +121,14 @@ fn hydrate(r: sqlx::sqlite::SqliteRow) -> Result<Generation> {
 }
 
 impl Store {
-    /// Record a generation and make it the live one.
-    ///
-    /// One transaction: a base with two live generations is a base whose
-    /// searches cannot say which settings produced them.
+    /// One transaction: two live generations would leave searches unattributable.
     pub async fn record_generation(&self, g: &NewGeneration) -> Result<String> {
         self.insert_live(g, None, None, false)
             .await?
             .ok_or_else(|| Error::Store("generations: an unconditional write was refused".into()))
     }
 
-    /// Record a generation adopted on lived evidence rather than a replay:
-    /// no run to name, and `predicted` is the rate that argued for it.
-    ///
-    /// `None`, and nothing written, where the parent is no longer live — see
-    /// `adopt_generation`.
+    /// `None`, and nothing written, where the parent is no longer live; see `adopt_generation`.
     pub async fn adopt_generation_lived(
         &self,
         g: &NewGeneration,
@@ -161,15 +137,8 @@ impl Store {
         self.insert_live(g, None, Some(predicted), true).await
     }
 
-    /// Record a generation the idle pass chose, carrying the run that chose it
-    /// and what it promised, and make it live.
-    ///
-    /// Only on top of the generation it was measured against. `None`, and
-    /// nothing written, where `g.parent_id` is no longer the live one: the pass
-    /// reads the live generation when it starts and adopts when it ends, and a
-    /// reopen restating the file in between has made another one live.
-    /// Superseding that unread put the loop's candidate back over the
-    /// person's choice.
+    /// `None`, and nothing written, where `g.parent_id` is no longer live: a reopen may have
+    /// restated the file meanwhile, and the person's choice wins.
     pub async fn adopt_generation(
         &self,
         g: &NewGeneration,
@@ -180,8 +149,7 @@ impl Store {
             .await
     }
 
-    /// `over_parent`: write only if `g.parent_id`, where it names one, is the
-    /// live generation — read under the same write lock as the write.
+    /// The live check is read under the same write lock as the write.
     async fn insert_live(
         &self,
         g: &NewGeneration,
@@ -225,8 +193,7 @@ impl Store {
         Ok(Some(id))
     }
 
-    /// A candidate the ladder chose and rehearsal refused. Never live; a row
-    /// so `tried_candidates` does not offer it again under these models.
+    /// Never live; a row so `tried_candidates` does not offer it again under these models.
     pub async fn refuse_generation(
         &self,
         g: &NewGeneration,
@@ -253,18 +220,8 @@ impl Store {
         Ok(id)
     }
 
-    /// Take a generation back: it becomes `reverted` and its parent is live
-    /// again. Returns the parent, or `None` — and changes nothing — for a
-    /// generation with nowhere to go back to, or one that is no longer live.
-    ///
-    /// Cheap and complete because a generation is a row. Nothing in the corpus
-    /// was touched by adopting it, so nothing has to be untouched here.
-    ///
-    /// The second `None` is a reopen restating the file while the idle pass
-    /// was measuring the generation it now takes back. Unchecked, the parent
-    /// was made live beside the generation the restatement had just minted —
-    /// two live rows — and every later pass stopped at the check that the
-    /// live generation describes the running parameters, until a restart.
+    /// Returns the parent, or `None` with nothing changed when there is no parent or the
+    /// generation is no longer live (a restatement made another live meanwhile).
     pub async fn revert_generation(&self, id: &str) -> Result<Option<Generation>> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         let parent: Option<String> = sqlx::query_scalar!(
@@ -316,25 +273,8 @@ impl Store {
         .transpose()
     }
 
-    /// The parameter sets already tried and taken back under these models, so
-    /// the chooser does not offer them again. Without this the pass proposes
-    /// the same losing candidate every quiet period, adopts it, watches it
-    /// fail, and reverts — forever.
-    ///
-    /// Keyed on the models rather than on a date, because that is what makes
-    /// a candidate eligible again: evidence gathered under other models is not
-    /// evidence about these, and neither is a failure.
-    ///
-    /// And on the corpus, which is the other thing a failure was about. A ban
-    /// for the life of an era is a ban forever on a base whose models never
-    /// change — a cap refused when there were two hundred artifacts stayed
-    /// refused at twenty thousand, though "one source may supply three
-    /// results" is a different question at each size. So a ban lapses once
-    /// more artifacts have arrived since the candidate was tried than existed
-    /// when it was tried: the corpus has more than doubled, and the base the
-    /// setting was measured on is not the base it would run on now. Counted
-    /// rather than dated, because growth is what the argument is about and a
-    /// quiet year is not growth.
+    /// Keyed on the models, and lapsing once the corpus has more than doubled since the try:
+    /// a setting refused on a small base is a different question on a large one.
     pub async fn tried_candidates(
         &self,
         embed_recipe: &str,
@@ -355,7 +295,6 @@ impl Store {
         .collect()
     }
 
-    /// Every generation, newest first. The journal a person reads.
     pub async fn generation_history(&self, limit: usize) -> Result<Vec<Generation>> {
         sqlx::query(
             "SELECT id, created_at, params, embed_recipe, chat_model, parent_id,
@@ -371,15 +310,8 @@ impl Store {
     }
 }
 
-/// The live generation for the running configuration, minting one where the
-/// base has none or where the models have changed under it.
-///
-/// A model change mints a generation rather than editing the live one: a
-/// generation is immutable, and the point of the row is that observations
-/// collected under it name something that still says what it said. The new
-/// era starts from the live generation's parameters, not the file's — a model
-/// change moves no knob — and `params` is only what a base with no generation
-/// at all starts from.
+/// A model change mints a new generation from the live parameters, never edits the live one.
+/// `params` is only what a base with no generation starts from.
 pub async fn ensure_generation(
     store: &Store,
     params: GenerationParams,
@@ -417,67 +349,11 @@ pub async fn ensure_generation(
         .ok_or_else(|| Error::Store("generations: the new generation was not made live".into()))
 }
 
-/// What `meta` remembers the file said the last time this base opened. How a
-/// boot tells an edited file from an unchanged one.
+/// How a boot tells an edited file from an unchanged one.
 const FILE_PARAMS_SEEN: &str = "evolve.file_params";
 
-/// The generation a base serves under from this boot on.
-///
-/// The file holds the operator's starting point and the database holds what
-/// is live, and at boot the two can disagree — the idle pass moved a knob
-/// while the file kept saying what it said. Who wins is decided by what
-/// changed:
-///
-/// - the file was edited since the last boot: the file wins, and a generation
-///   is minted from it so the journal shows the hand that moved the knob.
-/// - autonomy is off and the live generation is one *the loop* adopted: the
-///   file wins for the same reason. Turning the loop off is therefore the way
-///   back to the file, exactly.
-/// - otherwise the live generation wins, because nothing about the operator's
-///   intent changed and the loop's move is the newer fact.
-///
-/// "The loop adopted it" is `run_id`, and that qualifier is load-bearing: a
-/// generation a *person* set carries none, and reverting one on the autonomy
-/// switch reverted the operator rather than the loop. The way in is the
-/// ordinary one: an edit to `config.toml` is restated as a generation at the
-/// next boot, but the process-wide `Config` a core is rebuilt from is loaded
-/// once and never reloaded — so a base evicted and reopened later can be
-/// handed *stale* file params by `generation_check`, and under
-/// `learn.mode = "learning"` (which once resolved to `autonomous = "off"`) the
-/// old unconditional `!autonomous` undid the edit in both the journal and the
-/// serving core.
-///
-/// The caller serves under whatever comes back. Without this a restart would
-/// quietly return the ranking to the file while every observation kept being
-/// written under a generation that no longer described it.
-/// Whether the loop chose this generation, as opposed to a person setting it.
-///
-/// Two ways in, and `run_id` is only the first. The replay sweep names the
-/// `eval_runs` row that argued for its candidate, so `run_id` is set — but
-/// `tune::adopt_lived`, which adopts on what the band actually earned rather
-/// than on a replay, goes through `adopt_generation_lived` and writes
-/// `run_id = NULL`. There is no run to name; the evidence is the observations
-/// themselves.
-///
-/// What separates that from a person's edit is `predicted`. `restate_generation`
-/// — the one path a hand reaches, from a `config.toml` edit — leaves both
-/// empty, and says so: "nothing proposed this and nothing is watching it". A
-/// lived adoption always carries the rate that argued for it.
-///
-/// So: a run, or a parent and a prediction. `web::insights` already sorts the
-/// history by exactly this and renders the middle case as "adopted by the base
-/// on what the band earned"; reading it differently here meant a `spread_max`
-/// or a `review_min` the loop had chosen was indistinguishable from one
-/// somebody typed, and turning autonomy off — which is documented as the way
-/// back to the file, exactly — did not bring those knobs back.
-///
-/// And asked of the generation that set the knobs, which is not always the
-/// live one. A model change mints a generation that copies its parent's
-/// parameters and names neither a run nor a prediction — nothing proposed it
-/// and nothing watches it — so read where it stands it looked like a person's
-/// edit, and switching autonomy off after an embedder change kept every knob
-/// the loop had moved. A generation whose models changed and whose parameters
-/// did not moved nothing, so the question passes to its parent.
+/// Whether the loop chose this generation: a `run_id`, or a parent and a prediction (lived
+/// adoption). A model change copies its parent's params, so the question passes to the parent.
 async fn loop_moved(store: &Store, g: &Generation) -> Result<bool> {
     let mut g = g.clone();
     while g.run_id.is_none()
@@ -492,6 +368,8 @@ async fn loop_moved(store: &Store, g: &Generation) -> Result<bool> {
     Ok(g.run_id.is_some() || (g.parent_id.is_some() && g.predicted.is_some()))
 }
 
+/// The file wins if edited since the last boot, or if autonomy is off and the loop moved the
+/// live generation; otherwise the live generation wins.
 pub async fn boot_generation(
     store: &Store,
     file: GenerationParams,
@@ -517,12 +395,7 @@ pub async fn boot_generation(
     Ok(live)
 }
 
-/// Journal parameters a person set by editing the file, as a generation of
-/// the same era, child of the one that was live.
-///
-/// Every ranking change is a named generation, or the numbers gathered after
-/// it have nothing to be about. `run_id` and `predicted` stay empty: nothing
-/// proposed this and nothing is watching it.
+/// `run_id` and `predicted` stay empty: nothing proposed this and nothing is watching it.
 pub async fn restate_generation(
     store: &Store,
     live: &Generation,
@@ -545,10 +418,7 @@ pub async fn restate_generation(
         .ok_or_else(|| Error::Store("generations: the restated generation was not written".into()))
 }
 
-// `Error` has no `From<serde_json::Error>`, so both directions map explicitly.
-// This is the shape `eval_runs.rs` already uses; copied rather than replaced by
-// a blanket conversion, which would swallow the context in every other store
-// module too.
+// `Error` has no `From<serde_json::Error>`; a blanket conversion would lose context elsewhere.
 fn json<T: serde::Serialize>(v: &T) -> Result<String> {
     serde_json::to_string(v).map_err(|e| Error::Store(format!("generations: {e}")))
 }
@@ -587,8 +457,6 @@ mod tests {
         );
         assert_eq!(p.spread_max, crate::config::default_spread_max());
         assert!(p.rerank);
-        // The sitting flip joined the ladder later still, and a row from
-        // before it ran with the shipped value the same way.
         assert_eq!(p.sitting_prime, crate::config::default_sitting_prime());
         assert!(!p.sitting_prime, "and the shipped value is off");
     }
@@ -653,8 +521,6 @@ mod tests {
     #[tokio::test]
     async fn a_changed_chat_model_starts_a_new_era() {
         // Every citation-derived number shifts when the generator changes.
-        // Carrying on under the same generation would compare two things that
-        // were never measured the same way.
         let store = Store::memory().await.unwrap();
         let params = GenerationParams {
             recency_weight: 0.05,
@@ -702,8 +568,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_reverted_candidate_is_not_offered_again() {
-        // Without this the pass proposes the same losing candidate every quiet
-        // period, adopts it, watches it fail, and reverts — forever.
         let store = Store::memory().await.unwrap();
         let first = store.record_generation(&sample()).await.unwrap();
         let mut second = sample();
@@ -745,8 +609,7 @@ mod tests {
             .expect("the parent is live");
         store.revert_generation(&id).await.unwrap();
 
-        // Two artifacts stood there when it was refused, and the row is
-        // stamped after them.
+        // Two artifacts stood there when it was refused, and the row is stamped after them.
         let corpus = store.insert_corpus("x", "web", None).await.unwrap();
         grow(&store, &corpus.id, 2, 100).await;
         sqlx::query!("UPDATE generations SET created_at = 200 WHERE id = ?", &id)
@@ -759,7 +622,7 @@ mod tests {
             "the corpus has not grown at all"
         );
 
-        // Two more: the corpus doubled, which is not yet more than doubled.
+        // The corpus doubled, which is not yet more than doubled.
         grow(&store, &corpus.id, 2, 300).await;
         assert!(!tried().await.unwrap().is_empty(), "doubled is not enough");
         grow(&store, &corpus.id, 1, 300).await;
@@ -842,9 +705,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_generation_the_loop_adopted_survives_a_restart() {
-        // Without this a restart quietly returned the ranking to the file while
-        // every observation kept being written under a generation that no
-        // longer described it.
         let (store, adopted) = moved_by_the_loop(true).await;
         let g = boot_generation(&store, p(0.05, Some(3)), "recipe-a", "qwen", true)
             .await
@@ -901,7 +761,6 @@ mod tests {
         adopted.parent_id = Some(first.id);
         adopted.params = p(0.25, Some(3));
         adopted.embed_recipe = "recipe-a".into();
-        // The lived path: a prediction, and no run to name.
         let id = store
             .adopt_generation_lived(&adopted, 0.62)
             .await
@@ -954,13 +813,8 @@ mod tests {
 
     #[tokio::test]
     async fn switching_autonomy_off_does_not_revert_what_a_person_set() {
-        // The loop's adoptions go back to the file when autonomy is switched
-        // off; a person's restated settings must not, and `run_id` is what
-        // tells them apart. The process-wide `Config` a core is rebuilt from
-        // is loaded once at boot, so a reopen can hand us *stale* file params
-        // — and under `learn.mode = "learning"`, which resolves to
-        // `autonomous = "off"`, the old unconditional `!autonomous` undid the
-        // operator in both the journal and the serving core.
+        // A person's restated settings must survive autonomy off; a reopen can hand stale file
+        // params, since the process-wide `Config` is loaded once at boot.
         let store = Store::memory().await.unwrap();
         let file = p(0.05, Some(3));
         let first = boot_generation(&store, file, "recipe-a", "qwen", false)
@@ -1110,8 +964,7 @@ mod tests {
 
     #[test]
     fn a_generation_written_before_the_retrieval_knobs_still_reads() {
-        // Stage 1 and 2 rows. A migration here would be a recreated database,
-        // which is the price this schema charges and not one a knob may cost.
+        // Stage 1 and 2 rows: a migration here would mean recreating the database.
         let p: GenerationParams =
             from_json(r#"{"recency_weight":0.05,"per_source_cap":3}"#).unwrap();
         assert_eq!(p.candidate_multiplier, 3);
@@ -1137,8 +990,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_superseded_generation_is_kept_rather_than_replaced() {
-        // The journal is the whole point: a parameter that moved has to have
-        // something to have moved *from*, months later.
         let store = Store::memory().await.unwrap();
         store.record_generation(&sample()).await.unwrap();
         store.record_generation(&sample()).await.unwrap();

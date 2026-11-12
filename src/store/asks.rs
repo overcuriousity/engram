@@ -1,10 +1,4 @@
-//! What a question looked like, so it can be judged later.
-//!
-//! The search side keeps the query and the verdict apart in time; a question
-//! is judged where it is answered, because judging an answer means reading it
-//! in context. What still has to be recorded in the moment is the answer and
-//! the excerpts the model saw — the verdict is about *those*, and neither can
-//! be reconstructed afterwards.
+//! Recorded questions: the answer and the excerpts the model saw, which cannot be rebuilt later.
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
@@ -14,42 +8,30 @@ use sqlx::Row;
 pub struct NewAskCitation {
     pub artifact_id: String,
     pub score: f32,
-    /// The answer referenced this `[n]`. What the model was *shown* is not
-    /// what it used, and only what it used is engagement — see
-    /// `RecordedAsk::cited`.
+    /// The answer referenced this `[n]`; only use counts as engagement, not being shown.
     pub used: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewAsk {
     pub question: String,
-    /// The authenticated subject. Recorded, never used for coalescing: a
-    /// question is one deliberate act, not a typing burst.
+    /// Recorded, never used for coalescing: a question is one deliberate act.
     pub scope: Option<String>,
-    /// JSON, as `search_events.filters` is.
     pub filters: String,
-    /// The vector ask retrieved with. May be empty when the query cache had
-    /// already evicted it; such an event is never clustered as a gap.
+    /// Empty when the query cache had evicted it; such an event is never clustered as a gap.
     pub query_vec: Vec<f32>,
     pub embed_model: String,
     pub answer: String,
     pub abstained: bool,
     pub dropped: usize,
     pub truncated: bool,
-    /// How many literals the answer carried that no excerpt it was shown
-    /// held — the count behind the badge, not the strings.
-    ///
-    /// A count because one observation is written per answer rather than per
-    /// literal: three unsupported literals are one retrieval that fell short,
-    /// not three.
+    /// One count per answer, not per literal: several unsupported literals are one retrieval miss.
     pub unsupported: usize,
     /// In the order the model saw them; `n` is assigned 1-based from it.
     pub citations: Vec<NewAskCitation>,
 }
 
-/// Test-only, for the reason `NewArtifact`'s is: in production every field
-/// here is a decision, and a field added later must break every call site
-/// until somebody answers for it. A fixture has no such duty.
+/// Test-only: in production every field is a decision, so a new field must break every call site.
 #[cfg(test)]
 impl Default for NewAsk {
     fn default() -> Self {
@@ -69,7 +51,6 @@ impl Default for NewAsk {
     }
 }
 
-/// One recorded question as the pursuit sweep reads it.
 #[derive(Debug, Clone)]
 pub struct RecordedAsk {
     pub id: String,
@@ -77,17 +58,12 @@ pub struct RecordedAsk {
     pub query_vec: Vec<f32>,
     pub created_at: i64,
     pub abstained: bool,
-    /// The excerpts the answer actually referenced, in the order they were
-    /// shown. Not everything the model saw: an ask packs whatever fits, so
-    /// "was in the prompt" says nothing about whether it helped, and an
-    /// abstention leaves this empty however much it was given.
     pub cited: Vec<String>,
     pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskVerdict {
-    /// The answer is correct as stated.
     Right,
     /// The base holds the answer and this is not it.
     Wrong,
@@ -155,9 +131,7 @@ fn one_row(res: sqlx::sqlite::SqliteQueryResult) -> Result<()> {
 
 impl Store {
     pub async fn record_ask(&self, ask: NewAsk) -> Result<String> {
-        // Read before the transaction opens: this is a different table with a
-        // different lifetime, and holding the write lock across it would put a
-        // question's own record behind a row that never changes.
+        // Read before the transaction opens, so the write lock is not held across another table.
         let generation = self.live_generation().await?;
         let mut tx = self.pool.begin().await?;
         let id = new_id();
@@ -194,15 +168,7 @@ impl Store {
             .execute(&mut *tx)
             .await?;
 
-            // The densest positive signal there is, and until now it was
-            // computed, stored and read by nothing that tunes anything. An
-            // excerpt the answer actually drew on says the retrieval that put
-            // it there was right to.
-            //
-            // `abstained` is checked as well as `used`, though an abstention
-            // references nothing and so has no used citation: the guard is
-            // explicit because the rule is about the answer, not about the
-            // scan that happens to implement it.
+            // `abstained` is checked explicitly: the rule is about the answer, not the scan.
             if let Some(g) = &generation
                 && c.used
                 && !ask.abstained
@@ -224,10 +190,7 @@ impl Store {
             }
         }
 
-        // An answer that asserts a command or a path none of its excerpts held
-        // is retrieval having failed to supply what the answer needed. It
-        // names no artifact, because the claim is about the set: nothing in the
-        // list was wrong to be there, the list was missing something.
+        // Names no artifact: the claim is that the set was missing something.
         if let Some(g) = &generation
             && ask.unsupported > 0
         {
@@ -283,9 +246,6 @@ impl Store {
         }))
     }
 
-    /// The artifacts an answer actually referenced, in citation order. What
-    /// the model was shown but did not use is not here: only use is
-    /// engagement.
     pub async fn used_citations(&self, event_id: &str) -> Result<Vec<String>> {
         Ok(sqlx::query_scalar!(
             "SELECT artifact_id FROM ask_citations WHERE event_id = ? AND used = 1 ORDER BY n",
@@ -308,8 +268,7 @@ impl Store {
         )
     }
 
-    /// Take a verdict back, carriers included. A carrier left behind would
-    /// count towards citation recall for a judgement nobody stands behind.
+    /// A carrier left behind would count towards citation recall for a withdrawn verdict.
     pub async fn unjudge_ask(&self, id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query!(
@@ -329,10 +288,7 @@ impl Store {
         Ok(())
     }
 
-    /// Flip whether citation `n` carried the answer; returns the new state.
-    /// Saying an excerpt carried the answer is saying the answer was right, so
-    /// an unjudged event becomes `right`. A verdict already given is left as it
-    /// is: the toggle refines a verdict, it does not overrule one.
+    /// Marking a carrier makes an unjudged event `right`; an existing verdict is left alone.
     pub async fn toggle_carried(&self, id: &str, n: i64) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let res = sqlx::query!(
@@ -385,8 +341,7 @@ impl Store {
         Ok(s)
     }
 
-    /// Unjudged questions older than the window. Judged ones are exempt for
-    /// the reason judged searches are: they are the operator's own work.
+    /// Judged questions are exempt: they are the operator's own work.
     pub async fn expire_asks(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);
@@ -400,8 +355,7 @@ impl Store {
         .rows_affected())
     }
 
-    /// Recorded questions with `from < created_at <= to`, oldest first, with
-    /// the excerpts their answers referenced — the sources a question engaged.
+    /// `from < created_at <= to`, oldest first.
     pub async fn asks_between(&self, from: i64, to: i64) -> Result<Vec<RecordedAsk>> {
         let rows = sqlx::query(
             "SELECT id, question, query_vec, created_at, abstained, scope FROM ask_events
@@ -504,8 +458,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_abstention_leaves_no_observation_however_much_it_was_shown() {
-        // Being packed into the prompt is not engagement. An abstention
-        // references nothing however many excerpts it was given.
         let (store, generation) = base().await;
         let mut a = ask("something the base has never held", 3);
         a.abstained = true;
@@ -565,8 +517,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_ask_recorded_before_any_generation_exists_writes_no_observation() {
-        // Ordering safety: the boot path that names a generation runs in the
-        // background, and nothing may fail because it has not run yet.
+        // The boot path that names a generation runs in the background; nothing may depend on it.
         let store = Store::memory().await.unwrap();
         store.record_ask(ask("early", 2)).await.unwrap();
 
@@ -652,7 +603,6 @@ mod tests {
             vec![2]
         );
 
-        // Toggling again turns it off and leaves the verdict alone.
         assert!(!store.toggle_carried(&id, 2).await.unwrap());
         let ev = store.ask_event(&id).await.unwrap().unwrap();
         assert_eq!(ev.verdict, Some(AskVerdict::Right));
@@ -696,7 +646,6 @@ mod tests {
             .judge_ask(&old_judged, AskVerdict::Right)
             .await
             .unwrap();
-        // Age two of them past a 30-day window.
         for id in [&old_unjudged, &old_judged] {
             sqlx::query!(
                 "UPDATE ask_events SET created_at = ? WHERE id = ?",
@@ -713,7 +662,6 @@ mod tests {
         assert!(store.ask_event(&fresh).await.unwrap().is_some());
         // Zero means keep forever.
         assert_eq!(store.expire_asks(0).await.unwrap(), 0);
-        // Citations go with the event.
         let orphans: i64 = sqlx::query_scalar!(
             "SELECT count(*) FROM ask_citations WHERE event_id = ?",
             &old_unjudged

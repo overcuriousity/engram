@@ -19,25 +19,8 @@ pub struct Version {
 }
 
 impl Store {
-    /// The write, in one transaction: version `n` = the current text, the
-    /// artifact's text/title/caveats replaced, `embed_rev` bumped, the journal
-    /// row. All of it or none of it. Returns `(action_id, n)`.
-    ///
-    /// `expected_rev` is the `embed_rev` the caller read the text at, and
-    /// `None` where it did not read one — a restore, which is putting back a
-    /// version rather than rewriting the current one. `Ok(None)` means the
-    /// artifact has moved on since and nothing was written.
-    ///
-    /// The check is `mark_embedded`'s idiom, and it is here for the same
-    /// reason: a condensation is a read-modify-write with a model call in the
-    /// middle of it, and that call takes as long as the endpoint feels like
-    /// taking. `jobs::condense::run` reads the text, spends a minute
-    /// generating a shorter one, and writes it back — so an edit through the
-    /// API in that window was silently reverted to a rewrite of the text as it
-    /// stood *before* the edit. Worse than losing the edit: the `losses()`
-    /// guard that is the whole safety argument of this path was computed
-    /// against the stale copy, so a value the user had just added was covered
-    /// by nothing at all.
+    /// Returns `(action_id, n)`, or `Ok(None)` when `embed_rev` no longer
+    /// equals `expected_rev`: the model call is slow, and an edit made meanwhile must survive.
     pub async fn condense_artifact(
         &self,
         id: &str,
@@ -53,9 +36,7 @@ impl Store {
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::NotFound)?;
-        // Before anything is written, so the version row and the journal row
-        // are never minted for a rewrite that is then thrown away. The
-        // transaction is dropped rather than committed.
+        // Checked before any write, so no version or journal row is minted for a discarded rewrite.
         if let Some(want) = expected_rev
             && row.get::<i64, _>("embed_rev") != want
         {
@@ -113,7 +94,6 @@ impl Store {
         Ok(Some((action_id, n)))
     }
 
-    /// Oldest first.
     pub async fn versions_of(&self, artifact_id: &str) -> Result<Vec<Version>> {
         let rows = sqlx::query(
             "SELECT artifact_id, n, text, title, caveats, created_at, action_id
@@ -136,16 +116,8 @@ impl Store {
             .collect())
     }
 
-    /// Put version `n` back as the live text; bumps `embed_rev`. The caller
-    /// stamps the journal row. Nothing is deleted: the version row stays, and
-    /// the text being replaced becomes a version of its own first, retired by
-    /// `action_id` — the journal row this restore takes back.
-    ///
-    /// That second half was missing. A condensation keeps what it replaced,
-    /// and nothing kept what came after it: an edit made to the condensed text
-    /// lived only in `artifacts`, and restoring the version the condensation
-    /// retired wrote straight over it. Rule 1 restores on its own, so the edit
-    /// could be gone for good without anyone having pressed anything.
+    /// The text being replaced becomes a version first, retired by `action_id`, so an edit
+    /// made after a condensation survives a restore.
     pub async fn restore_version(&self, artifact_id: &str, n: i64, action_id: &str) -> Result<()> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         let row = sqlx::query(

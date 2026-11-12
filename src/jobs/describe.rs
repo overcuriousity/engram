@@ -16,8 +16,7 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
         return Ok(());
     }
     let Some(describer) = core.describer.as_ref() else {
-        // Not a validation error: the photo is stored and the job should wait
-        // for the role, not be dropped.
+        // Not a validation error: the photo is stored and the job waits for the role.
         return Err(Error::Inference {
             role: "vision",
             detail: "no vision role configured".into(),
@@ -36,14 +35,12 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     let text = read?;
 
     if text.trim().is_empty() {
-        // Not a near-duplicate, so not the review queue: that page offers
-        // "keep" and "discard" against another corpus, and there is none.
+        // Not the review queue: there is no other corpus to keep or discard against.
         park_failed(core, corpus_id, "the model returned no text for this image").await?;
         return Ok(());
     }
 
-    // Before the text is written: the scan reads every stored signature, and
-    // this row's is still empty, so it cannot match itself.
+    // Before the text is written: this row's signature is still empty, so it cannot match itself.
     let sig = crate::store::shingle::signature(&text);
     let near = core
         .store
@@ -60,16 +57,11 @@ pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// The read is not going to happen — the model said no, or said nothing for
-/// as long as we were willing to ask. The photo stays; the corpus says why it
-/// stopped, on its page and on Ops, and `reprocess(Describe)` is the way back.
+/// The model said no, or nothing for as long as we asked; `reprocess(Describe)` is the way back.
 pub async fn park_failed(core: &Core, corpus_id: &str, reason: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     let mut meta = src.metadata.clone();
-    // Indexing a `Value` that is not an object panics, and this one comes
-    // straight out of a column. The reason is the whole point of the write —
-    // it is what the corpus page and Ops show — so a column holding something
-    // else is started over rather than left to take the worker down.
+    // Indexing a non-object `Value` panics, and a column can hold anything.
     if !meta.is_object() {
         meta = serde_json::json!({});
     }
@@ -136,9 +128,7 @@ mod tests {
             d.last_context()
         );
         assert!(d.last_context().contains("p.png"));
-        // The note captured with the photo is armed for embedding at the door,
-        // so it sits ahead of the synthesis in the queue. Both are queued; the
-        // hand-off this test is about is the second one.
+        // The photo's note is embedded first; the hand-off under test is the second job.
         let embed = core
             .store
             .claim_job()
@@ -302,9 +292,6 @@ mod tests {
 
     #[tokio::test]
     async fn parking_survives_a_metadata_column_that_is_not_an_object() {
-        // `meta["describe"] = ...` panics on anything but an object or null,
-        // and the value comes out of a column. A worker is the wrong place to
-        // find that out.
         let core = test_core_without_vision().await;
         let src = image_corpus(&core, serde_json::json!("not an object")).await;
 

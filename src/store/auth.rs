@@ -10,9 +10,7 @@ pub struct ApiToken {
     pub created_at: i64,
     pub last_used_at: Option<i64>,
     pub revoked_at: Option<i64>,
-    /// What asked for this token. `None` for one minted before it was
-    /// recorded, and for a caller that sent no `User-Agent` — which is most
-    /// scripts, and honest of them.
+    /// `None` for older tokens and for callers that sent no `User-Agent`.
     pub user_agent: Option<String>,
 }
 
@@ -56,7 +54,6 @@ impl Control {
         Ok(t)
     }
 
-    /// The live token with this id, if there is one.
     pub async fn active_token(&self, id: &str) -> Result<Option<StoredToken>> {
         let row = sqlx::query!(
             r#"SELECT id AS "id!", subject, token_hash FROM api_tokens
@@ -72,13 +69,7 @@ impl Control {
         }))
     }
 
-    /// One subject's tokens, newest first.
-    ///
-    /// The predicate is not a nicety. `api_tokens` used to live in the single
-    /// user's own database, where "every row" and "my rows" were the same set;
-    /// it is one instance-wide table now, and an unfiltered listing is every
-    /// tenant's token ids, names, user-agents and last-used times rendered on
-    /// whoever opened Settings.
+    /// `api_tokens` is instance-wide: without the subject filter this lists every tenant's tokens.
     pub async fn list_tokens(&self, subject: &str) -> Result<Vec<ApiToken>> {
         let rows = sqlx::query!(
             r#"SELECT id AS "id!", name, subject, created_at, last_used_at, revoked_at, user_agent
@@ -112,14 +103,8 @@ impl Control {
         Ok(())
     }
 
-    /// Revoke one of `subject`'s tokens, and say whether there was one.
-    ///
-    /// Scoped for the same reason the listing is, and the consequence is worse:
-    /// an id-only UPDATE lets any signed-in user kill another tenant's
-    /// extension pairing. `false` rather than an error, so the caller decides
-    /// whether an unknown id is a 404 or nothing at all — from the outside the
-    /// two cases must look the same, or the answer enumerates other people's
-    /// token ids.
+    /// Scoped by subject so one user cannot revoke another's. An unknown id and another
+    /// tenant's id both return `false`, or the answer enumerates token ids.
     pub async fn revoke_token(&self, id: &str, subject: &str) -> Result<bool> {
         Ok(sqlx::query!(
             "UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND subject = ?",

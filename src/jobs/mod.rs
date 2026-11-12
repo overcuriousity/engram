@@ -37,12 +37,8 @@ pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// A job still marked `running` after this long belonged to a process that died.
 pub const STUCK_AFTER_SECS: i64 = 600;
 
-/// Supersede `loser` by `winner`, and carry on if it cannot be done.
-///
-/// `supersede` refuses a side that is no longer active, and every caller here
-/// read those statuses a moment ago — so an operator deprecating one in
-/// between is an ordinary race, not a reason to fail the caller's whole
-/// sweep or unit. Returns whether it happened.
+/// `supersede` refuses an inactive side, and a status changing since the caller read it is a race,
+/// not a failure of the sweep. Returns whether it happened.
 pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &str) -> bool {
     match core.supersede(loser, winner).await {
         Ok(()) => {
@@ -56,15 +52,11 @@ pub(crate) async fn try_supersede(core: &Core, loser: &str, winner: &str, why: &
     }
 }
 
-/// Claim one unit and run it, whoever it belongs to.
-///
-/// What a worker calls. The queue is instance-wide; the work is not. The
-/// subject comes off the claimed row and names the core the unit runs against,
-/// so a worker never holds a tenant across two units — which is what makes
-/// this round-robin between users without a scheduler in it.
+/// Claim one unit from the instance-wide queue and run it against the core its row names.
+/// A worker never holds a tenant across two units, which round-robins users without a scheduler.
 pub async fn run_any(tenants: &crate::tenants::Tenants) -> Result<bool> {
-    // Shut, the generating stages are passed over where they stand: see
-    // `Stage::calls_a_generator`. A server never shuts it.
+    // Shut, the generating stages are passed over (`Stage::calls_a_generator`); a server never
+    // shuts it.
     let held: &[Stage] = if tenants
         .generation()
         .load(std::sync::atomic::Ordering::Relaxed)
@@ -78,23 +70,14 @@ pub async fn run_any(tenants: &crate::tenants::Tenants) -> Result<bool> {
     };
     let core = match tenants.get(&subject).await {
         Ok(t) => t.core,
-        // The user was deleted between the enqueue and the claim. Their queue
-        // goes with the row cascade, but a unit already in a worker's hand can
-        // outlive it, and retrying it can never succeed.
+        // The user was deleted after the claim; retrying can never succeed.
         Err(Error::NotFound) => {
             tracing::info!(subject = %subject, "queue row for a user that no longer exists; dropping");
             tenants.control().complete_job(job.id).await?;
             return Ok(true);
         }
-        // Anything else is a fault of this moment rather than of the row: a
-        // Qdrant that will not answer, a file that will not open. The claim
-        // above already happened, so returning here would leave the unit
-        // `running` with nobody holding it — one attempt spent, no
-        // `last_error`, and nothing until the hourly `reclaim_stuck` notices.
-        // Put it back on the queue at the ordinary backoff, which is what
-        // every other failure in this module does, and then let the worker
-        // loop log and pause on the error rather than spinning through the
-        // whole queue one claim at a time while the endpoint is down.
+        // A fault of this moment, not of the row. The claim already happened, so put the unit back
+        // at the ordinary backoff rather than leave it `running` until `reclaim_stuck`.
         Err(e) => {
             tracing::warn!(
                 subject = %subject,
@@ -111,12 +94,7 @@ pub async fn run_any(tenants: &crate::tenants::Tenants) -> Result<bool> {
     run_dispatched(&core, job, Some(&subject)).await
 }
 
-/// Claim and run at most one of *this tenant's* jobs. Returns false when their
-/// queue is empty, which is the loop's signal to sleep.
-///
-/// Beside `run_any` rather than replaced by it: "take this base's next step" is
-/// a real operation, and every test that drives a capture to completion is
-/// asking for exactly it.
+/// Claim and run at most one of this tenant's jobs; false when their queue is empty.
 pub async fn run_one(core: &Core) -> Result<bool> {
     let Some(job) = core.store.claim_job().await? else {
         return Ok(false);
@@ -133,24 +111,20 @@ async fn run_dispatched(core: &Core, job: Job, subject: Option<&str>) -> Result<
         target = %job.target_id,
         attempt = job.attempts
     );
-    // `.instrument`, not `span.enter()`: a guard held across an `.await` does
-    // not travel with the future, so every line logged after the first
-    // suspension point lost its `job{...}` prefix — which in a journal full of
-    // interleaved windows is the only thing saying which job spoke.
+    // `.instrument`, not `span.enter()`: a guard held across `.await` does not travel with the
+    // future.
     let ran = run_claimed(core, job).instrument(span).await;
     core.live.changed();
     ran
 }
 
 async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
-    // Only a sweep answers this, and only a sweep is asked: `did_work`
-    // governs how long until the next *periodic* run, and a unit that is not
-    // periodic has none.
+    // `did_work` governs only the next periodic run, so only a sweep sets it.
     let mut did_work = false;
     let result = match (job.stage, job.target_kind.as_str()) {
         (Stage::Synthesize, _) => synthesize::plan(core, &job.target_id).await,
-        // Embedding is batched per source; the per-chunk path is for edits,
-        // for oversize splits, and for isolating a chunk the batch chokes on.
+        // Batched per source; the per-chunk path is for edits, oversize splits and isolating a bad
+        // chunk.
         (Stage::Embed, "corpus") => embed::run_corpus(core, &job.target_id).await,
         (Stage::Embed, _) => embed::run(core, &job.target_id).await,
         (Stage::LinkJudge, _) => associate::judge(core, &job.target_id).await,
@@ -164,9 +138,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Extract, _) => extract::run(core, &job.target_id).await,
         (Stage::Fetch, _) => refetch::run(core, &job.target_id).await,
         (Stage::Generate, _) => pursuit::generate(core, &job.target_id).await,
-        // Every periodic unit goes through one path, because every periodic
-        // unit is accounted for. The sweeps below look at the whole collection,
-        // so they ignore the target.
+        // The sweeps look at the whole collection and ignore the target.
         (
             Stage::Consolidate
             | Stage::Associate
@@ -183,26 +155,13 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     match result {
         Ok(()) => {
             core.store.complete_job(job.id).await?;
-            // After completing, never before: the queue is keyed by (stage,
-            // target), so a handler that re-armed itself would be upserting the
-            // very row this `complete_job` then closes.
+            // After completing, never before: the queue is keyed by (stage, target), so a handler
+            // re-arming itself would upsert the row `complete_job` then closes.
             if job.stage == Stage::Embed && job.target_kind == "corpus" {
                 embed::rearm_if_more(core, &job.target_id).await?;
             }
-            // Same rule, and the same reason `remind::run` does not do this
-            // itself: the unit sleeps until the *earliest* owed moment, so
-            // every run has to name the next one. `arm_at` refuses a `running`
-            // row — that guard is what stops a queued sweep receding forever —
-            // so an arming from inside the handler was silently a no-op, and
-            // with two reminders due the second never fired until an unrelated
-            // write happened to re-arm the unit.
-            // Logged and carried past, the way `rearm_periodic` treats its own
-            // failure. `complete_job` has already committed, so propagating
-            // recovers nothing here and only turns a lost arming into a lost
-            // arming plus a failed run. `arm_missing_periodic` is what actually
-            // puts the unit back — see the tail of it, where `Remind` is armed
-            // for exactly this reason — and a lost arming now costs one repair
-            // interval rather than lasting until an unrelated write.
+            // Same rule: `arm_at` refuses a `running` row. Logged, not propagated: `complete_job`
+            // has committed, and `arm_missing_periodic` repairs a lost arming.
             if job.stage == Stage::Remind
                 && let Err(e) = core.store.rearm_remind().await
             {
@@ -212,8 +171,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             arm_successor(core, &job).await;
             Ok(true)
         }
-        // The target was deleted while the job waited. Retrying can never
-        // succeed, so close the job instead of burning attempts.
+        // The target was deleted while the job waited; retrying can never succeed.
         Err(Error::NotFound) => {
             tracing::info!("target no longer exists; dropping job");
             core.store.complete_job(job.id).await?;
@@ -222,47 +180,33 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         Err(e) if e.retryable() => {
             let exhausted = job.attempts >= MAX_ATTEMPTS;
             match (job.stage, job.target_kind.as_str()) {
-                // The two units that stop asking. A name is decoration and the
-                // corpus already has its fallback. A pair the model will not
-                // judge stays pending, and `pairs_to_judge` orders it behind
-                // the ones that have been asked less, so a later sweep decides
-                // again whether it is worth asking about. Everything else
-                // stays queued at the backoff ceiling, because everything else
-                // carries knowledge that would otherwise be lost.
-                // A push that went out and could not be written down. The
-                // retries have each re-delivered it; going on would re-deliver
-                // it for ever, and the rows are still owed either way. Closed
-                // *without* re-arming — `rearm_remind` lives on the `Ok` road
-                // above — so the unit comes back through `arm_missing_periodic`
-                // rather than through the past instant that made this a loop.
+                // A push sent but not recorded: retrying re-delivers it. Closed without re-arming,
+                // so the unit returns through `arm_missing_periodic`, not the past instant.
                 (Stage::Remind, _) if exhausted => {
                     tracing::warn!(error = %e, "could not record a push after every retry; standing the unit down until the repair pass");
                     core.store.complete_job(job.id).await?;
                 }
+                // A name is decoration, and an unjudged pair stays pending for a later sweep;
+                // everything else stays queued, as it carries knowledge.
                 (Stage::Dedupe | Stage::Title, _) if exhausted => {
                     tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;
                 }
-                // The photo is stored, so nothing is lost by stopping — but a
-                // corpus shown as in flight forever is a lie. Unless the role
-                // is simply not configured, which is a wait, not a failure.
+                // The photo is stored, but a corpus in flight forever is a lie. An unconfigured
+                // role is a wait, not a failure.
                 (Stage::Describe, _) if exhausted && core.describer.is_some() => {
                     tracing::warn!(error = %e, "could not read this image; parking it");
                     park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
-                // The PDF is stored, so nothing is lost by stopping — but a
-                // corpus shown as in flight forever is a lie. No role guard,
-                // unlike `Describe`: extraction needs nothing configured, so
-                // this can never be a wait for a role that has not arrived.
+                // No role guard: extraction needs nothing configured.
                 (Stage::Extract, _) if exhausted => {
                     tracing::warn!(error = %e, "could not extract this PDF; parking it");
                     park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
-                // A whole source failing together usually means the endpoint is
-                // down, but it can also be one chunk the embedder rejects.
-                // Retrying chunk by chunk isolates the culprit either way.
+                // A whole source failing is usually the endpoint, but can be one chunk the embedder
+                // rejects.
                 (Stage::Embed, "corpus") if exhausted => {
                     tracing::warn!(error = %e, "batch embedding exhausted retries; retrying chunk by chunk");
                     split_or_fail(core, &job, &e).await?;
@@ -283,18 +227,15 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         Err(e) => {
             tracing::error!(error = %e, "job failed permanently");
             match (job.stage, job.target_kind.as_str()) {
-                // Refused as a batch does not mean refused as chunks; the same
-                // isolation the exhausted path buys is worth buying here.
+                // Refused as a batch does not mean refused as chunks.
                 (Stage::Embed, "corpus") => split_or_fail(core, &job, &e).await?,
                 (Stage::Embed, _) => settle_failed_artifact(core, &job, &e).await?,
                 (Stage::Describe | Stage::Extract, _) => {
                     park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
                     core.store.complete_job(job.id).await?;
                 }
-                // A link still unread. Every refusal is the site's answer
-                // today, not a verdict, so it is asked again on the ordinary
-                // backoff — until `refetch::ATTEMPTS`, after which the capture
-                // stays what it is: the link, searchable, with the reason.
+                // A refusal is the site's answer today, so it is asked again until
+                // `refetch::ATTEMPTS`; then the capture stays a searchable link with the reason.
                 (Stage::Fetch, _) => {
                     if job.attempts >= refetch::ATTEMPTS {
                         match core.give_up_on_link(&job.target_id, &e.to_string()).await {
@@ -308,10 +249,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                             .await?;
                     }
                 }
-                // Kept armed at the unit's own attempt count, floored at
-                // `MAX_ATTEMPTS`: the first refusal waits out the ordinary
-                // budget, and later ones keep backing off rather than pinning
-                // the delay at one value for ever.
+                // Floored at `MAX_ATTEMPTS`: later refusals keep backing off rather than pinning
+                // one delay.
                 _ => {
                     core.store
                         .fail_job(job.id, job.attempts.max(MAX_ATTEMPTS), &e.to_string())
@@ -323,17 +262,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
     }
 }
 
-/// Run one periodic unit and write down what it did.
-///
-/// The counts are the ones each sweep already returns; nothing here is counted
-/// for the account's sake. A failed run is recorded too — it is exactly the run
-/// an operator needs to see, and a history that kept only the successes would
-/// show a sweep going quiet with nothing anywhere saying why.
-///
-/// The row is written whatever happens to the unit afterwards, which is why it
-/// is written here rather than beside `complete_job`: a failed sweep stays
-/// queued behind a backoff, and that is a retry of the same unit rather than a
-/// run that never happened.
+/// Recorded here, failures included, whatever happens to the unit afterwards: a failed sweep's
+/// retry is the same run.
 async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
     let started_at = crate::store::now();
     let outcome = match stage {
@@ -351,8 +281,7 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
             }
             detail(serde_json::json!({ "armed": n }))
         }),
-        // `run_claimed` sends only the sweeps above here, and a sixth arriving
-        // silently unaccounted for is worse than a row saying so.
+        // A sweep arriving here unaccounted for is worse than a row saying so.
         _ => detail(serde_json::json!({})),
     };
     let (state, written) = match &outcome {
@@ -372,24 +301,9 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
     outcome.map(|d| did_work(&d))
 }
 
-/// Whether a sweep's own account says it did anything.
-///
-/// Read off the counts it already writes into `sweep_runs.detail` rather than
-/// each sweep learning to answer separately: every report is a flat object of
-/// numbers, so any non-zero one is work, and a report that gains a field keeps
-/// working without being told about this.
-///
-/// Only the *flat* numbers. A count nested one level down is read by nobody
-/// here, and that is the escape hatch a report uses for a standing count — a
-/// number saying what exists rather than what this pass did. Left flat, such a
-/// count claims work on every run over unchanged data and the backoff never
-/// engages at all, which is how the retention and context sweeps each woke a
-/// dormant base every interval to report the clusters it already had. See
-/// `retention::Standing` and `context::Standing`.
-///
-/// An unreadable report is not work. Claiming otherwise would reset the backoff
-/// on a base where nothing is happening, which is the one case the backoff is
-/// for.
+/// Any non-zero *flat* number in the report is work. Nested counts are standing counts
+/// (`retention::Standing`, `context::Standing`), so a dormant base still backs off. An unreadable
+/// report is not work.
 fn did_work(detail: &str) -> bool {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(detail)
     else {
@@ -400,43 +314,18 @@ fn did_work(detail: &str) -> bool {
         .any(|n| n != 0.0)
 }
 
-/// The counts a sweep returned, as the JSON the account stores.
 fn detail<T: serde::Serialize>(report: T) -> Result<String> {
     Ok(serde_json::to_string(&report).unwrap_or_else(|_| "{}".into()))
 }
 
-/// A sweep that has finished arms itself one interval out.
-///
-/// After completing, never before: the queue is keyed by `(stage, target)`, so
-/// a handler that re-armed itself would be upserting the very row
-/// `complete_job` then closes.
-///
-/// Nothing is done for a *failed* sweep, and nothing needs to be: `fail_job`
-/// leaves the row pending behind a backoff, which is already the re-arming. One
-/// failure ending a sweep for the life of the process is the one way this
-/// design could quietly stop the memory from learning, and there is a test
-/// saying it does not.
-///
-/// A sweep switched off since it was armed re-arms as nothing: `periodic_period`
-/// returns `None`, the row stays closed, and the repair pass will not put it
-/// back either, because it is no longer in `periodic_units`.
+/// Arms a finished sweep one interval out. A failed sweep needs nothing: `fail_job` leaves it
+/// pending behind a backoff. A sweep switched off since arming stays closed.
 async fn rearm_periodic(core: &Core, job: &Job, did_work: bool) {
     rearm_periodic_with(core, job.stage, &job.target_id, did_work).await;
 }
 
-/// How long until this sweep runs again.
-///
-/// The configured period when the run did something, doubled per consecutive
-/// empty run when it did not, capped at `schedule.backoff_max_hours`. A quiet
-/// base therefore stops waking every interval to find nothing — which is what a
-/// dormant tenant costs, multiplied by however many of them there are.
-///
-/// The reset comes free, and it is what makes this a backoff rather than a
-/// firing rule: `arm_now` already pulls a sleeping unit's `run_after` forward to
-/// zero and already clears the count, and every producer already calls it. New
-/// data cancels the wait without a single producer change. In a firing world a
-/// lost token stalls a transition for ever and silently; here a missed signal
-/// costs one longer interval.
+/// The period after work, doubled per consecutive empty run up to `schedule.backoff_max_hours`.
+/// `arm_now` resets it, so new data cancels the wait without any producer change.
 async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: bool) {
     let Some(period) = crate::core::background::periodic_period(core, stage) else {
         return;
@@ -447,9 +336,7 @@ async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: 
         core.store.empty_runs(stage, target).await.unwrap_or(0) + 1
     };
     let cap = core.schedule.backoff_max_hours.saturating_mul(3600);
-    // `empty - 1` doublings: the first empty run waits the configured period,
-    // and the shift is bounded well under `u64`'s width so a long-dormant base
-    // cannot wrap it back to something short.
+    // `empty - 1` doublings, with the shift bounded so a long-dormant base cannot wrap it short.
     let wait = period
         .as_secs()
         .saturating_mul(1u64 << empty.clamp(1, 32).saturating_sub(1))
@@ -464,12 +351,8 @@ async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: 
     }
 }
 
-/// Replay before pursue.
-///
-/// The one ordering worth expressing beyond what the tree already expresses by
-/// arming: a sitting scored against the links this run folded in, not against
-/// the last half-hour's. The pursuit sweep keeps its own period as a floor, so
-/// this pulls it forward rather than being the only thing that runs it.
+/// Replay before pursue: a sitting scores against the links this run folded in. Pursuit keeps its
+/// own period as a floor.
 async fn arm_successor(core: &Core, job: &Job) {
     if job.stage != Stage::Associate || !core.learn.enabled {
         return;
@@ -487,14 +370,8 @@ async fn arm_successor(core: &Core, job: &Job) {
     }
 }
 
-/// Park an image that could not be read, tolerating its corpus having been
-/// deleted in the meantime.
-///
-/// A corpus deleted before the job ran is caught far above, by the `NotFound`
-/// arm that simply closes the unit. This is the narrower race: deleted between
-/// the failed read and this write. Letting that `NotFound` out of `run_claimed`
-/// would leave the job `running` until `reclaim_stuck` picks it up ten minutes
-/// later, only to lose the same race again.
+/// Tolerates the corpus being deleted between the failed read and this write; otherwise the job
+/// stays `running` until `reclaim_stuck`, only to lose the race again.
 async fn park_failed_if_still_there(
     core: &Core,
     stage: Stage,
@@ -515,9 +392,8 @@ async fn park_failed_if_still_there(
     }
 }
 
-/// Hand a batch embed that will not go through as a batch to per-chunk units.
-/// The batch unit closes only once the split is queued; if even that fails,
-/// the batch stays armed so the work is not lost.
+/// Hand a batch embed that will not go through to per-chunk units; the batch stays armed if even
+/// that fails.
 async fn split_or_fail(core: &Core, job: &Job, e: &Error) -> Result<()> {
     match embed::split_into_artifact_jobs(core, &job.target_id).await {
         Ok(()) => core.store.complete_job(job.id).await,
@@ -530,17 +406,14 @@ async fn split_or_fail(core: &Core, job: &Job, e: &Error) -> Result<()> {
     }
 }
 
-/// One chunk the embedder will not take: mark it, and let the corpus settle to
-/// `partial` if this was the last one outstanding.
+/// Marks one chunk the embedder will not take; the corpus settles to `partial` if it was the last.
 async fn settle_failed_artifact(core: &Core, job: &Job, e: &Error) -> Result<()> {
-    // Kept armed at the backoff ceiling like every failed unit: no terminal
-    // state, see `fail_job`.
+    // Kept armed at the backoff ceiling: no terminal state (`fail_job`).
     core.store
         .fail_job(job.id, job.attempts.max(MAX_ATTEMPTS), &e.to_string())
         .await?;
     core.store.mark_embed_failed(&job.target_id).await?;
-    // A merged artifact belongs to no corpus, so there is no document whose
-    // coverage its failure completes.
+    // A merged artifact belongs to no corpus.
     if let Ok(c) = core.store.get_artifact(&job.target_id).await
         && let Some(corpus_id) = c.corpus_id.as_deref()
     {
@@ -552,13 +425,8 @@ async fn settle_failed_artifact(core: &Core, job: &Job, e: &Error) -> Result<()>
 pub struct Worker;
 
 impl Worker {
-    /// The pool, over the whole instance.
-    ///
-    /// `server.workers` keeps meaning what it has always meant — how many
-    /// things this machine does at once — however many people sign up. It is
-    /// the admission point in front of one set of inference endpoints, and a
-    /// pool per user would put that queueing in the model server's socket
-    /// backlog instead: invisible, unordered, unfair.
+    /// One pool for the instance: `server.workers` is the admission point in front of one set of
+    /// inference endpoints, whatever the number of users.
     pub fn spawn(
         tenants: std::sync::Arc<crate::tenants::Tenants>,
         workers: usize,
@@ -596,7 +464,7 @@ impl Worker {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    /// Run the queue dry. What every stage test does after a capture.
+    /// Run the queue dry.
     pub async fn drain(core: &crate::core::Core) {
         while crate::jobs::run_one(core).await.unwrap() {}
     }
@@ -615,9 +483,7 @@ mod tests {
     fn a_sweeps_standing_counts_are_not_work() {
         use crate::jobs::retention::{Report, Standing};
 
-        // A base with retrieval competition and a probe set that the lap keeps
-        // re-measuring, and nothing else happening. Every number here says what
-        // the base holds, not what this pass did to it.
+        // Every number here says what the base holds, not what this pass did.
         let quiet = Report {
             standing: Standing {
                 clusters: 7,
@@ -631,8 +497,6 @@ mod tests {
             "a quiet base reported work, so the backoff never engages"
         );
 
-        // And the moment anything actually moves, it is work again — which is
-        // what makes the backoff safe to have at all.
         for busy in [
             Report {
                 moved: 1,
@@ -674,8 +538,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_that_ran_says_what_it_did() {
-        // The question a system that describes itself as sleeping has to be
-        // able to answer: what did the memory do while I was away.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.store
@@ -704,8 +566,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_sweep_arms_itself_one_interval_out() {
-        // No ticker holds the period any more: `run_after` is the cursor
-        // recording when the sweep last ran, and it is already indexed.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.store
@@ -731,8 +591,6 @@ mod tests {
             (at - expected).abs() <= 5,
             "armed at {at}, expected about {expected}"
         );
-        // And exactly one of it: `UNIQUE(stage, target_id)` still does that
-        // work, for free and for the same reason it always did.
         let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM jobs WHERE stage = 'associate'")
             .fetch_one(&core.store.control.pool)
             .await
@@ -742,14 +600,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_that_failed_is_still_going_to_run_again() {
-        // The one way this design could quietly stop the memory from learning:
-        // one failure ending a sweep for the life of the process. `fail_job`
-        // leaves the row pending behind a backoff, which is the re-arming — so
-        // what this asserts is that nothing closes it instead.
+        // `fail_job` leaves the row pending behind a backoff; this asserts nothing closes it
+        // instead.
         let mut core = test_core().await;
         core.learn.enabled = true;
-        // A pursuit sweep with no store behind it fails; what it fails on does
-        // not matter, only that the row survives it.
         core.store
             .arm_periodic(Stage::Pursuit, "collection", "collection", 0)
             .await
@@ -773,8 +627,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_switched_off_since_it_was_armed_does_not_arm_itself_again() {
-        // The gates live on the list now, so this is what "switched off" means
-        // for a unit already in the queue: it runs once more and stops.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.store
@@ -799,13 +651,8 @@ mod tests {
 
     #[tokio::test]
     async fn replay_comes_before_pursue() {
-        // A sitting scored against the links this run folded in, not against
-        // the last half-hour's. The pursuit sweep keeps its own period as a
-        // floor; this is what pulls it forward.
         let mut core = test_core().await;
         core.learn.enabled = true;
-        // Pursuit asleep on its own period, as it is for all but a moment of
-        // every cycle.
         core.store
             .arm_periodic(
                 Stage::Pursuit,
@@ -844,7 +691,6 @@ mod tests {
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
             .unwrap();
-        // Run the queue up to and including the batch embed of this corpus.
         let mut guard = 0;
         while let Some(job) = core.store.claim_job().await.unwrap() {
             guard += 1;
@@ -897,17 +743,13 @@ mod tests {
             }
         };
 
-        // This measures one unit's backoff. Plan first so the window unit
-        // exists, then clear everything else capture queued beside it, so
-        // every iteration below claims the refusing window and nothing else.
+        // Clear everything but the window unit, so every iteration claims the refusing window.
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
         sqlx::query!("DELETE FROM jobs WHERE stage != 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
 
-        // Wind each refusal's delay back so the attempt budget is spent
-        // without sleeping, and record how long the unit asked to wait.
         let mut gaps = Vec::new();
         for _ in 0..MAX_ATTEMPTS + 3 {
             sqlx::query!("UPDATE jobs SET run_after = 0")
@@ -915,8 +757,8 @@ mod tests {
                 .await
                 .unwrap();
             let _ = run_one(&core).await;
-            // Before the window's own unit is first claimed its `run_after` is
-            // the zero this loop just wrote, which is not a refusal's delay.
+            // Before its first claim the unit's `run_after` is the zero just written, not a
+            // refusal's delay.
             match delay(&core).await {
                 g if g > 0 => gaps.push(g),
                 _ => {}
@@ -928,15 +770,10 @@ mod tests {
             "a refusal must back off further each time, not poll a dead endpoint \
              at a fixed interval forever; gaps were {gaps:?}"
         );
-        // The floor is still the ceiling of the ordinary budget, so a refusal
-        // is never *cheaper* to retry than a failure to connect.
         assert!(
             gaps.iter().all(|g| *g >= backoff_secs(MAX_ATTEMPTS)),
             "gaps were {gaps:?}"
         );
-        // And the document does not hang waiting on a window nobody will
-        // take: its passages are captured and searchable, with the one
-        // refused rewrite owed — partial, not failed.
         assert_eq!(
             core.store.get_corpus(&out.id).await.unwrap().status,
             CorpusStatus::Partial
@@ -974,12 +811,8 @@ mod tests {
             .enqueue(Stage::Embed, "corpus", "c-a")
             .await
             .unwrap();
-        // The cascade would take the queue row with the user, which is the
-        // ordinary case and leaves nothing to claim. What this reaches is the
-        // narrower one the branch exists for: the row outliving its user
-        // because the two deletes did not happen together. Foreign keys are
-        // per-connection in SQLite, so one connection with them off is how
-        // that state is reachable at all.
+        // Foreign keys are per-connection in SQLite: one connection with them off is how a row
+        // outlives its user.
         {
             use sqlx::Executor;
             let mut conn = tenants.control().pool.acquire().await.unwrap();
@@ -1144,10 +977,7 @@ mod tests {
             sweep_finds(&core, Stage::Retention, false).await;
         }
 
-        // The worker is inside the unit: the row is `running`, which is neither
-        // of the two states `arm_now` guards on. Set here rather than through
-        // `claim_job`, which would not hand out a row still sleeping behind the
-        // backoff this test just built.
+        // Set directly: `claim_job` would not hand out a row still sleeping behind the backoff.
         sqlx::query!(
             "UPDATE jobs SET state = 'running' WHERE stage = ?",
             Stage::Retention.as_str()
@@ -1161,18 +991,12 @@ mod tests {
             .await
             .unwrap();
 
-        // And the sweep finishes, having found nothing — it started before the
-        // capture landed. This run still waits the plain period, because the
-        // count of consecutive empty runs is about a base where nothing is
-        // happening and something just did.
         sweep_finds(&core, Stage::Retention, false).await;
         assert!(waits_about(&core, Stage::Retention, base).await);
     }
 
     #[test]
     fn a_sweep_did_work_when_any_of_its_counts_moved() {
-        // Read off the counts the account already writes, rather than each
-        // sweep learning to say so: a report that gains a field keeps working.
         assert!(!did_work(r#"{"expired":0,"named":0}"#));
         assert!(did_work(r#"{"expired":0,"named":3}"#));
         assert!(
@@ -1184,11 +1008,6 @@ mod tests {
             "an unreadable report is not a claim of work"
         );
 
-        // A count one level down is a standing count and never work. Flat, the
-        // retention sweep's `clusters` — how many gap clusters the base holds,
-        // not how many this pass touched — claimed work on every run over any
-        // base with a gap in it, which is precisely the dormant base the
-        // backoff exists for.
         assert!(!did_work(r#"{"expired":0,"standing":{"clusters":3}}"#));
         assert!(did_work(r#"{"expired":1,"standing":{"clusters":3}}"#));
 
@@ -1202,13 +1021,6 @@ mod tests {
         .unwrap();
         assert!(!did_work(&quiet), "{quiet}");
 
-        // And a sleep that only integrated is work. It adopted no generation
-        // and took nothing back — the four numbers the report used to carry
-        // are all zero — so the backoff doubled the interval away from
-        // `sweep_hours` on the very passes that were draining the integration
-        // backlog five hundred artifacts at a time. The rehearsal beside it
-        // rides along as a standing count and neither adds to that claim nor
-        // subtracts from it.
         let slept = serde_json::to_string(&crate::jobs::retention::Report {
             integrated: 500,
             standing: crate::jobs::retention::Standing {
@@ -1220,10 +1032,6 @@ mod tests {
         .unwrap();
         assert!(did_work(&slept), "{slept}");
 
-        // The other side of the move: a pass that replayed five hundred probes
-        // and changed nothing is five hundred repeated measurements, which is
-        // the dormant base the backoff exists for. Flat, `rehearsed` said work
-        // on every pass over any base that had ever captured anything.
         let rehearsed_only = serde_json::to_string(&crate::jobs::retention::Report {
             standing: crate::jobs::retention::Standing {
                 rehearsed: 500,
@@ -1234,9 +1042,6 @@ mod tests {
         .unwrap();
         assert!(!did_work(&rehearsed_only), "{rehearsed_only}");
 
-        // Same shape, and worse: `context::run` is a full recompute, so all
-        // three of its standing counts are non-zero on every run over unchanged
-        // data and the sweep could never report an empty run at all.
         let recomputed = serde_json::to_string(&crate::jobs::context::Report {
             standing: crate::jobs::context::Standing {
                 events: 40,
@@ -1254,11 +1059,6 @@ mod tests {
         .unwrap();
         assert!(did_work(&cleared), "a profile that decayed away is work");
 
-        // The consolidation sweep's repair passes had no field in its report,
-        // so a tick that moved hundreds of pairs onto the artifacts that could
-        // answer them still said `{"superseded":0,"judged":0}` — "no work" —
-        // and doubled its backoff toward the 24-hour ceiling with the backlog
-        // it was draining still there.
         let repairing = serde_json::to_string(&crate::jobs::consolidate::Outcome {
             repaired: 180,
             ..Default::default()
@@ -1289,8 +1089,7 @@ mod tests {
 
         let src = core.store.get_corpus(&out.id).await.unwrap();
         assert_eq!(src.status, CorpusStatus::Ready);
-        // Three vectors: the two synthesized artifacts, and the passage they
-        // superseded — which keeps its vector, hidden from results by status.
+        // The superseded passage keeps its vector, hidden from results by status.
         assert_eq!(core.vectors.count().await.unwrap(), 3);
     }
 
@@ -1302,10 +1101,8 @@ mod tests {
         )));
         let out = core.ingest("alpha\n\nbeta", "web", None).await.unwrap();
 
-        // Each attempt fails and pushes run_after forward; wind it back to
-        // exercise the attempt budget without sleeping. The queue also holds
-        // the capture's embed and follow-on units, so drive well past the
-        // window's own budget rather than counting iterations against it.
+        // The queue also holds the capture's other units, so drive well past the window's own
+        // budget.
         for _ in 0..40 {
             sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
@@ -1314,8 +1111,6 @@ mod tests {
             let _ = run_one(&core).await;
         }
 
-        // Verbatim-first: the capture survives the model in full — its
-        // passages are the index — and only the rewrite is missing.
         let rows = core.store.artifacts_for_corpus(&out.id).await.unwrap();
         assert!(!rows.is_empty(), "the verbatim capture must survive");
         assert!(
@@ -1328,8 +1123,6 @@ mod tests {
             CorpusStatus::Partial,
             "captured and searchable, with the one window's rewrite owed"
         );
-        // The window says why, so Ops can name the lines and the error rather
-        // than only reporting that something did not work.
         let w = &core.store.segments_for_corpus(&out.id).await.unwrap()[0];
         assert_eq!(w.state, crate::store::segments::SegmentState::Failed);
         assert!(
@@ -1358,9 +1151,6 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_workers_drain_a_queue_without_duplicating_chunks() {
-        // The real deployment runs several workers against one database. If
-        // claiming or the segment replace-step were not safe, this would
-        // produce duplicated or missing chunks.
         let core = test_core().await;
         let mut ids = Vec::new();
         for i in 0..12 {
@@ -1396,16 +1186,13 @@ mod tests {
                 .into_iter()
                 .filter(|c| c.in_results())
                 .count();
-            // Two synthesized artifacts plus the joint passage supersession
-            // leaves standing (no single artifact majority-covers it).
+            // No single artifact majority-covers the joint passage, so it stays live.
             assert_eq!(live, 3, "source {id} has {live} live chunks");
             assert_eq!(
                 core.store.get_corpus(id).await.unwrap().status,
                 CorpusStatus::Ready
             );
         }
-        // Per source: two synthesized artifacts plus the superseded passage's
-        // kept vector.
         assert_eq!(core.vectors.count().await.unwrap(), 36);
     }
 }
