@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "needs node and a headless Chrome; see the note above"]
+    #[ignore = "needs node and a headless Chrome; see web::test_support"]
     async fn no_page_runs_off_the_side_of_a_phone() {
         let pages = crate::web::test_support::every_page().await;
         for width in ["390", "700", "1280", "1500", "2560"] {

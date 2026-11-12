@@ -329,10 +329,9 @@ impl PkdbTools {
     }
 }
 
-/// Exactly one of `text`, `url` and `file_base64`. What an agent usually has
-/// is text or a link; `file_base64` is for a client that actually holds the
-/// bytes — a PDF, an image, a text file — and is bounded by the request body
-/// limit, so a book goes in by its link.
+/// Exactly one of `text`, `url` and `file_base64`. What an agent usually has is text or a link;
+/// `file_base64` is for a client that holds the bytes — a PDF, an image, a text file — and is
+/// bounded by the request body limit, so a book goes in by its link.
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct IngestParams {
     /// The text to store verbatim.

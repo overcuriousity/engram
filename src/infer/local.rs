@@ -175,7 +175,6 @@ fn context<'m>(
         .map_err(|e| failed(role, e))
 }
 
-
 struct EmbedJob {
     texts: Vec<String>,
     reply: oneshot::Sender<Result<Vec<Vec<f32>>>>,
@@ -288,7 +287,6 @@ impl Embedder for LocalEmbedder {
     }
 }
 
-
 struct RerankJob {
     query: String,
     docs: Vec<String>,
@@ -392,7 +390,6 @@ impl Reranker for LocalReranker {
         Ok(scored)
     }
 }
-
 
 struct AskJob {
     system: String,
@@ -662,7 +659,6 @@ pub struct LocalModels {
     /// Where there is one, the microphone's door is open.
     pub speech: Option<PathBuf>,
 }
-
 
 /// Loaded per recording and dropped after: dictation is rare, and phone memory is worth more than the load.
 pub struct LocalTranscriber {

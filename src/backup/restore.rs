@@ -27,25 +27,11 @@ pub struct RestoreOpts {
 pub enum Refusal {
     Archive(String),
     ServerRunning(String),
-    VersionSkew {
-        archive: String,
-        binary: String,
-    },
-    RecipeMismatch {
-        archive: String,
-        configured: String,
-    },
-    DimMismatch {
-        archive: usize,
-        configured: usize,
-    },
-    MissingCollection {
-        slug: String,
-    },
-    BackendMismatch {
-        archive: Backend,
-        build: Backend,
-    },
+    VersionSkew { archive: String, binary: String },
+    RecipeMismatch { archive: String, configured: String },
+    DimMismatch { archive: usize, configured: usize },
+    MissingCollection { slug: String },
+    BackendMismatch { archive: Backend, build: Backend },
     UnknownUser(String),
 }
 

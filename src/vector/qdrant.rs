@@ -1847,10 +1847,7 @@ impl VectorStore for QdrantVectors {
 pub enum AliasState {
     Absent,
     Dangling(String),
-    Live {
-        generation: String,
-        dim: usize,
-    },
+    Live { generation: String, dim: usize },
 }
 
 #[derive(Deserialize)]

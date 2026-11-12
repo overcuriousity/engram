@@ -450,6 +450,14 @@ fn long_blocks(name: &str, src: &str, max: usize) -> Vec<String> {
         let mut rest = src;
         let mut offset = 0;
         while let Some(i) = rest.find(open) {
+            // In JS a `/*` inside a string (an Accept header, a match pattern) is not a comment.
+            let at = offset + i;
+            let line_start = src[..at].rfind('\n').map_or(0, |n| n + 1);
+            if ext == "js" && !src[line_start..at].trim().is_empty() {
+                offset += i + open.len();
+                rest = &rest[i + open.len()..];
+                continue;
+            }
             let end = rest[i..]
                 .find(close)
                 .map_or(rest.len(), |j| i + j + close.len());
@@ -495,7 +503,6 @@ fn commented_files() -> Vec<(String, String)> {
 }
 
 #[test]
-#[ignore = "until the comment pass lands"]
 fn no_comment_block_is_longer_than_three_lines() {
     let offenders: Vec<String> = commented_files()
         .iter()
@@ -510,7 +517,6 @@ fn no_comment_block_is_longer_than_three_lines() {
 }
 
 #[test]
-#[ignore = "until the comment pass lands"]
 fn comment_lines_are_under_8_percent_of_src() {
     let (mut comments, mut lines) = (0usize, 0usize);
     for (_, src) in files("src", "rs") {

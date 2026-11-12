@@ -375,7 +375,6 @@ fn error_detail(e: &Error) -> &str {
     }
 }
 
-
 pub struct HttpSynthesizer {
     ep: Endpoint,
     budget: SynthesisBudget,
@@ -579,7 +578,6 @@ impl Synthesizer for HttpSynthesizer {
     }
 }
 
-
 pub struct HttpEmbedder {
     ep: Endpoint,
     dim: usize,
@@ -677,7 +675,6 @@ impl Embedder for HttpEmbedder {
     }
 }
 
-
 pub struct HttpReranker {
     ep: Endpoint,
     style: RerankStyle,
@@ -756,7 +753,6 @@ fn response_format(name: &str, schema: serde_json::Value) -> serde_json::Value {
         "json_schema": {"name": name, "strict": true, "schema": schema}
     })
 }
-
 
 fn content_type(res: &reqwest::Response) -> &str {
     res.headers()
@@ -851,7 +847,6 @@ impl SseBuffer {
             .collect()
     }
 }
-
 
 pub struct HttpCompleter {
     ep: Endpoint,
@@ -1117,7 +1112,6 @@ impl Completer for HttpCompleter {
         self.max_output_tokens
     }
 }
-
 
 pub struct HttpDescriber {
     ep: Endpoint,
@@ -2352,7 +2346,6 @@ mod tests {
         assert!(matches!(e, Error::Inference { role: "vision", .. }), "{e}");
         assert!(e.retryable());
     }
-
 
     fn completer_against(uri: &str) -> HttpCompleter {
         HttpCompleter::new(&ask_cfg(uri.to_string()))
