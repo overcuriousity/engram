@@ -489,46 +489,8 @@ impl From<ArtifactRow> for Chunk {
     }
 }
 
-pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
-    let tags_json: String = r.get("tags");
-    let span_json: Option<String> = r.get("corpus_span");
-    let flags_json: Option<String> = r.get("flags");
-    Chunk {
-        id: r.get("id"),
-        corpus_id: r.get("corpus_id"),
-        provenance: Provenance::parse(r.get::<String, _>("provenance").as_str()),
-        source_count: r.get("source_count"),
-        ordinal: r.get("ordinal"),
-        text: r.get("text"),
-        corpus_span: span_json.and_then(|s| serde_json::from_str(&s).ok()),
-        title: r.get("title"),
-        category: r.get("category"),
-        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-        embed_state: EmbedState::parse(r.get::<String, _>("embed_state").as_str()),
-        embed_model: r.get("embed_model"),
-        created_at: r.get("created_at"),
-        embed_rev: r.get("embed_rev"),
-        segment_idx: r.get("segment_idx"),
-        flags: flags_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
-        flag_detail: r.get("flag_detail"),
-        superseded_by: r.get("superseded_by"),
-        caveats: r
-            .get::<Option<String>, _>("caveats")
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
-        status: ArtifactStatus::parse(r.get::<String, _>("status").as_str()),
-        last_verified_at: r.get("last_verified_at"),
-        cues: r
-            .try_get::<Option<String>, _>("cues")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
-        retired_at: r.try_get("retired_at").ok().flatten(),
-        reaped_at: r.try_get("reaped_at").ok().flatten(),
-    }
+pub(crate) fn row_to_artifact(r: ArtifactRow) -> Chunk {
+    Chunk::from(r)
 }
 
 impl Store {
@@ -733,15 +695,16 @@ impl Store {
 
     /// Generated artifacts still in results, newest first. What Ops lists.
     pub async fn synthesized_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts
               WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL
               ORDER BY created_at DESC LIMIT ?",
+            limit.max(0)
         )
-        .bind(limit.max(0))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// How many artifacts a pursuit wrote, with no page over it. The predicate
@@ -835,26 +798,30 @@ impl Store {
     }
 
     pub async fn get_artifact(&self, id: &str) -> Result<Chunk> {
-        let row = sqlx::query("SELECT * FROM artifacts WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::NotFound)?;
-        Ok(row_to_artifact(&row))
+        let row = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        Ok(row_to_artifact(row))
     }
 
     /// Every row a window owns, whatever its status, in ordinal order. The
     /// promotion path reads this to see what it is superseding and, on a
     /// retry, what it already wrote.
     pub async fn artifacts_for_segment(&self, corpus_id: &str, idx: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts WHERE corpus_id = ? AND segment_idx = ? ORDER BY ordinal",
+            corpus_id,
+            idx
         )
-        .bind(corpus_id)
-        .bind(idx)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// Set an artifact's activation outright, stamped `at`. Promotion uses it
@@ -905,13 +872,19 @@ impl Store {
             let holes = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            // runtime: the IN list has one placeholder per id.
+            let mut q = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(format!(
                 "SELECT * FROM artifacts WHERE id IN ({holes})"
             )));
             for id in chunk {
                 q = q.bind(*id);
             }
-            out.extend(q.fetch_all(&self.pool).await?.iter().map(row_to_artifact));
+            out.extend(
+                q.fetch_all(&self.pool)
+                    .await?
+                    .into_iter()
+                    .map(row_to_artifact),
+            );
         }
         Ok(out)
     }
@@ -962,27 +935,29 @@ impl Store {
     /// exists; `status = 'active'` keeps deprecated and superseded artifacts
     /// out, exactly as an ordinary search would.
     pub async fn adjacent_artifacts(&self, corpus_id: &str, ordinal: i64) -> Result<Vec<Chunk>> {
-        let before = sqlx::query(
+        let before = sqlx::query_as!(
+            ArtifactRow,
             "SELECT * FROM artifacts
              WHERE corpus_id = ? AND ordinal < ? AND status = 'active'
              ORDER BY ordinal DESC LIMIT 1",
+            corpus_id,
+            ordinal
         )
-        .bind(corpus_id)
-        .bind(ordinal)
         .fetch_optional(&self.pool)
         .await?;
-        let after = sqlx::query(
+        let after = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts
              WHERE corpus_id = ? AND ordinal > ? AND status = 'active'
              ORDER BY ordinal ASC LIMIT 1",
+            corpus_id,
+            ordinal
         )
-        .bind(corpus_id)
-        .bind(ordinal)
         .fetch_optional(&self.pool)
         .await?;
         Ok(before
-            .iter()
-            .chain(after.iter())
+            .into_iter()
+            .chain(after)
             .map(row_to_artifact)
             .collect())
     }
@@ -1029,11 +1004,14 @@ impl Store {
     }
 
     pub async fn artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query("SELECT * FROM artifacts WHERE corpus_id = ? ORDER BY ordinal")
-            .bind(corpus_id)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE corpus_id = ? ORDER BY ordinal",
+            corpus_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// How many chunks a source produced, without loading any of them.
@@ -1090,7 +1068,8 @@ impl Store {
         sql.push_str(" ORDER BY created_at DESC, id LIMIT ?");
         // `AssertSqlSafe`: what is interpolated is a fixed clause repeated
         // once per term; every value is bound.
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        // runtime: one LIKE clause per search term.
+        let mut q = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(sql));
         for t in terms {
             let escaped = t
                 .replace('\\', "\\\\")
@@ -1100,19 +1079,19 @@ impl Store {
             q = q.bind(pattern.clone()).bind(pattern);
         }
         let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// Chunks of a source still waiting for a vector. The embed job batches
     /// these into one inference call, so it needs them as rows, not a count.
     pub async fn pending_artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending' ORDER BY ordinal",
-        )
-        .bind(corpus_id)
-        .fetch_all(&self.pool)
+            corpus_id
+        ).fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// Is every chunk still waiting to be embedded already armed as its own
@@ -1511,18 +1490,17 @@ impl Store {
 
     /// Trashed artifacts, most recent first.
     pub async fn trash(&self) -> Result<Vec<(Chunk, i64)>> {
-        let rows = sqlx::query(
-            "SELECT * FROM artifacts WHERE status = 'trashed' ORDER BY trashed_at DESC",
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE status = 'trashed' ORDER BY trashed_at DESC"
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| {
-                (
-                    row_to_artifact(r),
-                    r.get::<Option<i64>, _>("trashed_at").unwrap_or(0),
-                )
+                let at = r.trashed_at.unwrap_or(0);
+                (row_to_artifact(r), at)
             })
             .collect())
     }
@@ -1547,12 +1525,14 @@ impl Store {
     /// reporting success either way. What needs repairing is the writes that
     /// did not finish, and that set is almost always empty.
     pub async fn dirty_lifecycle_artifacts(&self, limit: usize) -> Result<Vec<Chunk>> {
-        let rows =
-            sqlx::query("SELECT * FROM artifacts WHERE lifecycle_dirty = 1 ORDER BY id LIMIT ?")
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE lifecycle_dirty = 1 ORDER BY id LIMIT ?",
+            limit as i64
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// Mark an artifact's lifecycle as in flight before either store is
@@ -1776,14 +1756,15 @@ impl Store {
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
         // Not a buried row: the graveyard lists those, with the one undo that
         // can put the text back. See `artifacts_by_status`.
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL AND reaped_at IS NULL
               ORDER BY created_at DESC LIMIT ?",
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// Artifacts currently carrying one lifecycle status, newest first. Used
@@ -1806,16 +1787,17 @@ impl Store {
         // rows came back about one artifact under one `kind`, and a client
         // that reads `subject_id` as the row's identity answered one of them
         // and lost the other.
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts
               WHERE status = ? AND reaped_at IS NULL AND superseded_by IS NULL
               ORDER BY created_at DESC LIMIT ?",
+            status.as_str(),
+            limit
         )
-        .bind(status.as_str())
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// Record what verification found. An empty list clears the flags, so a
@@ -1988,7 +1970,8 @@ impl Store {
     /// the vector point, not in this database. See `jobs::reap::nominees`,
     /// which over-fetches to absorb it.
     pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        // runtime: shares the REAPABLE predicate with the graveyard insert.
+        let rows = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifacts art
               WHERE {}
               ORDER BY art.retired_at ASC
@@ -2001,7 +1984,7 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
     /// Give every retired row that predates `retired_at` a clock starting now.
