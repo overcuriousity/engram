@@ -2374,7 +2374,7 @@
     // else. Without this, signing out and signing a second account in on the
     // same browser redrew the first one's cloud straight from `localStorage`,
     // with no authorization anywhere on the path.
-    if (!document.querySelector('.topbar')) {
+    if (!document.querySelector('.oc-topbar')) {
       try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
       return;
     }

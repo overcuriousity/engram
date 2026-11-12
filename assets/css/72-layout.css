@@ -159,7 +159,7 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
    settings and extension pages were both read at that. 46rem is the measure —
    around 75 characters, the top of the comfortable range — so the region is
    now as wide as the thing it is named for. */
-.regions-focus { grid-template-columns: minmax(0, 46rem); }
+.regions-focus { grid-template-columns: minmax(0, 46rem); justify-content: center; }
 .regions-focus > * { grid-column: 1 / -1; }
 .regions-table { grid-template-columns: minmax(0, 1fr); }
 /* One column, centred in the window rather than anchored to its left edge.
@@ -261,35 +261,6 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
    lining up. */
 /* Painted, not transparent: the projection's axes ran straight through the
    nav, which made the chrome look like part of the picture. */
-.topbar {
-  border-bottom: 1px solid var(--color-border); margin-bottom: 1.5rem; background: var(--color-bg-surface);
-  transition: background 200ms ease, border-color 200ms ease;
-}
-nav.top {
-  display: flex; gap: 0.25rem; align-items: center;
-  max-width: 110rem; margin: 0 auto; padding: 0.75rem 1rem;
-  transition: max-width 200ms ease;
-}
-/* On an idle workspace the top row is part of the page rather than a strip
-   over it: no rule, no paint, and the row takes the column's measure, so the
-   brand stands at the box's left edge and the links at its right and the page
-   has one width instead of two. 54rem is the column's 52rem plus this row's
-   own padding. The moment somebody types, the shell widens and so does this;
-   the transition above is what keeps the two moving together. Wide windows
-   only — under 62rem the column is the window anyway. */
-@media (width >= 62rem) {
-  html:not(.typing) body:has(.regions-rail-focus-source) .topbar {
-    background: transparent; border-bottom-color: transparent;
-  }
-  html:not(.typing) body:has(.regions-rail-focus-source) nav.top { max-width: 54rem; }
-}
-nav.top a {
-  color: var(--color-fg-secondary); text-decoration: none;
-  padding: 0.375rem 0.75rem; border-radius: var(--radius-sm); font-size: var(--text-ui);
-  transition: background 120ms ease, color 120ms ease;
-}
-nav.top a:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
-nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var(--color-bg-active); }
 .spacer { flex: 1; }
 
 
@@ -307,7 +278,7 @@ nav.top a[aria-current="page"] { color: var(--color-fg-primary); background: var
 
 @media (prefers-reduced-motion: no-preference) {
   ::view-transition-group(*) { animation-duration: 180ms; }
-  .topbar { view-transition-name: topbar; }
+  .oc-topbar { view-transition-name: topbar; }
   .region-rail { view-transition-name: rail; }
   .region-focus { view-transition-name: focus; }
 }

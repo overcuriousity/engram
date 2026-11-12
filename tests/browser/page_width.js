@@ -114,7 +114,22 @@ const PROBE = `
           }
         }
       });
+      var tab = document.querySelector('.oc-tabbar');
+      var tabShown = !!tab && getComputedStyle(tab).display !== 'none';
+      var tabItems = tab ? Array.prototype.map.call(tab.querySelectorAll('a'), function (a) {
+        return { label: a.textContent.trim(), height: a.getBoundingClientRect().height };
+      }) : [];
+      var rem = parseFloat(getComputedStyle(de).fontSize) || 16;
+      var focus = document.querySelector('.regions-focus');
+      var regions = Array.prototype.map.call(document.querySelectorAll('.regions > *'), function (el) {
+        return el.getBoundingClientRect().width / rem;
+      });
       fetch('/report', { method: 'POST', body: JSON.stringify({
+        tabShown: tabShown, tabItems: tabItems,
+        focusRem: focus ? Math.max.apply(null, [0].concat(Array.prototype.map.call(focus.children, function (c) {
+          return c.getBoundingClientRect().width / rem;
+        }))) : null,
+        widestRegionRem: regions.length ? Math.max.apply(null, regions) : 0,
         scrollWidth: de.scrollWidth, clientWidth: vw,
         over: over.slice(0, 12), squeezed: squeezed.slice(0, 12)
       })});

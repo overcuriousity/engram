@@ -180,14 +180,8 @@ table.grid tr:hover td { background: var(--color-bg-hover); }
    the theme -- including a `data-theme` override, which an <img> could not
    see. Sizing is here rather than on the element because it is included as a
    partial and every caller wants a different size. */
-nav.top a.brand {
-  display: inline-flex; align-items: center; gap: 0.45rem;
-  font-weight: 600; color: var(--color-fg-primary);
-  padding-left: 0; margin-right: 0.5rem;
-}
-nav.top a.brand:hover { background: transparent; }
 .mark { display: block; flex: none; color: inherit; }
-nav.top a.brand .mark { width: 22px; height: 22px; }
+.oc-topbar__logo .mark { width: 22px; height: 22px; }
 .brand-lockup .mark { width: 40px; height: 40px; }
 
 .brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
@@ -355,3 +349,4 @@ mark {
 .select-all { user-select: all; }
 .capture-photo { max-width: 100%; height: auto; border-radius: var(--radius-md); }
 .raw-unbounded { max-height: none; }
+.offline { max-width: 26rem; margin: 6rem auto; padding: 0 var(--space-4); text-align: center; }

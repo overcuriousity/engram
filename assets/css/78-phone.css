@@ -10,7 +10,6 @@
 /* Above 40rem the top row carries the destinations, so the tab bar has nothing
    to do. The back link answers a different width and gets its own block
    below. */
-.tabbar { display: none; }
 /* Shown by app.js on a phone only; see `installNudge`. Above 40rem there is
    no case for it, whatever the script decides. */
 .installnudge { display: none; }
@@ -36,7 +35,7 @@
   .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
 }
 
-@media (width <= 40rem) {
+@media (width < 48rem) {
   /* ── No container here ────────────────────────────────────────────────
      `container-type: inline-size` computes to `contain: layout style
      inline-size`, and layout containment makes `.shell` the containing block
@@ -90,12 +89,11 @@
      away at the bottom. */
   /* The nav used to inherit this from `.shell`; outside it, landscape on a
      notched phone put the cutout over the sign-out button. */
-  nav.top {
-    padding-left: max(1rem, env(safe-area-inset-left));
-    padding-right: max(1rem, env(safe-area-inset-right));
+  .oc-topbar {
+    padding-left: max(var(--space-3), env(safe-area-inset-left));
+    padding-right: max(var(--space-3), env(safe-area-inset-right));
   }
-  nav.top > a:not(.brand), nav.top .spacer { display: none; }
-  nav.top form { margin-left: auto; }
+  .oc-topnav { display: none; }
 
   /* ── The search box moves to the thumb ────────────────────────────────
      On Search the input is the application, and it was at the top of the
@@ -112,7 +110,7 @@
      for that to mean anything. */
   .regions-rail-focus-source .region-bar {
     position: fixed; left: 0; right: 0; z-index: 11;
-    bottom: calc(46px + env(safe-area-inset-bottom));
+    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
     padding: 0.5rem max(0.75rem, env(safe-area-inset-left))
              0.5rem max(0.75rem, env(safe-area-inset-right));
     background: var(--color-bg-surface);
@@ -175,7 +173,7 @@
      documents. */
   .installnudge {
     position: fixed; left: 0.75rem; right: 0.75rem; z-index: 11;
-    bottom: calc(46px + 0.75rem + env(safe-area-inset-bottom));
+    bottom: calc(var(--tabbar-h) + 0.75rem + env(safe-area-inset-bottom));
     display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
     padding: 0.75rem; border: 1px solid var(--color-border);
     border-radius: var(--radius-md); background: var(--color-bg-surface);
@@ -185,25 +183,14 @@
   .installnudge p { flex: 1 1 100%; margin: 0; color: var(--color-fg-secondary); }
   .installnudge [data-dismiss-install] { margin-left: auto; }
 
-  .tabbar {
-    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: flex;
-    background: var(--color-bg-surface); border-top: 1px solid var(--color-border);
-    /* Above the home indicator rather than under it. */
+  .oc-tabbar {
+    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-rail);
     padding-bottom: env(safe-area-inset-bottom);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
   }
-  /* `min-width: 0` and no wrapping, because the row grew a fourth entry: a
-     flex item's floor is its content, so without this the widest label sets
-     everyone's width and a narrow phone breaks "Insights" over two lines,
-     which makes that one tab taller than the rest of the bar. */
-  .tabbar a {
-    position: relative;
-    flex: 1; min-width: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 2px; min-height: 46px;
-    text-decoration: none; white-space: nowrap;
-    font-size: var(--text-micro); color: var(--color-fg-muted);
-  }
-  .tabbar a[aria-current="page"] { color: var(--color-accent); }
-  .tabbar svg { width: 20px; height: 20px; }
+  .oc-tabbar a { min-height: var(--tabbar-h); white-space: nowrap; }
 
   /* 16px, or iOS zooms the page on focus — and a standalone window has no URL
      bar to zoom back out from, so it simply stays zoomed.
@@ -243,3 +230,5 @@
   table.grid tr:hover td { background: transparent; }
 }
 
+
+:root { --tabbar-h: 3.5rem; }

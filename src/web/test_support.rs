@@ -383,6 +383,38 @@ pub(crate) fn nothing_is_broken(run: &serde_json::Value, width: &str) {
             p["name"],
             p["over"],
         );
+        let w: i64 = width.parse().unwrap();
+        let shown = p["tabShown"].as_bool().unwrap_or(false);
+        let items = p["tabItems"].as_array().cloned().unwrap_or_default();
+        let signed_in = !items.is_empty();
+        if signed_in && w < 768 {
+            assert!(shown, "at {width}px the {} page has no tab bar", p["name"]);
+            assert!((3..=5).contains(&items.len()), "{}: {items:?}", p["name"]);
+            for i in &items {
+                assert!(
+                    !i["label"].as_str().unwrap_or("").is_empty(),
+                    "an unlabelled tab: {i}"
+                );
+                assert!(
+                    i["height"].as_f64().unwrap_or(0.0) >= 44.0,
+                    "a tab under 44px: {i}"
+                );
+            }
+        }
+        if signed_in && w >= 768 {
+            assert!(
+                !shown,
+                "at {width}px the {} page still shows the tab bar",
+                p["name"]
+            );
+        }
+        if let Some(focus) = p["focusRem"].as_f64() {
+            assert!(
+                focus <= 46.05,
+                "at {width}px the {} column is {focus}rem wide",
+                p["name"]
+            );
+        }
         let squeezed = p["squeezed"].as_array().expect("a squeeze list");
         assert!(
             squeezed.is_empty(),

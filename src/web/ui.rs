@@ -6202,7 +6202,7 @@ mod tests {
         let (app, cookie) = app_with_session().await;
         for uri in ["/ui/capture", "/ui/search", "/ui/insights"] {
             let page = get_body(&app, &cookie, uri).await;
-            let bar = page.find(r#"class="topbar""#).expect("a top bar");
+            let bar = page.find(r#"class="oc-topbar""#).expect("a top bar");
             let shell = page.find(r#"class="shell"#).expect("a shell");
             assert!(
                 bar < shell,

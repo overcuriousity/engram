@@ -31,39 +31,16 @@
      every page. Out here the border spans the window and the row inside it is
      one width everywhere. #}
   {% block nav %}
-  <header class="topbar">
-    <nav class="top">
-      <a href="/ui" class="brand" aria-label="engram">
-        {% include "_mark.html" %}
-        <span>engram</span>
-      </a>
-      {# Capture, Search and Ask are gone from here. They are not places any
-         more: they are the three things the one box does, chosen by a button
-         on it. A link that navigates somewhere to change which verb you meant
-         is the thing this whole surface exists to remove. #}
-      {# What is true about this installation, and what the base did on its
-         own: the maintenance Housekeeping always held, plus the surfaces that
-         used to sit on Capture. Nothing there waits on a person. A destination
-         rather than a quiet link at the bottom of a page, because it is now
-         the only other place there is. #}
-      {# `aria-current` says which of these you are inside, and the stylesheet
-         has styled it since the port — but nothing ever set it, so the rule
-         was dead and the row never said where you were. `self.section()` is
-         the page's own answer; see `Section` in `web::mod`. #}
-      <a href="/ui/insights"
-         {%- if self.section() == "insights" %} aria-current="page"{% endif %}>Insights</a>
-      {# Where the account is, and where what reads this base over the API is
-         revoked. It was one quiet link at the foot of Insights, which is a
-         page you scroll — and on a phone that made it unreachable by anyone
-         who did not already know it was there. #}
-      <a href="/ui/settings"
-         {%- if self.section() == "settings" %} aria-current="page"{% endif %}>Settings</a>
-      <span class="spacer"></span>
-      {# The light palette has been in the stylesheet since the port and nobody
-         has ever seen it, because it activated only on prefers-color-scheme.
-         The label names where the button goes, not where it is. #}
-      {% let theme = crate::web::prefs::theme() %}
-      {% let compact = crate::web::prefs::density() == crate::web::prefs::Density::Compact %}
+  {% let theme = crate::web::prefs::theme() %}
+  {% let compact = crate::web::prefs::density() == crate::web::prefs::Density::Compact %}
+  <header class="oc-topbar">
+    <a href="/ui" class="oc-topbar__logo brand" aria-label="engram home">{% include "_mark.html" %}<span>engram</span></a>
+    <nav class="oc-topnav" aria-label="Main">
+      <a href="/ui"{% if self.section() == "search" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("search", 16) }}<span>Search</span></a>
+      <a href="/ui/insights"{% if self.section() == "insights" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("history", 16) }}<span>Insights</span></a>
+      <a href="/ui/settings"{% if self.section() == "settings" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("settings", 16) }}<span>Settings</span></a>
+    </nav>
+    <div class="oc-topbar__end">
       <button type="button" class="oc-btn oc-btn--icon oc-theme-toggle" data-oc-pref="theme"
               data-oc-value="{{ theme.as_str() }}" aria-label="{{ theme.next_label() }}"
               data-oc-tip="{{ theme.next_label() }}">{{ crate::web::icons::icon("monitor", 16) }}{{ crate::web::icons::icon("sun", 16) }}{{ crate::web::icons::icon("moon", 16) }}</button>
@@ -73,9 +50,9 @@
               aria-label="{% if compact %}Use default text size{% else %}Use compact text size{% endif %}"
               data-oc-tip="{% if compact %}Use default text size{% else %}Use compact text size{% endif %}">{{ crate::web::icons::icon("a-large-small", 16) }}</button>
       <form method="post" action="/auth/logout" class="inline-form">
-        <button class="btn btn-ghost btn-sm" type="submit">Sign out</button>
+        <button class="oc-btn oc-btn--icon" type="submit" aria-label="Sign out" data-oc-tip="Sign out">{{ crate::web::icons::icon("log-out", 16) }}</button>
       </form>
-    </nav>
+    </div>
   </header>
   {% endblock %}
   {# A page says which regions it uses. It never says how wide it is: the grid
@@ -96,25 +73,11 @@
      Search · Insights · Settings and invited to install an app they are
      locked out of. #}
   {% block tabbar %}
-  <nav class="tabbar" aria-label="Sections">
-    {# Three entries, not five. Capture and Ask were destinations when they were
-       pages; they are verbs on the box now, and the box is on this screen. #}
-    <a href="/ui"{% if self.section() == "search" %} aria-current="page"{% endif %}>
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="9" cy="9" r="5.5"/><path d="M13 13l4 4"/></svg>Search</a>
-    <a href="/ui/insights"{% if self.section() == "insights" %} aria-current="page"{% endif %}>
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 16V9M10 16V5M16 16v-4"/></svg>Insights</a>
-    {# A fourth entry. Since #52 this is where a person goes to see whose base
-       this is and to revoke what is reading it, and it was the one destination
-       the phone had no route to at all. #}
-    <a href="/ui/settings"{% if self.section() == "settings" %} aria-current="page"{% endif %}>
-      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10" cy="10" r="2.5"/><path d="M10 3.5v2M10 14.5v2M3.5 10h2M14.5 10h2M5.6 5.6l1.4 1.4M13 13l1.4 1.4M14.4 5.6L13 7M7 13l-1.4 1.4"/></svg>Settings</a>
+  <nav class="oc-tabbar" aria-label="Sections">
+    <a href="/ui"{% if self.section() == "search" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("search", 20) }}<span>Search</span></a>
+    <a href="/ui/insights"{% if self.section() == "insights" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("history", 20) }}<span>Insights</span></a>
+    <a href="/ui/settings"{% if self.section() == "settings" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("settings", 20) }}<span>Settings</span></a>
   </nav>
-  {# Offered on a phone browser, once a week, until it is installed or the
-     person says no. Hidden until app.js has ruled out an installed window, a
-     desktop and a nudge from this week; see `installNudge`. Two ways to
-     answer, because the browsers differ: Chrome hands the page an install
-     prompt to open, Safari has no such thing and the person is told the
-     route through the Share sheet. #}
   <div class="installnudge" hidden role="status">
     <p>Add engram to your home screen.
       <span data-install-how hidden>Share → Add to Home Screen.</span></p>

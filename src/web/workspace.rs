@@ -2167,7 +2167,7 @@ mod tests {
     async fn the_tab_bar_points_at_the_three_places_there_are() {
         let html = workspace("/ui").await;
         let bar = html
-            .split_once(r#"<nav class="tabbar""#)
+            .split_once(r#"<nav class="oc-tabbar""#)
             .expect("the tab bar is there")
             .1;
         let bar = &bar[..bar.find("</nav>").expect("the tab bar ends")];
@@ -2184,7 +2184,7 @@ mod tests {
         // The same rule in the row above it, which is the same three places
         // seen on a wider screen.
         let top = html
-            .split_once(r#"<nav class="top""#)
+            .split_once(r#"<nav class="oc-topnav""#)
             .expect("the top row is there")
             .1;
         let top = &top[..top.find("</nav>").expect("the top row ends")];

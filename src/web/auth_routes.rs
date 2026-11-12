@@ -283,9 +283,9 @@ mod tests {
         )
         .unwrap();
         for chrome in [
-            r#"class="tabbar""#,
+            r#"class="oc-tabbar""#,
             r#"class="installnudge""#,
-            r#"class="topbar""#,
+            r#"class="oc-topbar""#,
         ] {
             assert!(
                 !body.contains(chrome),

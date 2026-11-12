@@ -511,7 +511,7 @@ mod tests {
     #[ignore = "needs node and a headless Chrome; see the note above"]
     async fn no_page_runs_off_the_side_of_a_phone() {
         let pages = crate::web::test_support::every_page().await;
-        for width in ["375", "700", "1500"] {
+        for width in ["390", "700", "1280", "1500", "2560"] {
             let run = crate::web::test_support::measure(&pages, width);
             crate::web::test_support::nothing_is_broken(&run, width);
         }

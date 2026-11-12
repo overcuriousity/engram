@@ -100,10 +100,24 @@ async fn service_worker() -> Response {
     }
 }
 
+#[derive(askama::Template)]
+#[template(path = "offline.html")]
+struct OfflineTemplate;
+
+/// What the service worker shows when the server cannot be reached.
+async fn offline() -> Response {
+    use askama::Template;
+    match OfflineTemplate.render() {
+        Ok(html) => axum::response::Html(html).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 fn routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/assets/{*path}", get(serve))
         .route("/sw.js", get(service_worker))
+        .route("/offline", get(offline))
 }
 
 pub fn assets_router() -> Router<AppState> {
