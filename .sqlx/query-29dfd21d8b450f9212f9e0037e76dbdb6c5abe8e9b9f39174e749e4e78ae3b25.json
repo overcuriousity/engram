@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT opened_at FROM search_events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "opened_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "opened_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "29dfd21d8b450f9212f9e0037e76dbdb6c5abe8e9b9f39174e749e4e78ae3b25"
+}

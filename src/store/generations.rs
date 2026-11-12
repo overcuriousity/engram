@@ -192,9 +192,9 @@ impl Store {
         let id = new_id();
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         if over_parent && let Some(parent) = &g.parent_id {
-            let live: Option<String> = sqlx::query_scalar(
-                "SELECT id FROM generations WHERE state = 'live'
-                  ORDER BY created_at DESC, id DESC LIMIT 1",
+            let live: Option<String> = sqlx::query_scalar!(
+                r#"SELECT id AS "id!" FROM generations WHERE state = 'live'
+                  ORDER BY created_at DESC, id DESC LIMIT 1"#
             )
             .fetch_optional(&mut *tx)
             .await?;
@@ -202,23 +202,23 @@ impl Store {
                 return Ok(None);
             }
         }
-        sqlx::query("UPDATE generations SET state = 'superseded' WHERE state = 'live'")
+        sqlx::query!("UPDATE generations SET state = 'superseded' WHERE state = 'live'")
             .execute(&mut *tx)
             .await?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO generations
                (id, created_at, params, embed_recipe, chat_model, parent_id,
                 run_id, predicted, state)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live')",
+            &id,
+            now(),
+            json(&g.params)?,
+            &g.embed_recipe,
+            &g.chat_model,
+            &g.parent_id,
+            run_id,
+            predicted
         )
-        .bind(&id)
-        .bind(now())
-        .bind(json(&g.params)?)
-        .bind(&g.embed_recipe)
-        .bind(&g.chat_model)
-        .bind(&g.parent_id)
-        .bind(run_id)
-        .bind(predicted)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -234,20 +234,20 @@ impl Store {
         predicted: f64,
     ) -> Result<String> {
         let id = new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO generations
                (id, created_at, params, embed_recipe, chat_model, parent_id,
                 run_id, predicted, state)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'refused')",
+            &id,
+            now(),
+            json(&g.params)?,
+            &g.embed_recipe,
+            &g.chat_model,
+            &g.parent_id,
+            run_id,
+            predicted
         )
-        .bind(&id)
-        .bind(now())
-        .bind(json(&g.params)?)
-        .bind(&g.embed_recipe)
-        .bind(&g.chat_model)
-        .bind(&g.parent_id)
-        .bind(run_id)
-        .bind(predicted)
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -267,23 +267,25 @@ impl Store {
     /// live generation describes the running parameters, until a restart.
     pub async fn revert_generation(&self, id: &str) -> Result<Option<Generation>> {
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-        let parent: Option<String> =
-            sqlx::query_scalar("SELECT parent_id FROM generations WHERE id = ? AND state = 'live'")
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .flatten();
+        let parent: Option<String> = sqlx::query_scalar!(
+            "SELECT parent_id FROM generations WHERE id = ? AND state = 'live'",
+            id
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .flatten();
         let Some(parent) = parent else {
             return Ok(None);
         };
-        sqlx::query("UPDATE generations SET state = 'reverted' WHERE id = ?")
-            .bind(id)
+        sqlx::query!("UPDATE generations SET state = 'reverted' WHERE id = ?", id)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE generations SET state = 'live' WHERE id = ?")
-            .bind(&parent)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query!(
+            "UPDATE generations SET state = 'live' WHERE id = ?",
+            &parent
+        )
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         self.generation(&parent).await
     }
@@ -338,14 +340,14 @@ impl Store {
         embed_recipe: &str,
         chat_model: &str,
     ) -> Result<Vec<GenerationParams>> {
-        sqlx::query_scalar::<_, String>(
+        sqlx::query_scalar!(
             "SELECT params FROM generations g
               WHERE state IN ('reverted', 'refused') AND embed_recipe = ? AND chat_model = ?
                 AND (SELECT COUNT(*) FROM artifacts WHERE created_at > g.created_at) * 2
                     <= (SELECT COUNT(*) FROM artifacts)",
+            embed_recipe,
+            chat_model
         )
-        .bind(embed_recipe)
-        .bind(chat_model)
         .fetch_all(&self.pool)
         .await?
         .iter()
@@ -751,8 +753,7 @@ mod tests {
         // stamped after them.
         let corpus = store.insert_corpus("x", "web", None).await.unwrap();
         grow(&store, &corpus.id, 2, 100).await;
-        sqlx::query("UPDATE generations SET created_at = 200 WHERE id = ?")
-            .bind(&id)
+        sqlx::query!("UPDATE generations SET created_at = 200 WHERE id = ?", &id)
             .execute(&store.pool)
             .await
             .unwrap();
@@ -782,12 +783,14 @@ mod tests {
             })
             .collect();
         store.insert_artifacts(corpus_id, &rows).await.unwrap();
-        sqlx::query("UPDATE artifacts SET created_at = ? WHERE created_at > ?")
-            .bind(at)
-            .bind(at)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ? WHERE created_at > ?",
+            at,
+            at
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1005,7 +1008,7 @@ mod tests {
         boot_generation(&store, p(0.05, Some(3)), "recipe-a", "qwen", true)
             .await
             .unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generations")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM generations")
             .fetch_one(&store.pool)
             .await
             .unwrap();
@@ -1087,10 +1090,11 @@ mod tests {
                 .is_none()
         );
 
-        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generations WHERE state = 'live'")
-            .fetch_one(&store.pool)
-            .await
-            .unwrap();
+        let live: i64 =
+            sqlx::query_scalar!("SELECT COUNT(*) FROM generations WHERE state = 'live'")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
         assert_eq!(live, 1, "two generations live at once");
         assert_eq!(
             store.live_generation().await.unwrap().unwrap().id,
@@ -1164,7 +1168,7 @@ mod tests {
         store.record_generation(&sample()).await.unwrap();
         store.record_generation(&sample()).await.unwrap();
 
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generations")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM generations")
             .fetch_one(&store.pool)
             .await
             .unwrap();

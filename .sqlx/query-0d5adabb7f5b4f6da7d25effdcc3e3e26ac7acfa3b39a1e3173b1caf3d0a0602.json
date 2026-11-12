@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE generations SET state = 'live' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0d5adabb7f5b4f6da7d25effdcc3e3e26ac7acfa3b39a1e3173b1caf3d0a0602"
+}

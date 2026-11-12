@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET status = 'ready' WHERE corpus_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1892f01aaa7c181c69b3b7377eff6459305c9793e0ee10cc4256c37e9aa9ce21"
+}

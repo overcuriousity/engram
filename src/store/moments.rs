@@ -194,12 +194,12 @@ impl Store {
     /// reminder on — which `complete_moment` duly retired, sinking a note out
     /// of `recent_captures` while the one that was actually read stayed put.
     pub async fn corpus_of_moment(&self, moment_id: &str) -> Result<Option<String>> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COALESCE(m.origin_corpus_id, a.corpus_id) \
              FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
              WHERE m.id = ?",
+            moment_id
         )
-        .bind(moment_id)
         .fetch_optional(&self.pool)
         .await?
         .flatten())
@@ -219,12 +219,12 @@ impl Store {
     /// note open forever on the strength of a reminder that had already
     /// vanished from the screen.
     pub async fn has_open_reminder_for_corpus(&self, corpus_id: &str) -> Result<bool> {
-        let n: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
              WHERE COALESCE(m.origin_corpus_id, a.corpus_id) = ? AND m.kind = 'due' \
                AND m.done_at IS NULL AND a.status = 'active'",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
@@ -238,12 +238,12 @@ impl Store {
     /// `move_moment` — because correcting a date the base read wrong does not
     /// make the note stop having been read as a reminder.
     pub async fn corpus_was_read_as_reminder(&self, corpus_id: &str) -> Result<bool> {
-        let n: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id \
              WHERE COALESCE(m.origin_corpus_id, a.corpus_id) = ? \
                AND m.source IN ('cue', 'classified')",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
@@ -298,13 +298,13 @@ impl Store {
             // one row is the note, two is "several", and the second is never
             // read.
             None => {
-                let roots: Vec<String> = sqlx::query_scalar(
-                    "SELECT DISTINCT a.corpus_id FROM artifact_sources s
+                let roots: Vec<String> = sqlx::query_scalar!(
+                    r#"SELECT DISTINCT a.corpus_id AS "corpus_id!" FROM artifact_sources s
                        JOIN artifacts a ON a.id = s.root_id
                       WHERE s.child_id = ? AND a.corpus_id IS NOT NULL
-                      LIMIT 2",
+                      LIMIT 2"#,
+                    &m.artifact_id
                 )
-                .bind(&m.artifact_id)
                 .fetch_all(&self.pool)
                 .await?;
                 match roots.len() {
@@ -313,22 +313,22 @@ impl Store {
                 }
             }
         };
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, rule, source, span,
                                   series_id, origin_corpus_id, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            &m.artifact_id,
+            m.kind.as_str(),
+            m.at,
+            &m.tz,
+            &m.rule,
+            m.source.as_str(),
+            &m.span,
+            &series,
+            &corpus,
+            crate::store::now()
         )
-        .bind(&id)
-        .bind(&m.artifact_id)
-        .bind(m.kind.as_str())
-        .bind(m.at)
-        .bind(&m.tz)
-        .bind(&m.rule)
-        .bind(m.source.as_str())
-        .bind(&m.span)
-        .bind(&series)
-        .bind(&corpus)
-        .bind(crate::store::now())
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -368,18 +368,18 @@ impl Store {
         kind: Kind,
         at: Option<i64>,
     ) -> Result<bool> {
-        let n: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM moments
               WHERE artifact_id = ? AND kind = ?
                 AND (at IS ?
                      OR (moved_from IS NOT NULL AND moved_from IS ?)
                      OR (? IS NULL AND moved_at IS NOT NULL AND moved_from IS NULL))",
+            artifact_id,
+            kind.as_str(),
+            at,
+            at,
+            at
         )
-        .bind(artifact_id)
-        .bind(kind.as_str())
-        .bind(at)
-        .bind(at)
-        .bind(at)
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
@@ -431,7 +431,7 @@ impl Store {
         if loser == winner {
             return Ok(0);
         }
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE moments SET artifact_id = ?
               WHERE artifact_id = ? AND done_at IS NULL
                 AND NOT EXISTS (SELECT 1 FROM moments w
@@ -440,10 +440,10 @@ impl Store {
                                    AND w.at IS moments.at
                                    AND w.rule IS moments.rule
                                    AND w.done_at IS NULL)",
+            winner,
+            loser,
+            winner
         )
-        .bind(winner)
-        .bind(loser)
-        .bind(winner)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -461,24 +461,24 @@ impl Store {
     /// `None` where the series has no dated row, which leaves `next_after`
     /// reading the previous occurrence exactly as it always did.
     pub async fn series_anchor(&self, series_id: &str) -> Result<Option<i64>> {
-        let moved: Option<i64> = sqlx::query_scalar(
+        let moved: Option<i64> = sqlx::query_scalar!(
             "SELECT at FROM moments
               WHERE series_id = ? AND at IS NOT NULL AND moved_at IS NOT NULL
               ORDER BY moved_at DESC LIMIT 1",
+            series_id
         )
-        .bind(series_id)
         .fetch_optional(&self.pool)
         .await?
         .flatten();
         if moved.is_some() {
             return Ok(moved);
         }
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT at FROM moments
               WHERE series_id = ? AND at IS NOT NULL
               ORDER BY created_at, id LIMIT 1",
+            series_id
         )
-        .bind(series_id)
         .fetch_optional(&self.pool)
         .await?
         .flatten())
@@ -506,13 +506,13 @@ impl Store {
         kind: Kind,
         at: Option<i64>,
     ) -> Result<bool> {
-        let n: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM moments
               WHERE artifact_id = ? AND kind = ? AND at IS ?",
+            artifact_id,
+            kind.as_str(),
+            at
         )
-        .bind(artifact_id)
-        .bind(kind.as_str())
-        .bind(at)
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
@@ -531,12 +531,12 @@ impl Store {
     /// So the same stance `has_operator_moment` takes for a row a person moved: a
     /// row the base has already spoken about is not this re-read's to replace.
     pub async fn has_acted_on_due(&self, artifact_id: &str) -> Result<bool> {
-        let n: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM moments
               WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL
                 AND (notified_at IS NOT NULL OR snoozed_until IS NOT NULL)",
+            artifact_id
         )
-        .bind(artifact_id)
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
@@ -564,16 +564,16 @@ impl Store {
         // when its instant matches, and an operator who took a rule off a
         // reminder left that instant where it was: the next re-embed read the
         // invented rule back and the reminder repeated again.
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE moments SET rule = ?, series_id = COALESCE(series_id, id)
               WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL AND at IS ?
                 AND (rule IS NULL OR rule <> ?)
                 AND moved_at IS NULL AND source <> 'set'",
+            rule,
+            artifact_id,
+            at,
+            rule
         )
-        .bind(rule)
-        .bind(artifact_id)
-        .bind(at)
-        .bind(rule)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -598,12 +598,12 @@ impl Store {
     /// survive `delete_read_due`, so a re-read landing on another instant put
     /// the model's reading beside the operator's: two open rows, both pushing.
     pub async fn has_operator_moment(&self, artifact_id: &str, kind: Kind) -> Result<bool> {
-        let n: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM moments
               WHERE artifact_id = ? AND kind = ? AND (moved_at IS NOT NULL OR source = 'set')",
+            artifact_id,
+            kind.as_str()
         )
-        .bind(artifact_id)
-        .bind(kind.as_str())
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
@@ -613,11 +613,11 @@ impl Store {
     /// done rows included — the history of a recurring reminder is its rows,
     /// so counting them is counting the occurrences.
     pub async fn occurrences_of_rule(&self, artifact_id: &str, rule: &str) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM moments WHERE artifact_id = ? AND kind = 'due' AND rule = ?",
+            artifact_id,
+            rule
         )
-        .bind(artifact_id)
-        .bind(rule)
         .fetch_one(&self.pool)
         .await?)
     }
@@ -642,7 +642,7 @@ impl Store {
     /// the way `occurrences_of_rule` has always counted them — the due rows on
     /// this artifact under this rule — which is the count the series replaces.
     pub async fn adopt_into_own_series(&self, id: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE moments SET series_id = ?
               WHERE series_id IS NULL
                 AND (id = ?
@@ -651,11 +651,11 @@ impl Store {
                                              WHERE id = ? AND series_id IS NULL)
                          AND rule = (SELECT rule FROM moments
                                       WHERE id = ? AND series_id IS NULL)))",
+            id,
+            id,
+            id,
+            id
         )
-        .bind(id)
-        .bind(id)
-        .bind(id)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -672,12 +672,12 @@ impl Store {
     /// on the winner too — never stopped. A bounded recurrence became an
     /// unbounded one, silently.
     pub async fn occurrences_in_series(&self, series_id: &str) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM moments WHERE kind = 'due' AND series_id = ?")
-                .bind(series_id)
-                .fetch_one(&self.pool)
-                .await?,
+        Ok(sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM moments WHERE kind = 'due' AND series_id = ?",
+            series_id
         )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Has a `COUNT=n` rule had its n occurrences? False for a rule with no
@@ -744,13 +744,13 @@ impl Store {
     /// due row deleted before those was a standing reminder destroyed by a
     /// re-read with nothing to put in its place. See `jobs::judgement::apply`.
     pub async fn delete_read_events(&self, artifact_id: &str) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "DELETE FROM moments
               WHERE artifact_id = ? AND kind = 'event' AND source NOT IN ('set', 'armed')
                 AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
                 AND moved_at IS NULL",
+            artifact_id
         )
-        .bind(artifact_id)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -780,13 +780,13 @@ impl Store {
     /// here, it was gone for good, because the re-read then found the original
     /// instant still on the artifact — done — and armed nothing in its place.
     pub async fn delete_read_due(&self, artifact_id: &str) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "DELETE FROM moments
               WHERE artifact_id = ? AND kind = 'due' AND source NOT IN ('set', 'armed')
                 AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL
                 AND moved_at IS NULL",
+            artifact_id
         )
-        .bind(artifact_id)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -816,11 +816,11 @@ impl Store {
     /// Returns whether anything went, so the band can keep quiet rather than
     /// announce an undo for a row still sitting in front of the reader.
     pub async fn delete_refused_due(&self, artifact_id: &str) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "DELETE FROM moments
               WHERE artifact_id = ? AND kind = 'due' AND source <> 'set' AND done_at IS NULL",
+            artifact_id
         )
-        .bind(artifact_id)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -945,20 +945,19 @@ impl Store {
     /// and a `COUNT=5` that ends after three firings because the count is the
     /// rows. One statement decides it instead.
     pub async fn mark_done(&self, id: &str, at: i64) -> Result<bool> {
-        Ok(
-            sqlx::query("UPDATE moments SET done_at = ? WHERE id = ? AND done_at IS NULL")
-                .bind(at)
-                .bind(id)
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
-                > 0,
+        Ok(sqlx::query!(
+            "UPDATE moments SET done_at = ? WHERE id = ? AND done_at IS NULL",
+            at,
+            id
         )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
     }
 
     pub async fn undo_done(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE moments SET done_at = NULL WHERE id = ?")
-            .bind(id)
+        sqlx::query!("UPDATE moments SET done_at = NULL WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -984,16 +983,16 @@ impl Store {
     /// The snooze and the notification go with the old date: both were about
     /// an instant that is no longer this row's.
     pub async fn move_moment(&self, id: &str, at: i64, tz: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE moments
                 SET moved_from = COALESCE(moved_from, at), moved_at = ?, at = ?, tz = ?,
                     snoozed_until = NULL, notified_at = NULL
               WHERE id = ?",
+            crate::store::now(),
+            at,
+            tz,
+            id
         )
-        .bind(crate::store::now())
-        .bind(at)
-        .bind(tz)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1011,15 +1010,15 @@ impl Store {
     /// `delete_read_due`, `has_operator_moment`, `set_rule_of_open_due` — so a
     /// rule taken off here is not read back on the next re-embed.
     pub async fn restate_rule(&self, id: &str, rule: Option<&str>) -> Result<bool> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE moments
                 SET rule = ?1, series_id = CASE WHEN ?1 IS NULL THEN NULL ELSE id END,
                     moved_at = ?2
               WHERE id = ?3 AND kind = 'due' AND done_at IS NULL",
+            rule,
+            crate::store::now(),
+            id
         )
-        .bind(rule)
-        .bind(crate::store::now())
-        .bind(id)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -1031,10 +1030,10 @@ impl Store {
     /// spares `set` rows because the band's button is a claim about a
     /// misreading; the editor's is the operator taking back their own.
     pub async fn delete_open_due(&self, artifact_id: &str) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "DELETE FROM moments WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL",
+            artifact_id
         )
-        .bind(artifact_id)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -1059,15 +1058,15 @@ impl Store {
         rule: &str,
         at: i64,
     ) -> Result<bool> {
-        let n = sqlx::query(
+        let n = sqlx::query!(
             "DELETE FROM moments
               WHERE artifact_id = ? AND kind = 'due' AND rule = ? AND at = ?
                 AND source = 'armed'
                 AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL",
+            artifact_id,
+            rule,
+            at
         )
-        .bind(artifact_id)
-        .bind(rule)
-        .bind(at)
         .execute(&self.pool)
         .await?
         .rows_affected();
@@ -1097,11 +1096,11 @@ impl Store {
     /// API door reached it.
     pub async fn snooze(&self, id: &str, until: i64) -> Result<bool> {
         Ok(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE moments SET snoozed_until = ?                  WHERE id = ? AND done_at IS NULL AND at IS NOT NULL",
+                until,
+                id
             )
-                .bind(until)
-                .bind(id)
                 .execute(&self.pool)
                 .await?
                 .rows_affected()
@@ -1110,8 +1109,7 @@ impl Store {
     }
 
     pub async fn unsnooze(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE moments SET snoozed_until = NULL WHERE id = ?")
-            .bind(id)
+        sqlx::query!("UPDATE moments SET snoozed_until = NULL WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1207,7 +1205,7 @@ impl Store {
     /// waiting for, and polling before it is asking a question whose answer
     /// cannot have changed.
     pub async fn next_due_change(&self, now: i64, horizon: i64) -> Result<Option<i64>> {
-        let r: Option<Option<i64>> = sqlx::query_scalar(
+        let r: Option<Option<i64>> = sqlx::query_scalar!(
             "SELECT MIN(t) FROM (
                SELECT m.at - ? AS t FROM moments m JOIN artifacts a ON a.id = m.artifact_id
                  WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active' AND m.at IS NOT NULL
@@ -1219,10 +1217,10 @@ impl Store {
                  WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'
                    AND m.snoozed_until IS NOT NULL
              ) WHERE t > ?",
+            horizon,
+            now
         )
-        .bind(horizon)
-        .bind(now)
-        .fetch_optional(&self.pool)
+            .fetch_optional(&self.pool)
         .await?;
         Ok(r.flatten())
     }
@@ -1769,12 +1767,14 @@ mod tests {
     /// would be one created after its own due time. Backdating is what makes
     /// them the long-standing reminders they are written about.
     async fn existed_since(s: &Store, id: &str, created_at: i64) {
-        sqlx::query("UPDATE moments SET created_at = ? WHERE id = ?")
-            .bind(created_at)
-            .bind(id)
-            .execute(&s.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE moments SET created_at = ? WHERE id = ?",
+            created_at,
+            id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
     }
 
     fn due(aid: &str, at: Option<i64>) -> NewMoment {

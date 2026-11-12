@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT target_id FROM jobs WHERE stage = 'dedupe'",
+  "describe": {
+    "columns": [
+      {
+        "name": "target_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e9ca4ec20e6bedaec152acc74b88601792f9c66328e9bac5821590426f1a8ae4"
+}

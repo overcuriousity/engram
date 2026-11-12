@@ -158,11 +158,13 @@ mod tests {
         assert_eq!(verify(&s, &t).await.unwrap().subject, "user-1");
 
         revoke(&s, &row.id, "user-1").await.unwrap();
-        sqlx::query("UPDATE api_tokens SET revoked_at = revoked_at - ?")
-            .bind(RESTORE_WINDOW_SECS + 1)
-            .execute(&s.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE api_tokens SET revoked_at = revoked_at - ?",
+            RESTORE_WINDOW_SECS + 1
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
         assert!(matches!(
             restore(&s, &row.id, "user-1").await,
             Err(Error::NotFound)
@@ -188,7 +190,7 @@ mod tests {
         let stored = s.list_tokens("user-1").await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].id, row.id);
-        let raw: String = sqlx::query_scalar("SELECT token_hash FROM api_tokens")
+        let raw: String = sqlx::query_scalar!("SELECT token_hash FROM api_tokens")
             .fetch_one(&s.pool)
             .await
             .unwrap();

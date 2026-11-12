@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DROP TABLE search_events",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "2e1f1f3facb9de087e5896ad8a790890c67dc377480ba30798aab0946df6a4db"
+}

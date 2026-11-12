@@ -64,26 +64,26 @@ pub struct EvalRun {
 impl Store {
     pub async fn record_eval_run(&self, run: &NewEvalRun) -> Result<String> {
         let id = new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO eval_runs
                (id, created_at, judged_count, pairs_used, pairs_skipped,
                 base_params, base_recall, base_mrr,
                 best_params, best_recall, best_mrr,
                 diff)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            now(),
+            run.judged_count,
+            run.pairs_used,
+            run.pairs_skipped,
+            json(&run.base)?,
+            run.base_recall,
+            run.base_mrr,
+            json(&run.best)?,
+            run.best_recall,
+            run.best_mrr,
+            json(&run.diff)?
         )
-        .bind(&id)
-        .bind(now())
-        .bind(run.judged_count)
-        .bind(run.pairs_used)
-        .bind(run.pairs_skipped)
-        .bind(json(&run.base)?)
-        .bind(run.base_recall)
-        .bind(run.base_mrr)
-        .bind(json(&run.best)?)
-        .bind(run.best_recall)
-        .bind(run.best_mrr)
-        .bind(json(&run.diff)?)
         .execute(&self.pool)
         .await?;
         Ok(id)

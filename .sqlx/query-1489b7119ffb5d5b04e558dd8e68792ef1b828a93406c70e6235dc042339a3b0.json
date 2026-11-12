@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_links\n                       (a_id, b_id, weight, bumped_at, queries, cues, state, created_at)\n                     VALUES (?, ?, ?, ?, ?, ?, 'learning', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "1489b7119ffb5d5b04e558dd8e68792ef1b828a93406c70e6235dc042339a3b0"
+}

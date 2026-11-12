@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET state = 'running' WHERE stage = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e7075d50deb9a8df3ea8700b7ca090bef6bbf66532ef1c87bcef6a52503f4adc"
+}

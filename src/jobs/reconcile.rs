@@ -228,7 +228,7 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+        sqlx::query!("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -236,7 +236,7 @@ mod tests {
         run(&core).await.unwrap();
 
         let attempts: Vec<i64> =
-            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+            sqlx::query_scalar!("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
                 .fetch_all(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -267,7 +267,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        sqlx::query("DELETE FROM jobs WHERE stage = 'segment_window'")
+        sqlx::query!("DELETE FROM jobs WHERE stage = 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -280,8 +280,8 @@ mod tests {
 
         let windows = core.store.segments_for_corpus(&out.id).await.unwrap().len();
         assert!(windows > 2, "the fixture must span several windows");
-        let armed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state = 'pending'",
+        let armed: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state = 'pending'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -695,16 +695,18 @@ mod tests {
             .await
             .unwrap();
         core.store.set_corpus_status(&src.id, status).await.unwrap();
-        sqlx::query("UPDATE artifacts SET status = 'ready' WHERE corpus_id = ?")
-            .bind(&src.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET status = 'ready' WHERE corpus_id = ?",
+            &src.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         core.store.get_corpus(&src.id).await.unwrap()
     }
 
     async fn window_jobs(core: &Core) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE stage = 'segment_window'")
+        sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE stage = 'segment_window'")
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap()
@@ -754,7 +756,7 @@ mod tests {
             .set_segment_state(&c.id, 1, SegmentState::Done, None)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM jobs WHERE stage = 'segment_window'")
+        sqlx::query!("DELETE FROM jobs WHERE stage = 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();

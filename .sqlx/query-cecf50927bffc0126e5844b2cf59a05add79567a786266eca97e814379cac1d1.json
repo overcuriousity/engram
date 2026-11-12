@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts\n                SET source_count = (SELECT COUNT(*) FROM artifact_sources WHERE child_id = ?)\n              WHERE id = ? AND provenance = 'merged'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "cecf50927bffc0126e5844b2cf59a05add79567a786266eca97e814379cac1d1"
+}

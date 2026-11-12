@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO pursuits\n               (id, opened_at, state, queries, sources, query_vec, vec_dim, embed_model)\n             VALUES (?, ?, 'open', ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "dc0d92225c8b5f5d03ef994a40b5ee1cdf9f4afc62154054d5eabc3daf0c864c"
+}

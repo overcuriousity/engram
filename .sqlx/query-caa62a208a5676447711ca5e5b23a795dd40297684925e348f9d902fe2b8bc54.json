@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE ask_citations SET carried = 1 - carried WHERE event_id = ? AND n = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "caa62a208a5676447711ca5e5b23a795dd40297684925e348f9d902fe2b8bc54"
+}

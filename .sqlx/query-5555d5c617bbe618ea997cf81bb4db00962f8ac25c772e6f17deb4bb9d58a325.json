@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET series_id = NULL WHERE artifact_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "5555d5c617bbe618ea997cf81bb4db00962f8ac25c772e6f17deb4bb9d58a325"
+}

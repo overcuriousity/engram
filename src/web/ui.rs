@@ -3043,7 +3043,7 @@ mod tests {
             .record_pair_with_detail(&made[0].id, &made[1].id, 0.0, "link")
             .await
             .unwrap();
-        let id: i64 = sqlx::query_scalar("SELECT id FROM artifact_pairs")
+        let id: i64 = sqlx::query_scalar!("SELECT id FROM artifact_pairs")
             .fetch_one(&core.store.pool)
             .await
             .unwrap();
@@ -3155,9 +3155,7 @@ mod tests {
             .remove(0)
             .id;
         if let Some(p) = provenance {
-            sqlx::query("UPDATE artifacts SET provenance = ? WHERE id = ?")
-                .bind(p)
-                .bind(&aid)
+            sqlx::query!("UPDATE artifacts SET provenance = ? WHERE id = ?", p, &aid)
                 .execute(&core.store.pool)
                 .await
                 .unwrap();
@@ -5684,7 +5682,7 @@ mod tests {
             1,
             "the UI ask was not recorded"
         );
-        let id: String = sqlx::query_scalar("SELECT id FROM ask_events LIMIT 1")
+        let id: String = sqlx::query_scalar!(r#"SELECT id AS "id!" FROM ask_events LIMIT 1"#)
             .fetch_one(&handle.store.pool)
             .await
             .unwrap();
@@ -5762,11 +5760,11 @@ mod tests {
         );
         // Queued, not merely stored: the artifacts and their vectors are what
         // the next stage makes of it, at every synthesis setting.
-        let queued: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE target_id = ?")
-            .bind(&corpus_id)
-            .fetch_one(&core.store.control.pool)
-            .await
-            .unwrap();
+        let queued: i64 =
+            sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE target_id = ?", &corpus_id)
+                .fetch_one(&core.store.control.pool)
+                .await
+                .unwrap();
         assert!(queued > 0, "a kept answer was stored but never processed");
     }
 
@@ -5848,7 +5846,7 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let origin: String =
-            sqlx::query_scalar("SELECT origin FROM corpora WHERE raw_text = 'typed by a person'")
+            sqlx::query_scalar!("SELECT origin FROM corpora WHERE raw_text = 'typed by a person'")
                 .fetch_one(&core.store.pool)
                 .await
                 .unwrap();
@@ -6928,10 +6926,12 @@ mod tests {
     /// A search that returned nothing is not a card the deck deals — see
     /// `dealable!` — and the rail asks about one of those.
     async fn newest_event(handle: &crate::core::Core) -> String {
-        sqlx::query_scalar("SELECT id FROM search_events ORDER BY created_at DESC, id DESC LIMIT 1")
-            .fetch_one(&handle.store.pool)
-            .await
-            .expect("the search the rail was filled by")
+        sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM search_events ORDER BY created_at DESC, id DESC LIMIT 1"#
+        )
+        .fetch_one(&handle.store.pool)
+        .await
+        .expect("the search the rail was filled by")
     }
 
     /// A gap recorded against a capture that is still being read is a false

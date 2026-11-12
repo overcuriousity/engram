@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE rehearsal_results SET at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "4bffdc7ea502f83e9e701b2fba42fccb929fb952b9a5a127cf72ac49b35978aa"
+}

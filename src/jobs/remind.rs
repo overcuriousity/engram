@@ -791,11 +791,11 @@ mod tests {
 
     /// The pending Remind row's wake time, or none when nothing is armed.
     async fn run_after_of(core: &Core) -> Option<i64> {
-        sqlx::query_scalar::<_, i64>(
+        sqlx::query_scalar!(
             "SELECT run_after FROM jobs WHERE stage = ? AND target_id = ? AND state = 'pending'",
+            Stage::Remind.as_str(),
+            REMIND_TARGET
         )
-        .bind(Stage::Remind.as_str())
-        .bind(REMIND_TARGET)
         .fetch_optional(&core.store.control.pool)
         .await
         .unwrap()

@@ -671,11 +671,13 @@ mod tests {
 
     /// The row a sweep leaves behind, whatever state it left in.
     async fn pending_run_after(core: &Core, stage: Stage) -> Option<i64> {
-        sqlx::query_scalar("SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'")
-            .bind(stage.as_str())
-            .fetch_optional(&core.store.control.pool)
-            .await
-            .unwrap()
+        sqlx::query_scalar!(
+            "SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'",
+            stage.as_str()
+        )
+        .fetch_optional(&core.store.control.pool)
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -739,7 +741,7 @@ mod tests {
         );
         // And exactly one of it: `UNIQUE(stage, target_id)` still does that
         // work, for free and for the same reason it always did.
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE stage = 'associate'")
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM jobs WHERE stage = 'associate'")
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
@@ -767,8 +769,7 @@ mod tests {
             .await
             .unwrap();
 
-        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
-            .bind(id)
+        let state: String = sqlx::query_scalar!("SELECT state FROM jobs WHERE id = ?", id)
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
@@ -897,12 +898,12 @@ mod tests {
             let control_pool = core.store.control.pool.clone();
             let id = out.id.clone();
             async move {
-                sqlx::query_scalar::<_, i64>(
-                    "SELECT run_after - ? FROM jobs
-                      WHERE stage = 'segment_window' AND target_id LIKE ? || '%'",
+                sqlx::query_scalar!(
+                    r#"SELECT run_after - ? AS "delay!: i64" FROM jobs
+                      WHERE stage = 'segment_window' AND target_id LIKE ? || '%'"#,
+                    crate::store::now(),
+                    id
                 )
-                .bind(crate::store::now())
-                .bind(id)
                 .fetch_one(&control_pool)
                 .await
                 .unwrap()
@@ -913,7 +914,7 @@ mod tests {
         // exists, then clear everything else capture queued beside it, so
         // every iteration below claims the refusing window and nothing else.
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        sqlx::query("DELETE FROM jobs WHERE stage != 'segment_window'")
+        sqlx::query!("DELETE FROM jobs WHERE stage != 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -922,7 +923,7 @@ mod tests {
         // without sleeping, and record how long the unit asked to wait.
         let mut gaps = Vec::new();
         for _ in 0..MAX_ATTEMPTS + 3 {
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -1006,8 +1007,7 @@ mod tests {
             use sqlx::Executor;
             let mut conn = tenants.control().pool.acquire().await.unwrap();
             conn.execute("PRAGMA foreign_keys = OFF").await.unwrap();
-            sqlx::query("DELETE FROM users WHERE subject = ?")
-                .bind("sub-a")
+            sqlx::query!("DELETE FROM users WHERE subject = ?", "sub-a")
                 .execute(&mut *conn)
                 .await
                 .unwrap();
@@ -1088,8 +1088,7 @@ mod tests {
     /// the close then shuts, and the guard on the upsert says so by refusing to
     /// touch anything that is not already finished.
     async fn sweep_finds(core: &Core, stage: Stage, did_work: bool) {
-        let id: i64 = sqlx::query_scalar("SELECT id FROM jobs WHERE stage = ?")
-            .bind(stage.as_str())
+        let id: i64 = sqlx::query_scalar!("SELECT id FROM jobs WHERE stage = ?", stage.as_str())
             .fetch_optional(&core.store.control.pool)
             .await
             .unwrap()
@@ -1214,11 +1213,13 @@ mod tests {
         // of the two states `arm_now` guards on. Set here rather than through
         // `claim_job`, which would not hand out a row still sleeping behind the
         // backoff this test just built.
-        sqlx::query("UPDATE jobs SET state = 'running' WHERE stage = ?")
-            .bind(Stage::Retention.as_str())
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET state = 'running' WHERE stage = ?",
+            Stage::Retention.as_str()
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
 
         core.store
             .arm_now(Stage::Retention, "collection", "collection")
@@ -1371,7 +1372,7 @@ mod tests {
         // the capture's embed and follow-on units, so drive well past the
         // window's own budget rather than counting iterations against it.
         for _ in 0..40 {
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT carried FROM ask_citations WHERE event_id = ? AND n = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "carried",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ask_citations",
+            "name": "carried"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "521a2a755bf9a19556bb5e53377b81fdc62ac6deda89899666c8c53add1839d7"
+}

@@ -1098,12 +1098,14 @@ mod tests {
     }
 
     async fn job_state(core: &Core, stage: Stage, target: &str) -> Option<String> {
-        sqlx::query_scalar::<_, String>("SELECT state FROM jobs WHERE stage = ? AND target_id = ?")
-            .bind(stage.as_str())
-            .bind(target)
-            .fetch_optional(&core.store.control.pool)
-            .await
-            .unwrap()
+        sqlx::query_scalar!(
+            "SELECT state FROM jobs WHERE stage = ? AND target_id = ?",
+            stage.as_str(),
+            target
+        )
+        .fetch_optional(&core.store.control.pool)
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1216,11 +1218,13 @@ mod tests {
 
         // The path this exists for is untouched: a row closed with chunks still
         // pending comes back for the next batch.
-        sqlx::query("UPDATE jobs SET state = 'done' WHERE stage = 'embed' AND target_id = ?")
-            .bind(&src)
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET state = 'done' WHERE stage = 'embed' AND target_id = ?",
+            &src
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
         rearm_if_more(&core, &src).await.unwrap();
         assert_eq!(
             job_state(&core, Stage::Embed, &src).await.as_deref(),
@@ -1746,9 +1750,9 @@ mod tests {
         // One claim: the re-arm happens in `run_one` after the job is closed.
         crate::jobs::run_one(&core).await.unwrap();
 
-        let batch_armed: i64 = sqlx::query_scalar(
+        let batch_armed: i64 = sqlx::query_scalar!(
             "SELECT count(*) FROM jobs
-              WHERE stage = 'embed' AND target_kind = 'corpus' AND state = 'pending'",
+              WHERE stage = 'embed' AND target_kind = 'corpus' AND state = 'pending'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -1777,9 +1781,9 @@ mod tests {
             1,
             "the batch job made more than one inference call"
         );
-        let armed: i64 = sqlx::query_scalar(
+        let armed: i64 = sqlx::query_scalar!(
             "SELECT count(*) FROM jobs
-              WHERE stage = 'embed' AND target_kind = 'artifact' AND state = 'pending'",
+              WHERE stage = 'embed' AND target_kind = 'artifact' AND state = 'pending'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -2055,12 +2059,12 @@ mod tests {
             2,
             "the two small chunks should be embedded"
         );
-        let armed: i64 = sqlx::query_scalar(
+        let armed: i64 = sqlx::query_scalar!(
             "SELECT count(*) FROM jobs
               WHERE stage = 'embed' AND target_kind = 'artifact' AND target_id = ?
                 AND state = 'pending'",
+            &ids[1]
         )
-        .bind(&ids[1])
         .fetch_one(&core.store.control.pool)
         .await
         .unwrap();

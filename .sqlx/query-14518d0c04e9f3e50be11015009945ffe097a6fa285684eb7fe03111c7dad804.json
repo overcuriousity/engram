@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attachments (corpus_id, kind, mime, filename, bytes, preview, width, height, created_at)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "14518d0c04e9f3e50be11015009945ffe097a6fa285684eb7fe03111c7dad804"
+}

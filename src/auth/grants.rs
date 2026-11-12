@@ -85,7 +85,7 @@ mod tests {
     async fn the_store_holds_the_hash_and_not_the_code() {
         let c = Control::memory().await.unwrap();
         let code = mint(&c, "alice").await.unwrap();
-        let stored: String = sqlx::query_scalar("SELECT code_hash FROM pair_grants")
+        let stored: String = sqlx::query_scalar!("SELECT code_hash FROM pair_grants")
             .fetch_one(&c.pool)
             .await
             .unwrap();
@@ -137,7 +137,7 @@ mod tests {
             .await
             .unwrap();
         mint(&c, "alice").await.unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pair_grants")
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM pair_grants")
             .fetch_one(&c.pool)
             .await
             .unwrap();

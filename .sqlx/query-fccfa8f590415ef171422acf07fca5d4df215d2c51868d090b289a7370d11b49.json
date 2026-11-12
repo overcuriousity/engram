@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE segments SET state = 'done' WHERE corpus_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "fccfa8f590415ef171422acf07fca5d4df215d2c51868d090b289a7370d11b49"
+}

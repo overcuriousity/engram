@@ -1055,12 +1055,14 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(&eid)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            at,
+            &eid
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         // The answer, written into the box the query was typed into — and
         // driven the whole way through the queue, which is where `cover` runs
@@ -1267,12 +1269,14 @@ mod tests {
             .await
             .unwrap();
         // Back-date it: `record_search` stamps now, and the sweep wants quiet.
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            at,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         id
     }
 
@@ -1487,9 +1491,7 @@ mod tests {
             })
             .await
             .unwrap();
-        sqlx::query("UPDATE ask_events SET created_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(&id)
+        sqlx::query!("UPDATE ask_events SET created_at = ? WHERE id = ?", at, &id)
             .execute(&core.store.pool)
             .await
             .unwrap();

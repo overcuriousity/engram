@@ -1942,12 +1942,14 @@ mod tests {
             .set_artifact_status(&id, crate::store::artifacts::ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 400 * 86_400)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - 400 * 86_400,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         core.store
             .bury(
                 &id,

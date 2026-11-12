@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO context_events\n                 (scope, at, bundle, device_key, local_hour, weekday, tz)\n             VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "4c659a531f3a9a0ebf1887bc0412c15a503cffc244ec3ac61881e5a03f525d10"
+}

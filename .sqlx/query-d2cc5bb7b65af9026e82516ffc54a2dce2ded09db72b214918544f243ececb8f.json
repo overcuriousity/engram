@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT run_after FROM jobs WHERE stage = ? AND state = 'pending'",
+  "describe": {
+    "columns": [
+      {
+        "name": "run_after",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "run_after"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d2cc5bb7b65af9026e82516ffc54a2dce2ded09db72b214918544f243ececb8f"
+}

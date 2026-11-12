@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM context_clusters WHERE artifact_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "8634c29a745e3b7aa9439c4ab7cd97dd4cdf86bc237b8dde529fcc11fbb03daa"
+}

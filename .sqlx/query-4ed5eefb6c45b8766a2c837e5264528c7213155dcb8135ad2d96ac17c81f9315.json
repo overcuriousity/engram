@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM ask_subjects WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4ed5eefb6c45b8766a2c837e5264528c7213155dcb8135ad2d96ac17c81f9315"
+}

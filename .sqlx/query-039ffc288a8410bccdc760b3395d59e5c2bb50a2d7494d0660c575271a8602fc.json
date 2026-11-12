@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT empty_runs FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "empty_runs",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "empty_runs"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "039ffc288a8410bccdc760b3395d59e5c2bb50a2d7494d0660c575271a8602fc"
+}

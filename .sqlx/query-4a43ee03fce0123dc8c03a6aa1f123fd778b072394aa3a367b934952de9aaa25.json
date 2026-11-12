@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE ask_citations SET carried = 0 WHERE event_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4a43ee03fce0123dc8c03a6aa1f123fd778b072394aa3a367b934952de9aaa25"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE ask_events SET dismissed_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "99c5db696aedce6706d9ea2f62e3f1222992b34f24ecbdb0e9574f571233bf6a"
+}

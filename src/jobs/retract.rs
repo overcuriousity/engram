@@ -878,9 +878,7 @@ mod tests {
             })
             .await
             .unwrap();
-        sqlx::query("UPDATE rehearsal_results SET at = ? WHERE id = ?")
-            .bind(at)
-            .bind(&rid)
+        sqlx::query!("UPDATE rehearsal_results SET at = ? WHERE id = ?", at, &rid)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1355,12 +1353,14 @@ mod tests {
         // By hand, through the button's own method: no journal row, which is
         // the whole of what distinguishes this from a judged discard.
         core.deprecate(&answer).await.unwrap();
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 400 * 86_400)
-            .bind(&answer)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - 400 * 86_400,
+            &answer
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let dense = core
             .vectors
             .dense_of(&answer)
@@ -1414,12 +1414,14 @@ mod tests {
         core.deprecate_with(id, Some(discard_row(id)))
             .await
             .unwrap();
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 400 * 86_400)
-            .bind(id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - 400 * 86_400,
+            id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let dense = core.vectors.dense_of(id).await.unwrap().expect("a point");
         core.store
             .bury(

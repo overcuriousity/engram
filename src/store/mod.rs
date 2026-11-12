@@ -605,10 +605,10 @@ mod tests {
     use super::*;
 
     async fn table_names(pool: &sqlx::SqlitePool) -> Vec<String> {
-        sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'",
+        sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'"#
         )
-        .fetch_all(pool)
+            .fetch_all(pool)
         .await
         .unwrap()
     }
@@ -977,6 +977,7 @@ mod tests {
             .connect_with(opts)
             .await
             .unwrap();
+        // runtime: builds an older schema than the reference database holds.
         sqlx::query(
             "CREATE TABLE segments (
                corpus_id TEXT NOT NULL, idx INTEGER NOT NULL,
@@ -1009,13 +1010,15 @@ mod tests {
         let set = |id: String, origin: &'static str, meta: serde_json::Value| {
             let pool = store.pool.clone();
             async move {
-                sqlx::query("UPDATE corpora SET origin = ?, metadata = ? WHERE id = ?")
-                    .bind(origin)
-                    .bind(meta.to_string())
-                    .bind(id)
-                    .execute(&pool)
-                    .await
-                    .unwrap();
+                sqlx::query!(
+                    "UPDATE corpora SET origin = ?, metadata = ? WHERE id = ?",
+                    origin,
+                    meta.to_string(),
+                    id
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
             }
         };
         let filed = store.insert_corpus("Long day.", "web", None).await.unwrap();
@@ -1046,11 +1049,13 @@ mod tests {
         )
         .await;
         let broken = store.insert_corpus("not json", "web", None).await.unwrap();
-        sqlx::query("UPDATE corpora SET origin = 'journal', metadata = 'nope' WHERE id = ?")
-            .bind(&broken.id)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE corpora SET origin = 'journal', metadata = 'nope' WHERE id = ?",
+            &broken.id
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
 
         store.migrate().await.unwrap();
         store.migrate().await.unwrap();
@@ -1067,11 +1072,11 @@ mod tests {
         let c = store.get_corpus(&refused.id).await.unwrap();
         assert_eq!(c.origin, "share");
         assert_eq!(c.metadata, serde_json::json!({}));
-        let origin: String = sqlx::query_scalar("SELECT origin FROM corpora WHERE id = ?")
-            .bind(&broken.id)
-            .fetch_one(&store.pool)
-            .await
-            .unwrap();
+        let origin: String =
+            sqlx::query_scalar!("SELECT origin FROM corpora WHERE id = ?", &broken.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
         assert_eq!(
             origin, "web",
             "metadata that is not JSON still loses the filing"

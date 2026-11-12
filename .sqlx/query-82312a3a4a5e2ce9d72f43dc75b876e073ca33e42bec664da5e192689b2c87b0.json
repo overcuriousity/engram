@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id FROM ask_citations\n                  WHERE event_id = ? AND used = 1 ORDER BY n",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ask_citations",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "82312a3a4a5e2ce9d72f43dc75b876e073ca33e42bec664da5e192689b2c87b0"
+}

@@ -18,15 +18,15 @@ impl Control {
         subject: &str,
         expires_at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO pair_grants (id, code_hash, subject, created_at, expires_at)
              VALUES (?, ?, ?, ?, ?)",
+            id,
+            code_hash,
+            subject,
+            now(),
+            expires_at
         )
-        .bind(id)
-        .bind(code_hash)
-        .bind(subject)
-        .bind(now())
-        .bind(expires_at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -56,8 +56,7 @@ impl Control {
     }
 
     pub async fn purge_expired_grants(&self) -> Result<u64> {
-        let r = sqlx::query("DELETE FROM pair_grants WHERE expires_at <= ?")
-            .bind(now())
+        let r = sqlx::query!("DELETE FROM pair_grants WHERE expires_at <= ?", now())
             .execute(&self.pool)
             .await?;
         Ok(r.rows_affected())

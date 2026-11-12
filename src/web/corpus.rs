@@ -1185,8 +1185,7 @@ mod tests {
             .raw_text
             .lines()
             .count() as i64;
-        sqlx::query("DELETE FROM artifacts WHERE corpus_id = ?")
-            .bind(&out.id)
+        sqlx::query!("DELETE FROM artifacts WHERE corpus_id = ?", &out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1282,11 +1281,11 @@ mod tests {
         // claimed by nobody. Written straight to the column because nothing in
         // the store edits a span — synthesis computes it and is the only
         // writer, which is right everywhere except here.
-        sqlx::query(
+        sqlx::query!(
             r#"UPDATE artifacts SET corpus_span = '{"start_line":1,"end_line":1}' WHERE corpus_id = ?"#,
+            &out.id
         )
-        .bind(&out.id)
-        .execute(&core.store.pool)
+            .execute(&core.store.pool)
         .await
         .unwrap();
 
@@ -1312,8 +1311,7 @@ mod tests {
         // into it is a claim the arrangement cannot support.
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("alpha line", "web", None).await.unwrap();
-        sqlx::query("UPDATE corpora SET restored_at = 1 WHERE id = ?")
-            .bind(&out.id)
+        sqlx::query!("UPDATE corpora SET restored_at = 1 WHERE id = ?", &out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1356,8 +1354,7 @@ mod tests {
             .unwrap()[0]
             .id
             .clone();
-        sqlx::query("UPDATE corpora SET restored_at = 1 WHERE id = ?")
-            .bind(&out.id)
+        sqlx::query!("UPDATE corpora SET restored_at = 1 WHERE id = ?", &out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1386,18 +1383,18 @@ mod tests {
         // One artifact from before spans were recorded. Written straight to the
         // column for the same reason `an_unclaimed_passage_...` does: synthesis
         // is the only writer of a span, which is right everywhere except here.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts SET corpus_span = NULL
               WHERE id = (SELECT id FROM artifacts WHERE corpus_id = ? LIMIT 1)",
+            &out.id
         )
-        .bind(&out.id)
         .execute(&core.store.pool)
         .await
         .unwrap();
-        let orphan = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM artifacts WHERE corpus_id = ? AND corpus_span IS NULL",
+        let orphan = sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE corpus_id = ? AND corpus_span IS NULL"#,
+            &out.id
         )
-        .bind(&out.id)
         .fetch_one(&core.store.pool)
         .await
         .unwrap();
@@ -1429,11 +1426,13 @@ mod tests {
             .unwrap();
         // Every span gone: under the old rule the whole document is one red
         // band with a button on it, though every artifact of it still exists.
-        sqlx::query("UPDATE artifacts SET corpus_span = NULL WHERE corpus_id = ?")
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET corpus_span = NULL WHERE corpus_id = ?",
+            &out.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         let page = get_body(&app, &cookie, &format!("/ui/corpora/{}", out.id)).await;
         assert!(!page.contains("band-gap"), "{page}");

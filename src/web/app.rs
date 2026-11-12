@@ -225,7 +225,7 @@ mod tests {
             body.contains("http://127.0.0.1:8080"),
             "the page says where the phone will point"
         );
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pair_grants")
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM pair_grants")
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
@@ -341,12 +341,14 @@ mod tests {
         let (app, cookie) = crate::web::test_support::app_with_cookie(core.clone()).await;
         let code = press_and_read_code(&app, &cookie).await;
         // Age the row directly: the clock is not the test's to move.
-        sqlx::query("UPDATE pair_grants SET expires_at = ? WHERE code_hash = ?")
-            .bind(crate::store::now() - 1)
-            .bind(crate::auth::grants::hash_code(&code))
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE pair_grants SET expires_at = ? WHERE code_hash = ?",
+            crate::store::now() - 1,
+            crate::auth::grants::hash_code(&code)
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
         let res = app
             .clone()
             .oneshot(claim_req(

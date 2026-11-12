@@ -161,36 +161,36 @@ impl Store {
         let generation = self.live_generation().await?;
         let mut tx = self.pool.begin().await?;
         let id = new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO ask_events
                (id, question, scope, filters, query_vec, vec_dim, embed_model, answer,
                 abstained, dropped, truncated, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            &ask.question,
+            &ask.scope,
+            &ask.filters,
+            vec_to_blob(&ask.query_vec),
+            ask.query_vec.len() as i64,
+            &ask.embed_model,
+            &ask.answer,
+            ask.abstained as i64,
+            ask.dropped as i64,
+            ask.truncated as i64,
+            now()
         )
-        .bind(&id)
-        .bind(&ask.question)
-        .bind(&ask.scope)
-        .bind(&ask.filters)
-        .bind(vec_to_blob(&ask.query_vec))
-        .bind(ask.query_vec.len() as i64)
-        .bind(&ask.embed_model)
-        .bind(&ask.answer)
-        .bind(ask.abstained as i64)
-        .bind(ask.dropped as i64)
-        .bind(ask.truncated as i64)
-        .bind(now())
         .execute(&mut *tx)
         .await?;
         for (i, c) in ask.citations.iter().enumerate() {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO ask_citations (event_id, n, artifact_id, score, used)
                  VALUES (?, ?, ?, ?, ?)",
+                &id,
+                i as i64 + 1,
+                &c.artifact_id,
+                c.score,
+                c.used as i64
             )
-            .bind(&id)
-            .bind(i as i64 + 1)
-            .bind(&c.artifact_id)
-            .bind(c.score)
-            .bind(c.used as i64)
             .execute(&mut *tx)
             .await?;
 
@@ -292,22 +292,24 @@ impl Store {
     /// the model was shown but did not use is not here: only use is
     /// engagement.
     pub async fn used_citations(&self, event_id: &str) -> Result<Vec<String>> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT artifact_id FROM ask_citations WHERE event_id = ? AND used = 1 ORDER BY n",
+            event_id
         )
-        .bind(event_id)
         .fetch_all(&self.pool)
         .await?)
     }
 
     pub async fn judge_ask(&self, id: &str, verdict: AskVerdict) -> Result<()> {
         one_row(
-            sqlx::query("UPDATE ask_events SET judged_at = ?, verdict = ? WHERE id = ?")
-                .bind(now())
-                .bind(verdict.as_str())
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE ask_events SET judged_at = ?, verdict = ? WHERE id = ?",
+                now(),
+                verdict.as_str(),
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
@@ -315,16 +317,19 @@ impl Store {
     /// count towards citation recall for a judgement nobody stands behind.
     pub async fn unjudge_ask(&self, id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        let res =
-            sqlx::query("UPDATE ask_events SET judged_at = NULL, verdict = NULL WHERE id = ?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+        let res = sqlx::query!(
+            "UPDATE ask_events SET judged_at = NULL, verdict = NULL WHERE id = ?",
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
         one_row(res)?;
-        sqlx::query("UPDATE ask_citations SET carried = 0 WHERE event_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query!(
+            "UPDATE ask_citations SET carried = 0 WHERE event_id = ?",
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -335,27 +340,28 @@ impl Store {
     /// is: the toggle refines a verdict, it does not overrule one.
     pub async fn toggle_carried(&self, id: &str, n: i64) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE ask_citations SET carried = 1 - carried WHERE event_id = ? AND n = ?",
+            id,
+            n
         )
-        .bind(id)
-        .bind(n)
         .execute(&mut *tx)
         .await?;
         one_row(res)?;
-        let carried: i64 =
-            sqlx::query_scalar("SELECT carried FROM ask_citations WHERE event_id = ? AND n = ?")
-                .bind(id)
-                .bind(n)
-                .fetch_one(&mut *tx)
-                .await?;
+        let carried: i64 = sqlx::query_scalar!(
+            "SELECT carried FROM ask_citations WHERE event_id = ? AND n = ?",
+            id,
+            n
+        )
+        .fetch_one(&mut *tx)
+        .await?;
         if carried != 0 {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE ask_events SET judged_at = ?, verdict = 'right'
                  WHERE id = ? AND verdict IS NULL",
+                now(),
+                id
             )
-            .bind(now())
-            .bind(id)
             .execute(&mut *tx)
             .await?;
         }
@@ -365,7 +371,7 @@ impl Store {
 
     pub async fn ask_stats(&self) -> Result<AskStats> {
         let mut s = AskStats {
-            asked: sqlx::query_scalar("SELECT count(*) FROM ask_events")
+            asked: sqlx::query_scalar!("SELECT count(*) FROM ask_events")
                 .fetch_one(&self.pool)
                 .await?,
             ..Default::default()
@@ -375,10 +381,10 @@ impl Store {
             (&mut s.wrong, "wrong"),
             (&mut s.nothing_here, "nothing_here"),
         ] {
-            *field = sqlx::query_scalar("SELECT count(*) FROM ask_events WHERE verdict = ?")
-                .bind(verdict)
-                .fetch_one(&self.pool)
-                .await?;
+            *field =
+                sqlx::query_scalar!("SELECT count(*) FROM ask_events WHERE verdict = ?", verdict)
+                    .fetch_one(&self.pool)
+                    .await?;
         }
         s.judged = s.right + s.wrong + s.nothing_here;
         Ok(s)
@@ -390,13 +396,13 @@ impl Store {
         if retain_days <= 0 {
             return Ok(0);
         }
-        Ok(
-            sqlx::query("DELETE FROM ask_events WHERE created_at < ? AND verdict IS NULL")
-                .bind(now() - retain_days * 86_400)
-                .execute(&self.pool)
-                .await?
-                .rows_affected(),
+        Ok(sqlx::query!(
+            "DELETE FROM ask_events WHERE created_at < ? AND verdict IS NULL",
+            now() - retain_days * 86_400
         )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Recorded questions with `from < created_at <= to`, oldest first, with
@@ -413,11 +419,11 @@ impl Store {
         let mut out = Vec::with_capacity(rows.len());
         for r in &rows {
             let id: String = r.get("id");
-            let cited: Vec<String> = sqlx::query_scalar(
+            let cited: Vec<String> = sqlx::query_scalar!(
                 "SELECT artifact_id FROM ask_citations
                   WHERE event_id = ? AND used = 1 ORDER BY n",
+                &id
             )
-            .bind(&id)
             .fetch_all(&self.pool)
             .await?;
             out.push(RecordedAsk {
@@ -434,7 +440,7 @@ impl Store {
     }
 
     pub async fn purge_asks(&self) -> Result<u64> {
-        Ok(sqlx::query("DELETE FROM ask_events")
+        Ok(sqlx::query!("DELETE FROM ask_events")
             .execute(&self.pool)
             .await?
             .rows_affected())
@@ -571,7 +577,7 @@ mod tests {
         let store = Store::memory().await.unwrap();
         store.record_ask(ask("early", 2)).await.unwrap();
 
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM observations")
             .fetch_one(&store.pool)
             .await
             .unwrap();
@@ -699,12 +705,14 @@ mod tests {
             .unwrap();
         // Age two of them past a 30-day window.
         for id in [&old_unjudged, &old_judged] {
-            sqlx::query("UPDATE ask_events SET created_at = ? WHERE id = ?")
-                .bind(now() - 31 * 86_400)
-                .bind(id)
-                .execute(&store.pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE ask_events SET created_at = ? WHERE id = ?",
+                now() - 31 * 86_400,
+                id
+            )
+            .execute(&store.pool)
+            .await
+            .unwrap();
         }
         assert_eq!(store.expire_asks(30).await.unwrap(), 1);
         assert!(store.ask_event(&old_unjudged).await.unwrap().is_none());
@@ -713,12 +721,13 @@ mod tests {
         // Zero means keep forever.
         assert_eq!(store.expire_asks(0).await.unwrap(), 0);
         // Citations go with the event.
-        let orphans: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM ask_citations WHERE event_id = ?")
-                .bind(&old_unjudged)
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
+        let orphans: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM ask_citations WHERE event_id = ?",
+            &old_unjudged
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
         assert_eq!(orphans, 0);
     }
 

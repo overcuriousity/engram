@@ -621,18 +621,18 @@ impl Store {
         embed_model: &str,
     ) -> Result<String> {
         let id = crate::store::new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO ask_subjects
                (id, event_id, subject, query_vec, vec_dim, embed_model, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            event_id,
+            subject,
+            crate::store::feedback::vec_to_blob(query_vec),
+            query_vec.len() as i64,
+            embed_model,
+            now()
         )
-        .bind(&id)
-        .bind(event_id)
-        .bind(subject)
-        .bind(crate::store::feedback::vec_to_blob(query_vec))
-        .bind(query_vec.len() as i64)
-        .bind(embed_model)
-        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -815,18 +815,18 @@ impl Store {
         score: f32,
         by: CoveredBy,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT OR REPLACE INTO gap_coverage
                (kind, gap_id, corpus_id, artifact_id, score, covered_at, covered_by)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            kind.as_str(),
+            gap_id,
+            corpus_id,
+            artifact_id,
+            score,
+            now(),
+            by.as_str()
         )
-        .bind(kind.as_str())
-        .bind(gap_id)
-        .bind(corpus_id)
-        .bind(artifact_id)
-        .bind(score)
-        .bind(now())
-        .bind(by.as_str())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -937,7 +937,7 @@ impl Store {
     /// sentence. Collected on that score, the hole would come back the moment
     /// the base grew enough to measure its own line.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "DELETE FROM gap_coverage
               WHERE (score < ? AND (covered_by IS NULL OR covered_by <> 'capture'))
                  OR (kind = 'ask'
@@ -949,8 +949,8 @@ impl Store {
                  OR (kind = 'subject'
                      AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = gap_coverage.gap_id))
                  OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject')",
+            below
         )
-        .bind(below)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -959,11 +959,13 @@ impl Store {
     /// Undo a coverage: the gap is open again, and the judgement behind it was
     /// never touched.
     pub async fn uncover_gap(&self, kind: GapKind, gap_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM gap_coverage WHERE kind = ? AND gap_id = ?")
-            .bind(kind.as_str())
-            .bind(gap_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM gap_coverage WHERE kind = ? AND gap_id = ?",
+            kind.as_str(),
+            gap_id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -972,43 +974,51 @@ impl Store {
         // from a request reaches the statement text.
         let res = match kind {
             GapKind::Ask => {
-                sqlx::query("UPDATE ask_events SET dismissed_at = ? WHERE id = ?")
-                    .bind(now())
-                    .bind(id)
-                    .execute(&self.pool)
-                    .await?
+                sqlx::query!(
+                    "UPDATE ask_events SET dismissed_at = ? WHERE id = ?",
+                    now(),
+                    id
+                )
+                .execute(&self.pool)
+                .await?
             }
             // The same column `Search` writes, and correctly so: it is the same
             // row, dismissed for the same reason. A search dismissed as
             // unmatched is not offered again if it is later judged a gap
             // either — the operator has already said this one is answered.
             GapKind::Search | GapKind::Unmatched => {
-                sqlx::query("UPDATE search_events SET dismissed_at = ? WHERE id = ?")
-                    .bind(now())
-                    .bind(id)
-                    .execute(&self.pool)
-                    .await?
+                sqlx::query!(
+                    "UPDATE search_events SET dismissed_at = ? WHERE id = ?",
+                    now(),
+                    id
+                )
+                .execute(&self.pool)
+                .await?
             }
             // A pursuit has a state rather than a dismissal column, and
             // `dismissed` is already one of the states it can be in — set by
             // the operator on Ops, meaning the same thing it means here.
             GapKind::Pursuit => {
-                sqlx::query("UPDATE pursuits SET state = 'dismissed', closed_at = ? WHERE id = ?")
-                    .bind(now())
-                    .bind(id)
-                    .execute(&self.pool)
-                    .await?
+                sqlx::query!(
+                    "UPDATE pursuits SET state = 'dismissed', closed_at = ? WHERE id = ?",
+                    now(),
+                    id
+                )
+                .execute(&self.pool)
+                .await?
             }
             // Its own column, unlike `Search`/`Unmatched` above. A subject is
             // not a second reading of some other row — it is a row of its own,
             // written for one plan, and dismissing it says nothing about the
             // question it came from.
             GapKind::Subject => {
-                sqlx::query("UPDATE ask_subjects SET dismissed_at = ? WHERE id = ?")
-                    .bind(now())
-                    .bind(id)
-                    .execute(&self.pool)
-                    .await?
+                sqlx::query!(
+                    "UPDATE ask_subjects SET dismissed_at = ? WHERE id = ?",
+                    now(),
+                    id
+                )
+                .execute(&self.pool)
+                .await?
             }
         };
         if res.rows_affected() == 0 {
@@ -1049,8 +1059,7 @@ impl Store {
 
     pub async fn delete_clusters(&self, keys: &[String]) -> Result<()> {
         for k in keys {
-            sqlx::query("DELETE FROM gap_clusters WHERE key = ?")
-                .bind(k)
+            sqlx::query!("DELETE FROM gap_clusters WHERE key = ?", k)
                 .execute(&self.pool)
                 .await?;
         }
@@ -1065,17 +1074,17 @@ impl Store {
                 .collect::<Vec<_>>(),
         )
         .map_err(|e| Error::Internal(e.to_string()))?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO gap_clusters (key, label, labelled_by, members, created_at)
              VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(key) DO UPDATE SET label = excluded.label, labelled_by = excluded.labelled_by",
+            &c.key,
+            &c.label,
+            &c.labelled_by,
+            members,
+            now()
         )
-        .bind(&c.key)
-        .bind(&c.label)
-        .bind(&c.labelled_by)
-        .bind(members)
-        .bind(now())
-        .execute(&self.pool)
+            .execute(&self.pool)
         .await?;
         Ok(())
     }
@@ -1287,8 +1296,7 @@ mod tests {
         assert_eq!(named, vec!["job priority"]);
 
         // And when the subject is gone, the row goes with it.
-        sqlx::query("DELETE FROM ask_subjects WHERE id = ?")
-            .bind(&id)
+        sqlx::query!("DELETE FROM ask_subjects WHERE id = ?", &id)
             .execute(&store.pool)
             .await
             .unwrap();
@@ -1346,7 +1354,7 @@ mod tests {
     async fn a_subject_dies_with_the_question_it_came_from() {
         let store = Store::memory().await.unwrap();
         uncovered_subject(&store, "how do ticks work", "job priority", vec![0.0, 1.0]).await;
-        sqlx::query("DELETE FROM ask_events")
+        sqlx::query!("DELETE FROM ask_events")
             .execute(&store.pool)
             .await
             .unwrap();
@@ -1587,22 +1595,22 @@ mod tests {
         // `gap_coverage` names both a capture and the artifact of it that
         // answered, and both are foreign keys.
         for (c, a) in [("corpus-a", "art-1"), ("corpus-b", "art-2")] {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
                                       created_at, updated_at)
                  VALUES (?, 'text', 'paste', ?, 'ready', 0, 0)",
+                c,
+                c
             )
-            .bind(c)
-            .bind(c)
             .execute(&store.pool)
             .await
             .unwrap();
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
                  VALUES (?, ?, 0, 'text', 0)",
+                a,
+                c
             )
-            .bind(a)
-            .bind(c)
             .execute(&store.pool)
             .await
             .unwrap();
@@ -1679,17 +1687,17 @@ mod tests {
         // results bar. It must not come back as a hole the base has already
         // been given an answer to.
         let store = Store::memory().await.unwrap();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
                                   created_at, updated_at)
-             VALUES ('corpus-a', 'text', 'paste', 'h', 'ready', 0, 0)",
+             VALUES ('corpus-a', 'text', 'paste', 'h', 'ready', 0, 0)"
         )
         .execute(&store.pool)
         .await
         .unwrap();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
-             VALUES ('art-1', 'corpus-a', 0, 'text', 0)",
+             VALUES ('art-1', 'corpus-a', 0, 'text', 0)"
         )
         .execute(&store.pool)
         .await
@@ -1730,17 +1738,17 @@ mod tests {
         // Retention deletes the search; nothing deletes the row saying a
         // capture answered it, because `gap_id` cannot be a foreign key.
         let store = Store::memory().await.unwrap();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO corpora (id, raw_text, origin, content_hash, status,
                                   created_at, updated_at)
-             VALUES ('corpus-a', 'text', 'paste', 'h', 'ready', 0, 0)",
+             VALUES ('corpus-a', 'text', 'paste', 'h', 'ready', 0, 0)"
         )
         .execute(&store.pool)
         .await
         .unwrap();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)
-             VALUES ('art-1', 'corpus-a', 0, 'text', 0)",
+             VALUES ('art-1', 'corpus-a', 0, 'text', 0)"
         )
         .execute(&store.pool)
         .await
@@ -1760,8 +1768,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        sqlx::query("DELETE FROM search_events WHERE id = ?")
-            .bind(&expired)
+        sqlx::query!("DELETE FROM search_events WHERE id = ?", &expired)
             .execute(&store.pool)
             .await
             .unwrap();

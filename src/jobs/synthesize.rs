@@ -262,11 +262,11 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
         // old whole-corpus `run`, which segmented a document and left an embed
         // job queued behind it — several tests are about the state in exactly
         // that gap, and draining through it would erase what they check.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE jobs SET run_after = CASE WHEN stage = 'embed' THEN ? ELSE 0 END
               WHERE state = 'pending'",
+            crate::store::now() + 86_400
         )
-        .bind(crate::store::now() + 86_400)
         .execute(&core.store.control.pool)
         .await
         .unwrap();
@@ -278,8 +278,8 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
         // spent its attempts and been closed. The queue is the honest signal:
         // a failed window keeps its unit until the budget is gone, and only
         // then has `settle` had its last word.
-        let pending: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state != 'done'",
+        let pending: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state != 'done'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -294,17 +294,19 @@ pub async fn segment_all(core: &Core, corpus_id: &str) {
     // returned, and these tests were written against that. Settling also arms
     // embedding, with a fresh `run_after`, so the hold has to be reapplied.
     for _ in 0..20 {
-        sqlx::query("UPDATE jobs SET run_after = ? WHERE stage = 'embed' AND state = 'pending'")
-            .bind(crate::store::now() + 86_400)
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET run_after = ? WHERE stage = 'embed' AND state = 'pending'",
+            crate::store::now() + 86_400
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
         if !crate::jobs::run_one(core).await.unwrap_or(false) {
             break;
         }
     }
 
-    sqlx::query("UPDATE jobs SET run_after = 0 WHERE stage = 'embed'")
+    sqlx::query!("UPDATE jobs SET run_after = 0 WHERE stage = 'embed'")
         .execute(&core.store.control.pool)
         .await
         .unwrap();
@@ -367,7 +369,7 @@ mod tests {
             .await
             .unwrap();
         plan(&core, &out.id).await.unwrap();
-        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+        sqlx::query!("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -375,7 +377,7 @@ mod tests {
         plan(&core, &out.id).await.unwrap();
 
         let attempts: Vec<i64> =
-            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+            sqlx::query_scalar!("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
                 .fetch_all(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -445,11 +447,13 @@ mod tests {
         let core = test_core().await;
         let id = segmented(&core).await;
 
-        sqlx::query("UPDATE jobs SET state = 'running', claimed_at = ? WHERE stage = 'embed'")
-            .bind(crate::store::now())
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET state = 'running', claimed_at = ? WHERE stage = 'embed'",
+            crate::store::now()
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
 
         finish(&core, &id).await.unwrap();
 
@@ -468,8 +472,10 @@ mod tests {
         let id = segmented(&core).await;
 
         let later = crate::store::now() + 3600;
-        sqlx::query("UPDATE jobs SET state = 'pending', attempts = 4, run_after = ?, seq = 7 WHERE stage = 'embed'")
-            .bind(later)
+        sqlx::query!(
+            "UPDATE jobs SET state = 'pending', attempts = 4, run_after = ?, seq = 7 WHERE stage = 'embed'",
+            later
+        )
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -491,7 +497,7 @@ mod tests {
         let core = test_core().await;
         let id = segmented(&core).await;
 
-        sqlx::query("UPDATE jobs SET state = 'done' WHERE stage = 'embed'")
+        sqlx::query!("UPDATE jobs SET state = 'done' WHERE stage = 'embed'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -780,8 +786,7 @@ mod tests {
             .await
             .unwrap();
         segment_all(&core, &out.id).await;
-        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
-            .bind(&out.id)
+        sqlx::query!("UPDATE corpora SET title_hint = NULL WHERE id = ?", &out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -812,8 +817,7 @@ mod tests {
 
         // Put the document back in the state settling leaves it in — named by
         // nobody, with a title unit queued — and then break the model.
-        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
-            .bind(&out.id)
+        sqlx::query!("UPDATE corpora SET title_hint = NULL WHERE id = ?", &out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -825,15 +829,15 @@ mod tests {
             crate::infer::fake::FakeSynthesizer::failing("no title"),
         ));
         for _ in 0..crate::store::jobs::MAX_ATTEMPTS + 3 {
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();
             let _ = crate::jobs::run_one(&core).await;
         }
 
-        let still_queued: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'",
+        let still_queued: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -896,8 +900,7 @@ mod tests {
             .unwrap();
         segment_all(&core, &out.id).await;
         // Arm and spend a title unit: clear the derived name, settle, drive.
-        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
-            .bind(&out.id)
+        sqlx::query!("UPDATE corpora SET title_hint = NULL WHERE id = ?", &out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -906,16 +909,15 @@ mod tests {
 
         // What a corpus the model would not name looks like afterwards: no
         // title, and a title unit that has been closed.
-        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
-            .bind(&out.id)
+        sqlx::query!("UPDATE corpora SET title_hint = NULL WHERE id = ?", &out.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
 
         finish(&core, &out.id).await.unwrap();
 
-        let armed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'",
+        let armed: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM jobs WHERE stage = 'title' AND state = 'pending'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -943,8 +945,8 @@ mod tests {
         assert!(windows > 2, "the fixture must span several windows");
         // A large corpus arms nothing at capture: its windows wait for
         // promotion, verbatim and searchable.
-        let armed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state = 'pending'",
+        let armed: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM jobs WHERE stage = 'segment_window' AND state = 'pending'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -991,7 +993,7 @@ mod tests {
                 .unwrap();
         }
         for _ in 0..400 {
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -1040,12 +1042,13 @@ mod tests {
                 .is_empty(),
             "the good windows' artifacts were never written"
         );
-        let embed_armed: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE stage = 'embed' AND target_id = ?")
-                .bind(&out.id)
-                .fetch_one(&core.store.control.pool)
-                .await
-                .unwrap();
+        let embed_armed: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM jobs WHERE stage = 'embed' AND target_id = ?",
+            &out.id
+        )
+        .fetch_one(&core.store.control.pool)
+        .await
+        .unwrap();
         assert_eq!(
             embed_armed, 1,
             "the good artifacts were never queued to embed"
@@ -1609,16 +1612,20 @@ Then run sync.";
         // What a scan with no readable text leaves behind: the note, and
         // nothing made from the source. The passages capture wrote stand in
         // for text a real unreadable upload never yields.
-        sqlx::query("DELETE FROM artifacts WHERE corpus_id = ? AND provenance != 'note'")
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE segments SET state = 'done' WHERE corpus_id = ?")
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "DELETE FROM artifacts WHERE corpus_id = ? AND provenance != 'note'",
+            &out.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "UPDATE segments SET state = 'done' WHERE corpus_id = ?",
+            &out.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         finish(&core, &out.id).await.unwrap();
 

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM artifact_links WHERE state = 'learning' AND weight < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "c91c55e27ecb379b3692a6ba7de4d98429d5c43c9891c837717d89077ef48137"
+}

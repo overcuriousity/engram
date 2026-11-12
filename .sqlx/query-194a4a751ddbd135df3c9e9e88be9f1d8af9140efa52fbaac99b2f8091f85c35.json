@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!\" FROM artifacts a\n               LEFT JOIN integrations i ON i.artifact_id = a.id\n              WHERE i.artifact_id IS NULL\n                AND a.embed_state = 'embedded'\n                AND a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL\n              ORDER BY a.created_at ASC, a.id ASC\n              LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "194a4a751ddbd135df3c9e9e88be9f1d8af9140efa52fbaac99b2f8091f85c35"
+}

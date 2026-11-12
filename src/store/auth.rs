@@ -42,16 +42,16 @@ impl Control {
             revoked_at: None,
             user_agent: user_agent.map(str::to_string),
         };
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO api_tokens (id, name, token_hash, subject, created_at, user_agent, scheme)
              VALUES (?, ?, ?, ?, ?, ?, 2)",
+            &t.id,
+            &t.name,
+            hash,
+            &t.subject,
+            t.created_at,
+            &t.user_agent
         )
-        .bind(&t.id)
-        .bind(&t.name)
-        .bind(hash)
-        .bind(&t.subject)
-        .bind(t.created_at)
-        .bind(&t.user_agent)
         .execute(&self.pool)
         .await?;
         Ok(t)
@@ -103,11 +103,13 @@ impl Control {
     }
 
     pub async fn touch_token(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE api_tokens SET last_used_at = ? WHERE id = ?")
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE api_tokens SET last_used_at = ? WHERE id = ?",
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -120,27 +122,27 @@ impl Control {
     /// two cases must look the same, or the answer enumerates other people's
     /// token ids.
     pub async fn revoke_token(&self, id: &str, subject: &str) -> Result<bool> {
-        Ok(
-            sqlx::query("UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND subject = ?")
-                .bind(now())
-                .bind(id)
-                .bind(subject)
-                .execute(&self.pool)
-                .await?
-                .rows_affected()
-                > 0,
+        Ok(sqlx::query!(
+            "UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND subject = ?",
+            now(),
+            id,
+            subject
         )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
     }
 
     /// Un-revoke one of `subject`'s tokens revoked after `since`; `false` when there is none.
     pub async fn restore_token(&self, id: &str, subject: &str, since: i64) -> Result<bool> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE api_tokens SET revoked_at = NULL
              WHERE id = ? AND subject = ? AND revoked_at IS NOT NULL AND revoked_at >= ?",
+            id,
+            subject,
+            since
         )
-        .bind(id)
-        .bind(subject)
-        .bind(since)
         .execute(&self.pool)
         .await?
         .rows_affected()

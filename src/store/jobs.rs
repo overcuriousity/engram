@@ -545,7 +545,7 @@ impl Store {
         target_id: &str,
         run_after: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
              VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?)
              ON CONFLICT(subject, stage, target_id) DO UPDATE SET
@@ -553,15 +553,15 @@ impl Store {
                last_error = NULL, claimed_at = NULL,
                created_at = excluded.created_at, class = excluded.class
              WHERE jobs.state IN ('done', 'failed')",
+            &self.subject,
+            stage.as_str(),
+            target_kind,
+            target_id,
+            run_after,
+            now(),
+            stage.class()
         )
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_kind)
-        .bind(target_id)
-        .bind(run_after)
-        .bind(now())
-        .bind(stage.class())
-        .execute(&self.control.pool)
+            .execute(&self.control.pool)
         .await?;
         Ok(())
     }
@@ -576,22 +576,22 @@ impl Store {
         target_id: &str,
         run_after: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)
              VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, 0)
              ON CONFLICT(subject, stage, target_id) DO UPDATE SET
                state = 'pending', run_after = excluded.run_after, attempts = 0, empty_runs = 0,
                last_error = NULL, claimed_at = NULL, class = excluded.class
              WHERE jobs.state IN ('pending', 'done', 'failed')",
+            &self.subject,
+            stage.as_str(),
+            target_kind,
+            target_id,
+            run_after,
+            now(),
+            stage.class()
         )
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_kind)
-        .bind(target_id)
-        .bind(run_after)
-        .bind(now())
-        .bind(stage.class())
-        .execute(&self.control.pool)
+            .execute(&self.control.pool)
         .await?;
         Ok(())
     }
@@ -599,10 +599,12 @@ impl Store {
     /// A waiting unit that has nothing to wait for. Marked done rather than
     /// deleted, so the row keeps its history and `arm_at` can wake it again.
     pub async fn disarm(&self, stage: Stage, target_id: &str) -> Result<()> {
-        sqlx::query("UPDATE jobs SET state = 'done' WHERE subject = ? AND stage = ? AND target_id = ? AND state = 'pending'")
-            .bind(&self.subject)
-            .bind(stage.as_str())
-            .bind(target_id)
+        sqlx::query!(
+            "UPDATE jobs SET state = 'done' WHERE subject = ? AND stage = ? AND target_id = ? AND state = 'pending'",
+            &self.subject,
+            stage.as_str(),
+            target_id
+        )
             .execute(&self.control.pool)
             .await?;
         Ok(())
@@ -623,7 +625,7 @@ impl Store {
         run_after: i64,
         empty_runs: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)
              VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, ?)
              ON CONFLICT(subject, stage, target_id) DO UPDATE SET
@@ -632,16 +634,16 @@ impl Store {
                created_at = excluded.created_at, class = excluded.class,
                empty_runs = excluded.empty_runs
              WHERE jobs.state IN ('done', 'failed')",
+            &self.subject,
+            stage.as_str(),
+            target_kind,
+            target_id,
+            run_after,
+            now(),
+            stage.class(),
+            empty_runs
         )
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_kind)
-        .bind(target_id)
-        .bind(run_after)
-        .bind(now())
-        .bind(stage.class())
-        .bind(empty_runs)
-        .execute(&self.control.pool)
+            .execute(&self.control.pool)
         .await?;
         Ok(())
     }
@@ -649,12 +651,12 @@ impl Store {
     /// How many consecutive runs of this unit have found nothing. Zero when
     /// there is no row, which is the same answer a first run gets.
     pub async fn empty_runs(&self, stage: Stage, target_id: &str) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT empty_runs FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
+            &self.subject,
+            stage.as_str(),
+            target_id
         )
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_id)
         .fetch_optional(&self.control.pool)
         .await?
         .unwrap_or(0))
@@ -689,25 +691,25 @@ impl Store {
         // is running. Left to them, `rearm_periodic_with` read the count this
         // arming was supposed to have cleared and re-armed the sweep at the
         // doubled wait, with the new data already in the base.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE jobs SET empty_runs = 0
               WHERE subject = ? AND stage = ? AND target_id = ?",
+            &self.subject,
+            stage.as_str(),
+            target_id
         )
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_id)
         .execute(&self.control.pool)
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE jobs SET run_after = 0, class = ?, created_at = ?
               WHERE subject = ? AND stage = ? AND target_id = ?
                 AND state = 'pending' AND run_after > 0",
+            stage.class(),
+            now(),
+            &self.subject,
+            stage.as_str(),
+            target_id
         )
-        .bind(stage.class())
-        .bind(now())
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_id)
         .execute(&self.control.pool)
         .await?;
         self.rearm_idle_seq(stage, target_kind, target_id, 0).await
@@ -737,12 +739,12 @@ impl Store {
     /// The `seq` a job currently carries, so a unit that re-arms itself can
     /// climb rather than re-entering at the front of its batch.
     pub async fn job_seq(&self, stage: Stage, target_id: &str) -> Result<Option<i64>> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT seq FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
+            &self.subject,
+            stage.as_str(),
+            target_id
         )
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_id)
         .fetch_optional(&self.control.pool)
         .await?)
     }
@@ -755,14 +757,14 @@ impl Store {
     /// judgement is already queued is already going to be judged, and arming it
     /// again is a no-op that costs another pair its turn.
     pub async fn live_job(&self, stage: Stage, target_id: &str) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT 1 FROM jobs
               WHERE subject = ? AND stage = ? AND target_id = ?
                 AND state IN ('pending', 'running')",
+            &self.subject,
+            stage.as_str(),
+            target_id
         )
-        .bind(&self.subject)
-        .bind(stage.as_str())
-        .bind(target_id)
         .fetch_optional(&self.control.pool)
         .await?
         .is_some())
@@ -775,12 +777,14 @@ impl Store {
     /// undoes exactly that — which is the point when the person who owns the
     /// collection has asked for another try.
     pub async fn delete_job(&self, stage: Stage, target_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?")
-            .bind(&self.subject)
-            .bind(stage.as_str())
-            .bind(target_id)
-            .execute(&self.control.pool)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
+            &self.subject,
+            stage.as_str(),
+            target_id
+        )
+        .execute(&self.control.pool)
+        .await?;
         Ok(())
     }
 
@@ -796,14 +800,14 @@ impl Store {
     /// Matched on the `corpus#` prefix rather than with `LIKE`, so an id
     /// carrying a wildcard character cannot widen the delete.
     pub async fn delete_window_jobs(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "DELETE FROM jobs
               WHERE subject = ? AND stage = 'segment_window'
                 AND substr(target_id, 1, length(?) + 1) = ? || '#'",
+            &self.subject,
+            corpus_id,
+            corpus_id
         )
-        .bind(&self.subject)
-        .bind(corpus_id)
-        .bind(corpus_id)
         .execute(&self.control.pool)
         .await?;
         Ok(())
@@ -1051,10 +1055,10 @@ impl Control {
     }
 
     pub async fn complete_job(&self, id: i64) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE jobs SET state = 'done', last_error = NULL, claimed_at = NULL WHERE id = ?",
+            id
         )
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1068,24 +1072,24 @@ impl Control {
     /// the previous behaviour — mark it failed, close it, wait for a human —
     /// turned a ten-minute outage into permanently missing knowledge.
     pub async fn fail_job(&self, id: i64, attempts: i64, err: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE jobs SET state = 'pending', run_after = ?, last_error = ?, claimed_at = NULL WHERE id = ?",
+            now() + spread_backoff(attempts),
+            err,
+            id
         )
-        .bind(now() + spread_backoff(attempts))
-        .bind(err)
-        .bind(id)
-        .execute(&self.pool)
+            .execute(&self.pool)
         .await?;
         Ok(())
     }
 
     /// Rows left 'running' by a crashed process. Called once at startup.
     pub async fn reclaim_stuck(&self, older_than_secs: i64) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE jobs SET state = 'pending', run_after = 0, claimed_at = NULL
               WHERE state = 'running' AND claimed_at IS NOT NULL AND claimed_at < ?",
+            now() - older_than_secs
         )
-        .bind(now() - older_than_secs)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -1139,7 +1143,7 @@ impl Control {
     /// with a deep backlog is *always* the oldest, so it took the entire budget
     /// and everyone else waited on it.
     pub async fn age_background(&self, subject: &str, older_than: i64, limit: i64) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE jobs SET class = 0
               WHERE id IN (
                 SELECT id FROM jobs
@@ -1147,10 +1151,10 @@ impl Control {
                    AND max(created_at, run_after) < ?
                  ORDER BY max(created_at, run_after)
                  LIMIT ?)",
+            subject,
+            older_than,
+            limit
         )
-        .bind(subject)
-        .bind(older_than)
-        .bind(limit)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -1354,11 +1358,13 @@ mod tests {
         s.enqueue(Stage::Associate, "collection", "collection")
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'associate'")
-            .bind(now() - 7200)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET created_at = ? WHERE stage = 'associate'",
+            now() - 7200
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
         s.enqueue(Stage::Synthesize, "corpus", "src-1")
             .await
             .unwrap();
@@ -1372,7 +1378,7 @@ mod tests {
             Stage::Associate,
             "a sweep that has waited an hour is still behind a fresh capture"
         );
-        let class: i64 = sqlx::query_scalar("SELECT class FROM jobs WHERE stage = 'associate'")
+        let class: i64 = sqlx::query_scalar!("SELECT class FROM jobs WHERE stage = 'associate'")
             .fetch_one(&s.control.pool)
             .await
             .unwrap();
@@ -1395,16 +1401,18 @@ mod tests {
                 .await
                 .unwrap();
         }
-        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'relate'")
-            .bind(now() - 7200)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET created_at = ? WHERE stage = 'relate'",
+            now() - 7200
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
 
         assert_eq!(s.age_background(now() - 3600, 2).await.unwrap(), 2);
 
         let still: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM jobs WHERE class = 1 AND stage = 'relate'")
+            sqlx::query_scalar!("SELECT count(*) FROM jobs WHERE class = 1 AND stage = 'relate'")
                 .fetch_one(&s.control.pool)
                 .await
                 .unwrap();
@@ -1424,21 +1432,25 @@ mod tests {
                 .await
                 .unwrap();
         }
-        sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id = 'a-2'")
-            .bind(now() - 86_400)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE jobs SET created_at = ? WHERE target_id <> 'a-2'")
-            .bind(now() - 7200)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET created_at = ? WHERE target_id = 'a-2'",
+            now() - 86_400
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET created_at = ? WHERE target_id <> 'a-2'",
+            now() - 7200
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
 
         assert_eq!(s.age_background(now() - 3600, 1).await.unwrap(), 1);
 
         let aged: String =
-            sqlx::query_scalar("SELECT target_id FROM jobs WHERE class = 0 AND stage = 'relate'")
+            sqlx::query_scalar!("SELECT target_id FROM jobs WHERE class = 0 AND stage = 'relate'")
                 .fetch_one(&s.control.pool)
                 .await
                 .unwrap();
@@ -1457,11 +1469,13 @@ mod tests {
         s.arm_periodic(Stage::Retention, "collection", "collection", now() + 21_600)
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'retention'")
-            .bind(now() - 7200)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET created_at = ? WHERE stage = 'retention'",
+            now() - 7200
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
 
         assert_eq!(
             s.age_background(now() - 3600, 100).await.unwrap(),
@@ -1470,7 +1484,7 @@ mod tests {
         );
 
         // Due, and now it ages.
-        sqlx::query("UPDATE jobs SET run_after = 0 WHERE stage = 'retention'")
+        sqlx::query!("UPDATE jobs SET run_after = 0 WHERE stage = 'retention'")
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -1489,12 +1503,14 @@ mod tests {
             .await
             .unwrap();
         // Six hours later: due a minute ago, stamped when it was rescheduled.
-        sqlx::query("UPDATE jobs SET created_at = ?, run_after = ? WHERE stage = 'retention'")
-            .bind(now() - 21_600)
-            .bind(now() - 60)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET created_at = ?, run_after = ? WHERE stage = 'retention'",
+            now() - 21_600,
+            now() - 60
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
 
         assert_eq!(
             s.age_background(now() - 3600, 100).await.unwrap(),
@@ -1503,11 +1519,13 @@ mod tests {
         );
 
         // An hour of actually being ready, and now it ages.
-        sqlx::query("UPDATE jobs SET run_after = ? WHERE stage = 'retention'")
-            .bind(now() - 7200)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET run_after = ? WHERE stage = 'retention'",
+            now() - 7200
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
         assert_eq!(s.age_background(now() - 3600, 100).await.unwrap(), 1);
     }
 
@@ -1521,11 +1539,13 @@ mod tests {
         s.arm_periodic(Stage::Pursuit, "collection", "collection", now() + 600)
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET created_at = ? WHERE stage = 'pursuit'")
-            .bind(now() - 7200)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET created_at = ? WHERE stage = 'pursuit'",
+            now() - 7200
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
 
         s.arm_now(Stage::Pursuit, "collection", "collection")
             .await
@@ -1549,7 +1569,7 @@ mod tests {
         s.arm_periodic(Stage::Consolidate, "collection", "collection", 0)
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET state = 'failed' WHERE stage = 'consolidate'")
+        sqlx::query!("UPDATE jobs SET state = 'failed' WHERE stage = 'consolidate'")
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -1575,7 +1595,7 @@ mod tests {
         s.arm_periodic(Stage::Pursuit, "collection", "collection", now() + 600)
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET class = 0 WHERE stage = 'pursuit'")
+        sqlx::query!("UPDATE jobs SET class = 0 WHERE stage = 'pursuit'")
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -1677,7 +1697,7 @@ mod tests {
 
         // Well past the old give-up point.
         for _ in 0..MAX_ATTEMPTS + 3 {
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&s.control.pool)
                 .await
                 .unwrap();
@@ -1689,7 +1709,7 @@ mod tests {
             s.fail_job(j.id, j.attempts, "still down").await.unwrap();
         }
 
-        sqlx::query("UPDATE jobs SET run_after = 0")
+        sqlx::query!("UPDATE jobs SET run_after = 0")
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -1716,7 +1736,7 @@ mod tests {
             s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
             // Past the backoff it just set; the delay is not what this test is
             // about.
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&s.control.pool)
                 .await
                 .unwrap();
@@ -1726,7 +1746,7 @@ mod tests {
         s.enqueue(Stage::Synthesize, "corpus", "fresh")
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET run_after = 0")
+        sqlx::query!("UPDATE jobs SET run_after = 0")
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -1751,12 +1771,12 @@ mod tests {
             s.fail_job(j.id, 0, "malformed llm output").await.unwrap();
             // Past the backoff it just set; the delay is not what this test is
             // about.
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&s.control.pool)
                 .await
                 .unwrap();
         }
-        sqlx::query("UPDATE jobs SET run_after = 0")
+        sqlx::query!("UPDATE jobs SET run_after = 0")
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -1813,7 +1833,7 @@ mod tests {
         s.enqueue_seq(Stage::SegmentWindow, "segment", "fresh#9", 9)
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET run_after = 0")
+        sqlx::query!("UPDATE jobs SET run_after = 0")
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -1972,8 +1992,7 @@ mod tests {
             .await
             .unwrap();
 
-        let run_after: i64 = sqlx::query_scalar("SELECT run_after FROM jobs WHERE id = ?")
-            .bind(j.id)
+        let run_after: i64 = sqlx::query_scalar!("SELECT run_after FROM jobs WHERE id = ?", j.id)
             .fetch_one(&s.control.pool)
             .await
             .unwrap();
@@ -1992,7 +2011,7 @@ mod tests {
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Relate, "artifact", "a-1").await.unwrap();
         s.age_background(now() + 60, 10).await.unwrap();
-        let class: i64 = sqlx::query_scalar("SELECT class FROM jobs WHERE stage = 'relate'")
+        let class: i64 = sqlx::query_scalar!("SELECT class FROM jobs WHERE stage = 'relate'")
             .fetch_one(&s.control.pool)
             .await
             .unwrap();
@@ -2009,12 +2028,14 @@ mod tests {
         s.enqueue(Stage::Synthesize, "corpus", "c-1").await.unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
         assert!(s.capture_being_read().await.unwrap(), "a fresh claim");
-        sqlx::query("UPDATE jobs SET claimed_at = ? WHERE id = ?")
-            .bind(now() - crate::jobs::STUCK_AFTER_SECS - 1)
-            .bind(j.id)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET claimed_at = ? WHERE id = ?",
+            now() - crate::jobs::STUCK_AFTER_SECS - 1,
+            j.id
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
         assert!(
             !s.capture_being_read().await.unwrap(),
             "nothing is reading this one; the process that claimed it is gone"
@@ -2029,12 +2050,14 @@ mod tests {
             .unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
         // Simulate the process dying mid-job: row left 'running'.
-        sqlx::query("UPDATE jobs SET claimed_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 3600)
-            .bind(j.id)
-            .execute(&s.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET claimed_at = ? WHERE id = ?",
+            crate::store::now() - 3600,
+            j.id
+        )
+        .execute(&s.control.pool)
+        .await
+        .unwrap();
 
         assert_eq!(s.control.reclaim_stuck(600).await.unwrap(), 1);
         assert!(
@@ -2055,8 +2078,7 @@ mod tests {
         assert!(age < 5, "a just-enqueued job reported an age of {age}s");
 
         // A job enqueued an hour ago should read as roughly an hour.
-        sqlx::query("UPDATE jobs SET created_at = ?")
-            .bind(crate::store::now() - 3600)
+        sqlx::query!("UPDATE jobs SET created_at = ?", crate::store::now() - 3600)
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -2088,8 +2110,7 @@ mod tests {
             s.failed_jobs(10).await.unwrap().is_empty(),
             "a job was abandoned; nothing would ever pick it up again"
         );
-        let state: String = sqlx::query_scalar("SELECT state FROM jobs WHERE id = ?")
-            .bind(job.id)
+        let state: String = sqlx::query_scalar!("SELECT state FROM jobs WHERE id = ?", job.id)
             .fetch_one(&s.control.pool)
             .await
             .unwrap();
@@ -2101,8 +2122,7 @@ mod tests {
         let s = Store::memory().await.unwrap();
         s.enqueue(Stage::Embed, "artifact", "c-1").await.unwrap();
         let j = s.claim_job().await.unwrap().unwrap();
-        sqlx::query("UPDATE jobs SET state='failed' WHERE id = ?")
-            .bind(j.id)
+        sqlx::query!("UPDATE jobs SET state='failed' WHERE id = ?", j.id)
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -2156,7 +2176,7 @@ mod tests {
         a.enqueue(Stage::Embed, "corpus", "same").await.unwrap();
         b.enqueue(Stage::Embed, "corpus", "same").await.unwrap();
 
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs")
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM jobs")
             .fetch_one(&control.pool)
             .await
             .unwrap();

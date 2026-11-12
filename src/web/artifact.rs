@@ -1877,7 +1877,7 @@ mod tests {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text"]).await;
-        sqlx::query("DROP TABLE artifact_links")
+        sqlx::query!("DROP TABLE artifact_links")
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -3011,8 +3011,7 @@ mod tests {
             "{page}"
         );
         let opened: Option<i64> =
-            sqlx::query_scalar("SELECT opened_at FROM search_events WHERE id = ?")
-                .bind(&theirs)
+            sqlx::query_scalar!("SELECT opened_at FROM search_events WHERE id = ?", &theirs)
                 .fetch_one(&handle.store.pool)
                 .await
                 .unwrap();

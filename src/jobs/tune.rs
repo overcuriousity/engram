@@ -1965,7 +1965,7 @@ mod tests {
     }
 
     async fn eval_runs(core: &Core) -> i64 {
-        sqlx::query_scalar("SELECT COUNT(*) FROM eval_runs")
+        sqlx::query_scalar!("SELECT COUNT(*) FROM eval_runs")
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
@@ -2023,10 +2023,11 @@ mod tests {
                 .is_none()
         );
 
-        let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM generations WHERE state = 'live'")
-            .fetch_one(&core.store.pool)
-            .await
-            .unwrap();
+        let live: i64 =
+            sqlx::query_scalar!("SELECT COUNT(*) FROM generations WHERE state = 'live'")
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
         assert_eq!(live, 1, "two generations live at once");
         assert_eq!(
             core.store.live_generation().await.unwrap().unwrap().id,
@@ -2320,12 +2321,14 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() + 5)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            crate::store::now() + 5,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         id
     }
 
@@ -2361,12 +2364,14 @@ mod tests {
         assert!(run(&core).await.unwrap().is_none(), "interrupted");
 
         // The sitting ends: the search is now in the past.
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 5_000)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            crate::store::now() - 5_000,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         assert!(
             run(&core).await.unwrap().is_some(),
             "and the pass finds what it would have"

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET theme = ?, density = ? WHERE subject = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "86abcf9a24356d9984d0ade1486511c9e49445c2db785a622123d15fc6edcfc8"
+}

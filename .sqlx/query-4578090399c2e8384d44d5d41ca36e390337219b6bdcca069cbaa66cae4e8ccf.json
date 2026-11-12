@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET provenance = 'passage' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4578090399c2e8384d44d5d41ca36e390337219b6bdcca069cbaa66cae4e8ccf"
+}

@@ -649,12 +649,14 @@ mod tests {
     }
 
     async fn backdate_retired_at(core: &Core, id: &str, secs_ago: i64) {
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - secs_ago)
-            .bind(id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - secs_ago,
+            id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
     }
 
     async fn deprecate_long_ago(core: &Core, id: &str) {
@@ -762,14 +764,14 @@ mod tests {
 
     /// A due moment nobody has completed, on this artifact.
     async fn open_reminder(core: &Core, moment_id: &str, artifact_id: &str) {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
              VALUES (?, ?, 'due', ?, 'UTC', 'set', ?)",
+            moment_id,
+            artifact_id,
+            crate::store::now() + 3_600,
+            crate::store::now()
         )
-        .bind(moment_id)
-        .bind(artifact_id)
-        .bind(crate::store::now() + 3_600)
-        .bind(crate::store::now())
         .execute(&core.store.pool)
         .await
         .unwrap();
@@ -801,12 +803,14 @@ mod tests {
         let (cands, _) = nominees(&core).await.unwrap();
         assert!(cands.is_empty(), "a fresh merge's sources are protected");
 
-        sqlx::query("UPDATE artifacts SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 100 * 86_400)
-            .bind(&merge.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ? WHERE id = ?",
+            crate::store::now() - 100 * 86_400,
+            &merge.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let (cands, _) = nominees(&core).await.unwrap();
         assert_eq!(cands.len(), 2, "an old merge has forfeited its undo window");
     }
@@ -956,11 +960,13 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].subject_id, ids[0]);
         assert_eq!(rows[0].detail.as_deref(), Some("covered"));
-        let kept: i64 = sqlx::query_scalar("SELECT vec IS NOT NULL FROM graveyard WHERE id = ?")
-            .bind(&ids[0])
-            .fetch_one(&core.store.pool)
-            .await
-            .unwrap();
+        let kept: i64 = sqlx::query_scalar!(
+            "SELECT vec IS NOT NULL FROM graveyard WHERE id = ?",
+            &ids[0]
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
         assert_eq!(kept, 1, "the vector was not kept in the grave");
         assert!(
             core.vectors
@@ -1341,11 +1347,13 @@ mod tests {
             .set_artifact_status(&ids[0], ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        sqlx::query("UPDATE artifacts SET retired_at = NULL WHERE id = ?")
-            .bind(&ids[0])
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = NULL WHERE id = ?",
+            &ids[0]
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let (cands, stamped) = nominees(&core).await.unwrap();
         assert_eq!(stamped, 1);
         assert!(cands.is_empty(), "a fresh clock has not run");

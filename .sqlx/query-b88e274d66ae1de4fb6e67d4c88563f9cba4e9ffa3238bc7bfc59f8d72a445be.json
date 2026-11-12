@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?\n              WHERE survivor_id = ? AND kind = 'merge' AND undone_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b88e274d66ae1de4fb6e67d4c88563f9cba4e9ffa3238bc7bfc59f8d72a445be"
+}

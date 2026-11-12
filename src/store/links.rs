@@ -152,7 +152,7 @@ impl Store {
             .as_ref()
             .map(|r| decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days))
             .unwrap_or(0.0);
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO artifact_links
                    (a_id, b_id, weight, bumped_at, queries, cues, state, reason,
                     judged_rev_a, judged_rev_b, created_at)
@@ -174,19 +174,19 @@ impl Store {
                judged_rev_b = CASE WHEN artifact_links.state = 'dismissed'
                                    THEN artifact_links.judged_rev_b
                                    ELSE excluded.judged_rev_b END",
+            a,
+            b,
+            if dismissed {
+                carried
+            } else {
+                weight.max(carried)
+            },
+            at,
+            reason,
+            a,
+            b,
+            at
         )
-        .bind(a)
-        .bind(b)
-        .bind(if dismissed {
-            carried
-        } else {
-            weight.max(carried)
-        })
-        .bind(at)
-        .bind(reason)
-        .bind(a)
-        .bind(b)
-        .bind(at)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -434,17 +434,17 @@ async fn bump_one(
                 serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default();
             let fresh = cue.is_some_and(|q| bump_cue(&mut cues, q));
             let weight = decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days) + delta;
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifact_links
                         SET weight = ?, bumped_at = ?, queries = ?, cues = ?
                       WHERE a_id = ? AND b_id = ?",
+                weight,
+                at,
+                r.get::<i64, _>("queries") + i64::from(fresh),
+                serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()),
+                a,
+                b
             )
-            .bind(weight)
-            .bind(at)
-            .bind(r.get::<i64, _>("queries") + i64::from(fresh))
-            .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
-            .bind(a)
-            .bind(b)
             .execute(&mut *tx)
             .await?;
         }
@@ -453,18 +453,18 @@ async fn bump_one(
             if let Some(q) = cue {
                 bump_cue(&mut cues, q);
             }
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO artifact_links
                        (a_id, b_id, weight, bumped_at, queries, cues, state, created_at)
                      VALUES (?, ?, ?, ?, ?, ?, 'learning', ?)",
+                a,
+                b,
+                delta,
+                at,
+                cues.len() as i64,
+                serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()),
+                now()
             )
-            .bind(a)
-            .bind(b)
-            .bind(delta)
-            .bind(at)
-            .bind(cues.len() as i64)
-            .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
-            .bind(now())
             .execute(&mut *tx)
             .await?;
         }
@@ -528,19 +528,19 @@ impl Store {
                 } else {
                     LinkState::Learning
                 };
-                sqlx::query(
+                sqlx::query!(
                     "INSERT INTO artifact_links
                        (a_id, b_id, weight, bumped_at, queries, cues, state, created_at)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    a,
+                    b,
+                    incoming,
+                    at,
+                    from.queries,
+                    serde_json::to_string(&from.cues).unwrap_or_else(|_| "[]".into()),
+                    state.as_str(),
+                    now()
                 )
-                .bind(a)
-                .bind(b)
-                .bind(incoming)
-                .bind(at)
-                .bind(from.queries)
-                .bind(serde_json::to_string(&from.cues).unwrap_or_else(|_| "[]".into()))
-                .bind(state.as_str())
-                .bind(now())
                 .execute(&mut *tx)
                 .await?;
             }
@@ -561,19 +561,19 @@ impl Store {
                     } else {
                         LinkState::Learning
                     };
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE artifact_links
                         SET weight = ?, bumped_at = ?, queries = ?, cues = ?, state = ?,
                             reason = NULL, judged_rev_a = NULL, judged_rev_b = NULL
                       WHERE a_id = ? AND b_id = ?",
+                    weight,
+                    at,
+                    have.queries.max(from.queries),
+                    serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()),
+                    state.as_str(),
+                    a,
+                    b
                 )
-                .bind(weight)
-                .bind(at)
-                .bind(have.queries.max(from.queries))
-                .bind(serde_json::to_string(&cues).unwrap_or_else(|_| "[]".into()))
-                .bind(state.as_str())
-                .bind(a)
-                .bind(b)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -597,19 +597,20 @@ impl Store {
     }
 
     pub async fn meta_get(&self, key: &str) -> Result<Option<String>> {
-        Ok(sqlx::query_scalar("SELECT value FROM meta WHERE key = ?")
-            .bind(key)
-            .fetch_optional(&self.pool)
-            .await?)
+        Ok(
+            sqlx::query_scalar!("SELECT value FROM meta WHERE key = ?", key)
+                .fetch_optional(&self.pool)
+                .await?,
+        )
     }
 
     pub async fn meta_set(&self, key: &str, value: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO meta (key, value) VALUES (?, ?)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            key,
+            value
         )
-        .bind(key)
-        .bind(value)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -793,12 +794,13 @@ impl Store {
         at: i64,
         scan_limit: i64,
     ) -> Result<u64> {
-        let mut dropped =
-            sqlx::query("DELETE FROM artifact_links WHERE state = 'learning' AND weight < ?")
-                .bind(below)
-                .execute(&self.pool)
-                .await?
-                .rows_affected();
+        let mut dropped = sqlx::query!(
+            "DELETE FROM artifact_links WHERE state = 'learning' AND weight < ?",
+            below
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
 
         let rows = sqlx::query(
             "SELECT a_id, b_id, weight, bumped_at FROM artifact_links
@@ -811,12 +813,14 @@ impl Store {
             if decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days) >= below {
                 continue;
             }
-            dropped += sqlx::query("DELETE FROM artifact_links WHERE a_id = ? AND b_id = ?")
-                .bind(r.get::<String, _>("a_id"))
-                .bind(r.get::<String, _>("b_id"))
-                .execute(&self.pool)
-                .await?
-                .rows_affected();
+            dropped += sqlx::query!(
+                "DELETE FROM artifact_links WHERE a_id = ? AND b_id = ?",
+                r.get::<String, _>("a_id"),
+                r.get::<String, _>("b_id")
+            )
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
         }
         if rows.len() as i64 == scan_limit {
             tracing::info!(
@@ -871,17 +875,17 @@ impl Store {
             Some((x, y)) => (Some(x), Some(y)),
             None => (None, None),
         };
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifact_links
                 SET state = ?, reason = ?, judged_rev_a = ?, judged_rev_b = ?
               WHERE a_id = ? AND b_id = ?",
+            state.as_str(),
+            reason,
+            rev_a,
+            rev_b,
+            a,
+            b
         )
-        .bind(state.as_str())
-        .bind(reason)
-        .bind(rev_a)
-        .bind(rev_b)
-        .bind(a)
-        .bind(b)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -898,12 +902,14 @@ impl Store {
     /// claimed and that a person overruled it. Only `state` moves.
     pub async fn dismiss_link(&self, a: &str, b: &str) -> Result<()> {
         let (a, b) = canonical(a, b);
-        sqlx::query("UPDATE artifact_links SET state = ? WHERE a_id = ? AND b_id = ?")
-            .bind(LinkState::Dismissed.as_str())
-            .bind(a)
-            .bind(b)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifact_links SET state = ? WHERE a_id = ? AND b_id = ?",
+            LinkState::Dismissed.as_str(),
+            a,
+            b
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -915,12 +921,12 @@ impl Store {
     /// down.
     pub async fn record_link_judge_attempt(&self, a: &str, b: &str) -> Result<i64> {
         let (a, b) = canonical(a, b);
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "UPDATE artifact_links SET judge_attempts = judge_attempts + 1
               WHERE a_id = ? AND b_id = ? RETURNING judge_attempts",
+            a,
+            b
         )
-        .bind(a)
-        .bind(b)
         .fetch_optional(&self.pool)
         .await?
         .unwrap_or(0))
@@ -1006,12 +1012,14 @@ impl Store {
             };
             let value: f64 = row.get("activation");
             let stamp: i64 = row.get("activated_at");
-            sqlx::query("UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?")
-                .bind(decayed(value, stamp, at, half_life_days) + delta)
-                .bind(at)
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query!(
+                "UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?",
+                decayed(value, stamp, at, half_life_days) + delta,
+                at,
+                id
+            )
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
         }
         Ok(())
@@ -1020,11 +1028,11 @@ impl Store {
     /// The three numbers Ops shows.
     pub async fn link_counts(&self) -> Result<LinkCounts> {
         Ok(LinkCounts {
-            total: sqlx::query_scalar("SELECT COUNT(*) FROM artifact_links")
+            total: sqlx::query_scalar!("SELECT COUNT(*) FROM artifact_links")
                 .fetch_one(&self.pool)
                 .await?,
-            related: sqlx::query_scalar(
-                "SELECT COUNT(*) FROM artifact_links WHERE state = 'related'",
+            related: sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM artifact_links WHERE state = 'related'"
             )
             .fetch_one(&self.pool)
             .await?,
@@ -1703,11 +1711,13 @@ mod tests {
     async fn a_bump_folds_the_decay_in_like_a_link_does() {
         let store = Store::memory().await.unwrap();
         let (a, _) = two(&store).await;
-        sqlx::query("UPDATE artifacts SET activation = 4.0, activated_at = 0 WHERE id = ?")
-            .bind(&a)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET activation = 4.0, activated_at = 0 WHERE id = ?",
+            &a
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
 
         store
             .bump_activation(std::slice::from_ref(&a), 1.0, 14.0, 14 * 86_400)

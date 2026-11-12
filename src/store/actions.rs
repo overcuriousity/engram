@@ -187,20 +187,20 @@ where
     let id = new_id();
     let evidence = serde_json::to_string(&a.evidence)
         .map_err(|e| Error::Store(format!("corpus_actions: {e}")))?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO corpus_actions
            (id, at, job, kind, subject_id, survivor_id, detail, evidence_json, pair_score)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        &id,
+        now(),
+        a.job.as_str(),
+        a.kind.as_str(),
+        &a.subject_id,
+        &a.survivor_id,
+        &a.detail,
+        evidence,
+        a.pair_score
     )
-    .bind(&id)
-    .bind(now())
-    .bind(a.job.as_str())
-    .bind(a.kind.as_str())
-    .bind(&a.subject_id)
-    .bind(&a.survivor_id)
-    .bind(&a.detail)
-    .bind(evidence)
-    .bind(a.pair_score)
     .execute(ex)
     .await?;
     Ok(id)
@@ -301,12 +301,12 @@ impl Store {
     /// unasked, which is exactly what the cap is a bound on — but it can now
     /// only ever exhaust its own.
     pub async fn actions_since(&self, job: Job, at: i64) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM corpus_actions
               WHERE at > ? AND job = ? AND kind != 'moment'",
+            at,
+            job.as_str()
         )
-        .bind(at)
-        .bind(job.as_str())
         .fetch_one(&self.pool)
         .await?)
     }
@@ -314,12 +314,12 @@ impl Store {
     /// Whether an action of this kind on this subject was ever taken back —
     /// the memory an action site reads before acting again.
     pub async fn action_was_undone(&self, subject_id: &str, kind: Kind) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT 1 FROM corpus_actions
               WHERE subject_id = ? AND kind = ? AND undone_at IS NOT NULL LIMIT 1",
+            subject_id,
+            kind.as_str()
         )
-        .bind(subject_id)
-        .bind(kind.as_str())
         .fetch_optional(&self.pool)
         .await?
         .is_some())
@@ -333,15 +333,15 @@ impl Store {
         by: UndoneBy,
         reason: &str,
     ) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?
               WHERE subject_id = ? AND kind = ? AND undone_at IS NULL",
+            now(),
+            by.as_str(),
+            reason,
+            subject_id,
+            kind.as_str()
         )
-        .bind(now())
-        .bind(by.as_str())
-        .bind(reason)
-        .bind(subject_id)
-        .bind(kind.as_str())
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -362,14 +362,14 @@ impl Store {
         by: UndoneBy,
         reason: &str,
     ) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?
               WHERE survivor_id = ? AND kind = 'merge' AND undone_at IS NULL",
+            now(),
+            by.as_str(),
+            reason,
+            survivor_id
         )
-        .bind(now())
-        .bind(by.as_str())
-        .bind(reason)
-        .bind(survivor_id)
         .execute(&self.pool)
         .await?
         .rows_affected())

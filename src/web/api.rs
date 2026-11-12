@@ -3821,7 +3821,7 @@ pub(crate) mod tests {
         // A search from the panel is the least contaminated query there is:
         // composed while reading, before anything came back. The judging page
         // can only weigh it that way if the door says which it was.
-        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+        let doors: Vec<String> = sqlx::query_scalar!("SELECT door FROM search_events")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();
@@ -4000,7 +4000,7 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         core.background.wait_idle().await;
 
-        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+        let doors: Vec<String> = sqlx::query_scalar!("SELECT door FROM search_events")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();

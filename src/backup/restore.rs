@@ -661,11 +661,12 @@ pub(crate) mod tests {
         let mut embedded = vec![];
         for u in &users {
             let s = tenant_with_three(&store_dir.join(format!("{}.db", u.slug))).await;
-            let id: String =
-                sqlx::query_scalar("SELECT id FROM artifacts WHERE embed_state = 'embedded'")
-                    .fetch_one(&s.pool)
-                    .await
-                    .unwrap();
+            let id: String = sqlx::query_scalar!(
+                r#"SELECT id AS "id!" FROM artifacts WHERE embed_state = 'embedded'"#
+            )
+            .fetch_one(&s.pool)
+            .await
+            .unwrap();
             s.meta_set("embed.recipe", &cfg.infer.embed.fingerprint())
                 .await
                 .unwrap();
@@ -675,7 +676,7 @@ pub(crate) mod tests {
             gens.serve(&format!("{}_{}", cfg.vector.collection, u.slug), m, 2);
             embedded.push(id);
         }
-        sqlx::query("DELETE FROM jobs")
+        sqlx::query!("DELETE FROM jobs")
             .execute(&control.pool)
             .await
             .unwrap();
@@ -1062,11 +1063,11 @@ pub(crate) mod tests {
             .await
             .unwrap();
         for (i, id) in base.embedded.iter().enumerate() {
-            let state: String = sqlx::query_scalar(
+            let state: String = sqlx::query_scalar!(
                 "SELECT state FROM jobs WHERE subject = ? AND stage = 'embed' AND target_id = ?",
+                &base.subjects[i],
+                id
             )
-            .bind(&base.subjects[i])
-            .bind(id)
             .fetch_one(&control.pool)
             .await
             .unwrap();
@@ -1193,7 +1194,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         let mut armed: Vec<String> =
-            sqlx::query_scalar("SELECT target_id FROM jobs WHERE stage = 'embed'")
+            sqlx::query_scalar!("SELECT target_id FROM jobs WHERE stage = 'embed'")
                 .fetch_all(&control.pool)
                 .await
                 .unwrap();

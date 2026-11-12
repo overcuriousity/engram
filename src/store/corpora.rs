@@ -222,26 +222,26 @@ async fn insert_corpus_row<'e>(
     exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     src: &Corpus,
 ) -> Result<bool> {
-    let res = sqlx::query(
+    let res = sqlx::query!(
         "INSERT INTO corpora (id, raw_text, origin, title_hint, content_hash, status, created_at, updated_at,
                               shingles, source_url, metadata, near_dupe_of, near_dupe_score)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(content_hash) DO NOTHING",
+        &src.id,
+        &src.raw_text,
+        &src.origin,
+        &src.title_hint,
+        &src.content_hash,
+        src.status.as_str(),
+        src.created_at,
+        src.updated_at,
+        super::shingle::encode(&src.shingles),
+        &src.source_url,
+        src.metadata.to_string(),
+        &src.near_dupe_of,
+        src.near_dupe_score
     )
-    .bind(&src.id)
-    .bind(&src.raw_text)
-    .bind(&src.origin)
-    .bind(&src.title_hint)
-    .bind(&src.content_hash)
-    .bind(src.status.as_str())
-    .bind(src.created_at)
-    .bind(src.updated_at)
-    .bind(super::shingle::encode(&src.shingles))
-    .bind(&src.source_url)
-    .bind(src.metadata.to_string())
-    .bind(&src.near_dupe_of)
-    .bind(src.near_dupe_score)
-    .execute(exec)
+        .execute(exec)
     .await?;
     Ok(res.rows_affected() > 0)
 }
@@ -410,8 +410,7 @@ impl Store {
     /// answered before the blob is read rather than after.
     pub async fn content_hash_of(&self, id: &str) -> Result<Option<String>> {
         Ok(
-            sqlx::query_scalar("SELECT content_hash FROM corpora WHERE id = ?")
-                .bind(id)
+            sqlx::query_scalar!("SELECT content_hash FROM corpora WHERE id = ?", id)
                 .fetch_optional(&self.pool)
                 .await?,
         )
@@ -482,15 +481,15 @@ impl Store {
             Followup::Queue(_) | Followup::Nothing => (CorpusStatus::Raw, None, None),
         };
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE corpora SET status = ?, near_dupe_of = ?, near_dupe_score = ?, updated_at = ?
               WHERE id = ?",
+            status.as_str(),
+            &near_dupe_of,
+            near_dupe_score,
+            now(),
+            corpus_id
         )
-        .bind(status.as_str())
-        .bind(&near_dupe_of)
-        .bind(near_dupe_score)
-        .bind(now())
-        .bind(corpus_id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -505,12 +504,14 @@ impl Store {
     }
 
     pub async fn set_corpus_status(&self, id: &str, status: CorpusStatus) -> Result<()> {
-        sqlx::query("UPDATE corpora SET status = ?, updated_at = ? WHERE id = ?")
-            .bind(status.as_str())
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE corpora SET status = ?, updated_at = ? WHERE id = ?",
+            status.as_str(),
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -518,12 +519,14 @@ impl Store {
     /// design, so the name arrives later — once synthesis has read the document
     /// and knows what it is about.
     pub async fn set_title_hint(&self, id: &str, title: &str) -> Result<()> {
-        sqlx::query("UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?")
-            .bind(title)
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?",
+            title,
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -533,12 +536,14 @@ impl Store {
     /// one is measured against its own windows — and is what the
     /// reconciliation sweep reads as "this document never finished".
     pub async fn set_corpus_coverage(&self, corpus_id: &str, coverage: Option<f64>) -> Result<()> {
-        sqlx::query("UPDATE corpora SET coverage = ?, updated_at = ? WHERE id = ?")
-            .bind(coverage)
-            .bind(now())
-            .bind(corpus_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE corpora SET coverage = ?, updated_at = ? WHERE id = ?",
+            coverage,
+            now(),
+            corpus_id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -586,13 +591,13 @@ impl Store {
         of: Option<&str>,
         score: Option<f64>,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE corpora SET near_dupe_of = ?, near_dupe_score = ?, updated_at = ? WHERE id = ?",
+            of,
+            score,
+            now(),
+            corpus_id
         )
-        .bind(of)
-        .bind(score)
-        .bind(now())
-        .bind(corpus_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -601,38 +606,43 @@ impl Store {
     /// Record that the sweep has read this capture's lost lines again, so it
     /// does so once.
     pub async fn mark_auto_reread(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query("UPDATE corpora SET auto_reread_at = ? WHERE id = ?")
-            .bind(now())
-            .bind(corpus_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE corpora SET auto_reread_at = ? WHERE id = ?",
+            now(),
+            corpus_id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// The last reminder read out of this note is done, so the note stops
     /// being *recent*. Not a delete and not a hide: see `schema.sql`.
     pub async fn retire_corpus(&self, corpus_id: &str, at: i64) -> Result<()> {
-        sqlx::query("UPDATE corpora SET retired_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(corpus_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE corpora SET retired_at = ? WHERE id = ?",
+            at,
+            corpus_id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// The undo already on screen beside a completed reminder.
     pub async fn unretire_corpus(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query("UPDATE corpora SET retired_at = NULL WHERE id = ?")
-            .bind(corpus_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE corpora SET retired_at = NULL WHERE id = ?",
+            corpus_id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn is_retired(&self, corpus_id: &str) -> Result<bool> {
         let at: Option<Option<i64>> =
-            sqlx::query_scalar("SELECT retired_at FROM corpora WHERE id = ?")
-                .bind(corpus_id)
+            sqlx::query_scalar!("SELECT retired_at FROM corpora WHERE id = ?", corpus_id)
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(matches!(at, Some(Some(_))))
@@ -892,11 +902,13 @@ impl Store {
     /// signature, so the row is comparable to nothing until the stage that
     /// reads it speaks again.
     pub async fn clear_read_text(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE corpora SET raw_text = '', shingles = '', updated_at = ? WHERE id = ?")
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE corpora SET raw_text = '', shingles = '', updated_at = ? WHERE id = ?",
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -905,13 +917,13 @@ impl Store {
     /// comparable-by-shingle to something it does not say. Status is left to
     /// the caller, who knows whether this parks or proceeds.
     pub async fn set_read_text(&self, id: &str, text: &str, shingles: Vec<u64>) -> Result<()> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE corpora SET raw_text = ?, shingles = ?, updated_at = ? WHERE id = ?",
+            text,
+            super::shingle::encode(&shingles),
+            now(),
+            id
         )
-        .bind(text)
-        .bind(super::shingle::encode(&shingles))
-        .bind(now())
-        .bind(id)
         .execute(&self.pool)
         .await?;
         if res.rows_affected() == 0 {
@@ -921,12 +933,14 @@ impl Store {
     }
 
     pub async fn set_corpus_metadata(&self, id: &str, metadata: &serde_json::Value) -> Result<()> {
-        let res = sqlx::query("UPDATE corpora SET metadata = ?, updated_at = ? WHERE id = ?")
-            .bind(metadata.to_string())
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let res = sqlx::query!(
+            "UPDATE corpora SET metadata = ?, updated_at = ? WHERE id = ?",
+            metadata.to_string(),
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -934,8 +948,7 @@ impl Store {
     }
 
     pub async fn delete_corpus(&self, id: &str) -> Result<()> {
-        let res = sqlx::query("DELETE FROM corpora WHERE id = ?")
-            .bind(id)
+        let res = sqlx::query!("DELETE FROM corpora WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         if res.rows_affected() == 0 {
@@ -1250,18 +1263,18 @@ mod tests {
             .unwrap();
 
         for _ in 0..2 {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)
                  VALUES (?, ?, 0.9, 'pending', 0)",
+                &made[0].id,
+                &made[1].id
             )
-            .bind(&made[0].id)
-            .bind(&made[1].id)
             .execute(&s.pool)
             .await
             .unwrap();
         }
 
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM artifact_pairs")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM artifact_pairs")
             .fetch_one(&s.pool)
             .await
             .unwrap();
@@ -1415,7 +1428,7 @@ mod tests {
                 .unwrap(),
             Insertion::Existing(e) if e.id == src.id
         ));
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM attachments")
             .fetch_one(&s.pool)
             .await
             .unwrap();

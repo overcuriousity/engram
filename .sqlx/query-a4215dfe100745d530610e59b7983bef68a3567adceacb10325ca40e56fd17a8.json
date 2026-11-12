@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO corpus_actions\n           (id, at, job, kind, subject_id, survivor_id, detail, evidence_json, pair_score)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "a4215dfe100745d530610e59b7983bef68a3567adceacb10325ca40e56fd17a8"
+}

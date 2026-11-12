@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT count(empty_runs) FROM jobs",
+  "describe": {
+    "columns": [
+      {
+        "name": "count(empty_runs)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dafba7ce7ea368ddb3f831967f643ff35d1abffcc31869b4de45d62d2dda541e"
+}

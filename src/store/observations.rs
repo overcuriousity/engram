@@ -131,24 +131,24 @@ where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
 {
     let id = new_id();
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO observations
            (id, created_at, generation_id, query, query_vec, vec_dim,
             embed_model, artifact_id, rank, source, strength, event_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        &id,
+        now(),
+        &o.generation_id,
+        &o.query,
+        vec_to_blob(&o.query_vec),
+        o.query_vec.len() as i64,
+        &o.embed_model,
+        &o.artifact_id,
+        o.rank,
+        o.source.as_str(),
+        o.source.strength(),
+        &o.event_id
     )
-    .bind(&id)
-    .bind(now())
-    .bind(&o.generation_id)
-    .bind(&o.query)
-    .bind(vec_to_blob(&o.query_vec))
-    .bind(o.query_vec.len() as i64)
-    .bind(&o.embed_model)
-    .bind(&o.artifact_id)
-    .bind(o.rank)
-    .bind(o.source.as_str())
-    .bind(o.source.strength())
-    .bind(&o.event_id)
     .execute(ex)
     .await?;
     Ok(id)
@@ -266,13 +266,13 @@ impl Store {
     /// door added later. One statement, run where the rest of the quiet-period
     /// bookkeeping runs.
     pub async fn exclude_orphaned_observations(&self) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE observations SET excluded_at = ?
               WHERE excluded_at IS NULL
                 AND artifact_id IS NOT NULL
                 AND artifact_id NOT IN (SELECT id FROM artifacts)",
+            now()
         )
-        .bind(now())
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -291,11 +291,13 @@ impl Store {
         if retain_days <= 0 {
             return Ok(0);
         }
-        Ok(sqlx::query("DELETE FROM observations WHERE created_at < ?")
-            .bind(now() - retain_days * 86_400)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        Ok(sqlx::query!(
+            "DELETE FROM observations WHERE created_at < ?",
+            now() - retain_days * 86_400
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Every observation, gone. What "erase captured feedback" has to reach:
@@ -303,7 +305,7 @@ impl Store {
     /// emptied the searches out from under the UI left a complete log of the
     /// queries — text and embedding — standing behind it.
     pub async fn purge_observations(&self) -> Result<u64> {
-        Ok(sqlx::query("DELETE FROM observations")
+        Ok(sqlx::query!("DELETE FROM observations")
             .execute(&self.pool)
             .await?
             .rows_affected())
@@ -311,11 +313,13 @@ impl Store {
 
     /// Stop reading one observation back without losing it.
     pub async fn exclude_observation(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE observations SET excluded_at = ? WHERE id = ? AND excluded_at IS NULL")
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE observations SET excluded_at = ? WHERE id = ? AND excluded_at IS NULL",
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
@@ -458,7 +462,7 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM observations")
             .fetch_one(&store.pool)
             .await
             .unwrap();
@@ -520,12 +524,14 @@ mod tests {
             .record_observation(&obs(&generation, Some("art-1"), Some(1), Source::Cited))
             .await
             .unwrap();
-        sqlx::query("UPDATE observations SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 60 * 86_400)
-            .bind(&old)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE observations SET created_at = ? WHERE id = ?",
+            crate::store::now() - 60 * 86_400,
+            &old
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
         store
             .record_observation(&obs(&generation, Some("art-2"), Some(1), Source::Cited))
             .await
@@ -538,7 +544,7 @@ mod tests {
         );
         assert_eq!(store.expire_observations(30).await.unwrap(), 1);
         assert_eq!(store.purge_observations().await.unwrap(), 1);
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM observations")
             .fetch_one(&store.pool)
             .await
             .unwrap();

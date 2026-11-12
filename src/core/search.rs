@@ -2545,11 +2545,12 @@ mod tests {
             got.iter().any(|r| r.retired),
             "the fixture must actually put a retired hit in the list"
         );
-        let recorded: Vec<String> =
-            sqlx::query_scalar("SELECT artifact_id FROM search_candidates ORDER BY event_id, rank")
-                .fetch_all(&core.store.pool)
-                .await
-                .unwrap();
+        let recorded: Vec<String> = sqlx::query_scalar!(
+            "SELECT artifact_id FROM search_candidates ORDER BY event_id, rank"
+        )
+        .fetch_all(&core.store.pool)
+        .await
+        .unwrap();
         let shown: Vec<String> = got.iter().map(|r| r.artifact_id.clone()).collect();
         assert_eq!(
             recorded[..shown.len()],
@@ -3095,11 +3096,13 @@ mod tests {
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ?",
+            now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
         let before = core
@@ -3780,12 +3783,14 @@ mod tests {
 
         // `created_at` is set by the store, so age the one that should surface.
         let cutoff = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ? WHERE text = ?")
-            .bind(cutoff)
-            .bind("long forgotten")
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ? WHERE text = ?",
+            cutoff,
+            "long forgotten"
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         // The vector payload carries its own copy, so re-embed to pick it up.
         reembed_all(&core).await;
 
@@ -3806,8 +3811,7 @@ mod tests {
         let core = test_core().await;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
         let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(old)
+        sqlx::query!("UPDATE artifacts SET created_at = ?", old)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -3921,8 +3925,7 @@ mod tests {
         let core = test_core().await;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
         let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(old)
+        sqlx::query!("UPDATE artifacts SET created_at = ?", old)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -4035,12 +4038,14 @@ mod tests {
         let (core, old, young) = two_live_artifacts().await;
         core.trash_artifact(&old).await.unwrap();
         core.trash_artifact(&young).await.unwrap();
-        sqlx::query("UPDATE artifacts SET trashed_at = trashed_at - ? WHERE id = ?")
-            .bind(crate::core::TRASH_RETENTION_SECS + 1)
-            .bind(&old)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET trashed_at = trashed_at - ? WHERE id = ?",
+            crate::core::TRASH_RETENTION_SECS + 1,
+            &old
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         assert_eq!(
             core.purge_trash(crate::core::TRASH_RETENTION_SECS)
                 .await
@@ -4068,8 +4073,7 @@ mod tests {
         )
         .await;
         let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(old)
+        sqlx::query!("UPDATE artifacts SET created_at = ?", old)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -4467,12 +4471,14 @@ mod tests {
 
         // The one at the bottom is the one people actually keep confirming.
         let bottom = plain.last().unwrap().artifact_id.clone();
-        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
-            .bind(now_secs())
-            .bind(&bottom)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?",
+            now_secs(),
+            &bottom
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         let primed = core
             .search(&q("alpha text about it"), Door::Ui)
@@ -4628,12 +4634,14 @@ mod tests {
         // The one at the bottom is given a huge activation directly — exactly
         // what moved the order in the "feature on" test above.
         let bottom = plain.last().unwrap().artifact_id.clone();
-        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
-            .bind(now_secs())
-            .bind(&bottom)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?",
+            now_secs(),
+            &bottom
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         let with_huge_activation = core
             .search(&q("alpha text about it"), Door::Ui)
@@ -4677,12 +4685,14 @@ mod tests {
             .unwrap();
         assert!(plain.len() >= 4, "this test needs a list to reorder");
         let bottom = plain.last().unwrap().artifact_id.clone();
-        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
-            .bind(now_secs())
-            .bind(&bottom)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?",
+            now_secs(),
+            &bottom
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         // The same activation that does move the order on the UI door.
         let moved = core
@@ -4765,7 +4775,7 @@ mod tests {
 
     async fn captured_events(core: &crate::core::Core) -> i64 {
         core.background.wait_idle().await;
-        sqlx::query_scalar("SELECT count(*) FROM search_events")
+        sqlx::query_scalar!("SELECT count(*) FROM search_events")
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
@@ -4825,7 +4835,7 @@ mod tests {
         core.search(&query, Door::Ui).await.unwrap();
         core.background.wait_idle().await;
 
-        let pool: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+        let pool: i64 = sqlx::query_scalar!("SELECT count(*) FROM search_candidates")
             .fetch_one(&core.store.pool)
             .await
             .unwrap();
@@ -5025,7 +5035,7 @@ mod tests {
         core.search(&query, Door::Ui).await.unwrap();
         core.background.wait_idle().await;
 
-        let filters: String = sqlx::query_scalar("SELECT filters FROM search_events")
+        let filters: String = sqlx::query_scalar!("SELECT filters FROM search_events")
             .fetch_one(&core.store.pool)
             .await
             .unwrap();
@@ -5171,8 +5181,7 @@ mod tests {
     }
 
     async fn id_of(core: &crate::core::Core, text: &str) -> String {
-        sqlx::query_scalar("SELECT id FROM artifacts WHERE text = ?")
-            .bind(text)
+        sqlx::query_scalar!(r#"SELECT id AS "id!" FROM artifacts WHERE text = ?"#, text)
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
@@ -5478,7 +5487,7 @@ mod tests {
         // learns: the associate job's co-appearance read sees the ranked
         // list alone.
         let band: Vec<String> =
-            sqlx::query_scalar("SELECT artifact_id FROM search_candidates WHERE band = 1")
+            sqlx::query_scalar!("SELECT artifact_id FROM search_candidates WHERE band = 1")
                 .fetch_all(&linked.store.pool)
                 .await
                 .unwrap();
@@ -5487,7 +5496,7 @@ mod tests {
             vec![b.clone()],
             "the recalled hit is recorded as the band"
         );
-        let event: String = sqlx::query_scalar("SELECT id FROM search_events")
+        let event: String = sqlx::query_scalar!(r#"SELECT id AS "id!" FROM search_events"#)
             .fetch_one(&linked.store.pool)
             .await
             .unwrap();
@@ -5611,11 +5620,13 @@ mod tests {
 
         // A slice of a section, carrying that section's heading — `t1` here,
         // which names the seeded corpus and not this passage.
-        sqlx::query("UPDATE artifacts SET provenance = 'passage' WHERE id = ?")
-            .bind(&b)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET provenance = 'passage' WHERE id = ?",
+            &b
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let hit = recalled(&core).await;
         assert!(
             hit.borrowed_name,
@@ -5626,11 +5637,13 @@ mod tests {
 
         // The other side of the same read: a merge names its own text, and is
         // never its own root.
-        sqlx::query("UPDATE artifacts SET provenance = 'merged' WHERE id = ?")
-            .bind(&b)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET provenance = 'merged' WHERE id = ?",
+            &b
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let hit = recalled(&core).await;
         assert!(!hit.borrowed_name, "a merge was named by what wrote it");
         assert!(

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pair_grants WHERE expires_at <= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f7b3a8f8bf344e22b893983ca19aad2b5ee043d809f6cb1aa6c50f53d588af0f"
+}

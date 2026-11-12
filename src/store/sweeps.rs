@@ -43,15 +43,15 @@ impl Store {
         outcome: &str,
         detail: &str,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO sweep_runs (stage, started_at, ended_at, outcome, detail)
              VALUES (?, ?, ?, ?, ?)",
+            stage,
+            started_at,
+            now(),
+            outcome,
+            detail
         )
-        .bind(stage)
-        .bind(started_at)
-        .bind(now())
-        .bind(outcome)
-        .bind(detail)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -96,12 +96,12 @@ impl Store {
 
     /// Keep the newest `MAX_RUNS` and forget the rest.
     pub async fn trim_sweep_runs(&self) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "DELETE FROM sweep_runs WHERE id NOT IN (
                SELECT id FROM sweep_runs ORDER BY started_at DESC, id DESC LIMIT ?
              )",
+            MAX_RUNS
         )
-        .bind(MAX_RUNS)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())

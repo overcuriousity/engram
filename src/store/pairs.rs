@@ -385,14 +385,14 @@ impl Store {
     /// would make dismissing pointless.
     pub async fn record_pair(&self, a: &str, b: &str, score: f32) -> Result<bool> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)
              VALUES (?, ?, ?, 'pending', ?)",
+            a,
+            b,
+            score as f64,
+            now()
         )
-        .bind(a)
-        .bind(b)
-        .bind(score as f64)
-        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -415,15 +415,15 @@ impl Store {
         detail: &str,
     ) -> Result<bool> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, detail, created_at)
              VALUES (?, ?, ?, 'pending', ?, ?)",
+            a,
+            b,
+            score as f64,
+            detail,
+            now()
         )
-        .bind(a)
-        .bind(b)
-        .bind(score as f64)
-        .bind(detail)
-        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -446,17 +446,17 @@ impl Store {
         state: PairState,
     ) -> Result<bool> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT INTO artifact_pairs (a_id, b_id, score, state, created_at)
              VALUES (?, ?, ?, ?, ?)
              ON CONFLICT(a_id, b_id) DO UPDATE SET state = excluded.state
                WHERE artifact_pairs.state = 'pending'",
+            a,
+            b,
+            score as f64,
+            state.as_str(),
+            now()
         )
-        .bind(a)
-        .bind(b)
-        .bind(score as f64)
-        .bind(state.as_str())
-        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -478,13 +478,13 @@ impl Store {
     /// claim about a question nobody has answered.
     pub async fn unsettle_pair(&self, a: &str, b: &str, from: PairState) -> Result<bool> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL
               WHERE a_id = ? AND b_id = ? AND state = ?",
+            a,
+            b,
+            from.as_str()
         )
-        .bind(a)
-        .bind(b)
-        .bind(from.as_str())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -499,12 +499,13 @@ impl Store {
     /// local rule that re-derives the same answer must not overrule it.
     pub async fn pair_state_between(&self, a: &str, b: &str) -> Result<Option<PairState>> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let state: Option<String> =
-            sqlx::query_scalar("SELECT state FROM artifact_pairs WHERE a_id = ? AND b_id = ?")
-                .bind(a)
-                .bind(b)
-                .fetch_optional(&self.pool)
-                .await?;
+        let state: Option<String> = sqlx::query_scalar!(
+            "SELECT state FROM artifact_pairs WHERE a_id = ? AND b_id = ?",
+            a,
+            b
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(state.as_deref().map(PairState::parse))
     }
 
@@ -641,15 +642,15 @@ impl Store {
         detail: Option<&str>,
         by: DecidedBy,
     ) -> Result<()> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = ?, detail = ?, decided_by = ?, obsolete_id = NULL, merged_into = NULL
               WHERE id = ?",
+            state.as_str(),
+            detail,
+            by.as_str(),
+            id
         )
-        .bind(state.as_str())
-        .bind(detail)
-        .bind(by.as_str())
-        .bind(id)
         .execute(&self.pool)
         .await?;
         // A dismiss from a stale Ops page names a pair that is no longer there
@@ -680,16 +681,16 @@ impl Store {
         detail: Option<&str>,
         by: DecidedBy,
     ) -> Result<()> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'superseded', detail = ?, decided_by = ?,
                     obsolete_id = ?, merged_into = NULL
               WHERE id = ?",
+            detail,
+            by.as_str(),
+            obsolete_id,
+            id
         )
-        .bind(detail)
-        .bind(by.as_str())
-        .bind(obsolete_id)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         if res.rows_affected() == 0 {
@@ -752,21 +753,21 @@ impl Store {
     /// the sweep writes it as the operator's.
     pub async fn drain_waiting_pairs(&self) -> Result<DrainCounts> {
         let mut tx = self.pool.begin().await?;
-        let rejudged = sqlx::query(
+        let rejudged = sqlx::query!(
             "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL
               WHERE (state = 'duplicate' AND merged_into IS NULL AND synthesis_asked = 0)
                  OR state = 'superseded'
-                 OR state = 'vacuous'",
+                 OR state = 'vacuous'"
         )
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        let closed = sqlx::query(
+        let closed = sqlx::query!(
             "UPDATE artifact_pairs SET state = 'no_conflict', synthesis_asked = 0
               WHERE state = 'unmergeable'
                  OR (state = 'contradiction' AND detail LIKE '%esolve by hand%')
                  OR (state = 'contradiction'
-                     AND detail LIKE '%merging them would have dropped one of them%')",
+                     AND detail LIKE '%merging them would have dropped one of them%')"
         )
         .execute(&mut *tx)
         .await?
@@ -778,10 +779,12 @@ impl Store {
     /// Clear it. Called when the merge path refuses the draft, so the card
     /// stops promising a synthesis that will not arrive.
     pub async fn clear_pair_synthesis(&self, id: i64) -> Result<()> {
-        sqlx::query("UPDATE artifact_pairs SET synthesis_asked = 0 WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifact_pairs SET synthesis_asked = 0 WHERE id = ?",
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -838,16 +841,16 @@ impl Store {
         detail: Option<&str>,
         by: DecidedBy,
     ) -> Result<()> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'no_conflict', detail = ?, decided_by = ?,
                     merged_into = ?, obsolete_id = NULL
               WHERE id = ?",
+            detail,
+            by.as_str(),
+            merged_into,
+            id
         )
-        .bind(detail)
-        .bind(by.as_str())
-        .bind(merged_into)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         if res.rows_affected() == 0 {
@@ -867,14 +870,14 @@ impl Store {
     /// it is the model's — the same attribution
     /// `follow_supersession` writes when it settles a row the same way.
     pub async fn reopen_pairs_merged_into(&self, merged_id: &str, detail: &str) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'no_conflict', detail = ?, decided_by = 'model',
                     merged_into = NULL
               WHERE merged_into = ?",
+            detail,
+            merged_id
         )
-        .bind(detail)
-        .bind(merged_id)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -899,14 +902,14 @@ impl Store {
         detail: &str,
         by: DecidedBy,
     ) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'dismissed', detail = ?, decided_by = ?, merged_into = NULL
               WHERE merged_into = ?",
+            detail,
+            by.as_str(),
+            merged_id
         )
-        .bind(detail)
-        .bind(by.as_str())
-        .bind(merged_id)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -998,15 +1001,15 @@ impl Store {
                 } else {
                     (new_id, other.as_str())
                 };
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE artifact_pairs
                         SET a_id = ?, b_id = ?, judge_attempts = 0, judge_unreadable = 0,
                             detail = NULL
                       WHERE id = ?",
+                    a,
+                    b,
+                    p.id
                 )
-                .bind(a)
-                .bind(b)
-                .bind(p.id)
                 .execute(&self.pool)
                 .await?;
                 moved += 1;
@@ -1101,13 +1104,13 @@ impl Store {
     /// says a person answered a question still being asked. The column exists
     /// to end exactly that kind of untruth (`DecidedBy`).
     async fn reopen_pair(&self, id: i64) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'pending', detail = NULL, obsolete_id = NULL, merged_into = NULL,
                     decided_by = NULL, judge_attempts = 0, judge_unreadable = 0
               WHERE id = ?",
+            id
         )
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1281,15 +1284,15 @@ impl Store {
                 (winner, other.as_str())
             };
             if p.state == PairState::Pending {
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE artifact_pairs
                         SET a_id = ?, b_id = ?, judge_attempts = 0, judge_unreadable = 0,
                             detail = NULL
                       WHERE id = ?",
+                    a,
+                    b,
+                    p.id
                 )
-                .bind(a)
-                .bind(b)
-                .bind(p.id)
                 .execute(&self.pool)
                 .await?;
             } else {
@@ -1302,13 +1305,13 @@ impl Store {
                     Some(d) => format!("{d} ({note})"),
                     None => note.to_string(),
                 };
-                sqlx::query(
+                sqlx::query!(
                     "UPDATE artifact_pairs SET a_id = ?, b_id = ?, detail = ? WHERE id = ?",
+                    a,
+                    b,
+                    detail,
+                    p.id
                 )
-                .bind(a)
-                .bind(b)
-                .bind(detail)
-                .bind(p.id)
                 .execute(&self.pool)
                 .await?;
             }
@@ -1453,7 +1456,7 @@ impl Store {
     /// reopened here, and keeping their name on it would attribute a pending
     /// question to a person who answered a different one.
     pub async fn reopen_stale_pairs(&self, artifact_id: &str) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'pending', detail = NULL, obsolete_id = NULL, merged_into = NULL,
                     decided_by = NULL, judge_attempts = 0, judge_unreadable = 0
@@ -1463,9 +1466,9 @@ impl Store {
                       SELECT 1 FROM artifacts x
                        WHERE x.id IN (artifact_pairs.a_id, artifact_pairs.b_id)
                          AND (x.status <> 'active' OR x.superseded_by IS NOT NULL) AND x.status <> 'trashed')",
+            artifact_id
         )
-        .bind(artifact_id)
-        .execute(&self.pool)
+            .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
     }
@@ -1576,11 +1579,11 @@ impl Store {
     ///
     /// `decided_by` clears with them, for the reason `reopen_pair` gives.
     pub async fn reopen_oversized(&self) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'pending', detail = NULL, decided_by = NULL,
                     judge_attempts = 0, judge_unreadable = 0
-              WHERE state = 'oversized'",
+              WHERE state = 'oversized'"
         )
         .execute(&self.pool)
         .await?;
@@ -1689,10 +1692,12 @@ impl Store {
     /// answer. Written before the call, so a run that dies mid-judgement still
     /// leaves the pair at the back of the next sweep's queue.
     pub async fn record_judge_attempt(&self, id: i64) -> Result<()> {
-        sqlx::query("UPDATE artifact_pairs SET judge_attempts = judge_attempts + 1 WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifact_pairs SET judge_attempts = judge_attempts + 1 WHERE id = ?",
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1701,10 +1706,10 @@ impl Store {
     /// parse fails and nowhere else — an endpoint that is down must not shelve
     /// the whole review queue on its way past.
     pub async fn record_unreadable_judgement(&self, id: i64) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifact_pairs SET judge_unreadable = judge_unreadable + 1 WHERE id = ?",
+            id
         )
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -2169,10 +2174,10 @@ mod tests {
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let p = s.pairs_by_state(PairState::Pending, 10).await.unwrap()[0].id;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifact_pairs SET state = 'dismissed', decided_by = NULL WHERE id = ?",
+            p
         )
-        .bind(p)
         .execute(&s.pool)
         .await
         .unwrap();

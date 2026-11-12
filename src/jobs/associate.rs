@@ -331,11 +331,11 @@ async fn replay_verdicts(core: &Core, at: i64) -> Result<usize> {
 /// ranked list only: an artifact the band recalled is in the pool, flagged,
 /// and reading it here would let a link strengthen itself by having fired.
 async fn shown_candidates(core: &Core, event_id: &str) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar(
+    Ok(sqlx::query_scalar!(
         "SELECT artifact_id FROM search_candidates
           WHERE event_id = ? AND shown = 1 AND band = 0 ORDER BY rank",
+        event_id
     )
-    .bind(event_id)
     .fetch_all(&core.store.pool)
     .await?)
 }
@@ -646,10 +646,10 @@ mod tests {
     /// test that judges and sweeps in the same breath has to say which second
     /// it means. `judged_at` is NULL on an unjudged event and stays NULL here.
     async fn settle(core: &Core) {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE search_events
                 SET created_at = created_at - 3600,
-                    judged_at = judged_at - 3600",
+                    judged_at = judged_at - 3600"
         )
         .execute(&core.store.pool)
         .await
@@ -787,8 +787,7 @@ mod tests {
         let ids = seed(&core, 2).await;
         let ev = record(&core, "fat", &[&ids[0], &ids[1]], &[]).await;
         let created_at: i64 =
-            sqlx::query_scalar("SELECT created_at FROM search_events WHERE id = ?")
-                .bind(&ev)
+            sqlx::query_scalar!("SELECT created_at FROM search_events WHERE id = ?", &ev)
                 .fetch_one(&core.store.pool)
                 .await
                 .unwrap();
@@ -1147,7 +1146,7 @@ mod tests {
         record(&core, "a", &[&ids[0], &ids[1]], &[]).await;
         record(&core, "b", &[&ids[1], &ids[2]], &[]).await;
         settle(&core).await;
-        sqlx::query("UPDATE search_events SET created_at = 1000")
+        sqlx::query!("UPDATE search_events SET created_at = 1000")
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1626,11 +1625,13 @@ mod tests {
             .judge_hit(&first, &ids[0], crate::store::feedback::Labeller::Deck)
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
-            .bind(&first)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET judged_at = 1000 WHERE id = ?",
+            &first
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         // The sweep that ran during second 1000.
         replay_verdicts(&core, 1000).await.unwrap();
@@ -1641,11 +1642,13 @@ mod tests {
             .judge_hit(&second, &ids[2], crate::store::feedback::Labeller::Deck)
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET judged_at = 1000 WHERE id = ?")
-            .bind(&second)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET judged_at = 1000 WHERE id = ?",
+            &second
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         replay_verdicts(&core, 1001).await.unwrap();
 
@@ -1689,7 +1692,7 @@ mod tests {
             .record_pair(&ids[0], &ids[1], 0.91)
             .await
             .unwrap();
-        sqlx::query("UPDATE artifact_pairs SET state = 'dismissed'")
+        sqlx::query!("UPDATE artifact_pairs SET state = 'dismissed'")
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1726,8 +1729,7 @@ mod tests {
         record(&core, "three shown", &[&ids[0], &ids[1], &ids[2]], &[]).await;
         settle(&core).await;
         // Gone by the time the sweep reads the event it was shown in.
-        sqlx::query("DELETE FROM artifacts WHERE id = ?")
-            .bind(&ids[2])
+        sqlx::query!("DELETE FROM artifacts WHERE id = ?", &ids[2])
             .execute(&core.store.pool)
             .await
             .unwrap();

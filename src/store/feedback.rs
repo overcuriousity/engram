@@ -496,12 +496,10 @@ impl Store {
                 .bind(&id)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query("DELETE FROM search_candidates WHERE event_id = ?")
-                    .bind(&id)
+                sqlx::query!("DELETE FROM search_candidates WHERE event_id = ?", &id)
                     .execute(&mut *tx)
                     .await?;
-                sqlx::query("DELETE FROM search_context WHERE event_id = ?")
-                    .bind(&id)
+                sqlx::query!("DELETE FROM search_context WHERE event_id = ?", &id)
                     .execute(&mut *tx)
                     .await?;
                 id
@@ -536,30 +534,32 @@ impl Store {
         };
 
         for (rank, c) in ev.candidates.iter().enumerate() {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO search_candidates
                    (event_id, rank, artifact_id, score, similarity, shown, band, explored_from)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                &id,
+                rank as i64,
+                &c.artifact_id,
+                c.score,
+                c.similarity,
+                c.shown as i64,
+                c.band as i64,
+                c.explored_from
             )
-            .bind(&id)
-            .bind(rank as i64)
-            .bind(&c.artifact_id)
-            .bind(c.score)
-            .bind(c.similarity)
-            .bind(c.shown as i64)
-            .bind(c.band as i64)
-            .bind(c.explored_from)
             .execute(&mut *tx)
             .await?;
         }
         if let Some(ctx) = &ev.context {
             let raw = serde_json::to_string(ctx)
                 .map_err(|e| crate::error::Error::Store(format!("search_context: {e}")))?;
-            sqlx::query("INSERT INTO search_context (event_id, context) VALUES (?, ?)")
-                .bind(&id)
-                .bind(raw)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query!(
+                "INSERT INTO search_context (event_id, context) VALUES (?, ?)",
+                &id,
+                raw
+            )
+            .execute(&mut *tx)
+            .await?;
         }
 
         tx.commit().await?;
@@ -600,11 +600,12 @@ impl Store {
         &self,
         event_id: &str,
     ) -> Result<Option<crate::core::search::Priming>> {
-        let raw: Option<String> =
-            sqlx::query_scalar("SELECT context FROM search_context WHERE event_id = ?")
-                .bind(event_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let raw: Option<String> = sqlx::query_scalar!(
+            "SELECT context FROM search_context WHERE event_id = ?",
+            event_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         raw.map(|s| {
             serde_json::from_str(&s)
                 .map_err(|e| crate::error::Error::Store(format!("search_context: {e}")))
@@ -773,15 +774,15 @@ impl Store {
     /// meant.
     pub async fn judge_hit(&self, event_id: &str, artifact_id: &str, by: Labeller) -> Result<()> {
         Self::judged_one(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE search_events
                  SET judged_at = ?, verdict = 'hit', expect_id = ?, judged_by = ?
                  WHERE id = ? AND judged_at IS NULL",
+                now(),
+                artifact_id,
+                by.as_sql(),
+                event_id
             )
-            .bind(now())
-            .bind(artifact_id)
-            .bind(by.as_sql())
-            .bind(event_id)
             .execute(&self.pool)
             .await?,
         )
@@ -802,15 +803,15 @@ impl Store {
     /// for it the answer means what it always meant — that row is gone.
     pub async fn judge(&self, event_id: &str, verdict: Verdict, by: Labeller) -> Result<()> {
         Self::judged_one(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE search_events
                  SET judged_at = ?, verdict = ?, expect_id = NULL, judged_by = ?
                  WHERE id = ? AND judged_at IS NULL",
+                now(),
+                verdict.as_str(),
+                by.as_sql(),
+                event_id
             )
-            .bind(now())
-            .bind(verdict.as_str())
-            .bind(by.as_sql())
-            .bind(event_id)
             .execute(&self.pool)
             .await?,
         )
@@ -830,14 +831,14 @@ impl Store {
     /// through the UI door, and the UI door always names its subject (see
     /// `Origin`). A row with no scope is not one of them.
     pub async fn event_is_mine(&self, event_id: &str, scope: &str) -> Result<bool> {
-        Ok(
-            sqlx::query_scalar::<_, i64>("SELECT 1 FROM search_events WHERE id = ? AND scope = ?")
-                .bind(event_id)
-                .bind(scope)
-                .fetch_optional(&self.pool)
-                .await?
-                .is_some(),
+        Ok(sqlx::query_scalar!(
+            "SELECT 1 FROM search_events WHERE id = ? AND scope = ?",
+            event_id,
+            scope
         )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
     }
 
     /// The search a result was opened from, named by the page that listed it.
@@ -920,16 +921,16 @@ impl Store {
         .fetch_optional(&mut *tx)
         .await?;
 
-        let stamped = sqlx::query(
+        let stamped = sqlx::query!(
             "UPDATE search_events SET opened_at = ?
               WHERE id = ? AND judged_at IS NULL
                 AND EXISTS (SELECT 1 FROM search_candidates
                              WHERE event_id = ? AND artifact_id = ?)",
+            now(),
+            event_id,
+            event_id,
+            artifact_id
         )
-        .bind(now())
-        .bind(event_id)
-        .bind(event_id)
-        .bind(artifact_id)
         .execute(&mut *tx)
         .await?
         .rows_affected()
@@ -1000,12 +1001,12 @@ impl Store {
     /// `pairs.json`. `false` where that has happened — the same two ordinary
     /// outcomes `gap_event` reports.
     pub async fn decline(&self, event_id: &str) -> Result<bool> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE search_events
              SET judged_at = NULL, verdict = NULL, expect_id = NULL, judged_by = 'confirm'
              WHERE id = ? AND judged_at IS NULL",
+            event_id
         )
-        .bind(event_id)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -1029,16 +1030,16 @@ impl Store {
     /// answered. `false` where the query has moved on, which is the same
     /// ordinary outcome as a search already judged.
     pub async fn gap_event(&self, event_id: &str, query: &str) -> Result<bool> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE search_events
              SET judged_at = ?, verdict = ?, expect_id = NULL, judged_by = ?
              WHERE id = ? AND query = ? AND judged_at IS NULL",
+            now(),
+            Verdict::Gap.as_str(),
+            Labeller::Confirm.as_sql(),
+            event_id,
+            query
         )
-        .bind(now())
-        .bind(Verdict::Gap.as_str())
-        .bind(Labeller::Confirm.as_sql())
-        .bind(event_id)
-        .bind(query)
         .execute(&self.pool)
         .await?
         .rows_affected()
@@ -1092,10 +1093,12 @@ impl Store {
     /// counted as outstanding for ever and put to nobody.
     pub async fn skip_event(&self, event_id: &str) -> Result<()> {
         Self::judged_one(
-            sqlx::query("UPDATE search_events SET skips = skips + 1 WHERE id = ?")
-                .bind(event_id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE search_events SET skips = skips + 1 WHERE id = ?",
+                event_id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
@@ -1128,7 +1131,7 @@ impl Store {
     /// showing while judging rather than afterwards.
     pub async fn feedback_stats(&self, weak_below: f32) -> Result<Stats> {
         let mut s = Stats {
-            captured: sqlx::query_scalar("SELECT count(*) FROM search_events")
+            captured: sqlx::query_scalar!("SELECT count(*) FROM search_events")
                 .fetch_one(&self.pool)
                 .await?,
             pending: self.pending_count(weak_below).await?,
@@ -1140,10 +1143,12 @@ impl Store {
             (&mut s.gaps, "gap"),
             (&mut s.discards, "discard"),
         ] {
-            *field = sqlx::query_scalar("SELECT count(*) FROM search_events WHERE verdict = ?")
-                .bind(verdict)
-                .fetch_one(&self.pool)
-                .await?;
+            *field = sqlx::query_scalar!(
+                "SELECT count(*) FROM search_events WHERE verdict = ?",
+                verdict
+            )
+            .fetch_one(&self.pool)
+            .await?;
         }
         s.judged = s.hits + s.gaps + s.discards;
 
@@ -1252,8 +1257,7 @@ impl Store {
     /// typing became — has nothing to do about it either way.
     pub async fn search_query(&self, id: &str) -> Result<Option<String>> {
         Ok(
-            sqlx::query_scalar("SELECT query FROM search_events WHERE id = ?")
-                .bind(id)
+            sqlx::query_scalar!("SELECT query FROM search_events WHERE id = ?", id)
                 .fetch_optional(&self.pool)
                 .await?,
         )
@@ -1262,12 +1266,12 @@ impl Store {
     /// Whether anybody has searched or asked since `since`. What tells an idle
     /// pass that the quiet it started in has ended.
     pub async fn activity_since(&self, since: i64) -> Result<bool> {
-        let n: i64 = sqlx::query_scalar(
-            "SELECT (SELECT COUNT(*) FROM search_events WHERE created_at > ?)
-                  + (SELECT COUNT(*) FROM ask_events WHERE created_at > ?)",
+        let n: i64 = sqlx::query_scalar!(
+            r#"SELECT (SELECT COUNT(*) FROM search_events WHERE created_at > ?)
+                  + (SELECT COUNT(*) FROM ask_events WHERE created_at > ?) AS "n!: i64""#,
+            since,
+            since
         )
-        .bind(since)
-        .bind(since)
         .fetch_one(&self.pool)
         .await?;
         Ok(n > 0)
@@ -1276,12 +1280,12 @@ impl Store {
     /// Verdicts given since `since`. What the day's counter on the judge page
     /// reads, so it counts the work done rather than the pairs produced.
     pub async fn judged_since(&self, since: i64) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT count(*) FROM search_events WHERE judged_at >= ?")
-                .bind(since)
-                .fetch_one(&self.pool)
-                .await?,
+        Ok(sqlx::query_scalar!(
+            "SELECT count(*) FROM search_events WHERE judged_at >= ?",
+            since
         )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Drop captured *unjudged* searches older than the window. `0` keeps them
@@ -1305,11 +1309,11 @@ impl Store {
         if retain_days <= 0 {
             return Ok(0);
         }
-        let searches = sqlx::query(
+        let searches = sqlx::query!(
             "DELETE FROM search_events
                  WHERE created_at < ? AND (verdict IS NULL OR verdict = 'discard')",
+            now() - retain_days * 86_400
         )
-        .bind(now() - retain_days * 86_400)
         .execute(&self.pool)
         .await?
         .rows_affected();
@@ -1329,7 +1333,7 @@ impl Store {
     /// record of anything.
     pub async fn purge_feedback(&self) -> Result<u64> {
         // `search_candidates` goes with it through ON DELETE CASCADE.
-        let searches = sqlx::query("DELETE FROM search_events")
+        let searches = sqlx::query!("DELETE FROM search_events")
             .execute(&self.pool)
             .await?
             .rows_affected();
@@ -1342,11 +1346,11 @@ impl Store {
         // live on the points, which a DELETE here cannot reach —
         // `Core::forget_situations` clears those first, and the caller that
         // has a vector store runs the two together.
-        let situations = sqlx::query("DELETE FROM context_events")
+        let situations = sqlx::query!("DELETE FROM context_events")
             .execute(&self.pool)
             .await?
             .rows_affected();
-        let profiles = sqlx::query("DELETE FROM context_clusters")
+        let profiles = sqlx::query!("DELETE FROM context_clusters")
             .execute(&self.pool)
             .await?
             .rows_affected();
@@ -1434,10 +1438,10 @@ impl Store {
     /// waits for quiet then never ran at all.
     pub async fn newest_event_at(&self) -> Result<Option<i64>> {
         let s: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(created_at) FROM search_events WHERE door <> 'judge'")
+            sqlx::query_scalar!("SELECT MAX(created_at) FROM search_events WHERE door <> 'judge'")
                 .fetch_one(&self.pool)
                 .await?;
-        let a: Option<i64> = sqlx::query_scalar("SELECT MAX(created_at) FROM ask_events")
+        let a: Option<i64> = sqlx::query_scalar!("SELECT MAX(created_at) FROM ask_events")
             .fetch_one(&self.pool)
             .await?;
         // `recommended_shown` is excluded for the same reason the judge door is:
@@ -1447,8 +1451,8 @@ impl Store {
         // and the sweep that waits for quiet then never runs at all.
         //
         // `recommended_open` is not excluded. Taking the offer is a real act.
-        let i: Option<i64> = sqlx::query_scalar(
-            "SELECT MAX(at) FROM interaction_events WHERE kind <> 'recommended_shown'",
+        let i: Option<i64> = sqlx::query_scalar!(
+            "SELECT MAX(at) FROM interaction_events WHERE kind <> 'recommended_shown'"
         )
         .fetch_one(&self.pool)
         .await?;
@@ -2025,7 +2029,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(queries(&store).await, vec!["fat32"]);
-        let candidates: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+        let candidates: i64 = sqlx::query_scalar!("SELECT count(*) FROM search_candidates")
             .fetch_one(&store.pool)
             .await
             .unwrap();
@@ -2081,7 +2085,7 @@ mod tests {
         }
 
         assert_eq!(queries(&store).await, vec!["fat32"]);
-        let candidates: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+        let candidates: i64 = sqlx::query_scalar!("SELECT count(*) FROM search_candidates")
             .fetch_one(&store.pool)
             .await
             .unwrap();
@@ -2098,12 +2102,14 @@ mod tests {
             .record_search(ev("fat32", Door::Ui), 15)
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(now() - 3600)
-            .bind(&first)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            now() - 3600,
+            &first
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
         store
             .record_search(after(&first, "fat32", Door::Ui), 15)
             .await
@@ -2130,8 +2136,7 @@ mod tests {
     }
 
     async fn judged_by(store: &Store, id: &str) -> Option<String> {
-        sqlx::query_scalar("SELECT judged_by FROM search_events WHERE id = ?")
-            .bind(id)
+        sqlx::query_scalar!("SELECT judged_by FROM search_events WHERE id = ?", id)
             .fetch_one(&store.pool)
             .await
             .unwrap()
@@ -2669,12 +2674,14 @@ mod tests {
         // label attached to words the operator never judged.
         let store = Store::memory().await.unwrap();
         let id = store.record_search(ev("fat", Door::Ui), 15).await.unwrap();
-        sqlx::query("UPDATE search_events SET judged_at = ?, verdict = 'gap' WHERE id = ?")
-            .bind(now())
-            .bind(&id)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET judged_at = ?, verdict = 'gap' WHERE id = ?",
+            now(),
+            &id
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
         store
             .record_search(after(&id, "fat32", Door::Ui), 15)
             .await
@@ -3001,12 +3008,14 @@ mod tests {
     async fn an_event_past_the_retention_window_is_dropped() {
         let store = Store::memory().await.unwrap();
         let id = seed(&store, "old", &["a"]).await;
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(now() - 40 * 86_400)
-            .bind(&id)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            now() - 40 * 86_400,
+            &id
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
         assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
     }
 
@@ -3019,14 +3028,16 @@ mod tests {
         let kept = seed(&store, "judged", &["a"]).await;
         seed(&store, "never looked at", &["a"]).await;
         store.judge_hit(&kept, "a", Labeller::Deck).await.unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ?")
-            .bind(now() - 40 * 86_400)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ?",
+            now() - 40 * 86_400
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
 
         assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
-        let left: Vec<String> = sqlx::query_scalar("SELECT query FROM search_events")
+        let left: Vec<String> = sqlx::query_scalar!("SELECT query FROM search_events")
             .fetch_all(&store.pool)
             .await
             .unwrap();
@@ -3043,11 +3054,13 @@ mod tests {
             .judge(&id, Verdict::Discard, Labeller::Deck)
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ?")
-            .bind(now() - 40 * 86_400)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ?",
+            now() - 40 * 86_400
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
 
         assert_eq!(store.expire_feedback(30).await.unwrap(), 1);
     }
@@ -3058,7 +3071,7 @@ mod tests {
         seed(&store, "a search", &["a", "b"]).await;
         store.purge_feedback().await.unwrap();
 
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM search_candidates")
             .fetch_one(&store.pool)
             .await
             .unwrap();

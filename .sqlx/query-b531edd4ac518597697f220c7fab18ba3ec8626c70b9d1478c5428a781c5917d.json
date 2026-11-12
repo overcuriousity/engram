@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE observations SET excluded_at = ? WHERE id = ? AND excluded_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b531edd4ac518597697f220c7fab18ba3ec8626c70b9d1478c5428a781c5917d"
+}

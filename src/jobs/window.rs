@@ -485,12 +485,12 @@ async fn attempts_for(core: &Core, corpus_id: &str, idx: i64) -> Result<i64> {
     // wrong quietly: the queue is instance-wide, and the invariant the control
     // schema states — no query on it written without a tenant filter — is only
     // worth anything if it has no exceptions.
-    Ok(sqlx::query_scalar::<_, i64>(
+    Ok(sqlx::query_scalar!(
         "SELECT attempts FROM jobs
           WHERE subject = ? AND stage = 'segment_window' AND target_id = ?",
+        &core.store.subject,
+        unit_target(corpus_id, idx)
     )
-    .bind(&core.store.subject)
-    .bind(unit_target(corpus_id, idx))
     .fetch_optional(&core.store.control.pool)
     .await?
     .unwrap_or(MAX_ATTEMPTS))
@@ -1035,12 +1035,12 @@ mod tests {
             .provision("someone-else", None)
             .await
             .unwrap();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class)
              VALUES ('someone-else', 'segment_window', 'segment', ?, 'pending', 4, 0, 0, 0, 0)",
+            &target
         )
-        .bind(&target)
-        .execute(&core.store.control.pool)
+            .execute(&core.store.control.pool)
         .await
         .unwrap();
 
@@ -1053,12 +1053,14 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET attempts = 2 WHERE subject = ? AND target_id = ?")
-            .bind(&core.store.subject)
-            .bind(&target)
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET attempts = 2 WHERE subject = ? AND target_id = ?",
+            &core.store.subject,
+            &target
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
 
         assert_eq!(attempts_for(&core, &src.id, 0).await.unwrap(), 2);
     }

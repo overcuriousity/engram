@@ -293,16 +293,18 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 40 * 86_400)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            crate::store::now() - 40 * 86_400,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
     }
 
     async fn captured(core: &Core) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM search_events")
+        sqlx::query_scalar!("SELECT count(*) FROM search_events")
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
@@ -339,7 +341,7 @@ mod tests {
         core.learn.enabled = true;
         core.feedback.retain_days = 30;
         // The expiry's table, taken out from under it.
-        sqlx::query("DROP TABLE search_events")
+        sqlx::query!("DROP TABLE search_events")
             .execute(&core.store.pool)
             .await
             .unwrap();

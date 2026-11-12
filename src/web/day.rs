@@ -541,12 +541,14 @@ mod tests {
         // The capture lands at the real now, not on the fixed day; the row is
         // moved into the day's bounds by hand, as the fixture above does it.
         let (from, _) = bounds(NaiveDate::from_ymd_opt(2026, 8, 30).unwrap(), tz).unwrap();
-        sqlx::query("UPDATE corpora SET created_at = ? WHERE id = ?")
-            .bind(from + 3_600)
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE corpora SET created_at = ? WHERE id = ?",
+            from + 3_600,
+            &out.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let (app, cookie) = app_with_cookie(core).await;
         let d = crate::web::test_support::json_of(
             app.oneshot(get("/api/v1/days/2026-08-30?tz=Europe/Berlin", &cookie))
@@ -685,12 +687,14 @@ mod tests {
         // what is pinned for "Captured" is the section over a corpus created
         // inside the day's bounds, so one is written there by hand.
         let (from, _) = bounds(NaiveDate::from_ymd_opt(2026, 8, 30).unwrap(), tz).unwrap();
-        sqlx::query("UPDATE corpora SET created_at = ? WHERE id = ?")
-            .bind(from + 3_600)
-            .bind(&out.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE corpora SET created_at = ? WHERE id = ?",
+            from + 3_600,
+            &out.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let (app, cookie) = app_with_cookie(core).await;
         let res = app
             .clone()

@@ -97,10 +97,10 @@ impl Store {
         // captures failed a `synthesize` job with "database is locked" (#86).
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
-        let finished: i64 = sqlx::query_scalar(
+        let finished: i64 = sqlx::query_scalar!(
             "SELECT count(*) FROM segments WHERE corpus_id = ? AND state = 'done'",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_one(&mut *tx)
         .await?;
         // Owning artifacts settles the split too, not just being marked `done`.
@@ -113,11 +113,11 @@ impl Store {
         // A `note` is excluded for the same reason the sweep excludes it: it
         // owns no window, so counting it here would refuse to segment every
         // document that arrived with an annotation.
-        let owned: i64 = sqlx::query_scalar(
+        let owned: i64 = sqlx::query_scalar!(
             "SELECT count(*) FROM artifacts
               WHERE corpus_id = ? AND provenance != 'note' AND segment_idx IS NOT NULL",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_one(&mut *tx)
         .await?;
         if finished > 0 || owned > 0 {
@@ -150,11 +150,13 @@ impl Store {
         // Windows past the end of the new split. None of them owns an artifact:
         // the early return above leaves only corpora where no window has written
         // one, whatever state the rows are in.
-        sqlx::query("DELETE FROM segments WHERE corpus_id = ? AND idx >= ?")
-            .bind(corpus_id)
-            .bind(windows.len() as i64)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM segments WHERE corpus_id = ? AND idx >= ?",
+            corpus_id,
+            windows.len() as i64
+        )
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok(())
@@ -205,16 +207,16 @@ impl Store {
         // gone, and the retry deleted the curated originals the mark exists to
         // protect. Spending it here costs at worst one duplicated set of
         // artifacts, which the dedupe sweep folds.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE segments SET state = ?, last_error = ?,
                     keep_artifacts = CASE WHEN ? = 'done' THEN 0 ELSE keep_artifacts END
              WHERE corpus_id = ? AND idx = ?",
+            state.as_str(),
+            last_error,
+            state.as_str(),
+            corpus_id,
+            idx
         )
-        .bind(state.as_str())
-        .bind(last_error)
-        .bind(state.as_str())
-        .bind(corpus_id)
-        .bind(idx)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -222,11 +224,11 @@ impl Store {
 
     /// One window's state, or `None` for a window that does not exist.
     pub async fn segment_state(&self, corpus_id: &str, idx: i64) -> Result<Option<SegmentState>> {
-        Ok(sqlx::query_scalar::<_, String>(
+        Ok(sqlx::query_scalar!(
             "SELECT state FROM segments WHERE corpus_id = ? AND idx = ?",
+            corpus_id,
+            idx
         )
-        .bind(corpus_id)
-        .bind(idx)
         .fetch_optional(&self.pool)
         .await?
         .map(|s| SegmentState::parse(&s)))
@@ -235,11 +237,11 @@ impl Store {
     /// Whether this window may be promoted at all: an operator who undid its
     /// promotion said no, and nothing but a re-split says otherwise.
     pub async fn segment_no_promote(&self, corpus_id: &str, idx: i64) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT no_promote FROM segments WHERE corpus_id = ? AND idx = ?",
+            corpus_id,
+            idx
         )
-        .bind(corpus_id)
-        .bind(idx)
         .fetch_optional(&self.pool)
         .await?
         .is_some_and(|v| v != 0))
@@ -247,11 +249,13 @@ impl Store {
 
     /// Refuse this window to promotion, for good. Set by `undo_promotion`.
     pub async fn set_segment_no_promote(&self, corpus_id: &str, idx: i64) -> Result<()> {
-        sqlx::query("UPDATE segments SET no_promote = 1 WHERE corpus_id = ? AND idx = ?")
-            .bind(corpus_id)
-            .bind(idx)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE segments SET no_promote = 1 WHERE corpus_id = ? AND idx = ?",
+            corpus_id,
+            idx
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -259,10 +263,10 @@ impl Store {
     /// going to be, at this mode — as captured verbatim. Only `pending` rows:
     /// a window that is `done` or `failed` has a history this must not erase.
     pub async fn mark_segments_verbatim(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE segments SET state = 'verbatim' WHERE corpus_id = ? AND state = 'pending'",
+            corpus_id
         )
-        .bind(corpus_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -284,14 +288,14 @@ impl Store {
         idx: i64,
         keep_artifacts: bool,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE segments SET state = 'pending', attempts = 0, last_error = NULL,
                     keep_artifacts = ?
              WHERE corpus_id = ? AND idx = ?",
+            keep_artifacts as i64,
+            corpus_id,
+            idx
         )
-        .bind(keep_artifacts as i64)
-        .bind(corpus_id)
-        .bind(idx)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -311,11 +315,11 @@ impl Store {
 
     /// Is this window mid-re-read, so that a write appends rather than replaces?
     pub async fn segment_keeps_artifacts(&self, corpus_id: &str, idx: i64) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT keep_artifacts FROM segments WHERE corpus_id = ? AND idx = ?",
+            corpus_id,
+            idx
         )
-        .bind(corpus_id)
-        .bind(idx)
         .fetch_optional(&self.pool)
         .await?
         .unwrap_or(0)
@@ -341,8 +345,7 @@ impl Store {
     /// Drop the windowing entirely. Re-segmenting a source from scratch has to
     /// re-window it, because the text or the model's budget may have changed.
     pub async fn clear_segments(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM segments WHERE corpus_id = ?")
-            .bind(corpus_id)
+        sqlx::query!("DELETE FROM segments WHERE corpus_id = ?", corpus_id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -384,11 +387,13 @@ mod tests {
         let other = s.insert_corpus("other", "web", None).await.unwrap();
 
         let mut writer = s.pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
-        sqlx::query("UPDATE corpora SET updated_at = updated_at + 1 WHERE id = ?")
-            .bind(&other.id)
-            .execute(&mut *writer)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE corpora SET updated_at = updated_at + 1 WHERE id = ?",
+            &other.id
+        )
+        .execute(&mut *writer)
+        .await
+        .unwrap();
 
         let split = {
             let s = s.clone();

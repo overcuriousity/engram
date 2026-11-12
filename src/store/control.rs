@@ -106,13 +106,13 @@ impl Control {
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let private = b64.encode(secret.to_bytes());
         let public = b64.encode(secret.public_key().to_sec1_point(false).as_bytes());
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO instance (id, vapid_private, vapid_public, created_at) \
              VALUES (1, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            private,
+            public,
+            super::now()
         )
-        .bind(private)
-        .bind(public)
-        .bind(super::now())
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -235,6 +235,7 @@ impl Control {
             ),
         ];
         super::drop_removed(&self.pool, &REMOVED).await?;
+        // runtime: the migrator runs against older schemas than the reference.
         sqlx::query("DROP TABLE IF EXISTS sessions")
             .execute(&self.pool)
             .await?;
@@ -243,6 +244,7 @@ impl Control {
             .execute(&self.pool)
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        // runtime: the migrator runs against older schemas than the reference.
         let removed = sqlx::query("DELETE FROM api_tokens WHERE scheme = 1")
             .execute(&self.pool)
             .await?
@@ -276,37 +278,40 @@ impl Control {
     }
 
     pub async fn set_prefs(&self, subject: &str, p: crate::web::prefs::Prefs) -> Result<()> {
-        sqlx::query("UPDATE users SET theme = ?, density = ? WHERE subject = ?")
-            .bind(p.theme.as_str())
-            .bind(p.density.as_str())
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE users SET theme = ?, density = ? WHERE subject = ?",
+            p.theme.as_str(),
+            p.density.as_str(),
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// Records `issuer` on OIDC users from before issuers were stored, skipping the local user.
     pub async fn backfill_issuer(&self, issuer: &str, local_user: Option<&str>) -> Result<u64> {
-        Ok(
-            sqlx::query("UPDATE users SET issuer = ? WHERE issuer = '' AND subject IS NOT ?")
-                .bind(issuer)
-                .bind(local_user)
-                .execute(&self.pool)
-                .await?
-                .rows_affected(),
+        Ok(sqlx::query!(
+            "UPDATE users SET issuer = ? WHERE issuer = '' AND subject IS NOT ?",
+            issuer,
+            local_user
         )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
     /// Binds `subject` to `issuer` on first sign-in; `false` if it already belongs to another.
     pub async fn bind_issuer(&self, subject: &str, issuer: &str) -> Result<bool> {
-        sqlx::query("UPDATE users SET issuer = ? WHERE subject = ? AND issuer = ''")
-            .bind(issuer)
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE users SET issuer = ? WHERE subject = ? AND issuer = ''",
+            issuer,
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
         let bound: Option<String> =
-            sqlx::query_scalar("SELECT issuer FROM users WHERE subject = ?")
-                .bind(subject)
+            sqlx::query_scalar!("SELECT issuer FROM users WHERE subject = ?", subject)
                 .fetch_optional(&self.pool)
                 .await?;
         Ok(bound.is_some_and(|b| b == issuer))
@@ -315,8 +320,7 @@ impl Control {
     /// The issuer `subject` is bound to, if the user exists and is bound.
     pub async fn issuer_of(&self, subject: &str) -> Result<Option<String>> {
         Ok(
-            sqlx::query_scalar::<_, String>("SELECT issuer FROM users WHERE subject = ?")
-                .bind(subject)
+            sqlx::query_scalar!("SELECT issuer FROM users WHERE subject = ?", subject)
                 .fetch_optional(&self.pool)
                 .await?
                 .filter(|i| !i.is_empty()),
@@ -366,14 +370,14 @@ impl Control {
     /// `SELECT` afterwards means both callers get it.
     pub async fn provision(&self, subject: &str, email: Option<&str>) -> Result<User> {
         let now = super::now();
-        sqlx::query(
+        sqlx::query!(
             "INSERT OR IGNORE INTO users (subject, email, slug, created_at)
              VALUES (?, ?, ?, ?)",
+            subject,
+            email,
+            slug_for(subject),
+            now
         )
-        .bind(subject)
-        .bind(email)
-        .bind(slug_for(subject))
-        .bind(now)
         .execute(&self.pool)
         .await?;
         self.user(subject)
@@ -402,11 +406,10 @@ impl Control {
     /// The language this account's captures are read in, or `None` for
     /// automatic — which is the default and means the browser decides.
     pub async fn lang(&self, subject: &str) -> Result<Option<crate::infer::lang::Lang>> {
-        let raw: Option<String> = sqlx::query_scalar("SELECT lang FROM users WHERE subject = ?")
-            .bind(subject)
-            .fetch_optional(&self.pool)
-            .await?
-            .flatten();
+        let raw: Option<String> =
+            sqlx::query_scalar!("SELECT lang FROM users WHERE subject = ?", subject)
+                .fetch_optional(&self.pool)
+                .await?;
         // A stored tag this build does not know reads as automatic rather than
         // as English: the operator chose *something*, and falling back to the
         // browser is closer to that choice than overriding it.
@@ -419,19 +422,21 @@ impl Control {
         subject: &str,
         lang: Option<crate::infer::lang::Lang>,
     ) -> Result<()> {
-        sqlx::query("UPDATE users SET lang = ? WHERE subject = ?")
-            .bind(lang.map(|l| l.tag()).unwrap_or(""))
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE users SET lang = ? WHERE subject = ?",
+            lang.map(|l| l.tag()).unwrap_or(""),
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn notify(&self, subject: &str) -> Result<serde_json::Value> {
-        let raw: Option<String> = sqlx::query_scalar("SELECT notify FROM users WHERE subject = ?")
-            .bind(subject)
-            .fetch_optional(&self.pool)
-            .await?;
+        let raw: Option<String> =
+            sqlx::query_scalar!("SELECT notify FROM users WHERE subject = ?", subject)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(raw
             .and_then(|r| serde_json::from_str(&r).ok())
             .filter(serde_json::Value::is_object)
@@ -439,11 +444,13 @@ impl Control {
     }
 
     pub async fn set_notify(&self, subject: &str, notify: &serde_json::Value) -> Result<()> {
-        sqlx::query("UPDATE users SET notify = ? WHERE subject = ?")
-            .bind(notify.to_string())
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE users SET notify = ? WHERE subject = ?",
+            notify.to_string(),
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -466,15 +473,13 @@ impl Control {
     pub async fn delete_user(&self, subject: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         // Session records are opaque to SQL, so every browser signs in again.
-        sqlx::query("DELETE FROM tower_sessions")
+        sqlx::query!("DELETE FROM tower_sessions")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM api_tokens WHERE subject = ?")
-            .bind(subject)
+        sqlx::query!("DELETE FROM api_tokens WHERE subject = ?", subject)
             .execute(&mut *tx)
             .await?;
-        let gone = sqlx::query("DELETE FROM users WHERE subject = ?")
-            .bind(subject)
+        let gone = sqlx::query!("DELETE FROM users WHERE subject = ?", subject)
             .execute(&mut *tx)
             .await?
             .rows_affected()
@@ -546,12 +551,12 @@ impl Control {
 
     /// How many of this tenant's units at `stage` are still going to run.
     pub async fn live_count(&self, subject: &str, stage: crate::store::jobs::Stage) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM jobs
               WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')",
+            subject,
+            stage.as_str()
         )
-        .bind(subject)
-        .bind(stage.as_str())
         .fetch_one(&self.pool)
         .await?)
     }
@@ -717,7 +722,7 @@ mod tests {
                 .subject,
             "sub-2"
         );
-        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM tower_sessions")
+        let sessions: i64 = sqlx::query_scalar!("SELECT count(*) FROM tower_sessions")
             .fetch_one(&c.pool)
             .await
             .unwrap();
@@ -892,7 +897,7 @@ mod tests {
             .migrate()
             .await
             .expect("an additive column is added");
-        let n: i64 = sqlx::query_scalar("SELECT count(empty_runs) FROM jobs")
+        let n: i64 = sqlx::query_scalar!("SELECT count(empty_runs) FROM jobs")
             .fetch_one(&control.pool)
             .await
             .unwrap();
@@ -937,7 +942,7 @@ mod tests {
     async fn migrating_an_old_control_db_removes_scheme_1_tokens_and_keeps_users() {
         let (_dir, path) = old_control_db().await;
         let c = Control::connect(path.to_str().unwrap()).await.unwrap();
-        let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM api_tokens")
+        let tokens: i64 = sqlx::query_scalar!("SELECT count(*) FROM api_tokens")
             .fetch_one(&c.pool)
             .await
             .unwrap();
@@ -965,11 +970,12 @@ mod tests {
     async fn the_old_sessions_table_is_dropped() {
         let (_dir, path) = old_control_db().await;
         let c = Control::connect(path.to_str().unwrap()).await.unwrap();
-        let tables: Vec<String> =
-            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
-                .fetch_all(&c.pool)
-                .await
-                .unwrap();
+        let tables: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE type = 'table'"#
+        )
+        .fetch_all(&c.pool)
+        .await
+        .unwrap();
         assert!(!tables.iter().any(|t| t == "sessions"), "{tables:?}");
         assert!(tables.iter().any(|t| t == "tower_sessions"), "{tables:?}");
     }

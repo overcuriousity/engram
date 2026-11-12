@@ -744,12 +744,12 @@ mod tests {
         let ids = vec![p.clone()];
         let now = crate::store::now();
         let captured = now - 90 * 86_400;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts SET activation = 1.0, activated_at = ?, created_at = ? WHERE id = ?",
+            captured,
+            captured,
+            &p
         )
-        .bind(captured)
-        .bind(captured)
-        .bind(&p)
         .execute(&core.store.pool)
         .await
         .unwrap();
@@ -777,12 +777,12 @@ mod tests {
         let ids = vec![p.clone()];
         let now = crate::store::now();
         let captured = now - 900 * 86_400;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts SET activation = 1.0, activated_at = ?, created_at = ? WHERE id = ?",
+            captured,
+            captured,
+            &p
         )
-        .bind(captured)
-        .bind(captured)
-        .bind(&p)
         .execute(&core.store.pool)
         .await
         .unwrap();
@@ -1021,14 +1021,14 @@ mod tests {
         for (age_days, earned) in [(42i64, 1.9f64), (14, 4.0)] {
             let (core, corpus, passages, written) = promoted_fixture().await;
             let captured = now - age_days * 86_400;
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts SET activation = ?, activated_at = ?, created_at = ? WHERE id = ?",
+                1.0 + earned,
+                captured,
+                captured,
+                &passages[1].id
             )
-            .bind(1.0 + earned)
-            .bind(captured)
-            .bind(captured)
-            .bind(&passages[1].id)
-            .execute(&core.store.pool)
+                .execute(&core.store.pool)
             .await
             .unwrap();
 

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT at FROM moments\n              WHERE series_id = ? AND at IS NOT NULL AND moved_at IS NOT NULL\n              ORDER BY moved_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e5f66c210aaf2352e3dd3f3a1c08f03656cb8ede43c112e0b0189458a5018734"
+}

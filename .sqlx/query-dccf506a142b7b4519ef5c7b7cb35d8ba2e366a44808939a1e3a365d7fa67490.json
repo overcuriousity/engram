@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_links\n                   (a_id, b_id, weight, bumped_at, queries, cues, state, reason,\n                    judged_rev_a, judged_rev_b, created_at)\n             VALUES (?, ?, ?, ?, 0, '[]', 'related', ?,\n                     (SELECT embed_rev FROM artifacts WHERE id = ?),\n                     (SELECT embed_rev FROM artifacts WHERE id = ?), ?)\n             ON CONFLICT(a_id, b_id) DO UPDATE SET\n               weight = CASE WHEN artifact_links.state = 'dismissed'\n                             THEN artifact_links.weight ELSE excluded.weight END,\n               bumped_at = CASE WHEN artifact_links.state = 'dismissed'\n                                THEN artifact_links.bumped_at ELSE excluded.bumped_at END,\n               state = CASE WHEN artifact_links.state = 'dismissed'\n                            THEN artifact_links.state ELSE 'related' END,\n               reason = CASE WHEN artifact_links.state = 'dismissed'\n                             THEN artifact_links.reason ELSE excluded.reason END,\n               judged_rev_a = CASE WHEN artifact_links.state = 'dismissed'\n                                   THEN artifact_links.judged_rev_a\n                                   ELSE excluded.judged_rev_a END,\n               judged_rev_b = CASE WHEN artifact_links.state = 'dismissed'\n                                   THEN artifact_links.judged_rev_b\n                                   ELSE excluded.judged_rev_b END",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "dccf506a142b7b4519ef5c7b7cb35d8ba2e366a44808939a1e3a365d7fa67490"
+}

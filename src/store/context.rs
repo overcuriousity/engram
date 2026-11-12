@@ -54,18 +54,18 @@ pub struct StoredCluster {
 impl Store {
     /// Record one page view's situation. Returns the row's own id.
     pub async fn record_context(&self, ev: &ContextEvent) -> Result<i64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT INTO context_events
                  (scope, at, bundle, device_key, local_hour, weekday, tz)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            &ev.scope,
+            ev.at,
+            &ev.bundle,
+            &ev.device_key,
+            ev.local_hour,
+            ev.weekday,
+            &ev.tz
         )
-        .bind(&ev.scope)
-        .bind(ev.at)
-        .bind(&ev.bundle)
-        .bind(&ev.device_key)
-        .bind(ev.local_hour)
-        .bind(ev.weekday)
-        .bind(&ev.tz)
         .execute(&self.pool)
         .await?;
         Ok(res.last_insert_rowid())
@@ -105,11 +105,12 @@ impl Store {
     /// Drop situations past keeping. See `RETAIN_DAYS`.
     pub async fn expire_context_events(&self, retain_days: i64) -> Result<u64> {
         let cutoff = now() - retain_days * 86_400;
-        Ok(sqlx::query("DELETE FROM context_events WHERE at < ?")
-            .bind(cutoff)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        Ok(
+            sqlx::query!("DELETE FROM context_events WHERE at < ?", cutoff)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
     }
 
     /// One active artifact, drawn at random.
@@ -144,7 +145,7 @@ impl Store {
     /// months ago.
     pub async fn artifacts_with_context_clusters(&self) -> Result<Vec<String>> {
         Ok(
-            sqlx::query_scalar("SELECT DISTINCT artifact_id FROM context_clusters")
+            sqlx::query_scalar!("SELECT DISTINCT artifact_id FROM context_clusters")
                 .fetch_all(&self.pool)
                 .await?,
         )
@@ -164,26 +165,28 @@ impl Store {
         clusters: &[StoredCluster],
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM context_clusters WHERE artifact_id = ?")
-            .bind(artifact_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM context_clusters WHERE artifact_id = ?",
+            artifact_id
+        )
+        .execute(&mut *tx)
+        .await?;
         for c in clusters {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO context_clusters
                      (scope, artifact_id, slot, centroid, weight, events,
                       last_at, encoder_version, representative)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                &c.scope,
+                artifact_id,
+                c.slot,
+                vec_to_blob(&c.centroid),
+                c.weight,
+                c.events,
+                c.last_at,
+                c.encoder_version,
+                &c.representative
             )
-            .bind(&c.scope)
-            .bind(artifact_id)
-            .bind(c.slot)
-            .bind(vec_to_blob(&c.centroid))
-            .bind(c.weight)
-            .bind(c.events)
-            .bind(c.last_at)
-            .bind(c.encoder_version)
-            .bind(&c.representative)
             .execute(&mut *tx)
             .await?;
         }
@@ -392,8 +395,7 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::query("DELETE FROM artifacts WHERE id = ?")
-            .bind(&aid)
+        sqlx::query!("DELETE FROM artifacts WHERE id = ?", &aid)
             .execute(&store.pool)
             .await
             .unwrap();

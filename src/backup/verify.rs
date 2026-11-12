@@ -394,7 +394,7 @@ mod tests {
         let c = Control::connect(&base.cfg.store.control_path)
             .await
             .unwrap();
-        let n = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        let n = sqlx::query_scalar!("SELECT COUNT(*) FROM jobs")
             .fetch_one(&c.pool)
             .await
             .unwrap();
@@ -527,8 +527,8 @@ mod tests {
                 .connect(&format!("sqlite://{}", base.db(0).display()))
                 .await
                 .unwrap();
-            let id = sqlx::query_scalar(
-                "SELECT id FROM artifacts WHERE embed_state <> 'embedded' LIMIT 1",
+            let id = sqlx::query_scalar!(
+                r#"SELECT id AS "id!" FROM artifacts WHERE embed_state <> 'embedded' LIMIT 1"#
             )
             .fetch_one(&c)
             .await

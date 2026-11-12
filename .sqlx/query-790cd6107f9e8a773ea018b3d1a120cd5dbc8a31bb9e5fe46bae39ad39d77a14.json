@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT o.artifact_id AS \"artifact_id!\" FROM observations o\n               JOIN generations g ON g.id = o.generation_id\n              WHERE o.query = ? AND o.strength > 0 AND o.artifact_id IS NOT NULL\n                AND o.excluded_at IS NULL\n                AND g.embed_recipe = ? AND g.chat_model = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "observations",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "790cd6107f9e8a773ea018b3d1a120cd5dbc8a31bb9e5fe46bae39ad39d77a14"
+}

@@ -66,20 +66,20 @@ pub(crate) async fn insert_attachment_with<'e>(
     exec: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     a: &NewAttachment<'_>,
 ) -> Result<i64> {
-    let res = sqlx::query(
+    let res = sqlx::query!(
         "INSERT INTO attachments (corpus_id, kind, mime, filename, bytes, preview, width, height, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        a.corpus_id,
+        a.kind,
+        a.mime,
+        a.filename,
+        a.bytes,
+        a.preview,
+        a.width,
+        a.height,
+        now()
     )
-    .bind(a.corpus_id)
-    .bind(a.kind)
-    .bind(a.mime)
-    .bind(a.filename)
-    .bind(a.bytes)
-    .bind(a.preview)
-    .bind(a.width)
-    .bind(a.height)
-    .bind(now())
-    .execute(exec)
+        .execute(exec)
     .await?;
     Ok(res.last_insert_rowid())
 }
@@ -119,13 +119,13 @@ impl Store {
     /// yes or no must not pull `image_max_bytes` of original off disk and into
     /// memory to do it.
     pub async fn has_attachment(&self, corpus_id: &str) -> Result<bool> {
-        Ok(
-            sqlx::query_scalar::<_, i64>("SELECT 1 FROM attachments WHERE corpus_id = ? LIMIT 1")
-                .bind(corpus_id)
-                .fetch_optional(&self.pool)
-                .await?
-                .is_some(),
+        Ok(sqlx::query_scalar!(
+            "SELECT 1 FROM attachments WHERE corpus_id = ? LIMIT 1",
+            corpus_id
         )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
     }
 
     /// The preview alone. Separate from `attachment_for_corpus` so serving a

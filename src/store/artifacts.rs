@@ -598,10 +598,12 @@ impl Store {
         // server.
         if provenance == Provenance::Merged {
             for root in &root_ids {
-                let p: String = sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
-                    .bind(root.as_str())
-                    .fetch_one(&self.pool)
-                    .await?;
+                let p: String = sqlx::query_scalar!(
+                    "SELECT provenance FROM artifacts WHERE id = ?",
+                    root.as_str()
+                )
+                .fetch_one(&self.pool)
+                .await?;
                 if Provenance::parse(&p) != Provenance::Captured {
                     return Err(crate::error::Error::Validation(format!(
                         "a merge root must be a captured artifact; {root} is {p}"
@@ -638,25 +640,25 @@ impl Store {
             retired_at: None,
             reaped_at: None,
         };
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, cues)
              VALUES (?, NULL, ?, ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?, ?)",
+            &c.id,
+            c.provenance.as_str(),
+            c.source_count,
+            &c.text,
+            &c.title,
+            &c.category,
+            serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()),
+            c.embed_state.as_str(),
+            c.created_at,
+            serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()),
+            c.status.as_str(),
+            c.last_verified_at,
+            c.created_at,
+            serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into())
         )
-        .bind(&c.id)
-        .bind(c.provenance.as_str())
-        .bind(c.source_count)
-        .bind(&c.text)
-        .bind(&c.title)
-        .bind(&c.category)
-        .bind(serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()))
-        .bind(c.embed_state.as_str())
-        .bind(c.created_at)
-        .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
-        .bind(c.status.as_str())
-        .bind(c.last_verified_at)
-        .bind(c.created_at)
-        .bind(serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into()))
-        .execute(&mut *tx)
+            .execute(&mut *tx)
         .await?;
 
         for (via, roots) in &resolved {
@@ -664,14 +666,14 @@ impl Store {
                 // OR IGNORE because two sources can share a root: merging M(a,b)
                 // with a itself is a component the sweep can legitimately build,
                 // and it names `a` twice.
-                sqlx::query(
+                sqlx::query!(
                     "INSERT OR IGNORE INTO artifact_sources (child_id, root_id, via_id, created_at)
                      VALUES (?, ?, ?, ?)",
+                    &c.id,
+                    root,
+                    via,
+                    created_at
                 )
-                .bind(&c.id)
-                .bind(root)
-                .bind(via)
-                .bind(created_at)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -803,27 +805,27 @@ impl Store {
                 retired_at: None,
                 reaped_at: None,
             };
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
+                &c.id,
+                &c.corpus_id,
+                provenance.as_str(),
+                c.ordinal,
+                &c.text,
+                c.corpus_span.as_ref().and_then(|s| serde_json::to_string(s).ok()),
+                &c.title,
+                &c.category,
+                serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()),
+                c.embed_state.as_str(),
+                c.created_at,
+                c.segment_idx,
+                serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()),
+                c.status.as_str(),
+                c.last_verified_at,
+                c.created_at
             )
-            .bind(&c.id)
-            .bind(&c.corpus_id)
-            .bind(provenance.as_str())
-            .bind(c.ordinal)
-            .bind(&c.text)
-            .bind(c.corpus_span.as_ref().and_then(|s| serde_json::to_string(s).ok()))
-            .bind(&c.title)
-            .bind(&c.category)
-            .bind(serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()))
-            .bind(c.embed_state.as_str())
-            .bind(c.created_at)
-            .bind(c.segment_idx)
-            .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
-            .bind(c.status.as_str())
-            .bind(c.last_verified_at)
-            .bind(c.created_at)
-            .execute(&mut *tx)
+                .execute(&mut *tx)
             .await?;
             out.push(c);
         }
@@ -858,22 +860,24 @@ impl Store {
     /// to hand a new artifact the access its passages earned; everything else
     /// goes through `bump_activation`, which adds.
     pub async fn set_activation(&self, id: &str, value: f64, at: i64) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?")
-            .bind(value)
-            .bind(at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?",
+            value,
+            at,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// Has a person ever said this artifact was the answer? A `hit` verdict
     /// naming it, on any recorded search.
     pub async fn artifact_confirmed(&self, id: &str) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM search_events WHERE verdict = 'hit' AND expect_id = ?",
+            id
         )
-        .bind(id)
         .fetch_one(&self.pool)
         .await?
             > 0)
@@ -1038,12 +1042,12 @@ impl Store {
     /// every artifact's full text to call `.len()` on the result was the bulk
     /// of that poll.
     pub async fn count_artifacts_for_corpus(&self, corpus_id: &str) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE corpus_id = ?")
-                .bind(corpus_id)
-                .fetch_one(&self.pool)
-                .await?,
+        Ok(sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM artifacts WHERE corpus_id = ?",
+            corpus_id
         )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Artifacts in results whose text or title holds every one of `terms`,
@@ -1115,10 +1119,10 @@ impl Store {
     /// the per-chunk one, and re-arming its batch would only spend another call
     /// discovering the same refusal.
     pub async fn pending_artifacts_are_isolated(&self, corpus_id: &str) -> Result<bool> {
-        let pending: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending'",
+        let pending: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending'"#,
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_all(&self.pool)
         .await?;
         let armed = self
@@ -1148,12 +1152,12 @@ impl Store {
     /// the corpus as edited today, which is the one thing the column is there
     /// to deny.
     pub async fn reset_embed_state(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts
              SET embed_state = 'pending', embed_model = NULL, embed_rev = embed_rev + 1
              WHERE corpus_id = ?",
+            corpus_id
         )
-        .bind(corpus_id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1164,22 +1168,26 @@ impl Store {
     /// still correct.
     pub async fn update_artifact_category(&self, id: &str, category: Option<&str>) -> Result<()> {
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET category = ? WHERE id = ?")
-                .bind(category)
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE artifacts SET category = ? WHERE id = ?",
+                category,
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
     /// Replace the tag list. An empty list is a clear, not a no-op.
     pub async fn update_artifact_tags(&self, id: &str, tags: &[String]) -> Result<()> {
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET tags = ? WHERE id = ?")
-                .bind(serde_json::to_string(tags).unwrap_or_else(|_| "[]".into()))
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE artifacts SET tags = ? WHERE id = ?",
+                serde_json::to_string(tags).unwrap_or_else(|_| "[]".into()),
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
@@ -1187,15 +1195,15 @@ impl Store {
     /// clearing it invalidates the vector the same way changing the body does.
     pub async fn update_artifact_title(&self, id: &str, title: Option<&str>) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts
                  SET title = ?, embed_state = 'pending', embed_model = NULL,
                      embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
+                title,
+                super::now(),
+                id
             )
-            .bind(title)
-            .bind(super::now())
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
@@ -1203,15 +1211,15 @@ impl Store {
 
     pub async fn update_artifact_text(&self, id: &str, text: &str) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts
                  SET text = ?, embed_state = 'pending', embed_model = NULL,
                      embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
+                text,
+                super::now(),
+                id
             )
-            .bind(text)
-            .bind(super::now())
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
@@ -1222,16 +1230,16 @@ impl Store {
     /// The caller queues the embed, as with `update_artifact_text`.
     pub async fn absorb_passage(&self, id: &str, text: &str, span: &CorpusSpan) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts
                  SET text = ?, corpus_span = ?, embed_state = 'pending', embed_model = NULL,
                      embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
+                text,
+                serde_json::to_string(span).unwrap_or_default(),
+                super::now(),
+                id
             )
-            .bind(text)
-            .bind(serde_json::to_string(span).unwrap_or_default())
-            .bind(super::now())
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
@@ -1256,29 +1264,30 @@ impl Store {
     /// `reset_embed_state` are only ever called alongside an `enqueue`, so a
     /// chunk left pending here always has a job coming for it.
     pub async fn mark_embedded(&self, id: &str, model: &str, rev: i64) -> Result<bool> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifacts SET embed_state = 'embedded', embed_model = ?
              WHERE id = ? AND embed_rev = ?",
+            model,
+            id,
+            rev
         )
-        .bind(model)
-        .bind(id)
-        .bind(rev)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
     }
 
     pub async fn mark_embed_failed(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET embed_state = 'failed' WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET embed_state = 'failed' WHERE id = ?",
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn delete_artifact(&self, id: &str) -> Result<()> {
-        let res = sqlx::query("DELETE FROM artifacts WHERE id = ?")
-            .bind(id)
+        let res = sqlx::query!("DELETE FROM artifacts WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         if res.rows_affected() == 0 {
@@ -1319,12 +1328,12 @@ impl Store {
     /// Open a gap of `by` ordinals after `ordinal`, so chunks inserted into it
     /// keep reading order without renumbering the whole source.
     pub async fn make_room_after(&self, corpus_id: &str, ordinal: i64, by: i64) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts SET ordinal = ordinal + ? WHERE corpus_id = ? AND ordinal > ?",
+            by,
+            corpus_id,
+            ordinal
         )
-        .bind(by)
-        .bind(corpus_id)
-        .bind(ordinal)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1345,11 +1354,13 @@ impl Store {
         .await?;
         let mut tx = self.pool.begin().await?;
         for (n, r) in rows.iter().enumerate() {
-            sqlx::query("UPDATE artifacts SET ordinal = ? WHERE id = ?")
-                .bind(n as i64)
-                .bind(r.get::<String, _>("id"))
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query!(
+                "UPDATE artifacts SET ordinal = ? WHERE id = ?",
+                n as i64,
+                r.get::<String, _>("id")
+            )
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -1438,15 +1449,15 @@ impl Store {
         // that moves the status.
         let mut tx = self.pool.begin().await?;
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts SET status = ?, lifecycle_dirty = 1,
                         retired_at = CASE WHEN ? THEN COALESCE(retired_at, ?) ELSE NULL END
                  WHERE id = ?",
+                status.as_str(),
+                status != ArtifactStatus::Active,
+                now(),
+                id
             )
-            .bind(status.as_str())
-            .bind(status != ArtifactStatus::Active)
-            .bind(now())
-            .bind(id)
             .execute(&mut *tx)
             .await?,
         )?;
@@ -1460,13 +1471,13 @@ impl Store {
     /// Puts an artifact in Trash, remembering the status it had.
     pub async fn trash_artifact(&self, id: &str, at: i64) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts SET trashed_from = status, status = 'trashed', trashed_at = ?,
                         lifecycle_dirty = 1
                  WHERE id = ? AND status <> 'trashed'",
+                at,
+                id
             )
-            .bind(at)
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
@@ -1474,10 +1485,10 @@ impl Store {
 
     /// The status a trashed artifact goes back to.
     pub async fn trashed_from(&self, id: &str) -> Result<Option<ArtifactStatus>> {
-        let row: Option<Option<String>> = sqlx::query_scalar(
+        let row: Option<Option<String>> = sqlx::query_scalar!(
             "SELECT trashed_from FROM artifacts WHERE id = ? AND status = 'trashed'",
+            id
         )
-        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|s| ArtifactStatus::parse(s.as_deref().unwrap_or("active"))))
@@ -1486,12 +1497,12 @@ impl Store {
     /// Takes an artifact out of Trash into the status it had.
     pub async fn untrash_artifact(&self, id: &str) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts SET status = COALESCE(trashed_from, 'active'),
                         trashed_from = NULL, trashed_at = NULL, lifecycle_dirty = 1
                  WHERE id = ? AND status = 'trashed'",
+                id
             )
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
@@ -1517,10 +1528,10 @@ impl Store {
 
     /// Ids in Trash since before `cutoff`.
     pub async fn trashed_before(&self, cutoff: i64) -> Result<Vec<String>> {
-        Ok(sqlx::query_scalar(
-            "SELECT id FROM artifacts WHERE status = 'trashed' AND trashed_at < ?",
+        Ok(sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE status = 'trashed' AND trashed_at < ?"#,
+            cutoff
         )
-        .bind(cutoff)
         .fetch_all(&self.pool)
         .await?)
     }
@@ -1555,8 +1566,7 @@ impl Store {
     /// ever announced, and the marker would miss the one direction whose
     /// intermediate state it was most needed for.
     pub async fn mark_lifecycle_dirty(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET lifecycle_dirty = 1 WHERE id = ?")
-            .bind(id)
+        sqlx::query!("UPDATE artifacts SET lifecycle_dirty = 1 WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -1569,8 +1579,7 @@ impl Store {
     /// precisely the state this mechanism exists to make impossible.
     pub async fn clear_lifecycle_dirty(&self, ids: &[String]) -> Result<()> {
         for id in ids {
-            sqlx::query("UPDATE artifacts SET lifecycle_dirty = 0 WHERE id = ?")
-                .bind(id)
+            sqlx::query!("UPDATE artifacts SET lifecycle_dirty = 0 WHERE id = ?", id)
                 .execute(&self.pool)
                 .await?;
         }
@@ -1581,11 +1590,13 @@ impl Store {
     /// recency decay reads.
     pub async fn set_last_verified_at(&self, id: &str, at: i64) -> Result<()> {
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET last_verified_at = ? WHERE id = ?")
-                .bind(at)
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE artifacts SET last_verified_at = ? WHERE id = ?",
+                at,
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
@@ -1819,12 +1830,14 @@ impl Store {
         } else {
             Some(serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()))
         };
-        sqlx::query("UPDATE artifacts SET flags = ?, flag_detail = ? WHERE id = ?")
-            .bind(json)
-            .bind(detail)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET flags = ?, flag_detail = ? WHERE id = ?",
+            json,
+            detail,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1857,13 +1870,13 @@ impl Store {
     /// this, clearing the flag lasts exactly one sweep, because the row still
     /// answers "lost a source" and is flagged all over again.
     pub async fn accept_source_loss(&self, id: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts
                 SET source_count = (SELECT COUNT(*) FROM artifact_sources WHERE child_id = ?)
               WHERE id = ? AND provenance = 'merged'",
+            id,
+            id
         )
-        .bind(id)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -1995,12 +2008,12 @@ impl Store {
     /// invented historical one would hand the reaper rows it was never told
     /// to wait on.
     pub async fn stamp_unaged_retired(&self) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifacts SET retired_at = ?
               WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'
                 AND retired_at IS NULL",
+            now()
         )
-        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
@@ -2019,11 +2032,13 @@ impl Store {
     /// a second `valuable` verdict one more synthesized rewrite of the same
     /// content — every run.
     pub async fn restamp_retired(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL")
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL",
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -2089,11 +2104,11 @@ impl Store {
         // separate statement afterwards, a crash in the window left a stub
         // whose Qdrant point still held the reaped text, and the drift repair
         // only scans marked rows — nothing else would ever notice.
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts SET text = '', reaped_at = ?, lifecycle_dirty = 1 WHERE id = ?",
+            reaped_at,
+            id
         )
-        .bind(reaped_at)
-        .bind(id)
         .execute(&mut *tx)
         .await?;
         crate::store::actions::insert(&mut *tx, journal).await?;
@@ -2237,23 +2252,22 @@ impl Store {
             return Ok(false);
         };
         let text: String = row.get("text");
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifacts
                 SET text = ?, reaped_at = NULL, embed_state = 'pending',
                     embed_model = NULL, embed_rev = embed_rev + 1,
                     lifecycle_dirty = 0, updated_at = ?
               WHERE id = ? AND reaped_at IS NOT NULL",
+            &text,
+            super::now(),
+            id
         )
-        .bind(&text)
-        .bind(super::now())
-        .bind(id)
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {
             return Ok(false);
         }
-        sqlx::query("DELETE FROM graveyard WHERE id = ?")
-            .bind(id)
+        sqlx::query!("DELETE FROM graveyard WHERE id = ?", id)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -2273,10 +2287,10 @@ impl Store {
     /// How many retired rows still hold their text — the standing count the
     /// status line shows beside what the last sweep did.
     pub async fn retired_unreaped_count(&self) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM artifacts
               WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'
-                AND reaped_at IS NULL",
+                AND reaped_at IS NULL"
         )
         .fetch_one(&self.pool)
         .await?)
@@ -2677,11 +2691,11 @@ mod tests {
 
         s.reset_embed_state(&src.id).await.unwrap();
 
-        let stamp: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
-            .bind(&c.id)
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let stamp: i64 =
+            sqlx::query_scalar!("SELECT updated_at FROM artifacts WHERE id = ?", &c.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
         assert_eq!(stamp, 0, "a re-embed reported itself as an edit");
         let got = s.artifacts_for_corpus(&src.id).await.unwrap();
         assert_eq!(
@@ -2705,20 +2719,20 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let before: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
-            .bind(&c.id)
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let before: i64 =
+            sqlx::query_scalar!("SELECT updated_at FROM artifacts WHERE id = ?", &c.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
         assert_eq!(before, 0, "a fresh row has never been edited");
 
         s.update_artifact_text(&c.id, "after").await.unwrap();
 
-        let after: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
-            .bind(&c.id)
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let after: i64 =
+            sqlx::query_scalar!("SELECT updated_at FROM artifacts WHERE id = ?", &c.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
         assert!(after > 0, "an edit says when it happened");
     }
 
@@ -2865,9 +2879,9 @@ mod tests {
         // SQLite index and its three write triggers were actually dropped,
         // rather than left behind to be paid for on every artifact write.
         let s = Store::memory().await.unwrap();
-        let leftovers: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master
-             WHERE name = 'artifacts_fts' OR name LIKE 'artifacts_a%'",
+        let leftovers: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master
+             WHERE name = 'artifacts_fts' OR name LIKE 'artifacts_a%'"#
         )
         .fetch_all(&s.pool)
         .await
@@ -3024,7 +3038,7 @@ mod tests {
         // In the order the walk takes them, so "the first window" means
         // something whatever ids were minted.
         let ordered: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM artifacts ORDER BY created_at, id")
+            sqlx::query_scalar!(r#"SELECT id AS "id!" FROM artifacts ORDER BY created_at, id"#)
                 .fetch_all(&s.pool)
                 .await
                 .unwrap();
@@ -3071,8 +3085,7 @@ mod tests {
 
         // The arming that went missing, behind a cursor that has already been
         // everywhere.
-        sqlx::query("DELETE FROM jobs WHERE target_id = ?")
-            .bind(&ids[0])
+        sqlx::query!("DELETE FROM jobs WHERE target_id = ?", &ids[0])
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -3367,24 +3380,26 @@ mod tests {
 
     /// Push an artifact's retirement into the past, as if it happened then.
     async fn backdate_retired_at(s: &Store, id: &str, secs_ago: i64) {
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(now() - secs_ago)
-            .bind(id)
-            .execute(&s.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            now() - secs_ago,
+            id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
     }
 
     /// An open reminder on the artifact, the shape the reap rules must respect.
     async fn insert_open_moment(s: &Store, artifact_id: &str) {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
              VALUES (?, ?, 'due', ?, 'UTC', 'set', ?)",
+            new_id(),
+            artifact_id,
+            now() + 3_600,
+            now()
         )
-        .bind(new_id())
-        .bind(artifact_id)
-        .bind(now() + 3_600)
-        .bind(now())
         .execute(&s.pool)
         .await
         .unwrap();
@@ -3487,16 +3502,16 @@ mod tests {
 
         // The open reminder rides onto it, remembering the note it was read
         // out of.
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, origin_corpus_id, created_at)
              VALUES (?, ?, 'due', ?, 'UTC', 'set', ?, ?)",
+            new_id(),
+            &merged,
+            now() + 3_600,
+            &src.id,
+            now()
         )
-        .bind(new_id())
-        .bind(&merged)
-        .bind(now() + 3_600)
-        .bind(&src.id)
-        .bind(now())
-        .execute(&s.pool)
+            .execute(&s.pool)
         .await
         .unwrap();
 
@@ -3603,11 +3618,13 @@ mod tests {
             .await
             .unwrap();
         // Simulate a row retired before the column existed.
-        sqlx::query("UPDATE artifacts SET retired_at = NULL WHERE id = ?")
-            .bind(&made[0].id)
-            .execute(&s.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = NULL WHERE id = ?",
+            &made[0].id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
         assert_eq!(s.stamp_unaged_retired().await.unwrap(), 1);
         assert!(
             s.get_artifact(&made[0].id)

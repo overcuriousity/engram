@@ -249,12 +249,14 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - ago)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            crate::store::now() - ago,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         id
     }
 
@@ -422,21 +424,25 @@ mod tests {
             (Door::Cli, Some("me".to_string())),
         ] {
             let id = record_at(&core, "loop device", 4_000).await;
-            sqlx::query("UPDATE search_events SET door = ?, scope = ? WHERE id = ?")
-                .bind(door.as_str())
-                .bind(&scope)
-                .bind(&id)
-                .execute(&core.store.pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE search_events SET door = ?, scope = ? WHERE id = ?",
+                door.as_str(),
+                &scope,
+                &id
+            )
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
             let next = record_at(&core, "mount loop image", 3_940).await;
-            sqlx::query("UPDATE search_events SET door = ?, scope = ? WHERE id = ?")
-                .bind(door.as_str())
-                .bind(&scope)
-                .bind(&next)
-                .execute(&core.store.pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE search_events SET door = ?, scope = ? WHERE id = ?",
+                door.as_str(),
+                &scope,
+                &next
+            )
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
 
             core.store.meta_set(EVENTS_AFTER, "0").await.unwrap();
             assert_eq!(

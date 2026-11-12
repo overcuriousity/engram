@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_versions (artifact_id, n, text, title, caveats, created_at, action_id)\n             VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "e50c6d812ef4343ebf3158ac5b2aebe84b5a6a3df00ee2ff788b52cf6b96a20d"
+}

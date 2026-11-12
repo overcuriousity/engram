@@ -1216,17 +1216,21 @@ mod tests {
             );
         }
         // Both from before the column, and the first already done.
-        sqlx::query("UPDATE moments SET series_id = NULL WHERE artifact_id = ?")
-            .bind(&aid)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE moments SET done_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 86_400)
-            .bind(&rows[0])
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE moments SET series_id = NULL WHERE artifact_id = ?",
+            &aid
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "UPDATE moments SET done_at = ? WHERE id = ?",
+            crate::store::now() - 86_400,
+            &rows[0]
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         core.complete_moment(&rows[1]).await.unwrap();
         let third = core.store.open_due(0, i64::MAX).await.unwrap();
@@ -1277,8 +1281,7 @@ mod tests {
             })
             .await
             .unwrap();
-        sqlx::query("UPDATE moments SET series_id = NULL WHERE id = ?")
-            .bind(&first)
+        sqlx::query!("UPDATE moments SET series_id = NULL WHERE id = ?", &first)
             .execute(&core.store.pool)
             .await
             .unwrap();

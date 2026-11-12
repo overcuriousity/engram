@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO moments (id, artifact_id, kind, at, tz, rule, source, span,\n                                  series_id, origin_corpus_id, created_at)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "b7a4b76323510def5df6cb09fbb967dad6be19341d9faf5e92c4c4e4085509f0"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET state = 'running', claimed_at = ? WHERE stage = 'embed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1e3ff6bd1d06499c5fdc93598cdb84042950ee0e3841e3115d9f1214bbbd841d"
+}

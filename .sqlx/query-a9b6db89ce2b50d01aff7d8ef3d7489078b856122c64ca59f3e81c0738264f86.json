@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT updated_at FROM artifacts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "updated_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a9b6db89ce2b50d01aff7d8ef3d7489078b856122c64ca59f3e81c0738264f86"
+}

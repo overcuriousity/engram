@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET skips = skips + 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7acc153096d4c9e3d50517f9f87aed3a15ed80a6f20f433eb3be39efbe37a96c"
+}

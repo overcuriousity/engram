@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL\n              WHERE (state = 'duplicate' AND merged_into IS NULL AND synthesis_asked = 0)\n                 OR state = 'superseded'\n                 OR state = 'vacuous'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "cb22d0d3be76364fd03e4d65da7e8eb8a21d8929afd1108f24d25fb0e3466781"
+}

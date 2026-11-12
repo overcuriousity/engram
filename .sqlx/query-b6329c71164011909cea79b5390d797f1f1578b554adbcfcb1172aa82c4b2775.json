@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE segments SET state = 'pending', attempts = 0, last_error = NULL,\n                    keep_artifacts = ?\n             WHERE corpus_id = ? AND idx = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b6329c71164011909cea79b5390d797f1f1578b554adbcfcb1172aa82c4b2775"
+}

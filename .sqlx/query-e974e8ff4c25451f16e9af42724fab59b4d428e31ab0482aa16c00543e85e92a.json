@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE corpora SET title_hint = ?, updated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "e974e8ff4c25451f16e9af42724fab59b4d428e31ab0482aa16c00543e85e92a"
+}

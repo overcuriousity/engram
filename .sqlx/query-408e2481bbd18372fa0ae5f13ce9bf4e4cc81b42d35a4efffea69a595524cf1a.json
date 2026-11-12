@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE api_tokens SET revoked_at = ? WHERE id = ? AND subject = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "408e2481bbd18372fa0ae5f13ce9bf4e4cc81b42d35a4efffea69a595524cf1a"
+}

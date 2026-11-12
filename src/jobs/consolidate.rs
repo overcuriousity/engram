@@ -601,7 +601,7 @@ pub(crate) mod tests {
     async fn sweep_and_dedupe(core: &crate::core::Core) -> Outcome {
         let out = run(core).await.unwrap();
         for _ in 0..100 {
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -2146,8 +2146,8 @@ pub(crate) mod tests {
 
         assert_eq!(completer.calls(), 0, "the sweep called the model");
         assert_eq!(out.judged, 1, "no judge unit was armed: {out:?}");
-        let armed: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM jobs WHERE stage = 'dedupe' AND state = 'pending'",
+        let armed: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM jobs WHERE stage = 'dedupe' AND state = 'pending'"
         )
         .fetch_one(&core.store.control.pool)
         .await
@@ -2182,8 +2182,7 @@ pub(crate) mod tests {
         // 30 and 60 sit in one window, so they are not a pair (the same-window
         // rule) and the fixture has two pairs: 30–90 (0.898) and 60–90 (0.903).
         for id in &ids[..2] {
-            sqlx::query("UPDATE artifacts SET segment_idx = 0 WHERE id = ?")
-                .bind(id)
+            sqlx::query!("UPDATE artifacts SET segment_idx = 0 WHERE id = ?", id)
                 .execute(&core.store.pool)
                 .await
                 .unwrap();
@@ -2207,7 +2206,7 @@ pub(crate) mod tests {
             if asked {
                 break;
             }
-            sqlx::query("UPDATE jobs SET run_after = 0")
+            sqlx::query!("UPDATE jobs SET run_after = 0")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -2261,12 +2260,11 @@ pub(crate) mod tests {
         // normally take the pair row along with the artifact, which is exactly
         // why the pragma is needed to reproduce it: what the loop is holding is a
         // pair it read *before* the delete.
-        sqlx::query("PRAGMA foreign_keys = OFF")
+        sqlx::query!("PRAGMA foreign_keys = OFF")
             .execute(&core.store.pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM artifacts WHERE id = ?")
-            .bind(&ids[0])
+        sqlx::query!("DELETE FROM artifacts WHERE id = ?", &ids[0])
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -2278,7 +2276,7 @@ pub(crate) mod tests {
             "the pair that lost the race took the whole sweep down with it"
         );
         let target: String =
-            sqlx::query_scalar("SELECT target_id FROM jobs WHERE stage = 'dedupe'")
+            sqlx::query_scalar!("SELECT target_id FROM jobs WHERE stage = 'dedupe'")
                 .fetch_one(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -2333,12 +2331,14 @@ pub(crate) mod tests {
                 .await
                 .unwrap();
         let later = crate::store::now() + 3600;
-        sqlx::query("UPDATE jobs SET attempts = 2, run_after = ? WHERE id = ?")
-            .bind(later)
-            .bind(first.1)
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET attempts = 2, run_after = ? WHERE id = ?",
+            later,
+            first.1
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
 
         run(&core).await.unwrap();
 
@@ -2353,7 +2353,7 @@ pub(crate) mod tests {
             (2, later),
             "the sweep wound a queued judge unit back to zero attempts"
         );
-        let armed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM jobs WHERE stage = 'dedupe'")
+        let armed: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM jobs WHERE stage = 'dedupe'")
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
@@ -2469,12 +2469,14 @@ pub(crate) mod tests {
             .enqueue(crate::store::jobs::Stage::Embed, "artifact", &m.id)
             .await
             .unwrap();
-        sqlx::query("UPDATE jobs SET attempts = ? WHERE target_id = ?")
-            .bind(crate::store::jobs::MAX_ATTEMPTS)
-            .bind(&m.id)
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET attempts = ? WHERE target_id = ?",
+            crate::store::jobs::MAX_ATTEMPTS,
+            &m.id
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
 
         run(&core).await.unwrap();
 
@@ -2543,12 +2545,14 @@ pub(crate) mod tests {
             .await
             .unwrap();
         // The embed job has exhausted its retries and cannot succeed.
-        sqlx::query("UPDATE jobs SET attempts = ? WHERE target_id = ?")
-            .bind(crate::store::jobs::MAX_ATTEMPTS)
-            .bind(&m.id)
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET attempts = ? WHERE target_id = ?",
+            crate::store::jobs::MAX_ATTEMPTS,
+            &m.id
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
 
         run(&core).await.unwrap();
 

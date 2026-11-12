@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifacts (id, corpus_id, ordinal, text, created_at)\n                 VALUES (?, ?, 0, 'text', 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "74d4dae15287907fcffd927017ee4070b593ce2f962f7f554d8364ba94223826"
+}

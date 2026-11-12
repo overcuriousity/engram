@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET created_at = ? WHERE stage = 'pursuit'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "15283defbd60a3ef74ee3164e72b8cb6fb9da9803cbb6e0ae64009af2253226d"
+}

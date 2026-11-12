@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT lang FROM users WHERE subject = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "lang",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "lang"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "18b4af14d330b24ede14c1b8c53d43762c09531c9c7e555edccbdc7dd8059c0a"
+}

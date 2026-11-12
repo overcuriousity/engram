@@ -41,8 +41,7 @@ pub async fn vacuum_into(src: &Path, dst: &Path) -> Result<()> {
         .ok_or_else(|| Error::Validation(format!("{} is not UTF-8", dst.display())))?;
     let mut conn = open_read_only(src).await?;
     drop(create_private(dst)?);
-    let copied = sqlx::query("VACUUM INTO ?")
-        .bind(dst_str)
+    let copied = sqlx::query!("VACUUM INTO ?", dst_str)
         .execute(&mut conn)
         .await
         .map_err(|e| Error::Store(format!("VACUUM INTO {}: {e}", dst.display())));
@@ -184,11 +183,13 @@ pub(crate) mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE artifacts SET embed_state = 'embedded' WHERE id = ?")
-            .bind(&made[0].id)
-            .execute(&s.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET embed_state = 'embedded' WHERE id = ?",
+            &made[0].id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
         s
     }
 
@@ -214,11 +215,11 @@ pub(crate) mod tests {
             .connect()
             .await
             .unwrap();
-        sqlx::query("BEGIN IMMEDIATE")
+        sqlx::query!("BEGIN IMMEDIATE")
             .execute(&mut writer)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM artifacts")
+        sqlx::query!("DELETE FROM artifacts")
             .execute(&mut writer)
             .await
             .unwrap();
@@ -231,7 +232,7 @@ pub(crate) mod tests {
             "a VACUUM INTO copy has no WAL"
         );
         assert_eq!(counts(&copy).await.unwrap(), (3, 1));
-        sqlx::query("ROLLBACK").execute(&mut writer).await.unwrap();
+        sqlx::query!("ROLLBACK").execute(&mut writer).await.unwrap();
         drop(store);
     }
 
@@ -293,7 +294,7 @@ pub(crate) mod tests {
         {
             let src = dir.path().join("src.db");
             let s = tenant_with_three(&src).await;
-            sqlx::query("DELETE FROM artifacts WHERE ordinal = 2")
+            sqlx::query!("DELETE FROM artifacts WHERE ordinal = 2")
                 .execute(&s.pool)
                 .await
                 .unwrap();

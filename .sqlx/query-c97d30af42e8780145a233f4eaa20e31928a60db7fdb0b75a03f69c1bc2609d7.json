@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET created_at = 1000",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "c97d30af42e8780145a233f4eaa20e31928a60db7fdb0b75a03f69c1bc2609d7"
+}

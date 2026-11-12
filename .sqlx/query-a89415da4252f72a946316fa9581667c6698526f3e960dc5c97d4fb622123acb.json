@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_links SET judge_attempts = judge_attempts + 1\n              WHERE a_id = ? AND b_id = ? RETURNING judge_attempts",
+  "describe": {
+    "columns": [
+      {
+        "name": "judge_attempts",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "judge_attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a89415da4252f72a946316fa9581667c6698526f3e960dc5c97d4fb622123acb"
+}

@@ -33,38 +33,38 @@ pub struct SleepRun {
 
 impl Store {
     pub async fn record_sleep_run(&self, r: &SleepRun) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO sleep_runs
                (id, started, ended, stopped, generation_id, integrated, novel, known, conflicts,
                 rehearsed, found, adopted, reverted, refused, undone, restored, interference,
                 condensed, budget_used, budget, detail)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &r.id,
+            r.started,
+            if r.ended == 0 { now() } else { r.ended },
+            &r.stopped,
+            &r.generation_id,
+            r.integrated,
+            r.novel,
+            r.known,
+            r.conflicts,
+            r.rehearsed,
+            r.found,
+            &r.adopted,
+            &r.reverted,
+            &r.refused,
+            r.undone,
+            r.restored,
+            r.interference,
+            r.condensed,
+            r.budget_used,
+            r.budget,
+            if r.detail.is_empty() {
+                "{}"
+            } else {
+                r.detail.as_str()
+            }
         )
-        .bind(&r.id)
-        .bind(r.started)
-        .bind(if r.ended == 0 { now() } else { r.ended })
-        .bind(&r.stopped)
-        .bind(&r.generation_id)
-        .bind(r.integrated)
-        .bind(r.novel)
-        .bind(r.known)
-        .bind(r.conflicts)
-        .bind(r.rehearsed)
-        .bind(r.found)
-        .bind(&r.adopted)
-        .bind(&r.reverted)
-        .bind(&r.refused)
-        .bind(r.undone)
-        .bind(r.restored)
-        .bind(r.interference)
-        .bind(r.condensed)
-        .bind(r.budget_used)
-        .bind(r.budget)
-        .bind(if r.detail.is_empty() {
-            "{}"
-        } else {
-            r.detail.as_str()
-        })
         .execute(&self.pool)
         .await?;
         Ok(())

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT params FROM generations g\n              WHERE state IN ('reverted', 'refused') AND embed_recipe = ? AND chat_model = ?\n                AND (SELECT COUNT(*) FROM artifacts WHERE created_at > g.created_at) * 2\n                    <= (SELECT COUNT(*) FROM artifacts)",
+  "describe": {
+    "columns": [
+      {
+        "name": "params",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "params"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2870e637404a4710c94f8cbf446e09b07f5d1602ae71bfba6cbc40d8ffec38b1"
+}

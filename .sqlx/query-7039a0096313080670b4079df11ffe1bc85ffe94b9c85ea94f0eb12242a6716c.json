@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events\n                 SET judged_at = ?, verdict = 'hit', expect_id = ?, judged_by = ?\n                 WHERE id = ? AND judged_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "7039a0096313080670b4079df11ffe1bc85ffe94b9c85ea94f0eb12242a6716c"
+}

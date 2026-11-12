@@ -641,15 +641,17 @@ mod tests {
         }
         // Both claimed by a process that then died: `running`, claimed long
         // enough ago that nothing is coming back for them.
-        sqlx::query("UPDATE jobs SET state = 'running', claimed_at = ?")
-            .bind(crate::store::now() - crate::jobs::STUCK_AFTER_SECS - 60)
-            .execute(&tenants.control().pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE jobs SET state = 'running', claimed_at = ?",
+            crate::store::now() - crate::jobs::STUCK_AFTER_SECS - 60
+        )
+        .execute(&tenants.control().pool)
+        .await
+        .unwrap();
 
         repair_control_once(tenants.control()).await;
 
-        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM jobs WHERE state = 'pending'")
+        let pending: i64 = sqlx::query_scalar!("SELECT count(*) FROM jobs WHERE state = 'pending'")
             .fetch_one(&tenants.control().pool)
             .await
             .unwrap();
@@ -680,23 +682,26 @@ mod tests {
                     .await
                     .unwrap();
             }
-            sqlx::query("UPDATE jobs SET created_at = ? WHERE subject = ?")
-                .bind(crate::store::now() - base)
-                .bind(&t.user.subject)
-                .execute(&tenants.control().pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE jobs SET created_at = ? WHERE subject = ?",
+                crate::store::now() - base,
+                &t.user.subject
+            )
+            .execute(&tenants.control().pool)
+            .await
+            .unwrap();
         }
 
         repair_every_tenant(&tenants).await;
 
         for t in [&a, &b] {
-            let promoted: i64 =
-                sqlx::query_scalar("SELECT count(*) FROM jobs WHERE subject = ? AND class = 0")
-                    .bind(&t.user.subject)
-                    .fetch_one(&tenants.control().pool)
-                    .await
-                    .unwrap();
+            let promoted: i64 = sqlx::query_scalar!(
+                "SELECT count(*) FROM jobs WHERE subject = ? AND class = 0",
+                &t.user.subject
+            )
+            .fetch_one(&tenants.control().pool)
+            .await
+            .unwrap();
             assert_eq!(
                 promoted, AGE_PER_TICK,
                 "{} got {promoted} of its own budget of {AGE_PER_TICK}",

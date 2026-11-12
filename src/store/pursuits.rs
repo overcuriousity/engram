@@ -85,15 +85,15 @@ impl Store {
         scope: Option<&str>,
         at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO interaction_events (artifact_id, kind, via, scope, at)
              VALUES (?, ?, ?, ?, ?)",
+            artifact_id,
+            kind,
+            via,
+            scope,
+            at
         )
-        .bind(artifact_id)
-        .bind(kind)
-        .bind(via)
-        .bind(scope)
-        .bind(at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -110,14 +110,14 @@ impl Store {
         scope: Option<&str>,
         at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)
              VALUES (?, 'dwell', ?, ?, ?)",
+            artifact_id,
+            secs.to_string(),
+            scope,
+            at
         )
-        .bind(artifact_id)
-        .bind(secs.to_string())
-        .bind(scope)
-        .bind(at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -141,15 +141,15 @@ impl Store {
         scope: Option<&str>,
         at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)
              VALUES (?, ?, ?, ?, ?)",
+            artifact_id,
+            kind,
+            detail,
+            scope,
+            at
         )
-        .bind(artifact_id)
-        .bind(kind)
-        .bind(detail)
-        .bind(scope)
-        .bind(at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -226,11 +226,12 @@ impl Store {
     /// for a month, and the pursuit sweep works from a cursor.
     pub async fn expire_interactions(&self, retain_days: i64) -> Result<u64> {
         let cutoff = crate::store::now() - retain_days * 86_400;
-        Ok(sqlx::query("DELETE FROM interaction_events WHERE at < ?")
-            .bind(cutoff)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        Ok(
+            sqlx::query!("DELETE FROM interaction_events WHERE at < ?", cutoff)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
     }
 
     /// A new pursuit, `open`. Returns its id.
@@ -265,18 +266,18 @@ impl Store {
             ),
             _ => (Vec::new(), 0, None),
         };
-        sqlx::query(
+        sqlx::query!(
             "INSERT OR IGNORE INTO pursuits
                (id, opened_at, state, queries, sources, query_vec, vec_dim, embed_model)
              VALUES (?, ?, 'open', ?, ?, ?, ?, ?)",
+            &id,
+            opened_at,
+            serde_json::to_string(queries).unwrap_or_else(|_| "[]".into()),
+            serde_json::to_string(sources).unwrap_or_else(|_| "[]".into()),
+            blob,
+            dim,
+            model
         )
-        .bind(&id)
-        .bind(opened_at)
-        .bind(serde_json::to_string(queries).unwrap_or_else(|_| "[]".into()))
-        .bind(serde_json::to_string(sources).unwrap_or_else(|_| "[]".into()))
-        .bind(blob)
-        .bind(dim)
-        .bind(model)
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -284,24 +285,26 @@ impl Store {
 
     /// Close a pursuit with a state and a one-line reason.
     pub async fn close_pursuit(&self, id: &str, state: &str, reason: &str, at: i64) -> Result<()> {
-        sqlx::query("UPDATE pursuits SET state = ?, reason = ?, closed_at = ? WHERE id = ?")
-            .bind(state)
-            .bind(reason)
-            .bind(at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE pursuits SET state = ?, reason = ?, closed_at = ? WHERE id = ?",
+            state,
+            reason,
+            at,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// The generation landed: name the artifact, state `generated`.
     pub async fn set_pursuit_artifact(&self, id: &str, artifact_id: &str, at: i64) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE pursuits SET artifact_id = ?, state = 'generated', closed_at = ? WHERE id = ?",
+            artifact_id,
+            at,
+            id
         )
-        .bind(artifact_id)
-        .bind(at)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -377,11 +380,11 @@ impl Store {
 
     /// Forget every pursuit and every interaction. Rows dropped.
     pub async fn purge_pursuits(&self) -> Result<u64> {
-        let a = sqlx::query("DELETE FROM interaction_events")
+        let a = sqlx::query!("DELETE FROM interaction_events")
             .execute(&self.pool)
             .await?
             .rows_affected();
-        let b = sqlx::query("DELETE FROM pursuits")
+        let b = sqlx::query!("DELETE FROM pursuits")
             .execute(&self.pool)
             .await?
             .rows_affected();

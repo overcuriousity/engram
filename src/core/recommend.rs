@@ -718,8 +718,7 @@ mod tests {
             "it wins while it is there"
         );
 
-        sqlx::query("DELETE FROM artifacts WHERE id = ?")
-            .bind(&near)
+        sqlx::query!("DELETE FROM artifacts WHERE id = ?", &near)
             .execute(&core.store.pool)
             .await
             .unwrap();

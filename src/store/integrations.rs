@@ -50,17 +50,17 @@ pub struct Integration {
 impl Store {
     /// `false` when the artifact already has a row. A tag is written once.
     pub async fn record_integration(&self, i: &Integration) -> Result<bool> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT OR IGNORE INTO integrations
                (artifact_id, at, tag, nearest_id, nearest_score, detail)
              VALUES (?, ?, ?, ?, ?, ?)",
+            &i.artifact_id,
+            i.at,
+            i.tag.as_str(),
+            &i.nearest_id,
+            i.nearest_score.map(f64::from),
+            &i.detail
         )
-        .bind(&i.artifact_id)
-        .bind(i.at)
-        .bind(i.tag.as_str())
-        .bind(&i.nearest_id)
-        .bind(i.nearest_score.map(f64::from))
-        .bind(&i.detail)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
@@ -93,16 +93,16 @@ impl Store {
     /// then, which is when the question is live. The table is the memory, so
     /// there is no cursor to lose an artifact embedded late.
     pub async fn artifacts_to_integrate(&self, limit: usize) -> Result<Vec<Chunk>> {
-        let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT a.id FROM artifacts a
+        let ids: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT a.id AS "id!" FROM artifacts a
                LEFT JOIN integrations i ON i.artifact_id = a.id
               WHERE i.artifact_id IS NULL
                 AND a.embed_state = 'embedded'
                 AND a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
               ORDER BY a.created_at ASC, a.id ASC
-              LIMIT ?",
+              LIMIT ?"#,
+            limit as i64
         )
-        .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
         let rows = self.artifacts_by_ids(&ids).await?;

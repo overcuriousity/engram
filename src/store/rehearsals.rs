@@ -146,21 +146,21 @@ impl Store {
     /// `idx_rehearsals_live`.
     pub async fn record_rehearsal(&self, r: &NewRehearsal) -> Result<Option<String>> {
         let id = new_id();
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT OR IGNORE INTO rehearsals
                (id, created_at, class, query, query_vec, vec_dim, embed_model, artifact_id, source_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            now(),
+            r.class.as_str(),
+            &r.query,
+            vec_to_blob(&r.query_vec),
+            r.query_vec.len() as i64,
+            &r.embed_model,
+            &r.artifact_id,
+            &r.source_id
         )
-        .bind(&id)
-        .bind(now())
-        .bind(r.class.as_str())
-        .bind(&r.query)
-        .bind(vec_to_blob(&r.query_vec))
-        .bind(r.query_vec.len() as i64)
-        .bind(&r.embed_model)
-        .bind(&r.artifact_id)
-        .bind(&r.source_id)
-        .execute(&self.pool)
+            .execute(&self.pool)
         .await?;
         Ok((res.rows_affected() > 0).then_some(id))
     }
@@ -215,21 +215,23 @@ impl Store {
     }
 
     pub async fn retire_rehearsal(&self, id: &str, at: i64) -> Result<()> {
-        sqlx::query("UPDATE rehearsals SET retired_at = ? WHERE id = ? AND retired_at IS NULL")
-            .bind(at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE rehearsals SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+            at,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     /// Retire every live probe of this artifact. Rows stamped.
     pub async fn retire_rehearsals_of(&self, artifact_id: &str, at: i64) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE rehearsals SET retired_at = ? WHERE artifact_id = ? AND retired_at IS NULL",
+            at,
+            artifact_id
         )
-        .bind(at)
-        .bind(artifact_id)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -237,7 +239,7 @@ impl Store {
 
     pub async fn live_rehearsal_count(&self) -> Result<i64> {
         Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM rehearsals WHERE retired_at IS NULL")
+            sqlx::query_scalar!("SELECT COUNT(*) FROM rehearsals WHERE retired_at IS NULL")
                 .fetch_one(&self.pool)
                 .await?,
         )
@@ -245,16 +247,16 @@ impl Store {
 
     pub async fn record_rehearsal_result(&self, r: &NewResult) -> Result<String> {
         let id = new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO rehearsal_results (id, rehearsal_id, generation_id, at, rank, outranked_by)
              VALUES (?, ?, ?, ?, ?, ?)",
+            &id,
+            &r.rehearsal_id,
+            &r.generation_id,
+            now(),
+            r.rank,
+            serde_json::to_string(&r.outranked_by).unwrap_or_else(|_| "[]".into())
         )
-        .bind(&id)
-        .bind(&r.rehearsal_id)
-        .bind(&r.generation_id)
-        .bind(now())
-        .bind(r.rank)
-        .bind(serde_json::to_string(&r.outranked_by).unwrap_or_else(|_| "[]".into()))
         .execute(&self.pool)
         .await?;
         // And everything this probe has past `KEEP_PER_PROBE`, here rather
@@ -263,15 +265,15 @@ impl Store {
         // `OBSERVATION_LIMIT` JSON-carrying rows a pass with nothing ever
         // taking any of them out, and every pass ran window functions over
         // the lot.
-        sqlx::query(
+        sqlx::query!(
             "DELETE FROM rehearsal_results
               WHERE rehearsal_id = ? AND id NOT IN (
                     SELECT id FROM rehearsal_results WHERE rehearsal_id = ?
                      ORDER BY at DESC, id DESC LIMIT ?)",
+            &r.rehearsal_id,
+            &r.rehearsal_id,
+            KEEP_PER_PROBE as i64
         )
-        .bind(&r.rehearsal_id)
-        .bind(&r.rehearsal_id)
-        .bind(KEEP_PER_PROBE as i64)
         .execute(&self.pool)
         .await?;
         Ok(id)
@@ -479,11 +481,13 @@ impl Store {
         if retain_days <= 0 {
             return Ok(0);
         }
-        Ok(sqlx::query("DELETE FROM rehearsal_results WHERE at < ?")
-            .bind(now() - retain_days * 86_400)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        Ok(sqlx::query!(
+            "DELETE FROM rehearsal_results WHERE at < ?",
+            now() - retain_days * 86_400
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 }
 

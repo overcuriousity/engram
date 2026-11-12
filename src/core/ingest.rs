@@ -3196,7 +3196,7 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+        sqlx::query!("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -3205,7 +3205,7 @@ mod tests {
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
 
         let attempts: Vec<i64> =
-            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+            sqlx::query_scalar!("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
                 .fetch_all(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -3230,7 +3230,7 @@ mod tests {
         let core = test_core().await;
         let src = core.ingest(&manual("mount"), "web", None).await.unwrap();
         for _ in 0..200 {
-            sqlx::query("UPDATE jobs SET run_after = 0 WHERE state = 'pending'")
+            sqlx::query!("UPDATE jobs SET run_after = 0 WHERE state = 'pending'")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -3240,8 +3240,7 @@ mod tests {
         }
         // Capture names locally now, so the title unit is armed by putting
         // the corpus in the state the unit exists for: unnamed at settle.
-        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
-            .bind(&src.id)
+        sqlx::query!("UPDATE corpora SET title_hint = NULL WHERE id = ?", &src.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -4299,18 +4298,22 @@ mod tests {
             .unwrap();
         // Old enough for the sweep, and the merge old enough not to be the
         // "fresh merge" the age guard holds a root back for.
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 1_000)
-            .bind(&root)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE artifacts SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 1_000)
-            .bind(&merged.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - 1_000,
+            &root
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ? WHERE id = ?",
+            crate::store::now() - 1_000,
+            &merged.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         core.store
             .bury(
                 &root,
@@ -4349,11 +4352,11 @@ mod tests {
         // `set_artifact_status` and `set_superseded_by` each raise it again in
         // their own statement, so it was `1` by the time `reactivate`
         // returned and the repair wrote onto the deleted point.
-        let dirty: i64 = sqlx::query_scalar("SELECT lifecycle_dirty FROM artifacts WHERE id = ?")
-            .bind(&root)
-            .fetch_one(&core.store.pool)
-            .await
-            .unwrap();
+        let dirty: i64 =
+            sqlx::query_scalar!("SELECT lifecycle_dirty FROM artifacts WHERE id = ?", &root)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
         assert_eq!(
             dirty, 0,
             "the point arrives with the embed, payload and all"

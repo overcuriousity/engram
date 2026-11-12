@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM jobs WHERE subject = ? AND stage = ? AND target_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "666133e627646c4571f43511cffc5ab77f4aaf07d2659412ec45b4932be487ee"
+}

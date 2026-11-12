@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "76df90070a9aae6613a2cdd52244cd44b1a27f739155d2aff1fdfabc50d4bfec"
+}

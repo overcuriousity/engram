@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO context_clusters\n                     (scope, artifact_id, slot, centroid, weight, events,\n                      last_at, encoder_version, representative)\n                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "cee32ec024937453900481117a855207cb75e94098b0dec6566204da6329ee0b"
+}

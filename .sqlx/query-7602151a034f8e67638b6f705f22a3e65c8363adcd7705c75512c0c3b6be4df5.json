@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE rehearsals SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7602151a034f8e67638b6f705f22a3e65c8363adcd7705c75512c0c3b6be4df5"
+}

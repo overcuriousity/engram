@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM moments\n              WHERE artifact_id = ? AND kind = 'due' AND rule = ? AND at = ?\n                AND source = 'armed'\n                AND done_at IS NULL AND notified_at IS NULL AND snoozed_until IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "246343f777b872cb0cd17915eefbda97cea0fe399b89b727b6bf9db10ae24c4b"
+}

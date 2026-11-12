@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs SET state = 'no_conflict', synthesis_asked = 0\n              WHERE state = 'unmergeable'\n                 OR (state = 'contradiction' AND detail LIKE '%esolve by hand%')\n                 OR (state = 'contradiction'\n                     AND detail LIKE '%merging them would have dropped one of them%')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "0e3216f53022d8273a127b6b8d2dba2362e574d4f7ce422086364ee3182738ed"
+}

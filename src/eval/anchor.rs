@@ -90,27 +90,27 @@ pub async fn agreement(core: &Core) -> Result<Option<Agreement>> {
     let mut any = false;
     for v in &verdicts {
         let query: String = v.get("query");
-        let positives: Vec<String> = sqlx::query_scalar(
-            "SELECT o.artifact_id FROM observations o
+        let positives: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT o.artifact_id AS "artifact_id!" FROM observations o
                JOIN generations g ON g.id = o.generation_id
               WHERE o.query = ? AND o.strength > 0 AND o.artifact_id IS NOT NULL
                 AND o.excluded_at IS NULL
-                AND g.embed_recipe = ? AND g.chat_model = ?",
+                AND g.embed_recipe = ? AND g.chat_model = ?"#,
+            &query,
+            &live.embed_recipe,
+            &live.chat_model
         )
-        .bind(&query)
-        .bind(&live.embed_recipe)
-        .bind(&live.chat_model)
         .fetch_all(&core.store.pool)
         .await?;
-        let negative: i64 = sqlx::query_scalar(
+        let negative: i64 = sqlx::query_scalar!(
             "SELECT COUNT(*) FROM observations o
                JOIN generations g ON g.id = o.generation_id
               WHERE o.query = ? AND o.strength < 0 AND o.excluded_at IS NULL
                 AND g.embed_recipe = ? AND g.chat_model = ?",
+            &query,
+            &live.embed_recipe,
+            &live.chat_model
         )
-        .bind(&query)
-        .bind(&live.embed_recipe)
-        .bind(&live.chat_model)
         .fetch_one(&core.store.pool)
         .await?;
 
@@ -395,11 +395,13 @@ mod tests {
         judged(&core, "mount the image", Verdict::Hit, Some("art-1")).await;
         assert!(agreement(&core).await.unwrap().is_some());
 
-        sqlx::query("UPDATE search_events SET judged_at = ?")
-            .bind(crate::store::now() - VERDICT_WINDOW_SECS - 1)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET judged_at = ?",
+            crate::store::now() - VERDICT_WINDOW_SECS - 1
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         assert_eq!(agreement(&core).await.unwrap(), None);
     }
 

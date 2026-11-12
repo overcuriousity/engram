@@ -1718,11 +1718,13 @@ mod tests {
         let ids = disagreeing(&core).await;
         // `now()` is second-grained, so two rows inserted in one test would tie,
         // and a tie is meant to pass the guard. Force b strictly newer.
-        sqlx::query("UPDATE artifacts SET created_at = created_at + 100 WHERE id = ?")
-            .bind(&ids[1])
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = created_at + 100 WHERE id = ?",
+            &ids[1]
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"b","detail":"x"}"#.into(),
         ])));
@@ -1894,8 +1896,7 @@ mod tests {
             .await
             .unwrap();
         // Its every source cascades away, as a corpus deletion does.
-        sqlx::query("DELETE FROM artifact_sources WHERE child_id = ?")
-            .bind(&m.id)
+        sqlx::query!("DELETE FROM artifact_sources WHERE child_id = ?", &m.id)
             .execute(&core.store.pool)
             .await
             .unwrap();

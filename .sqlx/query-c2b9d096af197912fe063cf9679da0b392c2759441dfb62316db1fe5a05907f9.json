@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE corpora SET status = ?, near_dupe_of = ?, near_dupe_score = ?, updated_at = ?\n              WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "c2b9d096af197912fe063cf9679da0b392c2759441dfb62316db1fe5a05907f9"
+}

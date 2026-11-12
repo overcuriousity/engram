@@ -2409,8 +2409,7 @@ mod tests {
         assert!(!out.abstained);
         // The vector it retrieved with travels with it, so a gap can be
         // clustered later without re-embedding.
-        let dim: i64 = sqlx::query_scalar("SELECT vec_dim FROM ask_events WHERE id = ?")
-            .bind(&id)
+        let dim: i64 = sqlx::query_scalar!("SELECT vec_dim FROM ask_events WHERE id = ?", &id)
             .fetch_one(&core.store.pool)
             .await
             .unwrap();

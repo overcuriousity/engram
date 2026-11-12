@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET empty_runs = 0\n              WHERE subject = ? AND stage = ? AND target_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "7d5209d4ffa62cad2cd2bbc9994008f318cc82b55d97ba0aeb997c18e1e08e2a"
+}

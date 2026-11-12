@@ -61,10 +61,10 @@ impl Store {
         {
             return Ok(None);
         }
-        let n: i64 = sqlx::query_scalar(
+        let n: i64 = sqlx::query_scalar!(
             "SELECT COALESCE(MAX(n), 0) + 1 FROM artifact_versions WHERE artifact_id = ?",
+            id
         )
-        .bind(id)
         .fetch_one(&mut *tx)
         .await?;
         if let Some(obj) = evidence.as_object_mut() {
@@ -83,30 +83,30 @@ impl Store {
             },
         )
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO artifact_versions (artifact_id, n, text, title, caveats, created_at, action_id)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            id,
+            n,
+            row.get::<String, _>("text"),
+            row.get::<Option<String>, _>("title"),
+            row.get::<String, _>("caveats"),
+            now(),
+            &action_id
         )
-        .bind(id)
-        .bind(n)
-        .bind(row.get::<String, _>("text"))
-        .bind(row.get::<Option<String>, _>("title"))
-        .bind(row.get::<String, _>("caveats"))
-        .bind(now())
-        .bind(&action_id)
-        .execute(&mut *tx)
+            .execute(&mut *tx)
         .await?;
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts SET text = ?, title = ?, caveats = ?,
                     embed_state = 'pending', embed_model = NULL,
                     embed_rev = embed_rev + 1, updated_at = ?
               WHERE id = ?",
+            text,
+            title,
+            serde_json::to_string(caveats).unwrap_or_else(|_| "[]".into()),
+            now(),
+            id
         )
-        .bind(text)
-        .bind(title)
-        .bind(serde_json::to_string(caveats).unwrap_or_else(|_| "[]".into()))
-        .bind(now())
-        .bind(id)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -161,31 +161,31 @@ impl Store {
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::NotFound)?;
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO artifact_versions (artifact_id, n, text, title, caveats, created_at, action_id)
              SELECT ?, COALESCE(MAX(n), 0) + 1, ?, ?, ?, ?, ?
                FROM artifact_versions WHERE artifact_id = ?",
+            artifact_id,
+            current.get::<String, _>("text"),
+            current.get::<Option<String>, _>("title"),
+            current.get::<String, _>("caveats"),
+            now(),
+            action_id,
+            artifact_id
         )
-        .bind(artifact_id)
-        .bind(current.get::<String, _>("text"))
-        .bind(current.get::<Option<String>, _>("title"))
-        .bind(current.get::<String, _>("caveats"))
-        .bind(now())
-        .bind(action_id)
-        .bind(artifact_id)
-        .execute(&mut *tx)
+            .execute(&mut *tx)
         .await?;
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifacts SET text = ?, title = ?, caveats = ?,
                     embed_state = 'pending', embed_model = NULL,
                     embed_rev = embed_rev + 1, updated_at = ?
               WHERE id = ?",
+            row.get::<String, _>("text"),
+            row.get::<Option<String>, _>("title"),
+            row.get::<String, _>("caveats"),
+            now(),
+            artifact_id
         )
-        .bind(row.get::<String, _>("text"))
-        .bind(row.get::<Option<String>, _>("title"))
-        .bind(row.get::<String, _>("caveats"))
-        .bind(now())
-        .bind(artifact_id)
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {

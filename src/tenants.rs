@@ -658,8 +658,8 @@ mod tests {
             .filter(|n| n.ends_with(".db"))
             .collect();
         assert_eq!(files, [format!("{}.db", t.user.slug)], "one base, one file");
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE name LIKE 'vec_%' AND type='table'",
+        let tables: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE name LIKE 'vec_%' AND type='table'"#
         )
         .fetch_all(&t.core.store.pool)
         .await

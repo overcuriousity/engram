@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(created_at) FROM ask_events",
+  "describe": {
+    "columns": [
+      {
+        "name": "MAX(created_at)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "1e3777343962c1ce1677045237114b10e5340a4c4bca5bbd7c3c1baec899e4ee"
+}
