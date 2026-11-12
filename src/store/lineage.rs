@@ -382,14 +382,16 @@ impl Store {
         for (i, a) in ids.iter().enumerate() {
             for b in &ids[i + 1..] {
                 let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                if let Some(row) =
-                    sqlx::query("SELECT * FROM artifact_pairs WHERE a_id = ? AND b_id = ?")
-                        .bind(lo)
-                        .bind(hi)
-                        .fetch_optional(&self.pool)
-                        .await?
+                if let Some(row) = sqlx::query_as!(
+                    crate::store::pairs::PairRow,
+                    "SELECT * FROM artifact_pairs WHERE a_id = ? AND b_id = ?",
+                    lo,
+                    hi
+                )
+                .fetch_optional(&self.pool)
+                .await?
                 {
-                    out.push(crate::store::pairs::row_to_pair(&row));
+                    out.push(crate::store::pairs::row_to_pair(row));
                 }
             }
         }

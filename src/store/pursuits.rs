@@ -62,16 +62,35 @@ pub struct OfferRate {
     pub opened: i64,
 }
 
-fn row_to_pursuit(r: &sqlx::sqlite::SqliteRow) -> Pursuit {
+/// A `pursuits` row as stored, for `query_as!`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct PursuitRow {
+    pub id: Option<String>,
+    pub opened_at: i64,
+    pub closed_at: Option<i64>,
+    pub state: String,
+    pub reason: Option<String>,
+    pub queries: String,
+    pub sources: String,
+    pub artifact_id: Option<String>,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub query_vec: Option<Vec<u8>>,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub vec_dim: i64,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub embed_model: Option<String>,
+}
+
+fn row_to_pursuit(r: PursuitRow) -> Pursuit {
     Pursuit {
-        id: r.get("id"),
-        opened_at: r.get("opened_at"),
-        closed_at: r.get("closed_at"),
-        state: r.get("state"),
-        reason: r.get("reason"),
-        queries: serde_json::from_str(&r.get::<String, _>("queries")).unwrap_or_default(),
-        sources: serde_json::from_str(&r.get::<String, _>("sources")).unwrap_or_default(),
-        artifact_id: r.get("artifact_id"),
+        id: r.id.unwrap_or_default(),
+        opened_at: r.opened_at,
+        closed_at: r.closed_at,
+        state: r.state,
+        reason: r.reason,
+        queries: serde_json::from_str(&r.queries).unwrap_or_default(),
+        sources: serde_json::from_str(&r.sources).unwrap_or_default(),
+        artifact_id: r.artifact_id,
     }
 }
 
@@ -333,33 +352,40 @@ impl Store {
     }
 
     pub async fn get_pursuit(&self, id: &str) -> Result<Pursuit> {
-        let row = sqlx::query("SELECT * FROM pursuits WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::NotFound)?;
-        Ok(row_to_pursuit(&row))
+        let row = sqlx::query_as!(
+            crate::store::pursuits::PursuitRow,
+            "SELECT * FROM pursuits WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        Ok(row_to_pursuit(row))
     }
 
     /// Newest first. What Ops lists.
     pub async fn recent_pursuits(&self, limit: i64) -> Result<Vec<Pursuit>> {
-        let rows = sqlx::query("SELECT * FROM pursuits ORDER BY opened_at DESC LIMIT ?")
-            .bind(limit.max(0))
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(row_to_pursuit).collect())
+        let rows = sqlx::query_as!(
+            crate::store::pursuits::PursuitRow,
+            "SELECT * FROM pursuits ORDER BY opened_at DESC LIMIT ?",
+            limit.max(0)
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_pursuit).collect())
     }
 
     /// A day's sittings, oldest first — the day page's read.
     pub async fn pursuits_between(&self, from: i64, to: i64) -> Result<Vec<Pursuit>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::pursuits::PursuitRow,
             "SELECT * FROM pursuits WHERE opened_at >= ? AND opened_at < ? ORDER BY opened_at",
+            from,
+            to
         )
-        .bind(from)
-        .bind(to)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_pursuit).collect())
+        Ok(rows.into_iter().map(row_to_pursuit).collect())
     }
 
     /// How many pursuits are in one state, with no page over it.

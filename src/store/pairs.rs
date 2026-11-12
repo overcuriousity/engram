@@ -356,24 +356,39 @@ impl Followed {
     }
 }
 
-pub(crate) fn row_to_pair(r: &sqlx::sqlite::SqliteRow) -> ArtifactPair {
+/// A `artifact_pairs` row as stored, for `query_as!`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct PairRow {
+    pub id: i64,
+    pub a_id: String,
+    pub b_id: String,
+    pub score: f64,
+    pub state: String,
+    pub detail: Option<String>,
+    pub created_at: i64,
+    pub judge_attempts: i64,
+    pub judge_unreadable: i64,
+    pub obsolete_id: Option<String>,
+    pub merged_into: Option<String>,
+    pub decided_by: Option<String>,
+    pub synthesis_asked: i64,
+}
+
+pub(crate) fn row_to_pair(r: PairRow) -> ArtifactPair {
     ArtifactPair {
-        id: r.get("id"),
-        a_id: r.get("a_id"),
-        b_id: r.get("b_id"),
-        score: r.get::<f64, _>("score") as f32,
-        state: PairState::parse(r.get::<String, _>("state").as_str()),
-        detail: r.get("detail"),
-        created_at: r.get("created_at"),
-        decided_by: r
-            .get::<Option<String>, _>("decided_by")
-            .as_deref()
-            .and_then(DecidedBy::parse),
-        judge_attempts: r.get("judge_attempts"),
-        judge_unreadable: r.get("judge_unreadable"),
-        obsolete_id: r.get("obsolete_id"),
-        merged_into: r.get("merged_into"),
-        synthesis_asked: r.get::<i64, _>("synthesis_asked") != 0,
+        id: r.id,
+        a_id: r.a_id,
+        b_id: r.b_id,
+        score: r.score as f32,
+        state: PairState::parse(r.state.as_str()),
+        detail: r.detail,
+        created_at: r.created_at,
+        decided_by: r.decided_by.as_deref().and_then(DecidedBy::parse),
+        judge_attempts: r.judge_attempts,
+        judge_unreadable: r.judge_unreadable,
+        obsolete_id: r.obsolete_id,
+        merged_into: r.merged_into,
+        synthesis_asked: r.synthesis_asked != 0,
     }
 }
 
@@ -510,24 +525,28 @@ impl Store {
     }
 
     pub async fn get_pair(&self, id: i64) -> Result<ArtifactPair> {
-        let row = sqlx::query("SELECT * FROM artifact_pairs WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(crate::error::Error::NotFound)?;
-        Ok(row_to_pair(&row))
+        let row = sqlx::query_as!(
+            crate::store::pairs::PairRow,
+            "SELECT * FROM artifact_pairs WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(crate::error::Error::NotFound)?;
+        Ok(row_to_pair(row))
     }
 
     pub async fn pairs_by_state(&self, state: PairState, limit: i64) -> Result<Vec<ArtifactPair>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::pairs::PairRow,
             "SELECT * FROM artifact_pairs WHERE state = ?
               ORDER BY score DESC, created_at DESC LIMIT ?",
+            state.as_str(),
+            limit
         )
-        .bind(state.as_str())
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_pair).collect())
+        Ok(rows.into_iter().map(row_to_pair).collect())
     }
 
     /// Pairs the judge settled with a cosine in `[lo, hi)`, and, from the
@@ -609,7 +628,8 @@ impl Store {
         state: PairState,
         limit: i64,
     ) -> Result<Vec<ArtifactPair>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::pairs::PairRow,
             "SELECT p.* FROM artifact_pairs p
                JOIN artifacts a ON a.id = p.a_id
                JOIN artifacts b ON b.id = p.b_id
@@ -617,12 +637,12 @@ impl Store {
                 AND a.status = 'active' AND a.superseded_by IS NULL
                 AND b.status = 'active' AND b.superseded_by IS NULL
               ORDER BY p.score DESC, p.created_at DESC LIMIT ?",
+            state.as_str(),
+            limit
         )
-        .bind(state.as_str())
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_pair).collect())
+        Ok(rows.into_iter().map(row_to_pair).collect())
     }
 
     /// Move a pair to any state other than `Superseded`, clearing the judge's
@@ -812,17 +832,18 @@ impl Store {
     /// will not parse next time either, and a pair nothing can write must stop
     /// buying model calls at some point.
     pub async fn pairs_awaiting_synthesis(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::pairs::PairRow,
             "SELECT * FROM artifact_pairs
               WHERE synthesis_asked = 1 AND merged_into IS NULL
                 AND judge_unreadable < ?
               ORDER BY judge_attempts ASC, score DESC, created_at DESC LIMIT ?",
+            MAX_UNREADABLE_JUDGEMENTS,
+            limit
         )
-        .bind(MAX_UNREADABLE_JUDGEMENTS)
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_pair).collect())
+        Ok(rows.into_iter().map(row_to_pair).collect())
     }
 
     /// Settle a pair as answered by an applied merge. `merged_into` names the
@@ -955,15 +976,16 @@ impl Store {
             if o == new_id {
                 continue;
             }
-            let rows = sqlx::query(
+            let rows = sqlx::query_as!(
+                crate::store::pairs::PairRow,
                 "SELECT * FROM artifact_pairs
                   WHERE state = 'pending' AND (a_id = ? OR b_id = ?)",
+                o,
+                o
             )
-            .bind(o)
-            .bind(o)
             .fetch_all(&self.pool)
             .await?;
-            for p in rows.iter().map(row_to_pair) {
+            for p in rows.into_iter().map(row_to_pair) {
                 let other = if p.a_id == *o {
                     p.b_id.clone()
                 } else {
@@ -1025,12 +1047,15 @@ impl Store {
     /// the one caller that has to act on the row itself.
     pub async fn pair_between(&self, a: &str, b: &str) -> Result<Option<ArtifactPair>> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let row = sqlx::query("SELECT * FROM artifact_pairs WHERE a_id = ? AND b_id = ?")
-            .bind(a)
-            .bind(b)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.as_ref().map(row_to_pair))
+        let row = sqlx::query_as!(
+            crate::store::pairs::PairRow,
+            "SELECT * FROM artifact_pairs WHERE a_id = ? AND b_id = ?",
+            a,
+            b
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_pair))
     }
 
     /// What each of `ids` is known to disagree with: one row per side asked
@@ -1202,7 +1227,7 @@ impl Store {
         if loser == winner {
             return Ok(Followed::default());
         }
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        let rows = sqlx::query_as::<_, PairRow>(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifact_pairs
               WHERE state IN {}
                 AND (a_id = ? OR b_id = ?)",
@@ -1214,7 +1239,7 @@ impl Store {
         .await?;
 
         let mut out = Followed::default();
-        for p in rows.iter().map(row_to_pair) {
+        for p in rows.into_iter().map(row_to_pair) {
             let other = if p.a_id == loser {
                 p.b_id.clone()
             } else {
@@ -1603,16 +1628,17 @@ impl Store {
     /// exhausts its retries is closed rather than parked and the next sweep
     /// would find the pair pending, idle, and first in line all over again.
     pub async fn pairs_to_judge(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::pairs::PairRow,
             "SELECT * FROM artifact_pairs
               WHERE state = 'pending' AND judge_unreadable < ?
               ORDER BY judge_attempts ASC, score DESC, created_at DESC LIMIT ?",
+            MAX_UNREADABLE_JUDGEMENTS,
+            limit
         )
-        .bind(MAX_UNREADABLE_JUDGEMENTS)
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_pair).collect())
+        Ok(rows.into_iter().map(row_to_pair).collect())
     }
 
     /// Every `Pending` pair reachable from this one through a shared artifact.

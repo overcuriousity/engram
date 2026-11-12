@@ -360,7 +360,6 @@ const NOT_YET_CHECKED: &[&str] = &[
     "src/store/generations.rs",
     "src/store/insights.rs",
     "src/store/jobs.rs",
-    "src/store/lineage.rs",
     "src/store/links.rs",
     "src/store/mod.rs",
     "src/store/moments.rs",

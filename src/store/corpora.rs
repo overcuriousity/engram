@@ -250,30 +250,50 @@ pub fn content_hash(bytes: impl AsRef<[u8]>) -> String {
     hex::encode(Sha256::digest(bytes.as_ref()))
 }
 
-fn row_to_corpus(r: &sqlx::sqlite::SqliteRow) -> Corpus {
+/// A `corpora` row as stored, for `query_as!`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct CorpusRow {
+    pub id: Option<String>,
+    pub raw_text: String,
+    pub origin: String,
+    pub title_hint: Option<String>,
+    pub content_hash: String,
+    pub status: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub coverage: Option<f64>,
+    pub shingles: Option<String>,
+    pub near_dupe_of: Option<String>,
+    pub near_dupe_score: Option<f64>,
+    pub source_url: Option<String>,
+    pub restored_at: Option<i64>,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub retired_at: Option<i64>,
+    pub auto_reread_at: Option<i64>,
+    pub metadata: String,
+}
+
+fn row_to_corpus(r: CorpusRow) -> Corpus {
     Corpus {
-        id: r.get("id"),
-        raw_text: r.get("raw_text"),
-        origin: r.get("origin"),
-        title_hint: r.get("title_hint"),
-        content_hash: r.get("content_hash"),
-        status: CorpusStatus::parse(r.get::<String, _>("status").as_str()),
-        created_at: r.get("created_at"),
-        updated_at: r.get("updated_at"),
-        coverage: r.get("coverage"),
+        id: r.id.unwrap_or_default(),
+        raw_text: r.raw_text,
+        origin: r.origin,
+        title_hint: r.title_hint,
+        content_hash: r.content_hash,
+        status: CorpusStatus::parse(r.status.as_str()),
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+        coverage: r.coverage,
         shingles: r
-            .get::<Option<String>, _>("shingles")
+            .shingles
             .map(|s| super::shingle::decode(&s))
             .unwrap_or_default(),
-        near_dupe_of: r.get("near_dupe_of"),
-        near_dupe_score: r.get("near_dupe_score"),
-        source_url: r.get("source_url"),
-        restored_at: r.get("restored_at"),
-        auto_reread_at: r.get("auto_reread_at"),
-        metadata: r
-            .get::<Option<String>, _>("metadata")
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_else(|| serde_json::json!({})),
+        near_dupe_of: r.near_dupe_of,
+        near_dupe_score: r.near_dupe_score,
+        source_url: r.source_url,
+        restored_at: r.restored_at,
+        auto_reread_at: r.auto_reread_at,
+        metadata: serde_json::from_str(&r.metadata).unwrap_or_else(|_| serde_json::json!({})),
     }
 }
 
@@ -444,20 +464,26 @@ impl Store {
     }
 
     pub async fn get_corpus(&self, id: &str) -> Result<Corpus> {
-        let row = sqlx::query("SELECT * FROM corpora WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::NotFound)?;
-        Ok(row_to_corpus(&row))
+        let row = sqlx::query_as!(
+            crate::store::corpora::CorpusRow,
+            "SELECT * FROM corpora WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        Ok(row_to_corpus(row))
     }
 
     pub async fn find_by_hash(&self, hash: &str) -> Result<Option<Corpus>> {
-        let row = sqlx::query("SELECT * FROM corpora WHERE content_hash = ?")
-            .bind(hash)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.as_ref().map(row_to_corpus))
+        let row = sqlx::query_as!(
+            crate::store::corpora::CorpusRow,
+            "SELECT * FROM corpora WHERE content_hash = ?",
+            hash
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_corpus))
     }
 
     /// Write a follow-up onto a corpus that already has a row — the same three
@@ -729,13 +755,15 @@ impl Store {
     }
 
     pub async fn list_corpora(&self, limit: i64, offset: i64) -> Result<Vec<Corpus>> {
-        let rows =
-            sqlx::query("SELECT * FROM corpora ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?")
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.iter().map(row_to_corpus).collect())
+        let rows = sqlx::query_as!(
+            crate::store::corpora::CorpusRow,
+            "SELECT * FROM corpora ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            limit,
+            offset
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_corpus).collect())
     }
 
     /// One page of the list, newest first, without the text.
@@ -795,12 +823,14 @@ impl Store {
     /// Everything captured in a span of time, oldest first — a day, read in
     /// the viewer's zone.
     pub async fn corpora_between(&self, from: i64, to: i64) -> Result<Vec<Corpus>> {
-        let rows = sqlx::query("SELECT * FROM corpora WHERE created_at >= ? AND created_at < ? ORDER BY created_at, id")
-            .bind(from)
-            .bind(to)
-            .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+            crate::store::corpora::CorpusRow,
+            "SELECT * FROM corpora WHERE created_at >= ? AND created_at < ? ORDER BY created_at, id",
+            from,
+            to
+        ).fetch_all(&self.pool)
             .await?;
-        Ok(rows.iter().map(row_to_corpus).collect())
+        Ok(rows.into_iter().map(row_to_corpus).collect())
     }
 
     /// A page for a sweep that has to see every corpus exactly once: oldest
@@ -820,18 +850,19 @@ impl Store {
             Some((ts, id)) => (*ts, id.as_str()),
             None => (i64::MIN, ""),
         };
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::corpora::CorpusRow,
             "SELECT * FROM corpora
              WHERE created_at > ? OR (created_at = ? AND id > ?)
              ORDER BY created_at ASC, id ASC LIMIT ?",
+            ts,
+            ts,
+            id,
+            limit
         )
-        .bind(ts)
-        .bind(ts)
-        .bind(id)
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_corpus).collect())
+        Ok(rows.into_iter().map(row_to_corpus).collect())
     }
 
     /// The row for a capture whose source is bytes rather than text. There is

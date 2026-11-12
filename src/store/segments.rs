@@ -1,6 +1,5 @@
 use super::Store;
 use crate::error::Result;
-use sqlx::Row;
 
 /// Where one window of a source stands. `Failed` means the synthesizer never
 /// succeeded here and the lines are represented by no chunk at all — the model
@@ -59,16 +58,35 @@ pub struct NewSegment<'a> {
     pub text: &'a str,
 }
 
-fn row_to_segment(r: &sqlx::sqlite::SqliteRow) -> Segment {
+/// A `segments` row as stored, for `query_as!`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct SegmentRow {
+    pub corpus_id: String,
+    pub idx: i64,
+    pub start_line: i64,
+    pub end_line: i64,
+    pub text: String,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub carry_lines: i64,
+    pub state: String,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub keep_artifacts: i64,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub no_promote: i64,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+}
+
+fn row_to_segment(r: SegmentRow) -> Segment {
     Segment {
-        corpus_id: r.get("corpus_id"),
-        idx: r.get("idx"),
-        start_line: r.get("start_line"),
-        end_line: r.get("end_line"),
-        text: r.get("text"),
-        state: SegmentState::parse(r.get::<String, _>("state").as_str()),
-        attempts: r.get("attempts"),
-        last_error: r.get("last_error"),
+        corpus_id: r.corpus_id,
+        idx: r.idx,
+        start_line: r.start_line,
+        end_line: r.end_line,
+        text: r.text,
+        state: SegmentState::parse(r.state.as_str()),
+        attempts: r.attempts,
+        last_error: r.last_error,
     }
 }
 
@@ -163,11 +181,14 @@ impl Store {
     }
 
     pub async fn segments_for_corpus(&self, corpus_id: &str) -> Result<Vec<Segment>> {
-        let rows = sqlx::query("SELECT * FROM segments WHERE corpus_id = ? ORDER BY idx")
-            .bind(corpus_id)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(row_to_segment).collect())
+        let rows = sqlx::query_as!(
+            crate::store::segments::SegmentRow,
+            "SELECT * FROM segments WHERE corpus_id = ? ORDER BY idx",
+            corpus_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_segment).collect())
     }
 
     /// Segments still owed a model call: never tried, or tried and refused.
@@ -181,14 +202,14 @@ impl Store {
     /// `verbatim` is excluded: that window was captured as passages on purpose
     /// and is owed nothing.
     pub async fn pending_segments(&self, corpus_id: &str) -> Result<Vec<Segment>> {
-        let rows = sqlx::query(
-            "SELECT * FROM segments
-             WHERE corpus_id = ? AND state NOT IN ('done', 'verbatim') ORDER BY idx",
-        )
-        .bind(corpus_id)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+            crate::store::segments::SegmentRow,
+            r#"SELECT corpus_id AS "corpus_id!", idx AS "idx!", start_line AS "start_line!", end_line AS "end_line!", text AS "text!", carry_lines AS "carry_lines!", state AS "state!", keep_artifacts AS "keep_artifacts!", no_promote AS "no_promote!", attempts AS "attempts!", last_error AS "last_error?" FROM segments
+             WHERE corpus_id = ? AND state NOT IN ('done', 'verbatim') ORDER BY idx"#,
+            corpus_id
+        ).fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_segment).collect())
+        Ok(rows.into_iter().map(row_to_segment).collect())
     }
 
     pub async fn set_segment_state(

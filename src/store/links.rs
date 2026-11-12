@@ -266,20 +266,37 @@ pub fn engagement_at(value: f64, stamp: i64, created_at: i64, at: i64, half_life
     (now - baseline).max(0.0)
 }
 
-pub(crate) fn row_to_link(r: &sqlx::sqlite::SqliteRow) -> Link {
+/// A `artifact_links` row as stored, for `query_as!`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct LinkRow {
+    pub a_id: String,
+    pub b_id: String,
+    pub weight: f64,
+    pub bumped_at: i64,
+    pub queries: i64,
+    pub cues: String,
+    pub state: String,
+    pub reason: Option<String>,
+    pub judged_rev_a: Option<i64>,
+    pub judged_rev_b: Option<i64>,
+    pub judge_attempts: i64,
+    pub created_at: i64,
+}
+
+pub(crate) fn row_to_link(r: LinkRow) -> Link {
     Link {
-        a_id: r.get("a_id"),
-        b_id: r.get("b_id"),
-        weight: r.get("weight"),
-        bumped_at: r.get("bumped_at"),
-        queries: r.get("queries"),
-        cues: serde_json::from_str(&r.get::<String, _>("cues")).unwrap_or_default(),
-        state: LinkState::parse(r.get::<String, _>("state").as_str()),
-        reason: r.get("reason"),
-        judged_rev_a: r.get("judged_rev_a"),
-        judged_rev_b: r.get("judged_rev_b"),
-        judge_attempts: r.get("judge_attempts"),
-        created_at: r.get("created_at"),
+        a_id: r.a_id,
+        b_id: r.b_id,
+        weight: r.weight,
+        bumped_at: r.bumped_at,
+        queries: r.queries,
+        cues: serde_json::from_str(&r.cues).unwrap_or_default(),
+        state: LinkState::parse(r.state.as_str()),
+        reason: r.reason,
+        judged_rev_a: r.judged_rev_a,
+        judged_rev_b: r.judged_rev_b,
+        judge_attempts: r.judge_attempts,
+        created_at: r.created_at,
     }
 }
 
@@ -475,12 +492,15 @@ async fn bump_one(
 impl Store {
     /// Every link naming `id` at either end, in any state.
     pub async fn links_touching(&self, id: &str) -> Result<Vec<Link>> {
-        let rows = sqlx::query("SELECT * FROM artifact_links WHERE a_id = ? OR b_id = ?")
-            .bind(id)
-            .bind(id)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(row_to_link).collect())
+        let rows = sqlx::query_as!(
+            crate::store::links::LinkRow,
+            "SELECT * FROM artifact_links WHERE a_id = ? OR b_id = ?",
+            id,
+            id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_link).collect())
     }
 
     /// Copy a link that touches `old` onto `new` and the same other endpoint,
@@ -515,12 +535,15 @@ impl Store {
         let (a, b) = canonical(new, other);
         let incoming = decayed(from.weight, from.bumped_at, at, half_life_days);
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-        let existing = sqlx::query("SELECT * FROM artifact_links WHERE a_id = ? AND b_id = ?")
-            .bind(a)
-            .bind(b)
-            .fetch_optional(&mut *tx)
-            .await?
-            .map(|r| row_to_link(&r));
+        let existing = sqlx::query_as!(
+            crate::store::links::LinkRow,
+            "SELECT * FROM artifact_links WHERE a_id = ? AND b_id = ?",
+            a,
+            b
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(row_to_link);
         match existing {
             None => {
                 let state = if from.state == LinkState::Dismissed {
@@ -585,15 +608,15 @@ impl Store {
     /// One link, whichever way round it is named.
     pub async fn get_link(&self, a: &str, b: &str) -> Result<Option<Link>> {
         let (a, b) = canonical(a, b);
-        Ok(
-            sqlx::query("SELECT * FROM artifact_links WHERE a_id = ? AND b_id = ?")
-                .bind(a)
-                .bind(b)
-                .fetch_optional(&self.pool)
-                .await?
-                .as_ref()
-                .map(row_to_link),
+        Ok(sqlx::query_as!(
+            crate::store::links::LinkRow,
+            "SELECT * FROM artifact_links WHERE a_id = ? AND b_id = ?",
+            a,
+            b
         )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(row_to_link))
     }
 
     pub async fn meta_get(&self, key: &str) -> Result<Option<String>> {
@@ -740,7 +763,10 @@ impl Store {
         at: i64,
         limit: i64,
     ) -> Result<Vec<Link>> {
-        let rows = sqlx::query(
+        // SQLite reads a negative LIMIT as unbounded, so the cap is clamped at zero.
+        let cap = limit.max(0).saturating_mul(4);
+        let rows = sqlx::query_as!(
+            LinkRow,
             "SELECT l.* FROM artifact_links l
                JOIN artifacts a ON a.id = l.a_id
                JOIN artifacts b ON b.id = l.b_id
@@ -749,18 +775,15 @@ impl Store {
                 AND a.status = 'active' AND a.superseded_by IS NULL
                 AND b.status = 'active' AND b.superseded_by IS NULL
               ORDER BY l.weight DESC LIMIT ?",
+            min_weight,
+            min_queries,
+            cap
         )
-        .bind(min_weight)
-        .bind(min_queries)
-        // SQLite reads a negative LIMIT as unbounded, so the cap must be
-        // clamped at zero — a negative `limit` must still cap the fetch, not
-        // remove it, even though `take(limit.max(0))` below empties it anyway.
-        .bind(limit.max(0).saturating_mul(4))
         .fetch_all(&self.pool)
         .await?;
 
         let strong: Vec<Link> = rows
-            .iter()
+            .into_iter()
             .map(row_to_link)
             .filter(|l| decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
             .collect();

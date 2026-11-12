@@ -127,29 +127,51 @@ pub struct DueRow {
     pub opening: String,
 }
 
-fn moment_of(r: &sqlx::sqlite::SqliteRow) -> Moment {
+/// A `moments` row as stored, for `query_as!`.
+#[derive(sqlx::FromRow)]
+pub(crate) struct MomentRow {
+    pub id: Option<String>,
+    pub artifact_id: String,
+    pub kind: String,
+    pub at: Option<i64>,
+    pub until: Option<i64>,
+    pub tz: String,
+    pub rule: Option<String>,
+    pub source: String,
+    pub span: Option<String>,
+    pub done_at: Option<i64>,
+    pub snoozed_until: Option<i64>,
+    pub notified_at: Option<i64>,
+    pub moved_from: Option<i64>,
+    pub moved_at: Option<i64>,
+    pub series_id: Option<String>,
+    pub origin_corpus_id: Option<String>,
+    pub created_at: i64,
+}
+
+fn moment_of(r: MomentRow) -> Moment {
     Moment {
-        id: r.get("id"),
-        artifact_id: r.get("artifact_id"),
-        kind: Kind::parse(r.get::<String, _>("kind").as_str()).unwrap_or(Kind::Event),
-        at: r.get("at"),
-        until: r.get("until"),
-        tz: r.get("tz"),
-        rule: r.get("rule"),
-        source: Source::parse(r.get::<String, _>("source").as_str()).unwrap_or(Source::Extracted),
-        span: r.get("span"),
-        done_at: r.get("done_at"),
-        snoozed_until: r.get("snoozed_until"),
-        notified_at: r.get("notified_at"),
-        moved_from: r.get("moved_from"),
-        moved_at: r.get("moved_at"),
-        series_id: r.get("series_id"),
-        origin_corpus_id: r.get("origin_corpus_id"),
-        created_at: r.get("created_at"),
+        id: r.id.unwrap_or_default(),
+        artifact_id: r.artifact_id,
+        kind: Kind::parse(r.kind.as_str()).unwrap_or(Kind::Event),
+        at: r.at,
+        until: r.until,
+        tz: r.tz,
+        rule: r.rule,
+        source: Source::parse(r.source.as_str()).unwrap_or(Source::Extracted),
+        span: r.span,
+        done_at: r.done_at,
+        snoozed_until: r.snoozed_until,
+        notified_at: r.notified_at,
+        moved_from: r.moved_from,
+        moved_at: r.moved_at,
+        series_id: r.series_id,
+        origin_corpus_id: r.origin_corpus_id,
+        created_at: r.created_at,
     }
 }
 
-fn row_of(r: &sqlx::sqlite::SqliteRow) -> DueRow {
+fn row_of(r: &sqlx::sqlite::SqliteRow) -> Result<DueRow> {
     let text: String = r.get("text");
     let opening = text
         .lines()
@@ -166,12 +188,12 @@ fn row_of(r: &sqlx::sqlite::SqliteRow) -> DueRow {
         .names_its_own_text();
     let title: Option<String> = r.get("title");
     let title = title.filter(|t| !t.is_empty() && named);
-    DueRow {
-        moment: moment_of(r),
+    Ok(DueRow {
+        moment: moment_of(sqlx::FromRow::from_row(r)?),
         named: title.is_some(),
         title: title.unwrap_or_else(|| opening.clone()),
         opening,
-    }
+    })
 }
 
 /// What a row is due *at* from the reader's point of view: an elapsed snooze
@@ -704,11 +726,14 @@ impl Store {
     }
 
     pub async fn moment(&self, id: &str) -> Result<Option<Moment>> {
-        Ok(sqlx::query("SELECT * FROM moments WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|r| moment_of(&r)))
+        Ok(sqlx::query_as!(
+            crate::store::moments::MomentRow,
+            "SELECT * FROM moments WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(moment_of))
     }
 
     /// The open due moment on exactly this artifact, dated or not. Unlike
@@ -716,20 +741,16 @@ impl Store {
     /// exists here" is a fact about the artifact, not a claim about how soon
     /// it deserves a place on a list.
     pub async fn open_due_for_artifact(&self, artifact_id: &str) -> Result<Option<Moment>> {
-        Ok(sqlx::query(
-            // `COALESCE(snoozed_until, at)`, and not the raw `at`, because that
-            // is the instant this row is *rendered* at two lines below and the
-            // instant `due_for` and `open_due` both order on. Ordering on `at`
-            // picked the earliest row as captured and then displayed its snooze:
-            // a Monday row snoozed to next Friday beat a Wednesday one, so the
-            // pane said "in 10 days" while the band correctly said Wednesday.
+        // Ordered on the snoozed instant, as rendered and as `due_for` and `open_due` order.
+        Ok(sqlx::query_as!(
+            MomentRow,
             "SELECT * FROM moments WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL
              ORDER BY COALESCE(snoozed_until, at) IS NULL, COALESCE(snoozed_until, at) LIMIT 1",
+            artifact_id
         )
-        .bind(artifact_id)
         .fetch_optional(&self.pool)
         .await?
-        .map(|r| moment_of(&r)))
+        .map(moment_of))
     }
 
     /// The dates a note merely *states*, as the previous reading of it left
@@ -851,7 +872,7 @@ impl Store {
         .bind(now)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_of).collect())
+        rows.iter().map(row_of).collect()
     }
 
     /// The search lift's read: for these artifacts, the earliest open due
@@ -904,7 +925,7 @@ impl Store {
         .bind(to)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_of).collect())
+        rows.iter().map(row_of).collect()
     }
 
     /// Both kinds, any state — the day page's "was due" shows what was done.
@@ -932,7 +953,7 @@ impl Store {
         .bind(to)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_of).collect())
+        rows.iter().map(row_of).collect()
     }
 
     /// Claim a moment as done, once. Returns whether *this* call is the one
@@ -1172,7 +1193,7 @@ impl Store {
         )))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_of).collect())
+        rows.iter().map(row_of).collect()
     }
 
     /// The Remind unit sleeps until the earliest owed moment. Called by every

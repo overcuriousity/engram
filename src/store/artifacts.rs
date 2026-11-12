@@ -417,6 +417,7 @@ pub struct NewArtifact {
 }
 
 /// An `artifacts` row as stored, for `query_as!`.
+#[derive(sqlx::FromRow)]
 pub(crate) struct ArtifactRow {
     pub id: Option<String>,
     pub corpus_id: Option<String>,
