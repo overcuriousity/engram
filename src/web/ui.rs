@@ -4495,7 +4495,7 @@ mod tests {
             "a result row must not delete what it is only showing"
         );
         assert!(
-            include_str!("templates/_artifact.html").contains("btn-icon btn-icon-danger"),
+            include_str!("templates/_artifact.html").contains("<span>Delete</span>"),
             "the corpus page's artifact list stopped offering delete"
         );
     }

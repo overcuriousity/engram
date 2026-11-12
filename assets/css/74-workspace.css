@@ -121,7 +121,7 @@ body.row-dragging { user-select: none; cursor: row-resize; }
    siblings did not, so the source pane escaped to the right at every width. */
 .split > *, .rail-head { min-width: 0; }
 /* Titles and snippets are prose, not source: they break rather than push. */
-.rail-title, .rail-snippet, .card-title { overflow-wrap: anywhere; }
+.rail-title, .rail-snippet, .artifact-title, .cited-title { overflow-wrap: anywhere; }
 /* A backstop. If something new overflows, it scrolls in its own box rather
    than dragging the document sideways. */
 body { overflow-x: hidden; }
@@ -769,7 +769,7 @@ body { overflow-x: hidden; }
      no longer growing to take back what that height gave the lists. Unset —
      which is everyone who has not moved the boundary — this is the `flex: 1 1
      auto` it has always been. */
-  .split > :first-child > .card {
+  .split > :first-child > .artifact-main {
     flex: var(--artifact-fill, 1) 1 var(--artifact-h, auto);
     min-height: 8rem; overflow-y: auto;
   }
@@ -798,7 +798,7 @@ body { overflow-x: hidden; }
 .regions.hide-source .split > :first-child {
   display: block; max-height: none; overflow: visible;
 }
-.regions.hide-source .split > :first-child > .card {
+.regions.hide-source .split > :first-child > .artifact-main {
   min-height: 0; overflow: visible;
 }
 /* And with no box there is no height to divide. The two wide arrangements put
@@ -884,7 +884,7 @@ body { overflow-x: hidden; }
   .regions-rail-focus-source.hide-source .split > :first-child {
     display: flex; overflow-y: auto;
   }
-  .regions-rail-focus-source.hide-source .split > :first-child > .card {
+  .regions-rail-focus-source.hide-source .split > :first-child > .artifact-main {
     min-height: 12rem; overflow-y: auto;
   }
   /* The column is a box again here, so the boundary in it means something
@@ -1031,8 +1031,8 @@ body { overflow-x: hidden; }
 /* The fold, under the last row it kept: a count, and the way back to the rest.
    Quiet on purpose — it is the least urgent thing on the band. */
 .due-fold { margin: 0.15rem 0 0; font-size: var(--text-micro); }
-.due-fold .btn { color: var(--color-fg-muted); padding-left: 0; }
-.due-fold .btn:hover { color: var(--color-fg-secondary); }
+
+
 
 /* A phone. The card gives back its side padding, the countdown shrinks, and
    the row keeps its one line. */
@@ -1320,3 +1320,7 @@ html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 .cited-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
 .cited-title { font-weight: 600; }
 .cited-head .oc-mono { margin-left: auto; font-size: var(--text-micro); }
+.artifact-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.artifact-title { font-weight: 600; font-size: var(--text-prose); }
+.artifact-meta { margin-top: var(--space-3); }
+.remind-fields { flex-wrap: wrap; align-items: flex-end; }

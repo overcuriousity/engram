@@ -1,215 +1,92 @@
+{% let warn = crate::web::icons::icon("triangle-alert", 16) %}
 <div data-terms="{{ d.terms }}" data-artifact="{{ d.id }}">
-  {# The way back to the list, for a narrow window where opening a result hides
-     it. An installed app has no back button to fall back on. Hidden above
-     60rem, where the rail is still on screen beside this — the same width that
-     hides it, not the phone breakpoint.
+  {# Shown only where opening a result hid the rail; app.js turns it into "show the list again" where a rail exists. #}
+  <a class="back" href="/ui/search" data-back-to-results>Back to results</a>
 
-     Inside the region grid the rail is only hidden by a class, so back is "show
-     the list again" rather than a navigation: dropping the class puts the
-     results back exactly as they were, and `history.back()` follows to undo
-     the URL the click pushed. The plain href is what runs on the standalone
-     artifact page, which has no rail and no results to return to —
-     `/ui/search` cannot carry the query, because what this page is given is
-     the stripped highlight terms rather than what was typed.
-
-     The test is for the rail, not for the grid: every page is inside a
-     `.regions` now, so asking for that one found it on the standalone page too
-     and the plain href never ran — the link swallowed the click and popped a
-     history entry that was not there. What tells the two apart is whether
-     there is a list to go back to. #}
-  <a class="back" href="/ui/search" data-back-to-results>← Results</a>
-
+  {# These forms swap the artifact in place (`closest [data-artifact]`); `to` serves a browser without htmx. #}
   {% if let Some(winner) = d.superseded_by %}
-  <div class="flag" role="status">
-    <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
-    <div>
-      <b>Hidden from results</b>
-      <div>Something near-identical and newer
-        (<a href="/ui/artifacts/{{ winner }}">this one</a>) was kept instead.</div>
-      <div class="chips">
-        {# Swapped, not navigated. What these buttons change is the artifact,
-           so what they answer with is the artifact, re-rendered in place —
-           `closest [data-artifact]` is this fragment's own root, and it is the
-           root in both places this fragment is rendered: the standalone page,
-           and the pane beside the search results. The hidden `to` could only
-           ever name one of the two, and it named the page, so pressing one of
-           these on a search result took the whole window there and the results
-           being worked through were gone.
-
-           `method`/`action` and `to` stay for a browser with no htmx, which
-           still posts and still follows the redirect. `terms` rides along so
-           the highlighting survives the swap.
-
-           These buttons also live on Ops, whose copies send no `to` and land
-           back on the queue — there the queue *is* the thing being worked
-           through, and a row leaving it is the point. #}
-        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede"
-          hx-post="/ui/ops/artifacts/{{ d.id }}/unsupersede?terms={{ d.terms|urlencode }}"
-          hx-target="closest [data-artifact]" hx-swap="outerHTML">
-          <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-          <button class="btn btn-sm" type="submit">Put it back</button>
-        </form>
-      </div>
-    </div>
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">Hidden from results · <a href="/ui/artifacts/{{ winner }}">a newer near-copy</a> was kept</span>
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/unsupersede"
+      hx-post="/ui/ops/artifacts/{{ d.id }}/unsupersede?terms={{ d.terms|urlencode }}"
+      hx-target="closest [data-artifact]" hx-swap="outerHTML">
+      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
+      <button class="oc-btn" type="submit">Put it back</button>
+    </form>
   </div>
   {% else if d.status.as_str() == "deprecated" %}
-  <div class="flag" role="status">
-    <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
-    <div>
-      <b>Hidden as stale</b>
-      <div class="muted">Not in search or ask results.</div>
-      <div class="chips">
-        <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate"
-          hx-post="/ui/ops/artifacts/{{ d.id }}/reactivate?terms={{ d.terms|urlencode }}"
-          hx-target="closest [data-artifact]" hx-swap="outerHTML">
-          <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-          <button class="btn btn-sm" type="submit">Reactivate</button>
-        </form>
-      </div>
-    </div>
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">Hidden as stale · not in search or ask results</span>
+    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/reactivate"
+      hx-post="/ui/ops/artifacts/{{ d.id }}/reactivate?terms={{ d.terms|urlencode }}"
+      hx-target="closest [data-artifact]" hx-swap="outerHTML">
+      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
+      <button class="oc-btn" type="submit">Reactivate</button>
+    </form>
   </div>
   {% endif %}
 
-  {# Icons rather than labels: controls that belong to the artifact, not
-     sentences competing with it. Each carries its meaning in `title` and
-     `aria-label`, so the tooltip and the screen reader say the same thing.
-
-     Hide only applies to an artifact that is actually in results — the flag
-     above already offers the way back for one that is not — but delete is
-     offered whatever the status, because "get rid of this" is a decision that
-     does not depend on whether it is currently hidden.
-
-     `.actions` rather than `.chips`: it pushes delete to the far end, so the
-     one control that cannot be undone is never flush against one that can. It
-     is also a `.pane-header`, which anchors the row to the artifact under a
-     rule rather than leaving it floating at the top of a wide column — at
-     three-up the lone trash button ended a thousand pixels from its siblings
-     and read as stranded rather than as caution.
-
-     Every one of them carries its word, and the word has to be the whole of
-     what the control does. There was a *Still accurate* beside these, which
-     reset the artifact's age; it went when a good answer began confirming the
-     notes it was drawn from, which is the same reset made by the verdict a
-     person was already giving under the result.
-
-     "Hide" says what it hides from, and that the artifact survives it, in
-     its label: that lived only in a `title` once, and the phone this base is
-     mostly read on has no hover. #}
+  {# Delete goes to Trash, so it sits apart from Hide but needs no danger style. #}
   <div class="actions pane-header">
     {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
     <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate"
           hx-post="/ui/ops/artifacts/{{ d.id }}/deprecate?terms={{ d.terms|urlencode }}"
           hx-target="closest [data-artifact]" hx-swap="outerHTML">
       <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-      <button class="btn-icon" type="submit"
-              title="Hide from results — the artifact is kept, and this can be undone"
-              aria-label="Hide from results: the artifact is kept, and this can be undone">
-        {{ crate::web::icons::icon("eye-off", 16) }}<span>Hide from results</span>
-      </button>
+      <button class="oc-btn" type="submit">{{ crate::web::icons::icon("eye-off", 16) }}<span>Hide from results</span></button>
     </form>
     {% endif %}
-    {# Deprecating hides an artifact and keeps it; this removes it from both
-       stores and cannot be undone. Nothing else deletes an artifact — see
-       `Core::heal_store_drift`. #}
     <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
           hx-post="/ui/artifacts/{{ d.id }}/delete"
           hx-target="closest [data-artifact]" hx-swap="outerHTML">
-      <button class="btn-icon btn-icon-danger" type="submit"
-              title="Delete" aria-label="Delete artifact">
-        {{ crate::web::icons::icon("trash-2", 16) }}<span>Delete</span>
-      </button>
+      <button class="oc-btn" type="submit" aria-label="Delete artifact">{{ crate::web::icons::icon("trash-2", 16) }}<span>Delete</span></button>
     </form>
   </div>
 
   {% if d.corpus_restored %}
-  <div class="flag" role="status">
-    <div class="flag-icon">{{ crate::web::icons::icon("triangle-alert", 16) }}</div>
-    <div>
-      <b>Source not stored</b>
-      <div class="muted">Restored from the vector store; source text is a reconstruction.</div>
-    </div>
-  </div>
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">Source not stored · rebuilt from the vector store</span></div>
   {% endif %}
 
-  {# What a check found, as a badge and nothing to press. There was a *Mark
-     reviewed* here that cleared the flag; the one flag a person could act on
-     — a merge whose source was deleted — is accepted by the sweep on its own
-     now, and the rest are facts about the text that a press does not change.
-     The detail stays, because it is what says which number or path no source
-     carries. #}
   {% if !d.flags.is_empty() %}
-  <div class="chips" role="status">
-    {% for f in d.flags %}<span class="badge badge-warning">{{ f }}</span>{% endfor %}
-    {% if let Some(detail) = d.flag_detail %}<div class="mono muted">{{ detail }}</div>{% endif %}
-  </div>
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">{% for f in d.flags %}{{ f }}{% if !loop.last %} · {% endif %}{% endfor %}{% if let Some(detail) = d.flag_detail %} <span class="mono muted">{{ detail }}</span>{% endif %}</span></div>
   {% endif %}
 
   <div class="split">
     <div>
       <div class="label pane-label">Artifact</div>
-      <div class="card">
-        <div class="card-head{% if d.title.is_empty() %} card-head-bare{% endif %}">
-          {# No heading over a passage or a note: neither has a name of its own
-             — see `Provenance::names_its_own_text` — and the text starts one
-             line below. The element goes with the name, or an empty one takes
-             the head row's gap over a card that has nothing to head. #}
-          {% if !d.title.is_empty() %}<span class="card-title">{{ d.title }}</span>{% endif %}
+      <div class="artifact-main">
+        <div class="artifact-head">
+          {# A passage or note has no name of its own (`Provenance::names_its_own_text`), so no heading. #}
+          {% if !d.title.is_empty() %}<span class="artifact-title">{{ d.title }}</span>{% endif %}
           <span class="spacer"></span>
-          {# The corpus page could edit an artifact and this one could not, on
-             the screen whose whole subject is one artifact. Same box, same
-             route; what differs is which shape comes back. #}
-          <button class="btn btn-ghost btn-sm" type="button" data-show="#edit-{{ d.id }}">Edit</button>
+          <button class="oc-btn" type="button" data-show="#edit-{{ d.id }}">{{ crate::web::icons::icon("pencil", 16) }}<span>Edit</span></button>
         </div>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
-        {# Under the text, once it has been read: was it the one? Only where
-           this was opened from the rail and the search was recorded. #}
         {% if let Some(event_id) = d.search_event %}
         {% let artifact_id = d.id %}
         {% let state = "" %}
         {% include "_search_verdict.html" %}
         {% endif %}
-        {# The passage stopped mid-sentence, so the window it was cut from did.
-           The source column beside this already shows the rest of the line;
-           this is the way to the artifact that carries it.
-
-           Swapped in place, exactly as the Related list below swaps — and for
-           the same reason. Left as a bare `href` this was the one link on the
-           page that *navigated*: following it out of the workspace loaded the
-           standalone artifact page, and the results this passage was found in
-           went with it. The rest of the reading — the box, the rail, the run —
-           is what the pane is inside of, and continuing to the next passage is
-           the least of all the reasons to leave it. The `href` stays for a
-           browser running no script, where the standalone page is the right
-           and only answer. #}
+        {# Swapped in place, so following it keeps the results being worked through. #}
         {% if let Some(next) = d.continues_at %}
-        <p class="continues"><a class="quiet-link" href="/ui/artifacts/{{ next }}"
+        <p class="continues"><a href="/ui/artifacts/{{ next }}"
              hx-get="/ui/artifacts/{{ next }}?via={{ d.id }}"
              hx-target="closest [data-terms]" hx-swap="outerHTML"
-             hx-push-url="true">continues in the next passage →</a></p>
+             hx-push-url="true">continues in the next passage</a></p>
         {% endif %}
         {% if let Some(t) = d.tag %}
-        {# What the base found when this arrived: its salience, as a word. #}
         <p class="muted hint">{{ t }}</p>
         {% endif %}
         {% if !d.versions.is_empty() %}
-        {# What this artifact used to say, oldest first. The live text is a
-           condensed one where `condensed` is set, and the button puts the
-           last version back through the same method the base's undo calls. #}
         <details class="muted">
           <summary>earlier versions ({{ d.versions.len() }})</summary>
           <ul class="mono">
             {% for (n, when, _aid) in d.versions %}<li>version {{ n }} · {{ when }}</li>{% endfor %}
           </ul>
           {% if let Some(aid) = d.condensed %}
-          {# The same shape as the four buttons above, and for the reason
-             `ReturnTo` was introduced: this one had no `hx-post` and no `to`,
-             so pressing it from a search result took the whole window to
-             /ui/insights and the results being worked through were gone. #}
           <form method="post" action="/ui/ops/condensations/{{ aid }}/undo"
                 hx-post="/ui/ops/condensations/{{ aid }}/undo?terms={{ d.terms|urlencode }}"
                 hx-target="closest [data-artifact]" hx-swap="outerHTML">
             <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-            <button type="submit" class="quiet-link">Restore the last version</button>
+            <button type="submit" class="oc-btn">{{ crate::web::icons::icon("undo-2", 16) }}<span>Restore the last version</span></button>
           </form>
           {% endif %}
         </details>
@@ -221,72 +98,65 @@
         </details>
         {% endif %}
         {% if !d.caveats.is_empty() %}
-        {# Emitted by the same synthesis call that wrote the artifact, from what
-           the source states. Shown but deliberately not embedded. #}
+        {# From the synthesis call that wrote the artifact; shown, never embedded. #}
         <div class="caveats">
           <b>Before you rely on this</b>
           <ul>{% for c in d.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
         </div>
         {% endif %}
-        <div class="chips">
-          {# The kind, and nothing else. Tags are still stored and still
-             filterable through the API; they are no longer written by the
-             model, so a chip row here would show whatever a caller set on this
-             one artifact and nothing on the rest. #}
-          {% if let Some(c) = d.category %}<span class="badge badge-accent">{{ c }}</span>{% endif %}
-          {% if let Some(due) = d.due_in %}
-          <span class="badge badge-due" title="A reminder you set on this is due">due {{ due }}</span>
-          {% endif %}
+        {% if d.category.is_some() || d.due_in.is_some() %}
+        <div class="oc-row artifact-meta">
+          {% if let Some(c) = d.category %}<span class="oc-tag">{{ crate::web::icons::icon("tag", 14) }}<span>{{ c }}</span></span>{% endif %}
+          {% if let Some(due) = d.due_in %}{{ crate::web::ui::status("due", format!("due {}", due).as_str()) }}{% endif %}
         </div>
-        {# `view=detail`: the same PUT answers the corpus page with a card and
-           this pane with a pane. Without it the save would swap this whole
-           screen for a card and lose the source, the lineage and the
-           neighbours. `terms` rides along so the highlight survives the save. #}
-        <form id="edit-{{ d.id }}" class="edit-form" hidden
+        {% endif %}
+        {# `view=detail` makes the shared PUT answer with this pane rather than a corpus row. #}
+        <form id="edit-{{ d.id }}" class="oc-form edit-form" hidden
               hx-put="/ui/artifacts/{{ d.id }}"
               hx-target="closest [data-terms]" hx-swap="outerHTML">
           <input type="hidden" name="view" value="detail">
           <input type="hidden" name="terms" value="{{ d.terms }}">
-          <textarea class="textarea textarea-tall" name="text">{{ d.text }}</textarea>
-          <div class="row edit-actions">
-            <button class="btn btn-accent btn-sm" type="submit">Save and re-embed</button>
-            <button class="btn btn-ghost btn-sm" type="button" data-hide="#edit-{{ d.id }}">Cancel</button>
+          <div class="oc-field"><label for="edit-text-{{ d.id }}">Text</label>
+            <textarea class="oc-input textarea-tall" id="edit-text-{{ d.id }}" name="text">{{ d.text }}</textarea></div>
+          <div class="oc-form__actions oc-row">
+            <button class="oc-btn oc-btn--primary" type="submit">Save and re-embed</button>
+            <button class="oc-btn" type="button" data-hide="#edit-{{ d.id }}">Cancel</button>
           </div>
         </form>
-        {# The reminder, by hand: when, how it repeats, and the way back to an
-           ordinary entry. The same form makes one on an artifact that has
-           none. An existing row posts its own zone back, so a save that
-           changes nothing moves nothing; a new one takes the browser's. #}
+        {# An existing reminder posts its own zone back, so an unchanged save moves nothing; a new one takes the browser's. #}
         {% let r = d.reminder %}
         <details class="remind-edit">
-          <summary>{% if r.exists %}reminder{% if r.repeat != "once" %} · {{ r.repeat }}{% endif %}{% else %}+ reminder{% endif %}</summary>
-          <form class="row" hx-post="/ui/artifacts/{{ d.id }}/reminder"
+          <summary>{% if r.exists %}reminder{% if r.repeat != "once" %} · {{ r.repeat }}{% endif %}{% else %}Add a reminder{% endif %}</summary>
+          <form class="oc-form" hx-post="/ui/artifacts/{{ d.id }}/reminder"
                 hx-target="closest [data-terms]" hx-swap="outerHTML"
                 {%~ if !r.exists %} data-send-tz{% endif %}>
             <input type="hidden" name="terms" value="{{ d.terms }}">
             {% if r.exists %}<input type="hidden" name="tz" value="{{ r.tz }}">{% endif %}
-            <input type="datetime-local" name="when" class="input" value="{{ r.when }}" required>
-            <select name="repeat" class="input" data-shows-rule>
-              {% for n in ["once", "daily", "weekly", "monthly", "yearly", "custom"] %}
-              <option value="{{ n }}"{% if r.repeat == *n %} selected{% endif %}>{{ n }}</option>
-              {% endfor %}
-            </select>
-            <input name="rule" class="input mono" value="{{ r.rule }}" placeholder="FREQ=WEEKLY;BYDAY=MO"{% if r.repeat != "custom" %} hidden{% endif %}>
-            <button class="btn btn-accent btn-sm" type="submit">Save</button>
-            {% if r.exists %}
-            <button class="btn btn-ghost btn-sm" type="button" hx-post="/ui/artifacts/{{ d.id }}/reminder/remove"
-                    hx-include="closest form" hx-target="closest [data-terms]" hx-swap="outerHTML">Remove</button>
-            {% endif %}
+            <div class="oc-row remind-fields">
+              <div class="oc-field"><label for="remind-when-{{ d.id }}">When</label>
+                <input type="datetime-local" id="remind-when-{{ d.id }}" name="when" class="oc-input" value="{{ r.when }}" required></div>
+              <div class="oc-field"><label for="remind-repeat-{{ d.id }}">Repeats</label>
+                <select id="remind-repeat-{{ d.id }}" name="repeat" class="oc-input" data-oc-menu data-shows-rule>
+                  {% for n in ["once", "daily", "weekly", "monthly", "yearly", "custom"] %}
+                  <option value="{{ n }}"{% if r.repeat == *n %} selected{% endif %}>{{ n }}</option>
+                  {% endfor %}
+                </select></div>
+              <div class="oc-field"{% if r.repeat != "custom" %} hidden{% endif %} data-rule-field><label for="remind-rule-{{ d.id }}">Rule</label>
+                <input id="remind-rule-{{ d.id }}" name="rule" class="oc-input mono" value="{{ r.rule }}" placeholder="FREQ=WEEKLY;BYDAY=MO" autocapitalize="off" spellcheck="false"></div>
+            </div>
+            <div class="oc-form__actions oc-row">
+              <button class="oc-btn oc-btn--primary" type="submit">Save</button>
+              {% if r.exists %}
+              <button class="oc-btn" type="button" hx-post="/ui/artifacts/{{ d.id }}/reminder/remove"
+                      hx-include="closest form" hx-target="closest [data-terms]" hx-swap="outerHTML">Remove</button>
+              {% endif %}
+            </div>
           </form>
         </details>
       </div>
 
       {% if !d.related.is_empty() %}
-      {# Nearest by the vector already stored for this artifact: no embedding
-         call, no completion. Swaps this detail for the neighbour's in place,
-         rather than naming `#pane`: the same partial is also the whole of the
-         standalone artifact page, where no pane exists and a missing target
-         would leave the link dead. #}
+      {# Nearest by the stored vector: no model call. Swaps in place so the standalone page works too. #}
       <div class="label pane-label">Related</div>
       <div class="related">
         {% for r in d.related %}
@@ -294,10 +164,6 @@
            hx-get="/ui/artifacts/{{ r.id }}?via={{ d.id }}"
            hx-target="closest [data-terms]" hx-swap="outerHTML"
            hx-push-url="true">
-          {# No heading where the neighbour has no name of its own — a passage
-             carries its section's, and the snippet below is the row. The
-             element goes with the name; an empty one opened the row with a
-             blank line the named rows beside it do not have. #}
           {% if !r.title.is_empty() %}
           <div class="rail-head"><span class="rail-title">{{ r.title }}</span></div>
           {% endif %}
@@ -308,8 +174,6 @@
       {% endif %}
 
       {% if !d.seen_together.is_empty() %}
-      {# Beside the nearest neighbours, not instead of them: one list is what
-         this resembles, the other is what it has been needed alongside. #}
       <div class="label pane-label">Seen together</div>
       <div class="related">
         {% for r in d.seen_together %}
@@ -325,10 +189,10 @@
             <div class="rail-snippet">{{ r.snippet }} · {{ r.corpus_title }}</div>
           </a>
           <div class="rail-del">
-            <button class="btn-icon" title="Not related" aria-label="Not related"
+            <button class="oc-btn oc-btn--icon oc-btn--row" type="button" aria-label="Not related" data-oc-tip="Not related"
                     hx-post="/ui/artifacts/{{ d.id }}/links/{{ r.id }}/dismiss"
                     hx-target="closest .seen-row" hx-swap="outerHTML">
-              {{ crate::web::icons::icon("eye-off", 16) }}
+              {{ crate::web::icons::icon("eye-off", 14) }}
             </button>
           </div>
         </div>
@@ -337,35 +201,8 @@
       {% endif %}
     </div>
     <div>
-      {# One statement of which lines these are, and it is the link. The crumb
-         above the artifact said it, this label said it again, and a third link
-         beside the label said it a third time — on a screen whose whole point
-         is one artifact and the lines it came from.
-
-         "highlighted" rather than a bare range: the panel shows a few lines of
-         context either side, so naming the span alone read as a mismatch
-         against the line numbers actually on screen. The link opens the
-         document scrolled to those lines; an artifact with no recorded span
-         has none to jump to and gets the plain link. #}
-      {# A merged artifact belongs to no corpus and has no span, so there are no
-         lines to put beside it. What it was written from goes here instead:
-         those artifacts are still stored, each still names its own document,
-         and they are the only honest answer to "where did this come from".
-         Rendering a corpus it did not come from would be the one dishonesty
-         merging must not commit. #}
-      {# On provenance, not on the list being empty. A merge that has lost every
-         source to a delete has an empty list and is still a merge: it has no
-         corpus to link and no span to highlight, so the captured branch would
-         render a dead link over an empty table — on the very artifact whose
-         orphan notice matters most. #}
-      {# One statement of which lines these are, and it is the link — see the
-         note above. #}
+      {# A merge has no corpus or span; its lineage is what it was written from, shown even when empty (the orphan case). #}
       {% if !d.merged %}{% include "_source_lines.html" %}{% endif %}
-
-      {# A merge always shows its lineage, empty or not — the empty case is the
-         orphan notice, and it matters most exactly there. A captured artifact
-         shows one only when it has replaced something: its own lineage is the
-         document, which is the table above. #}
       {% if d.merged || !d.lineage.is_empty() %}
       {% include "_lineage.html" %}
       {% endif %}

@@ -223,7 +223,7 @@
   function lockstep(root) {
     var split = root.querySelector('.split');
     if (!split || split.dataset.lockstep) return;
-    var artifact = split.children[0] && split.children[0].querySelector('.card');
+    var artifact = split.children[0] && split.children[0].querySelector('.artifact-main');
     var source = split.querySelector('.raw');
     if (!artifact || !source) return;
     split.dataset.lockstep = '1';
@@ -455,7 +455,7 @@
   // of lines of prose, and lines do not come in percentages of a window.
   function cardHandle(col) {
     if (!col || !col.matches) return;
-    var card = col.querySelector(':scope > .card');
+    var card = col.querySelector(':scope > .artifact-main');
     // Nothing under the artifact is nothing to divide it from. Both lists are
     // conditional in the template — a fresh artifact has no neighbours yet.
     if (!card || !col.querySelector(':scope > .related')) return;
@@ -3392,9 +3392,8 @@
 
   document.addEventListener('change', function (e) {
     var select = e.target.closest && e.target.closest('[data-shows-rule]');
-    if (select && select.form && select.form.rule) {
-      select.form.rule.hidden = select.value !== 'custom';
-    }
+    var field = select && select.form && select.form.querySelector('[data-rule-field]');
+    if (field) field.hidden = select.value !== 'custom';
   });
 
   document.addEventListener('htmx:configRequest', function (e) {

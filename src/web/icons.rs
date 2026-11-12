@@ -33,6 +33,7 @@ icons! {
     More => "ellipsis", ChevronRight => "chevron-right", ChevronDown => "chevron-down", Notes => "notebook",
     Folder => "folder", Account => "user", SignOut => "log-out", Panel => "panel-left", Read => "book-open",
     Key => "key-round", List => "list", Dictate => "mic", Due => "alarm-clock", Attach => "paperclip",
+    Repeats => "repeat", ChevronLeft => "chevron-left",
 }
 
 impl Icon {

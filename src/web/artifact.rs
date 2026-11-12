@@ -1639,7 +1639,7 @@ mod tests {
     /// operator checks one specific note, and a reminder set for next week
     /// is exactly the kind `due_for`'s horizon leaves out of that list.
     #[tokio::test]
-    async fn the_pane_badges_an_open_reminder_however_far_out_it_is() {
+    async fn the_pane_marks_an_open_reminder_however_far_out_it_is() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("water the plants", "web", None).await.unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
@@ -1667,7 +1667,7 @@ mod tests {
             .unwrap();
 
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
-        assert!(page.contains("badge-due"), "{page}");
+        assert!(page.contains("oc-status--due"), "{page}");
         assert!(
             page.contains("30 days"),
             "far outside the 48h horizon, still shown: {page}"
@@ -1675,7 +1675,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_pane_of_an_artifact_with_no_reminder_carries_no_due_badge() {
+    async fn the_pane_of_an_artifact_with_no_reminder_carries_no_due_mark() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("just a note", "web", None).await.unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
@@ -1684,7 +1684,7 @@ mod tests {
             .clone();
 
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
-        assert!(!page.contains("badge-due"), "{page}");
+        assert!(!page.contains("oc-status--due"), "{page}");
     }
 
     /// The corpus page could edit an artifact and the pane could not, on the
@@ -2186,7 +2186,7 @@ mod tests {
             .unwrap()
             .id;
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{aid}")).await;
-        assert!(page.contains("+ reminder"), "{page}");
+        assert!(page.contains("Add a reminder"), "{page}");
 
         let uri = format!("/ui/artifacts/{aid}/reminder");
         let html = body_of(
@@ -2241,7 +2241,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(html.contains("+ reminder"), "{html}");
+        assert!(html.contains("Add a reminder"), "{html}");
         assert!(
             core.store
                 .open_due_for_artifact(&aid)

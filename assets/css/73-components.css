@@ -302,7 +302,7 @@ mark {
   .raw,
   .reasoning,
   .split > :first-child,
-  .split > :first-child > .card {
+  .split > :first-child > .artifact-main {
     mask-image: linear-gradient(to bottom, currentColor calc(100% - var(--edge)), transparent);
     animation: scroll-edge linear both;
     animation-timeline: scroll(self);

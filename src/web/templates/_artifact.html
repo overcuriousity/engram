@@ -1,27 +1,23 @@
-<div class="card" id="artifact-{{ c.id }}">
-  <div class="card-head{% if c.title.is_empty() %} card-head-bare{% endif %}">
-    {# A passage card has no title: its first line is its body, and printed as
-       both the card said everything twice. See `artifact_view`. #}
-    {% if !c.title.is_empty() %}<span class="card-title">{{ c.title }}</span>{% endif %}
-    <span class="card-meta">{{ crate::web::ui::status(c.embed_badge, c.embed_state) }}</span>
+<article class="artifact-row" id="artifact-{{ c.id }}">
+  <div class="artifact-head">
+    {# A passage has no title: its first line is its body. See `artifact_view`. #}
+    {% if !c.title.is_empty() %}<span class="artifact-title">{{ c.title }}</span>{% endif %}
+    <span class="spacer"></span>
+    {{ crate::web::ui::status(c.embed_badge, c.embed_state) }}
   </div>
   <div class="md">{{ c.html|safe }}</div>
-  <div class="chips">
-    <button class="btn btn-ghost btn-sm" type="button" data-show="#edit-{{ c.id }}">Edit</button>
-    {# This page could delete the whole source but not one artifact out of it.
-       Swaps its own card away and leaves the rest of the list alone. #}
-    <button class="btn-icon btn-icon-danger" title="Delete artifact"
-            aria-label="Delete artifact"
-            hx-post="/ui/artifacts/{{ c.id }}/delete"
-            hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML">
-      {{ crate::web::icons::icon("trash-2", 16) }}
-    </button>
+  <div class="oc-row">
+    <button class="oc-btn" type="button" data-show="#edit-{{ c.id }}">{{ crate::web::icons::icon("pencil", 16) }}<span>Edit</span></button>
+    <button class="oc-btn" type="button" hx-post="/ui/artifacts/{{ c.id }}/delete"
+            hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML">{{ crate::web::icons::icon("trash-2", 16) }}<span>Delete</span></button>
   </div>
-  <form id="edit-{{ c.id }}" class="edit-form" hidden
+  <form id="edit-{{ c.id }}" class="oc-form edit-form" hidden
         hx-put="/ui/artifacts/{{ c.id }}" hx-target="#artifact-{{ c.id }}" hx-swap="outerHTML">
-    <textarea class="textarea textarea-mid" name="text">{{ c.text }}</textarea>
-    <div class="row edit-actions">
-      <button class="btn btn-accent btn-sm" type="submit">Save and re-embed</button>
+    <div class="oc-field"><label for="edit-text-{{ c.id }}">Text</label>
+      <textarea class="oc-input textarea-mid" id="edit-text-{{ c.id }}" name="text">{{ c.text }}</textarea></div>
+    <div class="oc-form__actions oc-row">
+      <button class="oc-btn oc-btn--primary" type="submit">Save and re-embed</button>
+      <button class="oc-btn" type="button" data-hide="#edit-{{ c.id }}">Cancel</button>
     </div>
   </form>
-</div>
+</article>

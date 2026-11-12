@@ -137,7 +137,7 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
   .regions-split.hide-source .split > :first-child {
     display: flex; overflow-y: auto;
   }
-  .regions-split.hide-source .split > :first-child > .card {
+  .regions-split.hide-source .split > :first-child > .artifact-main {
     min-height: 12rem; overflow-y: auto;
   }
   .regions-split.hide-source .split > :first-child > .row-handle { display: block; }
