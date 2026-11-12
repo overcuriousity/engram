@@ -251,39 +251,34 @@ impl Store {
     }
 
     pub async fn ask_event(&self, id: &str) -> Result<Option<AskEvent>> {
-        let Some(row) = sqlx::query(
-            "SELECT id, question, answer, abstained, verdict, judged_at FROM ask_events WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
+        let Some(row) = sqlx::query!(
+            r#"SELECT id AS "id!", question, answer, abstained, verdict, judged_at FROM ask_events WHERE id = ?"#,
+            id
+        ).fetch_optional(&self.pool)
         .await?
         else {
             return Ok(None);
         };
-        let citations = sqlx::query(
+        let citations = sqlx::query!(
             "SELECT n, artifact_id, score, carried FROM ask_citations WHERE event_id = ? ORDER BY n",
-        )
-        .bind(id)
-        .fetch_all(&self.pool)
+            id
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(|r| AskCitation {
-            n: r.get("n"),
-            artifact_id: r.get("artifact_id"),
-            score: r.get::<f64, _>("score") as f32,
-            carried: r.get::<i64, _>("carried") != 0,
+            n: r.n,
+            artifact_id: r.artifact_id,
+            score: r.score as f32,
+            carried: r.carried != 0,
         })
         .collect();
         Ok(Some(AskEvent {
-            id: row.get("id"),
-            question: row.get("question"),
-            answer: row.get("answer"),
-            abstained: row.get::<i64, _>("abstained") != 0,
-            verdict: row
-                .get::<Option<String>, _>("verdict")
-                .as_deref()
-                .and_then(AskVerdict::parse),
-            judged_at: row.get("judged_at"),
+            id: row.id,
+            question: row.question,
+            answer: row.answer,
+            abstained: row.abstained != 0,
+            verdict: row.verdict.as_deref().and_then(AskVerdict::parse),
+            judged_at: row.judged_at,
             citations,
         }))
     }

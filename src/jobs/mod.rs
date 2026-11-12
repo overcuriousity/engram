@@ -1031,7 +1031,6 @@ mod tests {
     /// worker cannot see.
     #[tokio::test]
     async fn a_unit_whose_base_will_not_open_goes_back_on_the_queue() {
-        use sqlx::Row;
         let (tenants, _dir) = crate::tenants::test_support::unopenable_tenants().await;
         tenants.control().provision("sub-a", None).await.unwrap();
         crate::store::jobs::enqueue_with(
@@ -1049,22 +1048,18 @@ mod tests {
             "the outage has to reach the worker loop, which is what makes it pause"
         );
 
-        let row = sqlx::query("SELECT state, attempts, run_after, last_error FROM jobs")
+        let row = sqlx::query!("SELECT state, attempts, run_after, last_error FROM jobs")
             .fetch_one(&tenants.control().pool)
             .await
             .unwrap();
-        assert_eq!(
-            row.get::<String, _>("state"),
-            "pending",
-            "the claim was abandoned in `running`"
-        );
-        assert_eq!(row.get::<i64, _>("attempts"), 1);
+        assert_eq!(row.state, "pending", "the claim was abandoned in `running`");
+        assert_eq!(row.attempts, 1);
         assert!(
-            row.get::<i64, _>("run_after") > crate::store::now(),
+            row.run_after > crate::store::now(),
             "requeued with no backoff at all"
         );
         assert!(
-            row.get::<Option<String>, _>("last_error").is_some(),
+            row.last_error.is_some(),
             "nothing on the row says why it did not run"
         );
     }

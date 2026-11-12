@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pair_grants SET claimed_at = ?\n             WHERE code_hash = ? AND claimed_at IS NULL AND expires_at > ?\n             RETURNING subject",
+  "describe": {
+    "columns": [
+      {
+        "name": "subject",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pair_grants",
+            "name": "subject"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0835b1bf5462e13b9967ed582f2353dfa7046bfb794ce69cfc655b23f1e14c0f"
+}

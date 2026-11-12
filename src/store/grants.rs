@@ -8,7 +8,6 @@
 use super::control::Control;
 use super::now;
 use crate::error::Result;
-use sqlx::Row;
 
 impl Control {
     pub async fn insert_grant(
@@ -42,17 +41,17 @@ impl Control {
     /// them into one status, so a guesser learns nothing from the difference.
     pub async fn claim_grant(&self, code_hash: &str) -> Result<Option<String>> {
         let t = now();
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "UPDATE pair_grants SET claimed_at = ?
              WHERE code_hash = ? AND claimed_at IS NULL AND expires_at > ?
              RETURNING subject",
+            t,
+            code_hash,
+            t
         )
-        .bind(t)
-        .bind(code_hash)
-        .bind(t)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.get("subject")))
+        Ok(row.map(|r| r.subject))
     }
 
     pub async fn purge_expired_grants(&self) -> Result<u64> {

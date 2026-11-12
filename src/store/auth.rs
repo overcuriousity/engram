@@ -1,7 +1,6 @@
 use super::control::Control;
 use super::now;
 use crate::error::Result;
-use sqlx::Row;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ApiToken {
@@ -59,17 +58,17 @@ impl Control {
 
     /// The live token with this id, if there is one.
     pub async fn active_token(&self, id: &str) -> Result<Option<StoredToken>> {
-        let row = sqlx::query(
-            "SELECT id, subject, token_hash FROM api_tokens
-             WHERE id = ? AND revoked_at IS NULL AND scheme = 2",
+        let row = sqlx::query!(
+            r#"SELECT id AS "id!", subject, token_hash FROM api_tokens
+             WHERE id = ? AND revoked_at IS NULL AND scheme = 2"#,
+            id
         )
-        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| StoredToken {
-            id: r.get("id"),
-            subject: r.get("subject"),
-            token_hash: r.get("token_hash"),
+            id: r.id,
+            subject: r.subject,
+            token_hash: r.token_hash,
         }))
     }
 
@@ -81,23 +80,23 @@ impl Control {
     /// tenant's token ids, names, user-agents and last-used times rendered on
     /// whoever opened Settings.
     pub async fn list_tokens(&self, subject: &str) -> Result<Vec<ApiToken>> {
-        let rows = sqlx::query(
-            "SELECT id, name, subject, created_at, last_used_at, revoked_at, user_agent
-             FROM api_tokens WHERE subject = ? ORDER BY created_at DESC",
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", name, subject, created_at, last_used_at, revoked_at, user_agent
+             FROM api_tokens WHERE subject = ? ORDER BY created_at DESC"#,
+            subject
         )
-        .bind(subject)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| ApiToken {
-                id: r.get("id"),
-                name: r.get("name"),
-                subject: r.get("subject"),
-                created_at: r.get("created_at"),
-                last_used_at: r.get("last_used_at"),
-                revoked_at: r.get("revoked_at"),
-                user_agent: r.get("user_agent"),
+                id: r.id,
+                name: r.name,
+                subject: r.subject,
+                created_at: r.created_at,
+                last_used_at: r.last_used_at,
+                revoked_at: r.revoked_at,
+                user_agent: r.user_agent,
             })
             .collect())
     }

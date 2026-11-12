@@ -78,26 +78,26 @@ impl Store {
     /// and therefore needs all of them. Paging it would mean holding a cursor
     /// across a rebuild that is only correct when it sees the whole window.
     pub async fn context_events_since(&self, since: i64) -> Result<Vec<ContextEvent>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT id, scope, at, bundle, device_key, local_hour, weekday, tz
                FROM context_events
               WHERE at >= ?
               ORDER BY at, id",
+            since
         )
-        .bind(since)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| ContextEvent {
-                id: r.get("id"),
-                scope: r.get("scope"),
-                at: r.get("at"),
-                bundle: r.get("bundle"),
-                device_key: r.get("device_key"),
-                local_hour: r.get("local_hour"),
-                weekday: r.get("weekday"),
-                tz: r.get("tz"),
+                id: r.id,
+                scope: r.scope,
+                at: r.at,
+                bundle: r.bundle,
+                device_key: r.device_key,
+                local_hour: r.local_hour,
+                weekday: r.weekday,
+                tz: r.tz,
             })
             .collect())
     }
@@ -126,14 +126,14 @@ impl Store {
     /// at, while the base has nothing to say about the situation. Nothing is
     /// claimed about it, and the page prints no reason beside it.
     pub async fn random_artifact(&self) -> Result<Option<(String, Option<String>, String)>> {
-        let row = sqlx::query(
-            "SELECT id, title, text FROM artifacts
+        let row = sqlx::query!(
+            r#"SELECT id AS "id!", title, text FROM artifacts
               WHERE status = 'active' AND superseded_by IS NULL
-              ORDER BY RANDOM() LIMIT 1",
+              ORDER BY RANDOM() LIMIT 1"#
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| (r.get("id"), r.get("title"), r.get("text"))))
+        Ok(row.map(|r| (r.id, r.title, r.text)))
     }
 
     /// Every artifact that currently has a profile.

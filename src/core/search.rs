@@ -2308,7 +2308,6 @@ mod tests {
     use crate::core::test_support::{test_core, test_core_counting_reranked_docs};
     use crate::store::artifacts::NewArtifact;
     use crate::store::feedback::Door;
-    use sqlx::Row;
 
     /// An empty vector is the *absence* of one, spelled `unwrap_or_default()`
     /// upstream — and this cache is not the sweep's own. `search_inner` reads
@@ -4798,7 +4797,7 @@ mod tests {
         core.search(&query, Door::Ui).await.unwrap();
         core.background.wait_idle().await;
 
-        let rows = sqlx::query("SELECT rank, shown FROM search_candidates ORDER BY rank")
+        let rows = sqlx::query!("SELECT rank, shown FROM search_candidates ORDER BY rank")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();
@@ -4807,7 +4806,7 @@ mod tests {
             "the pool must be wider than the three results shown, got {}",
             rows.len()
         );
-        let shown: i64 = rows.iter().map(|r| r.get::<i64, _>("shown")).sum();
+        let shown: i64 = rows.into_iter().map(|r| r.shown).sum();
         assert_eq!(
             shown, 3,
             "exactly the answer the searcher saw is flagged shown"
@@ -5002,7 +5001,7 @@ mod tests {
         assert_eq!(answer.len(), 3, "the searcher still sees only the answer");
         core.background.wait_idle().await;
 
-        let rows = sqlx::query("SELECT rank, shown FROM search_candidates ORDER BY rank")
+        let rows = sqlx::query!("SELECT rank, shown FROM search_candidates ORDER BY rank")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();
@@ -5011,7 +5010,7 @@ mod tests {
             "the reranked pool collapsed to the answer, got {}",
             rows.len()
         );
-        let shown: i64 = rows.iter().map(|r| r.get::<i64, _>("shown")).sum();
+        let shown: i64 = rows.into_iter().map(|r| r.shown).sum();
         assert_eq!(
             shown, 3,
             "only the answer the searcher saw is flagged shown"
@@ -5260,18 +5259,14 @@ mod tests {
         assert_eq!(out.len(), 2);
         let event = outcome.event.expect("the UI door waits for its capture");
         let rows =
-            sqlx::query("SELECT artifact_id, band, shown FROM search_candidates ORDER BY rank")
-                .bind(&event)
+            sqlx::query!("SELECT artifact_id, band, shown FROM search_candidates ORDER BY rank")
                 .fetch_all(&core.store.pool)
                 .await
                 .unwrap();
-        let band: Vec<&sqlx::sqlite::SqliteRow> = rows
-            .iter()
-            .filter(|r| r.get::<i64, _>("band") == 1)
-            .collect();
+        let band: Vec<_> = rows.iter().filter(|r| r.band == 1).collect();
         assert_eq!(band.len(), 1, "the appended hit is in the pool, flagged");
-        assert_eq!(band[0].get::<String, _>("artifact_id"), b);
-        assert_eq!(band[0].get::<i64, _>("shown"), 1);
+        assert_eq!(band[0].artifact_id, b);
+        assert_eq!(band[0].shown, 1);
         // It is also in the ranked pool, unshown, past the limit of one: the
         // open below has to land on the row the person saw.
 

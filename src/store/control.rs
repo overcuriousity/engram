@@ -120,12 +120,12 @@ impl Control {
 
     /// The instance's VAPID keypair, as stored.
     pub async fn vapid(&self) -> Result<VapidKeys> {
-        let row = sqlx::query("SELECT vapid_private, vapid_public FROM instance WHERE id = 1")
+        let row = sqlx::query!("SELECT vapid_private, vapid_public FROM instance WHERE id = 1")
             .fetch_one(&self.pool)
             .await?;
         Ok(VapidKeys {
-            private: row.get("vapid_private"),
-            public: row.get("vapid_public"),
+            private: row.vapid_private,
+            public: row.vapid_public,
         })
     }
 

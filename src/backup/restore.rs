@@ -20,7 +20,7 @@ use super::{lock, sqlite};
 use crate::config::Config;
 use crate::error::{Error, Result};
 use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{ConnectOptions, Connection, Row};
+use sqlx::{ConnectOptions, Connection};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Default)]
@@ -312,14 +312,11 @@ async fn live_users(control: &Path) -> Result<Vec<(String, String)>> {
         .connect()
         .await
         .map_err(|e| Error::Store(format!("{}: {e}", control.display())))?;
-    let rows = sqlx::query("SELECT slug, subject FROM users ORDER BY slug")
+    let rows = sqlx::query!(r#"SELECT slug, subject AS "subject!" FROM users ORDER BY slug"#)
         .fetch_all(&mut conn)
         .await?;
     let _ = conn.close().await;
-    Ok(rows
-        .iter()
-        .map(|r| (r.get::<String, _>("slug"), r.get::<String, _>("subject")))
-        .collect())
+    Ok(rows.into_iter().map(|r| (r.slug, r.subject)).collect())
 }
 
 /// What happened to one tenant's vectors.

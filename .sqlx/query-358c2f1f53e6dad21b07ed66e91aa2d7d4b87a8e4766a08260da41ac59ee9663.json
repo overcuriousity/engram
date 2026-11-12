@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS total,\n                    SUM(CASE WHEN state <> 'pending' THEN 1 ELSE 0 END) AS resolved\n             FROM segments WHERE corpus_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "total",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "resolved",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "358c2f1f53e6dad21b07ed66e91aa2d7d4b87a8e4766a08260da41ac59ee9663"
+}

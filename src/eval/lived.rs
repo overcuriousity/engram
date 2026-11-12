@@ -14,7 +14,6 @@
 
 use crate::core::Core;
 use crate::error::Result;
-use sqlx::Row;
 
 /// The lived record of one generation.
 ///
@@ -37,21 +36,21 @@ impl Lived {
 
 /// Everything observed under `generation_id` that is still usable.
 pub async fn lived(core: &Core, generation_id: &str) -> Result<Lived> {
-    let r = sqlx::query(
+    let r = sqlx::query!(
         "SELECT COUNT(*) AS n,
                 COALESCE(SUM(CASE WHEN strength > 0 THEN 1 ELSE 0 END), 0) AS positives,
                 CAST(COALESCE(SUM(CASE WHEN strength < 0 THEN -strength ELSE 0 END), 0) AS REAL)
                     AS negatives
            FROM observations
           WHERE generation_id = ? AND excluded_at IS NULL",
+        generation_id
     )
-    .bind(generation_id)
     .fetch_one(&core.store.pool)
     .await?;
     Ok(Lived {
-        positives: r.get::<i64, _>("positives") as usize,
-        negatives: r.get::<f64, _>("negatives") as f32,
-        observations: r.get::<i64, _>("n") as usize,
+        positives: r.positives as usize,
+        negatives: r.negatives as f32,
+        observations: r.n as usize,
     })
 }
 

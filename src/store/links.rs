@@ -135,22 +135,22 @@ impl Store {
         let (a, b) = canonical(a, b);
         let at = now();
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-        let existing = sqlx::query(
+        let existing = sqlx::query!(
             "SELECT weight, bumped_at, state FROM artifact_links
                                      WHERE a_id = ? AND b_id = ?",
+            a,
+            b
         )
-        .bind(a)
-        .bind(b)
         .fetch_optional(&mut *tx)
         .await?;
         // Read inside the transaction the write happens in, so the decay is
         // folded from the number the update is about to replace.
-        let dismissed = existing.as_ref().is_some_and(|r| {
-            LinkState::parse(r.get::<String, _>("state").as_str()) == LinkState::Dismissed
-        });
+        let dismissed = existing
+            .as_ref()
+            .is_some_and(|r| LinkState::parse(r.state.as_str()) == LinkState::Dismissed);
         let carried = existing
             .as_ref()
-            .map(|r| decayed(r.get("weight"), r.get("bumped_at"), at, half_life_days))
+            .map(|r| decayed(r.weight, r.bumped_at, at, half_life_days))
             .unwrap_or(0.0);
         sqlx::query!(
             "INSERT INTO artifact_links

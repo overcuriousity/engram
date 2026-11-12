@@ -822,12 +822,13 @@ impl Store {
     }
 
     pub async fn job_counts(&self) -> Result<Vec<(String, i64)>> {
-        let rows =
-            sqlx::query("SELECT state, COUNT(*) AS n FROM jobs WHERE subject = ? GROUP BY state")
-                .bind(&self.subject)
-                .fetch_all(&self.control.pool)
-                .await?;
-        Ok(rows.iter().map(|r| (r.get("state"), r.get("n"))).collect())
+        let rows = sqlx::query!(
+            "SELECT state, COUNT(*) AS n FROM jobs WHERE subject = ? GROUP BY state",
+            &self.subject
+        )
+        .fetch_all(&self.control.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| (r.state, r.n)).collect())
     }
 
     /// Jobs waiting on a backoff, soonest first.
@@ -836,46 +837,46 @@ impl Store {
     /// that is merely queued: a fresh job has `run_after` in the past and does
     /// not belong on a page about trouble.
     pub async fn retrying_jobs(&self, limit: i64) -> Result<Vec<RetryingJob>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT stage, target_id, attempts, last_error, run_after FROM jobs
               WHERE subject = ? AND state = 'pending' AND attempts > 0 AND run_after > ?
               ORDER BY run_after LIMIT ?",
+            &self.subject,
+            now(),
+            limit
         )
-        .bind(&self.subject)
-        .bind(now())
-        .bind(limit)
         .fetch_all(&self.control.pool)
         .await?;
         let at = now();
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| RetryingJob {
-                stage: r.get("stage"),
-                target_id: r.get("target_id"),
-                attempts: r.get("attempts"),
-                next_attempt_secs: (r.get::<i64, _>("run_after") - at).max(0),
-                last_error: r.get("last_error"),
+                stage: r.stage,
+                target_id: r.target_id,
+                attempts: r.attempts,
+                next_attempt_secs: (r.run_after - at).max(0),
+                last_error: r.last_error,
             })
             .collect())
     }
 
     pub async fn failed_jobs(&self, limit: i64) -> Result<Vec<FailedJob>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT id, stage, target_id, attempts, last_error FROM jobs
               WHERE subject = ? AND state = 'failed' ORDER BY id DESC LIMIT ?",
+            &self.subject,
+            limit
         )
-        .bind(&self.subject)
-        .bind(limit)
         .fetch_all(&self.control.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| FailedJob {
-                id: r.get("id"),
-                stage: r.get("stage"),
-                target_id: r.get("target_id"),
-                attempts: r.get("attempts"),
-                last_error: r.get("last_error"),
+                id: r.id,
+                stage: r.stage,
+                target_id: r.target_id,
+                attempts: r.attempts,
+                last_error: r.last_error,
             })
             .collect())
     }
@@ -885,13 +886,13 @@ impl Store {
     /// Measured from `created_at`, not `run_after`: a job that was never
     /// delayed has `run_after = 0`, which would report seconds-since-epoch.
     pub async fn oldest_pending_age(&self) -> Result<Option<i64>> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT MIN(created_at) AS oldest FROM jobs WHERE subject = ? AND state = 'pending'",
+            &self.subject
         )
-        .bind(&self.subject)
         .fetch_one(&self.control.pool)
         .await?;
-        let oldest: Option<i64> = row.get("oldest");
+        let oldest: Option<i64> = row.oldest;
         Ok(oldest.map(|t| (now() - t).max(0)))
     }
 
@@ -1191,7 +1192,7 @@ impl Store {
     /// one set of inference endpoints. This is for asking a single base to take
     /// its next step, which is what every test of a stage is doing.
     pub async fn claim_job(&self) -> Result<Option<Job>> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "UPDATE jobs
                 SET state = 'running', claimed_at = ?, attempts = attempts + 1
               WHERE id = (
@@ -1200,19 +1201,19 @@ impl Store {
                  ORDER BY class, attempts, seq, id LIMIT 1
               )
               RETURNING id, stage, target_kind, target_id, attempts",
+            now(),
+            &self.subject,
+            now()
         )
-        .bind(now())
-        .bind(&self.subject)
-        .bind(now())
         .fetch_optional(&self.control.pool)
         .await?;
 
         Ok(row.map(|r| Job {
-            id: r.get("id"),
-            stage: Stage::parse(r.get::<String, _>("stage").as_str()).unwrap_or(Stage::Synthesize),
-            target_kind: r.get("target_kind"),
-            target_id: r.get("target_id"),
-            attempts: r.get("attempts"),
+            id: r.id,
+            stage: Stage::parse(r.stage.as_str()).unwrap_or(Stage::Synthesize),
+            target_kind: r.target_kind,
+            target_id: r.target_id,
+            attempts: r.attempts,
         }))
     }
 }
@@ -1325,19 +1326,19 @@ mod tests {
         // age in the ordering turns every poll into a temp B-tree sort, and
         // nothing about the queue's behaviour would say so.
         let s = Store::memory().await.unwrap();
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "EXPLAIN QUERY PLAN
              SELECT id FROM jobs
               WHERE state = 'pending' AND run_after <= ?
               ORDER BY class, attempts, seq, id LIMIT 1",
+            now()
         )
-        .bind(now())
         .fetch_all(&s.control.pool)
         .await
         .unwrap();
         let plan = rows
-            .iter()
-            .map(|r| r.get::<String, _>("detail"))
+            .into_iter()
+            .map(|r| r.detail.unwrap_or_default())
             .collect::<Vec<_>>()
             .join("\n");
         assert!(

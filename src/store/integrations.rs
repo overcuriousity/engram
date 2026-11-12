@@ -3,7 +3,6 @@
 use super::Store;
 use super::artifacts::Chunk;
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 /// Two answers, not three. There used to be a `conflict`: two artifacts at or
 /// above the supersede line whose value-shaped tokens differed, filed as a
@@ -67,21 +66,21 @@ impl Store {
     }
 
     pub async fn integration_of(&self, artifact_id: &str) -> Result<Option<Integration>> {
-        let row = sqlx::query(
-            "SELECT artifact_id, at, tag, nearest_id, nearest_score, detail
-               FROM integrations WHERE artifact_id = ?",
+        let row = sqlx::query!(
+            r#"SELECT artifact_id AS "artifact_id!", at, tag, nearest_id, nearest_score, detail
+               FROM integrations WHERE artifact_id = ?"#,
+            artifact_id
         )
-        .bind(artifact_id)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|r| {
             Ok(Integration {
-                artifact_id: r.get("artifact_id"),
-                at: r.get("at"),
-                tag: Tag::parse(&r.get::<String, _>("tag"))?,
-                nearest_id: r.get("nearest_id"),
-                nearest_score: r.get::<Option<f64>, _>("nearest_score").map(|s| s as f32),
-                detail: r.get("detail"),
+                artifact_id: r.artifact_id,
+                at: r.at,
+                tag: Tag::parse(&r.tag)?,
+                nearest_id: r.nearest_id,
+                nearest_score: r.nearest_score.map(|s| s as f32),
+                detail: r.detail,
             })
         })
         .transpose()
@@ -114,15 +113,15 @@ impl Store {
 
     /// (novel, known, conflict) over every row.
     pub async fn integration_counts(&self) -> Result<(i64, i64, i64)> {
-        let r = sqlx::query(
+        let r = sqlx::query!(
             "SELECT COALESCE(SUM(tag = 'novel'), 0) AS novel,
                     COALESCE(SUM(tag = 'known'), 0) AS known,
                     COALESCE(SUM(tag = 'conflict'), 0) AS conflict
-               FROM integrations",
+               FROM integrations"
         )
         .fetch_one(&self.pool)
         .await?;
-        Ok((r.get("novel"), r.get("known"), r.get("conflict")))
+        Ok((r.novel, r.known, r.conflict))
     }
 }
 

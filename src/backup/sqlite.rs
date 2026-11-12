@@ -75,11 +75,11 @@ async fn count(conn: &mut SqliteConnection, sql: &'static str) -> Result<u64> {
 /// Every user's slug in a control database, in order.
 pub async fn users_in(control: &Path) -> Result<Vec<String>> {
     let mut conn = open_read_only(control).await?;
-    let rows = sqlx::query("SELECT slug FROM users ORDER BY slug")
+    let rows = sqlx::query!("SELECT slug FROM users ORDER BY slug")
         .fetch_all(&mut conn)
         .await?;
     let _ = conn.close().await;
-    Ok(rows.iter().map(|r| r.get::<String, _>("slug")).collect())
+    Ok(rows.into_iter().map(|r| r.slug).collect())
 }
 
 /// `<path>.restoring`: where a restore stages a file beside its target.

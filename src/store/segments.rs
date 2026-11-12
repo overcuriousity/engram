@@ -329,16 +329,16 @@ impl Store {
     /// `(resolved, total)`, where resolved counts both a clean window and one
     /// the model gave up on. Both are settled; neither is still owed work.
     pub async fn segment_progress(&self, corpus_id: &str) -> Result<(i64, i64)> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT COUNT(*) AS total,
                     SUM(CASE WHEN state <> 'pending' THEN 1 ELSE 0 END) AS resolved
              FROM segments WHERE corpus_id = ?",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_one(&self.pool)
         .await?;
-        let total: i64 = row.get("total");
-        let resolved: Option<i64> = row.get("resolved");
+        let total: i64 = row.total;
+        let resolved: Option<i64> = row.resolved;
         Ok((resolved.unwrap_or(0), total))
     }
 

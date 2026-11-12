@@ -338,12 +338,10 @@ fn no_literal_colour_outside_the_token_file() {
 
 /// Files whose runtime queries are not yet converted to the checked macros; shrinks to empty.
 const NOT_YET_CHECKED: &[&str] = &[
-    "src/backup/restore.rs",
     "src/backup/sqlite.rs",
     "src/core/ingest.rs",
     "src/core/search.rs",
     "src/eval/anchor.rs",
-    "src/eval/lived.rs",
     "src/jobs/associate.rs",
     "src/jobs/consolidate.rs",
     "src/jobs/mod.rs",
@@ -353,8 +351,6 @@ const NOT_YET_CHECKED: &[&str] = &[
     "src/store/actions.rs",
     "src/store/artifacts.rs",
     "src/store/asks.rs",
-    "src/store/attachments.rs",
-    "src/store/auth.rs",
     "src/store/context.rs",
     "src/store/control.rs",
     "src/store/corpora.rs",
@@ -362,9 +358,7 @@ const NOT_YET_CHECKED: &[&str] = &[
     "src/store/feedback.rs",
     "src/store/gaps.rs",
     "src/store/generations.rs",
-    "src/store/grants.rs",
     "src/store/insights.rs",
-    "src/store/integrations.rs",
     "src/store/jobs.rs",
     "src/store/lineage.rs",
     "src/store/links.rs",
@@ -375,12 +369,9 @@ const NOT_YET_CHECKED: &[&str] = &[
     "src/store/pursuits.rs",
     "src/store/rehearsals.rs",
     "src/store/segments.rs",
-    "src/store/sleep_runs.rs",
     "src/store/sweeps.rs",
     "src/store/versions.rs",
     "src/vector/sqlite.rs",
-    "src/web/api.rs",
-    "src/web/insights.rs",
     "src/web/ui.rs",
 ];
 

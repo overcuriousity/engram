@@ -1969,7 +1969,6 @@ async fn restore_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<Sta
 }
 
 async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<StatusResponse>> {
-    use sqlx::Row;
     let (held_corpora, held_artifacts) = tenant.core.store.held_brief().await?;
     let last_kept = tenant
         .core
@@ -1985,13 +1984,12 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
             at: created_at,
         });
     let (example_remind, example_lang) = crate::web::workspace::examples(&tenant.core, &headers);
-    let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
+    let corpus_rows = sqlx::query!("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
         .fetch_all(&tenant.core.store.pool)
         .await?;
-    let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+    let chunks: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
-        .await?
-        .get("n");
+        .await?;
 
     // Counted rather than paged. Every one of these was the length of a list
     // the insights page draws — fifty pursuits, two hundred artifacts — which
@@ -2071,10 +2069,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
             remind: example_remind,
         },
         teach: held_corpora < crate::web::ui::TEACH_UNTIL_SOURCES,
-        sources: corpus_rows
-            .iter()
-            .map(|r| (r.get("status"), r.get("n")))
-            .collect(),
+        sources: corpus_rows.into_iter().map(|r| (r.status, r.n)).collect(),
         jobs: tenant.core.store.job_counts().await?,
         failed: tenant.core.store.failed_jobs(50).await?,
         oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,

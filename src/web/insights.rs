@@ -627,11 +627,9 @@ pub(crate) struct Machine {
 }
 
 pub(crate) async fn machine(tenant: &Tenant) -> Result<Machine> {
-    use sqlx::Row;
-    let artifacts: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+    let artifacts: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
-        .await?
-        .get("n");
+        .await?;
     let retrying: Vec<RetryingRow> = tenant
         .core
         .store
@@ -753,12 +751,9 @@ pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
 }
 
 async fn page(tenant: Tenant) -> UiResult<Response> {
-    use sqlx::Row;
-
-    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+    let artifact_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
-        .await?
-        .get("n");
+        .await?;
 
     // Not a queue of chores: work that hit something and is waiting to try
     // again on its own. Nothing here needs a person.

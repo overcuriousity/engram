@@ -556,7 +556,7 @@ impl Store {
     /// rate. A row an operator asked for — Synthese, marked `asked_by` — is
     /// not a verdict's doing and is not counted at all.
     pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
-        let r = sqlx::query(
+        let r = sqlx::query!(
             "WITH acts AS (
                SELECT json_extract(evidence_json, '$.pair_id') AS pair_id,
                       MAX(undone_at IS NOT NULL) AS undone
@@ -572,15 +572,15 @@ impl Store {
                LEFT JOIN acts ON acts.pair_id = p.id
               WHERE p.score >= ? AND p.score < ? AND p.state <> 'pending'
                 AND (p.decided_by IN ('model', 'evidence') OR acts.pair_id IS NOT NULL)",
+            lo,
+            hi
         )
-        .bind(lo)
-        .bind(hi)
         .fetch_one(&self.pool)
         .await?;
         Ok(BandRecord {
-            judged: r.get::<i64, _>("judged") as usize,
-            acted: r.get::<i64, _>("acted") as usize,
-            undone: r.get::<i64, _>("undone") as usize,
+            judged: r.judged as usize,
+            acted: r.acted as usize,
+            undone: r.undone as usize,
         })
     }
 

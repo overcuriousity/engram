@@ -1034,15 +1034,15 @@ impl Store {
     /// between removing a stale heading and taking a live gap off the page.
     pub async fn cluster_keys(&self) -> Result<Vec<StoredCluster>> {
         let mut out = Vec::new();
-        for r in sqlx::query("SELECT key, labelled_by, members FROM gap_clusters")
+        for r in sqlx::query!(r#"SELECT key AS "key!", labelled_by, members FROM gap_clusters"#)
             .fetch_all(&self.pool)
             .await?
         {
-            let raw: Vec<serde_json::Value> = serde_json::from_str(&r.get::<String, _>("members"))
-                .map_err(|e| Error::Internal(e.to_string()))?;
+            let raw: Vec<serde_json::Value> =
+                serde_json::from_str(&r.members).map_err(|e| Error::Internal(e.to_string()))?;
             out.push(StoredCluster {
-                key: r.get("key"),
-                labelled_by: r.get("labelled_by"),
+                key: r.key,
+                labelled_by: r.labelled_by,
                 members: raw
                     .iter()
                     .filter_map(|m| {
@@ -1775,12 +1775,12 @@ mod tests {
 
         assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 1);
 
-        let left: Vec<String> = sqlx::query("SELECT gap_id FROM gap_coverage")
+        let left: Vec<String> = sqlx::query!("SELECT gap_id FROM gap_coverage")
             .fetch_all(&store.pool)
             .await
             .unwrap()
-            .iter()
-            .map(|r| r.get("gap_id"))
+            .into_iter()
+            .map(|r| r.gap_id)
             .collect();
         assert_eq!(left, vec![kept], "the coverage of a gap that still exists");
         // And a second pass has nothing left to do.

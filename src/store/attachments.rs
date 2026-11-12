@@ -7,7 +7,6 @@
 
 use super::{Store, now};
 use crate::error::Result;
-use sqlx::Row;
 
 #[derive(Debug, Clone)]
 pub struct Attachment {
@@ -93,24 +92,24 @@ impl Store {
     }
 
     pub async fn attachment_for_corpus(&self, corpus_id: &str) -> Result<Option<Attachment>> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT id, corpus_id, kind, mime, filename, bytes, preview, width, height, created_at
              FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| Attachment {
-            id: r.get("id"),
-            corpus_id: r.get("corpus_id"),
-            kind: r.get("kind"),
-            mime: r.get("mime"),
-            filename: r.get("filename"),
-            bytes: r.get("bytes"),
-            preview: r.get("preview"),
-            width: r.get("width"),
-            height: r.get("height"),
-            created_at: r.get("created_at"),
+            id: r.id,
+            corpus_id: r.corpus_id,
+            kind: r.kind,
+            mime: r.mime,
+            filename: r.filename,
+            bytes: r.bytes,
+            preview: r.preview,
+            width: r.width,
+            height: r.height,
+            created_at: r.created_at,
         }))
     }
 
@@ -135,25 +134,26 @@ impl Store {
     /// stored without one, and answering `Some` for it hands the caller a
     /// broken image under an `image/jpeg` header instead of a plain no.
     pub async fn attachment_preview(&self, corpus_id: &str) -> Result<Option<(String, Vec<u8>)>> {
-        let row =
-            sqlx::query("SELECT preview FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1")
-                .bind(corpus_id)
-                .fetch_optional(&self.pool)
-                .await?;
+        let row = sqlx::query!(
+            "SELECT preview FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1",
+            corpus_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row
-            .map(|r| r.get::<Vec<u8>, _>("preview"))
+            .map(|r| r.preview)
             .filter(|p| !p.is_empty())
             .map(|p| (PREVIEW_MIME.to_string(), p)))
     }
 
     pub async fn attachment_original(&self, corpus_id: &str) -> Result<Option<(String, Vec<u8>)>> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT mime, bytes FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| (r.get("mime"), r.get("bytes"))))
+        Ok(row.map(|r| (r.mime, r.bytes)))
     }
 }
 
