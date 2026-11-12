@@ -134,6 +134,8 @@ pub struct Tenants {
     /// `Working::is_idle` says when nobody is serving the subject and nothing
     /// warm is left to keep, and `working_for` drops those as it goes.
     working: Mutex<HashMap<String, crate::core::Working>>,
+    /// One live channel per subject, kept across eviction so open pages stay subscribed.
+    live: Mutex<HashMap<String, crate::web::live::Live>>,
     /// Whether this registry holds one tenant that answers for every subject.
     /// See `Tenants::single`.
     solo: bool,
@@ -162,6 +164,7 @@ impl Tenants {
             first_opened: Mutex::new(HashSet::new()),
             provisioning: Mutex::new(HashMap::new()),
             working: Mutex::new(HashMap::new()),
+            live: Mutex::new(HashMap::new()),
             solo: false,
             #[cfg(feature = "contained")]
             local: None,
@@ -376,8 +379,9 @@ impl Tenants {
             std::path::Path::new(&self.cfg.store.dir),
         )
         .await;
-        let core =
+        let mut core =
             Core::from_config_with(&self.cfg, vectors, store, self.working_for(&user.subject));
+        core.live = self.live_for(&user.subject);
         #[cfg(feature = "contained")]
         let core = match &self.local {
             Some(models) => core.with_local_models(&self.cfg, models),
@@ -439,6 +443,13 @@ impl Tenants {
         };
         map.retain(|s, w| s == subject || !w.is_idle());
         map.entry(subject.to_string()).or_default().clone()
+    }
+
+    fn live_for(&self, subject: &str) -> crate::web::live::Live {
+        self.live
+            .lock()
+            .map(|mut m| m.entry(subject.to_string()).or_default().clone())
+            .unwrap_or_default()
     }
 
     /// Whether this is the first time this process has opened `subject`.

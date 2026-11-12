@@ -44,7 +44,7 @@ async-stream = "0.3"
 # The `Stream` trait itself (a re-export of `futures-core`'s) and `next()`.
 # Already in the tree by way of axum and sqlx; named here because this uses it
 # directly.
-tokio-stream = "0.1"
+tokio-stream = { version = "0.1", features = ["sync"] }
 # `blocking` is for exactly one call: the one-time tokenizer download at boot,
 # which runs on its own OS thread — see `infer::budget::fetch_blocking`.
 # `multipart` is for exactly one other: the speech endpoint, which takes the

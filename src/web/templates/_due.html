@@ -27,7 +27,7 @@
    stamp its own predecessor reported is a row the viewer has not seen. #}
 <div id="due" class="due{% if !rows.is_empty() || just.is_some() %} due-filled{% endif %}"
      hx-post="/ui/due" hx-swap="outerHTML"
-     hx-trigger="refresh{% if let Some(s) = refresh_in %}, every {{ s }}s{% endif %}"
+     hx-trigger="refresh, sse:queue"{% if let Some(s) = refresh_in %} data-refresh-in="{{ s }}"{% endif %}
      hx-vals='{"tz": "{{ tz }}", "since": "{{ since }}", "all": "{% if all %}1{% else %}0{% endif %}", "head": "{% if head %}1{% else %}0{% endif %}"}'>
 {% if head && (!rows.is_empty() || just.is_some() || !events.is_empty()) %}<h2>Due</h2>{% endif %}
 {% if let Some(j) = just %}

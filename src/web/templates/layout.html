@@ -24,7 +24,7 @@
   {%- endfor %}
   <script src="{{ crate::web::assets::url("app.js") }}" defer></script>
 </head>
-<body>
+<body{% block live %}{% endblock %}>
   {# Chrome, not content. Inside `.shell` the nav took whichever measure the
      page had chosen — 60rem on Capture, 110rem on Search — so it changed width
      as you navigated, and the rule under it stopped at a different place on

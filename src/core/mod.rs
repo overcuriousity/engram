@@ -141,6 +141,8 @@ pub const UNDO_MS: u32 = 6000;
 
 #[derive(Clone)]
 pub struct Core {
+    /// Tells open pages that the queue or the idle line moved.
+    pub live: crate::web::live::Live,
     pub store: Store,
     pub vectors: Arc<dyn VectorStore>,
     /// `None` without `[infer.synthesize]`: the embed-only floor, where every
@@ -560,6 +562,7 @@ impl Core {
             std::path::Path::new(&cfg.store.dir),
         ));
         Core {
+            live: Default::default(),
             evolve: cfg.evolve.clone(),
             store,
             vectors,
@@ -943,6 +946,7 @@ pub mod test_support {
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
+            live: Default::default(),
             evolve: crate::config::EvolveConfig::default(),
             store,
             vectors: Arc::new(MemoryVectors::new()),

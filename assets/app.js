@@ -3460,3 +3460,20 @@
     applyVars(document);
   }
 })();
+
+// The due band counts down to its next row by a timer the server names, not by polling.
+(function () {
+  'use strict';
+  var timer = null;
+  function arm() {
+    clearTimeout(timer);
+    var due = document.getElementById('due');
+    var secs = due && Number(due.getAttribute('data-refresh-in'));
+    if (!secs || !window.htmx) return;
+    timer = setTimeout(function () { window.htmx.trigger(due, 'refresh'); }, secs * 1000);
+  }
+  document.addEventListener('htmx:afterSettle', function (e) {
+    if (e.detail.elt && (e.detail.elt.id === 'due' || e.detail.elt.querySelector && e.detail.elt.querySelector('#due'))) arm();
+  });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', arm); else arm();
+})();

@@ -637,6 +637,12 @@ impl Core {
 
     /// The same thing, for a door that also knows where the text was read.
     pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
+        let out = self.ingest_capture_quiet(c).await;
+        self.live.changed();
+        out
+    }
+
+    async fn ingest_capture_quiet(&self, c: Capture) -> Result<IngestOutcome> {
         let text = c.text.as_str();
         let origin = c.origin.as_str();
         let title_hint = c.title_hint.as_deref();

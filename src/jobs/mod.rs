@@ -137,7 +137,9 @@ async fn run_dispatched(core: &Core, job: Job, subject: Option<&str>) -> Result<
     // not travel with the future, so every line logged after the first
     // suspension point lost its `job{...}` prefix — which in a journal full of
     // interleaved windows is the only thing saying which job spoke.
-    run_claimed(core, job).instrument(span).await
+    let ran = run_claimed(core, job).instrument(span).await;
+    core.live.changed();
+    ran
 }
 
 async fn run_claimed(core: &Core, job: Job) -> Result<bool> {

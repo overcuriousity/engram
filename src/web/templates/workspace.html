@@ -1,5 +1,6 @@
 {% extends "layout.html" %}
 {% block title %}engram{% endblock %}
+{% block live %} hx-ext="sse" sse-connect="/ui/live"{% endblock %}
 {% block regions %}regions-rail-focus-source{% endblock %}
 {% block content %}
 {# The one page with no visible heading: the box names itself, and a title

@@ -1494,7 +1494,7 @@ mod tests {
         let line = get_body(&app, &cookie, "/ui/idle-foot").await;
         assert!(line.contains("reading…"), "{line}");
         assert!(
-            line.contains("every 3s"),
+            line.contains("sse:idle"),
             "and asks again until it is not: {line}"
         );
         assert!(

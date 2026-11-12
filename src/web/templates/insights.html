@@ -1,5 +1,6 @@
 {% extends "layout.html" %}
 {% block title %}Insights — engram{% endblock %}
+{% block live %} hx-ext="sse" sse-connect="/ui/live"{% endblock %}
 {% block regions %}regions-table{% endblock %}
 {% block content %}
 <h1>Insights</h1>

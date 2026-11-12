@@ -1808,7 +1808,7 @@ mod tests {
         )
         .await;
         assert!(
-            html.contains("every 300s"),
+            html.contains(r#"data-refresh-in="300""#),
             "an idle page asks once every five minutes, and no more often: {html}"
         );
     }
@@ -1831,7 +1831,7 @@ mod tests {
         )
         .await;
         assert!(
-            html.contains("every 90s"),
+            html.contains(r#"data-refresh-in="90""#),
             "polled when it lands, not on a fixed tick: {html}"
         );
     }
@@ -1849,7 +1849,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(html.contains("every 300s"), "five-minute cap: {html}");
+        assert!(
+            html.contains(r#"data-refresh-in="300""#),
+            "five-minute cap: {html}"
+        );
     }
 
     #[test]

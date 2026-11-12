@@ -159,3 +159,38 @@ fn the_static_scan_reads_the_files_it_claims_to() {
     assert!(Path::new(&root().join("src/web/templates/layout.html")).exists());
     assert!(!files("src/web/templates", "html").is_empty());
 }
+
+#[test]
+fn no_template_polls() {
+    let mut offenders = Vec::new();
+    for (name, src) in files("src/web/templates", "html") {
+        for (n, line) in without_template_comments(&src).lines().enumerate() {
+            let mut rest = line;
+            while let Some(i) = rest.find("every ") {
+                let after = &rest[i + 6..];
+                let digits = after
+                    .chars()
+                    .take_while(|c| {
+                        c.is_ascii_digit()
+                            || *c == '{'
+                            || *c == ' '
+                            || c.is_alphanumeric()
+                            || *c == '}'
+                    })
+                    .collect::<String>();
+                if after.starts_with(|c: char| c.is_ascii_digit() || c == '{')
+                    && digits.contains('s')
+                {
+                    offenders.push(format!("{name}:{}: {line}", n + 1));
+                    break;
+                }
+                rest = after;
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "polling triggers:\n{}",
+        offenders.join("\n")
+    );
+}

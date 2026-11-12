@@ -5275,7 +5275,7 @@ mod tests {
             "a capture nothing has read yet is called by its opening words, \
              which is what tells two of them apart"
         );
-        assert!(body.contains("every 3s"), "work in flight keeps polling");
+        assert!(body.contains("sse:queue"), "work in flight keeps listening");
 
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
         crate::jobs::embed::run_corpus(&core, &out.id)
@@ -5288,8 +5288,8 @@ mod tests {
             "the row is called by the name capture derived"
         );
         assert!(
-            !body.contains("every 3s"),
-            "an idle queue stops polling itself"
+            !body.contains("sse:queue"),
+            "an idle queue stops listening for work"
         );
         assert!(
             body.contains("captured from:body"),

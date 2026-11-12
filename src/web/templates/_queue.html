@@ -10,7 +10,7 @@
    the list sits there stale until a reload. The form fires the event; this
    fetch is what starts the polling for the job it started. #}
 <div id="queue" class="queue" hx-get="/ui/queue" hx-swap="outerHTML"
-     hx-trigger="{% if active %}every 3s, {% endif %}captured from:body">
+     hx-trigger="{% if active %}sse:queue, sse:resync, {% endif %}captured from:body">
   {% for r in rows %}
   <div class="qrow">
     {% if r.in_flight %}<span class="qdot" aria-hidden="true"></span>{% endif %}

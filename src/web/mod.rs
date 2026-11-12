@@ -16,6 +16,7 @@ pub mod icons;
 pub mod insights;
 pub mod judge;
 pub mod lineage_view;
+pub mod live;
 pub mod markdown;
 pub mod notice;
 pub mod ops;
@@ -149,6 +150,7 @@ pub fn router(state: AppState) -> Router {
         .merge(corpus::routes())
         .merge(artifact::routes())
         .merge(trash::routes())
+        .route("/ui/live", get(live::live))
         .merge(ops::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
