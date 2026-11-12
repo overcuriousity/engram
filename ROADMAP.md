@@ -116,3 +116,11 @@ backend: they run against both, unchanged, before the local one is offered as
 a default. What they cannot say — whether the two order a real base the same —
 is per base, and a base that changes backend is a new era to the runtime loop
 the way a change of embedder is: evidence from before it stops counting.
+
+## Config shape: move to the manifest's layout
+
+Top-level deployment keys (`public_url`, `trusted_proxies`, `bind`), app settings under `[app]`.
+
+*Worth:* one config shape across the owner's apps. *Cost:* a branch — a loader that refuses the old
+shape with one sentence per moved key, and every live config rewritten once.
+
