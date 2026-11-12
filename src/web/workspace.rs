@@ -1981,9 +1981,6 @@ mod tests {
         );
     }
 
-    /// A cited excerpt is a card with the excerpt in it. Where the excerpt is
-    /// a passage there is no name to head it with, and the card wrote an empty
-    /// `card-title` over text that starts one line lower.
     #[test]
     fn a_cited_passage_gets_no_heading_over_its_excerpt() {
         let mut cited = crate::web::ui::RenderedResult {
@@ -2007,9 +2004,9 @@ mod tests {
         .unwrap();
         assert!(html.contains("Der Vorgang setzt voraus"), "{html}");
         assert_eq!(
-            html.matches("card-title").count(),
-            1,
-            "only the answer card is headed: {html}"
+            html.matches("cited-title").count(),
+            0,
+            "a nameless excerpt is not headed: {html}"
         );
     }
 
@@ -2032,7 +2029,7 @@ mod tests {
     /// An answer written across a disagreement says so on its face, naming the
     /// other note and what differs, and picks neither.
     #[test]
-    fn an_answer_across_a_disagreement_is_badged_with_the_other_note() {
+    fn an_answer_across_a_disagreement_names_the_other_note() {
         let html = askama::Template::render(&AnswerTemplate {
             answer: "<p>30 days [1], or 14 [2].</p>".into(),
             citations: vec![],
@@ -2057,7 +2054,7 @@ mod tests {
             html.contains("your notes disagree: Retention, revised"),
             "{html}"
         );
-        assert!(html.contains(r#"title="30 days there, 14 here""#), "{html}");
+        assert!(html.contains("30 days there, 14 here"), "{html}");
         assert!(
             !answer_fixture(0).contains("your notes disagree"),
             "no disagreement, no badge"

@@ -11,7 +11,7 @@
     </a>
     <span class="qmeta">
       {% if let Some(p) = r.progress %}
-        {{ crate::web::ui::status("none", format!("segmenting {p}").as_str()) }}
+        {{ crate::web::ui::status("none", format!("segmenting {}", p).as_str()) }}
       {% else if r.in_flight %}
         {{ crate::web::ui::status("none", r.status) }}
       {% else if !r.settled %}

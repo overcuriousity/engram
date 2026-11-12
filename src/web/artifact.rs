@@ -2550,13 +2550,9 @@ mod tests {
         assert_eq!(ids, counted, "the rail must number 1..n in order: {rail}");
 
         // And the n-th rail item has to be the n-th excerpt. The answer fragment
-        // lists the same citations in the same order under "Artifacts used"
-        // (after its own card, which is why the first title is dropped), so the
-        // two renderings of one list are checked against each other rather than
-        // each being trusted separately.
+        // lists the same citations in the same order under "Artifacts used".
         let rail_titles = pulled(&rail, r#"<span class="rail-title">"#, '<');
-        let mut card_titles = pulled(&answer, r#"<span class="card-title">"#, '<');
-        card_titles.remove(0);
+        let card_titles = pulled(&answer, r#"<span class="cited-title">"#, '<');
         assert_eq!(
             rail_titles, card_titles,
             "the rail and the answer disagree about which excerpt is which"
