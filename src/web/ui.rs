@@ -5325,7 +5325,10 @@ mod tests {
         let out = core.ingest("alpha line", "web", None).await.unwrap();
 
         for (status, badge) in [
-            (crate::store::corpora::CorpusStatus::Failed, "oc-status--danger"),
+            (
+                crate::store::corpora::CorpusStatus::Failed,
+                "oc-status--danger",
+            ),
             (
                 crate::store::corpora::CorpusStatus::NeedsReview,
                 "oc-status--warning",

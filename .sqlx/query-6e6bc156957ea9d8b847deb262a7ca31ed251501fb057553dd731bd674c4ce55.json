@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_sources SET restored = 1 WHERE root_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6e6bc156957ea9d8b847deb262a7ca31ed251501fb057553dd731bd674c4ce55"
+}

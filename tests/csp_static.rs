@@ -335,3 +335,119 @@ fn no_literal_colour_outside_the_token_file() {
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
+
+/// Files whose runtime queries are not yet converted to the checked macros; shrinks to empty.
+const NOT_YET_CHECKED: &[&str] = &[
+    "src/auth/grants.rs",
+    "src/auth/tokens.rs",
+    "src/backup/restore.rs",
+    "src/backup/sqlite.rs",
+    "src/backup/verify.rs",
+    "src/core/ask/mod.rs",
+    "src/core/background.rs",
+    "src/core/ingest.rs",
+    "src/core/moments.rs",
+    "src/core/recommend.rs",
+    "src/core/search.rs",
+    "src/eval/anchor.rs",
+    "src/eval/lived.rs",
+    "src/jobs/associate.rs",
+    "src/jobs/consolidate.rs",
+    "src/jobs/dedupe.rs",
+    "src/jobs/describe.rs",
+    "src/jobs/embed.rs",
+    "src/jobs/mod.rs",
+    "src/jobs/observe.rs",
+    "src/jobs/promote.rs",
+    "src/jobs/pursuit.rs",
+    "src/jobs/reap.rs",
+    "src/jobs/reconcile.rs",
+    "src/jobs/remind.rs",
+    "src/jobs/retention.rs",
+    "src/jobs/retract.rs",
+    "src/jobs/synthesize.rs",
+    "src/jobs/tune.rs",
+    "src/jobs/window.rs",
+    "src/store/actions.rs",
+    "src/store/artifacts.rs",
+    "src/store/asks.rs",
+    "src/store/attachments.rs",
+    "src/store/auth.rs",
+    "src/store/context.rs",
+    "src/store/control.rs",
+    "src/store/corpora.rs",
+    "src/store/eval_runs.rs",
+    "src/store/feedback.rs",
+    "src/store/gaps.rs",
+    "src/store/generations.rs",
+    "src/store/grants.rs",
+    "src/store/insights.rs",
+    "src/store/integrations.rs",
+    "src/store/jobs.rs",
+    "src/store/lineage.rs",
+    "src/store/links.rs",
+    "src/store/mod.rs",
+    "src/store/moments.rs",
+    "src/store/observations.rs",
+    "src/store/pairs.rs",
+    "src/store/pursuits.rs",
+    "src/store/rehearsals.rs",
+    "src/store/segments.rs",
+    "src/store/sleep_runs.rs",
+    "src/store/sweeps.rs",
+    "src/store/versions.rs",
+    "src/tenants.rs",
+    "src/vector/sqlite.rs",
+    "src/web/api.rs",
+    "src/web/app.rs",
+    "src/web/artifact.rs",
+    "src/web/corpus.rs",
+    "src/web/day.rs",
+    "src/web/insights.rs",
+    "src/web/ui.rs",
+];
+
+fn runtime_query_lines(src: &str) -> Vec<usize> {
+    let calls = [
+        "sqlx::query(",
+        "sqlx::query_as(",
+        "sqlx::query_scalar(",
+        "query_as::<",
+        "query_scalar::<",
+        "sqlx::query::<",
+    ];
+    src.lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim_start().starts_with("//") && calls.iter().any(|c| l.contains(c)))
+        .map(|(n, _)| n)
+        .collect()
+}
+
+#[test]
+fn every_runtime_query_says_why() {
+    let mut offenders = Vec::new();
+    let mut sources = files("src", "rs");
+    sources.extend(files("tests", "rs"));
+    for (name, src) in sources.iter().filter(|(n, _)| n != "tests/csp_static.rs") {
+        let lines: Vec<&str> = src.lines().collect();
+        let found = runtime_query_lines(src);
+        if NOT_YET_CHECKED.contains(&name.as_str()) {
+            if found.is_empty() {
+                offenders.push(format!("{name}: converted; drop it from NOT_YET_CHECKED"));
+            }
+            continue;
+        }
+        for n in found {
+            let why = lines[n.saturating_sub(3)..n]
+                .iter()
+                .any(|l| l.trim_start().starts_with("// runtime:"));
+            if !why {
+                offenders.push(format!(
+                    "{name}:{}: runtime query without `// runtime:`",
+                    n + 1
+                ));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}

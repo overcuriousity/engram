@@ -26,6 +26,7 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 - `cargo test` and `cargo test --features contained --lib`
 - `cargo clippy --all-targets -- -D warnings` and `cargo clippy --all-targets --features contained -- -D warnings`
 - `cargo deny check`
+- after changing a query or a schema: `cargo run -- --dev-schema target/sqlx-prepare.db`, then `DATABASE_URL=sqlite://target/sqlx-prepare.db cargo sqlx prepare -- --all-targets --features contained`; commit `.sqlx/`
 - `oc-check .` on a source checkout (a build writes `assets/app.css`, which holds the tokens; delete it first)
 - `node --test assets/js/*.test.mjs`
 - `cargo test --lib -- --ignored` and `cargo test --test browser_ask -- --ignored` with `ENGRAM_CHROME` set (layout at 390–2560 px)
@@ -38,7 +39,7 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 | SQLite only | Qdrant beside SQLite | integral to engram's retrieval; SQLite vectors serve the contained build |
 | `unsafe_code = "forbid"` | `deny`, allowed only in `src/infer/whisper.rs` and `register()` in `src/vector/sqlite.rs` | in-process inference needs FFI; `forbid` cannot be overridden |
 | sqlx migrations | `Store::migrate` / `Control::migrate` | they read a base's columns before touching it; live bases depend on it |
-| compile-time-checked queries | runtime `sqlx::query` throughout | not yet converted |
+| compile-time-checked queries | runtime `sqlx::query` in the files `NOT_YET_CHECKED` lists (`tests/csp_static.rs`) | conversion in progress; the list only shrinks |
 | utoipa OpenAPI + parity test | none | owner's decision |
 | passkeys | none | owner's decision |
 | `oc-kit` dependency | ported into engram's own modules | owner's decision; `oc-check` is a dev-dependency only |

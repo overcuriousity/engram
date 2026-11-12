@@ -749,10 +749,8 @@ mod tests {
     /// live; it was also the one page a phone could not reach.
     #[tokio::test]
     async fn an_unconfigured_subsystem_shows_no_entry_point() {
-        let (app, cookie) = app_with_cookie(
-            crate::core::test_support::test_core_without_synthesizer().await,
-        )
-        .await;
+        let (app, cookie) =
+            app_with_cookie(crate::core::test_support::test_core_without_synthesizer().await).await;
         let settings = get_body(&app, &cookie, "/ui/settings").await;
         assert!(!settings.contains("/ui/settings/lang"), "{settings}");
 

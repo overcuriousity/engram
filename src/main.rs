@@ -21,6 +21,9 @@ struct Args {
     /// Print an argon2id hash for a password, for auth.local.password_hash.
     #[arg(long)]
     hash_password: Option<String>,
+    /// Write an empty database with both schemas, for `cargo sqlx prepare`.
+    #[arg(long, hide = true, value_name = "PATH")]
+    dev_schema: Option<PathBuf>,
     /// Copy every vector into a fresh collection generation and swap the alias
     /// onto it, then exit. Costs no embedding calls and leaves the previous
     /// generation in place.
@@ -408,6 +411,10 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(pw) = &args.hash_password {
         println!("{}", engram::auth::local::hash_password(pw)?);
+        return Ok(());
+    }
+    if let Some(path) = &args.dev_schema {
+        engram::store::dev_schema(path).await?;
         return Ok(());
     }
 

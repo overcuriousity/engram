@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT other.id AS \"id!\" FROM artifacts other\n              WHERE other.provenance = 'merged'\n                AND other.status = 'active'\n                AND other.superseded_by IS NULL\n                AND other.id != ?1\n                AND EXISTS (SELECT 1 FROM artifact_sources WHERE child_id = other.id)\n                AND NOT EXISTS (\n                      SELECT 1 FROM artifact_sources mine\n                       WHERE mine.child_id = other.id\n                         AND mine.root_id NOT IN (\n                               SELECT root_id FROM artifact_sources WHERE child_id = ?1))",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "2a254d51633d7adcc7ffc3ac37a7df5d43755cb205d3b40fc1eb3cfd30ce3061"
+}

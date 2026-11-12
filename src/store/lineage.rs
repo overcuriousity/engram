@@ -18,7 +18,6 @@ use super::Store;
 use crate::error::Result;
 use crate::store::artifacts::{Chunk, CorpusSpan};
 use crate::store::pairs::ArtifactPair;
-use sqlx::Row;
 use std::collections::BTreeMap;
 
 /// Where an artifact comes from, as corpus and lines. Derived from lineage,
@@ -49,17 +48,15 @@ impl Store {
     pub async fn roots_of(&self, artifact_ids: &[String]) -> Result<BTreeMap<String, Vec<String>>> {
         let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for id in artifact_ids {
-            let rows = sqlx::query(
+            let roots: Vec<String> = sqlx::query_scalar!(
                 "SELECT root_id FROM artifact_sources WHERE child_id = ? ORDER BY root_id",
+                id
             )
-            .bind(id)
             .fetch_all(&self.pool)
             .await?;
-            let roots: Vec<String> = rows.iter().map(|r| r.get("root_id")).collect();
             let entry = if roots.is_empty() {
                 let provenance: Option<String> =
-                    sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
-                        .bind(id)
+                    sqlx::query_scalar!("SELECT provenance FROM artifacts WHERE id = ?", id)
                         .fetch_optional(&self.pool)
                         .await?;
                 if provenance.as_deref().is_some_and(|p| {
@@ -115,20 +112,18 @@ impl Store {
     /// Model-written artifacts with a root in this corpus: what the corpus
     /// page lists as written from it.
     pub async fn artifacts_originating_in(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT DISTINCT m.* FROM artifacts m
                JOIN artifact_sources s ON s.child_id = m.id
                JOIN artifacts r ON r.id = s.root_id
               WHERE r.corpus_id = ? AND m.provenance IN ('merged', 'synthesized')
               ORDER BY m.created_at",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(crate::store::artifacts::row_to_artifact)
-            .collect())
+        Ok(rows.into_iter().map(Chunk::from).collect())
     }
 
     /// Merged artifacts still standing, newest first. What Ops lists.
@@ -144,20 +139,18 @@ impl Store {
         &self,
         limit: i64,
     ) -> Result<Vec<crate::store::artifacts::Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts
               WHERE provenance = 'merged'
                 AND status = 'active'
                 AND superseded_by IS NULL
               ORDER BY created_at DESC, id LIMIT ?",
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(crate::store::artifacts::row_to_artifact)
-            .collect())
+        Ok(rows.into_iter().map(Chunk::from).collect())
     }
 
     /// Merged artifacts at least one of whose roots is still active.
@@ -172,7 +165,7 @@ impl Store {
     /// unfinished merge, and the repair must not see it — re-hiding it undid
     /// the operator's decision on every sweep.
     pub async fn merged_with_active_roots(&self, limit: i64) -> Result<Vec<String>> {
-        let rows = sqlx::query(
+        Ok(sqlx::query_scalar!(
             "SELECT DISTINCT s.child_id FROM artifact_sources s
                JOIN artifacts child ON child.id = s.child_id
                JOIN artifacts root  ON root.id  = s.root_id
@@ -184,11 +177,10 @@ impl Store {
                 AND root.superseded_by IS NULL
                 AND s.restored = 0
               LIMIT ?",
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("child_id")).collect())
+        .await?)
     }
 
     /// Record that an operator explicitly restored this captured root: no
@@ -198,10 +190,12 @@ impl Store {
     /// writes fresh rows with `restored = 0`, and that is new evidence rather
     /// than a repair of old state.
     pub async fn mark_source_restored(&self, root_id: &str) -> Result<()> {
-        sqlx::query("UPDATE artifact_sources SET restored = 1 WHERE root_id = ?")
-            .bind(root_id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifact_sources SET restored = 1 WHERE root_id = ?",
+            root_id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -210,14 +204,13 @@ impl Store {
     /// answers "what was this written from" and must keep seeing the true
     /// closure.
     pub async fn roots_to_hide(&self, child_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query(
+        Ok(sqlx::query_scalar!(
             "SELECT root_id FROM artifact_sources
               WHERE child_id = ? AND restored = 0 ORDER BY root_id",
+            child_id
         )
-        .bind(child_id)
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("root_id")).collect())
+        .await?)
     }
 
     /// Active merged artifacts whose embedding can no longer arrive: no live
@@ -246,8 +239,8 @@ impl Store {
         let mut out: Vec<String> = Vec::new();
         let mut after = String::new();
         while out.len() < want {
-            let rows = sqlx::query(
-                "SELECT a.id FROM artifacts a
+            let candidates: Vec<String> = sqlx::query_scalar!(
+                r#"SELECT a.id AS "id!" FROM artifacts a
                   WHERE a.provenance = 'merged'
                     AND a.status = 'active'
                     AND a.superseded_by IS NULL
@@ -255,13 +248,12 @@ impl Store {
                     AND NOT EXISTS (SELECT 1 FROM artifacts r WHERE r.superseded_by = a.id)
                     AND a.id > ?
                   ORDER BY a.id
-                  LIMIT ?",
+                  LIMIT ?"#,
+                after,
+                PAGE
             )
-            .bind(&after)
-            .bind(PAGE)
             .fetch_all(&self.pool)
             .await?;
-            let candidates: Vec<String> = rows.iter().map(|r| r.get("id")).collect();
             let Some(last) = candidates.last().cloned() else {
                 break;
             };
@@ -295,13 +287,13 @@ impl Store {
     /// again on the next sweep and the two would churn against each other for
     /// as long as they both existed.
     pub async fn subsumed_merges(&self, child_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query(
+        Ok(sqlx::query_scalar!(
             // The EXISTS guard is load-bearing. A merged artifact whose roots
             // have all been deleted has no lineage rows left, and without it the
             // NOT EXISTS below would call the empty set a subset of everything
             // and hide it behind an unrelated merge. That artifact is
             // `merged_missing_a_source`'s business, not this function's.
-            "SELECT other.id FROM artifacts other
+            r#"SELECT other.id AS "id!" FROM artifacts other
               WHERE other.provenance = 'merged'
                 AND other.status = 'active'
                 AND other.superseded_by IS NULL
@@ -311,12 +303,11 @@ impl Store {
                       SELECT 1 FROM artifact_sources mine
                        WHERE mine.child_id = other.id
                          AND mine.root_id NOT IN (
-                               SELECT root_id FROM artifact_sources WHERE child_id = ?1))",
+                               SELECT root_id FROM artifact_sources WHERE child_id = ?1))"#,
+            child_id
         )
-        .bind(child_id)
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        .await?)
     }
 
     /// Merged artifacts holding fewer lineage rows than the number of sources
@@ -329,31 +320,30 @@ impl Store {
     /// A comparison rather than a guess, which is what `source_count` is for:
     /// without it, "lost a source" cannot be told from "only ever had two".
     pub async fn merged_missing_a_source(&self, limit: i64) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT a.id FROM artifacts a
+        Ok(sqlx::query_scalar!(
+            r#"SELECT a.id AS "id!" FROM artifacts a
               WHERE a.provenance = 'merged'
                 AND a.source_count >
                     (SELECT COUNT(*) FROM artifact_sources WHERE child_id = a.id)
                 AND (a.flags IS NULL OR a.flags NOT LIKE '%orphaned_source%')
               ORDER BY a.created_at DESC, a.id
-              LIMIT ?",
+              LIMIT ?"#,
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        .await?)
     }
 
     /// Artifacts carrying `flag`, for sweeps that retire a flag they used to set.
     pub async fn artifacts_flagged(&self, flag: &str, limit: i64) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT id FROM artifacts WHERE flags LIKE ? ORDER BY created_at DESC, id LIMIT ?",
+        let pattern = format!("%\"{flag}\"%");
+        Ok(sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE flags LIKE ? ORDER BY created_at DESC, id LIMIT ?"#,
+            pattern,
+            limit
         )
-        .bind(format!("%\"{flag}\"%"))
-        .bind(limit)
         .fetch_all(&self.pool)
-        .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        .await?)
     }
 
     /// Every pair, in any state, both of whose artifacts are in this set.
@@ -369,17 +359,14 @@ impl Store {
     /// `ON DELETE SET NULL`, because losing the middle of the path does not
     /// invalidate its end.
     pub async fn sources_with_via(&self, child_id: &str) -> Result<Vec<(String, Option<String>)>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT root_id, via_id FROM artifact_sources
               WHERE child_id = ? ORDER BY root_id",
+            child_id
         )
-        .bind(child_id)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .iter()
-            .map(|r| (r.get("root_id"), r.get("via_id")))
-            .collect())
+        Ok(rows.into_iter().map(|r| (r.root_id, r.via_id)).collect())
     }
 
     /// What undoing a merge has to dismiss. Reactivating the roots alone

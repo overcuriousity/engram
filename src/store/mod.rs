@@ -397,6 +397,22 @@ impl Store {
     }
 }
 
+/// One file holding the control and the tenant schema, the reference database for `cargo sqlx prepare`.
+pub async fn dev_schema(path: &std::path::Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let control = control::Control::connect(&path.to_string_lossy()).await?;
+    let store = Store {
+        pool: control.pool.clone(),
+        control: control.clone(),
+        subject: String::new(),
+    };
+    store.migrate().await?;
+    control.pool.close().await;
+    Ok(())
+}
+
 /// The `(table, columns)` pairs `schema.sql` declares.
 ///
 /// Read out of the file rather than listed by hand, so it cannot fall behind
@@ -587,6 +603,38 @@ impl Cursor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn table_names(pool: &sqlx::SqlitePool) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn dev_schema_builds_a_database_with_both_schemas() {
+        let control = control::Control::memory().await.unwrap();
+        let store = Store::memory().await.unwrap();
+        let ours = table_names(&store.pool).await;
+        let clash: Vec<_> = table_names(&control.pool)
+            .await
+            .into_iter()
+            .filter(|t| ours.contains(t))
+            .collect();
+        assert!(clash.is_empty(), "defined by both schemas: {clash:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prepare.db");
+        dev_schema(&path).await.unwrap();
+        let both = control::Control::connect(&path.to_string_lossy())
+            .await
+            .unwrap();
+        let names = table_names(&both.pool).await;
+        assert!(names.contains(&"users".to_string()), "{names:?}");
+        assert!(names.contains(&"artifacts".to_string()), "{names:?}");
+    }
 
     #[tokio::test]
     async fn a_base_without_updated_at_gains_the_column_instead_of_being_refused() {

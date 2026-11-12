@@ -416,6 +416,78 @@ pub struct NewArtifact {
     pub caveats: Vec<String>,
 }
 
+/// An `artifacts` row as stored, for `query_as!`.
+pub(crate) struct ArtifactRow {
+    pub id: Option<String>,
+    pub corpus_id: Option<String>,
+    pub provenance: String,
+    pub source_count: i64,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub lifecycle_dirty: i64,
+    pub ordinal: i64,
+    pub text: String,
+    pub corpus_span: Option<String>,
+    pub title: Option<String>,
+    pub category: Option<String>,
+    pub tags: String,
+    pub embed_state: String,
+    pub embed_model: Option<String>,
+    pub created_at: i64,
+    pub embed_rev: i64,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub updated_at: i64,
+    pub segment_idx: Option<i64>,
+    pub flags: Option<String>,
+    pub flag_detail: Option<String>,
+    pub superseded_by: Option<String>,
+    pub caveats: String,
+    pub status: String,
+    pub last_verified_at: Option<i64>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub activation: f64,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub activated_at: i64,
+    pub cues: String,
+    pub retired_at: Option<i64>,
+    pub reaped_at: Option<i64>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub trashed_at: Option<i64>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub trashed_from: Option<String>,
+}
+
+impl From<ArtifactRow> for Chunk {
+    fn from(r: ArtifactRow) -> Chunk {
+        let json = |s: &str| serde_json::from_str(s).unwrap_or_default();
+        Chunk {
+            id: r.id.unwrap_or_default(),
+            corpus_id: r.corpus_id,
+            provenance: Provenance::parse(&r.provenance),
+            source_count: r.source_count,
+            ordinal: r.ordinal,
+            text: r.text,
+            corpus_span: r.corpus_span.and_then(|s| serde_json::from_str(&s).ok()),
+            title: r.title,
+            category: r.category,
+            tags: json(&r.tags),
+            embed_state: EmbedState::parse(&r.embed_state),
+            embed_model: r.embed_model,
+            created_at: r.created_at,
+            embed_rev: r.embed_rev,
+            segment_idx: r.segment_idx,
+            flags: r.flags.as_deref().map(json).unwrap_or_default(),
+            flag_detail: r.flag_detail,
+            superseded_by: r.superseded_by,
+            caveats: json(&r.caveats),
+            status: ArtifactStatus::parse(&r.status),
+            last_verified_at: r.last_verified_at,
+            cues: json(&r.cues),
+            retired_at: r.retired_at,
+            reaped_at: r.reaped_at,
+        }
+    }
+}
+
 pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
     let tags_json: String = r.get("tags");
     let span_json: Option<String> = r.get("corpus_span");
