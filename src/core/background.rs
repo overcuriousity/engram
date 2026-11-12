@@ -451,7 +451,7 @@ fn age_threshold(cfg: &crate::config::Config) -> i64 {
 /// The repairs that are about the queue rather than about anyone's knowledge.
 ///
 /// One control database, so one pass — not one per tenant. `reclaim_stuck` and
-/// `purge_expired_sessions` are questions about the whole table, and running
+/// expired-session deletion are questions about the whole table, and running
 /// them per user would ask the same thing as many times as there are users and
 /// act on the first answer. Ageing is not one of those and no longer lives
 /// here: it is a per-tenant budget, so it runs in the per-tenant loop.
@@ -464,10 +464,12 @@ pub(crate) async fn repair_control_once(control: &crate::store::control::Control
         Err(e) => tracing::warn!(error = %e, "could not requeue jobs left running"),
         _ => {}
     }
-    match control.purge_expired_sessions().await {
-        Ok(n) if n > 0 => tracing::info!(purged = n, "removed expired sessions"),
-        Err(e) => tracing::warn!(error = %e, "could not remove expired sessions"),
-        _ => {}
+    use tower_sessions::ExpiredDeletion;
+    if let Err(e) = tower_sessions_sqlx_store::SqliteStore::new(control.pool.clone())
+        .delete_expired()
+        .await
+    {
+        tracing::warn!(error = %e, "could not remove expired sessions");
     }
 }
 

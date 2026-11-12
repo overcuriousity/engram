@@ -69,12 +69,7 @@ pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web
 
 /// A router over `core` plus a browser session cookie for `user-1`.
 pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
-    let cid = crate::store::new_id();
-    core.store
-        .control
-        .insert_session(&cid, "user-1", None, 3600)
-        .await
-        .unwrap();
+    let control = core.store.control.clone();
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
     let user = registered_user(&core).await;
     let state = crate::web::state::AppState {
@@ -92,10 +87,32 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
         }),
         ask_handoff: Default::default(),
     };
-    (
-        crate::web::router(state.clone()),
-        format!("engram_session={cid}"),
-    )
+    let cookie = session_cookie(&control, &state.auth.deployment, "user-1").await;
+    (crate::web::router(state.clone()), cookie)
+}
+
+/// A live browser session for `subject`, as the `Cookie` header that carries it.
+pub async fn session_cookie(
+    control: &crate::store::control::Control,
+    dep: &crate::web::security::Deployment,
+    subject: &str,
+) -> String {
+    use tower_sessions::SessionStore;
+    use tower_sessions::cookie::time::{Duration, OffsetDateTime};
+    use tower_sessions::session::{Id, Record};
+    let store = tower_sessions_sqlx_store::SqliteStore::new(control.pool.clone());
+    let mut record = Record {
+        id: Id::default(),
+        data: [(
+            crate::auth::SUBJECT_KEY.to_string(),
+            serde_json::json!(subject),
+        )]
+        .into_iter()
+        .collect(),
+        expiry_date: OffsetDateTime::now_utc() + Duration::days(1),
+    };
+    store.create(&mut record).await.unwrap();
+    format!("{}={}", crate::auth::session_cookie_name(dep), record.id)
 }
 
 /// A router over `core` plus a bearer token for `user-1`.

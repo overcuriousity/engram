@@ -2131,8 +2131,6 @@ pub struct OidcConfig {
     /// `open_registration` says so — see [`crate::auth::oidc::is_allowed`].
     #[serde(default)]
     pub allowed_subs: Vec<String>,
-    #[serde(default)]
-    pub allowed_emails: Vec<String>,
     /// Group names from the provider's `groups` claim. Nextcloud's OIDC
     /// provider app only sends this when the admin has turned on group
     /// provisioning for the client; without it the claim is simply absent; and
@@ -2343,6 +2341,12 @@ impl Config {
             )));
         }
 
+        if raw.get::<config::Value>("auth.oidc.allowed_emails").is_ok() {
+            return Err(ConfigError::Invalid(
+                "auth.oidc.allowed_emails is gone; list subjects in allowed_subs or use allowed_groups."
+                    .into(),
+            ));
+        }
         if raw.get::<config::Value>("auth.oidc.redirect_url").is_ok() {
             return Err(ConfigError::Invalid(
                 "auth.oidc.redirect_url is gone; set server.public_url.".into(),

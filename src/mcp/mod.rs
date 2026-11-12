@@ -930,6 +930,37 @@ fn service_for(
     svc
 }
 
+/// RFC 9728: where an MCP client finds the authorization server. Only with OIDC.
+async fn protected_resource(
+    axum::extract::State(st): axum::extract::State<AppState>,
+) -> crate::error::Result<axum::Json<serde_json::Value>> {
+    let oidc = st.auth.oidc.as_ref().ok_or(crate::error::Error::NotFound)?;
+    Ok(axum::Json(serde_json::json!({
+        "resource": oidc.resource(),
+        "authorization_servers": [oidc.issuer()],
+    })))
+}
+
+/// Points a client without a token at the resource metadata.
+async fn bearer_challenge(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    if res.status() == axum::http::StatusCode::UNAUTHORIZED
+        && st.auth.oidc.is_some()
+        && let Ok(v) = axum::http::HeaderValue::from_str(&format!(
+            "Bearer resource_metadata=\"{}/.well-known/oauth-protected-resource\"",
+            st.auth.deployment.base()
+        ))
+    {
+        res.headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, v);
+    }
+    res
+}
+
 pub fn mcp_router(state: AppState) -> Router<AppState> {
     let public_host = state
         .auth
@@ -941,7 +972,7 @@ pub fn mcp_router(state: AppState) -> Router<AppState> {
     let tenants = state.tenants.clone();
     let services: std::sync::Arc<TenantServices> = Default::default();
 
-    Router::new()
+    let router = Router::new()
         .route(
             "/mcp",
             axum::routing::any(
@@ -957,11 +988,26 @@ pub fn mcp_router(state: AppState) -> Router<AppState> {
                 },
             ),
         )
-        .layer(axum::middleware::from_fn_with_state(state, mcp_guard))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            mcp_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            bearer_challenge,
+        ))
         .layer(crate::web::security::rate_limit(
             crate::web::API_PER_MINUTE,
             crate::web::API_BURST,
-        ))
+        ));
+    if state.auth.oidc.is_some() {
+        router.route(
+            "/.well-known/oauth-protected-resource",
+            axum::routing::get(protected_resource),
+        )
+    } else {
+        router
+    }
 }
 
 #[cfg(test)]
@@ -1140,6 +1186,81 @@ mod tests {
     #[test]
     fn the_mcp_door_is_stateless_so_a_handshakeless_probe_is_served() {
         assert!(!service_config(None).legacy_session_mode);
+    }
+
+    #[tokio::test]
+    async fn the_protected_resource_document_points_at_the_issuer() {
+        let core = crate::core::test_support::test_core().await;
+        let mut state =
+            crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc).await;
+        let base = state.auth.deployment.base();
+        let (_idp, client) = crate::auth::oidc::fake_client(&base).await;
+        let issuer = client.issuer().to_string();
+        state.auth = std::sync::Arc::new(crate::web::state::AuthContext {
+            mode: crate::config::AuthMode::Oidc,
+            local: None,
+            oidc: Some(client),
+            pending: crate::auth::oidc::PendingStore::new(),
+            deployment: state.auth.deployment.clone(),
+        });
+        let app = crate::web::router(state);
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-protected-resource")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["resource"], format!("{base}/mcp"));
+        assert_eq!(v["authorization_servers"][0], issuer);
+
+        let unauth = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .method("POST")
+                    .header("authorization", "Bearer not.a.jwt")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            unauth.headers()["www-authenticate"]
+                .to_str()
+                .unwrap()
+                .contains("/.well-known/oauth-protected-resource")
+        );
+    }
+
+    #[tokio::test]
+    async fn there_is_no_well_known_route_without_oidc() {
+        let core = crate::core::test_support::test_core().await;
+        let state =
+            crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
+        let res = crate::web::router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/oauth-protected-resource")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("authorization_servers"));
     }
 
     #[tokio::test]

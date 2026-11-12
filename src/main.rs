@@ -113,17 +113,10 @@ fn validate_auth(cfg: &Config) -> Result<()> {
             // path. Silently closing it instead would lock a working
             // deployment out of its own instance on upgrade, which is why
             // neither reading is guessed.
-            let listed = !oidc.allowed_subs.is_empty()
-                || !oidc.allowed_emails.is_empty()
-                || !oidc.allowed_groups.is_empty();
+            let listed = !oidc.allowed_subs.is_empty() || !oidc.allowed_groups.is_empty();
             if !listed && !oidc.open_registration {
                 return Err(Error::Validation(
-                    "[auth.oidc] names nobody who may sign in. List the people this instance is \
-                     for in `allowed_subs`, `allowed_emails` or `allowed_groups` — or, if the \
-                     identity provider is the only gate you want, set `open_registration = true`. \
-                     Be aware that an open instance provisions a tenant for every subject the \
-                     provider authenticates, so a provider that allows self-registration allows \
-                     strangers to create databases here."
+                    "[auth.oidc] names nobody; list allowed_subs or allowed_groups, or set open_registration = true."
                         .into(),
                 ));
             }
@@ -641,6 +634,13 @@ async fn main() -> anyhow::Result<()> {
         }
         AuthMode::Local => None,
     };
+    if let Some(o) = &oidc {
+        let local = cfg.auth.local.as_ref().map(|l| l.username.as_str());
+        let n = control.backfill_issuer(o.issuer(), local).await?;
+        if n > 0 {
+            tracing::info!(users = n, "bound existing users to the configured issuer");
+        }
+    }
 
     let state = engram::web::state::AppState {
         tenants: tenants.clone(),
@@ -836,7 +836,7 @@ mod startup_tests {
         let mut cfg = Config::test_default();
         cfg.auth.mode = AuthMode::Oidc;
         let mut oidc = oidc_cfg();
-        oidc.allowed_emails = vec!["me@example.com".into()];
+        oidc.allowed_subs = vec!["sub-1".into()];
         cfg.auth.oidc = Some(oidc);
         assert!(validate_auth(&cfg).is_ok());
     }
@@ -859,7 +859,6 @@ mod startup_tests {
             scopes: vec!["openid".into()],
             open_registration: false,
             allowed_subs: vec![],
-            allowed_emails: vec![],
             allowed_groups: vec![],
         }
     }

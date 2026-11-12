@@ -97,6 +97,9 @@ docling = { version = "=1.53.0", default-features = false, features = ["pdf-text
 
 url = "2"
 ipnet = "2"
+tower-sessions = "0.15"
+tower-sessions-sqlx-store = { version = "0.16", features = ["sqlite"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["rust_crypto"] }
 
 # The pairing QR, drawn on the server as inline SVG so the page needs no
 # script and no image route. Pure Rust. Default features off: `image` pulls

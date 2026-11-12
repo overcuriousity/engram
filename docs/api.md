@@ -1,6 +1,7 @@
 # The REST API's read contract
 
-`/api/v1`, authenticated by a bearer token or a session cookie. This page is
+`/api/v1`, authenticated by a bearer token (`engram_<id>.<secret>`, minted in
+Settings) or a session cookie. This page is
 the part of the API that clients — the CLI, the extension, the Android app,
 and later the watch — are entitled to rely on. It states the rules every route
 obeys and lists the read routes. It is not a full reference; the handlers in

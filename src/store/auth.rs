@@ -24,14 +24,6 @@ pub struct StoredToken {
     pub token_hash: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct Session {
-    pub id: String,
-    pub subject: String,
-    pub email: Option<String>,
-    pub expires_at: i64,
-}
-
 impl Control {
     pub async fn insert_token(
         &self,
@@ -51,8 +43,8 @@ impl Control {
             user_agent: user_agent.map(str::to_string),
         };
         sqlx::query(
-            "INSERT INTO api_tokens (id, name, token_hash, subject, created_at, user_agent)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO api_tokens (id, name, token_hash, subject, created_at, user_agent, scheme)
+             VALUES (?, ?, ?, ?, ?, ?, 2)",
         )
         .bind(&t.id)
         .bind(&t.name)
@@ -65,19 +57,20 @@ impl Control {
         Ok(t)
     }
 
-    pub async fn active_tokens(&self) -> Result<Vec<StoredToken>> {
-        let rows =
-            sqlx::query("SELECT id, subject, token_hash FROM api_tokens WHERE revoked_at IS NULL")
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows
-            .iter()
-            .map(|r| StoredToken {
-                id: r.get("id"),
-                subject: r.get("subject"),
-                token_hash: r.get("token_hash"),
-            })
-            .collect())
+    /// The live token with this id, if there is one.
+    pub async fn active_token(&self, id: &str) -> Result<Option<StoredToken>> {
+        let row = sqlx::query(
+            "SELECT id, subject, token_hash FROM api_tokens
+             WHERE id = ? AND revoked_at IS NULL AND scheme = 2",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| StoredToken {
+            id: r.get("id"),
+            subject: r.get("subject"),
+            token_hash: r.get("token_hash"),
+        }))
     }
 
     /// One subject's tokens, newest first.
@@ -139,60 +132,18 @@ impl Control {
         )
     }
 
-    pub async fn insert_session(
-        &self,
-        id: &str,
-        subject: &str,
-        email: Option<&str>,
-        ttl: i64,
-    ) -> Result<()> {
-        sqlx::query(
-            "INSERT INTO sessions (id, subject, email, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(id).bind(subject).bind(email).bind(now() + ttl).bind(now())
-        .execute(&self.pool).await?;
-        Ok(())
-    }
-
-    pub async fn get_session(&self, id: &str) -> Result<Option<Session>> {
-        let row = sqlx::query(
-            "SELECT id, subject, email, expires_at FROM sessions WHERE id = ? AND expires_at > ?",
+    /// Un-revoke one of `subject`'s tokens revoked after `since`; `false` when there is none.
+    pub async fn restore_token(&self, id: &str, subject: &str, since: i64) -> Result<bool> {
+        Ok(sqlx::query(
+            "UPDATE api_tokens SET revoked_at = NULL
+             WHERE id = ? AND subject = ? AND revoked_at IS NOT NULL AND revoked_at >= ?",
         )
         .bind(id)
-        .bind(now())
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|r| Session {
-            id: r.get("id"),
-            subject: r.get("subject"),
-            email: r.get("email"),
-            expires_at: r.get("expires_at"),
-        }))
-    }
-
-    /// Sliding expiry: an active session keeps renewing itself.
-    pub async fn extend_session(&self, id: &str, ttl: i64) -> Result<()> {
-        sqlx::query("UPDATE sessions SET expires_at = ? WHERE id = ?")
-            .bind(now() + ttl)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn delete_session(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn purge_expired_sessions(&self) -> Result<u64> {
-        let r = sqlx::query("DELETE FROM sessions WHERE expires_at <= ?")
-            .bind(now())
-            .execute(&self.pool)
-            .await?;
-        Ok(r.rows_affected())
+        .bind(subject)
+        .bind(since)
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            > 0)
     }
 }

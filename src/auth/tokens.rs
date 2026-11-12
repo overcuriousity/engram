@@ -26,55 +26,51 @@ pub fn verify_secret(secret: &str, stored: &str) -> bool {
     }
 }
 
-/// Mint a token. The plaintext is returned exactly once; only its argon2id
-/// hash is persisted, so a database read cannot recover working credentials.
-/// `user_agent` is what asked for the token, as it announced itself. Recorded
-/// because the extension mints every one of its tokens under the same name, so
-/// two rows can otherwise be identical in everything a person can read.
+/// How long a revoked token can still be restored.
+pub const RESTORE_WINDOW_SECS: i64 = 30 * 24 * 3600;
+
+/// `engram_<id>.<secret>`: the id addresses one row, the secret is argon2-verified against it.
+fn parse(presented: &str) -> Option<(&str, &str)> {
+    let (id, secret) = presented.strip_prefix(TOKEN_PREFIX)?.split_once('.')?;
+    (!id.is_empty() && !secret.is_empty()).then_some((id, secret))
+}
+
+/// Mint a token. The plaintext is returned exactly once; only the secret's
+/// argon2id hash is persisted. `user_agent` tells same-named tokens apart.
 pub async fn mint(
     control: &Control,
     name: &str,
     subject: &str,
     user_agent: Option<&str>,
 ) -> Result<(ApiToken, String)> {
-    // OsRng from the rand_core that argon2 re-exports, avoiding a second rand
-    // major version in the tree.
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    let plaintext = format!(
-        "{TOKEN_PREFIX}{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
-    );
+    let secret = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let id = crate::store::new_id();
     let row = control
-        .insert_token(&id, name, &hash_secret(&plaintext)?, subject, user_agent)
+        .insert_token(&id, name, &hash_secret(&secret)?, subject, user_agent)
         .await?;
     tracing::info!(token_id = %id, name, "api token minted");
-    Ok((row, plaintext))
+    Ok((row, format!("{TOKEN_PREFIX}{id}.{secret}")))
 }
 
-/// Verify a presented bearer token.
-///
-/// Argon2 is deliberately slow, so every active token has to be hashed on each
-/// request. With a single-operator install the token count is tiny and that is
-/// acceptable; if it ever grows, add a fast lookup key rather than weakening
-/// the hash.
 pub async fn verify(control: &Control, presented: &str) -> Result<Identity> {
-    if !presented.starts_with(TOKEN_PREFIX) {
+    let Some((id, secret)) = parse(presented) else {
+        return Err(Error::Unauthorized);
+    };
+    let Some(t) = control.active_token(id).await? else {
+        return Err(Error::Unauthorized);
+    };
+    if !verify_secret(secret, &t.token_hash) {
         return Err(Error::Unauthorized);
     }
-    for t in control.active_tokens().await? {
-        if verify_secret(presented, &t.token_hash) {
-            control.touch_token(&t.id).await?;
-            return Ok(Identity {
-                subject: t.subject,
-                email: None,
-                // A token is not a conversation. See `Identity::session`.
-                session: None,
-            });
-        }
-    }
-    Err(Error::Unauthorized)
+    control.touch_token(&t.id).await?;
+    Ok(Identity {
+        subject: t.subject,
+        email: None,
+        // A token is not a conversation. See `Identity::session`.
+        session: None,
+    })
 }
 
 /// Revoke one of `subject`'s tokens. `Error::NotFound` when that subject has
@@ -87,10 +83,91 @@ pub async fn revoke(control: &Control, id: &str, subject: &str) -> Result<()> {
     Err(Error::NotFound)
 }
 
+/// Undo a revoke made in the last 30 days.
+pub async fn restore(control: &Control, id: &str, subject: &str) -> Result<()> {
+    let since = crate::store::now() - RESTORE_WINDOW_SECS;
+    if control.restore_token(id, subject, since).await? {
+        return Ok(());
+    }
+    Err(Error::NotFound)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::control::Control;
+
+    #[tokio::test]
+    async fn a_minted_token_has_prefix_id_dot_secret() {
+        let s = Control::memory().await.unwrap();
+        let (row, plaintext) = mint(&s, "laptop", "user-1", None).await.unwrap();
+        let (id, secret) = parse(&plaintext).unwrap();
+        assert_eq!(id, row.id);
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(secret)
+                .unwrap()
+                .len(),
+            32
+        );
+    }
+
+    #[tokio::test]
+    async fn verifying_reads_one_row_by_id() {
+        let s = Control::memory().await.unwrap();
+        let (_, a) = mint(&s, "a", "user-1", None).await.unwrap();
+        let (_, b) = mint(&s, "b", "user-2", None).await.unwrap();
+        let (a_id, _) = parse(&a).unwrap();
+        let (_, b_secret) = parse(&b).unwrap();
+        let crossed = format!("{TOKEN_PREFIX}{a_id}.{b_secret}");
+        assert!(matches!(
+            verify(&s, &crossed).await,
+            Err(Error::Unauthorized)
+        ));
+        assert_eq!(verify(&s, &b).await.unwrap().subject, "user-2");
+    }
+
+    #[tokio::test]
+    async fn a_token_without_an_id_is_unauthorized() {
+        let s = Control::memory().await.unwrap();
+        let (_, t) = mint(&s, "a", "user-1", None).await.unwrap();
+        let secret = parse(&t).unwrap().1.to_string();
+        for bad in [
+            format!("{TOKEN_PREFIX}{secret}"),
+            format!("{TOKEN_PREFIX}.{secret}"),
+            format!("{TOKEN_PREFIX}nope.{secret}"),
+        ] {
+            assert!(
+                matches!(verify(&s, &bad).await, Err(Error::Unauthorized)),
+                "{bad}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_revoked_token_can_be_restored_within_30_days() {
+        let s = Control::memory().await.unwrap();
+        let (row, t) = mint(&s, "a", "user-1", None).await.unwrap();
+        revoke(&s, &row.id, "user-1").await.unwrap();
+        assert!(verify(&s, &t).await.is_err());
+        assert!(matches!(
+            restore(&s, &row.id, "user-2").await,
+            Err(Error::NotFound)
+        ));
+        restore(&s, &row.id, "user-1").await.unwrap();
+        assert_eq!(verify(&s, &t).await.unwrap().subject, "user-1");
+
+        revoke(&s, &row.id, "user-1").await.unwrap();
+        sqlx::query("UPDATE api_tokens SET revoked_at = revoked_at - ?")
+            .bind(RESTORE_WINDOW_SECS + 1)
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            restore(&s, &row.id, "user-1").await,
+            Err(Error::NotFound)
+        ));
+    }
 
     #[tokio::test]
     async fn a_minted_token_verifies_once_and_is_never_retrievable() {
@@ -116,6 +193,7 @@ mod tests {
             .await
             .unwrap();
         assert!(!raw.contains(&plaintext));
+        assert!(!raw.contains(plaintext.split_once('.').unwrap().1));
         assert!(raw.starts_with("$argon2"));
     }
 

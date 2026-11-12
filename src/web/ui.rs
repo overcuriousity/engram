@@ -6805,16 +6805,13 @@ mod tests {
     /// can look at the same handoff map the routes write to. `app_with_cookie`
     /// builds its own state and cannot be asked what is in it.
     async fn app_over(st: &AppState) -> (axum::Router, String) {
-        let cid = crate::store::new_id();
-        st.tenants
-            .control()
-            .insert_session(&cid, "user-1", None, 3600)
-            .await
-            .unwrap();
-        (
-            crate::web::router(st.clone()),
-            format!("engram_session={cid}"),
+        let cookie = crate::web::test_support::session_cookie(
+            st.tenants.control(),
+            &st.auth.deployment,
+            "user-1",
         )
+        .await;
+        (crate::web::router(st.clone()), cookie)
     }
 
     /// The same markup, marked rather than linked: marking subtracts trust, and

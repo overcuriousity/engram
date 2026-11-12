@@ -135,6 +135,7 @@ async fn declare_html_uncacheable(req: Request, next: Next) -> Response {
 }
 
 pub fn router(state: AppState) -> Router {
+    let sessions = crate::auth::session_layer(state.tenants.control(), &state.auth.deployment);
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(assets::assets_router())
@@ -164,6 +165,7 @@ pub fn router(state: AppState) -> Router {
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))
         .layer(axum::middleware::from_fn(declare_html_uncacheable))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(sessions)
         .layer(tower_http::trace::TraceLayer::new_for_http())
         .with_state(state)
 }

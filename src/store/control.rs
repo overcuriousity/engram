@@ -146,7 +146,17 @@ impl Control {
     /// old rows mean is not something a boot path may guess about.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("control_schema.sql");
-        const ADDITIVE: [(&str, &str, &str); 4] = [
+        const ADDITIVE: [(&str, &str, &str); 6] = [
+            (
+                "api_tokens",
+                "scheme",
+                "ALTER TABLE api_tokens ADD COLUMN scheme INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
+                "users",
+                "issuer",
+                "ALTER TABLE users ADD COLUMN issuer TEXT NOT NULL DEFAULT ''",
+            ),
             (
                 "users",
                 "lang",
@@ -215,13 +225,67 @@ impl Control {
             ),
         ];
         super::drop_removed(&self.pool, &REMOVED).await?;
+        sqlx::query("DROP TABLE IF EXISTS sessions")
+            .execute(&self.pool)
+            .await?;
 
         sqlx::raw_sql(SCHEMA)
             .execute(&self.pool)
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        let removed = sqlx::query("DELETE FROM api_tokens WHERE scheme = 1")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if removed > 0 {
+            tracing::warn!(
+                "{removed} API tokens from before this version were removed; mint new ones in Settings and pair clients again."
+            );
+        }
+        tower_sessions_sqlx_store::SqliteStore::new(self.pool.clone())
+            .migrate()
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
         self.backfill_job_class().await?;
         Ok(())
+    }
+
+    /// Records `issuer` on OIDC users from before issuers were stored, skipping the local user.
+    pub async fn backfill_issuer(&self, issuer: &str, local_user: Option<&str>) -> Result<u64> {
+        Ok(
+            sqlx::query("UPDATE users SET issuer = ? WHERE issuer = '' AND subject IS NOT ?")
+                .bind(issuer)
+                .bind(local_user)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
+    }
+
+    /// Binds `subject` to `issuer` on first sign-in; `false` if it already belongs to another.
+    pub async fn bind_issuer(&self, subject: &str, issuer: &str) -> Result<bool> {
+        sqlx::query("UPDATE users SET issuer = ? WHERE subject = ? AND issuer = ''")
+            .bind(issuer)
+            .bind(subject)
+            .execute(&self.pool)
+            .await?;
+        let bound: Option<String> =
+            sqlx::query_scalar("SELECT issuer FROM users WHERE subject = ?")
+                .bind(subject)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(bound.is_some_and(|b| b == issuer))
+    }
+
+    /// The issuer `subject` is bound to, if the user exists and is bound.
+    pub async fn issuer_of(&self, subject: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT issuer FROM users WHERE subject = ?")
+                .bind(subject)
+                .fetch_optional(&self.pool)
+                .await?
+                .filter(|i| !i.is_empty()),
+        )
     }
 
     /// Put the sweeps in the background class.
@@ -349,7 +413,7 @@ impl Control {
     }
 
     /// Remove a user and everything in the control plane that speaks for them:
-    /// their sessions, their API tokens, and — through `jobs`' foreign key —
+    /// every browser session, their API tokens, and — through `jobs`' foreign key —
     /// their queued work.
     ///
     /// The credentials go with the row and not after it. `sessions` and
@@ -366,8 +430,8 @@ impl Control {
     /// order for the same reason: credentials first, identity last.
     pub async fn delete_user(&self, subject: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM sessions WHERE subject = ?")
-            .bind(subject)
+        // Session records are opaque to SQL, so every browser signs in again.
+        sqlx::query("DELETE FROM tower_sessions")
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM api_tokens WHERE subject = ?")
@@ -596,12 +660,11 @@ mod tests {
         let (_, spared) = crate::auth::tokens::mint(&c, "laptop", "sub-2", None)
             .await
             .unwrap();
-        c.insert_session("sid-1", "sub-1", None, 3600)
-            .await
-            .unwrap();
-        c.insert_session("sid-2", "sub-2", None, 3600)
-            .await
-            .unwrap();
+        let dep = crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            8080,
+        )));
+        crate::web::test_support::session_cookie(&c, &dep, "sub-2").await;
 
         assert!(c.delete_user("sub-1").await.unwrap());
 
@@ -609,7 +672,6 @@ mod tests {
             crate::auth::tokens::verify(&c, &doomed).await,
             Err(crate::error::Error::Unauthorized)
         ));
-        assert!(c.get_session("sid-1").await.unwrap().is_none());
 
         // The other tenant is untouched, which is the whole point of scoping
         // the delete rather than clearing the tables.
@@ -620,7 +682,11 @@ mod tests {
                 .subject,
             "sub-2"
         );
-        assert!(c.get_session("sid-2").await.unwrap().is_some());
+        let sessions: i64 = sqlx::query_scalar("SELECT count(*) FROM tower_sessions")
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0, "every browser signs in again");
     }
 
     #[tokio::test]
@@ -806,14 +872,71 @@ mod tests {
         assert_eq!(c.users().await.unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn a_session_survives_in_the_control_database() {
-        let c = Control::memory().await.unwrap();
-        c.insert_session("sid-1", "sub-1", Some("a@example.org"), 3600)
+    const PRE_CONFORMANCE_SCHEMA: &str =
+        include_str!("../../tests/fixtures/control_schema_pre_conformance.sql");
+
+    async fn old_control_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.db");
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::raw_sql(PRE_CONFORMANCE_SCHEMA)
+            .execute(&pool)
             .await
             .unwrap();
-        let s = c.get_session("sid-1").await.unwrap().expect("session");
-        assert_eq!(s.subject, "sub-1");
+        sqlx::raw_sql(
+            "INSERT INTO users (subject, email, slug, created_at) VALUES ('sub-1', 'a@example.org', 'slug1', 1);
+             INSERT INTO api_tokens (id, name, token_hash, subject, created_at) VALUES ('t1', 'laptop', '$argon2id$x', 'sub-1', 1);
+             INSERT INTO sessions (id, subject, email, expires_at, created_at) VALUES ('s1', 'sub-1', NULL, 9999999999, 1);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn migrating_an_old_control_db_removes_scheme_1_tokens_and_keeps_users() {
+        let (_dir, path) = old_control_db().await;
+        let c = Control::connect(path.to_str().unwrap()).await.unwrap();
+        let tokens: i64 = sqlx::query_scalar("SELECT count(*) FROM api_tokens")
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+        assert_eq!(tokens, 0);
+        let u = c.user("sub-1").await.unwrap().expect("the user is kept");
+        assert_eq!(u.email.as_deref(), Some("a@example.org"));
+        let (_, fresh) = crate::auth::tokens::mint(&c, "new", "sub-1", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::auth::tokens::verify(&c, &fresh)
+                .await
+                .unwrap()
+                .subject,
+            "sub-1"
+        );
+        c.migrate().await.unwrap();
+        assert!(
+            crate::auth::tokens::verify(&c, &fresh).await.is_ok(),
+            "a second migrate keeps new tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_old_sessions_table_is_dropped() {
+        let (_dir, path) = old_control_db().await;
+        let c = Control::connect(path.to_str().unwrap()).await.unwrap();
+        let tables: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .fetch_all(&c.pool)
+                .await
+                .unwrap();
+        assert!(!tables.iter().any(|t| t == "sessions"), "{tables:?}");
+        assert!(tables.iter().any(|t| t == "tower_sessions"), "{tables:?}");
     }
 
     #[tokio::test]
