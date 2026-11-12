@@ -2886,7 +2886,7 @@ mod tests {
             "the tab names this capture rather than its kind"
         );
         assert!(
-            corpus.contains("<h1>LevelDB tombstones"),
+            corpus.contains(r#"<h1 class="oc-text-page">LevelDB tombstones"#),
             "and so does the page"
         );
         assert!(
