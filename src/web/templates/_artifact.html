@@ -3,7 +3,7 @@
     {# A passage card has no title: its first line is its body, and printed as
        both the card said everything twice. See `artifact_view`. #}
     {% if !c.title.is_empty() %}<span class="card-title">{{ c.title }}</span>{% endif %}
-    <span class="card-meta"><span class="badge {{ c.embed_badge }}">{{ c.embed_state }}</span></span>
+    <span class="card-meta">{{ crate::web::ui::status(c.embed_badge, c.embed_state) }}</span>
   </div>
   <div class="md">{{ c.html|safe }}</div>
   <div class="chips">

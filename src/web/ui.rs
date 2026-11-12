@@ -163,23 +163,39 @@ pub struct ArtifactView {
 pub fn status_badge(status: &crate::store::corpora::CorpusStatus) -> &'static str {
     use crate::store::corpora::CorpusStatus::*;
     match status {
-        Ready => "badge-success",
-        Partial => "badge-warning",
-        Failed => "badge-danger",
-        // Only an older build's parked capture, until the reconcile sweep
-        // releases it into the pipeline.
-        NeedsReview => "badge-warning",
-        Describing | Extracting | Raw | Segmenting | Segmented | Embedding => "badge-accent",
+        Ready => "success",
+        // NeedsReview is only an older build's parked capture.
+        Partial | NeedsReview => "warning",
+        Failed => "danger",
+        Describing | Extracting | Raw | Segmenting | Segmented | Embedding => "none",
     }
 }
 
 pub fn embed_badge(state: &crate::store::artifacts::EmbedState) -> &'static str {
     use crate::store::artifacts::EmbedState::*;
     match state {
-        Embedded => "badge-success",
-        Failed => "badge-danger",
-        Pending => "badge-muted",
+        Embedded => "success",
+        Failed => "danger",
+        Pending => "none",
     }
+}
+
+/// The kit's status symbol: coloured icon, then the text in normal colour.
+pub fn status(kind: &str, text: &str) -> askama::filters::Safe<String> {
+    use crate::web::icons::Icon;
+    let icon = match kind {
+        "success" => Icon::Success.svg(14),
+        "warning" => Icon::Warning.svg(14),
+        "danger" => Icon::Danger.svg(14),
+        "due" => Icon::Due.svg(14),
+        _ => String::new(),
+    };
+    let text = askama::filters::escape(text, askama::filters::Html)
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    askama::filters::Safe(format!(
+        "<span class=\"oc-status oc-status--{kind}\">{icon}<span>{text}</span></span>"
+    ))
 }
 
 /// A sweep in words, for a page a person reads.
@@ -2696,7 +2712,7 @@ mod tests {
             "and does not say it a second time under the column"
         );
         assert!(
-            html.contains(r#"<label class="btn btn-ghost" id="drop""#),
+            html.contains(r#"<label class="oc-btn" id="drop""#),
             "the picker is in the verb row, not inside the hidden staged box"
         );
         let staged = html.split(r#"id="staged""#).nth(1).unwrap();
@@ -4720,7 +4736,7 @@ mod tests {
     }
 
     #[test]
-    fn a_primed_hit_gets_a_small_marker() {
+    fn a_primed_hit_says_it_moved_up() {
         let mut r = ranked(false);
         r.primed = true;
         let body = ResultsTemplate {
@@ -4729,17 +4745,17 @@ mod tests {
         }
         .render()
         .unwrap();
-        assert!(body.contains("primed"), "{body}");
+        assert!(body.contains("moved up"), "{body}");
     }
 
     #[test]
-    fn status_maps_to_the_right_badge_class() {
+    fn status_maps_to_the_right_status_kind() {
         use crate::store::corpora::CorpusStatus::*;
-        assert_eq!(status_badge(&Ready), "badge-success");
-        assert_eq!(status_badge(&Partial), "badge-warning");
-        assert_eq!(status_badge(&Failed), "badge-danger");
-        assert_eq!(status_badge(&Raw), "badge-accent");
-        assert_eq!(status_badge(&Embedding), "badge-accent");
+        assert_eq!(status_badge(&Ready), "success");
+        assert_eq!(status_badge(&Partial), "warning");
+        assert_eq!(status_badge(&Failed), "danger");
+        assert_eq!(status_badge(&Raw), "none");
+        assert_eq!(status_badge(&Embedding), "none");
     }
 
     #[tokio::test]
@@ -4826,7 +4842,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let html = flat(&body_of(res).await).to_lowercase();
         assert!(
-            html.contains("looks like something stored"),
+            html.contains("% like") && html.contains("a kept source"),
             "the flagged capture rendered as an ordinary one: {html}"
         );
         assert!(
@@ -5309,14 +5325,14 @@ mod tests {
         let out = core.ingest("alpha line", "web", None).await.unwrap();
 
         for (status, badge) in [
-            (crate::store::corpora::CorpusStatus::Failed, "badge-danger"),
+            (crate::store::corpora::CorpusStatus::Failed, "oc-status--danger"),
             (
                 crate::store::corpora::CorpusStatus::NeedsReview,
-                "badge-warning",
+                "oc-status--warning",
             ),
             (
                 crate::store::corpora::CorpusStatus::Partial,
-                "badge-warning",
+                "oc-status--warning",
             ),
         ] {
             let name = status.as_str();
@@ -5634,8 +5650,8 @@ mod tests {
             "a fully covered row announced a number that is the same on every row: {frag}"
         );
         assert!(
-            !frag.contains("badge-warning"),
-            "the warning is carried by colour on the number, not by a badge: {frag}"
+            !frag.contains("oc-status--warning"),
+            "the warning is carried by colour on the number, not by a status: {frag}"
         );
     }
 

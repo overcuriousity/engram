@@ -32,7 +32,7 @@ icons! {
     Info => "info", Success => "circle-check", Warning => "triangle-alert", Danger => "circle-x",
     More => "ellipsis", ChevronRight => "chevron-right", ChevronDown => "chevron-down", Notes => "notebook",
     Folder => "folder", Account => "user", SignOut => "log-out", Panel => "panel-left", Read => "book-open",
-    Key => "key-round", List => "list",
+    Key => "key-round", List => "list", Dictate => "mic", Due => "alarm-clock", Attach => "paperclip",
 }
 
 impl Icon {

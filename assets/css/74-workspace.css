@@ -271,12 +271,6 @@ body { overflow-x: hidden; }
   -webkit-user-select: none; user-select: none; touch-action: none;
 }
 .mic:hover { color: var(--color-fg-primary); background: var(--color-bg-surface); }
-.mic:focus-visible {
-  outline: none;
-  color: var(--color-fg-primary);
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px var(--color-accent-dim);
-}
 /* Listening. The one state that has to read across a room: it says a
    microphone in this room is open, which is not a thing to indicate subtly. */
 .mic.listening {
@@ -314,12 +308,7 @@ body { overflow-x: hidden; }
 /* Both verbs are disabled while the box is empty, and while an ask is in
    flight. Dimmed rather than hidden: what the box can do does not change, only
    whether it can do it now. */
-.verbs .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-/* `.btn` sets `display: inline-flex`, which beats the UA's `[hidden]` rule
-   whatever its specificity — the same trap `.keyhint` documents below. Without
-   this the Stop button is on screen from first paint, offering to stop an ask
-   nobody has started. */
-.btn[hidden] { display: none; }
+.verbs .oc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* The grid itself lives in 20-layout.css now: the rail beside the artifact is
    the region model rather than a layout this one page invented, and the
@@ -690,7 +679,7 @@ body { overflow-x: hidden; }
   .regions.reading .rail-snippet,
   .regions.reading .rail-why,
   .regions.reading .rail-where,
-  .regions.reading .badge { display: none; }
+  .regions.reading .badge, .regions.reading .rail-head .oc-status { display: none; }
   .regions.reading .rail-item {
     padding: 0.5rem 0; text-align: center;
   }
@@ -1064,6 +1053,7 @@ body { overflow-x: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .due-new { animation: none; }
 }
+.oc-status--due .oc-icon { color: var(--color-due); }
 .badge-due { color: var(--color-due); border-color: var(--color-due); }
 
 /* ── The day page ───────────────────────────────────────────────────────── */

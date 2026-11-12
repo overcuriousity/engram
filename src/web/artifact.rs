@@ -2669,7 +2669,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_badged_in_the_rail() {
+    async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_named_in_the_rail() {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let handle = core.clone();
@@ -2735,7 +2735,7 @@ mod tests {
             "/ui/search/results?q=Generated%20title%0Agenerated%20from%20S",
         )
         .await;
-        assert!(rail.contains("model-written"), "{rail}");
+        assert!(rail.contains("written by a model"), "{rail}");
     }
 
     #[tokio::test]

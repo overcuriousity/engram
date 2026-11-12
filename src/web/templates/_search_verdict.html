@@ -1,29 +1,18 @@
-{# The bar under a result opened from the rail: the judge deck's question,
-   asked where the answer is cheap — at the moment, by the person who searched,
-   with the result in front of them. `_ask_verdict.html` applied to search.
-
-   Three answers, and none of them is "gap": whether *nothing* has it is a
-   verdict on the whole list, and the rail asks that where the list is.
-
-   Nor is "Not sure" a verdict. The search stays unjudged: it is not a hit, not
-   a miss, and above all not a discard — which says the search was never real,
-   and would spend the search on somebody simply not remembering. What it does
-   do is leave the waiting figure, because nothing asks it again. #}
-<div id="search-verdict" class="row ask-verdict">
+{# "Not sure" is no verdict: the search stays unjudged rather than discarded. #}
+<div id="search-verdict" class="oc-row ask-verdict">
   {% if state.is_empty() %}
     <span class="muted">Was this what you were looking for?</span>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+    <button class="oc-btn" type="button" hx-post="/ui/search/{{ event_id }}/verdict"
             hx-vals='{"verdict":"hit","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">Yes</button>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+    <button class="oc-btn" type="button" hx-post="/ui/search/{{ event_id }}/verdict"
             hx-vals='{"verdict":"no","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">No</button>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+    <button class="oc-btn" type="button" hx-post="/ui/search/{{ event_id }}/verdict"
             hx-vals='{"verdict":"skip","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">Not sure</button>
   {% else if state == "skip" %}
-    {# No undo: a skip is not a verdict, so there is nothing to take back. #}
     <span class="muted">left unanswered</span>
   {% else %}
     <span class="muted">{% if state == "hit" %}yes, this was it{% else %}not this one{% endif %}</span>
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/search/{{ event_id }}/verdict"
+    <button class="oc-btn" type="button" hx-post="/ui/search/{{ event_id }}/verdict"
             hx-vals='{"verdict":"none","artifact_id":"{{ artifact_id }}"}' hx-target="#search-verdict" hx-swap="outerHTML">Undo</button>
   {% endif %}
 </div>

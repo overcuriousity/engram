@@ -1,19 +1,7 @@
-{# The Ask verb, in a slot that is always there.
-
-   Two callers: the workspace renders it inline, and `_held.html` swaps it in
-   out-of-band the moment the base stops being empty. The wrapper is what makes
-   the second one possible — htmx needs an element with this id already in the
-   page to swap against, and the button itself is absent on an empty base. #}
+{# A slot that is always present, so `_held.html` can swap the button in once the base holds something. app.js lends the primary style to the likelier verb. #}
 <span id="ask-verb-slot"{% if oob %} hx-swap-oob="true"{% endif %}>
   {%- if ask_enabled && held -%}
-  {# Carries the reason it is dead. app.js clears `disabled` the moment there
-     is something to act on, so the title only ever describes the state that
-     renders it — and a permanently grey button with no stated reason is
-     indistinguishable from a broken one.
-
-     app.js lends the accent to whichever verb the box's content shape
-     suggests; see the verb-arming sync(). #}
-  <button class="btn" type="button" data-verb="ask" disabled
+  <button class="oc-btn" type="button" data-verb="ask" disabled
           title="Type or attach something first">Ask</button>
   {%- endif -%}
 </span>

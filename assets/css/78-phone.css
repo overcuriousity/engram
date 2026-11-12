@@ -160,7 +160,7 @@
      about six hundred pixels of height and the results are what they are for.
      It still grows as you type, up to the same cap. */
   .regions-rail-focus-source .region-bar .verbs { margin-top: 0.4rem; gap: 0.4rem; }
-  .regions-rail-focus-source .region-bar .verbs .btn { min-height: 40px; }
+  .regions-rail-focus-source .region-bar .verbs .oc-btn { min-height: 40px; }
   .regions-rail-focus-source .region-bar .box { max-height: 40vh; }
 
   /* Clear of both bars, so the last result can be scrolled to. The shell's own

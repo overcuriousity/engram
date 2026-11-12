@@ -23,7 +23,7 @@
      edge of a screen too narrow to hold them. #}
   <div class="src-head">
     <h1>{{ title }}</h1>
-    <span class="badge {{ badge }}">{{ status }}</span>
+    {{ crate::web::ui::status(badge, status) }}
   </div>
   {# `.actions`, the same row an artifact's own controls use: delete goes last
      and takes the far end, so the one thing here that cannot be undone is

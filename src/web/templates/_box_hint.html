@@ -1,46 +1,11 @@
-{# The one line under the box, and the only guidance an idle page carries.
-
-   It replaces two: a sentence claiming that typing searches as you go, and a
-   second copy of the accepted file types that the Attach button's own `title`
-   and the input's `aria-label` already carry. An example teaches the first
-   better than the claim did, and the second was never guidance — the picker a
-   phone opens names what it will accept itself.
-
-   The examples are the classifier's own prototypes, in the reader's language:
-   see `moments::examples_for`. Nothing here is a second copy of anything, so
-   the page cannot come to teach a phrasing the base has stopped recognising.
-
-   A chip fills the box and does not submit. Pressing one puts the phrasing in
-   front of you and fires the echo below it, which is the whole loop in one
-   press — and a press is still yours to make.
-
-   The chips are here in every state, and the idle column's list of what a
-   paste becomes carries the phrasing as a gloss rather than as a second
-   pair of buttons. They used to move: while the base was young the buttons
-   stood in that list and this line went without them. Two problems with that,
-   and they are the same problem. This paragraph is what the textarea names in
-   `aria-describedby`, so a reader who is told about the box was told about
-   nothing pressable; and this paragraph is the only one of the two that
-   survives the first keystroke, so the chips were unreachable exactly when
-   somebody is typing. Standing still, they also stop needing a `teach` flag
-   threaded through two templates to keep them from appearing twice.
-
-   With nothing held the opening clause says whose base this is, which is what
-   a person wants to know before pasting their own notes onto a server. #}
+{# Named by the textarea's aria-describedby, so it must survive the first keystroke. Examples come from `moments::examples_for`. #}
 <p id="box-hint" class="muted hint"{% if oob %} hx-swap-oob="true"{% endif %}>
   {%- if held -%}
   A whole sentence finds more than keywords do.
   {%- else -%}
   Paste a note, article or chat · only you can search it.
   {%- endif %}
-  {# `lang` on it, because the example is the only part of the page that is
-     not English. On a browser asking for German the interface stays English
-     and it comes back in German — correctly, since they are the words that
-     base would be written in — and without the attribute a screen reader read
-     them aloud in the page's voice. See `moments::examples_lang_for`. #}
   {% if example_remind.is_empty() -%}
-  {# The embed-only floor: no synthesizer reads a reminder out of the box, so
-     no phrasing is offered that would do nothing. #}
   Reminders are not configured on this base.
   {%- else %}
   Try
@@ -48,7 +13,5 @@
           data-example="{{ example_remind }}">&ldquo;{{ example_remind }}&rdquo;</button>.
   {%- endif %}
 </p>
-{# The slot the echo swaps into. Present from first paint and swapped on every
-   answer, even an empty one: that is how an echo for text no longer in the box
-   dies rather than standing over the next thing typed. #}
+{# Swapped on every answer, even an empty one, so a stale echo dies. #}
 <span id="intent-echo" class="intent-echo"></span>

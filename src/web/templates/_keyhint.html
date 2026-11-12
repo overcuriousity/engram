@@ -1,10 +1,4 @@
-{# Taught once. A shortcut nobody is told about is a shortcut nobody uses, and
-   a hint that cannot be dismissed is a banner. Hidden until app.js decides
-   there is a keyboard to use it with.
-
-   In a slot for the same reason as the Ask verb: on an empty base there are no
-   lists to move through and no verbs to chord, so there is nothing to teach
-   until the first capture lands. #}
+{# Shown by app.js only where there is a keyboard; dismissed once. #}
 <span id="keyhint-slot"{% if oob %} hx-swap-oob="true"{% endif %}>
   {%- if held %}
   <p class="keyhint" hidden>
@@ -12,7 +6,7 @@
     <kbd>Ctrl</kbd><kbd>⇧</kbd><kbd>↵</kbd> capture
     <kbd>↑</kbd><kbd>↓</kbd> move <kbd>↵</kbd> open
     <kbd>s</kbd> hide source <kbd>r</kbd> reading
-    <button type="button" class="btn btn-ghost btn-sm" data-dismiss-hint>Got it</button>
+    <button type="button" class="oc-btn" data-dismiss-hint>Got it</button>
   </p>
   {%- endif %}
 </span>

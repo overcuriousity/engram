@@ -1,69 +1,33 @@
-{# Polls itself, and only while something is still moving. The trigger lives on
-   the fragment rather than on the page, so the swap that reports the last job
-   finishing is also the swap that stops the polling — an idle page open in a
-   background tab makes no requests at all. Three seconds because a segment is
-   one model call: polling faster only samples the same answer twice.
-
-   `captured` is listened for whatever the state, and that is the half that has
-   to survive every swap: a capture pasted onto an idle page has nothing in
-   flight to poll, so without this the row it just created never arrives and
-   the list sits there stale until a reload. The form fires the event; this
-   fetch is what starts the polling for the job it started. #}
+{# Polls only while something moves; `captured` is listened for always, so a capture on an idle page starts it. #}
 <div id="queue" class="queue" hx-get="/ui/queue" hx-swap="outerHTML"
      hx-trigger="{% if active %}sse:queue, sse:resync, {% endif %}captured from:body">
   {% for r in rows %}
   <div class="qrow">
     {% if r.in_flight %}<span class="qdot" aria-hidden="true"></span>{% endif %}
-    {# The opening words on a line of their own, and only where the label they
-       belong to is shared with another row. Inside the link, so the whole of
-       what names a capture is the same target; outside `.qtitle`, so the
-       truncation that keeps one label on one line cannot cut off the half
-       that says which capture this is. #}
+    {# The opening words only where the label is shared; outside `.qtitle` so truncation cannot cut them. #}
     <a class="qname {% if r.unnamed %}pending{% endif %}" href="/ui/corpora/{{ r.id }}">
       <span class="qtitle">{{ r.label }}</span>
       {% if !r.opening.is_empty() %}<span class="qtitle-opening">{{ r.opening }}</span>{% endif %}
     </a>
     <span class="qmeta">
       {% if let Some(p) = r.progress %}
-        <span class="badge badge-accent">segmenting {{ p }}</span>
+        {{ crate::web::ui::status("none", format!("segmenting {p}").as_str()) }}
       {% else if r.in_flight %}
-        <span class="badge badge-accent">{{ r.status }}</span>
-      {# Failed, parked and partial stop moving without finishing, and their
-         artifact count is usually zero — which renders as "0 artifacts · —",
-         indistinguishable from a capture that was read and yielded nothing.
-         The status is the only thing worth saying about these rows. #}
+        {{ crate::web::ui::status("none", r.status) }}
       {% else if !r.settled %}
-        <span class="badge {{ r.badge }}">{{ r.status }}</span>
-      {# One shape for every settled row. A low reading used to render as a
-         badge and a healthy one as plain text, so two rows saying the same kind
-         of thing looked like two different kinds of thing — and the badge's
-         width moved the timestamp beside it around. The warning is carried by
-         the colour of the number and by the fact that it is now a link: it
-         used to state a problem and offer nowhere to go. #}
+        {{ crate::web::ui::status(r.badge, r.status) }}
       {% else if r.low_coverage && r.locatable %}
         <span>{{ r.artifact_count }} artifact{% if r.artifact_count != 1 %}s{% endif %} ·
-          <a class="qcov-low" href="/ui/corpora/{{ r.id }}#uncovered"
-             title="Some of this capture never reached an artifact — see which lines">{{ r.coverage }} covered</a></span>
-      {# Same warning, no link: a capture with no windows has nothing to point
-         at, and a link to a section that renders nothing is worse than the
-         number alone. #}
+          <a class="qcov-low" href="/ui/corpora/{{ r.id }}#uncovered">{{ r.coverage }} covered</a></span>
       {% else if r.low_coverage %}
+        {# No windows to point at: read before engram recorded which lines each artifact came from. #}
         <span>{{ r.artifact_count }} artifact{% if r.artifact_count != 1 %}s{% endif %} ·
-          <span class="qcov-low"
-                title="Some of this capture never reached an artifact — it was read before engram recorded which lines each artifact came from, so the loss cannot be placed">{{ r.coverage }} covered</span></span>
-      {# Coverage speaks when it is not whole and stays quiet when it is. Ten
-         rows all reading "100% covered" is a column that says nothing, and it
-         crowded out the one number on the row that differs. The two branches
-         above are the case worth saying. #}
+          <span class="qcov-low">{{ r.coverage }} covered</span></span>
       {% else %}
         <span>{{ r.artifact_count }} artifact{% if r.artifact_count != 1 %}s{% endif %}</span>
       {% endif %}
       <span class="qtime">{{ r.created }}</span>
     </span>
-    {# What this capture did beyond being stored. Closed silently — nothing
-       asked the operator to confirm it — so this is the only place it is
-       said, and it says nothing at all on the captures that answered
-       nothing, which is nearly all of them. #}
     {% if !r.covered.is_empty() %}
     <div class="qanswers">
       answers {% for q in r.covered %}&ldquo;{{ q }}&rdquo;{% if !loop.last %}, {% endif %}{% endfor %}

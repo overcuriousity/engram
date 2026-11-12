@@ -137,7 +137,7 @@
       el.classList.add('is-clamped');
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'btn btn-ghost btn-sm expand';
+      btn.className = 'oc-btn expand';
       btn.textContent = 'Expand';
       btn.addEventListener('click', function () {
         var stillClamped = el.classList.toggle('is-clamped');
@@ -1614,7 +1614,7 @@
           // question was never about.
           : (!hasText || hasFile);
         var lead = verb === 'ask' ? (asksLike && !keepsLike) : keepsLike;
-        buttons[i].classList.toggle('btn-accent', lead && !buttons[i].disabled);
+        buttons[i].classList.toggle('oc-btn--primary', lead && !buttons[i].disabled);
       }
     }
 
