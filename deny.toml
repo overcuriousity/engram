@@ -1,0 +1,56 @@
+[graph]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-gnu", "aarch64-linux-android"]
+
+[advisories]
+version = 2
+yanked = "deny"
+# Unmaintained transitive crates are reported, not failed: the same policy cargo-audit ran with.
+unmaintained = "workspace"
+# Every ignore carries its reachability argument; delete an entry once a fixed version is reachable.
+ignore = [
+  { id = "RUSTSEC-2023-0071", reason = "rsa via openidconnect and jsonwebtoken: Marvin needs private-key decryption or signing; engram only verifies IdP signatures with public keys and authenticates with client_secret." },
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.31 via docling -> calamine: only the xls/xlsx backends use it, and engram passes docling InputFormat::Pdf only (src/core/pdf.rs)." },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.31 via docling -> calamine: same as RUSTSEC-2026-0194; the spreadsheet backends are never reached." },
+  { id = "RUSTSEC-2026-0436", reason = "calamine CFB/OLE2 parsing via docling: never reached, docling is only handed PDFs." },
+  { id = "RUSTSEC-2026-0367", reason = "zip 2.4 via docling/calamine: needs extraction to disk; both only read archives in memory, and their zip backends are never reached." },
+  { id = "RUSTSEC-2026-0368", reason = "zip 2.4 extract symlinks: as RUSTSEC-2026-0367, nothing extracts." },
+  { id = "RUSTSEC-2026-0369", reason = "zip 2.4 extract permissions: as RUSTSEC-2026-0367, nothing extracts." },
+  { id = "RUSTSEC-2026-0429", reason = "zip 2.4 extract symlink size: as RUSTSEC-2026-0367, nothing extracts." },
+  { id = "RUSTSEC-2026-0459", reason = "SQLite < 3.54 via libsqlite3-sys 0.37 (sqlx-sqlite 0.9 admits no newer): needs a foreign -wal beside a database; engram opens only databases it wrote, backups are VACUUM INTO, and restore deletes -wal/-shm before renaming (src/backup/sqlite.rs)." },
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+unused-allowed-license = "allow"
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "0BSD",
+  "CC0-1.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "OFL-1.1",
+  "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  "https://github.com/overcuriousity/overcuriousity-dev-manifest",
+  "https://github.com/overcuriousity/docling.rs",
+]
