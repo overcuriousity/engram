@@ -1,94 +1,7 @@
-/* The panel wears the deployment's face.
- *
- * Everything below the tokens is the panel's own — a sidebar is 350 pixels of
- * one column and shares no layout with the web UI — but the palette, the type
- * scale and the geometry are ported verbatim from `assets/css/00-tokens.css`
- * so that the two surfaces are one system rather than two things that both
- * happen to be about engram. The panel used to run its own green on white,
- * which is most of what read as "an extension somebody wrote for engram"
- * rather than as engram.
- *
- * Only the tokens the panel actually names are carried. The rest — the surfaces,
- * roles, type steps and the mono face that 350 pixels of one column never asks
- * for — has no reader here, and a token nothing reads is a second copy of a
- * decision waiting to fall out of step with the first. The app has since applied
- * the same rule to itself and dropped its overlay surface, its info role and its
- * shadow scale, none of which it read either.
- *
- * `--fg-disabled` is the one token going the other way: the panel's placeholder
- * text and its disabled button read it, and the app, which does not, no longer
- * defines it. The value here is the light palette's, unchanged. */
+/* The panel's own rules; `pack` prepends assets/css/00-tokens.css and the font faces. */
 
-/* Bundled rather than fetched. The deployment serves these at
- * `/assets/fonts/`, but a panel that reaches for them over the network draws
- * in the fallback face on every cold open, announces to that origin each time
- * the panel is opened, and renders in system-ui entirely when engram is
- * unreachable — which is exactly the moment the panel is being read. */
-@font-face { font-family: Inter; font-weight: 400; font-display: swap;
-  src: url("inter-400.woff2") format("woff2"); }
-@font-face { font-family: Inter; font-weight: 500; font-display: swap;
-  src: url("inter-500.woff2") format("woff2"); }
-
-:root {
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-
-  --text-xs: 0.75rem;
-  --text-sm: 0.8125rem;
-  --text-base: 0.875rem;
-  --text-md: 0.9375rem;
-
-  --radius-md: 6px;
-
-  --bg-base: #f8f6f1;
-  --bg-surface: #f2f0ea;
-  --bg-hover: #ece9e2;
-
-  --fg-primary: #2d2d2d;
-  --fg-secondary: #5a5a5a;
-  --fg-muted: #7a7a72;
-  --fg-disabled: #b8b5ac;
-
-  --border: #ddd8cc;
-  --border-subtle: #eae7de;
-
-  --accent: #3b6e91;
-  --accent-dim: rgba(59, 110, 145, 0.1);
-  --accent-fg: #ffffff;
-
-  --danger: #b3382c;
-  --success: #2f7a4f;
-
-  color-scheme: light;
-}
-
-/* A side panel has no theme switch — there is nowhere to put one that anybody
- * would find, and a panel that disagreed with the browser around it would be
- * wrong more often than right. So it follows the system, which is the same
- * default the web UI has before anyone chooses. */
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg-base: #0e1015;
-    --bg-surface: #14171d;
-    --bg-hover: #262a34;
-
-    --fg-primary: #e2e4ec;
-    --fg-secondary: #8b8fa8;
-    --fg-muted: #7d82a0;
-    --fg-disabled: #3a3d50;
-
-    --border: #232636;
-    --border-subtle: #191c26;
-
-    --accent: #5aa8b0;
-    --accent-dim: rgba(90, 168, 176, 0.15);
-    --accent-fg: #0e1015;
-
-    --danger: #e05252;
-    --success: #4caf7d;
-
-    color-scheme: dark;
-  }
-}
+@font-face { font-family: "Atkinson Hyperlegible Next"; font-weight: 400; font-display: swap; src: url("atkinson-next-400.woff2") format("woff2"); }
+@font-face { font-family: "Atkinson Hyperlegible Next"; font-weight: 500; font-display: swap; src: url("atkinson-next-500.woff2") format("woff2"); }
 
 * { box-sizing: border-box; }
 
@@ -98,9 +11,9 @@
 
 body {
   margin: 0;
-  background: var(--bg-base);
-  color: var(--fg-primary);
-  font: 400 var(--text-base)/1.5 var(--font-sans);
+  background: var(--color-bg-base);
+  color: var(--color-fg-primary);
+  font: 400 var(--text-ui)/1.5 var(--font-ui);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -111,16 +24,16 @@ main {
   padding: .75rem;
 }
 
-:focus-visible { outline: 1.5px solid var(--accent); outline-offset: 2px; }
-::selection { background: var(--accent-dim); }
+:focus-visible { outline: 1.5px solid var(--color-accent); outline-offset: 2px; }
+::selection { background: var(--color-accent-dim); }
 
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
 
 label {
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+  font-size: var(--text-micro);
   text-transform: uppercase;
   letter-spacing: .04em;
 }
@@ -130,10 +43,10 @@ textarea,
 button {
   width: 100%;
   padding: .5rem .6rem;
-  border: 1px solid var(--border);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  background: var(--bg-surface);
-  color: var(--fg-primary);
+  background: var(--color-bg-surface);
+  color: var(--color-fg-primary);
   font: inherit;
 }
 
@@ -148,13 +61,13 @@ textarea {
 }
 
 input::placeholder,
-textarea::placeholder { color: var(--fg-disabled); }
+textarea::placeholder { color: var(--color-fg-muted); }
 
 button { cursor: pointer; }
 
 button.primary {
-  background: var(--accent);
-  color: var(--accent-fg);
+  background: var(--color-accent);
+  color: var(--color-accent-fg);
   border-color: transparent;
   font-weight: 500;
 }
@@ -170,17 +83,17 @@ button.primary {
 
 button.verb {
   background: none;
-  color: var(--fg-secondary);
+  color: var(--color-fg-secondary);
   font-weight: 500;
 }
 
 button.verb:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--fg-primary);
+  background: var(--color-bg-hover);
+  color: var(--color-fg-primary);
 }
 
 button:disabled {
-  color: var(--fg-disabled);
+  color: var(--color-fg-muted);
   cursor: default;
 }
 
@@ -188,7 +101,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: .35rem;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--color-border-subtle);
   padding-bottom: .75rem;
 }
 
@@ -199,32 +112,32 @@ button.quiet {
   padding: .25rem 0;
   border: 0;
   background: none;
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+  font-size: var(--text-micro);
   text-align: left;
 }
 
-button.quiet:hover { color: var(--fg-secondary); }
+button.quiet:hover { color: var(--color-fg-secondary); }
 
 #forget { margin-top: .5rem; }
 
 #status,
 #hint {
   margin: 0;
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+  font-size: var(--text-micro);
 }
 
-#status.error { color: var(--danger); }
-#status.good { color: var(--success); }
+#status.error { color: var(--color-danger); }
+#status.good { color: var(--color-success); }
 
 /* What the model is doing while it does it. Distinct from `#status`, which
  * says what happened; this line is replaced continually and says nothing once
  * the answer is there. */
 #thinking {
   margin: 0;
-  color: var(--fg-muted);
-  font-size: var(--text-xs);
+  color: var(--color-fg-muted);
+  font-size: var(--text-micro);
   font-style: italic;
   /* One line, however long the model's aside is. */
   overflow: hidden;
@@ -235,23 +148,23 @@ button.quiet:hover { color: var(--fg-secondary); }
 #results { display: flex; flex-direction: column; }
 
 .hit {
-  border-top: 1px solid var(--border-subtle);
+  border-top: 1px solid var(--color-border-subtle);
   padding: .5rem 0;
 }
 
 .hit h3 {
   margin: 0 0 .15rem;
-  font-size: var(--text-sm);
+  font-size: var(--text-dense);
   font-weight: 500;
 }
 
 .hit a { color: inherit; text-decoration: none; }
-.hit a:hover { color: var(--accent); }
+.hit a:hover { color: var(--color-accent); }
 
 .hit p {
   margin: 0;
-  color: var(--fg-secondary);
-  font-size: var(--text-sm);
+  color: var(--color-fg-secondary);
+  font-size: var(--text-dense);
 }
 
 /* The answer, above the excerpts it was drawn from. Not muted: it is the thing
@@ -259,7 +172,7 @@ button.quiet:hover { color: var(--fg-secondary); }
 .answer {
   margin: .25rem 0 .5rem;
   white-space: pre-wrap;
-  font-size: var(--text-md);
+  font-size: var(--text-prose);
 }
 
 /* Present only while an ask is on screen, and the way back to the results the
@@ -273,25 +186,25 @@ button.quiet:hover { color: var(--fg-secondary); }
   gap: .5rem;
   align-items: baseline;
   padding: .3rem 0;
-  border-top: 1px solid var(--border-subtle);
-  font-size: var(--text-xs);
+  border-top: 1px solid var(--color-border-subtle);
+  font-size: var(--text-micro);
 }
 
 .recent-row a {
-  color: var(--fg-secondary);
+  color: var(--color-fg-secondary);
   text-decoration: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.recent-row a:hover { color: var(--accent); }
+.recent-row a:hover { color: var(--color-accent); }
 
 .recent-row .state {
   margin-left: auto;
   flex: none;
-  color: var(--fg-muted);
+  color: var(--color-fg-muted);
 }
 
-.recent-row .state.failed { color: var(--danger); }
-.recent-row .state.ready { color: var(--success); }
+.recent-row .state.failed { color: var(--color-danger); }
+.recent-row .state.ready { color: var(--color-success); }

@@ -233,3 +233,36 @@ fn no_css_sets_a_px_root_font_size_or_text_below_12px() {
     }
     assert!(offenders.is_empty(), "{}", offenders.join("\n"));
 }
+
+#[test]
+fn the_extension_panel_has_no_inline_code_or_literal_colours() {
+    let mut offenders = Vec::new();
+    for ext in ["html", "js", "css"] {
+        for (name, src) in files("extension/shared", ext) {
+            for (n, line) in src.lines().enumerate() {
+                if ext == "html" {
+                    for what in markup_offences(line) {
+                        offenders.push(format!("{name}:{}: {what}", n + 1));
+                    }
+                }
+                let code = if ext == "js" { line.split("//").next().unwrap_or("") } else { line };
+                let hex = code.char_indices().any(|(i, c)| {
+                    c == '#' && {
+                        let h: String = code[i + 1..].chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+                        matches!(h.len(), 3 | 4 | 6 | 8) && !code[i + 1 + h.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '-')
+                    }
+                });
+                if ext != "html" && (hex || code.contains("rgb(") || code.contains("rgba(") || code.contains("hsl(")) {
+                    offenders.push(format!("{name}:{}: literal colour: {}", n + 1, line.trim()));
+                }
+                if ext == "css" && code.contains("@import") {
+                    offenders.push(format!("{name}:{}: @import", n + 1));
+                }
+                if ext == "js" && (code.contains("confirm(") || code.contains("alert(") || code.contains("prompt(")) {
+                    offenders.push(format!("{name}:{}: native dialog", n + 1));
+                }
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "{}", offenders.join("\n"));
+}

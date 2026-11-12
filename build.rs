@@ -25,6 +25,7 @@ fn main() {
     build_stylesheet();
 
     println!("cargo:rerun-if-changed=extension/shared");
+    println!("cargo:rerun-if-changed={TOKENS}");
     println!("cargo:rerun-if-changed=extension/chrome/manifest.json");
     println!("cargo:rerun-if-changed=extension/firefox/manifest.json");
     // Only where it exists. Cargo reads a watched path that is missing as one
@@ -156,6 +157,9 @@ fn git_sha() -> Option<String> {
 }
 
 /// Zip one browser's manifest together with the shared sources.
+const TOKENS: &str = "assets/css/00-tokens.css";
+const PANEL_FONTS: [&str; 2] = ["atkinson-next-400.woff2", "atkinson-next-500.woff2"];
+
 fn pack(manifest_path: &str, out: &Path) {
     let file = std::fs::File::create(out).unwrap_or_else(|e| panic!("{}: {e}", out.display()));
     let mut zip = zip::ZipWriter::new(file);
@@ -180,8 +184,21 @@ fn pack(manifest_path: &str, out: &Path) {
     // Sorted, so the same sources produce the same archive twice running.
     names.sort();
     for name in names {
-        let body = std::fs::read(Path::new("extension/shared").join(&name)).unwrap();
+        let mut body = std::fs::read(Path::new("extension/shared").join(&name)).unwrap();
+        // One source of truth for the palette: the app's own token file.
+        if name == "panel.css" {
+            let mut css = std::fs::read(TOKENS).unwrap_or_else(|e| panic!("{TOKENS}: {e}"));
+            css.push(b'\n');
+            css.append(&mut body);
+            body = css;
+        }
         zip.start_file(format!("shared/{name}"), opts).unwrap();
+        zip.write_all(&body).unwrap();
+    }
+    for font in PANEL_FONTS {
+        let body = std::fs::read(Path::new("assets/fonts").join(font))
+            .unwrap_or_else(|e| panic!("assets/fonts/{font}: {e}"));
+        zip.start_file(format!("shared/{font}"), opts).unwrap();
         zip.write_all(&body).unwrap();
     }
     zip.finish().unwrap();
