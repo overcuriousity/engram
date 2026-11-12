@@ -1,10 +1,5 @@
-// Injected on demand by `scripting.executeScript`, never declared in the
-// manifest: `activeTab` grants access to this one tab, for this one action,
-// because the operator just asked for it. A declared content script would mean
-// `<all_urls>` and a "read your data on all websites" warning at install.
-//
-// The last expression is the injection's result, which is how it gets back to
-// the panel.
+// Injected on demand under `activeTab`; a declared content script would need `<all_urls>`.
+// The last expression is the injection's result.
 (() => {
   const scope = globalThis.__engramScope || 'page';
 
@@ -18,8 +13,7 @@
     return box.innerHTML;
   }
 
-  // The selection's HTML, not the page's: capturing three paragraphs must not
-  // quietly store the article they sit in.
+  // Only the selection, not the article around it.
   const html = scope === 'selection'
     ? selectionHtml()
     : document.documentElement.outerHTML;

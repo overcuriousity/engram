@@ -1,19 +1,7 @@
-/* The shell, the top row and the phone's tab bar — the frame every page is
-   drawn inside, and nothing that belongs to one page. */
+/* The frame every page is drawn inside. */
 
-/* ── The region grid ─────────────────────────────────────────────────────
-   Four regions — bar, rail, focus, source — and a page says which of them it
-   uses. It never says how wide it is. `rail` and `focus` begin in the same
-   grid columns on every page, so the single left anchor is a property of the
-   model rather than a correction laid over three pages that disagreed: Capture
-   centred itself in 60rem, Search centred a 48rem filter block inside 110rem,
-   Housekeeping ran full bleed, and the content column moved under a brand that
-   did not.
-
-   Container queries rather than media queries. The workspace answers to the
-   space it is actually in, which is what a half-width desktop window needs —
-   and what the back link appearing at 60rem rather than at the phone
-   breakpoint was already working around. */
+/* Four regions (bar, rail, focus, source); `rail` and `focus` start in the same columns on every page.
+   Container queries, so the workspace answers to the space it is in. */
 .shell {
   container-type: inline-size;
   container-name: shell;
@@ -27,75 +15,34 @@
   gap: 1rem;
   align-items: start;
   grid-template-columns: [rail] 22rem [focus] minmax(0, 1fr);
-  /* The containing block for the column handle, which is absolutely positioned
-     precisely so that it is *not* a grid item: placed in flow it would take a
-     track of its own, or open an implicit row under the two that are there. */
+  /* The containing block for the absolutely placed column handle, which must not take a grid track. */
   position: relative;
 }
 
-/* A grid child defaults to `min-width: auto`, which resolves to min-content:
-   one unwrappable line of source widens its column instead of scrolling inside
-   it, and takes the document's width with it. */
+/* `min-width: auto` would let one unwrappable source line widen the column and the document. */
 .regions > * { min-width: 0; }
 
 .region-bar { grid-column: 1 / -1; }
 .region-rail { grid-column: rail; }
 .region-focus { grid-column: focus; }
 
-/* The three-up workspace fills the window instead of ending wherever its
-   tallest pane happens to stop. `.shell` takes the space under the top row and
-   hands it to the region grid, which is what lets one height reach all three
-   panes at once — see "One height, for all three" in 40-search.css for why
-   they needed one.
-
-   Scoped with `:has` because it is a fact about the arrangement inside, not
-   about the shell: every other page is prose, and prose scrolls. `min-height`
-   rather than `height`, so a narrow window — where the grid is one column and
-   the panes are not pinned to anything — still grows and scrolls as it did.
-   The 4rem foot is the gap under a page that ends; a page that reaches the
-   bottom of the window does not have one. */
+/* The three-up workspace fills the window; `min-height`, so a one-column window still grows and scrolls. */
 body:has(.regions-rail-focus-source) {
   display: flex; flex-direction: column; min-height: 100dvh;
 }
-/* `width` is not redundant beside `max-width` here. `.shell` centres itself
-   with `margin: 0 auto`, and an auto margin on the cross axis of a flex
-   container defeats `stretch` — the shell sized itself to its content and the
-   whole workspace collapsed to a column of wrapped text. */
+/* Not redundant: the auto margin defeats `stretch`, and the shell would shrink to its content. */
 body:has(.regions-rail-focus-source) > .shell {
   flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column;
 }
 body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 0; }
 
-/* `min-height` above is what lets a one-up window grow and scroll as it always
-   did. It is also not a height: with it alone the panes simply grew to their
-   content and the window's bottom meant nothing. This is the pin, and it needs
-   a definite height to divide.
-
-   62rem is `@container shell (width <= 60rem)` written as a media query, and
-   the arithmetic is exact rather than approximate: `.shell` is `min(110rem,
-   100vw)` wide less its own `1rem` of padding on each side, so a 60rem
-   container is a 62rem viewport. It has to be a media query — `body` is
-   outside the container it would have to ask about. */
+/* The pin. 62rem is `@container shell (width <= 60rem)` as a media query: `body` is outside the container. */
 @media (width >= 62rem) {
   body:has(.regions-rail-focus-source) { height: 100dvh; overflow: hidden; }
-  /* The foot under a page that ends. This one ends at the window. */
   body:has(.regions-rail-focus-source) > .shell { padding-bottom: 1rem; }
 }
 
-/* And the standalone artifact page, which is the same two panes with no rail
-   beside them and was pinned to nothing at all.
-
-   Every rule above is scoped to `.regions-rail-focus-source`, the workspace's
-   own arrangement, so `regions-split` matched none of them — while the split
-   inside it still carried the `max-height: min(60vh, 45rem)` that the pane
-   overrides and this page did not. The two together are what that screen was:
-   an artifact clipped at three fifths of the window with the other two fifths
-   empty underneath it, on the one page whose whole subject is that artifact and
-   the lines it came from.
-
-   Written out rather than folded into the selectors above, because the chain is
-   not the same chain: there is no `.region-focus` and no `#pane-content` here —
-   the fragment's own root is the region's only child. */
+/* The standalone artifact page: the same two panes with no rail, pinned the same way. */
 body:has(.regions-split) {
   display: flex; flex-direction: column; min-height: 100dvh;
 }
@@ -107,22 +54,14 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
 @media (width >= 62rem) {
   body:has(.regions-split) { height: 100dvh; overflow: hidden; }
   body:has(.regions-split) > .shell { padding-bottom: 1rem; }
-  /* One row, and it may shrink: `.regions` is `align-items: start`, so its
-     child was content-sized and the grid's own height meant nothing — the
-     fragment simply grew past the pinned region and out of the window, which
-     is the same defect in the other direction. `minmax(0, 1fr)` plus
-     `align-self: stretch` is what the workspace does one row lower down; see
-     `grid-template-rows: auto minmax(0, 1fr)` in 40-workspace.css. */
+  /* `.regions` is `align-items: start`, so the row needs `minmax(0, 1fr)` and `stretch` to have a height. */
   .regions-split { grid-template-rows: minmax(0, 1fr); }
-  /* The fragment's root is the flex column here — the job
-     `#pane-content > [data-terms]` does in the workspace. */
+  /* The fragment's root is the flex column here. */
   .regions-split > [data-terms] {
     display: flex; flex-direction: column; align-self: stretch;
     flex: 1; min-height: 0;
   }
-  /* The row-axis `min-height: 0` a grid needs before `stretch` has a height to
-     hand its columns; see the same note on the workspace's split in
-     40-workspace.css. */
+  /* A grid needs `min-height: 0` before `stretch` can hand its columns a height. */
   .regions-split .split {
     flex: 1; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr);
   }
@@ -132,8 +71,7 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
     display: flex; flex-direction: column; max-height: none;
   }
   .regions-split .raw { max-height: none; flex: 1; min-height: 0; }
-  /* Hiding the source hands the artifact the width, not the page: the page is
-     not what scrolls here either. */
+  /* The artifact takes the width; the page still does not scroll. */
   .regions-split.hide-source .split > :first-child {
     display: flex; overflow-y: auto;
   }
@@ -143,136 +81,52 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
   .regions-split.hide-source .split > :first-child > .row-handle { display: block; }
 }
 
-/* One region. Two of them, and the difference is what the region holds rather
-   than how wide the page fancies being — which is the distinction the three
-   old shell widths were a clumsy proxy for.
-
-   Prose is the default, because most pages are prose: a capture textarea
-   110rem wide is a worse place to paste a chapter, not a better one. A table
-   is not prose and has no measure — it is as wide as its columns need.
-
-   Both start at the shell's left edge, and so does the rail. That is the whole
-   anchor: the inner grid is never centred, only the shell is.
-
-   68rem was the number here, and it is a layout width rather than a measure:
-   at 1088px a 14px paragraph runs to about 155 characters a line, and the
-   settings and extension pages were both read at that. 46rem is the measure —
-   around 75 characters, the top of the comfortable range — so the region is
-   now as wide as the thing it is named for. */
+/* Prose is the default; 46rem is the measure (about 75 characters). Only the shell is centred. */
 .regions-focus { grid-template-columns: minmax(0, 46rem); justify-content: center; }
 .regions-focus > * { grid-column: 1 / -1; }
 .regions-table { grid-template-columns: minmax(0, 1fr); }
-/* One column, centred in the window rather than anchored to its left edge.
-   For the pages that are not part of the workspace and have nothing to line
-   up with: signing in, and pairing a browser extension. */
+/* For pages outside the workspace: signing in and pairing. */
 .regions-center { grid-template-columns: minmax(0, 26rem); justify-content: center; }
 .regions-center > * { grid-column: 1 / -1; }
 .regions-table > * { grid-column: 1 / -1; }
 
-/* An artifact and where it came from, as one `.split` in a single full-width
-   region. Not prose and not a table: the split decides its own two columns,
-   and this is the same pair the search pane renders — so it gets the same
-   room rather than a reading measure with a void beside it. */
+/* The split decides its own two columns. */
 .regions-split { grid-template-columns: minmax(0, 1fr); }
 .regions-split > * { grid-column: 1 / -1; }
 
-/* Three-up. The third region is the source, and it is not a third grid column:
-   an artifact and the lines it came from are rendered together, as one
-   `.split` inside focus, because the pane is swapped as a unit and nothing
-   fills a column the server does not know about. What the extra width buys is
-   that split having room to be two columns instead of two stacked halves.
-
-   So the rail gives some back rather than the grid growing a column. */
-/* `--rail-w` rather than the number, so the boundary is one a reader can move.
-   19rem is what it is until somebody drags it; see `resizableColumns` in
-   app.js, which writes the property onto this element and remembers it. */
+/* The source is not a third column: the pane renders artifact and source as one `.split`. */
+/* `--rail-w` is written by `resizableColumns` in app.js when a reader drags the boundary. */
 @container shell (width >= 90rem) {
   .regions-rail-focus-source { grid-template-columns: [rail] var(--rail-w, 19rem) [focus] minmax(0, 1fr); }
 }
 
-/* The rail boundary is offered exactly where that 19rem track is in effect:
-   wide enough for three regions, and with something in the pane. Idle, the rail
-   is `minmax(0, 40rem)` beside a placeholder and there is no division to make. */
+/* The handle shows only where the 19rem track is in effect. */
 @container shell (width >= 90rem) {
   .regions-rail-focus-source:is(.pane-open, .answering) > .col-handle {
     display: block; left: var(--rail-w, 19rem); width: 1rem;
   }
 }
 
-/* Until something is opened into it, the pane holds one line of placeholder
-   and the rail holds every result — so the rail takes the width the pane is
-   not using. `pane-open` is what the pane gains when an artifact is swapped
-   into it, so its absence is exactly "nothing open yet".
-   The pane is not filled on arrival instead: opening the top hit would spend
-   a read on every search, including the ones the rail already answers.
-
-   `pane-open` rather than `has-selection`, which is the same fact asked for a
-   different reason: narrow reads it as "hide the rail", so a fresh list has to
-   drop it — the results have changed underneath whatever is open, and a phone
-   showing the old artifact over them would be showing the wrong screen. Wide
-   has no such claim to make: what is open is still open, and still needs its
-   width. One class answered both, so the rail refresh a capture fires — the
-   box is empty by then, and an empty box comes back as the idle rail through
-   the same `#results` swap — took the artifact's width away while the artifact
-   was on screen, and left it in a 24rem pane spelling one word per line.
-
-   `.answering` is the other thing the pane can hold. An answer is not swapped
-   into `#pane-content` and never gained `pane-open`, so it arrived into
-   whatever was left beside a 40rem rail — the widest the rail is ever allowed
-   to be, held there because nothing was open, while an answer was being
-   written into the column beside it.
-
-   Inside a container query because of what it is: a claim about how to divide
-   two columns, which is nonsense where there is only one. Chained rather than
-   `:not(.pane-open, .answering)`: the chain counts both classes and the
-   list counts one, and the three classes are what outrank the `.regions.reading`
-   track list in 40-workspace.css, which is a later file at equal weight. The
-   chain also outranks the single class the one-up block below sets
-   `grid-template-columns` with, and specificity does not care that the two rules answer different
-   widths — so an idle narrow screen kept this two-column track list, and the
-   pane it left beside a 40rem rail was twelve pixels wide. Bounded here rather
-   than fought there: the one-up block says what one column is, and this says
-   what to do when there are two. */
+/* Idle, the rail takes the width the pane is not using; opening the top hit would spend a read per search.
+   Chained, not `:not(a, b)`: three classes outrank `.regions.reading` in 74-workspace.css. */
 @container shell (width > 60rem) {
   .regions-rail-focus-source:not(.pane-open):not(.answering) {
     grid-template-columns: [rail] minmax(0, 40rem) [focus] minmax(0, 1fr);
   }
 }
 
-/* One-up: one region, the rest a navigation away. This is the phone, and it is
-   equally a half-width desktop window — which is the whole reason it is a
-   container query and not a device breakpoint. */
+/* A container query, so a half-width desktop window is one-up like a phone. */
 @container shell (width <= 60rem) {
   .regions { grid-template-columns: minmax(0, 1fr); }
   .regions > * { grid-column: 1 / -1; }
   .regions.has-selection .region-rail { display: none; }
-  /* An answer is the exception: the rail holds the excerpts it was written
-     from and the `[n]` links in it point into them, so this is the one act
-     that must not hide the rail. It goes under the answer instead — the
-     reading order the two have on a wide screen, in one column. */
+  /* An answer keeps the rail, whose excerpts its `[n]` links point into; it goes under the answer. */
   .regions.answering .region-rail { order: 1; }
 }
 
-/* Full-bleed, so the rule under the header runs the width of the window
-   instead of stopping at whatever measure the page below happens to use. The
-   row inside it takes the wider of the two measures: it lines up with content
-   on the pages that are that wide, and simply runs wider than the reading
-   column on the pages that are not. Always the same width beats sometimes
-   lining up. */
-/* Painted, not transparent: the projection's axes ran straight through the
-   nav, which made the chrome look like part of the picture. */
 .spacer { flex: 1; }
 
-/* ── Motion ──────────────────────────────────────────────────────────────
-   One rule: motion explains what moved, and never decorates.
-
-   Anything that should be understood as the same thing across a change is
-   named here, so the browser tweens it rather than repainting it. Everything
-   unnamed cross-fades, which is the right default for content that genuinely
-   was replaced. */
-/* Navigating between two pages that share this grid should look like the
-   content changing, not like the window being replaced. An at-rule rather than
-   the old meta tag, and browsers without it simply navigate. */
+/* Motion explains what moved; named elements tween, everything else cross-fades. */
 @view-transition { navigation: auto; }
 
 @media (prefers-reduced-motion: no-preference) {
@@ -282,9 +136,7 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
   .region-focus { view-transition-name: focus; }
 }
 
-/* `navigation: auto` is not inside the query above — an at-rule cannot be —
-   so the transition would still run at the browser's own duration for someone
-   who asked not to see motion. This is what actually turns it off. */
+/* An at-rule cannot sit in a media query, so this is what turns the transition off. */
 @media (prefers-reduced-motion: reduce) {
   ::view-transition-group(*),
   ::view-transition-old(*),

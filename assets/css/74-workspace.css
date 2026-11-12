@@ -1,43 +1,20 @@
-/* The workspace: the box, its verbs, the rail, the reading pane and its
-   source. One stylesheet, because there is one page.
+/* The workspace: the box, its verbs, the rail, the reading pane and its source. Widths belong to 72-layout.css. */
 
-   It was three — 40-search, 41-capture, 45-ask — and most of what they
-   disagreed about was width, which the region grid in 20-layout.css owns and
-   always did. What is left here is what the workspace actually holds. */
-
-/* Search: the ranked rail, the artifact beside it, and the source lines it
-   claims — with the controls and the lineage that hang off an artifact. */
-
-/* ── Chunk detail: the chunk beside the lines it claims ──────────────────── */
-
-/* The source column takes the larger share: it holds the source's own lines,
-   while the artifact beside it is prose that reads better narrow.
-   45.45% is `1fr 1.2fr` written as a share the reader can take hold of;
-   `--split-l` is what the handle between the two columns writes. */
+/* The source takes the larger share; 45.45% is `1fr 1.2fr`, and the handle writes `--split-l`. */
 .split {
   display: grid; grid-template-columns: var(--split-l, 45.45%) minmax(0, 1fr);
   gap: 0.75rem; align-items: start; position: relative;
 }
 
-/* ── A column boundary somebody can move ─────────────────────────────────── */
-
-/* Absolutely positioned, and that is not decoration: both parents are grids,
-   and a handle in flow would either eat a track or open a row beneath the two
-   that are there. Out of flow it sits over the gap it divides — exactly over
-   it, `width` being the gap's own width, so it covers nothing either column is
-   using and there is nothing to mis-click.
-   Hidden by default: the two blocks that show it — one here, one in
-   20-layout.css — name the arrangements that have two columns to divide. */
+/* Out of flow, exactly over the gap: in flow it would eat a track or open a row. Hidden by default. */
 .col-handle {
   display: none; position: absolute; top: 0; bottom: 0; z-index: 2;
   appearance: none; background: none; border: 0; padding: 0;
   cursor: col-resize;
-  /* Or a drag on a touchscreen scrolls the page out from under the finger. */
+  /* Or a touch drag scrolls the page out from under the finger. */
   touch-action: none;
 }
-/* The line is the affordance, and it is absent until somebody goes looking for
-   it: a permanent rule between the panes is furniture, and the gap already
-   separates them. */
+/* The line appears only on hover or focus; the gap already separates the panes. */
 .col-handle::before {
   content: ""; position: absolute; top: 0; bottom: 0; left: 50%;
   width: 2px; transform: translateX(-50%); border-radius: 1px;
@@ -48,15 +25,10 @@
 .col-handle:focus-visible::before,
 .col-handle.dragging::before { opacity: 0.7; }
 .col-handle:focus-visible { outline: none; }
-/* The pointer is captured for the length of a drag, so the cursor is right
-   wherever it goes; this is only about not selecting the prose it passes over. */
+/* The pointer is captured during a drag; this only stops text selection. */
 body.col-dragging { user-select: none; cursor: col-resize; }
 
-/* The horizontal one, between the artifact and the lists under it. In flow
-   rather than over a gap, because there is no gap: that column is a flex
-   column whose spacing is the card's own bottom margin. So the handle takes
-   that margin back — `margin-top` cancels its own height — and offering the
-   boundary costs the layout nothing. */
+/* In flow, taking back the card's bottom margin, since this column has no gap to sit over. */
 .row-handle {
   display: none; flex: none; position: relative;
   height: 0.75rem; margin-top: -0.75rem; width: 100%;
@@ -80,9 +52,7 @@ body.row-dragging { user-select: none; cursor: row-resize; }
   .col-handle::before, .row-handle::before { transition: none; }
 }
 
-/* The artifact/source boundary, wherever the split is actually two columns —
-   the same pair of conditions the split itself answers to, and not when the
-   source is hidden, which leaves one column and nothing to divide. */
+/* Only where the split is two columns and the source is shown. */
 @media (width > 62rem) {
   @container artifact (width > 36rem) {
     .regions:not(.hide-source) .split > .col-handle {
@@ -91,50 +61,21 @@ body.row-dragging { user-select: none; cursor: row-resize; }
   }
 }
 
-/* 62rem rather than 60rem: this has to be a media query — `.shell` stops being
-   a container under 40rem — and 62rem of viewport is the 60rem of container
-   that every `@container shell` block beside it asks about. At 60rem the split
-   stayed two columns for the two rem in which the regions had already gone
-   one-up. */
+/* 62rem of viewport is the 60rem container the `@container shell` blocks ask about. */
 @media (width <= 62rem) { .split { grid-template-columns: 1fr; } }
 
-/* And the backstop the rule above cannot be. That one answers the window,
-   which is the right question for the one-up arrangement — the whole screen is
-   the pane there, so the split's width and the window's are the same fact. It
-   is the wrong question everywhere else: between 62rem and 90rem the split
-   lives inside the focus pane, whose width is whatever the rail leaves, and no
-   width of window says what that is. A pane narrowed to 24rem beside a wide
-   rail kept two columns of eleven rem and set German compounds one word to the
-   line — see the `pane-open` note in 20-layout.css for how it got that narrow.
-   That state is fixed; this is so no future one can spell the same way.
-
-   The container is the fragment's own root, which is the split's parent in
-   both places it renders — the pane, and the standalone artifact page — and is
-   nothing else on any page. 36rem is where the narrower half stops being a
-   column of prose and starts being a column of syllables. */
+/* Inside the focus pane the window width says nothing, so the split also answers its own container.
+   36rem is where the narrower half turns into a column of syllables. */
 [data-artifact] { container-type: inline-size; container-name: artifact; }
 @container artifact (width <= 36rem) { .split { grid-template-columns: minmax(0, 1fr); } }
 
-/* A grid child defaults to `min-width: auto`, which resolves to min-content:
-   one unwrappable line of source then widens the column instead of scrolling
-   inside `.raw`, and takes the document's width with it. `.pane` had this; its
-   siblings did not, so the source pane escaped to the right at every width. */
+/* `min-width: auto` would let one unwrappable source line widen the column and the document. */
 .split > *, .rail-head { min-width: 0; }
-/* Titles and snippets are prose, not source: they break rather than push. */
 .rail-title, .rail-snippet, .artifact-title, .cited-title { overflow-wrap: anywhere; }
-/* A backstop. If something new overflows, it scrolls in its own box rather
-   than dragging the document sideways. */
+/* A backstop: anything new that overflows scrolls in its own box. */
 body { overflow-x: hidden; }
 
-/* Composes `.label` for the type; keeps only the row it makes. */
-/* The label vocabulary is `.label` in 10-base.css — uppercase, letterspaced,
-   muted, one step. What this adds is the hairline that runs out from it to the
-   edge of its region, which is most of why a column of these reads as an
-   organised page rather than as three lists that happen to be adjacent.
-
-   `::after` on a flex row, so the rule takes whatever width the words leave
-   and needs no measuring. `min-width: 0` on the text, or a long label pushes
-   the rule out of the column instead of shortening it. */
+/* The hairline after a `.label` runs to the region's edge; `min-width: 0` lets a long label shorten it. */
 .pane-label, .rail-act {
   display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;
 }
@@ -143,71 +84,37 @@ body { overflow-x: hidden; }
   content: ""; flex: 1 1 auto; height: 1px; min-width: 1rem;
   background: var(--color-border-subtle);
 }
-/* Except where the label holds its own trailing control — a link back, a
-   count — which would be pushed off the end by a rule that takes what is
-   left. Those rows say where the rule goes themselves. */
+/* A trailing link or button would be pushed off by the rule. */
 .pane-label:has(a)::after, .pane-label:has(button)::after { display: none; }
 
-/* Tall enough to stand beside the artifact rather than under a third of it,
-   and still bounded: the source of a chapter is not a page to scroll here. */
+/* Tall enough to stand beside the artifact, and still bounded. */
 .raw {
   background: var(--color-bg-elevated); border: 1px solid var(--color-border);
   border-radius: var(--radius-md); overflow: auto; max-height: min(60vh, 45rem);
-  /* Part of the overflow backstop above: without it one unwrappable line of
-     source widens the column rather than scrolling inside this box. */
+  /* Part of the overflow backstop. */
   max-width: 100%;
 }
 .raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: var(--text-dense); }
-/* Wrapped, with the continuation hanging under its own line rather than under
-   the line-number column — which is what made `pre` the right answer before: a
-   command broken across two flush rows read as two commands, in a pane whose
-   whole purpose is showing exactly what the source says.
-
-   The container scrolled instead, and in a column this narrow that meant a
-   filename clipped mid-word behind a hairline scrollbar — hiding the one thing
-   the pane exists to show. The hanging indent keeps a wrapped line readable as
-   one line, and the pane is wide enough now that few of them wrap at all. */
+/* Wrapped with a hanging indent, so a wrapped command still reads as one line. */
 .raw td {
   padding: 1px 0.5rem 1px 2rem; vertical-align: top;
   white-space: pre-wrap; overflow-wrap: anywhere; text-indent: -1.5rem;
 }
-/* The line numbers stay put while the code scrolls under them; a line number
-   that scrolls out of view makes the column useless for finding a line. */
 .raw td.ln {
   position: sticky; left: 0; background: var(--color-bg-elevated); z-index: 1;
   width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
   border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
-  /* The hanging indent belongs to the source lines, not to their numbers. */
   padding: 1px 0.5rem; text-indent: 0;
 }
-/* The lines the artifact was written from, and their numbers with them. The
-   tint says these are the ones; a bar down their edge says where the run starts
-   and stops, which a background shared with the row above it does not — and it
-   survives a glance from across the pane. */
+/* A bar down the edge marks where the run starts and stops. */
 .raw tr.in td { background: var(--color-accent-dim); }
 .raw tr.in td.ln {
   background: var(--color-accent-dim); color: var(--color-accent);
   box-shadow: inset 2px 0 0 var(--color-accent);
 }
 
-/* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
-
-/* ── The box, and its two verbs ──────────────────────────────────────────── */
-
-/* The one text surface. A textarea from the first keystroke to the last, so it
-   inherits none of `.input`'s single-line assumptions and needs its own rule —
-   `.input` is 44px tall and centred, which is wrong for something a chapter
-   gets pasted into.
-
-   `width: 100%` is not cosmetic: a textarea's intrinsic width is its `cols`
-   attribute, about twenty characters, so without this the box that is supposed
-   to be the application sits in the top-left corner of a full-width bar.
-
-   `resize: none` because app.js sizes it: it grows to a ten-line cap on input,
-   and a drag handle fighting that is two mechanisms for one height.
-
-   `font: inherit` for the same reason a textarea needs saying: the UA default
-   is monospace, and what goes in here is prose. */
+/* A textarea needs its own rule: `width: 100%` (intrinsic width is `cols`), `resize: none` (app.js sizes
+   it up to ten lines), `font: inherit` (the UA default is monospace). */
 .box {
   display: block; width: 100%; box-sizing: border-box;
   min-height: 2.75rem; padding: 0.625rem 0.75rem;
@@ -222,32 +129,16 @@ body { overflow-x: hidden; }
   border-color: var(--color-accent);
   box-shadow: 0 0 0 3px var(--color-accent-dim);
 }
-/* A box someone is waiting on is still a box someone is reading. The UA greys
-   disabled text towards the background, which says "broken" where this means
-   "busy" — the question you asked stays worth reading while you wait for it.
-
-   `[readonly]` rather than `:disabled`, and app.js now sets that attribute
-   instead: `disabled` was undoing this rule's whole point one level below the
-   colour, because disabled text cannot be selected and cannot be copied. The
-   question was legible and untouchable, in the one box on the page it could
-   have been edited back out of. */
+/* `[readonly]`, not `:disabled`: a waiting question stays legible, selectable and copyable. */
 .box[readonly] {
   color: var(--color-fg-secondary); opacity: 1; cursor: wait;
   background: var(--color-bg-surface);
 }
 
-/* ── The microphone on the box ───────────────────────────────────────────────
-   The wrapper exists only so the button has an edge to sit against. It is a
-   plain block otherwise: the box's own width, growth and focus ring are
-   untouched by it, and where no speech model is configured the button inside
-   is not rendered at all. */
+/* The wrapper gives the microphone an edge; without a speech model the button is not rendered. */
 .box-wrap { position: relative; }
-/* Room for the button, so a line of text never runs under it. On the box
-   rather than the wrapper, and only where a microphone is actually there. */
 .box-with-mic { padding-right: 2.75rem; }
-/* Anchored to the top, not centred: the box grows to ten lines, and a control
-   that walks down the page as you type is a control you have to look for.
-   Beside the first line is where it was when the box was one line tall. */
+/* Anchored to the top, so it does not walk down as the box grows. */
 .mic {
   position: absolute; top: 0.375rem; right: 0.375rem;
   display: inline-flex; align-items: center; justify-content: center;
@@ -255,72 +146,43 @@ body { overflow-x: hidden; }
   color: var(--color-fg-muted); background: transparent;
   border: 1px solid transparent; border-radius: var(--radius-md);
   cursor: pointer;
-  /* A held button that also selects the text under it is a held button that
-     paints half the query blue on every dictation — and on a touch screen a
-     long press over a control is the browser's own gesture for exactly that. */
+  /* A long press over a control would otherwise select the query. */
   -webkit-user-select: none; user-select: none; touch-action: none;
 }
 .mic:hover { color: var(--color-fg-primary); background: var(--color-bg-surface); }
-/* Listening. The one state that has to read across a room: it says a
-   microphone in this room is open, which is not a thing to indicate subtly. */
+/* An open microphone must be obvious across a room. */
 .mic.listening {
   color: var(--color-bg-elevated); background: var(--color-danger);
   border-color: transparent;
   animation: mic-pulse 1.4s ease-in-out infinite;
 }
-/* Waiting on the endpoint. Dimmed and inert rather than hidden: the recording
-   is over, and pressing again before the words come back would start a second
-   one over the first. */
+/* Inert while transcribing: a second press would start another recording over the first. */
 .mic[disabled] { opacity: 0.5; cursor: wait; }
 @keyframes mic-pulse {
   0%, 100% { box-shadow: 0 0 0 0 var(--color-accent-dim); }
   50% { box-shadow: 0 0 0 4px var(--color-accent-dim); }
 }
-/* Motion is the redundant half of this signal — the colour is the signal — so
-   it is the half that goes. */
+/* The colour is the signal; the motion is redundant and goes. */
 @media (prefers-reduced-motion: reduce) { .mic.listening { animation: none; } }
-/* Empty on every ordinary press: what the button is doing is on the button.
-   This line is for the screen reader, and for the one failure a person can see
-   nothing else about — a microphone the browser refused us. */
+/* Empty on ordinary presses; it is for screen readers and a refused microphone. */
 .mic-status { display: block; margin-top: 0.375rem;
   font-size: var(--text-dense); color: var(--color-fg-muted); }
 .mic-status:empty { display: none; }
 
-/* The row under the box. Two verbs on the left, what narrows the typing on the
-   right, and the spinner between them. It wraps, because the chip row grows
-   with the vocabulary and a bar that scrolls sideways is a bar that hides one
-   of its verbs. */
+/* It wraps, so a growing chip row never hides a verb. */
 .verbs {
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
   margin-top: 0.5rem;
 }
 .verbs-spacer { flex: 1 1 auto; }
-/* Both verbs are disabled while the box is empty, and while an ask is in
-   flight. Dimmed rather than hidden: what the box can do does not change, only
-   whether it can do it now. */
 .verbs .oc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-/* The grid itself lives in 20-layout.css now: the rail beside the artifact is
-   the region model rather than a layout this one page invented, and the
-   one-region-at-a-time rule that used to live here is `.regions.has-selection`
-   under a container query. */
-
-/* `overflow-x: hidden` is not belt and braces. Setting one axis to `auto`
-   computes the other from `visible` to `auto`, so the rail grew a horizontal
-   scrollbar of its own accord — a bar across the bottom of the column that
-   moves the list by a millimetre and says nothing, since every card inside
-   already wraps. The vertical axis is the only one this box has ever had
-   anything to scroll. */
+/* Setting one axis to `auto` turns the other to `auto` too, hence `overflow-x: hidden`. */
 .rail {
   display: flex; flex-direction: column; gap: 0.5rem;
   max-height: 40rem; overflow-y: auto; overflow-x: hidden;
 }
-/* The results are their own element inside the rail, so that a search replaces
-   them and not the heading above them — the heading names the act that filled
-   the rail, and a swap that took it with the list would leave the rail
-   unlabelled for as long as the next request takes. The rail's own column
-   layout has to carry through to it, or every card loses the gap between it
-   and the next. */
+/* A search replaces only `#results`, so the rail's heading survives the swap. */
 #results { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
 .rail-item {
   display: block; text-decoration: none; color: inherit;
@@ -329,95 +191,38 @@ body { overflow-x: hidden; }
 }
 .rail-item:hover { background: var(--color-bg-hover); }
 
-/* A result row is the link and nothing else. It carried a delete control until
-   that control turned out to be the only irreversible act in the app that could
-   be fired on something nobody had opened; `.rail-row` stays as the row's own
-   element, and the shape the control needed — a sibling of the anchor, held out
-   of the way until hover or focus — lives on in `.seen-row` below, which still
-   has a dismiss button to place. */
 .rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
-/* Wrapped, and the row depends on it. A badge is `white-space: nowrap` and a
-   title is `overflow-wrap: anywhere` — the second of those is what keeps a long
-   name from pushing the column open, and together, in a row that could not
-   wrap, they were a trap: once the badges filled the line the title was
-   squeezed to its own minimum, which `anywhere` makes a single character. It
-   then set one character per line, thirty-odd lines tall, in a box thirteen
-   pixels wide that `.rail` clips — so a result carrying `loose · primed · due`
-   in a rail dragged near its floor rendered as a chip row, four hundred pixels
-   of nothing, and a snippet at the bottom of a card nobody could read.
-   A row gap under the column gap, so a title that drops to its own line sits
-   under the chips rather than a chip's width away from them. */
+/* Wrapped: a nowrap badge row would squeeze an `anywhere` title to one character per line. */
 .rail-head { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
-/* A passage has no title by design, so this row's head is a badge and nothing
-   else — and at the head's full height it spent a whole line on one chip
-   before the snippet started, which made an untitled card a different shape
-   from a titled one down the same list. Marked by the template rather than
-   guessed at with `:has()`, because the template is what knows. */
+/* An untitled passage's head is one badge; this keeps it the shape of a titled card. */
 .rail-head-bare { margin-bottom: -0.125rem; }
 .rail-rank { font-size: var(--text-micro); color: var(--color-fg-muted); }
-/* `flex-basis: 0`, so the title never decides where the row breaks. Flex wraps
-   on an item's *preferred* width, and a title's preferred width is the whole of
-   it — so with the basis left at `auto` a two-word rank chip and a title that
-   wanted 250px put the chip alone on one line and the title on the next, on
-   every ranked row in the list. At a basis of zero the title asks for nothing
-   and takes what the line has left, which is the behaviour the row had before
-   it could wrap at all.
-   The floor is the other half: it is what still sends the title to a line of
-   its own when the chips have genuinely taken the row, rather than leaving it
-   to be squeezed to the single character `overflow-wrap: anywhere` allows. */
+/* `flex-basis: 0`: flex wraps on preferred width, and the title's would push the chips onto their own line.
+   The floor still sends the title to its own line when the chips fill the row. */
 .rail-title { font-weight: 600; font-size: var(--text-ui); flex: 1 1 0; min-width: 7rem; }
-/* A passage with no heading of its own is shown under its note's title. The
-   name is borrowed, not earned, so it is said quietly and marked, and the
-   weight is the surrounding text's rather than a title's. Without this the
-   borrowed name rendered identical to a real heading and the distinction lived
-   only in the tooltip, where nobody scanning a list looks.
-
-   The mark used to be a bare `·`. On the row it read as a separator with its
-   left-hand side missing, and the only thing that said otherwise was that
-   tooltip — which is to say nothing at all on the phone this is mostly read
-   on. A word does the marking now and needs no explaining. */
-/* Two lines at most, and a floor under it: an artifact whose excerpt came back
-   empty collapsed to a bare title, so card heights swung between one line and
-   four down a list that is read by scanning. */
+/* A borrowed title (from the note) is quieter than a real one and marked by a word. */
+/* A floor, so an empty excerpt does not collapse the card. */
 .rail-snippet {
   font-size: var(--text-dense); color: var(--color-fg-secondary); margin-top: 0.25rem;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
   min-height: 2.4em;
 }
-/* With the rail at its reading width there is room for the whole excerpt, and
-   the two-line clamp is what made a result unreadable without opening it.
-   The floor stays: an artifact whose excerpt came back empty still must not
-   collapse the card.
-
-   `pane-open`, because this is a statement about how wide the rail is and that
-   is what the track list above answers to. `has-selection` is the narrow
-   screen's separate question — see 20-layout.css — and reading the wrong one
-   here unclamped every excerpt in a 22rem rail. */
+/* Unclamped while nothing is open, since the rail has its reading width; keyed to `pane-open`, not `has-selection`. */
 .regions-rail-focus-source:not(.pane-open) .rail-snippet {
   -webkit-line-clamp: unset; display: block; overflow: visible;
 }
 
 .pane { min-width: 0; }
 
-/* Association is a second list on the same page, not a continuation of the
-   first: the rule and label are what keep a reader from reading straight
-   through and treating a recalled hit as the next-best answer. */
+/* The rule and label keep a recalled hit from reading as the next-best answer. */
 .assoc-rule {
   margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--color-border-subtle);
   font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted);
 }
-/* Recalled by association, not ranked against the query — so it must not
-   borrow the shape of something that was. The rule and the heading above said
-   so already, and the identical card underneath them said otherwise. */
+/* Recalled, not ranked, so it must not look like a ranked card. */
 .rail-assoc { border-style: dashed; background: transparent; }
-/* The rail's heading names the act that filled it: "3 results" while typing,
-   "Written from · 5" after an Ask. The row-and-hairline itself is shared with
-   `.pane-label` above, because it is the same kind of statement about the
-   same kind of region; what differs is below. */
-/* The heading slot carries this class permanently (see workspace.html), and
-   before anything has filled it — or after a failed swap empties it — a
-   visible row would be the hairline hanging alone over the rail. */
+/* Empty before a swap fills it, or after a failed one; a hairline alone would hang over the rail. */
 .rail-act:empty { display: none; }
 
 .rail-act::after { order: 2; }
@@ -425,10 +230,7 @@ body { overflow-x: hidden; }
   font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted); flex: 0 0 auto;
 }
-/* The refining pass landed: the reranker confirmed this order. A step quieter
-   than the count it hangs off — it is a footnote to the number, not a second
-   heading — and it fades in with the glide so the word and the movement read
-   as one event. */
+/* The reranker confirmed the order; it fades in with the glide so they read as one event. */
 .refined-tick {
   color: var(--color-fg-faint, var(--color-fg-muted));
   text-transform: none; letter-spacing: normal;
@@ -439,34 +241,24 @@ body { overflow-x: hidden; }
   .refined-tick { animation: none; }
 }
 
-/* Where the ranked list's relevance falls off. The rows past it are still
-   ranked — they placed — but they no longer read as answers. */
+/* Past here results still placed, but no longer read as answers. */
 .cliff-rule {
   margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed var(--color-border-subtle);
   font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.04em;
   color: var(--color-fg-muted);
 }
-/* Demoted, not unreadable. At 0.55 over the dark base this was very likely
-   under AA, and a result past the cliff is still a result — the dashed divider
-   above it is what says it is past, not the fact that it cannot be read. */
+/* 0.7 keeps AA; the dashed rule is what says it is past. */
 .rail-past { opacity: 0.7; }
 
-/* Judging an answer where it is read. */
 .ask-verdict { margin-top: 0.5rem; gap: 0.5rem; }
 
-/* The holes, on the capture page. */
 .rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
 
-/* Neighbours under the artifact. Narrower than the rail on purpose: this is a
-   way out of the pane, not a second set of results competing with it. */
+/* Narrower than the rail: a way out of the pane, not a competing list. */
 .related { display: flex; flex-direction: column; gap: 0.375rem; }
 .related .rail-item { padding: 0.5rem 0.625rem; }
 
-/* Same shape as `.rail-row`: the dismiss control sits beside the link rather
-   than inside it, revealed on hover or focus. `.muted` is the same-corpus
-   case — two passages of one document needing each other is not the finding
-   that a cross-corpus pair is, so it recedes instead of competing for
-   attention. */
+/* Dismiss beside the link, revealed on hover or focus; `.muted` marks the less notable same-corpus pair. */
 .seen-row { position: relative; }
 .seen-row .rail-item { padding-right: 2.75rem; }
 .seen-row .rail-del {
@@ -477,11 +269,7 @@ body { overflow-x: hidden; }
 @media (hover: none) { .seen-row .rail-del { opacity: 1; } }
 .seen-row.muted .rail-item { opacity: 0.75; }
 
-/* ── How an artifact came to exist ───────────────────────────────────────── */
-
-/* Indentation is the generation: a row's parent is the nearest row above it at
-   one less depth. Drawn as a flat list with a depth variable rather than nested
-   lists, because the template that renders it cannot include itself. */
+/* A flat list with a depth variable: the template cannot include itself. */
 .lineage { list-style: none; margin: 0 0 0.75rem; padding: 0; }
 .lin {
   display: flex; gap: 0.4rem; padding: 0.4rem 0;
@@ -493,112 +281,57 @@ body { overflow-x: hidden; }
 .lin-body { min-width: 0; }
 .lin-head { display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
 .lin-title { font-size: var(--text-ui); }
-/* What kind of artifact this is, and whether the one above replaced it. Quiet:
-   the title is what is being read, these are what qualify it. */
 .lin-kind {
   font-size: var(--text-micro); color: var(--color-fg-muted);
   text-transform: uppercase; letter-spacing: 0.04em;
 }
 .lin-sub { font-size: var(--text-micro); color: var(--color-fg-muted); }
-/* A source deleted since. Struck through rather than dropped: the text above
-   still carries what it said. */
+/* Struck, not dropped: the text above still carries what it said. */
 .lin-gone .lin-title { text-decoration: line-through; }
 
-/* An artifact claiming more than one band has its card in the first of them
-   and this line in the rest: the card carries element ids and cannot be
-   repeated, but the claim is real and the band would otherwise read as if only
-   the other artifact came out of it. */
+/* The card has element ids and renders once; later bands echo the claim. */
 .band-echo { font-size: var(--text-dense); margin: 0 0 0.5rem; }
 
-/* The fallback for a source there is nothing to band. */
 .raw-flat { margin: 0; padding: 0.5rem 0.75rem; white-space: pre-wrap;
             overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-dense); }
 
-/* What tells two rows with one title apart: when it was written, and how it
-   opens. Quiet, because it is a disambiguator and not a second title. */
 .row-sub { font-size: var(--text-micro); }
 
-/* ── The controls for whatever the page is about ─────────────────────────── */
-
-/* An artifact's own row, and the corpus page's: the same shape either way — a
-   handful of things you can do to the one thing on the screen, with the one
-   that cannot be undone held apart from the rest.
-
-   Delete is not one of the others. It sits at the far end so the control that
-   cannot be undone is never flush against ones that can.
-
-   `form + form`, because a superseded or deprecated artifact renders neither
-   verify nor deprecate: delete is then the only form in the row, and pushing
-   it away from siblings it does not have just stranded a lone trash button at
-   the far side of an empty row. A restored corpus is the same case — nothing
-   to re-segment, nothing to re-read, delete and nothing else.
-
-   Wrapped, for the reason `.row` is: the corpus page puts four labelled `.btn`
-   controls in here, and a `.btn` does not break its label, so on a phone the
-   row ran off the side of the window and took the document's width with it. A
-   wrapped delete keeps its auto margin and lands at the right of its own line,
-   which is the same statement one line lower down. */
+/* Delete sits apart at the far end (`form + form`, so a lone delete is not stranded). It wraps on a phone. */
 .actions {
   display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center;
   margin-bottom: 0.75rem;
 }
-/* Anchored to the artifact under a rule rather than floating at the top of a
-   wide column. At three-up the lone trash button ended a thousand pixels from
-   its siblings, which reads as stranded rather than as caution — the distance
-   is the point, but it needs something to be distant *within*. */
+/* Under a rule, so delete's distance from its siblings reads as caution, not stranding. */
 .pane-header {
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--color-border-subtle);
 }
 
-/* The heading scrolls with the text it names. It was sticky, to keep the name
-   of what is being read on screen while it was read — but a sticky child comes
-   to rest against its scroll container's *content* box, and the card's is one
-   padding in: the header parked 1rem down and the text went on scrolling
-   through the strip above it, past the one thing that was supposed to be
-   standing still. A heading that scrolls away is the honest version. */
+/* Not sticky: a sticky child rests against the card's content box, one padding down. */
 .actions > form + form:last-of-type { margin-left: auto; }
 
-/* The open card keeps one line of itself. The pane beside it holds the text in
-   full, but the rail is the ranking too — a card collapsing to a bare stub
-   punched a hole in the ordering and lost the reader's place in it. The accent
-   border and background are what say "this one is open"; the snippet's job
-   here is only to keep the row a row. */
+/* The open card keeps one line, so the ranking keeps its place. */
 .rail-item[aria-selected="true"] .rail-snippet {
   display: -webkit-box;
   -webkit-line-clamp: 1;
   line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  /* `.rail-snippet` carries a two-line floor so card heights stop swinging
-     down a list that is read by scanning. Left standing here it defeats the
-     clamp: line-clamp truncates what overflows the box, and a box held two
-     lines tall by `min-height` has nothing overflowing at one line — so two
-     lines rendered and the second was cut through the middle at the border,
-     with no ellipsis to say anything was missing. The floor belongs to the
-     rows that are still a list; the open one is a single line by decision. */
+  /* The two-line floor would defeat the one-line clamp. */
   min-height: 0;
   opacity: 0.6;
 }
 
-/* The one statement of which lines these are, underlined on hover only, so the
-   pane label reads as a label rather than as a link dropped into a heading. */
 .pane-label a { color: var(--color-accent); text-decoration: none; }
 .pane-label a:hover { text-decoration: underline; }
 
-/* ── Teaching the keys ───────────────────────────────────────────────────── */
-
-/* One line, once. Quieter than the hint above it, because that one is about
-   what to type and this one is about what to press — and only one of those is
-   needed before you have typed anything. */
+/* One line, shown once; quieter than the hint above. */
 .keyhint {
   display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
   margin: 0 0 0.75rem; font-size: var(--text-micro); color: var(--color-fg-muted);
 }
-/* The row ships `hidden` and app.js decides. An author `display` beats the
-   UA's `[hidden]` rule whatever its specificity, so without this the hint was
-   on every load — including on a touch screen, where there are no keys to
-   teach — and "Got it" set an attribute that changed nothing. */
+/* Ships `hidden`, and an author `display` beats the UA's `[hidden]` rule. */
 .keyhint[hidden] { display: none; }
 .keyhint kbd {
   font-family: var(--font-mono); font-size: var(--text-micro); line-height: 1.6;
@@ -608,15 +341,7 @@ body { overflow-x: hidden; }
 }
 .keyhint button { margin-left: auto; }
 
-/* ── A fresh list arrives ────────────────────────────────────────────────── */
-
-/* A replaced rail appeared all at once, which reads as a flicker rather than
-   as an answer. The stagger is short and capped at the first six: past that
-   the delay would outlast the reading of the first result, and a list still
-   arriving cannot be scanned.
-
-   The cliff divider is deliberately not in this. Its whole job is to stay put
-   while the things either side of it change. */
+/* A short stagger, capped at six; the cliff divider stays put on purpose. */
 @media (prefers-reduced-motion: no-preference) {
   .rail-item { animation: rail-in 160ms ease-out both; }
   .rail-item:nth-child(2) { animation-delay: 20ms; }
@@ -630,26 +355,8 @@ body { overflow-x: hidden; }
   to   { opacity: 1; transform: none; }
 }
 
-/* ── Reading mode ────────────────────────────────────────────────────────── */
-
-/* Once an artifact is open the list has done its job and the verification has
-   not. `r` gives the width to the artifact and its source, and leaves the rail
-   as a spine of ranks.
-
-   It narrows rather than closes for one reason: the spine still marks the
-   cliff, so position in the ordering survives. A rail that closed would take
-   that with it, and "where in the ranking was this" is the question the pane
-   beside it cannot answer.
-
-   Only at three-up. Below that the rail is already the whole column or already
-   hidden, and a 3rem spine would be neither.
-
-   Two columns, not three. The source is not a grid column here any more than
-   it is anywhere else — it is the second half of the `.split` inside focus —
-   so a third track named `source` sat empty and the pane took a fraction of
-   the width the narrowed rail had just given up. What `r` frees goes to focus
-   entire, which is what "gives the width to the artifact and its source"
-   means. */
+/* `r` narrows the rail to a spine of ranks (at three-up only), so the cliff and position survive.
+   Two tracks: the source is the split's second half, so focus takes all the freed width. */
 @container shell (width >= 90rem) {
   .regions.reading {
     grid-template-columns: [rail] 3.25rem [focus] minmax(0, 1fr);
@@ -662,43 +369,22 @@ body { overflow-x: hidden; }
     padding: 0.5rem 0; text-align: center;
   }
   .regions.reading .rail-head { justify-content: center; }
-  /* The divider keeps its meaning without its sentence: there is no room for
-     the words at 3rem, and the line is the half that has to survive. */
+  /* At 3rem the line survives without its words. */
   .regions.reading .cliff-rule {
     font-size: 0; padding: 0; margin: 0.375rem 0;
     border-top: 1px dashed var(--color-accent-muted);
   }
 }
 
-/* `s`: the artifact takes the whole column.
-
-   The source is the second half of the split, so it is the second half that
-   goes. Targeted by position rather than by `:last-child`, because a merged
-   artifact renders no source at all — and `:last-child` would then be the
-   artifact itself, hidden by the key meant to give it more room.
-
-   That same merge is why the key is gated on `.raw` rather than on `.split`:
-   with no source in it, the second half of the split is the lineage, and `s`
-   hid a merge's provenance under a word that says source. */
+/* `s` hides the split's second half by position: a merge has no source, and its second half is the lineage. */
 .regions.hide-source .split { grid-template-columns: minmax(0, 1fr); }
 .regions.hide-source .split > :nth-child(2) { display: none; }
 
-/* Why a result arrived, and — one line further down — where in its source it
-   sits, both under the snippet that shows what it says. Quieter than the
-   snippet: these explain the row, they are not the row. Two names and one
-   rule, because they are two statements, one about the ranking and one about
-   the document, rendered the same way. Gone in reading mode with everything
-   else but the rank. */
 .rail-why, .rail-where { margin: 0.25rem 0 0; font-size: var(--text-micro); color: var(--color-fg-muted); }
-/* Accented rather than muted like `.rail-why` above it: that line explains
-   something that already happened to the ordering, this one is an offer. */
+/* Accented: an offer, not an explanation. */
 .rail-continues { margin: 0.25rem 0 0; font-size: var(--text-micro); color: var(--color-accent); }
 
-/* ── The source pane ─────────────────────────────────────────────────────── */
-
-/* A fold is a rule with a count, not a gap. "Something was left out here" is
-   what empty space fails to say. Indented past the gutter, so the line-number
-   column stays a column. */
+/* A fold is a rule with a count, indented past the gutter. */
 .raw tr.srcfold td {
   cursor: pointer; padding: 0.125rem 0.5rem 0.125rem 3.25rem;
   border-top: 1px dashed var(--color-border-subtle);
@@ -708,61 +394,26 @@ body { overflow-x: hidden; }
   color: var(--color-fg-secondary); background: var(--color-bg-hover);
 }
 
-/* The artifact gets a scroll box of its own, matching the source's, so the two
-   can move together — an artifact and the lines it came from are one thing
-   read twice. Only where the split is actually side by side: stacked, they are
-   one column and "in lockstep" would mean scrolling a thing off screen to move
-   the thing below it.
-
-   The box is the card, not the column. The column also holds Related and Seen
-   together, and those are not the artifact: with the scroll on the column,
-   reading down the neighbour list dragged the source panel along with it — a
-   pane that claims to show the lines this artifact came from, scrolled by a
-   list of other artifacts. The card scrolls, the neighbours sit under it, and
-   `app.js` binds lockstep to the card for the same reason.
-
-   The floor is what stops a long neighbour list from squeezing the artifact to
-   a sliver; past it the column scrolls as a whole. */
+/* Side by side, the card (not the column) scrolls in lockstep with the source; a floor keeps it from a sliver. */
 @container shell (width >= 60rem) {
- /* Nested, because "side by side" is now two conditions rather than one: the
-    shell has to be wide enough for the arrangement, and the pane the split
-    landed in has to be wide enough to hold two columns. The second is what the
-    backstop at the top of this file decides, and these boxes have to agree
-    with it — stacked halves that each scroll are the exact thing the note
-    above rules out. */
+ /* Two conditions: the shell's width and the pane's own (`artifact` container, as above). */
  @container artifact (width > 36rem) {
   .split > :first-child {
     display: flex; flex-direction: column; overflow-y: auto;
     max-height: min(60vh, 45rem);
   }
-  /* The shares, when the column cannot hold both at their natural size. The
-     artifact is what the screen is for, so it shrinks last and by the least:
-     the neighbour lists carry the larger shrink factor and a scroll of their
-     own, and give way first. Both keep a floor — a list crushed to one clipped
-     row says less than no list at all, and an artifact crushed to a sliver is
-     the pane the page exists to show. */
-  /* `--artifact-fill` and `--artifact-h` are the two halves of one statement,
-     and both are written by the handle below the card: a height, and the card
-     no longer growing to take back what that height gave the lists. Unset —
-     which is everyone who has not moved the boundary — this is the `flex: 1 1
-     auto` it has always been. */
+  /* The neighbour lists give way first; both keep a floor. */
+  /* Both written by the row handle; unset, this is `flex: 1 1 auto`. */
   .split > :first-child > .artifact-main {
     flex: var(--artifact-fill, 1) 1 var(--artifact-h, auto);
     min-height: 8rem; overflow-y: auto;
   }
   .split > :first-child > .related { flex: 0 4 auto; min-height: 5rem; overflow-y: auto; }
   .split > :first-child > .pane-label { flex: none; }
-  /* Offered exactly where the column is a box of a fixed height with something
-     under the artifact in it. Stacked, the column is as tall as it needs to be
-     and "how to divide it" is not a question anyone is asking. */
+  /* Only where the column has a fixed height with something under the artifact. */
   .split > :first-child > .row-handle { display: block; }
 
-  /* The right column carries the cap too, rather than the source table alone
-     inside it. With it on the table, the column stood one label taller than
-     the left and the two finished 24px apart on every screen that showed both
-     — including the standalone artifact page, which is not pinned to the
-     window and so cannot get the alignment from a shared row. The table takes
-     what is left after the label and any lineage under it. */
+  /* The cap is on the right column, not the table, so both columns end at the same height. */
   .split > :nth-child(2) {
     display: flex; flex-direction: column; max-height: min(60vh, 45rem);
   }
@@ -770,138 +421,70 @@ body { overflow-x: hidden; }
  }
 }
 
-/* With the source hidden there is nothing left to stay in step with, so the
-   artifact stops being a box that scrolls inside a page that also scrolls. */
+/* With the source hidden the artifact stops being a nested scroll box. */
 .regions.hide-source .split > :first-child {
   display: block; max-height: none; overflow: visible;
 }
 .regions.hide-source .split > :first-child > .artifact-main {
   min-height: 0; overflow: visible;
 }
-/* And with no box there is no height to divide. The two wide arrangements put
-   the column back to `flex` further down and below, where the page is still
-   not what scrolls; this is the one place the artifact simply runs. */
+/* And with no box, no height to divide. */
 .regions.hide-source .split > :first-child > .row-handle { display: none; }
 
-/* ── One height, for all three ────────────────────────────────────────────
-   The rail, the artifact and the source used to carry three ceilings in two
-   units — `40rem` on the rail, `min(60vh, 45rem)` on the other two — so their
-   bottoms met at exactly one window height (a 1066px viewport, where 60vh is
-   40rem) and drifted apart everywhere else. Measured at 1714×863 they ended at
-   864, 795 and 819.
-
-   The last of those three was not even a decision. The same cap sat on the
-   whole left column but on the source *table* alone on the right, so the
-   source's own label hung outside the budget and the two columns finished 24px
-   apart — an asymmetry in where the rule was attached, standing in for a
-   height nobody owned. And because every ceiling was a cap rather than a
-   height, a tall window left a band of nothing under all three.
-
-   None of that is a statement about how tall a pane should be. It is the three
-   shell widths again, one axis over: the row owns the height now, and each
-   pane scrolls inside a height it is given rather than one it declares. The
-   bottoms line up because there is only one bottom.
-
-   Only where all three regions are on screen. One-up is a page you scroll, and
-   pinning the single visible region to the viewport there would put the
-   results list in a box the size of the window it already fills. */
+/* One height for all three, owned by the row, so the panes share one bottom. Only where all three show. */
 @container shell (width >= 60rem) {
   .regions-rail-focus-source { grid-template-rows: auto minmax(0, 1fr); }
   .regions-rail-focus-source > .region-rail,
   .regions-rail-focus-source > .region-focus { align-self: stretch; min-height: 0; }
 
-  /* Every link in the chain from the region down to the two scrollers has to
-     pass the height on, and each needs `min-height: 0`: a flex item refuses to
-     shrink below its own content by default, and one unbroken link is enough
-     for a pane to grow past the window instead of scrolling inside it. */
+  /* Each link in the chain needs `min-height: 0`, or one pane grows past the window. */
   .regions-rail-focus-source .rail { max-height: none; }
   .regions-rail-focus-source > .region-focus { display: flex; flex-direction: column; }
   .regions-rail-focus-source .pane > #pane-content,
   .regions-rail-focus-source #pane-content > [data-terms] {
     display: flex; flex-direction: column; flex: 1; min-height: 0;
   }
-  /* The answer is not on that chain. `#ask-live` and `#ask-result` are
-     siblings of `#pane-content`, and a flex item that neither shrinks nor
-     scrolls grows the column past the pinned height, where the body's
-     `overflow: hidden` clips it: a long answer simply left the screen, and
-     nothing anywhere could scroll to it. Each is its own scroller — the two
-     never show at once — and shrinks before the empty `#pane-content`
-     beside it, whose basis is zero. */
+  /* The answer is its own scroller beside `#pane-content` (basis zero), or `overflow: hidden` clips it. */
   .regions-rail-focus-source .pane > #ask-live,
   .regions-rail-focus-source .pane > #ask-result {
     flex: 0 1 auto; min-height: 0; overflow-y: auto;
   }
-  /* `.split` is a grid, not a flex column — `flex: 1; min-height: 0;` size the
-     grid *container* correctly against its own flex parent, but an implicit
-     grid row is sized to its tallest cell's content regardless of the
-     container's own height. Without a row track to cap it, the source column
-     grew to its full content height and silently overflowed the box `align-
-     items: stretch` never got the chance to stretch it into — nothing scrolled
-     because nothing above ever shrank. `minmax(0, 1fr)` is the row-axis
-     `min-height: 0` this needed: it lets the one row shrink to what `.split`
-     was already given, so `stretch` has an actual height to hand each column. */
+  /* An implicit grid row sizes to its content; `minmax(0, 1fr)` gives `stretch` a real height. */
   .regions-rail-focus-source .split {
     flex: 1; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr);
   }
   .regions-rail-focus-source .split > * { min-height: 0; }
   .regions-rail-focus-source .split > :first-child { max-height: none; }
 
-  /* The right column becomes a column, so its label is inside the same budget
-     as the left one's rather than stacked on top of it — that 24px was the
-     whole left-to-right mismatch — and the table takes what is left after the
-     label and any lineage under it. */
+  /* A column, so its label is inside the same height budget as the left one. */
   .regions-rail-focus-source .split > :nth-child(2) {
     display: flex; flex-direction: column; max-height: none;
   }
   .regions-rail-focus-source .raw { max-height: none; flex: 1; min-height: 0; }
 
-  /* Hiding the source does not hand the artifact back to the page here: the
-     page is not what scrolls, so the card keeps its box and simply gets the
-     width the source gave up. */
+  /* The page does not scroll here, so the card keeps its box and takes the width. */
   .regions-rail-focus-source.hide-source .split > :first-child {
     display: flex; overflow-y: auto;
   }
   .regions-rail-focus-source.hide-source .split > :first-child > .artifact-main {
     min-height: 12rem; overflow-y: auto;
   }
-  /* The column is a box again here, so the boundary in it means something
-     again — see the hide-source note above for the case that it doesn't. */
   .regions-rail-focus-source.hide-source .split > :first-child > .row-handle {
     display: block;
   }
 }
 
-/* Said under the passage it belongs to, quietly: it is a way onward, not a
-   warning that something is wrong. */
 .continues { margin: 0.5rem 0 0; font-size: var(--text-dense); }
 
-/* The area under the search box. `min-height` is what keeps the answer landing
-   from pushing the hint and the chips down a page that has already been read —
-   the fetch is one round trip after `load`, which is long enough to see. */
+/* Holds the row open for the fetch after `load`, so nothing below jumps. */
 .offer { min-height: 3.25rem; margin: 0.5rem 0 0.75rem; }
-/* The card, and only around an offer that exists: `.offer-filled` is on the
-   answer and never on the placeholder, which is an empty div holding a height
-   open for one round trip. Bordered, that placeholder would be an empty box on
-   screen every time the page opens.
-
-   Composed from `.rail-item`'s parts rather than sharing its rule, because the
-   two are not the same thing: a result is a link and the whole of it is the
-   click target, while this holds a link and a `<details>` beside it. So no
-   hover on the box — the card is a container, and lighting it up under the
-   cursor would promise a click that only the title answers. */
-/* Quieter than the band under it, on purpose. The offer is a guess and the
-   band is a fact, and with the same border on both they were two cards of
-   equal weight — the subtle rule is what lets the band's one accent be the
-   only colour on the page. */
+/* Only around an offer that exists. No hover on the box: only the title is a link. */
+/* Quieter than the due band: the offer is a guess, the band a fact. */
 .offer-filled {
   background: var(--color-bg-elevated); border: 1px solid var(--color-border-subtle);
   border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
 }
 
-/* The anchor was inheriting the browser's underline and nothing else, which
-   read as an unstyled link dropped under the chips. Weight and no rule by
-   default; the underline comes back on hover, which is the idiom the capture
-   page's links already use. */
 .offer-title {
   font-size: var(--text-ui); color: var(--color-fg-primary);
   font-weight: 500; text-decoration: none;
@@ -909,9 +492,7 @@ body { overflow-x: hidden; }
 .offer-title:hover, .offer-title:focus-visible {
   text-decoration: underline; text-decoration-color: var(--color-border-strong);
 }
-/* What the artifact says, under what it is called. The measure is the card's,
-   not the page's: two lines at most, because this is a card you decide about
-   rather than a thing you read here. */
+/* Two lines at most: a card to decide about, not to read. */
 .offer-snippet {
   margin: 0.25rem 0 0; font-size: var(--text-dense); color: var(--color-fg-secondary);
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
@@ -924,10 +505,7 @@ body { overflow-x: hidden; }
   white-space: pre-wrap; word-break: break-all;
   margin: 0.375rem 0 0; font-size: var(--text-micro);
 }
-/* ── What is due, under the recommendation ──────────────────────────────── */
-/* A card, drawn around something or not at all. The left accent is what tells
-   it apart from the context offer directly above it: two bordered blocks with
-   the same edge read as one list of two unrelated things. */
+/* The left accent tells it apart from the offer above. */
 .due { margin: 0 0 0.75rem; }
 .due-filled {
   border-left: 3px solid var(--color-due);
@@ -935,10 +513,7 @@ body { overflow-x: hidden; }
   background: color-mix(in oklab, var(--color-due) 6%, transparent);
   padding: 0.5rem 0.75rem;
 }
-/* One line: title, when, and the two buttons. The title takes what is left and
-   is cut rather than wrapped — a reminder is recognised from its first few
-   words, and three lines per row was most of a phone screen for four of them.
-   Nothing is lost: the full text is the link's title, and one tap opens it. */
+/* One line per reminder, cut; the full text is the link's title. */
 .due-row {
   --heat: 0;
   display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem;
@@ -950,10 +525,7 @@ body { overflow-x: hidden; }
   flex: 1 1 8rem; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-/* The ramp. Neutral beyond six hours out, red at the moment it is due — one
-   colour mixed against `--heat` and nothing else, so the row, its edge and its
-   time all move together and cannot disagree about how urgent this is.
-   `--heat` is set on the row by the server and kept moving by app.js. */
+/* One colour mixed against `--heat` (server-set, moved by app.js), so row, edge and time agree. */
 .due-row[data-due-at] {
   background: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 12%), transparent);
   border-left-color: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 85%), transparent);
@@ -970,10 +542,7 @@ body { overflow-x: hidden; }
   display: inline-flex; gap: 0.5rem; align-items: baseline;
   margin-left: auto; flex-wrap: wrap; justify-content: flex-end;
 }
-/* Opened, the second thoughts get their own line rather than squeezing the
-   title off the row that was the reason to open them. */
 .due-later[open] { flex-basis: 100%; justify-content: flex-end; }
-/* Everything that is not `done`. Closed, it is one quiet word. */
 .due-later > summary {
   cursor: pointer;
   font-size: var(--text-micro);
@@ -984,17 +553,12 @@ body { overflow-x: hidden; }
 .due-later > summary:hover { color: var(--color-fg-secondary); }
 .due-later[open] { display: inline-flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
 .due-snooze { display: inline-flex; gap: 0.25rem; align-items: baseline; font-size: var(--text-micro); }
-/* "Not a reminder": the answer that says the reading was wrong rather than
-   anything about when. Quiet as the fold is quiet — it is the rarest thing on
-   the row and must not compete with `done` — but it is a real button and not
-   a link, because it takes a row off the band. */
+/* A real button, since it takes the row off the band; quiet, as the rarest answer. */
 .due-notmine { color: var(--color-fg-muted); font-size: var(--text-micro); }
 .due-notmine:hover { color: var(--color-fg-secondary); }
 .due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 
 .due-coming { margin: 0.25rem 0 0; }
-/* The artifact's reminder, by hand. Closed it is one quiet word under the
-   text, like the band's fold. */
 .remind-edit { margin-top: 0.5rem; }
 .remind-edit > summary {
   cursor: pointer;
@@ -1004,12 +568,8 @@ body { overflow-x: hidden; }
 .remind-edit > summary:hover { color: var(--color-fg-secondary); }
 .remind-edit form { flex-wrap: wrap; gap: 0.25rem; margin-top: 0.35rem; }
 
-/* The fold, under the last row it kept: a count, and the way back to the rest.
-   Quiet on purpose — it is the least urgent thing on the band. */
 .due-fold { margin: 0.15rem 0 0; font-size: var(--text-micro); }
 
-/* A phone. The card gives back its side padding, the countdown shrinks, and
-   the row keeps its one line. */
 @media (width <= 30rem) {
   .due-filled { padding: 0.4rem 0.5rem; }
   .due-row { gap: 0.25rem 0.4rem; padding: 0.25rem 0.3rem; }
@@ -1017,8 +577,7 @@ body { overflow-x: hidden; }
   .due-acts { gap: 0.4rem; }
 }
 
-/* A row that was not here a moment ago. One pass, then it is an ordinary row:
-   a mark that persisted would be furniture inside a day. */
+/* One pass: a mark that stayed would be furniture. */
 @keyframes due-arrive {
   from { background: color-mix(in oklab, var(--color-due) 28%, transparent); }
   to   { background: transparent; }
@@ -1029,21 +588,12 @@ body { overflow-x: hidden; }
 }
 .oc-status--due .oc-icon { color: var(--color-due); }
 
-/* ── The day page ───────────────────────────────────────────────────────── */
 .day-nav { display: flex; align-items: baseline; gap: 1rem; margin: 1rem 0; }
 .day-nav h1 { flex: 1; text-align: center; margin: 0; font-size: var(--text-section); }
 .day-line { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; margin: 0.25rem 0; }
 
-/* ── A file, waiting to be sent ──────────────────────────────────────────── */
-
-/* The box holds only a file that exists: thumbnail, name, note, Remove. The
-   invitation is the Attach control in the verb row — the old arrangement had
-   the picker *inside* this box, which is hidden until a file is staged, and
-   that circle meant staging was unreachable by anything but a drag. */
-/* Same trap as `.btn` above: `display: flex` beats the UA's `[hidden]`, and
-   the box that is supposed to appear only when a file is waiting was on screen
-   from first paint — a note field for a file nobody chose, and a Remove
-   button with nothing to remove. */
+/* The box holds only a staged file; the picker lives in the verb row so it is reachable without a drag. */
+/* `display: flex` beats the UA's `[hidden]`. */
 .staged[hidden] { display: none; }
 .staged {
   display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
@@ -1051,11 +601,7 @@ body { overflow-x: hidden; }
   border: 1px solid var(--color-border); border-radius: var(--radius-sm);
   background: var(--color-bg-elevated); font-size: var(--text-dense);
 }
-/* The verb-row picker. The input is the control — focusable, submitting
-   nothing (the form's `hx-params` names what rides a search), and Enter opens
-   the picker — hidden only from sight, which is the chips' pattern exactly.
-   The ring lands on the visible word, or a keyboard reaches a control it
-   cannot see. */
+/* The input is the control, hidden only from sight; the ring lands on the visible word. */
 #drop { cursor: pointer; }
 #drop input[type="file"] {
   position: absolute; width: 1px; height: 1px; margin: -1px;
@@ -1064,10 +610,7 @@ body { overflow-x: hidden; }
 #drop:has(input:focus-visible) {
   outline: 1.5px solid var(--color-accent); outline-offset: 2px;
 }
-/* A file is somewhere over the window. Said on whichever of the two is on
-   screen: the staged box while a file is already waiting, and the Attach
-   control before one is — the box is `display: none` until then, so a class
-   on it alone left the first drop, the common one, with no visible target. */
+/* On the Attach control too: before a file is staged the box is `display: none`. */
 .staged.dropping {
   border-color: var(--color-accent); border-style: dashed;
   background: var(--color-bg-hover);
@@ -1076,29 +619,18 @@ body { overflow-x: hidden; }
   border-color: var(--color-accent); border-style: dashed;
   background: var(--color-bg-hover); color: var(--color-fg-primary);
 }
-/* Small: it identifies the photo, it does not display it. Capped in both
-   directions so a portrait shot from a phone cannot become the page. */
+/* Capped both ways so a portrait photo cannot become the page. */
 .staged img {
   max-width: 3.5rem; max-height: 3.5rem; border-radius: var(--radius-sm);
   object-fit: cover; flex: none;
 }
 #staged-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-fg-secondary); }
-/* Away from the name, so a long filename does not push it under the thumb. */
 #staged-clear { margin-left: auto; }
 
-/* Ask, as it streams. */
-
-/* ── Ask, as it streams ──────────────────────────────────────────────────── */
-
-/* Visible for as long as the stream is open. The htmx indicator class does not
-   apply here: this request is a fetch and an EventSource, neither of which htmx
-   knows about. */
+/* The stream is a fetch and an EventSource, which htmx's indicator class does not know about. */
 #box-form.asking .spinner { visibility: visible; }
 
-/* The answer while it is being written: plain text, wrapped, and deliberately
-   quieter than the rendered version that replaces it — what is on screen here
-   is not finished, has no citations yet, and nothing in it has been checked
-   against an excerpt. */
+/* Quieter than the rendered answer: unfinished, uncited, unchecked. */
 .answer-live {
   margin: 0 0 1rem; padding: 0.75rem;
   font-family: var(--font-mono); font-size: var(--text-ui); line-height: 1.6;
@@ -1108,9 +640,7 @@ body { overflow-x: hidden; }
   border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md);
 }
 
-/* What the model said on the way. Dimmer and smaller again than the draft
-   answer, and capped: it is a long aside that no one has to read, and letting
-   it grow would push the answer it precedes off the screen. */
+/* Capped, so it cannot push the answer off screen. */
 .reasoning {
   margin-bottom: 0.75rem; padding: 0.5rem 0.75rem;
   font-size: var(--text-dense); line-height: 1.5; white-space: pre-wrap;
@@ -1119,8 +649,6 @@ body { overflow-x: hidden; }
   max-height: 12rem; overflow-y: auto;
 }
 
-/* A citation in the prose. Small and raised, so `[1]` reads as a mark on the
-   sentence rather than as a word in it. */
 .cite {
   font-family: var(--font-mono); font-size: var(--text-micro);
   vertical-align: super; line-height: 0;
@@ -1128,84 +656,45 @@ body { overflow-x: hidden; }
 }
 .cite:hover { text-decoration: underline; }
 
-/* The excerpt a citation was just followed to. The same emphasis a selected
-   result carries, because it means the same thing — this is the row the page is
-   pointing at. */
+/* The same emphasis as a selected result: the row the page is pointing at. */
 .rail-active { border-color: var(--color-accent); background: var(--color-accent-dim); }
 
-/* Bounded once it is open: the reasoning runs to several times the length of
-   the answer it precedes, and an unbounded box pushes that answer off screen
-   for as long as the model is thinking. */
 .reasoning-box { margin-bottom: 0.75rem; }
 .reasoning-box > summary {
   cursor: pointer; font-size: var(--text-dense); color: var(--color-fg-muted);
 }
 .reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
 
-/* ── The idle column ─────────────────────────────────────────────────────── */
-
-/* One measure, and in the middle of the window. The bar holds everything an
-   idle page shows — the box, the offer, the band, the closing line — and it
-   used to sit at the shell's left edge in a 46rem column: at 1800px that was
-   a box, a card and three reminders in the left third of the window and the
-   vector field standing to the right of them as a separate picture. Centred,
-   the column is the page and the field is the ground behind it. The width
-   goes back to the shell's on the first keystroke, when the rail and the pane
-   arrive under it and need it, and the box grows into it from the middle
-   rather than from one side.
-
-   `width: 100%` because the bar is a grid item: `max-width` alone would let
-   it shrink to its content and the auto margins would centre a box the width
-   of its placeholder. */
+/* Centred idle, on the field; back to the shell's width with the first keystroke.
+   `width: 100%`: a grid item with only `max-width` shrinks to its content. */
 html:not(.typing) .regions-rail-focus-source .region-bar {
   max-width: 52rem; width: 100%; margin-inline: auto;
 }
 
-/* And on a window with room, the column sits a little way down rather than
-   pressed under the top row: a box at the very top of an otherwise empty
-   window reads as a toolbar. Inside the pinned grid, so the band and the line
-   under it still fit. Given back on the first keystroke, when the results
-   want the height. */
+/* A little way down on a roomy window, so the box does not read as a toolbar. */
 @media (width >= 62rem) {
   html:not(.typing) .regions-rail-focus-source { padding-top: clamp(1rem, 8vh, 5.5rem); }
   .regions-rail-focus-source { transition: padding-top 200ms ease; }
 }
 
-/* The box, idle: three lines tall and a larger placeholder, because it is the
-   one thing this page is about and at one line it read as a search field
-   rather than as a place to write. The height is the floor `grow()` in app.js
-   sizes above; it drops back to the one-line floor with the first keystroke,
-   and the transition is what stops that reading as a collapse. Only the
-   placeholder is set larger: the text somebody types keeps the size the
-   results and the pane are read at, so nothing re-flows under the caret. */
+/* Three lines idle (the floor `grow()` in app.js uses); only the placeholder grows, so typing never reflows. */
 html:not(.typing) .regions-rail-focus-source .box {
   min-height: 6.25rem; padding: 0.875rem 1rem;
 }
 .box { transition: min-height 200ms ease, padding 200ms ease; }
 .box::placeholder { font-size: var(--text-section); }
 
-/* The closing line, and the only place an idle page says what the base holds.
-   It replaced a block of counts and a list of five captures in the rail — the
-   same five the middle column was already rendering in another shape.
-
-   Body size, not the smallest type on the page: this is the sentence that
-   says the base is yours and how much of you it holds. The two counts are
-   set in the primary ink, and the last thing kept is the one link in it. */
+/* The only place an idle page says what the base holds. */
 .idle-foot { margin: 1rem 0 0; font-size: var(--text-ui); color: var(--color-fg-secondary); }
 .idle-foot .mono { color: var(--color-fg-primary); }
-/* An empty base prints no foot at all — the hint under the box says the one
-   thing there is to say — and an empty paragraph would still take its margin. */
+/* An empty paragraph would still take its margin. */
 .idle-foot:empty { display: none; }
-/* The last kept note is a link, and a note's first line can be a paragraph.
-   One line, cut with an ellipsis; the title on the far side is the same
-   text in full. The day beside it stays in the line's own colour: one link
-   is the invitation, two are a list. */
+/* One line, cut; the title holds the full text. Only one link in the line. */
 .idle-foot a {
   color: var(--color-accent); display: inline-block; max-width: 22rem; vertical-align: bottom;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .idle-foot a[data-day-link] { color: inherit; }
-/* What a paste becomes: a term and its gloss, two columns. */
 .teach {
   display: grid; grid-template-columns: max-content minmax(0, 1fr);
   gap: 0.125rem 0.75rem; margin: 0.75rem 0 0; font-size: var(--text-micro);
@@ -1213,39 +702,20 @@ html:not(.typing) .regions-rail-focus-source .box {
 .teach dt { color: var(--color-fg-primary); }
 .teach dd { margin: 0; color: var(--color-fg-secondary); }
 .teach .chip-example { text-align: left; }
-/* The list retires by coming back empty: an out-of-band swap can only replace
-   an element the response carries, so the fragment renders the `<dl>` in every
-   state and fills it in only while the base is young. */
+/* Rendered empty in every state: an out-of-band swap can only replace what the response carries. */
 .teach:empty { display: none; }
 
-/* The chip row is revealed by app.js on the first keystroke. `display: contents`
-   so the wrapper adds no box of its own: the label and the chips go on being
-   laid out by `.verbs`, which is what they are positioned against. */
+/* `display: contents`, so the label and chips stay laid out by `.verbs`. */
 .kind-row { display: contents; }
 .kind-row[hidden] { display: none; }
 
-/* ── The guidance line, and what the box says back ───────────────────────── */
-
-/* The row reads "All · concept · procedure": the first is written into the
-   template and the rest come off the artifacts' own `category`, which is
-   stored lower-case. One capitalised chip beside three that are not is the
-   sort of thing that reads as a bug in the data. Presentation, so nothing is
-   guessed at in Rust and the stored value is untouched. */
+/* Categories are stored lower-case; capitalised here, not in Rust. */
 #kind-chips .chip > span { text-transform: capitalize; }
 
-/* The hint is what an idle box says for itself: two example phrasings and a
-   sentence about pasting. It goes with the first keystroke, like the rest of
-   the idle column — the template calls it "the only guidance an idle page
-   carries", and a page with a query typed and ten results under it is not an
-   idle page.
-
-   This rule lived in the phone stylesheet, so only a phone did it. On every
-   other screen "Try 'remind me to send the invoice on friday'" stood above the
-   results for as long as the search did. */
+/* The hint goes with the first keystroke on every screen, like the rest of the idle column. */
 html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 
-/* An example reads as a quotation you can press, not as a button. Three
-   buttons in a sentence would make the sentence a toolbar. */
+/* A quotation you can press, not a button. */
 .chip-example {
   background: none;
   border: 0;
@@ -1256,8 +726,7 @@ html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 }
 .chip-example:hover { color: var(--color-fg-primary); text-decoration: underline; }
 
-/* `min-height` because the line arrives on a keystroke: without it the offer
-   and the band below shift down by a row the first time a cue is recognised. */
+/* `min-height`, so the first recognised cue does not shift the offer and band down. */
 .intent-echo {
   display: block;
   min-height: 1.2em;
@@ -1266,17 +735,8 @@ html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
 }
 .intent-echo-kind { font-weight: 600; }
 
-/* The same trap as `.btn`, `.keyhint`, `.staged` and `.kind-row` above, and
-   the two elements it hurts most: `.rail { display: flex }` and, on a wide
-   screen, `.regions-rail-focus-source > .region-focus { display: flex }` are
-   author rules, and an author rule beats the UA's `[hidden] { display: none }`
-   whatever its specificity. So `hideIdle`/`showIdle` set `hidden` on `#rail`
-   and `#pane` and nothing happened: an idle page still drew the empty rail
-   column and the empty pane beside it — the column of nothing this state
-   exists to remove.
-   Last in the file on purpose. `.pane[hidden]` and the container rule that
-   opens the pane are both one class plus one more selector, so the tie is
-   broken by source order and this has to come after it. */
+/* Author `display` beats the UA's `[hidden]`, so `hideIdle`/`showIdle` need this.
+   Last on purpose: it ties on specificity with the rule that opens the pane. */
 .rail[hidden], .pane[hidden] { display: none; }
 
 .answer { margin-bottom: var(--space-4); }

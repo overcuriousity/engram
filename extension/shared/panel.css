@@ -5,8 +5,7 @@
 
 * { box-sizing: border-box; }
 
-/* `hidden` is a presentation hint and loses to any `display` rule, and most of
- * what toggles in this panel sets one. */
+/* `hidden` loses to any `display` rule. */
 [hidden] { display: none !important; }
 
 body {
@@ -51,9 +50,7 @@ button {
 }
 
 textarea {
-  /* Resizes to its contents from JavaScript, and never below three lines: the
-   * box is the same box whether a query or a chapter is in it, so it must not
-   * flinch when text arrives. */
+  /* Never below three lines, so the box does not flinch when text arrives. */
   min-height: 4.5rem;
   resize: none;
   overflow: hidden;
@@ -72,10 +69,7 @@ button.primary {
   font-weight: 500;
 }
 
-/* The two verbs that act on the box. Not primary: the box is where the
- * attention is, and two filled buttons under it would compete with it and with
- * each other. They earn their weight by being the only controls that light up
- * when there is something to act on. */
+/* Not primary: the box holds the attention. */
 .verbs {
   display: flex;
   gap: .5rem;
@@ -105,8 +99,6 @@ button:disabled {
   padding-bottom: .75rem;
 }
 
-/* Not a call to action. Unpairing is something you go looking for, not
- * something to hit while reaching for Capture. */
 button.quiet {
   width: auto;
   padding: .25rem 0;
@@ -131,15 +123,12 @@ button.quiet:hover { color: var(--color-fg-secondary); }
 #status.error { color: var(--color-danger); }
 #status.good { color: var(--color-success); }
 
-/* What the model is doing while it does it. Distinct from `#status`, which
- * says what happened; this line is replaced continually and says nothing once
- * the answer is there. */
+/* What the model is doing now, unlike `#status`, which says what happened. */
 #thinking {
   margin: 0;
   color: var(--color-fg-muted);
   font-size: var(--text-micro);
   font-style: italic;
-  /* One line, however long the model's aside is. */
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -167,16 +156,12 @@ button.quiet:hover { color: var(--color-fg-secondary); }
   font-size: var(--text-dense);
 }
 
-/* The answer, above the excerpts it was drawn from. Not muted: it is the thing
- * that was asked for, and the sources under it are the evidence. */
 .answer {
   margin: .25rem 0 .5rem;
   white-space: pre-wrap;
   font-size: var(--text-prose);
 }
 
-/* Present only while an ask is on screen, and the way back to the results the
- * same words find for nothing. */
 #back { margin-bottom: .25rem; }
 
 #recent-list { display: flex; flex-direction: column; }

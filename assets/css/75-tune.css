@@ -1,17 +1,13 @@
-/* Accent-bordered because the recommendation is the only thing in this block
-   that can be acted on. */
+/* Accent-bordered: the recommendation is the only actionable thing here. */
 .judge-tune { margin-bottom: 0.9rem; }
 
 .judge-tune-history { margin-top: 0.375rem; }
 .judge-tune summary { cursor: pointer; }
 .judge-tune ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: var(--text-dense); }
-/* A query is whatever someone typed: it wraps rather than setting the width of
-   the page. */
+/* A query is whatever someone typed, so it wraps. */
 .judge-tune li { overflow-wrap: anywhere; }
 .judge-tune-history { font-size: var(--text-dense); }
 
-/* The rest of what the camera wrote. Folded, and smaller than the facts above
-   it, because it is a reference to fall back on rather than something to read. */
 .exif-all { margin-top: 0.75rem; font-size: var(--text-dense); }
 .exif-all summary { cursor: pointer; }
 .exif-all table { margin-top: 0.5rem; }

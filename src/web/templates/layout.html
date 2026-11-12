@@ -25,11 +25,7 @@
   <script src="{{ crate::web::assets::url("app.js") }}" defer></script>
 </head>
 <body{% block live %}{% endblock %}>
-  {# Chrome, not content. Inside `.shell` the nav took whichever measure the
-     page had chosen — 60rem on Capture, 110rem on Search — so it changed width
-     as you navigated, and the rule under it stopped at a different place on
-     every page. Out here the border spans the window and the row inside it is
-     one width everywhere. #}
+  {# Outside `.shell`, so the nav and its rule are one width on every page. #}
   {% block nav %}
   {% let theme = crate::web::prefs::theme() %}
   {% let compact = crate::web::prefs::density() == crate::web::prefs::Density::Compact %}
@@ -55,23 +51,14 @@
     </div>
   </header>
   {% endblock %}
-  {# A page says which regions it uses. It never says how wide it is: the grid
-     puts rail and focus in the same columns everywhere, and the viewport
-     decides only how many regions are visible at once. Prose in one column is
-     the default, because most pages are that. #}
+  {# A page names its regions, never its width: the grid and the viewport decide that. #}
   <div class="shell">
     <div class="regions {% block regions %}regions-focus{% endblock %}">
       {% block content %}{% endblock %}
     </div>
   </div>
-  {# On a phone the destinations move under the thumb and the top row keeps
-     only identity. Hidden above 40rem, where the top row does the same job.
-     The same links as the top row, so an installed window and a desktop tab
-     are the same app rather than two arrangements of one. #}
-  {# Chrome for a signed-in person, like the top row: a page with no session
-     — the login — empties this block as it empties `nav`, so nobody is shown
-     Search · Insights · Settings and invited to install an app they are
-     locked out of. #}
+  {# The phone's thumb-reach copy of the top row's links; hidden above 40rem. #}
+  {# Emptied with `nav` on pages without a session, such as the login. #}
   {% block tabbar %}
   <nav class="oc-tabbar" aria-label="Sections">
     <a href="/ui"{% if self.section() == "search" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("search", 20) }}<span>Search</span></a>

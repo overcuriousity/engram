@@ -14,9 +14,7 @@ env:
   CARGO_TERM_COLOR: always
   # Queries are checked against the committed `.sqlx/`; the `sqlx` job keeps it current.
   SQLX_OFFLINE: "true"
-  # Note: deliberately NOT setting `RUSTFLAGS: -D warnings` globally. It would
-  # apply to dependency compilation too, so any warning in a third-party crate
-  # would fail our build. Our own code is held to -D warnings via clippy below.
+  # No global `RUSTFLAGS: -D warnings`: it would fail on third-party warnings; clippy holds ours.
 
 permissions:
   contents: read
@@ -33,17 +31,13 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
-      # Everything here runs without infrastructure: inference roles and the
-      # vector store sit behind traits with deterministic fakes.
+      # Inference roles and the vector store have deterministic fakes, so no infrastructure is needed.
       - run: cargo test --locked
 
   contained:
     name: contained feature
     runs-on: ubuntu-latest
-    # The phone's core: llama.cpp and whisper.cpp in process, off by default
-    # and so compiled by nothing above. The tests that want model files skip
-    # themselves where `ENGRAM_TEST_MODELS` is unset; what this proves is that
-    # the feature builds, lints and passes everything else.
+    # `contained` is off by default; model-file tests skip without `ENGRAM_TEST_MODELS`.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -62,9 +56,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      # Pinned to the version README and Cargo.toml promise. The floor is set
-      # by sqlx 0.9, which requires 1.94 — higher than the 1.88 our own
-      # let-chains need. This job is what stops that promise drifting silently.
+      # The promised rust-version; sqlx 0.9 sets the floor at 1.94.
       - uses: dtolnay/rust-toolchain@dc08e2af391d489dff6d14cf743e574f7d1229c5 # 1.94.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -98,12 +90,7 @@ jobs:
   browser:
     name: browser layout
     runs-on: ubuntu-latest
-    # The `#[ignore]`d tests in `web::mod`, `web::ui` and `tests/browser_ask`
-    # need a real headless Chrome, so they cannot ride the `check` job. They
-    # were written, wired to `tests/browser/page_width.js`, and then run by
-    # nobody: `cargo test --locked` skips them by name and the only `--ignored`
-    # line in this file names the Qdrant suite. A layout guard that never runs
-    # is a layout guard that is already failing and does not say so.
+    # The `#[ignore]`d headless-Chrome tests (`web::mod`, `web::ui`, `tests/browser_ask`).
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -111,8 +98,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '22'
-      # `test_support::chrome` looks for playwright's own build under
-      # ~/.cache/ms-playwright, which is what this installs.
+      # `test_support::chrome` looks for playwright's build under ~/.cache/ms-playwright.
       - run: npx --yes playwright install --with-deps chromium-headless-shell
       - run: cargo test --locked --lib -- --ignored
       - run: cargo test --locked --test browser_ask -- --ignored

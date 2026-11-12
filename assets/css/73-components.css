@@ -13,49 +13,33 @@
 .md code { background: var(--color-bg-surface); padding: 1px 4px;
            border-radius: var(--radius-sm); font-size: 0.85em; }
 .md pre code { background: none; padding: 0; }
-/* A verbatim passage is a slice of the document, not a code block. Kept as
-   written — the line breaks are its structure, and a table of contents whose
-   breaks are gone is one paragraph of stretched leader dots — but in the
-   reading font and without a code block's chrome, because it is prose as often
-   as it is not. `anywhere` is for those leader dots: one unbreakable word the
-   width of the card. */
+/* A verbatim passage keeps its line breaks but not code chrome; `anywhere` breaks long leader-dot runs. */
 .md pre.verbatim {
   background: none; border: 0; border-radius: 0; padding: 0;
   font-family: inherit; font-size: inherit;
   white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
 }
-/* A displayed formula wider than a phone scrolls on its own rather than
-   widening the card. */
 .md math[display="block"] { margin: 0.5rem 0; overflow-x: auto; overflow-y: hidden; }
 .md table { border-collapse: collapse; width: 100%; font-size: var(--text-ui); }
 .md th, .md td { border: 1px solid var(--color-border); padding: 0.375rem 0.5rem; text-align: left; }
 .md blockquote { margin: 0.5rem 0; padding-left: 0.75rem;
                  border-left: 2px solid var(--color-border-strong); color: var(--color-fg-secondary); }
 
-/* A literal no cited excerpt carries. Tinted rather than filled: it has to be
-   legible inside a code block, where it matters most, and keep the text colour
-   it already had. */
+/* A literal no cited excerpt carries; tinted, so it stays legible inside code. */
 mark.unsupported {
   background: var(--color-warning-dim); color: inherit;
   border-bottom: 1px dashed var(--color-warning); padding: 0 0.1em;
 }
 
 .muted { color: var(--color-fg-muted); font-size: var(--text-ui); }
-/* A line of guidance under the field it belongs to: smaller than the label it
-   follows, and close enough to it to read as part of the same control. */
 .hint { margin: 0.375rem 0 0; font-size: var(--text-dense); line-height: 1.45; }
-/* A term's few-word gloss, beside the term. */
 .gloss { color: var(--color-fg-secondary); font-size: var(--text-micro); font-weight: normal; }
 
 .stack { display: flex; flex-direction: column; gap: 0.75rem; }
 .spinner { visibility: hidden; color: var(--color-fg-muted); font-size: var(--text-micro); }
 .htmx-request .spinner, .htmx-request.spinner { visibility: visible; }
 
-/* ── Brand ───────────────────────────────────────────────────────────────── */
-/* The mark is one colour and takes it from the text beside it, so it follows
-   the theme -- including a `data-theme` override, which an <img> could not
-   see. Sizing is here rather than on the element because it is included as a
-   partial and every caller wants a different size. */
+/* Takes `currentColor`, so it follows a `data-theme` override an <img> could not see. */
 .mark { display: block; flex: none; color: inherit; }
 .oc-topbar__logo .mark { width: 22px; height: 22px; }
 .brand-lockup .mark { width: 40px; height: 40px; }
@@ -63,15 +47,9 @@ mark.unsupported {
 .brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
 .brand-name { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.02em; }
 
-/* ── Filter chips ────────────────────────────────────────────────────────── */
-
-/* Composes `.label` for the type; keeps only what is about its place in the
-   row of verbs the one taxonomy rides in. */
 .facet-label { flex: none; width: 2.5rem; padding-top: 3px; }
 
-/* A radio styled as a chip. The input is the state — checked, focusable,
-   reachable by keyboard, submitted with the form — and is hidden only from
-   sight, so none of that is reimplemented in script. */
+/* The radio input is the state, hidden only from sight, so keyboard and form submission still work. */
 .chip { display: inline-flex; cursor: pointer; }
 .chip input {
   position: absolute; width: 1px; height: 1px; margin: -1px;
@@ -89,17 +67,7 @@ mark.unsupported {
 }
 .chip input:focus-visible + span { outline: 2px solid var(--color-accent); outline-offset: 1px; }
 
-/* ── Reading aids: highlighting, clamping, copying ───────────────────────── */
-
-/* A matched term. `color: inherit` took the muted grey of the snippet around
-   it, and over the tint that came to 4.43:1 — the highlight was making the
-   word it points at harder to read than the words beside it. Primary, so a
-   match is the most legible thing on the row.
-
-   Three states, two selectors, exactly as the palette does it. This was a bare
-   `prefers-color-scheme` media query, which is the one shape the theme toggle
-   cannot override: on a dark-preferring system an explicit *light* choice
-   turned every surface light and left the highlight on its dark tint. */
+/* Primary, not `inherit`: muted text over the tint fell to 4.43:1. Both theme selectors, so the toggle wins. */
 mark {
   background: var(--color-accent-dim); color: var(--color-fg-primary);
   border-radius: 2px; padding: 0 1px;
@@ -115,12 +83,7 @@ mark {
   background: linear-gradient(to bottom, transparent, var(--color-bg-elevated));
 }
 
-/* Room above the block for the button, rather than the button on top of the
-   block. A fenced code sample is short and its first line usually is too, so
-   sitting over its top-right corner cost nothing — but a passage kept as the
-   document wrote it is one `<pre>` from end to end, and there the button
-   landed squarely on the first sentence of the artifact. Reserved space
-   overlaps nothing, whichever of the two it is. */
+/* Reserved space above the block: a verbatim `<pre>` would put the button on its first sentence. */
 .codewrap { position: relative; padding-top: 1.6rem; }
 .copy {
   position: absolute; top: 0; right: 0;
@@ -131,29 +94,8 @@ mark {
 }
 .copy:hover { color: var(--color-fg-primary); background: var(--color-bg-hover); }
 
-/* ── The bottom of a box that scrolls ────────────────────────────────────────
-   Four boxes in this app scroll inside a page that also scrolls: the results
-   rail, the source table, the artifact pane beside it and the ask reasoning.
-   Every one of them ended at a hard border drawn
-   straight through a line of type — glyphs sliced across the middle, with
-   nothing to say whether that was the end of the text or only the end of the
-   box. Three of them are visible at once on the search page, so the screen read
-   as damaged rather than as scrollable.
-
-   The last few millimetres fade instead. A cut that fades is a sentence that
-   continues; a cut that is a straight edge is a sentence that was severed. And
-   the fade retracts as you reach the end, so the final line is delivered whole
-   rather than permanently half-erased — which is the failure of every static
-   scrim, and the reason this is on a scroll timeline rather than a plain rule.
-
-   `--edge` is animated rather than the gradient itself: two gradients only
-   interpolate when their stops correspond, and a registered property is one
-   number the browser can simply count down.
-
-   Behind `@supports`, and harmless without it. An inactive timeline leaves
-   `--edge` at its initial `0px`, which makes the mask fully opaque — so a box
-   that does not scroll, and a browser that cannot drive this, both render
-   exactly as they do today. */
+/* Scrolling boxes fade at the bottom instead of cutting through a line, and the fade retracts at the end.
+   `--edge` is a registered property so it can animate; without timeline support it stays 0px (no mask). */
 @property --edge {
   syntax: "<length>";
   inherits: false;
@@ -171,25 +113,16 @@ mark {
     animation-timeline: scroll(self);
   }
 
-  /* Held for most of the travel and given back over the last stretch, so the
-     fade is gone by the time the last line arrives rather than lifting the
-     instant anything is scrolled. */
+  /* Held for most of the travel, so the fade is gone by the last line. */
   @keyframes scroll-edge {
     0%, 88% { --edge: 2.5rem; }
     100%    { --edge: 0px; }
   }
 
-  /* No `prefers-reduced-motion` carve-out, deliberately. Nothing here moves on
-     its own: the mask tracks a scroll the reader is already performing, so
-     there is no motion to reduce. Pinning the fade for those readers instead
-     would put a permanent gradient on the boxes that are too short to scroll,
-     which is the one case that has nothing to indicate. */
+  /* No reduced-motion carve-out: the mask follows the reader's own scroll. */
 }
 
-/* A row whose whole content is a label — a Housekeeping cell, a lineage node,
-   a day's opened list — has nothing to show when the artifact has no name of
-   its own, so it shows how the text opens instead. This is what keeps that
-   from reading as a name: see `ui::RowLabel`. */
+/* A nameless artifact's opening text must not read as a name; see `ui::RowLabel`. */
 .name-opening { font-weight: 400; color: var(--color-fg-secondary); }
 
 /* Replacements for the inline styles the CSP forbids. */

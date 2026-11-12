@@ -1,21 +1,13 @@
 name: release
 
-# Triggered by `ci` finishing rather than by the push itself.
-#
-# Both workflows fire on the same push, so a release keyed to the push would
-# race the tests it depends on and could ship binaries from a master whose
-# suite had just gone red. `workflow_run` waits for the verdict, and every job
-# below checks out `workflow_run.head_sha` — the exact commit CI proved, not
-# whatever master has drifted to since.
+# After `ci` succeeds (`workflow_run`), building `workflow_run.head_sha`: the commit CI proved.
 on:
   workflow_run:
     workflows: [ci]
     types: [completed]
     branches: [master]
 
-# Never cancel in flight: a release interrupted between `gh release create` and
-# the last asset upload leaves a published version with missing binaries, which
-# is worse than two runs queueing.
+# Never cancel: an interrupted upload leaves a published version with missing binaries.
 concurrency:
   group: release
   cancel-in-progress: false
@@ -29,8 +21,7 @@ permissions:
 jobs:
   version:
     name: version
-    # A failed, cancelled or skipped CI run reaches here too, and only a
-    # successful one may ship.
+    # Failed, cancelled and skipped CI runs reach here too.
     if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
@@ -41,8 +32,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
-          # The whole history and every tag: the counter below reads the tags
-          # already cut today, and the docs-only check needs the parent commit.
+          # The counter reads today's tags; the docs-only check needs the parent commit.
           fetch-depth: 0
 
       - name: Pick the version
@@ -50,28 +40,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          # CalVer, `YYYY.MMDD.N`. Valid semver, and monotonic across a year
-          # because the day is one field: January is 101 and December is 1231.
-          # `10#` forces base ten, or `0827` would be read as octal and fail.
+          # CalVer `YYYY.MMDD.N`: semver-valid and monotonic within a year. `10#` stops `0827` reading as octal.
           year=$(date -u +%Y)
           mmdd=$((10#$(date -u +%m%d)))
 
-          # N counts what is already tagged today, so a second push the same
-          # day becomes `.1` rather than colliding.
           n=$(git tag --list "v${year}.${mmdd}.*" | wc -l)
           version="${year}.${mmdd}.${n}"
           tag="v${version}"
 
-          # Refuse rather than overwrite: a tag that exists means the count was
-          # wrong, and a silently moved tag is a released version whose source
-          # nobody can find again.
+          # A moved tag would be a release whose source nobody can find again.
           if git rev-parse "$tag" >/dev/null 2>&1; then
             echo "::error::$tag already exists" >&2
             exit 1
           fi
 
-          # A README typo should not mint a version. A commit that touched
-          # nothing outside markdown and docs/ is not a release.
+          # A commit touching only markdown and docs/ is not a release.
           if git rev-parse HEAD^ >/dev/null 2>&1; then
             changed=$(git diff --name-only HEAD^ HEAD)
           else
@@ -96,21 +79,15 @@ jobs:
     if: needs.version.outputs.release == 'yes'
     runs-on: ${{ matrix.runner }}
     strategy:
-      # One target failing must not delete the other's artifact: the release
-      # job below refuses to publish a partial set, and seeing both failures at
-      # once is worth the minutes.
+      # The release job refuses a partial set; seeing both failures at once is worth the minutes.
       fail-fast: false
       matrix:
         include:
-          # Statically linked, so one binary runs against any libc — Alpine and
-          # an ancient LTS alike. `libsqlite3-sys` compiles bundled C, which is
-          # why `musl-tools` is here and why this is a native build rather than
-          # a cross-compile.
+          # Static musl runs on any libc; bundled SQLite C is why this is native, with `musl-tools`.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
             packages: musl-tools
-          # Native on GitHub's arm64 runners. Same reason: a cross-compiled
-          # SQLite would need a toolchain we would have to assemble ourselves.
+          # Native arm64: cross-compiling SQLite would need a toolchain of our own.
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             packages: ""
@@ -135,13 +112,9 @@ jobs:
         run: |
           set -euo pipefail
           v="${{ needs.version.outputs.version }}"
-          # Only here, never committed back: master stays free of bot commits
-          # and the binary still reports the version it was released as —
-          # which is what `engram-cli/<version>` sends as its user agent.
+          # Never committed back; the binary reports its released version (and sends it as its user agent).
           sed -i '0,/^version = /s/^version = .*/version = "'"$v"'"/' Cargo.toml
-          # The lock carries engram's own version too, and `--locked` refuses a
-          # lock that disagrees with the manifest. This is the package's own
-          # entry; no dependency is touched.
+          # `--locked` refuses a lock that disagrees with the manifest; only engram's own entry changes.
           sed -i '/^name = "engram"$/{n;s/^version = .*/version = "'"$v"'"/}' Cargo.lock
           sh scripts/stamp-changelog.sh "$v" > /dev/null
           grep -m1 '^version = ' Cargo.toml
@@ -156,8 +129,7 @@ jobs:
 
       - name: Build
         env:
-          # `cc` picks the host compiler otherwise, and the bundled SQLite
-          # would be linked against glibc inside a musl binary.
+          # Otherwise `cc` takes the host compiler and links glibc SQLite into a musl binary.
           CC_x86_64_unknown_linux_musl: musl-gcc
         run: cargo build --release --locked --target ${{ matrix.target }}
 
@@ -190,17 +162,12 @@ jobs:
       - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with: { distribution: temurin, java-version: "21" }
 
-      # The same dance as the android workflow: the runner's SDK is used
-      # directly because the setup-android action runs `sdkmanager tools`,
-      # a package that no longer exists.
+      # As in the android workflow: setup-android runs the gone `sdkmanager tools`.
       - name: accept SDK licences
         run: yes | "$(ls -d $ANDROID_HOME/cmdline-tools/*/bin | sort -V | tail -1)/sdkmanager" --licenses > /dev/null || true
 
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6
-      # The core, for contained mode. Without it the APK still builds and
-      # still installs, and never offers "On this phone" — which is how every
-      # release before this one went out. Gradle calls `cargo +stable ndk`,
-      # so the toolchain has to be the one named `stable`.
+      # The contained core; Gradle calls `cargo +stable ndk`, so the toolchain must be `stable`.
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: aarch64-linux-android
@@ -214,8 +181,7 @@ jobs:
         with:
           tool: cargo-ndk
 
-      # The NDK version `core/build.gradle.kts` names, and libclang for the
-      # bindings llama.cpp's crate generates; cmake is already on the runner.
+      # The NDK version `core/build.gradle.kts` names, and libclang for llama.cpp's bindings.
       - name: Install the NDK and libclang
         run: |
           set -euo pipefail
@@ -225,16 +191,11 @@ jobs:
       - name: Stamp the version into this checkout
         run: |
           set -euo pipefail
-          # The core reports this version as the server does. The native
-          # crate's lock is not built `--locked`, so Cargo follows it there.
+          # The native crate's lock is not `--locked`, so Cargo follows the version.
           sed -i '0,/^version = /s/^version = .*/version = "${{ needs.version.outputs.version }}"/' Cargo.toml
           grep -m1 '^version = ' Cargo.toml
 
-      # An unsigned APK is one no phone will install, and an APK signed by a
-      # key that is not the usual one is worse: it installs nowhere an older
-      # build already sits, and the person has to uninstall — losing the
-      # pairing — to take an update. Neither is worth publishing, so a missing
-      # key stops the release rather than shipping something inert.
+      # Unsigned, or signed by another key, an APK cannot update an installed one; stop the release instead.
       - name: Unpack the signing key
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
@@ -263,13 +224,10 @@ jobs:
           set -euo pipefail
           v="${{ needs.version.outputs.version }}"
           apk=android/app/build/outputs/apk/release/app-release.apk
-          # AGP writes `app-release-unsigned.apk` when no signing config took
-          # effect. Its absence is the check: a build that produced one has a
-          # key that did not load, whatever the secrets said.
+          # AGP names the APK `-unsigned` when no signing config took effect.
           test -f "$apk" || { echo "::error::the APK came out unsigned" >&2; exit 1; }
           "$(ls -d $ANDROID_HOME/build-tools/*/ | sort -V | tail -1)apksigner" verify --print-certs "$apk"
-          # And that the core is inside: an APK without it is server mode only,
-          # and nothing else about it would say so.
+          # Without the core the APK is server-mode only, and nothing else would say so.
           unzip -l "$apk" | grep -q 'lib/arm64-v8a/libengram_android\.so' \
             || { echo "::error::the APK has no native core" >&2; exit 1; }
           mkdir -p dist && cp "$apk" "dist/engram-${v}.apk"
@@ -319,12 +277,10 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          # Every archive, or the release is not published. A missing target is
-          # a broken release rather than a smaller one.
+          # A missing target is a broken release, not a smaller one.
           test "$(ls -1 ./*-offline.tar.gz | wc -l)" -eq 2
           test "$(ls -1 ./*-src-vendored.tar.gz | wc -l)" -eq 1
-          # And the APK, which Obtainium reads straight off the newest release:
-          # a release published without it is an update the phones cannot see.
+          # Obtainium reads the APK off the newest release.
           test "$(ls -1 ./*.apk | wc -l)" -eq 1
           sha256sum ./*.tar.gz ./*.apk ./install.sh > SHA256SUMS
           cat SHA256SUMS
@@ -339,8 +295,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # `--prerelease` while the version is under 1.0: the tags are dates,
-          # not promises about compatibility.
+          # `--prerelease` under 1.0: the tags are dates, not compatibility promises.
           gh release create "${{ needs.version.outputs.tag }}" \
             --target "${{ github.event.workflow_run.head_sha }}" \
             --title "${{ needs.version.outputs.tag }}" \

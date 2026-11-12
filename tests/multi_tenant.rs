@@ -1,15 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-//! Two tenants over the real router.
-//!
-//! Everything else in the suite runs one tenant, which is what keeps it honest
-//! about the single-user case; this is what keeps it honest about the other
-//! one. It goes through `engram::web::router` rather than calling handlers,
-//! because the boundary being tested is the extractor: a handler that reached
-//! a core from anywhere but its own `Tenant` would still pass a unit test.
-//!
-//! In-memory vectors, so this runs anywhere. The one thing `MemoryVectors`
-//! cannot cover — an alias per tenant resolving to a different collection —
-//! has its case in `integration_qdrant.rs`.
+//! Two tenants through `web::router`, since the boundary under test is the `Tenant` extractor.
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -186,8 +176,7 @@ async fn fetching_the_other_tenants_id_is_a_404_and_not_a_403() {
     let res = get(&app, &a, &format!("/api/v1/corpora/{b_id}")).await;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
-    // And the same id is fine for the tenant it belongs to, so the 404 above is
-    // about who asked rather than about the id being bad.
+    // The 404 above is about who asked, not about the id.
     assert_eq!(
         get(&app, &b, &format!("/api/v1/corpora/{b_id}"))
             .await
@@ -203,7 +192,6 @@ async fn a_capture_by_one_tenant_queues_work_only_for_them() {
 
     let a_status = json(get(&app, &a, "/api/v1/status").await).await;
     let b_status = json(get(&app, &b, "/api/v1/status").await).await;
-    // `jobs` is a list of [state, count] pairs, in the order Ops renders them.
     let queued = |v: &serde_json::Value| {
         v.get("jobs")
             .and_then(serde_json::Value::as_array)
@@ -234,7 +222,7 @@ async fn a_tenant_that_was_evicted_comes_back_with_its_data() {
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = engram::config::Config::test_default();
     cfg.store.dir = dir.path().to_string_lossy().to_string();
-    // One at a time: opening the second evicts the first.
+    // Opening the second tenant evicts the first.
     cfg.store.max_open_tenants = 1;
     let cfg = Arc::new(cfg);
 
@@ -274,10 +262,7 @@ async fn text(res: axum::response::Response) -> String {
 
 #[tokio::test]
 async fn settings_lists_this_tenants_tokens_and_not_the_others() {
-    // `api_tokens` used to live in the single user's own database, where "every
-    // row" and "my rows" were the same set. It is one instance-wide table now,
-    // and an unfiltered listing puts every tenant's token ids, names,
-    // user-agents and last-used times on whoever opened Settings.
+    // `api_tokens` is instance-wide: an unfiltered listing exposes every tenant's tokens.
     let (app, a, b, _dir) = two_tenant_app().await;
     let page = text(get(&app, &a, "/ui/settings").await).await;
     assert!(
@@ -292,9 +277,7 @@ async fn settings_lists_this_tenants_tokens_and_not_the_others() {
 
 #[tokio::test]
 async fn a_tenant_cannot_revoke_the_others_token() {
-    // Worse than the listing it used to be paired with: the route took the id
-    // straight to an `UPDATE ... WHERE id = ?`, so one press killed another
-    // tenant's extension pairing. Their token has to keep working.
+    // Revoking by bare id would kill another tenant's extension pairing.
     let (app, a, b, _dir) = two_tenant_app().await;
     let res = send(
         &app,
@@ -311,7 +294,7 @@ async fn a_tenant_cannot_revoke_the_others_token() {
         StatusCode::NOT_FOUND,
         "another tenant's token id was accepted"
     );
-    // The same answer a made-up id gets, or the route enumerates token ids.
+    // A made-up id gets the same answer, or the route enumerates token ids.
     let invented = send(
         &app,
         &a,
@@ -333,8 +316,6 @@ async fn a_tenant_cannot_revoke_the_others_token() {
 
 #[tokio::test]
 async fn a_tenant_can_revoke_its_own_token() {
-    // The other half: scoping the revoke must not have closed the door on the
-    // person it belongs to.
     let (app, a, _b, _dir) = two_tenant_app().await;
     let res = send(
         &app,

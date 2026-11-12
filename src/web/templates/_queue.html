@@ -20,7 +20,7 @@
         <span>{{ r.artifact_count }} artifact{% if r.artifact_count != 1 %}s{% endif %} ·
           <a class="qcov-low" href="/ui/corpora/{{ r.id }}#uncovered">{{ r.coverage }} covered</a></span>
       {% else if r.low_coverage %}
-        {# No windows to point at: read before engram recorded which lines each artifact came from. #}
+        {# Older captures recorded no line windows to point at. #}
         <span>{{ r.artifact_count }} artifact{% if r.artifact_count != 1 %}s{% endif %} ·
           <span class="qcov-low">{{ r.coverage }} covered</span></span>
       {% else %}

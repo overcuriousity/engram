@@ -1,9 +1,4 @@
-// The whole of the Chrome/Firefox divergence, in one place.
-//
-// Firefox exposes a promise-based `browser`; Chrome exposes `chrome`, which in
-// MV3 also returns promises for everything used here. The panel is the one
-// real difference: Chrome opens a side panel through `chrome.sidePanel`,
-// Firefox through `browser.sidebarAction`, and neither knows the other's name.
+// The Chrome/Firefox divergence: `browser` vs `chrome`, and `sidePanel` vs `sidebarAction` for the panel.
 const engramBrowser = globalThis.browser ?? globalThis.chrome;
 
 globalThis.engramShim = {

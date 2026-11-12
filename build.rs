@@ -1,27 +1,13 @@
-//! Packs the browser extension into `assets/extension/`.
-//!
-//! Built from source at compile time so a deployment always serves the build
-//! that matches it, and so there is no second artifact to publish or forget.
-//! Written into `assets/` rather than `OUT_DIR` because `rust-embed` embeds
-//! that directory; the files are generated and are gitignored.
-//!
-//! Firefox is the same package under a different name and a different
-//! manifest. The XPI produced here is unsigned, which release Firefox will not
-//! install permanently — it loads through `about:debugging` and lasts until
-//! the browser restarts. An AMO-signed build is the way to make it stick, and
-//! signing is a network round trip that does not belong in `cargo build`, so a
-//! signed package is committed to `extension/firefox-signed.xpi` and preferred
-//! here when it exists. See `extension/README.md`.
+//! Packs the browser extension into `assets/` (embedded by `rust-embed`, gitignored) and
+//! prefers a committed AMO-signed XPI, since release Firefox will not keep an unsigned one.
 
 use std::io::Write;
 use std::path::Path;
 
-/// The signed package, when a release has been through AMO.
 const SIGNED: &str = "extension/firefox-signed.xpi";
 
 type Res = Result<(), Box<dyn std::error::Error>>;
 
-/// A build failure that names the file it was about.
 fn at<E: std::fmt::Display>(
     what: impl std::fmt::Display,
 ) -> impl FnOnce(E) -> Box<dyn std::error::Error> {
@@ -37,12 +23,7 @@ fn main() -> Res {
     println!("cargo:rerun-if-changed={TOKENS}");
     println!("cargo:rerun-if-changed=extension/chrome/manifest.json");
     println!("cargo:rerun-if-changed=extension/firefox/manifest.json");
-    // Only where it exists. Cargo reads a watched path that is missing as one
-    // that has always just changed, and this file is missing from every
-    // checkout but a release's — so naming it unconditionally rebuilt the
-    // whole crate on every build, for everyone. What that gives up: dropping a
-    // signed package into a warm tree does not by itself trigger a rebuild. A
-    // release builds from a fresh checkout, where there is nothing to be stale.
+    // Watched only where it exists: Cargo treats a missing watched path as always changed.
     if std::path::Path::new(SIGNED).exists() {
         println!("cargo:rerun-if-changed={SIGNED}");
     }
@@ -62,21 +43,13 @@ fn main() -> Res {
         std::fs::write(&marker, b"").map_err(at("the signed marker"))?;
     } else {
         pack("extension/firefox/manifest.json", &out.join("firefox.xpi"))?;
-        // Removed rather than left behind: a marker surviving from a build
-        // that had the signed package would have the page promise one-click
-        // install of an XPI Firefox refuses.
+        // A stale marker would promise one-click install of an XPI Firefox refuses.
         let _ = std::fs::remove_file(&marker);
     }
     Ok(())
 }
 
-/// One stylesheet, assembled from layers.
-///
-/// `assets/app.css` is generated and gitignored, exactly like
-/// `assets/extension/`: `rust-embed` takes the whole of `assets/`, so writing
-/// it there is what puts it in the binary. Concatenated in filename order,
-/// which is what the numeric prefixes are for — the cascade depends on the
-/// tokens arriving before the rules that name them.
+/// Concatenated in filename order: tokens must arrive before the rules that name them.
 fn build_stylesheet() -> Res {
     println!("cargo:rerun-if-changed=assets/css");
     let dir = Path::new("assets/css");
@@ -87,7 +60,7 @@ fn build_stylesheet() -> Res {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| n.ends_with(".css"))
         .collect();
-    // Sorted, so the same layers produce the same stylesheet twice running.
+    // Sorted, so a build is reproducible.
     names.sort();
 
     let mut out = String::new();
@@ -109,18 +82,8 @@ fn build_stylesheet() -> Res {
     Ok(())
 }
 
-/// The commit this binary was built from, so two builds of the same
-/// `CARGO_PKG_VERSION` can be told apart: a backup manifest records it and
-/// restore reports a mismatch, and the pairing response carries it.
-///
-/// `ENGRAM_GIT_SHA` is the 12-character short sha, or `unknown`, or whatever
-/// the environment set it to (a build from a tree without `.git`, such as a
-/// crate tarball, can pass the sha in). `ENGRAM_VERSION` is `<semver>+<sha>`,
-/// or the bare semver when the sha is unknown — semver build metadata, which
-/// the version comparison of an older binary already ignores.
-///
-/// Only a `.git` in this directory counts: a tarball unpacked inside some
-/// other repository must not take that repository's commit for its own.
+/// `ENGRAM_VERSION` is `<semver>+<sha>`: build metadata an older binary's comparison ignores.
+/// Only a `.git` here counts, so a tarball inside another repository takes no commit of its own.
 fn stamp_build() -> Res {
     println!("cargo:rerun-if-env-changed=ENGRAM_GIT_SHA");
     let sha = std::env::var("ENGRAM_GIT_SHA")
@@ -139,7 +102,6 @@ fn stamp_build() -> Res {
     Ok(())
 }
 
-/// `git rev-parse --short=12 HEAD`, watching `HEAD` and the ref it names.
 fn git_sha() -> Option<String> {
     if !Path::new(".git").exists() {
         return None;
@@ -150,10 +112,7 @@ fn git_sha() -> Option<String> {
         let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
         (!s.is_empty()).then_some(s)
     };
-    // Through `--git-path`, because in a worktree `.git` is a file and the
-    // branch refs live in the common directory, not beside `HEAD`. Watched
-    // only where they exist, for the reason given for `SIGNED` above; a ref
-    // that is only packed is covered by `packed-refs`.
+    // `--git-path`: in a worktree `.git` is a file and branch refs live in the common directory.
     let mut watch = vec!["HEAD".to_string(), "packed-refs".to_string()];
     if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"]) {
         watch.push(r);
@@ -168,7 +127,6 @@ fn git_sha() -> Option<String> {
     git(&["rev-parse", "--short=12", "HEAD"])
 }
 
-/// Zip one browser's manifest together with the shared sources.
 const TOKENS: &str = "assets/css/00-tokens.css";
 const PANEL_FONTS: [&str; 2] = ["atkinson-next-400.woff2", "atkinson-next-500.woff2"];
 
@@ -182,23 +140,20 @@ fn pack(manifest_path: &str, out: &Path) -> Res {
     zip.start_file("manifest.json", opts)?;
     zip.write_all(&manifest)?;
 
-    // Flat `shared/` inside the package, matching the paths the manifest names.
-    // Read from `extension/shared` rather than from the copy `pack.sh` makes,
-    // so a stale copy cannot end up in a release.
+    // Read from `extension/shared`, not the copy `pack.sh` makes, so a stale copy cannot ship.
     let mut names: Vec<String> = std::fs::read_dir("extension/shared")
         .map_err(at("extension/shared"))?
         .filter_map(|e| e.ok())
-        // Files only. A subdirectory added here would otherwise be read as a
-        // file and fail the build with a bare `Is a directory`.
+        // A subdirectory would otherwise fail the build with a bare `Is a directory`.
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    // Sorted, so the same sources produce the same archive twice running.
+    // Sorted, so the archive is reproducible.
     names.sort();
     for name in names {
         let mut body =
             std::fs::read(Path::new("extension/shared").join(&name)).map_err(at(&name))?;
-        // One source of truth for the palette: the app's own token file.
+        // The panel takes its palette from the app's own token file.
         if name == "panel.css" {
             let mut css = std::fs::read(TOKENS).map_err(at(TOKENS))?;
             css.push(b'\n');
@@ -218,15 +173,8 @@ fn pack(manifest_path: &str, out: &Path) -> Res {
     Ok(())
 }
 
-/// whisper.cpp, compiled over the ggml llama.cpp already built.
-///
-/// `llama-cpp-sys-2` installs its ggml and says where in
-/// `DEP_LLAMA_GGML_CMAKE_DIR`, for exactly this: a second crate that wants
-/// ggml uses that one, and there is one ggml in the program. Nothing here
-/// builds or links a ggml of its own — the libraries are already on the link
-/// line, put there by the crate that built them. What is compiled is three
-/// vendored files and a four-function shim; see `vendor/whisper.cpp/README.md`
-/// for why that release and why the two pins move together.
+/// Compiled against the ggml `llama-cpp-sys-2` already built (`DEP_LLAMA_GGML_CMAKE_DIR`), so the
+/// program has one ggml; see `vendor/whisper.cpp/README.md` for the pins.
 #[cfg(feature = "contained")]
 fn build_whisper() -> Res {
     let vendor = Path::new("vendor/whisper.cpp");
@@ -259,9 +207,7 @@ fn build_whisper() -> Res {
         .warnings(false)
         .file(vendor.join("src/whisper.cpp"))
         .file(vendor.join("engram_whisper.cpp"));
-    // On Android the C++ runtime is linked once, statically, by the llama
-    // build (`android-static-stdcxx`). Asking for it again here would put
-    // libc++_shared.so on the link line and a second .so in the APK.
+    // llama links the C++ runtime statically on Android; asking again adds libc++_shared.so to the APK.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("android") {
         build.cpp_link_stdlib(None);
     }
