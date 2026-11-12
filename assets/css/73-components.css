@@ -186,7 +186,6 @@ table.grid tr:hover td { background: var(--color-bg-hover); }
 
 .brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
 .brand-name { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.02em; }
-.brand-tag { margin-top: 0; margin-bottom: 1rem; }
 
 
 /* ── Filter chips ────────────────────────────────────────────────────────── */
@@ -340,9 +339,7 @@ mark {
 .form-notify { max-width: 32rem; gap: var(--space-2); margin-bottom: var(--space-4); }
 .flush { margin: 0; }
 .row-check { gap: var(--space-2); align-items: center; }
-.login-card { max-width: 22rem; margin: 6rem auto; }
-.btn-block { width: 100%; }
-.error-line { color: var(--color-danger); }
+.login { margin-block: var(--space-6); }
 .qr { max-width: 256px; }
 .break-all { word-break: break-all; }
 .inline-form { display: inline; }

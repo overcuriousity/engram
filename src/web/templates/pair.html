@@ -1,34 +1,29 @@
 {% extends "layout.html" %}
 {% block title %}Pair the extension — engram{% endblock %}
 {% block content %}
-<h1>Pair the extension</h1>
-{# The origin is stated because it is the one thing the operator can check:
-   the extension will ask the browser for permission to reach exactly this
-   host, and nothing else. #}
-<p>Token for the browser extension · <strong>{{ origin }}
-</strong></p>
+<div class="oc-page-head"><h1 class="oc-text-page">Pair the extension</h1></div>
+{# The origin is the one thing the operator can check: the extension asks for exactly this host. #}
+<dl class="oc-facts">
+  <dt>Server</dt>
+  <dd><span class="oc-value oc-mono">{{ origin }}
+  </span>{% let copy_label = "server address" %}{% let copy_value = origin.as_str() %}{% include "_copy.html" %}</dd>
+</dl>
 {% if signed_in %}
-<form method="post" action="/ui/pair">
+<form class="oc-form" method="post" action="/ui/pair">
   <input type="hidden" name="redirect_uri" value="{{ self.redirect_uri_attr()|safe }}">
   <input type="hidden" name="state" value="{{ state }}">
-  <button class="btn btn-accent" type="submit">Pair</button>
+  <div class="oc-form__actions oc-row"><button class="oc-btn oc-btn--primary" type="submit">Pair</button><a href="/ui/settings#tokens">API tokens</a></div>
 </form>
-<p class="muted">You can revoke it any time under Settings → API tokens.</p>
 {% else %}
-{# This window belongs to the browser's auth flow, and it cannot be sent
-   through sign-in and back: the login redirect carries no return path, so it
-   would land on the search page and the flow would never reach the extension.
-   Signing in happens in an ordinary tab instead — the session cookie is the
-   same one — and then this page is asked for again. #}
+{# This window belongs to the browser's auth flow and cannot round-trip through sign-in; sign in in a tab, then reload. #}
 <p>Not signed in in this window.</p>
-<ol>
-  <li><a href="/auth/login" target="_blank" rel="noopener">Sign in to engram
-      in a new tab</a>, then come back here.</li>
+<ol class="oc-stack">
+  <li><a href="/auth/login" target="_blank" rel="noopener">Sign in in a new tab</a>, then come back.</li>
   <li>
-    <form method="get" action="/ui/pair">
+    <form class="oc-row" method="get" action="/ui/pair">
       <input type="hidden" name="redirect_uri" value="{{ self.redirect_uri_attr()|safe }}">
       <input type="hidden" name="state" value="{{ state }}">
-      <button class="btn btn-accent" type="submit">I have signed in — continue</button>
+      <button class="oc-btn oc-btn--primary" type="submit">Continue</button>
     </form>
   </li>
 </ol>

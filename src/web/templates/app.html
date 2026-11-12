@@ -1,23 +1,28 @@
 {% extends "layout.html" %}
 {% block title %}Pair the app — engram{% endblock %}
 {% block content %}
-<h1>Pair the app</h1>
-{# The origin is stated because it is the one thing the operator can check:
-   the phone will be pointed at exactly this address. #}
-<p>Server <strong>{{ origin }}
-</strong>· in the app, choose <em>Scan to pair</em></p>
+<div class="oc-page-head"><h1 class="oc-text-page">Pair the app</h1></div>
+<dl class="oc-facts">
+  <dt>Server</dt>
+  <dd><span class="oc-value oc-mono">{{ origin }}
+  </span>{% let copy_label = "server address" %}{% let copy_value = origin.as_str() %}{% include "_copy.html" %}</dd>
+</dl>
+<p>In the app, choose <em>Scan to pair</em>.</p>
 {% match code %}
 {% when Some with ((uri, svg)) %}
 <div class="qr">{{ svg|safe }}</div>
-<p class="mono muted break-all">{{ uri }}
-{% let copy_label = "pairing link" %}{% let copy_value = uri.as_str() %}{% include "_copy.html" %}</p>
-<p class="muted">Valid two minutes, for one phone.</p>
+<dl class="oc-facts">
+  <dt>Link</dt>
+  <dd><span class="oc-value oc-mono break-all">{{ uri }}
+  </span>{% let copy_label = "pairing link" %}{% let copy_value = uri.as_str() %}{% include "_copy.html" %}</dd>
+  <dt>Valid</dt>
+  <dd><span class="oc-value">Two minutes, one phone</span></dd>
+</dl>
 {% when None %}
 {% endmatch %}
-<form method="post" action="/ui/app/grant">
-  <button class="btn btn-accent" type="submit">
-    {% if code.is_some() %}Show a new code{% else %}Show a code for this phone{% endif %}
-  </button>
+<form class="oc-form" method="post" action="/ui/app/grant">
+  <div class="oc-form__actions"><button class="oc-btn{% if code.is_none() %} oc-btn--primary{% endif %}" type="submit">
+    {% if code.is_some() %}Show a new code{% else %}Show a code{% endif %}
+  </button></div>
 </form>
-
 {% endblock %}
