@@ -1,41 +1,5 @@
-//! One pair, one call.
-//!
-//! The sweep used to make up to `max_judgements` of these in a single job, so a
-//! consolidation run blocked every capture behind it for as long as twenty model
-//! calls took — the second-worst blocker in the system after synthesis. The
-//! sweep now decides *which* pairs are worth asking about, which costs nothing,
-//! and arms one unit each. The queue paces them and interleaves them with
-//! everything else.
-//!
-//! The unit asks about the two artifacts its pair names and nothing else. It
-//! used to expand into the connected component of still-open pairs around it and
-//! settle all of them with one verdict, which is what made fan-in something a
-//! single call had to survive: past `merge_max_roots` captured roots the
-//! component was refused outright and every pair in it settled `Oversized`,
-//! terminal and reached before the model saw anything. Sixteen pairs sat that
-//! way, twelve roots against a default of eight nobody had typed.
-//!
-//! A cluster converges by merging two at a time instead. Each merge inherits the
-//! flattened roots of both sides — `insert_merged_artifact` resolves the lineage
-//! closure — and carries its members' open pairs with it, so the next question is
-//! armed as soon as the merge is indexed rather than one sweep later.
-//!
-//! A member that is itself a merge is shown its own text as the thing under
-//! judgement, with its captured roots beneath it as context. The context is what
-//! keeps repeated merging from walking away from the wording someone captured:
-//! the model can put back a detail an earlier merge dropped. It is unlettered, so
-//! no verdict can name it, and it is trimmed oldest-first when the window is
-//! tight — reference material degrades an answer when it goes, where refusing the
-//! call answers nothing at all.
-//!
-//! Five verdicts come back and four act: one is replaced by the other, the two
-//! are merged, neither states anything and both are retired, or the two are
-//! distinct and the question is closed. Each is carried out where it is found,
-//! because deprecation, supersession and merging are reversible and the undo
-//! is the review. A value conflict is never merged and never decided: it is
-//! kept as a disagreement, and search and Ask show both sides of it. Where the
-//! base cannot act on a pair, both are left as they are and the pair is closed
-//! with the reason on it. Nothing here waits on a person.
+//! One judge call per pair. Members that are merges show their captured roots as unlettered
+//! context, trimmed oldest-first; a value conflict is kept as a disagreement, never merged.
 
 use crate::core::Core;
 use crate::error::{Error, Result};
@@ -44,7 +8,6 @@ use crate::store::actions::{Job, Kind, NewAction};
 use crate::store::artifacts::{Chunk, Provenance};
 use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
 
-/// The journal row for one thing this job did to one artifact.
 fn action(
     kind: Kind,
     pair: &ArtifactPair,
@@ -63,9 +26,7 @@ fn action(
     }
 }
 
-/// Whether this job already did this to any of these artifacts and had it
-/// taken back — by a person, or by the base on what use showed. The journal
-/// is the memory, and a verdict repeated over it leaves both as they are.
+/// Whether this job already did this to any of these artifacts and had it taken back.
 async fn taken_back_before(core: &Core, kind: Kind, subjects: &[&str]) -> Result<bool> {
     for id in subjects {
         if core.store.action_was_undone(id, kind).await? {
@@ -75,31 +36,24 @@ async fn taken_back_before(core: &Core, kind: Kind, subjects: &[&str]) -> Result
     Ok(false)
 }
 
-/// Why a pair whose merge draft was refused by the loss check is closed: the
-/// draft, not the notes, was at fault, so both stay as they are.
+/// The draft, not the notes, was at fault, so both stay as they are.
 const LOSS_REFUSED: &str = "a draft dropped a value one of them states; both stay as they are";
 
 const TAKEN_BACK: &str =
     "This was done to one of these before and taken back, so both stay as they are.";
 
-/// The wording rows on bases from before autonomous curation carry for the
-/// same refusal. The drain reads it to close what was waiting on a person.
+/// Older bases' wording for the same refusal; the drain reads it.
 #[cfg(test)]
 pub(crate) const TAKEN_BACK_OLD: &str =
     "This was done to one of these before and taken back. Resolve by hand.";
 
-/// What the model decided, with everything the write path needs already read.
 pub struct Settlement {
     pub relation: Relation,
     pub detail: Option<String>,
-    /// The member named obsolete, already checked against newest-wins. A member
-    /// and not a root, because the members are the only artifacts the prompt
-    /// letters and therefore the only things a letter can be naming. Only set
-    /// for `Replaced`.
+    /// Checked against newest-wins; a member, because only members are lettered.
     pub obsolete: Option<String>,
-    /// Only set for `Duplicate`, and only once the loss check has passed.
     pub merged: Option<MergedDraft>,
-    /// The two artifacts the model was shown, in letter order.
+    /// In letter order.
     pub members: Vec<Chunk>,
     pub pair: ArtifactPair,
 }
@@ -107,43 +61,23 @@ pub struct Settlement {
 pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let id: i64 = pair_id.parse().map_err(|_| Error::NotFound)?;
     let p = core.store.get_pair(id).await?;
-    // Settled by an operator, by a later sweep, or by the unit that merged one
-    // of its members while this one waited out a backoff.
-    //
-    // `synthesis_asked` is the exception, and it has to be: the ask is an
-    // operator's press from before autonomous curation, made on a pair that
-    // was already settled — most often `PairState::Duplicate` — so the path to
-    // a synthesis arrives here in a state that is not `Pending`. Without the
-    // second half of this test every one of those asks was sent home having
-    // done nothing, and since every caller of `clear_pair_synthesis` sits
-    // below this line, the pair was frozen for good on the one ask that is
-    // supposed to resolve it.
-    //
-    // Every test seeded a `Pending` pair, which is why the suite was green.
+    // `synthesis_asked` arrives on a settled pair (often `Duplicate`); skipping it would freeze the
+    // ask.
     if p.state != PairState::Pending && !p.synthesis_asked {
         return Ok(());
     }
     if p.synthesis_asked && p.merged_into.is_some() {
-        // Already written. The flag outlived its own answer — a second arming
-        // racing the first, or an old row — and re-running it would merge the
-        // pair twice.
+        // Already written; re-running would merge the pair twice.
         core.store.clear_pair_synthesis(p.id).await?;
         return Ok(());
     }
-    // A press the pair has outlived: something answered it while the unit
-    // waited. The press is taken as the verdict below, without asking the
-    // state again, so a pair dismissed after it was pressed would be merged
-    // anyway. `ask_pair_synthesis` refuses the press on such a pair; this is
-    // the answer that lands after it.
+    // The pair outlived its press: the press would be taken as the verdict without re-reading the
+    // state.
     if p.synthesis_asked && !crate::store::pairs::AWAITING_REVIEW.contains(&p.state) {
         core.store.clear_pair_synthesis(p.id).await?;
         return Ok(());
     }
-    // Dedupe's own day, read before the judge call: a verdict this unit may
-    // not act on is a call spent for nothing. The pair stays pending and the
-    // next arming asks again once the window has moved. Only under "full";
-    // below it this sweep is under its own switch, as it was. Counted per job,
-    // so a day of promotions or condensations cannot close this one.
+    // Read before the judge call: a verdict this unit may not act on is a call spent for nothing.
     if !core.may_act(crate::store::actions::Job::Dedupe).await? {
         tracing::info!(
             pair = id,
@@ -152,21 +86,12 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Reported, not swallowed. `a_id` and `b_id` are `ON DELETE CASCADE` and
-    // every pool sets `foreign_keys`, so a pair naming an artifact that is gone
-    // is a state the schema does not allow — a failure here is the store being
-    // unwell, not a deletion to absorb.
+    // Pairs cascade on artifact delete, so a missing artifact is a store failure, not a deletion.
     let a = core.store.get_artifact(&p.a_id).await?;
     let b = core.store.get_artifact(&p.b_id).await?;
-    // Re-checked here and not only when the unit was armed: a member can be
-    // superseded by a later sweep or deprecated by an operator while this waits
-    // out a backoff, and spending the scarcest thing in the system to rule on an
-    // artifact no longer in results buys nothing.
+    // Re-checked: a member can leave results while this waits out a backoff.
     if !a.in_results() || !b.in_results() {
-        // The ask goes with it. `ask_pair_synthesis_ui` checks both sides are
-        // live at the press, but a lifecycle event can take one away while the
-        // unit waits out a backoff — and a cleared flag is what stops the card
-        // promising a synthesis nothing is going to write.
+        // A cleared flag stops the card promising a synthesis nothing will write.
         if p.synthesis_asked {
             core.store.clear_pair_synthesis(p.id).await?;
         }
@@ -182,10 +107,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let members = vec![a, b];
     let member_ids: Vec<String> = members.iter().map(|c| c.id.clone()).collect();
     let root_map = core.store.roots_of(&member_ids).await?;
-    // A member with no roots at all is a merge whose sources were deleted out
-    // from under it. Its text is a paraphrase with nothing behind it — not
-    // something to show the model as an original, and not something a rule can
-    // settle. Both stay as they are; `leave_both` clears any ask with it.
+    // No roots: a merge whose sources were deleted, a paraphrase with nothing behind it.
     if members
         .iter()
         .any(|c| root_map.get(&c.id).is_none_or(|r| r.is_empty()))
@@ -197,8 +119,6 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         )
         .await;
     }
-    // A merge and one of its own sources are not two things to compare. Asking
-    // would spend a call to be told that an artifact matches itself.
     let one_contains_the_other = root_map[&members[0].id].contains(&members[1].id)
         || root_map[&members[1].id].contains(&members[0].id);
     if one_contains_the_other {
@@ -211,25 +131,8 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .await;
     }
 
-    // Every root a merge would record has to be a captured artifact. That is
-    // the invariant `insert_merged_artifact` enforces and the whole anti-drift
-    // rule rests on: a merge over verbatim source text rewrites the substrate
-    // into wording that belongs to no corpus and carries no span.
-    //
-    // Asked here, before the model call, and not left to the merge path. That
-    // path refuses with `Error::Validation`, and `apply` propagates it — which
-    // leaves the pair `Pending`, so `arm_dedupe` re-arms it on the next tick
-    // and the same pair buys the same refusal every tick, forever. Refusing at
-    // admission costs nothing and settles the row once.
-    //
-    // A synthesis over passages is the ordinary way to arrive here, and it is
-    // not a defect: `roots_of` resolves such an artifact to the passages it
-    // drew on, which is exactly what a synthesis is made of. A passage member
-    // reaches it too, since a passage is its own root.
-    //
-    // Closed with both left as they are, and not `Dismissed`: these two may
-    // well say the same thing, and the reason on the row says so. What is
-    // unavailable is only the merge, and there is nobody else to ask for it.
+    // Refused here, before the call: the merge path's `Validation` error would leave the pair
+    // `Pending` and buy the same refusal every tick. Every merge root must be a captured artifact.
     let all_roots: Vec<String> = root_map.values().flatten().cloned().collect();
     let roots = core.store.artifacts_by_ids(&all_roots).await?;
     if let Some(r) = roots.iter().find(|r| r.provenance != Provenance::Captured) {
@@ -239,8 +142,6 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             provenance = r.provenance.as_str(),
             "a member's lineage names something a merge may not rewrite; both stay as they are"
         );
-        // An ask set on an older base is cleared with it by `leave_both`:
-        // nothing is going to write this one.
         return leave_both(
             core,
             &p,
@@ -250,28 +151,14 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         .await;
     }
 
-    // An operator pressed "Write one", on a base from before autonomous
-    // curation; nothing sets the ask now. The verdict is not asked for again,
-    // because it has been given: they read both sides and decided these cover
-    // the same ground. Asking the model to decide again invites it to answer
-    // `distinct` and leave the press with nothing to show for it — and it does
-    // not decide this class reliably. Asked twelve times about two artifacts
-    // describing one veterinary practice, one carrying the contact details and
-    // the other the services, the live judge wrote the same reasoning every
-    // time and labelled it `distinct` nine times and `duplicate` three. The prompt's own
-    // categories both fit that shape, so the label was a coin flip on an action
-    // that hides two artifacts behind a third.
-    //
-    // Below the lineage refusal above, not before it: a person asking does not
-    // make stored source text mergeable, and `merge::write` would refuse it
-    // anyway.
+    // The operator already decided these cover the same ground, and the judge does not decide this
+    // class reliably (9 of 12 `distinct` on one case). Below the lineage refusal, which still
+    // applies.
     if p.synthesis_asked {
         return synthesize_asked_pair(core, &p, members).await;
     }
 
-    // A merged member's captured roots, oldest first — context, never an input.
-    // Read as whole artifacts because the prompt needs their titles: a body that
-    // never names its own subject is the failure `dedupe_prompt` documents.
+    // Whole artifacts, because the prompt needs their titles.
     let mut context: Vec<Vec<Chunk>> = Vec::new();
     for c in &members {
         let mut v = Vec::new();
@@ -288,19 +175,9 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         context.push(v);
     }
 
-    // The two artifacts under judgement are bounded by what capture bounds and
-    // always go out. What can grow without limit is the context block behind a
-    // long lineage — and context is reference, not input, so it is trimmed
-    // rather than defended against. Oldest first: the roots furthest from the
-    // present are the ones a later capture is most likely to have restated.
-    //
-    // No count-based cap. `merge_max_roots` was one, left at a default of eight
-    // nobody typed, and it settled whole clusters before any call was made.
+    // Context is reference, not input: trimmed oldest-first rather than capped by count.
     let Some(judge) = core.judge.clone() else {
-        // Nothing to ask. The pair stays pending, which is where it belongs
-        // until a judge arrives — and `periodic_units` does not arm this stage
-        // at all without one, so reaching here means the role went away
-        // between the arming and the run.
+        // The role went away between the arming and the run; the pair stays pending.
         return Ok(());
     };
     let counter = crate::infer::budget::TokenCounter::default();
@@ -313,7 +190,6 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         if crate::infer::budget::checked_ceiling_for_prompt(window, cost, ceiling).is_some() {
             break user;
         }
-        // Whichever member still holds the oldest surviving source gives it up.
         let oldest = context
             .iter()
             .enumerate()
@@ -324,11 +200,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
             Some(i) => {
                 context[i].remove(0);
             }
-            // Nothing left to give: the two artifacts alone do not fit one call.
-            // That is a fact about an artifact's size rather than about this
-            // pair, and no call can settle it. Both stay as they are, with the
-            // reason on the row — not a terminal state of its own, which is
-            // what `Oversized` did wrong.
+            // The two artifacts alone do not fit one call; no call can settle that.
             None => {
                 return leave_both(
                     core,
@@ -340,9 +212,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         }
     };
 
-    // Counted before the call and regardless of how it goes, so a pair the model
-    // keeps failing on drops behind the rest of the queue rather than absorbing
-    // the budget again on the next sweep.
+    // Counted before the call so a pair the model keeps failing on drops behind the queue.
     core.store.record_judge_attempt(p.id).await?;
 
     let permit = core.gate.background().await;
@@ -354,28 +224,15 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
 
     let verdict = match crate::infer::prompt::parse_dedupe(&reply) {
         Ok(v) => v,
-        // A reply that cannot be read is an error, not a verdict: the pair stays
-        // pending and the unit retries under the queue's backoff.
-        //
-        // Retrying is only worth anything because `dedupe_prompt` carries the
-        // attempt number. Against an endpoint that caches by exact prompt, an
-        // unchanged prompt would replay the same unreadable bytes for every one
-        // of `MAX_ATTEMPTS`.
-        //
-        // Counted here and not beside `record_judge_attempt`, because this is
-        // the only failure that says anything about the pair. A call the
-        // endpoint never answered says something about the endpoint, and letting
-        // an outage count against every pending pair would take the whole review
-        // queue out of reach on its way past.
+        // Retrying helps only because `dedupe_prompt` carries the attempt number (caching
+        // endpoints). Counted here, not beside `record_judge_attempt`: an outage must not count
+        // against every pair.
         Err(e) => {
             core.store.record_unreadable_judgement(p.id).await?;
             tracing::warn!(
                 pair = id,
                 attempt = p.judge_attempts,
-                // A parse error names the column it gave up at; without the
-                // length there is no way to tell whether that was the end of the
-                // reply — a cut-off answer — or a break in the middle of one the
-                // endpoint finished writing.
+                // Tells a cut-off reply from a break mid-reply.
                 reply_len = reply.len(),
                 error = %e,
                 "dedupe reply unreadable; pair stays pending"
@@ -387,8 +244,6 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     apply(core, interpret(verdict, members, p)).await
 }
 
-/// Assemble the user prompt from the two members and whatever context survives
-/// the budget.
 fn build_prompt(members: &[Chunk], context: &[Vec<Chunk>], attempt: i64) -> String {
     let member = |i: usize| crate::infer::prompt::DedupeMember {
         title: members[i].title.as_deref().unwrap_or("untitled"),
@@ -401,40 +256,21 @@ fn build_prompt(members: &[Chunk], context: &[Vec<Chunk>], attempt: i64) -> Stri
     crate::infer::prompt::dedupe_prompt(&member(0), &member(1), attempt)
 }
 
-/// Turn a parsed reply into what the write path will do.
-///
-/// Both guards live here because neither needs the store, which makes them
-/// testable without one — and both turn a verdict *down* rather than up. This
-/// pass is allowed to decline to act; it is not allowed to act on a shaky
-/// answer.
+/// Both guards only ever turn a verdict down, never up.
 fn interpret(
     v: crate::infer::prompt::Dedupe,
     members: Vec<Chunk>,
     pair: ArtifactPair,
 ) -> Settlement {
     let mut relation = v.relation;
-    // The judge's own line. Nothing here writes one any more: the loss check
-    // used to, and what it had to say was a list of tokens rather than a
-    // finding. It is dropped rather than carried on the one path that turns the
-    // verdict into its opposite — see the loss check below.
+    // Dropped on the loss-check path, where it would argue the opposite of the outcome.
     let mut detail = v.detail;
     let mut merged = v.merged;
     let mut obsolete = None;
 
     if relation == Relation::Replaced {
-        // Trust a named direction only when it agrees with the sweep's own
-        // newest-wins bias (see `keeper`): a call naming the *newer* artifact
-        // obsolete is exactly the failure mode worth guarding against, since it
-        // would hide the side more likely to be current. Turned down, it is
-        // two texts stating something differently with no direction anyone
-        // trusts — a disagreement, both sides of which search and Ask show.
-        //
-        // The letter indexes the members, which are the only artifacts the
-        // prompt letters. A merged member's sources go in unlettered, so a
-        // letter can no longer resolve to something shown as reference — the
-        // mismatch that used to supersede an artifact the model had never been
-        // shown at all. A letter past the end names nothing and downgrades here,
-        // which is why `parse_dedupe` does not pin the range itself.
+        // A named direction is trusted only when it agrees with newest-wins (see `keeper`);
+        // otherwise it is a disagreement. A letter past the end names nothing and downgrades here.
         let named = v
             .supersedes
             .map(|c| (c as u8 - b'a') as usize)
@@ -457,34 +293,12 @@ fn interpret(
     if relation == Relation::Duplicate
         && let Some(d) = &merged
     {
-        // Against the members, which are what is actually being merged — not
-        // against every captured root behind them. A merged member's own text is
-        // already a generation away from its sources, so checking the draft
-        // against those sources would fail on a value an earlier merge dropped
-        // and freeze that lineage: no later merge in it could ever be written.
-        // Loss stays one generation deep per step, and the sources are in the
-        // prompt as context precisely so the model can undo the earlier drift
-        // rather than compound it.
+        // Against the members, not their roots: checking against roots would freeze a lineage on a
+        // value an earlier merge dropped.
         let lost = crate::jobs::merge::losses(&members, d);
         if !lost.is_empty() {
-            // Refused, and the pair closed with both sides as they are. Not a
-            // disagreement: the judge found the two say the same thing, and it
-            // is the draft that dropped a value, not the notes that state one
-            // differently. Filing it as `Contradiction` put a "these two
-            // disagree" line under two notes that agree, in search and Ask
-            // both. Not retried either — the same draft would be refused
-            // again — and nothing waits on a person.
-            //
-            // The reason goes on the row rather than the lost tokens: those are
-            // as often a bare "1, 4" as a version number, evidence too thin to
-            // read as a reason. Nor the judge's own detail, which says why the
-            // two are the same and would read as the opposite of what
-            // happened.
-            //
-            // Logged, though. Keeping the tokens off the row is a judgement
-            // about what a reader can use; keeping them out of the process
-            // entirely left a refusal nothing anywhere could explain. This is
-            // the one place that knows.
+            // Closed, not a `Contradiction`: the draft dropped a value, the notes agree. Tokens go
+            // to the log, not the row, where they read as too thin to be a reason.
             tracing::warn!(
                 pair = pair.id,
                 lost = lost.join(", "),
@@ -506,29 +320,14 @@ fn interpret(
     }
 }
 
-/// Write one artifact from a pair an operator asked to have synthesized.
-///
-/// Only an operator's press sets that ask, and only before autonomous
-/// curation: nothing on this path arms one now, so this answers the asks an
-/// older base still holds, and keeps them recorded as the operator's.
-///
-/// The judgement is theirs and is not revisited; only the writing is asked for.
-/// From the draft on this is `write_merge`, the `Relation::Duplicate` tail, and
-/// deliberately the same one: a synthesis and a merge the judge applied must
-/// leave the base in the same shape, or the journal has two kinds of merge in
-/// it and the undo path has to know which is which.
+/// Answers an operator's synthesis ask on an older base; the tail is `write_merge` so both kinds of
+/// merge leave the base in one shape.
 async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk>) -> Result<()> {
     let Some(writer) = core.pair_synthesizer.clone() else {
-        // Nothing to ask with. The flag stays set, so the press is not lost and
-        // the next run with a writer configured picks it up.
+        // The flag stays set, so the next run with a writer picks it up.
         return Ok(());
     };
-    // The two bodies have to fit one call. The judge path asks this and trims
-    // its context block until they do; there is no context block here, so
-    // there is nothing to give up and the answer is either yes or a pair no
-    // model can write. Unasked, two large artifacts failed at the endpoint
-    // every tick for ever — the same treadmill the fit loop exists to end,
-    // reached from the one path that never had one.
+    // No context block to trim here, so the two bodies fit or no model can write the pair.
     let user = synthesis_prompt(&members);
     let counter = crate::infer::budget::TokenCounter::default();
     let cost = counter.count(crate::infer::prompt::SYNTHESIZE_SYSTEM) + counter.count(&user);
@@ -560,13 +359,7 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
     let reply = reply?;
     let draft = match crate::infer::prompt::parse_synthesis(&reply) {
         Ok(d) => d,
-        // Counted, for the reason the judge path counts its own: without it
-        // nothing here ever stops. The pair keeps `synthesis_asked` set, the
-        // sweep re-arms it on every tick, and each tick buys another call on a
-        // reply that will not parse — unbounded at the shipped default, where
-        // `may_act()` answers `true` unconditionally below "full".
-        // `pairs_awaiting_synthesis` holds the row back past
-        // `MAX_UNREADABLE_JUDGEMENTS`, exactly as `pairs_to_judge` does.
+        // Without the count this re-arms every tick on a reply that will not parse.
         Err(e) => {
             core.store.record_unreadable_judgement(p.id).await?;
             tracing::warn!(
@@ -579,18 +372,8 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
         }
     };
 
-    // The loss check, on this path as on the judge's: `interpret` checks the
-    // judge's own draft, and this draft was written by a different call. It is
-    // the requirement rather than a style, and `merge::write` validates nothing
-    // — it takes a draft and inserts it. Two artifacts differing only in
-    // `mount -o ro` against `mount -o rw` once went in unchecked, the writer
-    // kept one of them, `merge::finish` superseded both sources on embed, and
-    // the other command was gone with no warning.
-    //
-    // Against the members for the reason `interpret` gives at length: a merged
-    // member's own text is already a generation away from its sources, so
-    // checking a draft against those sources would refuse a value an earlier
-    // merge dropped and freeze that lineage for ever.
+    // `merge::write` validates nothing, so the loss check belongs to each caller; against the
+    // members, as in `interpret`.
     let lost = crate::jobs::merge::losses(&members, &draft);
     if !lost.is_empty() {
         tracing::warn!(
@@ -598,9 +381,6 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
             lost = lost.join(", "),
             "refused a synthesis that would have dropped these"
         );
-        // The same shape as the merge path's own refusal in `write_merge`.
-        // That these two cover the same ground is not overturned by this;
-        // what is refused is only the writing of it, and the sentence says so.
         return leave_both(
             core,
             p,
@@ -613,12 +393,7 @@ async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk
     write_merge(core, p, &sources, &draft, DecidedBy::Operator).await
 }
 
-/// Write one merge over a pair's two members and journal it, one row a
-/// source, whoever decided it.
-///
-/// The judge's duplicate verdict and an asked-for synthesis both end here, so
-/// a merge leaves the base in one shape either way. The loss check is the
-/// caller's: each checks the draft it holds before handing it over.
+/// The loss check is the caller's.
 async fn write_merge(
     core: &Core,
     p: &ArtifactPair,
@@ -631,11 +406,7 @@ async fn write_merge(
             let act = format!("merged into {} from {} sources", m.id, sources.len());
             for source in sources {
                 let mut row = action(Kind::Merge, p, source, Some(&m.id), Some(act.as_str()));
-                // Marked as asked for when a person asked. `Store::band_record`
-                // reads this job's rows as what the judge's verdicts led to,
-                // and a press is not a verdict: counted, it raised the lowest
-                // band's action rate. The judge's own merge carries no mark,
-                // so it is counted like any other verdict acted on.
+                // `Store::band_record` reads this job's rows as verdicts; a press is not one.
                 if by == DecidedBy::Operator
                     && let Some(evidence) = row.evidence.as_object_mut()
                 {
@@ -649,9 +420,7 @@ async fn write_merge(
             };
             core.store.set_pair_merged(p.id, &m.id, Some(why), by).await
         }
-        // The merge path's own refusal, not a failure to retry. `leave_both`
-        // clears any ask with it, so nothing goes on promising a synthesis
-        // that will not arrive.
+        // `leave_both` clears any ask with it.
         Err(Error::Validation(why)) => {
             tracing::warn!(pair = p.id, reason = %why, "the merge path refused a merge");
             leave_both(
@@ -666,27 +435,12 @@ async fn write_merge(
     }
 }
 
-/// The two artifacts, for a call that is writing rather than deciding.
-///
-/// Unlettered, unlike `dedupe_prompt`: a letter exists so a verdict can name a
-/// side, and this reply names nothing. No sources block either — the draft is
-/// written from the two bodies themselves, and a merged member's roots would be
-/// reference material for a judgement nobody is making here.
+/// Unlettered and without sources: this call writes, it does not decide.
 fn synthesis_prompt(members: &[Chunk]) -> String {
     let mut s = String::new();
     for m in members {
         s.push_str("----- ARTIFACT -----\n");
-        // Where there is a name. This used to call `web::ui::row_label`, which
-        // is the page's rule for a table cell — a ranking job reaching into an
-        // HTTP page module for a string, the dependency commit 21e55f9 removed
-        // from `fmt` and this one reintroduced.
-        //
-        // It is also the wrong rule here. `row_label` stands the first sixty
-        // characters of the body in for a missing name, so a passage arrived
-        // as "Title: <its own opening>" directly above that same opening in
-        // full — the model was shown one artifact and told the first line of
-        // it was what it is called. A passage has no name; the body says
-        // everything the body says.
+        // A passage has no name; `row_label` would repeat its opening as a title.
         if let Some(name) = prompt_name(m) {
             s.push_str(&format!("Title: {name}\n"));
         }
@@ -696,12 +450,7 @@ fn synthesis_prompt(members: &[Chunk]) -> String {
     s
 }
 
-/// What to call an artifact in a prompt, where a writer named it.
-///
-/// `Provenance::names_its_own_text` is the same rule `web::ui::title_of`
-/// applies before anything else, asked here at the layer it belongs to: a
-/// passage and a note carry a heading that names the section they were cut
-/// from, not the artifact.
+/// A passage or note heading names a section, not the artifact.
 fn prompt_name(c: &Chunk) -> Option<&str> {
     if !c.provenance.names_its_own_text() {
         return None;
@@ -714,17 +463,11 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
         Relation::Distinct => {
             settle(core, &s.pair, PairState::NoConflict, s.detail.as_deref()).await
         }
-        // Kept as a disagreement: the base picks neither side, and search and
-        // Ask show both.
         Relation::Conflict => {
             tracing::info!("artifacts disagree; kept as a disagreement rather than merged");
             settle(core, &s.pair, PairState::Contradiction, s.detail.as_deref()).await
         }
-        // Acted on where it is found, like the two verdicts below it. Filing it
-        // as a recommendation left the one answer that clears a pair of empty
-        // artifacts waiting on a person holding no more evidence than the judge
-        // had — and unlike a merge, nothing here is rewritten: both sides are
-        // one press from active and still readable under `include_deprecated`.
+        // Both sides stay one press from active, readable under `include_deprecated`.
         Relation::Vacuous => {
             discard_both(core, &s.pair, s.detail.as_deref(), DecidedBy::Model).await
         }
@@ -738,8 +481,7 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .find(|m| m.id != obsolete)
                 .map(|m| m.id.clone())
                 .ok_or_else(|| Error::Internal("a replaced pair without a winner".into()))?;
-            // A fresh status, not the snapshot `interpret` saw: an operator can
-            // retire either side while the unit waits out a backoff.
+            // Fresh status: either side can be retired while the unit waits out a backoff.
             let live = |id: String| async move {
                 match core.store.get_artifact(&id).await {
                     Ok(c) => Ok(c.in_results()),
@@ -747,21 +489,11 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                     Err(e) => Err(e),
                 }
             };
-            // The survivor, checked for the same reason and for a worse
-            // failure: `Core::supersede` refuses a winner that is not active,
-            // so applying this would return a validation error out of the unit
-            // and retry the same model call under the queue's backoff until the
-            // attempts ran out — never settling the pair and never saying why.
-            // Hiding the loser behind it is not the alternative: the answer
-            // would disappear from results altogether.
+            // `Core::supersede` refuses an inactive winner, which would retry the call until
+            // attempts ran out.
             if !live(winner.clone()).await? {
-                // `Stale` and not `Dismissed`, for the reason `PairState::Stale`
-                // gives: a lifecycle event took the winner out of results, and
-                // nobody answered anything. `Dismissed` is an operator's
-                // decision and binding forever — `record_pair` is `INSERT OR
-                // IGNORE` and `reopen_stale_pairs` only reopens `'stale'` — so
-                // filing it here would bury the duplicate permanently the
-                // moment someone deprecated the winner and reactivated it.
+                // `Stale`, not `Dismissed`: `record_pair` is `INSERT OR IGNORE`, so `Dismissed`
+                // buries it for good.
                 return settle(
                     core,
                     &s.pair,
@@ -771,8 +503,6 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 .await;
             }
             if !live(obsolete.clone()).await? {
-                // Nothing to apply: the named side is already out of results, so
-                // the replacement has in effect already happened.
                 return settle(
                     core,
                     &s.pair,
@@ -785,10 +515,8 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             if taken_back_before(core, Kind::Supersede, &[&obsolete]).await? {
                 return leave_both(core, &s.pair, TAKEN_BACK).await;
             }
-            // The side effect FIRST. A failure here leaves the pair pending, so
-            // the unit retries under the queue's backoff — the reverse order
-            // left the verdict recorded on the pair but never applied, because
-            // `run` skips a pair that is no longer Pending.
+            // Side effect first: `run` skips a non-Pending pair, so the reverse order never applies
+            // it.
             core.supersede_with(
                 &obsolete,
                 &winner,
@@ -802,23 +530,10 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
             )
             .await?;
             tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
-            // Done, with the model's reasoning kept as the record of why.
-            // Leaving it Superseded listed the applied replacement as awaiting
-            // confirmation forever.
             settle(core, &s.pair, PairState::Dismissed, s.detail.as_deref()).await
         }
-        // Written where it is found, like the verdicts above it.
-        //
-        // The label is not steady on every pair: asked twelve times about two
-        // artifacts describing one veterinary practice — one holding the
-        // contact details, the other the services — the live judge wrote the
-        // same reasoning every time and answered `distinct` nine times and
-        // `duplicate` three. What makes acting on it safe is not the label but
-        // what stands around the write: `interpret`'s loss check has already
-        // refused any draft that drops a number, command or path, every source
-        // gets a journal row, and `jobs::retract` takes a merge back when later
-        // searches show it hid what was asked for. A person holding no more
-        // evidence than the judge is not who this waits on.
+        // Safe because of the loss check, the journal and `jobs::retract`, not because the label is
+        // steady.
         Relation::Duplicate => {
             let ids: Vec<String> = s.members.iter().map(|m| m.id.clone()).collect();
             let subjects: Vec<&str> = ids.iter().map(String::as_str).collect();
@@ -826,17 +541,9 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
                 return leave_both(core, &s.pair, TAKEN_BACK).await;
             }
             match &s.merged {
-                // Both members, not their roots. A merged member is not its
-                // own root, and `finish` hides what the lineage names — so
-                // passing only the roots would leave that earlier merge active
-                // and near-identical to the new one.
+                // Members, not roots: a merged member is not its own root and would stay active.
                 Some(draft) => write_merge(core, &s.pair, &ids, draft, DecidedBy::Model).await,
-                // No draft to write. Unreachable today: `parse_dedupe` refuses
-                // a duplicate reply that carries no merged artifact. Should
-                // one arrive, there is nothing to merge and nobody to ask —
-                // a synthesis ask is an operator's press, and recording the
-                // judge's verdict as one would misattribute it — so both
-                // stay as they are.
+                // Unreachable: `parse_dedupe` refuses a duplicate without a draft.
                 None => {
                     leave_both(
                         core,
@@ -850,50 +557,22 @@ async fn apply(core: &Core, s: Settlement) -> Result<()> {
     }
 }
 
-/// Answer a pair by retiring both sides.
-///
-/// The queue's other answers each assume something. Keeping one side assumes
-/// one of them is worth keeping; Dismiss assumes the pair is a question not
-/// worth asking and leaves both in results. Neither fits two artifacts that
-/// state nothing — a body that is its own file path, an outline with nothing
-/// under it — which are alike for a reason that has no keeper.
-///
-/// Deprecation, not deletion, and through `core.deprecate` like every other
-/// hide in the app: this is the one answer here that retires *both* artifacts,
-/// so it is also the one that most needs the same undo as the rest.
-///
-/// Both callers of this — the judge's own `Relation::Vacuous` and the "Discard
-/// both" button — reach it through here rather than each writing the sequence,
-/// because the orderings and the one refusal below are the whole of what makes
-/// it safe and none of them is obvious from the outside.
-///
-/// Which is also why `by` is a parameter and not `DecidedBy::Model`. The two
-/// callers are a judge and a person, and a shared helper that picked one of
-/// them would record every press of "Discard both" as the model's decision —
-/// the precise untruth `DecidedBy` exists to end.
+/// For two artifacts that state nothing. `by` is a parameter so a person's press is not recorded as
+/// the model's.
 pub(crate) async fn discard_both(
     core: &Core,
     pair: &ArtifactPair,
     detail: Option<&str>,
     by: DecidedBy,
 ) -> Result<()> {
-    // Both sides read before either is retired. A side already hidden in
-    // favour of another artifact — an applied supersede from a neighbouring
-    // pair does this, and on the job path it can land while this pair waits on
-    // its own model call — is one `core.deprecate` refuses. Deprecating in
-    // sequence therefore hid the first side and then failed on the second,
-    // leaving the pair answerable, half of it already gone, and unanswerable
-    // for good: every later attempt repeated the same refusal.
-    //
-    // A superseded artifact is out of results already, which is all a discard
-    // is asking for, so it is skipped rather than treated as an error.
+    // Superseded sides are skipped: `core.deprecate` refuses them, and deprecating in sequence
+    // would strand the pair half-retired.
     let mut retire = Vec::new();
     for id in [&pair.a_id, &pair.b_id] {
         if core.store.get_artifact(id).await?.superseded_by.is_none() {
             retire.push(id.clone());
         }
     }
-    // The judge does not repeat what was taken back; a person may.
     if by == DecidedBy::Model
         && taken_back_before(
             core,
@@ -904,18 +583,8 @@ pub(crate) async fn discard_both(
     {
         return leave_both(core, pair, TAKEN_BACK).await;
     }
-    // A side that other artifacts are hidden *behind* is not this pass's to
-    // retire. `core.deprecate` refuses a supersession loser and has no rule for
-    // a winner, so retiring one would leave `A -> W` with both ends out of
-    // results: the reader who opens A is sent to an artifact that answers
-    // nothing either, and no page can follow the hop.
-    //
-    // Nothing should reach here. A winner is an artifact a judgement already
-    // preferred to another, and a later call finding that same artifact states
-    // nothing contradicts the earlier one. So it is neither skipped nor
-    // absorbed: both stay as they are, the pair is closed with the reason on
-    // it, and the log carries the ids, because a rule that fires when it
-    // cannot is worth hearing about rather than working around.
+    // A supersession winner is not this pass's to retire: `A -> W` would leave both ends out of
+    // results.
     for id in &retire {
         let hidden = core.store.artifacts_superseded_by(id).await?;
         if !hidden.is_empty() {
@@ -927,9 +596,6 @@ pub(crate) async fn discard_both(
             );
             let why = "One of these is the current version of another artifact, so retiring \
                        both would leave that one pointing at nothing; both stay as they are.";
-            // The judge's refusal closes the question as `leave_both` does. A
-            // person's press is recorded as theirs, the reason `by` is a
-            // parameter at all.
             return match by {
                 DecidedBy::Model => leave_both(core, pair, why).await,
                 _ => {
@@ -941,21 +607,14 @@ pub(crate) async fn discard_both(
             };
         }
     }
-    // The side effects first and the pair settled after, the ordering the rest
-    // of `apply` documents: a failure part-way leaves the pair answerable
-    // rather than recorded as answered and never applied.
+    // Side effects first, then the pair: a failure part-way leaves it answerable.
     for id in &retire {
-        // Journaled as the base's action only when it is one: a person's
-        // press is theirs, and the journal is what the base did to itself.
+        // The journal is what the base did to itself; a person's press is not journaled.
         let journal =
             (by == DecidedBy::Model).then(|| action(Kind::Discard, pair, id, None, detail));
         core.deprecate_with(id, journal).await?;
     }
-    // The one line that says this happened. `core.deprecate` logs an id apiece,
-    // byte-identical to an operator pressing the button, and the pair settles
-    // `Dismissed` — a state no queue lists. Without this, two artifacts leaving
-    // results unattended is a thing an operator can find no record of, and the
-    // judge's reason for it sits on a row nothing in the UI reads back.
+    // The only record of an unattended discard; `core.deprecate` logs like an operator press.
     tracing::info!(
         pair = pair.id,
         a = %pair.a_id,
@@ -964,17 +623,11 @@ pub(crate) async fn discard_both(
         detail = detail.unwrap_or("none given"),
         "retired both sides of a pair that states nothing"
     );
-    // Settled the way an applied replacement settles, and carrying the judge's
-    // line rather than dropping it: it is the only record of why both sides
-    // were retired, and `set_pair_state` writes `detail` unconditionally, so
-    // `None` would null it.
+    // `set_pair_state` writes `detail` unconditionally, so `None` would null the reason.
     settle_as(core, pair, PairState::Dismissed, detail, by).await
 }
 
-/// Leave both sides as they are and close the question. What every refusal
-/// on this path used to hand a person: the base cannot act on this pair, and
-/// a person holding no more evidence than the judge is not who it asks now.
-/// The reason is kept on the row, which is what the journal reads back.
+/// Close the question with both sides as they are; the reason is kept on the row.
 async fn leave_both(core: &Core, p: &ArtifactPair, why: &str) -> Result<()> {
     if p.synthesis_asked {
         core.store.clear_pair_synthesis(p.id).await?;
@@ -982,10 +635,6 @@ async fn leave_both(core: &Core, p: &ArtifactPair, why: &str) -> Result<()> {
     settle(core, p, PairState::NoConflict, Some(why)).await
 }
 
-/// One pair, one verdict, decided by the judge.
-///
-/// Everything on this path is the model's: the unit runs unattended, and the
-/// rules it applies without asking are the judge's too (`DecidedBy::Model`).
 async fn settle(
     core: &Core,
     pair: &ArtifactPair,
@@ -995,7 +644,6 @@ async fn settle(
     settle_as(core, pair, state, detail, DecidedBy::Model).await
 }
 
-/// The same write, for the one path here a person can also reach.
 async fn settle_as(
     core: &Core,
     pair: &ArtifactPair,
@@ -1141,10 +789,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_judge_runs_on_the_synthesize_endpoint_not_the_ask_one() {
-        // The duplicate judge used to share `completer` with the RAG answer
-        // path, which put background sweep traffic in front of an interactive
-        // question and tuned one model for two unrelated jobs. The pair here
-        // must be ruled on without the ask model being touched at all.
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -1194,7 +838,6 @@ mod tests {
             Some("each body is its own file path"),
             "the only record of why both sides went was dropped"
         );
-        // The judge's discard is the base's action, one row a side.
         let rows = core
             .store
             .open_actions(&[crate::store::actions::Kind::Discard], 10)
@@ -1239,12 +882,7 @@ mod tests {
         )
         .await;
         let pid = queue_pair(&core, &ids[0], &ids[1]).await;
-        // The row alone, not `Core::supersede`: that path moves the loser's
-        // open pairs onto the winner, so the pair under test would no longer
-        // name a hidden side. What this pins is the settlement holding a pair
-        // that still does — the drift the sweep repairs
-        // (`jobs::consolidate::follow_supersessions`), and the window in which
-        // a neighbouring unit hides a side while this one waits for its answer.
+        // The row alone: `Core::supersede` would move the loser's open pairs onto the winner.
         core.store
             .set_superseded_by(&ids[0], Some(&ids[2]))
             .await
@@ -1350,11 +988,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_artifacts_about_different_subjects_are_never_merged() {
-        // FAT12, FAT16 and FAT32 are near-identical in form and deliberately
-        // different in content: they sit at 0.91 and every number in them
-        // differs. This is where the feature fires hardest and is most wrong,
-        // and it no longer merely flags them — a merge would grind a reference
-        // document into one paragraph that describes none of its subjects.
+        // FAT12/16/32 sit at 0.91 and every number differs.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"two different filesystems"}"#.into(),
@@ -1451,10 +1085,6 @@ mod tests {
             "a lifecycle event settled the pair as though a person had decided it"
         );
 
-        // The property `Stale` buys, and the reason it is not `Dismissed`:
-        // putting the winner back puts the question back. `record_pair` is
-        // `INSERT OR IGNORE`, so a `Dismissed` row here would have buried this
-        // duplicate for the life of the base with nothing saying why.
         core.reactivate(&winner).await.unwrap();
         assert_eq!(
             core.store.get_pair(pair_id).await.unwrap().state,
@@ -1502,8 +1132,6 @@ mod tests {
             core.store.get_pair(pair).await.unwrap().state,
             PairState::Pending
         );
-        // Below "full" the sweep is under its own switch and the budget is
-        // not consulted.
         core.evolve.autonomous = crate::config::Autonomy::Ranking;
         run(&core, &pair.to_string()).await.unwrap();
         assert_eq!(judge.calls(), 1);
@@ -1511,9 +1139,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_value_conflict_is_kept_as_a_disagreement_and_never_merged() {
-        // The base never picks a side of two texts that state a value
-        // differently. It keeps the pair as a disagreement, and search and Ask
-        // show both sides of it; nothing is hidden and nothing is merged.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"conflict","detail":"1.21.4 versus 1.30.0"}"#.into(),
@@ -1620,10 +1245,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_plain_replacement_supersedes_rather_than_merging() {
-        // The survivor is a stored original with a valid span and corpus lines
-        // to render beside it. That is strictly better than a rewrite, and it is
-        // the path by which the fidelity thesis keeps holding under autonomy —
-        // so the prompt prefers it and this pins that the code does too.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
@@ -1653,14 +1274,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_replacement_naming_the_newer_artifact_is_not_trusted() {
-        // A miscalibrated call proposing to hide the *newer* side disagrees with
-        // the sweep's own newest-wins bias, so it falls back to a conflict
-        // rather than being applied. Guessing here means hiding an artifact for
-        // no stated reason.
         let mut core = test_core().await;
         let ids = disagreeing(&core).await;
-        // `now()` is second-grained, so two rows inserted in one test would tie,
-        // and a tie is meant to pass the guard. Force b strictly newer.
+        // `now()` is second-grained; a tie passes the guard, so force b strictly newer.
         sqlx::query!(
             "UPDATE artifacts SET created_at = created_at + 100 WHERE id = ?",
             &ids[1]
@@ -1698,13 +1314,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_that_would_lose_a_literal_says_so_without_naming_the_tokens() {
-        // The loss check, from the unit's side. Two sentences must not be
-        // written here: the lost tokens, which are as often a bare "1, 4" as a
-        // version number and are evidence too thin to act on; and the judge's
-        // own line, which was written to say the two are the *same* and would
-        // read as the reason the pair was closed. Neither of those is an
-        // argument for saying nothing at all — a closed pair with no reason on
-        // it leaves nobody able to tell why two near-copies both stand.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
@@ -1750,9 +1359,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_second_unit_for_a_pair_already_settled_is_a_no_op() {
-        // Two units are armed for one pair — a sweep re-arming what a queued
-        // job already holds — and both run. The second must find its work done
-        // rather than paying for the same verdict twice.
         let mut core = test_core().await;
         let completer = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"unrelated"}"#.into(),
@@ -1776,7 +1382,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_dedupe_leaves_the_pair_pending() {
-        // A dead endpoint must not silently clear a queue of real duplicates.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec!["not json".into()])));
         let ids = disagreeing(&core).await;
@@ -1819,10 +1424,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_that_lost_its_sources_is_never_shown_as_an_original() {
-        // The self-root fallback put a model-synthesized paraphrase in the
-        // prompt as a captured original, and a Duplicate verdict would then
-        // record a merged artifact as root_id — paraphrase drift, one
-        // generation per merge, which the lineage design exists to prevent.
         let mut core = test_core().await;
         let completer = Arc::new(ScriptedCompleter::new(vec![]));
         core.judge = Some(completer.clone());
@@ -1838,7 +1439,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // Its every source cascades away, as a corpus deletion does.
         sqlx::query!("DELETE FROM artifact_sources WHERE child_id = ?", &m.id)
             .execute(&core.store.pool)
             .await
@@ -1861,9 +1461,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_applied_replacement_does_not_wait_for_an_operator() {
-        // The pair used to stay in Superseded — the state every consumer reads
-        // as "awaiting confirmation" — with Keep buttons that could only
-        // return a validation error against the already-superseded side.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"replaced","supersedes":"a","detail":"old flag vs new flag"}"#.into(),
@@ -1920,9 +1517,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_unit_settles_only_its_own_pair() {
-        // The unit used to claim the whole connected component and answer every
-        // pair in it with one verdict. A sibling pair is a separate question
-        // about a different pair of artifacts, and it keeps its own turn.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -1962,10 +1556,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_cluster_past_the_old_cap_is_asked_about_rather_than_refused() {
-        // Twelve artifacts in one chain is exactly the shape the fan-in cap
-        // refused: it flattened past the default of eight and every pair in it
-        // was settled Oversized, terminal, with no call ever made. Nothing about
-        // it is oversized now — it is a sequence of two-artifact questions.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -2012,11 +1602,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_letter_names_a_member_and_never_one_of_its_sources() {
-        // The letter used to be resolved against the flattened roots while the
-        // members were a different list, and whenever a component held an
-        // earlier merge the two diverged — superseding an artifact the model had
-        // never been shown. Here "a" is the merge, whose own sources would be
-        // the ones a stale resolution reached.
         let mut core = test_core().await;
         let ids = seed_titled(
             &core,
@@ -2027,8 +1612,6 @@ mod tests {
             ],
         )
         .await;
-        // A is the merge, so its two sources are what a letter resolved against
-        // a flattened root list would reach. B is the artifact beside it.
         let m = merged_from(
             &core,
             "Merged",
@@ -2037,11 +1620,7 @@ mod tests {
         )
         .await;
         let pair = queue_pair(&core, &m, &ids[2]).await;
-        // `record_pair` stores the two sides in id order, and `run` letters them
-        // as it finds them — so which letter the merge got is not the caller's
-        // to choose. The stale artifact is the one being named here; naming the
-        // merge would be refused by newest-wins, since a merge is always the
-        // newest artifact in its own lineage.
+        // `record_pair` stores sides in id order, so the letter is not the caller's to choose.
         let stored = core.store.get_pair(pair).await.unwrap();
         let letter = if stored.a_id == ids[2] { "a" } else { "b" };
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![format!(
@@ -2070,8 +1649,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merged_member_reaches_the_model_with_its_sources() {
-        // Its own words are the thing under judgement; the captured originals go
-        // beneath them so a detail an earlier merge dropped can come back.
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -2112,9 +1689,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_and_one_of_its_own_sources_is_dismissed_without_a_call() {
-        // The pairwise form of the old "flattens to one root" guard: comparing a
-        // merge with an artifact it was written from asks whether something
-        // matches itself, at the price of a call.
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![]));
         core.judge = Some(judge.clone());
@@ -2147,9 +1721,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_value_lost_by_an_earlier_merge_does_not_block_the_next_one() {
-        // The loss check runs against what is actually being merged. Against the
-        // whole flattened lineage instead, a value dropped a generation ago
-        // would fail every later merge in that lineage forever and freeze it.
         let mut core = test_core().await;
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same thing",
@@ -2169,7 +1740,7 @@ mod tests {
             ],
         )
         .await;
-        // This merge already dropped "30s". The next one is not to blame for it.
+        // This merge already dropped "30s".
         let m = merged_from(
             &core,
             "Pool",
@@ -2204,8 +1775,7 @@ mod tests {
     async fn a_pair_a_person_asked_about_is_written_without_being_judged_again() {
         use crate::store::actions::Kind;
         let mut core = test_core().await;
-        // A verdict-shaped reply would not parse here: this path asks for a
-        // draft. If the branch fell through to the judge, the test fails.
+        // A verdict-shaped reply would not parse here: falling through to the judge fails the test.
         core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"merged":{"title":"Tierarztpraxis Dr. Brinkmann","text":"Kleintierpraxis in Bad Aibling. Sprechzeiten Mo-Fr 08:00-12:00.","category":"reference","caveats":[]}}"#
                 .into(),
@@ -2232,10 +1802,7 @@ mod tests {
             Some(DecidedBy::Operator),
             "the press is what settled this, not the model"
         );
-        // The sources are still in results here, and that is the shape the
-        // judge's own merge leaves too: `merge::write` writes and enqueues an
-        // embed, and `merge::finish` hides them when that lands. The lineage is
-        // what says the merge holds them.
+        // `merge::finish` hides the sources only when the embed lands.
         let roots = core
             .store
             .roots_of(std::slice::from_ref(&merged))
@@ -2266,8 +1833,6 @@ mod tests {
         )
         .await;
         let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        // The state the judge leaves behind, and the state the card is drawn
-        // from. Nothing here is `Pending` any more.
         core.store
             .set_pair_state(
                 pair,
@@ -2292,9 +1857,7 @@ mod tests {
     #[tokio::test]
     async fn a_settled_pair_nobody_pressed_is_still_left_alone() {
         let mut core = test_core().await;
-        // Empty scripts: any call at all comes back an error, and the
-        // `unwrap` below carries it out. That is the assertion — nothing may
-        // be asked about this pair, by either role.
+        // Empty scripts: any call errors and the `unwrap` fails.
         core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![])));
         let ids = seed_titled(
@@ -2594,7 +2157,6 @@ mod tests {
     async fn a_merge_that_would_lose_a_value_leaves_both_and_closes_the_pair() {
         use crate::store::actions::Kind;
         let mut core = test_core().await;
-        // The draft keeps `ro` and drops `rw`.
         core.judge = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"duplicate","detail":"same claim",
                 "merged":{"text":"Mount the image with `mount -o ro /dev/loop0 /mnt/case`.","tags":[],"caveats":[]}}"#
@@ -2735,13 +2297,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_of_a_merge_names_every_original_behind_it() {
-        // The whole point of merging two at a time: the result is mergeable
-        // again, and it carries the flattened lineage of both sides rather than
-        // naming the intermediate.
         let mut core = test_core().await;
-        // Through the press, the path rows an older base asked on still take.
-        // The judge's own merge goes through the same `write_merge`, so the
-        // lineage it records is the same.
         core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
             r#"{"merged":{"title":"Pool","text":"max_connections is 16, raise it for batch jobs, sixteen connections","category":"reference","caveats":[]}}"#
                 .into(),
@@ -2788,15 +2344,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_context_block_too_big_for_the_window_is_trimmed_not_refused() {
-        // Context is reference material, so a window too small to hold it costs
-        // the answer some quality — never the answer itself.
-        //
-        // The window is the system prompt plus room for the two members and
-        // the reply, and nothing more: it has to be too small for the source
-        // block and large enough for everything that is not trimmable, so it
-        // moves when `DEDUPE_SYSTEM` does. Left at a number chosen against an
-        // older, shorter prompt, this stopped testing the trim and started
-        // testing the refusal one paragraph later.
+        // Too small for the source block, large enough for the rest; moves with `DEDUPE_SYSTEM`.
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![
             r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
@@ -2842,10 +2390,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_members_that_alone_do_not_fit_are_left_as_they_are() {
-        // A different failure with a different cause: an artifact so large that
-        // no pair containing it can be judged. Both stay as they are and the
-        // pair is closed with the reason on it — not filed under a terminal
-        // state of its own, which is what `Oversized` did wrong.
         let mut core = test_core().await;
         let judge = Arc::new(ScriptedCompleter::new(vec![]));
         judge.set_context_tokens(100);

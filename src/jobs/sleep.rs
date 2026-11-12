@@ -1,16 +1,5 @@
-//! Sleep: what a quiet base does with what the day brought.
-//!
-//! Four phases, in `tune::run_if_quiet`'s order: integrate (here), rehearse
-//! (here), reorganise (the corpus rules), wake (the journal). This module
-//! holds the two that read the base and write evidence, and two of the corpus
-//! rules that read back what they left: `interference`, which counts what
-//! outranks a probe's owner and files nothing at all, and
-//! `condense_candidates`, which arms a rewrite. Nothing in it spends a
-//! generation.
-//!
-//! Integration files each new artifact as novel or known and mints a capture
-//! probe per near hit. There is no third tag — `store::integrations::Tag`
-//! says what happened to the one there was.
+//! Sleep's integrate and rehearse phases, plus the corpus rules `interference` (counts, files
+//! nothing) and `condense_candidates`. Nothing here spends a generation.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -23,23 +12,12 @@ pub struct Integrated {
     pub integrated: usize,
     pub novel: usize,
     pub known: usize,
-    /// Capture probes written.
     pub probes: usize,
-    /// Somebody came back; the rest waits for the next quiet period.
     pub stopped: bool,
 }
 
-/// The tag, from the best surviving hit. Pure, so the rule is one function.
-///
-/// Below `review_min` nothing near: novel. At or above it: known. There is no
-/// third answer here. There used to be — two artifacts at or above
-/// `auto_supersede` whose value-shaped tokens differed were tagged a conflict
-/// and filed as a contradiction, without a model ever reading either one. In a
-/// base of lecture slides the tokens that differed were the footer dates and
-/// the section numbers, so 130 pairs of near-identical passages settled into a
-/// terminal state no sweep reopens and no person could clear. Whether two
-/// artifacts disagree is a question about what they say, and nothing that
-/// splits on whitespace can be asked it.
+/// Novel below `review_min`, known at or above it; whether two artifacts disagree is not a question
+/// token splitting can answer.
 pub fn tag_for(review_min: f32, nearest: Option<f32>) -> Tag {
     match nearest {
         Some(score) if score >= review_min => Tag::Known,
@@ -47,16 +25,8 @@ pub fn tag_for(review_min: f32, nearest: Option<f32>) -> Tag {
     }
 }
 
-/// Every new artifact, run once against the rest of the base.
-///
-/// Same-corpus hits are structure, not knowledge — the reason `relate` skips
-/// passages — applied as a filter so passages are integrated too. The
-/// integration row is the whole of what this files: novel or known, what it
-/// landed on, how near. No pair is filed for a person here or anywhere else in
-/// this module. A known artifact files nothing further either, because
-/// `relate` already does for model-written ones and verbatim text waits for
-/// promotion. Every near hit gets a probe: this text is a question somebody
-/// asked that the near artifact answers.
+/// Same-corpus hits are structure and filtered out. Files the integration row and one probe per
+/// near hit, nothing for a person.
 pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
     let mut out = Integrated::default();
     let review_min = core
@@ -97,30 +67,9 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
         let nearest = surviving.first();
         let tag = tag_for(review_min, nearest.map(|(s, _)| *s));
 
-        // The probes first, and the integration row that closes the artifact
-        // out only once they are written.
-        //
-        // The other order is the one the whole write path is arranged to
-        // avoid: `record_integration` commits, and `artifacts_to_integrate`
-        // excludes anything that has a row — so an artifact was marked
-        // integrated and *then* its capture probes were minted behind two
-        // `?`s. A vector store that hiccupped at `dense_of` aborted the pass
-        // with no `sleep_runs` row to say so, and every later pass skipped the
-        // artifact as already integrated. Nothing else mints a capture probe:
-        // `integrate` files an artifact once and never revisits it, so those
-        // probes were not late, they were gone — and with them the anchor that
-        // refuses a candidate generation and reverts a bad one.
-        //
-        // Written twice rather than not at all, in the failure this leaves:
-        // `record_rehearsal` is unique over `(artifact_id, class, query)` where
-        // `retired_at IS NULL`, so a pass that mints probes and then fails to
-        // record the integration re-mints nothing on the next lap — it gets
-        // `None` back and counts nothing — and goes on to write the row.
-        //
-        // The vector is the artifact's own, read back from the index so
-        // nothing is embedded. `None` means it has no point yet: nothing to
-        // mint a probe from, and nothing that says the integration should
-        // wait, so the row is still written and the artifact is done with.
+        // Probes before the integration row: once the row commits the artifact is never revisited,
+        // so probes minted after a failure are gone. A re-run re-mints nothing (unique over live
+        // rows).
         let mut minted = 0;
         if let Some(vec) = core.vectors.dense_of(&a.id).await? {
             for (sim, other) in &surviving {
@@ -156,9 +105,7 @@ pub async fn integrate(core: &Core, started: i64) -> Result<Integrated> {
                 detail: None,
             })
             .await?;
-        // Counted off the row, which is what makes this pass the one that
-        // integrated the artifact. `false` is another pass having got there
-        // first, and its probes are the ones that stand.
+        // `false` is another pass having got there first; its probes stand.
         if !written {
             continue;
         }
@@ -178,30 +125,15 @@ pub const REHEARSED_AFTER: &str = "sleep.rehearsed_after";
 pub struct Replayed {
     pub rehearsed: usize,
     pub found: usize,
-    /// Of those replayed, the ones that landed somewhere new — a different
-    /// rank than this probe's last result under this generation, found where
-    /// it was missing, or missing where it was found. A probe measured with no
-    /// previous result under this generation counts, because a first
-    /// measurement is all signal.
-    ///
-    /// This is what the pass *learned*, and it is the number `jobs::did_work`
-    /// reads. `rehearsed` is not: the lap wraps, so on any base that has ever
-    /// captured anything it is non-zero on every pass for ever, and a count
-    /// that is never zero is a backoff that never engages. Replaying a probe
-    /// to the rank it already had, under the parameters it already had, is not
-    /// work — it is the same measurement again, and the base is entitled to
-    /// sleep through it. What moves is what is worth waking for, which is the
-    /// rule `fragile_rehearsals` already applies to *which* probes to spend a
-    /// pass on, read here one level up at *how often* to spend one.
+    /// A changed rank, or a first measurement under this generation. `jobs::did_work` reads this,
+    /// not `rehearsed`, which the wrapping lap keeps non-zero forever.
     pub moved: usize,
-    /// Probes retired on the way: another embedder, or an owner gone.
     pub retired: usize,
-    /// Of those, the ones asked again at the live embedder. See `remint`.
+    /// See `remint`.
     pub reminted: usize,
     pub stopped: bool,
 }
 
-/// One probe as a `Pair`, `satisfies` widened to what supersedes the owner.
 pub(crate) async fn pair_of(
     core: &Core,
     r: &crate::store::rehearsals::Rehearsal,
@@ -211,21 +143,14 @@ pub(crate) async fn pair_of(
         satisfies: crate::eval::satisfied_by(core, &r.artifact_id).await,
         query_vec: Some(r.query_vec.clone()),
         priming: None,
-        // A probe was never served to anybody, so there is no served rank and
-        // no list the reranker could have ordered.
         served_rank: None,
         served_reranked: false,
-        // The artifact whose text is the query. It answers itself at cosine
-        // one and a perfect lexical match, so left in the results it stands
-        // above the owner in every replay whatever the parameters are — which
-        // caps a probe's reciprocal rank at one half, makes the source an
-        // interferer of its own owner, and halves the margin the refuse gate
-        // thinks it is asking for. See `Pair::exclude`.
+        // The source answers itself at cosine one and would cap the owner's reciprocal rank at one
+        // half.
         exclude: r.source_id.iter().cloned().collect(),
     }
 }
 
-/// Whether anything in the chain a probe is satisfied by is still in results.
 async fn owner_stands(core: &Core, satisfies: &[String]) -> bool {
     for id in satisfies {
         if let Ok(c) = core.store.get_artifact(id).await
@@ -237,13 +162,8 @@ async fn owner_stands(core: &Core, satisfies: &[String]) -> bool {
     false
 }
 
-/// Fragile first, then the lap. Pure vector reads; nothing embedded.
-///
-/// The lap walks `(created_at, id)` from where the last pass stopped and
-/// wraps at the end, the way `retract`'s cursor does: a probe has no end
-/// state to reach, so the cursor has no end. Half the bound goes to the
-/// probes whose last two results disagree — what wobbles is what needs
-/// rehearsing, and this is the spacing effect measured rather than scheduled.
+/// Half the bound goes to probes whose last two results disagree; the lap cursor wraps like
+/// `retract`'s.
 pub async fn rehearse(
     core: &Core,
     live: &crate::store::generations::Generation,
@@ -272,22 +192,9 @@ pub async fn rehearse(
             .rehearsals_after(&crate::store::Cursor::default(), want)
             .await?;
     }
-    // The two halves overlap, and the overlap has to go. A fragile probe is a
-    // live probe like any other, so the lap walks straight over the ones
-    // already in hand — and on a base whose probes all fit in one lap, that is
-    // every one of them. `rehearsal_results` has no uniqueness, so a probe
-    // measured twice in one pass writes two rows off a single reading — a
-    // second search spent to learn nothing, and a pair of rows that
-    // `fragile_rehearsals` then reads as its last two results agreeing. The
-    // rules downstream count distinct probes now (`MIN_AGREEING_PROBES`) and
-    // are no longer fooled into reading one reading as two, but the wasted
-    // search is reason enough on its own.
+    // A fragile probe is also on the lap; measuring it twice writes two rows off one reading.
     let held: std::collections::HashSet<String> = batch.iter().map(|r| r.id.clone()).collect();
-    // Where the lap ends, taken before the overlap is dropped. The cursor
-    // below moves only over probes the loop measures, so a lap whose every
-    // probe past the cursor was also fragile filtered to nothing and the
-    // cursor stood still: the next pass fetched the same lap, dropped it the
-    // same way, and the probes behind the cursor were never walked again.
+    // Taken before the overlap is dropped, or a lap that was all fragile never advances the cursor.
     let lap_end = lap.last().map(|r| crate::store::Cursor {
         at: r.created_at,
         id: r.id.clone(),
@@ -296,10 +203,7 @@ pub async fn rehearse(
     let lap_start = batch.len();
     batch.extend(lap);
 
-    // Where each of these probes stood last time, in one query rather than a
-    // point lookup per probe on a pass that already runs `OBSERVATION_LIMIT`
-    // searches. Absent means never measured under this generation, which is
-    // not the same fact as measured and missed — see `latest_ranks_under`.
+    // Absent means never measured under this generation, not measured and missed.
     let ids: Vec<String> = batch.iter().map(|r| r.id.clone()).collect();
     let was = core.store.latest_ranks_under(&ids, &live.id).await?;
 
@@ -318,44 +222,18 @@ pub async fn rehearse(
                 id: r.id.clone(),
             };
         }
-        // Another era's vector is not comparable with the live index, the
-        // way rule 2 skips give-ups from another embedder; retired, not
-        // replayed. An owner nothing answers for any more likewise.
+        // Another era's vector is not comparable with the live index.
         let pair = pair_of(core, r).await;
         let stale = r.embed_model != model;
         let stands = owner_stands(core, &pair.satisfies).await;
         if stale || !stands {
-            // The two retirements are not the same event. An owner that left
-            // results is a question with nothing left to answer it, and it
-            // stays retired. A changed embedder is not: the question is as
-            // good as it ever was, only the vector beside it is from another
-            // era. Nothing else would ever ask it again — `integrate` files
-            // an artifact once and never revisits it, and a cue is minted at
-            // `embed::mark_indexed` — so a base that changed embedder lost
-            // every probe it had, and with them the anchor that refuses a
-            // candidate and reverts a generation.
-            //
-            // Which is why the stale probe is retired only once its
-            // replacement exists, or once it is certain none ever will.
-            // `retired_at` is a one-way door and every reader filters on it,
-            // and a capture probe's replacement is minted from the artifact
-            // its query *is* — an artifact that, on the pass right after the
-            // embedder changed, has very often not been re-embedded yet.
-            // Retired first and re-minted after, that probe was thrown away
-            // for the reason it was being kept: the sweep ran while the
-            // re-embed was still queued. `Waiting` leaves it live for the
-            // pass that finds the artifact ready.
+            // A gone owner stays retired; a changed embedder needs a replacement, minted from an
+            // artifact that may not be re-embedded yet. `Waiting` keeps the probe live until it is.
             if stale && stands {
-                // The vector first, and the retirement only after it is in
-                // hand. `idx_rehearsals_live` is unique over
-                // `(artifact_id, class, query)` where `retired_at IS NULL`, so
-                // the replacement cannot be written beside the old row — the
-                // retirement has to come first, and that is exactly what made
-                // the loss possible. Deciding here and writing below keeps
-                // both: nothing is retired that has no replacement coming, and
-                // nothing is inserted against a row still holding the index.
+                // Decide here, write below: the live index is unique over `(artifact_id, class,
+                // query)`, so the retirement must precede the insert, and nothing is retired
+                // without a replacement coming.
                 match remintable(core, r, &model).await? {
-                    // Left live for the pass that finds the artifact embedded.
                     Remintable::Waiting => continue,
                     Remintable::Gone => {}
                     Remintable::From(query_vec) => {
@@ -379,8 +257,7 @@ pub async fn rehearse(
         if rank.is_some() {
             out.found += 1;
         }
-        // Stored 1-based, measured 0-based, and the comparison has to be made
-        // in one of them or every probe reads as having moved.
+        // Stored 1-based, measured 0-based.
         let now_at = rank.map(|r| r as i64 + 1);
         match was.get(&r.id) {
             Some(before) => out.moved += usize::from(*before != now_at),
@@ -395,8 +272,6 @@ pub async fn rehearse(
             })
             .await?;
     }
-    // The whole lap was walked, including what the fragile half took out of
-    // it, so the next one starts after all of it.
     if let Some(end) = lap_end {
         cursor = end;
     }
@@ -406,28 +281,8 @@ pub async fn rehearse(
     Ok(out)
 }
 
-/// The same question again, at the live embedder.
-///
-/// Both classes are re-embedded the way they were minted, which is what keeps
-/// a re-minted probe comparable with the ones around it. A cue is a question
-/// and cost a query embedding; a capture probe's query is another artifact's
-/// text and cost nothing at all — its vector is that artifact's own, read back
-/// out of the index — so it is read back the same way, and only once the
-/// source itself carries the live model. Reading it sooner would write the
-/// very vector this probe is being retired for.
-///
-/// `false` where the source is gone, not yet re-embedded, or already has a
-/// live probe for this question. None of those is a failure: the next lap
-/// comes round.
-/// The query vector a re-mint would carry, or why there is none.
-///
-/// Asked before the old probe is retired, which is the whole point of it
-/// being a separate step. `retired_at` is a one-way door and every reader
-/// filters on it, so a probe retired ahead of a replacement that never came
-/// is a probe the base has lost — and a capture probe's replacement is minted
-/// from the artifact its query *is*, an artifact that, on the pass right
-/// after the embedder changed, has very often not been re-embedded yet. That
-/// pass used to retire every probe it had and re-mint almost none of them.
+/// Asked before the old probe is retired: `retired_at` is one-way. A capture probe's vector is read
+/// back from its source, so it waits until the source carries the live model.
 async fn remintable(
     core: &Core,
     r: &crate::store::rehearsals::Rehearsal,
@@ -447,8 +302,7 @@ async fn remintable(
             let Ok(a) = core.store.get_artifact(source).await else {
                 return Ok(Remintable::Gone);
             };
-            // Not yet, rather than never: the embed queue is what makes both
-            // of these true, and it drains.
+            // Not yet, rather than never: the embed queue drains.
             if a.embed_model.as_deref() != Some(model) {
                 return Ok(Remintable::Waiting);
             }
@@ -460,22 +314,14 @@ async fn remintable(
     })
 }
 
-/// Three answers and not two, because "no replacement" splits: a source that
-/// has not been re-embedded *yet* is a wait the embed queue ends, and a source
-/// that is gone is not. Only the second may retire the probe.
+/// Only `Gone` may retire the probe.
 enum Remintable {
-    /// The query vector for the replacement.
     From(Vec<f32>),
-    /// Nothing to mint from yet. The old probe stays live.
     Waiting,
-    /// Nothing to mint from, ever.
     Gone,
 }
 
-/// Write the replacement, once the old row is out of the live index.
-///
-/// `false` where `INSERT OR IGNORE` declined — this question already stands on
-/// this artifact at the live embedder, which is a replacement either way.
+/// `false` where `INSERT OR IGNORE` declined, which is a replacement either way.
 async fn remint(
     core: &Core,
     r: &crate::store::rehearsals::Rehearsal,
@@ -496,8 +342,7 @@ async fn remint(
         .is_some())
 }
 
-/// How many distinct probes these results came from. Two rows are two
-/// observations only if two probes wrote them; see `interferers`.
+/// Two rows are two observations only if two probes wrote them.
 fn probes_behind(results: &[crate::store::rehearsals::RehearsalResult]) -> usize {
     results
         .iter()
@@ -506,26 +351,9 @@ fn probes_behind(results: &[crate::store::rehearsals::RehearsalResult]) -> usize
         .len()
 }
 
-/// Ids that stood above the owner in **every** retained result, from at least
-/// `MIN_AGREEING_PROBES` distinct probes, and from another corpus. A
-/// same-corpus neighbour is structure.
-///
-/// Probes and not rows. The rehearsal lap wraps, so an unchanged base replays
-/// the same probe on consecutive nights and writes identical rows: counting
-/// rows, "at least two retained results" was one reading agreeing with itself,
-/// which is not the agreement between two questions the rule claims to have.
-///
-/// Nothing at all where any retained result missed the owner, which is the
-/// same guard `condense_candidates` carries and for a sharper reason here.
-/// `rank_and_above` returns the *entire* top ten as `outranked_by` when the
-/// owner is not in the results, so a probe whose owner is simply not
-/// retrievable — one condensed and awaiting a re-embed, which still passes
-/// `in_results()` — contributed a full slate of ids to the "stood above it in
-/// every one" test and made interference out of consistency. That mattered
-/// more when the rule filed pairs and dedupe could merge or supersede away the
-/// very artifact that was only briefly unfindable; it files nothing now, so
-/// the cost of the same mistake is a wrong number on Ops rather than a lost
-/// artifact. The guard stays: a wrong number is still wrong.
+/// Ids above the owner in every retained result from at least `MIN_AGREEING_PROBES` distinct
+/// probes, in another corpus. Empty if any result missed the owner: its `outranked_by` is the whole
+/// top ten.
 pub fn interferers<F>(
     results: &[crate::store::rehearsals::RehearsalResult],
     own_corpus: Option<&str>,
@@ -551,30 +379,8 @@ where
     out
 }
 
-/// Rule 3: forgetting by displacement. Which artifacts stand above a probe
-/// owner in every one of its retained results — retrieval competition,
-/// counted for Ops. Returns (interferers observed, stopped early).
-///
-/// It files nothing, and that is the point. It used to record an
-/// `artifact_pairs` row per interferer, which put a ranking observation onto a
-/// queue whose cards made claims about meaning: the review card rendered a
-/// pair as "these two disagree", as search and Ask still say of a real one, and two documents sharing a template outrank each
-/// other constantly while agreeing about everything. A base's whole queue was
-/// this rule's output — cover pages against cover pages, one town's shop
-/// listings against another's — and not one of them was a disagreement.
-///
-/// It also carried neither passage guard its sibling producers have
-/// (`relate::arm`, `associate::judge` both refuse a passage), so it was the
-/// only reason passage pairs reached consolidation at all — where `dedupe`
-/// cannot merge stored source text and settles them `Contradiction`, which is
-/// the state that renders as the claim. And it invented a `0.0` score out of a
-/// missed neighbour lookup, colliding with the marker `web::ops` reads as
-/// "found by co-retrieval, never measured".
-///
-/// The budget does not gate it any more either. That check was here because
-/// filing is what leads to a merge; with nothing written there is nothing to
-/// withhold, and a count that fell to zero when the day ran out would report
-/// that the competition had stopped rather than that the spending had.
+/// Rule 3: retrieval competition, counted for Ops. Files nothing, since a ranking observation is
+/// not a disagreement, and is not budget-gated. Returns (interferers observed, stopped early).
 pub async fn interference(
     core: &Core,
     live: &crate::store::generations::Generation,
@@ -600,12 +406,7 @@ pub async fn interference(
         if !owner.in_results() {
             continue;
         }
-        // Every retained result of every live probe of this owner, together —
-        // under the live generation and no other. A rank is a measurement made
-        // at one set of ranking parameters, so results either side of a
-        // generation boundary are two different measurements, and what a probe
-        // keeps reaches back `KEEP_PER_PROBE` passes whatever generation wrote
-        // them.
+        // Under the live generation only: a rank is a measurement at one set of parameters.
         let mut results = Vec::new();
         for p in core.store.rehearsals_of(&owner.id).await? {
             results.extend(
@@ -616,18 +417,8 @@ pub async fn interference(
         }
         let mut corpora: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
-        // Which of these ids the base still has. `outranked_by` is free-form
-        // JSON written when the rehearsal ran, and an id in it can name an
-        // artifact a burial or a merge has since taken away — a missing row
-        // and a row with no corpus are two different answers, and reading
-        // both as `None` conflated them.
-        //
-        // Only the ids that could still be an answer, which is the first
-        // result's list narrowed to what every other result also carries.
-        // `outranked_by` is a whole top ten, so resolving all of it cost ten
-        // lookups per result of every probe of every owner to decide a
-        // question about the handful that stood above the owner in all of
-        // them. `interferers` asks the same of the same ids below.
+        // Only the ids every result carries; `outranked_by` can name an artifact since buried or
+        // merged.
         let mut gone: std::collections::HashSet<String> = std::collections::HashSet::new();
         for x in results
             .first()
@@ -652,16 +443,11 @@ pub async fn interference(
             corpora.get(id).cloned().flatten()
         });
         for x in found {
-            // An id the base no longer has is not an observation about
-            // anything still in results. `outranked_by` is free-form JSON
-            // written when the rehearsal ran, and a burial or a merge can take
-            // the artifact it names away afterwards.
             if gone.contains(&x) {
                 tracing::debug!(owner = %owner.id, outranker = %x, "an outranker the base no longer has");
                 continue;
             }
-            // A pair the base once acted on and took back is a person's now,
-            // and their decision is not re-observed at them.
+            // An action taken back is a person's decision, not re-observed at them.
             if core.store.action_was_undone(&owner.id, Kind::Merge).await?
                 || core
                     .store
@@ -678,14 +464,8 @@ pub async fn interference(
     Ok((observed, false))
 }
 
-/// A stable owner dragging one competitor, with use behind it: arm a
-/// condensation. Three things, each already measured: model-written and in
-/// results; found in every retained result of at least
-/// `MIN_AGREEING_PROBES` distinct probes, with one id standing above it in
-/// every one — the measurable half of "the same competitor trails or leads
-/// it", since what trails is not in the results table; and engagement at or
-/// above `promote.activation_above`. Returns
-/// (units armed, stopped early).
+/// Arm a condensation for a model-written owner one competitor stands above in every result of
+/// `MIN_AGREEING_PROBES` probes, with engagement above `promote.activation_above`.
 pub async fn condense_candidates(
     core: &Core,
     live: &crate::store::generations::Generation,
@@ -724,13 +504,8 @@ pub async fn condense_candidates(
         {
             continue;
         }
-        // Under the live generation only. Unscoped, this test was permanent
-        // and self-inflicted: `condense_artifact` sets `embed_state =
-        // 'pending'`, so the first rehearsal after any condensation records a
-        // `rank: None` — and one such row anywhere in the artifact's history
-        // then disabled condense *and* interference for that owner for ever,
-        // on a miss the base itself had manufactured under settings it no
-        // longer runs.
+        // Under the live generation only: condensing sets `embed_state = 'pending'`, and its own
+        // miss would otherwise disable this owner forever.
         let mut results = Vec::new();
         for p in core.store.rehearsals_of(&owner.id).await? {
             results.extend(
@@ -739,9 +514,7 @@ pub async fn condense_candidates(
                     .await?,
             );
         }
-        // Distinct probes, not rows: the lap wraps, so the same probe replayed
-        // on two nights writes two identical rows, and a rewrite armed on that
-        // is armed on one reading agreeing with itself.
+        // Distinct probes, not rows: the wrapping lap writes identical rows.
         if probes_behind(&results) < crate::store::rehearsals::MIN_AGREEING_PROBES
             || results.iter().any(|r| r.rank.is_none())
         {
@@ -835,8 +608,7 @@ mod tests {
         let r = integrate(&core, crate::store::now()).await.unwrap();
         assert_eq!(r.integrated, 1, "the first corpus was filed the day before");
         assert!(!r.stopped);
-        // The first corpus's two saw only each other, discarded as structure:
-        // novel, and they stay novel. The second lands on both of the first.
+        // The first corpus's two saw only each other, discarded as structure.
         let tag = |id: &str| {
             let core = &core;
             let id = id.to_string();
@@ -845,14 +617,12 @@ mod tests {
         assert_eq!(tag(&a1).await, Tag::Novel);
         assert_eq!(tag(&a2).await, Tag::Novel);
         assert_eq!(tag(&b).await, Tag::Known);
-        // b's text is a probe for a1 and for a2; nothing probes b.
         assert_eq!(core.store.rehearsals_of(&a1).await.unwrap().len(), 1);
         assert_eq!(core.store.rehearsals_of(&a2).await.unwrap().len(), 1);
         assert!(core.store.rehearsals_of(&b).await.unwrap().is_empty());
         let p = &core.store.rehearsals_of(&a1).await.unwrap()[0];
         assert_eq!(p.source_id.as_deref(), Some(b.as_str()));
         assert_eq!(p.query, "the image will not mount");
-        // A second pass finds nothing to do.
         assert_eq!(
             integrate(&core, crate::store::now())
                 .await
@@ -864,9 +634,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_artifacts_differing_only_in_a_value_are_known_and_file_nothing() {
-        // The fake embedder hashes text; two texts that differ only in a value
-        // do not land at 0.94, and may land below zero. Set the threshold so
-        // that any neighbour counts as the same statement.
+        // The fake embedder hashes text, so any neighbour must count as the same statement.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.auto_supersede = -1.0;
         core.ranking
@@ -895,10 +663,6 @@ mod tests {
             ids.push(c.id);
         }
         let r = integrate(&core, crate::store::now()).await.unwrap();
-        // Two artifacts stating one thing with different values is the cleanest
-        // thing there is to merge, and which of them is current is the judge's
-        // question. Reading the answer off the digits in the text is what filed
-        // a lecture archive's slide dates as contradictions nobody could clear.
         assert_eq!(r.known, 2, "{r:?}");
         assert!(
             core.store
@@ -982,7 +746,6 @@ mod tests {
         let res = core.store.results_of(&p.id, 10).await.unwrap();
         assert_eq!(res.len(), 1);
         assert!(res[0].rank.is_some());
-        // The lap wraps: a second pass replays the same two again.
         assert_eq!(
             rehearse(&core, &live, crate::store::now())
                 .await
@@ -994,8 +757,6 @@ mod tests {
 
     #[test]
     fn an_interferer_stands_above_in_every_result_of_two_probes_and_is_from_another_corpus() {
-        // Which probe wrote the row is the whole of what makes two rows two
-        // observations, so every row here names one.
         let res = |probe: &str, above: &[&str]| crate::store::rehearsals::RehearsalResult {
             id: String::new(),
             rehearsal_id: probe.to_string(),
@@ -1015,9 +776,6 @@ mod tests {
             interferers(&[res("p", &["x"])], Some("mine"), corpus).is_empty(),
             "one result is not a pattern"
         );
-        // The lap wraps, so an unchanged base replays one probe night after
-        // night and writes the same row again. Counted as rows, that was the
-        // agreement the rule acted on.
         assert!(
             interferers(&[res("p", &["x"]), res("p", &["x"])], Some("mine"), corpus).is_empty(),
             "one probe agreeing with itself is one observation"
@@ -1043,9 +801,6 @@ mod tests {
             "same corpus is structure"
         );
 
-        // A result that missed the owner carries the whole top ten as
-        // `outranked_by`, so it agrees with anything. One is enough to make
-        // the set say nothing.
         let missed = |probe: &str, above: &[&str]| crate::store::rehearsals::RehearsalResult {
             rank: None,
             ..res(probe, above)
@@ -1067,7 +822,6 @@ mod tests {
         let live = live_generation(&core).await;
         integrate(&core, crate::store::now()).await.unwrap();
         let pid = core.store.rehearsals_of(&a1).await.unwrap()[0].id.clone();
-        // Two results that disagree is what `fragile_rehearsals` selects on.
         for rank in [Some(1), Some(3)] {
             core.store
                 .record_rehearsal_result(&crate::store::rehearsals::NewResult {
@@ -1105,8 +859,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(probes.len(), 2);
-        // The last pass stopped after the first probe, and the second one's
-        // results disagree, which puts it in the fragile half.
         let first = crate::store::Cursor {
             at: probes[0].created_at,
             id: probes[0].id.clone(),
@@ -1145,8 +897,6 @@ mod tests {
     async fn a_capture_probe_waits_for_its_artifact_to_be_re_embedded_rather_than_being_lost() {
         let (core, a1, _a2, b) = two_corpora().await;
         let live = live_generation(&core).await;
-        // The probe and its source are both from the old era, which is the
-        // state a changed embedder leaves behind.
         let source = core.store.get_artifact(&b).await.unwrap();
         core.store
             .mark_embedded(&b, "older-model", source.embed_rev)
@@ -1182,7 +932,6 @@ mod tests {
             "the probe is still live"
         );
 
-        // The embed queue drains, and the next pass mints the replacement.
         core.store
             .mark_embedded(&b, core.embedder.model(), source.embed_rev)
             .await
@@ -1201,7 +950,6 @@ mod tests {
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let live = live_generation(&core).await;
         let pids = two_probes_on(&core, &a1).await;
-        // One id the base has, one it never had.
         outranked(
             &core,
             &pids,
@@ -1224,7 +972,6 @@ mod tests {
         let (mut core, a1, _a2, b) = two_corpora().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         let live = live_generation(&core).await;
-        // Two probes for a1 that b — another corpus — has outranked in both.
         let pids = two_probes_on(&core, &a1).await;
         outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;
         let (seen, _) = interference(&core, &live, crate::store::now())
@@ -1235,9 +982,6 @@ mod tests {
             core.store.pair_between(&a1, &b).await.unwrap().is_none(),
             "retrieval competition is not a dedupe finding and files no pair"
         );
-        // Observing is idempotent in a way filing never was: the same standing
-        // is still the same standing on the next pass, and reporting it twice
-        // is the truth twice rather than a duplicate row.
         assert_eq!(
             interference(&core, &live, crate::store::now())
                 .await
@@ -1296,8 +1040,6 @@ mod tests {
         core.promote.activation_above = 0.0;
         let old = live_generation(&core).await;
         let pids = two_probes_on(&core, &a1).await;
-        // The manufactured miss, under the generation that is about to be
-        // superseded.
         core.store
             .record_rehearsal_result(&crate::store::rehearsals::NewResult {
                 rehearsal_id: pids[0].clone(),
@@ -1308,7 +1050,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A new generation, and a clean result from each probe under it.
         let live = live_generation(&core).await;
         assert_ne!(live.id, old.id);
         outranked(&core, &pids, &live.id, std::slice::from_ref(&b)).await;
@@ -1336,8 +1077,6 @@ mod tests {
         let live = live_generation(&core).await;
         integrate(&core, crate::store::now()).await.unwrap();
 
-        // First measurement: every probe is news, because none of them has a
-        // result under this generation yet.
         let first = rehearse(&core, &live, crate::store::now()).await.unwrap();
         assert!(first.rehearsed > 0);
         assert_eq!(
@@ -1345,8 +1084,6 @@ mod tests {
             "a first measurement is all signal"
         );
 
-        // The lap wraps and measures the same probes against an unchanged
-        // base. Same ranks, nothing learned.
         let second = rehearse(&core, &live, crate::store::now()).await.unwrap();
         assert_eq!(second.rehearsed, first.rehearsed, "the lap wrapped");
         assert_eq!(
@@ -1361,8 +1098,6 @@ mod tests {
         let out = integrate(&core, crate::store::now()).await.unwrap();
         assert!(out.integrated > 0);
         assert!(out.probes > 0, "the near hits minted nothing");
-        // Every probe the pass counted is on the base, readable from the
-        // artifact it answers for.
         let mut found = 0;
         for id in [&a1, &a2, &b] {
             found += core.store.rehearsals_of(id).await.unwrap().len();
@@ -1397,7 +1132,6 @@ mod tests {
         assert_eq!(live_probes.len(), 1, "the same question, once");
         assert_eq!(live_probes[0].query, "from another era");
         assert_eq!(live_probes[0].embed_model, core.embedder.model());
-        // And the next lap replays it like any other.
         let r = rehearse(&core, &live, crate::store::now()).await.unwrap();
         assert_eq!(r.rehearsed, 1);
         assert_eq!(r.retired, 0);
