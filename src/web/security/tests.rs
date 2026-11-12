@@ -182,3 +182,151 @@ fn base_is_the_public_origin_or_the_loopback_bind() {
     assert_eq!(dep(None).base(), "http://127.0.0.1:8080");
     assert_eq!(dep(None).authority(), "127.0.0.1:8080");
 }
+
+fn write_req(
+    origin: Option<&str>,
+    site: Option<&str>,
+    cookie: bool,
+    bearer: bool,
+) -> Request<Body> {
+    let mut r = Request::post("/write").header(header::HOST, "localhost:8080");
+    if let Some(o) = origin {
+        r = r.header(header::ORIGIN, o);
+    }
+    if let Some(s) = site {
+        r = r.header("sec-fetch-site", s);
+    }
+    if cookie {
+        r = r.header(header::COOKIE, "engram-session=1");
+    }
+    if bearer {
+        r = r.header(header::AUTHORIZATION, "Bearer engram_1.x");
+    }
+    r.body(Body::empty()).unwrap()
+}
+
+async fn status(r: Request<Body>) -> StatusCode {
+    local().oneshot(r).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn a_same_origin_post_passes() {
+    let r = write_req(
+        Some("http://localhost:8080"),
+        Some("same-origin"),
+        true,
+        false,
+    );
+    assert_eq!(status(r).await, StatusCode::OK);
+    let r = write_req(Some("http://127.0.0.1:8080"), None, true, false);
+    assert_eq!(status(r).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_foreign_origin_post_with_a_cookie_is_rejected() {
+    let r = write_req(Some("https://evil.example"), None, true, false);
+    assert_eq!(status(r).await, StatusCode::FORBIDDEN);
+    let forged = write_req(
+        Some("https://evil.example"),
+        Some("same-origin"),
+        true,
+        false,
+    );
+    assert_eq!(status(forged).await, StatusCode::FORBIDDEN);
+    let cross = write_req(None, Some("cross-site"), true, false);
+    assert_eq!(status(cross).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn origin_null_counts_as_absent() {
+    let r = write_req(Some("null"), Some("same-origin"), true, false);
+    assert_eq!(status(r).await, StatusCode::OK);
+    let r = write_req(Some("null"), None, true, false);
+    assert_eq!(status(r).await, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_post_with_no_origin_and_no_fetch_site_may_carry_no_cookie() {
+    assert_eq!(
+        status(write_req(None, None, false, false)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        status(write_req(None, None, true, false)).await,
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn a_bearer_request_without_a_cookie_skips_the_origin_check() {
+    let r = write_req(Some("moz-extension://abc"), Some("cross-site"), false, true);
+    assert_eq!(status(r).await, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_bearer_request_with_a_cookie_does_not_skip_it() {
+    let r = write_req(Some("moz-extension://abc"), Some("cross-site"), true, true);
+    assert_eq!(status(r).await, StatusCode::FORBIDDEN);
+}
+
+fn limited() -> Router {
+    let router = Router::new().route(
+        "/auth/login",
+        post(|| async { "ok" }).layer(rate_limit(
+            crate::web::auth_routes::SIGN_IN_PER_MINUTE,
+            crate::web::auth_routes::SIGN_IN_BURST,
+        )),
+    );
+    secure(router, &dep(None)).layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))))
+}
+
+fn sign_in_from(ip: &str) -> Request<Body> {
+    Request::post("/auth/login")
+        .header(header::HOST, "localhost:8080")
+        .header("x-forwarded-for", ip)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_eleventh_sign_in_in_a_minute_gets_429() {
+    let app = limited();
+    let mut statuses = Vec::new();
+    for _ in 0..11 {
+        let res = app
+            .clone()
+            .oneshot(sign_in_from("203.0.113.9"))
+            .await
+            .unwrap();
+        statuses.push(res.status());
+        if res.status() == StatusCode::TOO_MANY_REQUESTS {
+            assert!(res.headers().contains_key(header::RETRY_AFTER));
+        }
+    }
+    assert_eq!(statuses[0], StatusCode::OK);
+    assert_eq!(statuses[10], StatusCode::TOO_MANY_REQUESTS);
+    let other = app.oneshot(sign_in_from("203.0.113.10")).await.unwrap();
+    assert_eq!(
+        other.status(),
+        StatusCode::OK,
+        "another client has its own bucket"
+    );
+}
+
+#[tokio::test]
+async fn one_ipv6_64_shares_a_bucket() {
+    let app = limited();
+    for i in 0..crate::web::auth_routes::SIGN_IN_BURST {
+        let ip = format!("2001:db8:1:2::{i:x}");
+        let res = app.clone().oneshot(sign_in_from(&ip)).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let same_64 = app
+        .clone()
+        .oneshot(sign_in_from("2001:db8:1:2:ffff::1"))
+        .await
+        .unwrap();
+    assert_eq!(same_64.status(), StatusCode::TOO_MANY_REQUESTS);
+    let next_64 = app.oneshot(sign_in_from("2001:db8:1:3::1")).await.unwrap();
+    assert_eq!(next_64.status(), StatusCode::OK);
+}

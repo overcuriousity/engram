@@ -133,7 +133,14 @@ async fn claim(
 
 /// The API side, mounted under `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/pair/claim", post(claim))
+    use crate::web::auth_routes::{SIGN_IN_BURST, SIGN_IN_PER_MINUTE};
+    Router::new().route(
+        "/pair/claim",
+        post(claim).layer(crate::web::security::rate_limit(
+            SIGN_IN_PER_MINUTE,
+            SIGN_IN_BURST,
+        )),
+    )
 }
 
 pub fn app_router() -> Router<AppState> {

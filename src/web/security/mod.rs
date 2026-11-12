@@ -1,5 +1,7 @@
 mod client_ip;
 mod headers;
+mod origin;
+mod rate;
 #[cfg(test)]
 mod tests;
 
@@ -13,6 +15,7 @@ use url::Url;
 
 pub use client_ip::ClientIp;
 pub use headers::CSP;
+pub use rate::{RateLayer, rate_limit};
 
 const LOOPBACK_NAMES: [&str; 3] = ["localhost", "127.0.0.1", "[::1]"];
 
@@ -121,10 +124,11 @@ pub(crate) struct Ctx {
     pub dep: Deployment,
 }
 
-/// Wraps the whole app: response headers and the host check.
+/// Wraps the whole app: response headers, the host check and the origin check.
 pub fn secure(router: Router, dep: &Deployment) -> Router {
     let ctx = Arc::new(Ctx { dep: dep.clone() });
     router
+        .layer(from_fn_with_state(ctx.clone(), origin::origin_check))
         .layer(from_fn_with_state(ctx.clone(), client_ip::host_check))
         .layer(from_fn_with_state(ctx, headers::security_headers))
 }

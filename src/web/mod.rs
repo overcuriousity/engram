@@ -46,6 +46,9 @@ use state::AppState;
 /// that a runaway upload is refused rather than buffered.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
+pub const API_PER_MINUTE: u32 = 600;
+pub const API_BURST: u32 = 120;
+
 /// A browser landing on a page it has no session for should end up in front
 /// of the identity provider, not staring at `{"error":"unauthorized"}` with
 /// no way to act on it.
@@ -154,7 +157,8 @@ pub fn router(state: AppState) -> Router {
             api::api_router(
                 state.config.capture.image_max_bytes,
                 state.config.capture.pdf_max_bytes,
-            ),
+            )
+            .layer(security::rate_limit(API_PER_MINUTE, API_BURST)),
         )
         .fallback(ui::not_found)
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))

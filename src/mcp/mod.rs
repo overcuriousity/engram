@@ -958,6 +958,10 @@ pub fn mcp_router(state: AppState) -> Router<AppState> {
             ),
         )
         .layer(axum::middleware::from_fn_with_state(state, mcp_guard))
+        .layer(crate::web::security::rate_limit(
+            crate::web::API_PER_MINUTE,
+            crate::web::API_BURST,
+        ))
 }
 
 #[cfg(test)]

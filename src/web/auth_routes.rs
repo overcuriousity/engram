@@ -218,9 +218,18 @@ async fn logout(State(st): State<AppState>, headers: axum::http::HeaderMap) -> R
         .into_response())
 }
 
+pub const SIGN_IN_PER_MINUTE: u32 = 10;
+pub const SIGN_IN_BURST: u32 = 5;
+
 pub fn auth_router() -> Router<AppState> {
     Router::new()
-        .route("/auth/login", get(login_page).post(login_submit))
+        .route(
+            "/auth/login",
+            get(login_page).merge(post(login_submit).layer(crate::web::security::rate_limit(
+                SIGN_IN_PER_MINUTE,
+                SIGN_IN_BURST,
+            ))),
+        )
         .route("/auth/callback", get(callback))
         .route("/auth/logout", post(logout))
 }

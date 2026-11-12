@@ -25,6 +25,8 @@ globalThis.engramApi = {
     try {
       res = await fetch(cfg.origin + path, {
         ...init,
+        // A cookie would put the request back under the server's origin check.
+        credentials: 'omit',
         headers: {
           ...(init.headers || {}),
           authorization: 'Bearer ' + cfg.token,
