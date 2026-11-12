@@ -1,4 +1,4 @@
-<button type="button" class="btn btn-sm btn-danger" data-oc-dialog-open="{{ tc_id }}">{{ tc_open }}</button>
+<button type="button" class="oc-btn oc-btn--danger" data-oc-dialog-open="{{ tc_id }}">{{ tc_open }}</button>
 <dialog id="{{ tc_id }}" class="oc-dialog" aria-labelledby="{{ tc_id }}-title">
   <form class="oc-dialog__body" data-oc-confirm-name="{{ tc_name }}"
         hx-post="{{ tc_action }}" hx-target="#{{ tc_id }}-error" hx-swap="innerHTML">

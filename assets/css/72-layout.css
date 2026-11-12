@@ -263,7 +263,6 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
    nav, which made the chrome look like part of the picture. */
 .spacer { flex: 1; }
 
-
 /* ── Motion ──────────────────────────────────────────────────────────────
    One rule: motion explains what moved, and never decorates.
 

@@ -190,16 +190,6 @@ body { overflow-x: hidden; }
   box-shadow: inset 2px 0 0 var(--color-accent);
 }
 
-/* A notice: status symbol and text between hairlines, no box or tint. */
-.flag {
-  display: flex; gap: var(--space-2); align-items: flex-start;
-  border-top: 1px solid var(--color-border-subtle); border-bottom: 1px solid var(--color-border-subtle);
-  padding: var(--space-2) 0;
-  font-size: var(--text-dense); margin-bottom: var(--space-3);
-}
-
-
-
 /* ── Search workspace: ranked rail beside the chunk pane ─────────────────── */
 
 /* ── The box, and its two verbs ──────────────────────────────────────────── */
@@ -429,9 +419,7 @@ body { overflow-x: hidden; }
    before anything has filled it — or after a failed swap empties it — a
    visible row would be the hairline hanging alone over the rail. */
 .rail-act:empty { display: none; }
-/* The way back to results, after an Ask. Last on the row, past the rule, so
-   the heading still reads as a heading. */
-.rail-act .quiet-link { order: 3; flex: 0 0 auto; font-size: var(--text-micro); }
+
 .rail-act::after { order: 2; }
 .result-count {
   font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.04em;
@@ -465,7 +453,6 @@ body { overflow-x: hidden; }
 
 /* Judging an answer where it is read. */
 .ask-verdict { margin-top: 0.5rem; gap: 0.5rem; }
-.is-on { color: var(--color-accent); }
 
 /* The holes, on the capture page. */
 .rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
@@ -489,7 +476,6 @@ body { overflow-x: hidden; }
 .seen-row:hover .rail-del, .seen-row .rail-del:focus-within { opacity: 1; }
 @media (hover: none) { .seen-row .rail-del { opacity: 1; } }
 .seen-row.muted .rail-item { opacity: 0.75; }
-
 
 /* ── How an artifact came to exist ───────────────────────────────────────── */
 
@@ -531,12 +517,6 @@ body { overflow-x: hidden; }
 /* What tells two rows with one title apart: when it was written, and how it
    opens. Quiet, because it is a disambiguator and not a second title. */
 .row-sub { font-size: var(--text-micro); }
-/* Four underlined links in a row read as a wall. The artifact each row is
-   about keeps its underline; what it was written from stays reachable and
-   recedes until pointed at. */
-.grid td div > a { text-decoration: none; }
-.grid td div > a:hover { text-decoration: underline; }
-
 
 /* ── The controls for whatever the page is about ─────────────────────────── */
 
@@ -605,7 +585,6 @@ body { overflow-x: hidden; }
    pane label reads as a label rather than as a link dropped into a heading. */
 .pane-label a { color: var(--color-accent); text-decoration: none; }
 .pane-label a:hover { text-decoration: underline; }
-
 
 /* ── Teaching the keys ───────────────────────────────────────────────────── */
 
@@ -678,8 +657,7 @@ body { overflow-x: hidden; }
   .regions.reading .rail-title,
   .regions.reading .rail-snippet,
   .regions.reading .rail-why,
-  .regions.reading .rail-where,
-  .regions.reading .badge, .regions.reading .rail-head .oc-status { display: none; }
+  .regions.reading .rail-where, .regions.reading .rail-head .oc-status { display: none; }
   .regions.reading .rail-item {
     padding: 0.5rem 0; text-align: center;
   }
@@ -715,7 +693,6 @@ body { overflow-x: hidden; }
 /* Accented rather than muted like `.rail-why` above it: that line explains
    something that already happened to the ordering, this one is an offer. */
 .rail-continues { margin: 0.25rem 0 0; font-size: var(--text-micro); color: var(--color-accent); }
-.rail-continues .arrow { display: inline-block; width: 1em; text-align: center; }
 
 /* ── The source pane ─────────────────────────────────────────────────────── */
 
@@ -1014,7 +991,7 @@ body { overflow-x: hidden; }
 .due-notmine { color: var(--color-fg-muted); font-size: var(--text-micro); }
 .due-notmine:hover { color: var(--color-fg-secondary); }
 .due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
-.due-date .input { flex: 1 1 9rem; min-width: 0; }
+
 .due-coming { margin: 0.25rem 0 0; }
 /* The artifact's reminder, by hand. Closed it is one quiet word under the
    text, like the band's fold. */
@@ -1026,13 +1003,10 @@ body { overflow-x: hidden; }
 }
 .remind-edit > summary:hover { color: var(--color-fg-secondary); }
 .remind-edit form { flex-wrap: wrap; gap: 0.25rem; margin-top: 0.35rem; }
-.remind-edit .input { flex: 1 1 9rem; min-width: 0; }
-.remind-edit select.input { flex: 0 1 7rem; }
+
 /* The fold, under the last row it kept: a count, and the way back to the rest.
    Quiet on purpose — it is the least urgent thing on the band. */
 .due-fold { margin: 0.15rem 0 0; font-size: var(--text-micro); }
-
-
 
 /* A phone. The card gives back its side padding, the countdown shrinks, and
    the row keeps its one line. */
@@ -1054,13 +1028,11 @@ body { overflow-x: hidden; }
   .due-new { animation: none; }
 }
 .oc-status--due .oc-icon { color: var(--color-due); }
-.badge-due { color: var(--color-due); border-color: var(--color-due); }
 
 /* ── The day page ───────────────────────────────────────────────────────── */
 .day-nav { display: flex; align-items: baseline; gap: 1rem; margin: 1rem 0; }
 .day-nav h1 { flex: 1; text-align: center; margin: 0; font-size: var(--text-section); }
 .day-line { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; margin: 0.25rem 0; }
-.inline { display: inline; }
 
 /* ── A file, waiting to be sent ──────────────────────────────────────────── */
 
@@ -1113,7 +1085,6 @@ body { overflow-x: hidden; }
 #staged-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-fg-secondary); }
 /* Away from the name, so a long filename does not push it under the thumb. */
 #staged-clear { margin-left: auto; }
-
 
 /* Ask, as it streams. */
 
@@ -1170,12 +1141,6 @@ body { overflow-x: hidden; }
   cursor: pointer; font-size: var(--text-dense); color: var(--color-fg-muted);
 }
 .reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
-
-/* A full basis, so it takes a line of its own under the row rather than
-   competing with the verbs for one. Last in the DOM as well as last on screen:
-   placed earlier it would have wrapped the chips onto a third line, which
-   costs the row the density it is arranged for. */
-.attach-types { flex: 1 0 100%; margin: 0.25rem 0 0; }
 
 /* ── The idle column ─────────────────────────────────────────────────────── */
 

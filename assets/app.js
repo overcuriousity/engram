@@ -624,13 +624,8 @@
       var head = document.getElementById('rail-head');
       if (head) head.textContent = '';
       result.textContent = '';
-      var box = document.createElement('div');
-      box.className = 'flag';
-      box.setAttribute('role', 'status');
-      // textContent, not innerHTML: an error string is the one payload here
-      // that never went through the sanitizing renderer.
-      box.textContent = message;
-      result.appendChild(box);
+      // textContent inside: an error string never went through the sanitizer.
+      result.appendChild(notice('danger', message));
       live.hidden = true;
       reasoningBox.hidden = true;
       progress.hidden = true;
@@ -670,11 +665,11 @@
           var label = document.createElement('span');
           label.className = 'result-count';
           label.textContent = 'Written from · ' + n;
-          var back = document.createElement('a');
-          back.className = 'quiet-link';
-          back.href = '#';
+          var back = document.createElement('button');
+          back.type = 'button';
+          back.className = 'oc-btn';
           back.setAttribute('data-rerun', '');
-          back.textContent = '← results';
+          back.textContent = 'Back to results';
           head.appendChild(label);
           head.appendChild(back);
         }
@@ -1454,17 +1449,22 @@
   //
   // Silence would be the other mistake, and the handler below has a comment
   // about it: a door that fails invisibly reads as a base with nothing in it.
+  // A kit notice from the layout's template, so it carries the status icon.
+  function notice(kind, text) {
+    var t = document.getElementById('oc-notice-' + kind);
+    var box = t.content.firstElementChild.cloneNode(true);
+    box.querySelector('.oc-notice__text').textContent = text;
+    return box;
+  }
+
   function busyNote(target) {
     if (!target || target.id !== 'results') return false;
     // One note however many keystrokes are refused. The next successful search
     // swaps the rail's innerHTML and takes it away with everything else, so
     // nothing has to remove it.
-    if (target.querySelector('.flag-busy')) return true;
-    var box = document.createElement('div');
-    box.className = 'flag flag-busy';
-    box.setAttribute('role', 'status');
-    box.textContent =
-      'The model endpoint is busy. This search has not run — the next thing you type will try again.';
+    if (target.querySelector('[data-busy-note]')) return true;
+    var box = notice('warning', 'The model endpoint is busy · the next keystroke tries again');
+    box.setAttribute('data-busy-note', '');
     target.insertBefore(box, target.firstChild);
     return true;
   }
@@ -1473,23 +1473,8 @@
     if (!target || !target.id) return;
     var reason = 'Server unreachable.';
     if (xhr) reason = reasonOf(xhr) || ('engram answered ' + xhr.status + '.');
-    var box = document.createElement('div');
-    box.className = 'flag';
-    box.setAttribute('role', 'status');
-    // Not named `b`: `the_browser_sends_exactly_the_fields_this_struct_reads`
-    // reads the context bundle's fields off this file by looking for lines
-    // that start with `b.`, and a one-letter element handle here is
-    // indistinguishable from a bundle assignment.
-    var title = document.createElement('b');
-    title.textContent = 'That did not work';
-    var why = document.createElement('div');
-    why.textContent = reason;
-    var wrap = document.createElement('div');
-    wrap.appendChild(title);
-    wrap.appendChild(why);
-    box.appendChild(wrap);
     target.textContent = '';
-    target.appendChild(box);
+    target.appendChild(notice('danger', 'That did not work · ' + reason));
     // The heading names the act that filled the rail, and nothing filled it.
     var head = document.getElementById('rail-head');
     if (head && target.id === 'results') head.textContent = '';

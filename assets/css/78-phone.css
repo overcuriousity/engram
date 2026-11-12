@@ -149,8 +149,7 @@
      to the box and the verbs. */
   .regions-rail-focus-source .region-bar .chips,
   .regions-rail-focus-source .region-bar .facet-label,
-  .regions-rail-focus-source .region-bar .keyhint,
-  .regions-rail-focus-source .region-bar .row { display: none; }
+  .regions-rail-focus-source .region-bar .keyhint { display: none; }
   /* The hint's own rule moved to 40-workspace.css: it was never about the
      phone, and being here was why a desktop kept "Try …" standing over ten
      results. */
@@ -197,14 +196,8 @@
      `.box` belongs in this list above all: it is the one control on the phone
      that is always there and always focused, and it is not a `.textarea` —
      it has a rule of its own, so it was not covered by this one. */
-  .box, .input, .textarea { font-size: 1rem; }
-  .input { height: 44px; }
+  .box { font-size: 1rem; }
 
-  /* Targets a thumb can hit. */
-  /* :not(:has(span)) — a labelled control still needs room for its word;
-     only the square ones grow into a 44px target. */
-  .btn-icon:not(:has(span)) { width: 44px; height: 44px; }
-  .btn-icon:has(span) { height: 44px; }
   .chip > span { padding: 8px 12px; font-size: var(--text-dense); }
 
   /* No scroller inside a scroller: the page is the only thing that scrolls. */
@@ -219,16 +212,6 @@
      hole where the timestamp used to be. */
   .qmeta { grid-template-columns: auto; }
 
-  /* A row of five cells, most of them empty, is a card here instead. */
-  table.grid, table.grid tbody, table.grid tr, table.grid td { display: block; }
-  table.grid thead { display: none; }
-  table.grid tr {
-    border: 1px solid var(--color-border); border-radius: var(--radius-md);
-    padding: 0.75rem; margin-bottom: 0.5rem;
-  }
-  table.grid td { border: none; height: auto; padding: 0.125rem 0; }
-  table.grid tr:hover td { background: transparent; }
 }
-
 
 :root { --tabbar-h: 3.5rem; }

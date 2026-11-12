@@ -80,12 +80,14 @@
   </nav>
   <div class="installnudge" hidden role="status">
     <p>Add engram to your home screen.
-      <span data-install-how hidden>Share → Add to Home Screen.</span></p>
-    <button type="button" class="btn btn-sm" data-install hidden>Install</button>
-    <button type="button" class="btn btn-ghost btn-sm" data-dismiss-install>Not now</button>
+      <span data-install-how hidden>Share, then Add to Home Screen.</span></p>
+    <button type="button" class="oc-btn oc-btn--primary" data-install hidden>Install</button>
+    <button type="button" class="oc-btn" data-dismiss-install>Not now</button>
   </div>
   {% endblock %}
   <div class="oc-notices" id="oc-notices" aria-live="polite"></div>
+  <template id="oc-notice-danger"><div class="oc-notice oc-notice--danger" role="status">{{ crate::web::icons::icon("circle-x", 16) }}<span class="oc-notice__text"></span></div></template>
+  <template id="oc-notice-warning"><div class="oc-notice oc-notice--warning" role="status">{{ crate::web::icons::icon("triangle-alert", 16) }}<span class="oc-notice__text"></span></div></template>
   <div class="oc-sr-only" id="oc-live" aria-live="polite"></div>
   <dialog id="oc-shortcuts" class="oc-dialog" aria-labelledby="oc-shortcuts-title">
     <h2 class="oc-dialog__title" id="oc-shortcuts-title">Keyboard shortcuts</h2>
