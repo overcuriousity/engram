@@ -965,6 +965,65 @@ impl Decider for ScriptedDecider {
     }
 }
 
+type Rule = dyn Fn(&str, &[Question]) -> Result<Answers> + Send + Sync;
+
+/// Answers by rule, so parallel reads need no ordering; records what it was asked.
+pub struct RuleDecider {
+    rule: Box<Rule>,
+    requests: std::sync::Mutex<Vec<(String, Vec<Question>)>>,
+    context_tokens: std::sync::atomic::AtomicUsize,
+}
+
+impl RuleDecider {
+    pub fn new(
+        rule: impl Fn(&str, &[Question]) -> Result<Answers> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            rule: Box::new(rule),
+            requests: std::sync::Mutex::new(Vec::new()),
+            context_tokens: std::sync::atomic::AtomicUsize::new(DECIDER_WINDOW),
+        }
+    }
+    /// Calls that passed `check`.
+    pub fn calls(&self) -> usize {
+        self.requests().len()
+    }
+    pub fn requests(&self) -> Vec<(String, Vec<Question>)> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    pub fn set_context_tokens(&self, n: usize) {
+        self.context_tokens
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Decider for RuleDecider {
+    async fn decide(&self, state: &str, questions: &[Question]) -> Result<Answers> {
+        check(
+            &TokenCounter::default(),
+            self.context_tokens(),
+            state,
+            questions,
+        )?;
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((state.to_string(), questions.to_vec()));
+        (self.rule)(state, questions)
+    }
+    fn context_tokens(&self) -> usize {
+        self.context_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn model(&self) -> &str {
+        "rule-decider"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1131,6 +1190,22 @@ mod decide_tests {
         let d = ScriptedDecider::rejecting("no");
         let e = d.decide("", &[Question::noul("n", "Is it?")]).await;
         assert!(matches!(e, Err(Error::InferenceRejected { .. })), "{e:?}");
+    }
+    #[tokio::test]
+    async fn the_rule_answers_and_remembers_what_it_was_asked() {
+        let d =
+            RuleDecider::new(|state, _| Ok(noul_answers(if state == "one" { 0.1 } else { 0.2 })));
+        let q = [Question::noul("n", "Is it?")];
+        assert_eq!(d.decide("two", &q).await.unwrap(), noul_answers(0.2));
+        assert_eq!(d.decide("one", &q).await.unwrap(), noul_answers(0.1));
+        assert_eq!(d.calls(), 2);
+        assert_eq!(d.requests()[0], ("two".to_string(), q.to_vec()));
+        d.set_context_tokens(1024);
+        assert!(matches!(
+            d.decide(&"word ".repeat(4000), &q).await,
+            Err(Error::Validation(_))
+        ));
+        assert_eq!(d.calls(), 2);
     }
     #[tokio::test]
     async fn the_fakes_refuse_what_the_client_would() {

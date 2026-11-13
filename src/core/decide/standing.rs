@@ -1,5 +1,5 @@
 use crate::config::DecideConfig;
-use crate::infer::decide::{Answer, Kind, Question};
+use crate::infer::decide::{Answer, Kind, Question, trim};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,7 +42,10 @@ pub fn pick(q: &Question, a: &Answer) -> usize {
     match (a, &q.kind) {
         (Answer::Choice { pick, .. }, Kind::Choice { options }) => {
             // The decider only returns a named option; 0 is a harmless floor.
-            options.iter().position(|(n, _)| n == pick).unwrap_or(0)
+            options
+                .iter()
+                .position(|(n, _)| trim(n) == pick)
+                .unwrap_or(0)
         }
         (Answer::Choice { probabilities, .. } | Answer::Score { probabilities, .. }, _) => {
             first_max(probabilities)
@@ -130,6 +133,21 @@ mod tests {
             confidence: 0.5,
         };
         assert_eq!((top(&a), pick(&s, &a)), (0.45, 1));
+    }
+
+    #[test]
+    fn a_pick_matches_an_option_named_with_whitespace_around_it() {
+        let q = Question {
+            key: "c".into(),
+            kind: Kind::Choice {
+                options: vec![
+                    ("switch".into(), String::new()),
+                    (" keep\n".into(), String::new()),
+                ],
+            },
+            instructions: "Keep?".into(),
+        };
+        assert_eq!(pick(&q, &ch("keep", 0.9)), 1);
     }
 
     #[test]
