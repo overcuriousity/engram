@@ -3,8 +3,11 @@ use super::{
     SegmentReply, SynthesisBudget, Synthesizer, Transcriber,
 };
 use crate::error::{Error, Result};
+use crate::infer::budget::TokenCounter;
+use crate::infer::decide::{Answer, Answers, Decider, Kind, Question, check};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 
 /// Context is zero so a test that did not ask for context cannot be moved by it.
 pub const FAKE_BUDGET: SynthesisBudget = SynthesisBudget {
@@ -819,6 +822,149 @@ impl Transcriber for FakeTranscriber {
     }
 }
 
+/// The same answer to anything: `yes` to a noul, `yes` on the first option or level, the rest shared equally.
+pub struct FakeDecider {
+    pub yes: f64,
+}
+
+impl Default for FakeDecider {
+    fn default() -> Self {
+        Self { yes: 0.9 }
+    }
+}
+
+impl FakeDecider {
+    pub fn saying(yes: f64) -> Self {
+        Self { yes }
+    }
+}
+
+const DECIDER_WINDOW: usize = 8192;
+
+fn first_heavy(yes: f64, n: usize) -> Vec<f64> {
+    let rest = (1.0 - yes) / (n - 1) as f64;
+    (0..n).map(|i| if i == 0 { yes } else { rest }).collect()
+}
+
+#[async_trait]
+impl Decider for FakeDecider {
+    async fn decide(&self, state: &str, questions: &[Question]) -> Result<Answers> {
+        check(&TokenCounter::default(), DECIDER_WINDOW, state, questions)?;
+        let mut answers = HashMap::new();
+        for q in questions {
+            let a = match &q.kind {
+                Kind::Noul => Answer::Noul { yes: self.yes },
+                Kind::Choice { options } => Answer::Choice {
+                    pick: options[0].0.clone(),
+                    probabilities: first_heavy(self.yes, options.len()),
+                    confidence: self.yes,
+                },
+                Kind::Score { levels } => {
+                    let probabilities = first_heavy(self.yes, levels.len());
+                    let score = probabilities
+                        .iter()
+                        .enumerate()
+                        .map(|(i, p)| i as f64 * p)
+                        .sum();
+                    Answer::Score {
+                        score,
+                        probabilities,
+                        confidence: self.yes,
+                    }
+                }
+            };
+            answers.insert(q.key.clone(), a);
+        }
+        Ok(Answers {
+            answers,
+            model: "fake-decider".into(),
+            input_tokens: 0,
+        })
+    }
+    fn context_tokens(&self) -> usize {
+        DECIDER_WINDOW
+    }
+    fn model(&self) -> &str {
+        "fake-decider"
+    }
+}
+
+/// A queue of replies; records what it was asked. An exhausted script is `Error::Inference`.
+pub struct ScriptedDecider {
+    replies: std::sync::Mutex<std::collections::VecDeque<Answers>>,
+    requests: std::sync::Mutex<Vec<(String, Vec<Question>)>>,
+    context_tokens: std::sync::atomic::AtomicUsize,
+    rejects: Option<String>,
+}
+
+impl ScriptedDecider {
+    pub fn new(replies: Vec<Answers>) -> Self {
+        Self {
+            replies: std::sync::Mutex::new(replies.into()),
+            requests: std::sync::Mutex::new(Vec::new()),
+            context_tokens: std::sync::atomic::AtomicUsize::new(DECIDER_WINDOW),
+            rejects: None,
+        }
+    }
+    /// Distinct from an exhausted script, which did not answer.
+    pub fn rejecting(msg: &str) -> Self {
+        let mut s = Self::new(Vec::new());
+        s.rejects = Some(msg.to_string());
+        s
+    }
+    /// Calls that passed `check`.
+    pub fn calls(&self) -> usize {
+        self.requests().len()
+    }
+    pub fn requests(&self) -> Vec<(String, Vec<Question>)> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    pub fn set_context_tokens(&self, n: usize) {
+        self.context_tokens
+            .store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Decider for ScriptedDecider {
+    async fn decide(&self, state: &str, questions: &[Question]) -> Result<Answers> {
+        check(
+            &TokenCounter::default(),
+            self.context_tokens(),
+            state,
+            questions,
+        )?;
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((state.to_string(), questions.to_vec()));
+        if let Some(detail) = &self.rejects {
+            return Err(Error::InferenceRejected {
+                role: "decide",
+                detail: detail.clone(),
+            });
+        }
+        self.replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+            .ok_or_else(|| Error::Inference {
+                role: "decide",
+                detail: "the script ran out of replies".into(),
+            })
+    }
+    fn context_tokens(&self) -> usize {
+        self.context_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn model(&self) -> &str {
+        "scripted-decider"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -887,5 +1033,121 @@ mod tests {
             .unwrap();
         let q = e.embed_query("t0\nalpha").await.unwrap();
         assert_eq!(d[0], q);
+    }
+}
+
+#[cfg(test)]
+mod decide_tests {
+    use super::*;
+    use crate::infer::decide::{Answer, Answers, Decider, Kind, Question};
+    use std::collections::HashMap;
+
+    fn choice(key: &str, names: &[&str]) -> Question {
+        Question {
+            key: key.into(),
+            instructions: "Which?".into(),
+            kind: Kind::Choice {
+                options: names
+                    .iter()
+                    .map(|n| (n.to_string(), String::new()))
+                    .collect(),
+            },
+        }
+    }
+    fn score(key: &str, levels: &[&str]) -> Question {
+        Question {
+            key: key.into(),
+            instructions: "How much?".into(),
+            kind: Kind::Score {
+                levels: levels.iter().map(|l| l.to_string()).collect(),
+            },
+        }
+    }
+    fn near(a: &[f64], b: &[f64]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+    }
+    fn noul_answers(yes: f64) -> Answers {
+        Answers {
+            answers: HashMap::from([("n".to_string(), Answer::Noul { yes })]),
+            model: "x".into(),
+            input_tokens: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_fake_answers_every_kind() {
+        let qs = [
+            Question::noul("n", "Is it?"),
+            choice("c", &["a", "b", "c"]),
+            score("s", &["lo", "mid", "hi"]),
+        ];
+        let a = FakeDecider::default().decide("", &qs).await.unwrap();
+        assert_eq!(a.answers["n"], Answer::Noul { yes: 0.9 });
+        let Answer::Choice {
+            pick,
+            probabilities,
+            confidence,
+        } = &a.answers["c"]
+        else {
+            panic!()
+        };
+        assert_eq!(pick, "a");
+        assert!(near(probabilities, &[0.9, 0.05, 0.05]) && (confidence - 0.9).abs() < 1e-9);
+        let Answer::Score {
+            score,
+            probabilities,
+            confidence,
+        } = &a.answers["s"]
+        else {
+            panic!()
+        };
+        assert!(
+            near(probabilities, &[0.9, 0.05, 0.05])
+                && (score - 0.15).abs() < 1e-9
+                && (confidence - 0.9).abs() < 1e-9
+        );
+        assert!(qs.iter().all(|q| a.answers.contains_key(&q.key)));
+        assert_eq!((a.model.as_str(), a.input_tokens), ("fake-decider", 0));
+    }
+    #[tokio::test]
+    async fn the_script_replies_in_order_and_remembers_what_it_was_asked() {
+        let d = ScriptedDecider::new(vec![noul_answers(0.1), noul_answers(0.2)]);
+        let q = [Question::noul("n", "Is it?")];
+        assert_eq!(d.decide("one", &q).await.unwrap(), noul_answers(0.1));
+        assert_eq!(d.decide("two", &q).await.unwrap(), noul_answers(0.2));
+        assert_eq!(d.calls(), 2);
+        assert_eq!(d.requests()[1].0, "two");
+        assert_eq!(d.requests()[1].1, q.to_vec());
+    }
+    #[tokio::test]
+    async fn an_exhausted_script_is_an_error_not_a_guess() {
+        let d = ScriptedDecider::new(vec![]);
+        let e = d.decide("", &[Question::noul("n", "Is it?")]).await;
+        assert!(
+            matches!(e, Err(Error::Inference { role: "decide", .. })),
+            "{e:?}"
+        );
+    }
+    #[tokio::test]
+    async fn a_rejecting_script_rejects() {
+        let d = ScriptedDecider::rejecting("no");
+        let e = d.decide("", &[Question::noul("n", "Is it?")]).await;
+        assert!(matches!(e, Err(Error::InferenceRejected { .. })), "{e:?}");
+    }
+    #[tokio::test]
+    async fn the_fakes_refuse_what_the_client_would() {
+        assert!(matches!(
+            FakeDecider::default().decide("", &[]).await,
+            Err(Error::Validation(_))
+        ));
+        let d = ScriptedDecider::new(vec![noul_answers(0.5)]);
+        d.set_context_tokens(1024);
+        let e = d
+            .decide(&"word ".repeat(4000), &[Question::noul("n", "Is it?")])
+            .await;
+        assert!(matches!(e, Err(Error::Validation(_))));
+        assert_eq!(d.calls(), 0);
+        d.set_context_tokens(8192);
+        assert!(d.decide("", &[Question::noul("n", "Is it?")]).await.is_ok());
     }
 }
