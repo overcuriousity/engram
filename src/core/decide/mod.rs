@@ -3,6 +3,7 @@
 pub mod standing;
 pub mod state;
 pub mod stream;
+pub mod verdict;
 pub mod wire;
 
 use super::Core;
@@ -412,7 +413,7 @@ impl Core {
             filters: serde_json::json!({
                 "tags": req.tags,
                 "category": req.category,
-                "limit": asked.limit,
+                "limit": req.limit.unwrap_or(DEFAULT_LIMIT),
             })
             .to_string(),
             answers: wire::answers_text(d),
@@ -1182,6 +1183,31 @@ mod tests {
             assert_eq!(read["verdict"]["type"], "noul");
         }
         assert_eq!(s.evidence.iter().filter(|e| e.bearing).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn the_recorded_limit_is_the_one_asked_for() {
+        let mut core = learning().await;
+        deciding(&mut core, marked(0.9));
+        for (limit, kept) in [(Some(40), 40), (None, DEFAULT_LIMIT as i64)] {
+            let r = DecideRequest {
+                limit,
+                ..req("Keep bge-m3?")
+            };
+            let id = core
+                .decide(&r, Door::Ui.by("me"))
+                .await
+                .unwrap()
+                .event_id
+                .unwrap();
+            let filters: String =
+                sqlx::query_scalar!("SELECT filters FROM decide_events WHERE id = ?", id)
+                    .fetch_one(&core.store.pool)
+                    .await
+                    .unwrap();
+            let filters: serde_json::Value = serde_json::from_str(&filters).unwrap();
+            assert_eq!(filters["limit"], kept, "as ask stores it, not clamped");
+        }
     }
 
     #[tokio::test]

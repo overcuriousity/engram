@@ -158,6 +158,47 @@ impl DecideBody {
     }
 }
 
+/// A stored decision's questions, read back from the shape `questions_json` wrote.
+pub(super) fn stored_questions(text: &str) -> Result<Vec<Question>> {
+    serde_json::from_str::<InOrder<RawQuestion>>(text)
+        .map_err(|e| crate::error::Error::Internal(format!("a stored decision's questions: {e}")))?
+        .0
+        .into_iter()
+        .map(|(key, raw)| raw.into_question(key))
+        .collect()
+}
+
+/// `q`'s answer in a stored `{key: answer}`, as `AnswerOut` wrote it; `None` when it does not read.
+pub(super) fn stored_answer(q: &Question, text: &str) -> Option<Answer> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let a = v.get(&q.key)?;
+    let f = |k: &str| a.get(k).and_then(serde_json::Value::as_f64);
+    Some(match &q.kind {
+        Kind::Choice { options } => {
+            let table = a.get("probabilities")?;
+            Answer::Choice {
+                pick: a.get("choice")?.as_str()?.to_string(),
+                probabilities: options
+                    .iter()
+                    .map(|(n, _)| table.get(n).and_then(serde_json::Value::as_f64))
+                    .collect::<Option<_>>()?,
+                confidence: f("confidence")?,
+            }
+        }
+        Kind::Score { .. } => Answer::Score {
+            score: f("score")?,
+            probabilities: a
+                .get("probabilities")?
+                .as_array()?
+                .iter()
+                .map(serde_json::Value::as_f64)
+                .collect::<Option<_>>()?,
+            confidence: f("confidence")?,
+        },
+        Kind::Noul => Answer::Noul { yes: f("noul")? },
+    })
+}
+
 /// One answer as the response writes it; a choice's probabilities by name, in option order.
 struct AnswerOut<'a> {
     options: &'a [(String, String)],
