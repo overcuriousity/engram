@@ -18,6 +18,9 @@ pub enum GapKind {
     /// A subject `[infer.ask] plan` named as missing whose fan-out found nothing near it, by
     /// `Unmatched`'s measure. Web door only: it rides with `record_ask`'s consent line.
     Subject,
+    /// A decision the base did not hold, or a held one judged `nothing_here`; one judged
+    /// `wrong` is the reading's fault, not the base's. Recorded on `record_ask`'s doors.
+    Decide,
 }
 
 impl GapKind {
@@ -28,6 +31,7 @@ impl GapKind {
             GapKind::Unmatched => "unmatched",
             GapKind::Pursuit => "pursuit",
             GapKind::Subject => "subject",
+            GapKind::Decide => "decide",
         }
     }
     pub fn parse(s: &str) -> Option<Self> {
@@ -37,6 +41,7 @@ impl GapKind {
             "unmatched" => Some(GapKind::Unmatched),
             "pursuit" => Some(GapKind::Pursuit),
             "subject" => Some(GapKind::Subject),
+            "decide" => Some(GapKind::Decide),
             _ => None,
         }
     }
@@ -101,7 +106,7 @@ pub struct GapRow {
     pub members: Vec<Gap>,
 }
 
-/// Per kind (five kinds): the sweep's clustering is quadratic in the total and the capture
+/// Per kind (six kinds): the sweep's clustering is quadratic in the total and the capture
 /// page renders every row. Newest first, ties broken by uuid v7 id; `open_gaps` logs a bite.
 pub const MAX_OPEN_GAPS: i64 = 500;
 
@@ -123,6 +128,30 @@ macro_rules! ask_gaps_sql {
             $cols,
             ask_gaps_from!(),
             " ORDER BY judged_at DESC, id DESC LIMIT ?"
+        )
+    };
+}
+
+macro_rules! decide_gaps_from {
+    () => {
+        " FROM decide_events
+          WHERE ((not_held = 1 AND COALESCE(verdict, '') <> 'wrong')
+                 OR (not_held = 0 AND verdict = 'nothing_here'))
+            AND dismissed_at IS NULL
+            AND embed_model = ? AND vec_dim > 0
+            AND NOT EXISTS (SELECT 1 FROM gap_coverage
+                             WHERE kind = 'decide' AND gap_id = decide_events.id)"
+    };
+}
+
+/// Unjudged, a not-held decision dates from when it was made.
+macro_rules! decide_gaps_sql {
+    ($cols:literal) => {
+        concat!(
+            "SELECT id, question AS text",
+            $cols,
+            decide_gaps_from!(),
+            " ORDER BY COALESCE(judged_at, created_at) DESC, id DESC LIMIT ?"
         )
     };
 }
@@ -386,11 +415,37 @@ impl Store {
         let subjects_capped = (out.len() - before_subjects) as i64 > MAX_OPEN_GAPS;
         out.truncate(before_subjects + MAX_OPEN_GAPS as usize);
         let subjects = out.len() - before_subjects;
+        let before_decisions = out.len();
+        // runtime: the gap kinds share their predicates through macros.
+        for r in sqlx::query(decide_gaps_sql!(
+            ", query_vec, COALESCE(judged_at, created_at) AS judged_at"
+        ))
+        .bind(embed_model)
+        .bind(MAX_OPEN_GAPS + 1)
+        .fetch_all(&self.pool)
+        .await?
+        {
+            out.push((
+                r.get("judged_at"),
+                GapVec {
+                    gap: Gap {
+                        kind: GapKind::Decide,
+                        id: r.get("id"),
+                        text: r.get("text"),
+                    },
+                    vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
+                },
+            ));
+        }
+        let decisions_capped = (out.len() - before_decisions) as i64 > MAX_OPEN_GAPS;
+        out.truncate(before_decisions + MAX_OPEN_GAPS as usize);
+        let decisions = out.len() - before_decisions;
         let capped = asks_capped
             || searches_capped
             || unmatched_capped
             || pursuits_capped
-            || subjects_capped;
+            || subjects_capped
+            || decisions_capped;
         // Ties in whole-second `judged_at` broken by the uuid v7 id.
         out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.gap.id.cmp(&a.1.gap.id)));
         let out: Vec<GapVec> = out.into_iter().map(|(_, g)| g).collect();
@@ -402,6 +457,7 @@ impl Store {
                 unmatched,
                 pursuits,
                 subjects,
+                decisions,
                 "more open gaps than one pass reads; the oldest are left out of this one"
             );
         }
@@ -442,6 +498,7 @@ impl Store {
             (ask_gaps_sql!(""), GapKind::Ask),
             (search_gaps_sql!(""), GapKind::Search),
             (subject_gaps_sql!(""), GapKind::Subject),
+            (decide_gaps_sql!(""), GapKind::Decide),
         ] {
             // runtime: the gap kinds share their predicates through macros.
             for r in sqlx::query(sql)
@@ -457,7 +514,7 @@ impl Store {
                 });
             }
         }
-        // One more bind than the other two, so it is read on its own.
+        // One more bind than the others, so it is read on its own.
         // runtime: the gap kinds share their predicates through macros.
         for r in sqlx::query(unmatched_gaps_sql!(""))
             .bind(embed_model)
@@ -505,7 +562,7 @@ impl Store {
             .collect())
     }
 
-    /// Uncapped: `open_gap_refs` saturates at five times `MAX_OPEN_GAPS`.
+    /// Uncapped: `open_gap_refs` saturates at six times `MAX_OPEN_GAPS`.
     pub async fn count_open_gaps(&self, embed_model: &str, weak_below: f32) -> Result<i64> {
         use sqlx::Row;
         let mut n: i64 = 0;
@@ -514,6 +571,7 @@ impl Store {
             concat!("SELECT COUNT(*) AS n", search_gaps_from!()),
             concat!("SELECT COUNT(*) AS n", subject_gaps_from!()),
             concat!("SELECT COUNT(*) AS n", pursuit_gaps_from!()),
+            concat!("SELECT COUNT(*) AS n", decide_gaps_from!()),
         ] {
             // runtime: the gap kinds share their predicates through macros.
             n += sqlx::query(sql)
@@ -522,7 +580,7 @@ impl Store {
                 .await?
                 .get::<i64, _>("n");
         }
-        // One more bind than the other four, so it is read on its own.
+        // One more bind than the others, so it is read on its own.
         // runtime: the gap kinds share their predicates through macros.
         n += sqlx::query(concat!("SELECT COUNT(*) AS n", unmatched_gaps_from!()))
             .bind(embed_model)
@@ -552,6 +610,8 @@ impl Store {
             "SELECT query_vec FROM ask_events WHERE embed_model = ? AND vec_dim > 0
              ORDER BY id DESC LIMIT ?",
             "SELECT query_vec FROM search_events WHERE embed_model = ? AND vec_dim > 0
+             ORDER BY id DESC LIMIT ?",
+            "SELECT query_vec FROM decide_events WHERE embed_model = ? AND vec_dim > 0
              ORDER BY id DESC LIMIT ?",
         ] {
             // runtime: the gap kinds share their predicates through macros.
@@ -621,12 +681,13 @@ impl Store {
         // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT c.corpus_id, c.kind, c.gap_id,
-                    COALESCE(a.question, s.query, p.queries, sub.subject) AS text
+                    COALESCE(a.question, s.query, p.queries, sub.subject, d.question) AS text
                FROM gap_coverage c
                LEFT JOIN ask_events a    ON c.kind = 'ask'    AND a.id = c.gap_id
                LEFT JOIN search_events s ON c.kind IN ('search', 'unmatched') AND s.id = c.gap_id
                LEFT JOIN pursuits p      ON c.kind = 'pursuit' AND p.id = c.gap_id
                LEFT JOIN ask_subjects sub ON c.kind = 'subject' AND sub.id = c.gap_id
+               LEFT JOIN decide_events d ON c.kind = 'decide'  AND d.id = c.gap_id
               WHERE c.corpus_id IN ({holes})
               ORDER BY c.covered_at DESC"
         )));
@@ -654,7 +715,7 @@ impl Store {
         Ok(out)
     }
 
-    /// `gap_id` names one of three tables, so no foreign key cascades. Also drops coverage
+    /// `gap_id` names one of several tables, so no foreign key cascades. Also drops coverage
     /// scored under `below`, except `capture` rows, which no line wrote.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
         Ok(sqlx::query!(
@@ -668,7 +729,9 @@ impl Store {
                      AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = gap_coverage.gap_id))
                  OR (kind = 'subject'
                      AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = gap_coverage.gap_id))
-                 OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject')",
+                 OR (kind = 'decide'
+                     AND NOT EXISTS (SELECT 1 FROM decide_events WHERE id = gap_coverage.gap_id))
+                 OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject', 'decide')",
             below
         )
         .execute(&self.pool)
@@ -688,7 +751,7 @@ impl Store {
     }
 
     pub async fn dismiss_gap(&self, kind: GapKind, id: &str) -> Result<()> {
-        // Two literal statements: nothing from a request reaches the statement text.
+        // Literal statements: nothing from a request reaches the statement text.
         let res = match kind {
             GapKind::Ask => {
                 sqlx::query!(
@@ -723,6 +786,15 @@ impl Store {
             GapKind::Subject => {
                 sqlx::query!(
                     "UPDATE ask_subjects SET dismissed_at = ? WHERE id = ?",
+                    now(),
+                    id
+                )
+                .execute(&self.pool)
+                .await?
+            }
+            GapKind::Decide => {
+                sqlx::query!(
+                    "UPDATE decide_events SET dismissed_at = ? WHERE id = ?",
                     now(),
                     id
                 )
@@ -1727,5 +1799,95 @@ mod tests {
         assert_eq!(keys[0].members, c.members);
         store.delete_clusters(&["k".into()]).await.unwrap();
         assert!(store.cluster_keys().await.unwrap().is_empty());
+    }
+
+    async fn not_held(store: &Store, q: &str, vec: Vec<f32>) -> String {
+        use crate::store::decisions::NewDecision;
+        store
+            .record_decision(NewDecision {
+                question: q.into(),
+                questions: "{}".into(),
+                situation: None,
+                scope: None,
+                filters: "{}".into(),
+                answers: None,
+                prior: "{}".into(),
+                standing: r#"{"verdict":"not_held"}"#.into(),
+                not_held: true,
+                model: "clef".into(),
+                read: 0,
+                dropped: 0,
+                query_vec: vec,
+                embed_model: "fake".into(),
+                evidence: vec![],
+            })
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_decision_the_base_could_not_hold_is_a_gap_until_covered() {
+        let store = Store::memory().await.unwrap();
+        let id = not_held(&store, "Keep bge-m3?", vec![1.0, 0.0]).await;
+        not_held(&store, "no vector", vec![]).await;
+        let open = store.open_gaps("fake", 0.35).await.unwrap().gaps;
+        let decides: Vec<&str> = open
+            .iter()
+            .filter(|g| g.gap.kind == GapKind::Decide)
+            .map(|g| g.gap.text.as_str())
+            .collect();
+        assert_eq!(decides, vec!["Keep bge-m3?"]);
+        assert!(
+            store
+                .open_gaps("other", 0.35)
+                .await
+                .unwrap()
+                .gaps
+                .is_empty()
+        );
+        assert_eq!(store.count_open_gaps("fake", 0.35).await.unwrap(), 1);
+        assert_eq!(store.calibration_vecs("fake").await.unwrap().len(), 1);
+
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        let made = store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "bge-m3 stays".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap();
+        store
+            .cover_gap(
+                GapKind::Decide,
+                &id,
+                &src.id,
+                &made[0].id,
+                0.9,
+                CoveredBy::Distance,
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.count_open_gaps("fake", 0.35).await.unwrap(), 0);
+        let covered = store.gaps_covered_by(&src.id).await.unwrap();
+        assert_eq!(covered.len(), 1);
+        assert_eq!(
+            (covered[0].kind, covered[0].text.as_str()),
+            (GapKind::Decide, "Keep bge-m3?")
+        );
+        assert_eq!(
+            store.trim_gap_coverage(0.0).await.unwrap(),
+            0,
+            "its decision exists"
+        );
+        sqlx::query!("DELETE FROM decide_events WHERE id = ?", &id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 1);
+        assert_eq!(GapKind::parse("decide"), Some(GapKind::Decide));
+        assert_eq!(GapKind::Decide.as_str(), "decide");
     }
 }

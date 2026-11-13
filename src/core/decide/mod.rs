@@ -3,6 +3,7 @@
 pub mod standing;
 pub mod state;
 pub mod stream;
+pub mod wire;
 
 use super::Core;
 use super::search::SearchQuery;
@@ -11,6 +12,7 @@ use crate::infer::budget::TokenCounter;
 use crate::infer::decide::{
     Answer, Answers, Kind, Question, budget, decide_swapped, swapped_questions, trim, validate,
 };
+use crate::store::decisions::{NewDecision, NewEvidence};
 use crate::store::feedback::{Door, Origin};
 pub use standing::Standing;
 use state::{BEARS_KEY, Excerpt, bears_question, joint_state, prior_state, single_state};
@@ -222,8 +224,7 @@ impl Core {
     ) -> impl tokio_stream::Stream<Item = Result<DecideEvent>> + 'static + use<O> {
         let core = self.clone();
         let req = req.clone();
-        // Recorded against once decisions are stored.
-        let _origin = origin.into();
+        let origin = origin.into();
 
         async_stream::try_stream! {
             let asked = normalise(&req, &core.counter)?;
@@ -306,6 +307,7 @@ impl Core {
             };
             if bearing.is_empty() {
                 decision.reads = reads;
+                core.record_decision(&req, &asked, &origin, &mut decision).await;
                 yield DecideEvent::Done(Box::new(decision));
                 return;
             }
@@ -360,8 +362,76 @@ impl Core {
             decision.model = joint.answers.model;
             decision.state = req.explain.then_some(state);
             decision.reads = reads;
+            core.record_decision(&req, &asked, &origin, &mut decision).await;
             yield DecideEvent::Done(Box::new(decision));
         }
+    }
+
+    /// Where an ask would be recorded; a failure is logged and the decision still goes out.
+    async fn record_decision(
+        &self,
+        req: &DecideRequest,
+        asked: &Asked,
+        origin: &Origin,
+        d: &mut Decision,
+    ) {
+        if !(self.learn.enabled && matches!(origin.door, Door::Ui | Door::Cli | Door::App)) {
+            return;
+        }
+        let held = !d.not_held();
+        let evidence = d
+            .reads
+            .iter()
+            .map(|r| {
+                let placed = d.evidence.iter().find(|e| e.artifact_id == r.artifact_id);
+                NewEvidence {
+                    rank: r.rank,
+                    artifact_id: r.artifact_id.clone(),
+                    bears: r.bears,
+                    bearing: r.bearing,
+                    joint: placed.is_some_and(|e| e.joint),
+                    n: placed.map(|e| e.n),
+                    read: wire::read_text(&d.questions, &r.read),
+                }
+            })
+            .collect::<Vec<_>>();
+        let cited: Vec<String> = if held {
+            evidence
+                .iter()
+                .filter(|e| e.joint)
+                .map(|e| e.artifact_id.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let new = NewDecision {
+            question: d.question.clone(),
+            questions: wire::questions_json(&d.questions),
+            situation: asked.situation.clone(),
+            scope: origin.scope.clone(),
+            filters: serde_json::json!({
+                "tags": req.tags,
+                "category": req.category,
+                "limit": asked.limit,
+            })
+            .to_string(),
+            answers: wire::answers_text(d),
+            prior: wire::prior_text(d),
+            standing: wire::standing_text(d),
+            not_held: !held,
+            model: d.model.clone(),
+            read: d.read,
+            dropped: d.dropped,
+            query_vec: self.cached_query_vector(&asked.q).unwrap_or_default(),
+            embed_model: self.embedder.model().to_string(),
+            evidence,
+        };
+        match self.store.record_decision(new).await {
+            Ok(id) => d.event_id = Some(id),
+            Err(e) => tracing::warn!(error = %e, "could not record the decision"),
+        }
+        // Off the recording's success: an insert that fails does not unmake what was weighed.
+        self.mark_artifacts_cited(cited);
     }
 
     /// Asks search for twice the limit, so dropping retired notes still leaves `limit` to read.
@@ -744,6 +814,16 @@ mod tests {
         };
         let d = core.decide(&r, Door::Api).await.unwrap();
         assert!(!d.not_held());
+        let single = dec
+            .requests()
+            .into_iter()
+            .find(|(s, _)| s.contains("Excerpt:"))
+            .unwrap();
+        assert!(
+            !single.0.contains(&d.evidence[0].text),
+            "the passage went in whole"
+        );
+        assert!(single.0.contains(MARK));
         let c = crate::infer::budget::TokenCounter::default();
         for (s, qs) in dec.requests() {
             assert!(
@@ -950,7 +1030,7 @@ mod tests {
                 tokio::time::timeout(std::time::Duration::from_millis(50), self.gate.background())
                     .await
                     .is_err();
-            self.background_was_held.fetch_or(held, Ordering::SeqCst);
+            self.background_was_held.fetch_and(held, Ordering::SeqCst);
             self.finished.fetch_add(1, Ordering::SeqCst);
             got
         }
@@ -966,7 +1046,7 @@ mod tests {
         let p = Arc::new(Probe {
             inner: RuleDecider::new(marked(0.9)),
             gate: Arc::clone(&core.gate),
-            background_was_held: AtomicBool::new(false),
+            background_was_held: AtomicBool::new(true),
             sleep_on_excerpts,
             finished: AtomicUsize::new(0),
         });
@@ -982,7 +1062,7 @@ mod tests {
         assert_eq!(p.finished.load(Ordering::SeqCst), 5);
         assert!(
             p.background_was_held.load(Ordering::SeqCst),
-            "a window could have started while the decision was being read"
+            "a window could have started during one of the decision's reads"
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), core.gate.background())
             .await
@@ -1019,5 +1099,263 @@ mod tests {
             1,
             "only the prior finished"
         );
+    }
+
+    fn none_bear() -> impl Fn(&str, &[Question]) -> crate::error::Result<Answers> {
+        |_, qs| {
+            Ok(answers(qs, |q| Answer::Noul {
+                yes: if q.key == "bears" { 0.02 } else { 0.99 },
+            }))
+        }
+    }
+
+    async fn learning() -> Core {
+        let mut core = three_base().await;
+        core.learn.enabled = true;
+        core
+    }
+
+    async fn decide_gaps(core: &Core) -> Vec<crate::store::gaps::Gap> {
+        core.store
+            .open_gap_refs(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|g| g.kind == crate::store::gaps::GapKind::Decide)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_decision_from_the_ui_is_recorded_with_its_evidence() {
+        let mut core = learning().await;
+        deciding(&mut core, marked(0.9));
+        let r = DecideRequest {
+            situation: Some("12 GB.".into()),
+            limit: Some(5),
+            ..req("  Keep bge-m3?  ")
+        };
+        let d = core.decide(&r, Door::Ui.by("user-1")).await.unwrap();
+        let id = d.event_id.clone().expect("a UI decision is recorded");
+        let s = core.store.decision(&id).await.unwrap().unwrap();
+        assert_eq!(s.question, "Keep bge-m3?");
+        assert_eq!(s.questions, wire::questions_json(&d.questions));
+        assert!(!s.not_held);
+        let standing: serde_json::Value = serde_json::from_str(&s.standing).unwrap();
+        assert_eq!(standing, serde_json::json!({"verdict": "settled"}));
+        let answers: serde_json::Value =
+            serde_json::from_str(s.answers.as_deref().unwrap()).unwrap();
+        assert_eq!(answers["verdict"]["noul"], 0.9);
+        let row = sqlx::query!(
+            "SELECT scope, filters, situation, prior, model, read, dropped, vec_dim, embed_model
+               FROM decide_events WHERE id = ?",
+            id
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(row.scope.as_deref(), Some("user-1"));
+        let filters: serde_json::Value = serde_json::from_str(&row.filters).unwrap();
+        assert_eq!(
+            filters,
+            serde_json::json!({"tags": [], "category": null, "limit": 5})
+        );
+        assert_eq!(row.situation.as_deref(), Some("12 GB."));
+        assert!(row.prior.contains("\"verdict\""));
+        assert_eq!((row.model.as_str(), row.read, row.dropped), ("rule", 3, 0));
+        assert!(row.vec_dim > 0);
+        assert_eq!(row.embed_model, core.embedder.model());
+
+        assert_eq!(s.evidence.len(), 3, "every passage read, bearing or not");
+        assert_eq!(
+            s.evidence.iter().map(|e| e.rank).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        for e in &s.evidence {
+            let r = &d.reads[e.rank as usize - 1];
+            assert_eq!(e.artifact_id, r.artifact_id);
+            assert!((e.bears - r.bears).abs() < 1e-9);
+            assert_eq!(e.bearing, r.bearing);
+            let placed = d.evidence.iter().find(|x| x.artifact_id == e.artifact_id);
+            assert_eq!(e.n, placed.map(|x| x.n as i64));
+            assert_eq!(e.joint, placed.is_some_and(|x| x.joint));
+            let read: serde_json::Value = serde_json::from_str(&e.read).unwrap();
+            assert_eq!(read["verdict"]["type"], "noul");
+        }
+        assert_eq!(s.evidence.iter().filter(|e| e.bearing).count(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_held_decision_marks_what_it_was_weighed_from_as_cited() {
+        let mut core = learning().await;
+        deciding(&mut core, marked(0.9));
+        let d = core
+            .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+        let ids: Vec<String> = d.reads.iter().map(|r| r.artifact_id.clone()).collect();
+        let act = core.store.activation_of(&ids).await.unwrap();
+        let of = |id: &str| act.get(id).map(|(a, _, _)| *a).unwrap_or(0.0);
+        let unread = of(&d.reads.iter().find(|r| !r.bearing).unwrap().artifact_id);
+        assert_eq!(d.evidence.len(), 2);
+        for e in &d.evidence {
+            assert!(
+                (of(&e.artifact_id) - unread - core.activation.cited).abs() < 1e-6,
+                "cited {} against {unread}",
+                of(&e.artifact_id)
+            );
+        }
+
+        let mut core = learning().await;
+        deciding(&mut core, none_bear());
+        let d = core
+            .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
+            .await
+            .unwrap();
+        core.background.wait_idle().await;
+        assert!(d.not_held() && d.event_id.is_some());
+        let ids: Vec<String> = d.reads.iter().map(|r| r.artifact_id.clone()).collect();
+        let act = core.store.activation_of(&ids).await.unwrap();
+        let first = act.get(&ids[0]).map(|(a, _, _)| *a);
+        assert!(
+            ids.iter().all(|i| act.get(i).map(|(a, _, _)| *a) == first),
+            "a decision the base does not hold cites nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_api_and_mcp_doors_leave_no_record() {
+        let mut core = learning().await;
+        deciding(&mut core, marked(0.9));
+        for door in [Door::Api, Door::Mcp] {
+            let d = core.decide(&req("Keep bge-m3?"), door).await.unwrap();
+            assert_eq!(d.event_id, None);
+        }
+        for door in [Door::Cli, Door::App] {
+            let d = core.decide(&req("Keep bge-m3?"), door).await.unwrap();
+            assert!(d.event_id.is_some(), "{door:?}");
+        }
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM decide_events")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_recorded_while_learning_is_off() {
+        let mut core = three_base().await;
+        core.learn.enabled = false;
+        deciding(&mut core, marked(0.9));
+        let d = core
+            .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
+            .await
+            .unwrap();
+        assert_eq!(d.event_id, None);
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM decide_events")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn a_not_held_decision_is_recorded_and_is_an_open_gap() {
+        let mut core = learning().await;
+        deciding(&mut core, none_bear());
+        let d = core
+            .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
+            .await
+            .unwrap();
+        let id = d.event_id.clone().expect("recorded");
+        let s = core.store.decision(&id).await.unwrap().unwrap();
+        assert!(s.not_held && s.answers.is_none());
+        assert_eq!(s.evidence.len(), 3);
+        assert!(
+            s.evidence
+                .iter()
+                .all(|e| !e.bearing && e.n.is_none() && !e.joint)
+        );
+        let gaps = decide_gaps(&core).await;
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(
+            (gaps[0].id.as_str(), gaps[0].text.as_str()),
+            (id.as_str(), "Keep bge-m3?")
+        );
+        let open = core
+            .store
+            .open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert!(
+            open.gaps
+                .iter()
+                .any(|g| g.gap.kind == crate::store::gaps::GapKind::Decide && !g.vec.is_empty())
+        );
+        let n = core
+            .store
+            .count_open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert_eq!(
+            n as usize,
+            core.store
+                .open_gap_refs(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .len()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_held_decision_judged_nothing_here_becomes_a_gap_and_dismissing_closes_it() {
+        use crate::store::asks::AskVerdict;
+        let mut core = learning().await;
+        deciding(&mut core, marked(0.9));
+        let d = core
+            .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
+            .await
+            .unwrap();
+        let id = d.event_id.unwrap();
+        assert!(
+            decide_gaps(&core).await.is_empty(),
+            "a held decision is no gap"
+        );
+        core.store
+            .judge_decision(&id, AskVerdict::NothingHere, None)
+            .await
+            .unwrap();
+        assert_eq!(decide_gaps(&core).await.len(), 1);
+        core.store
+            .dismiss_gap(crate::store::gaps::GapKind::Decide, &id)
+            .await
+            .unwrap();
+        assert!(decide_gaps(&core).await.is_empty());
+        assert!(matches!(
+            core.store
+                .dismiss_gap(crate::store::gaps::GapKind::Decide, "nope")
+                .await,
+            Err(Error::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_not_held_decision_judged_wrong_is_no_gap_and_undoing_reopens_it() {
+        use crate::store::asks::AskVerdict;
+        let mut core = learning().await;
+        deciding(&mut core, none_bear());
+        let d = core
+            .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
+            .await
+            .unwrap();
+        let id = d.event_id.unwrap();
+        assert_eq!(decide_gaps(&core).await.len(), 1);
+        core.store
+            .judge_decision(&id, AskVerdict::Wrong, None)
+            .await
+            .unwrap();
+        assert!(decide_gaps(&core).await.is_empty());
+        core.store.unjudge_decision(&id).await.unwrap();
+        assert_eq!(decide_gaps(&core).await.len(), 1);
     }
 }

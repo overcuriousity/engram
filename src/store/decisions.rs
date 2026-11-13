@@ -69,7 +69,10 @@ fn vec_to_blob(v: &[f32]) -> Vec<u8> {
 }
 
 impl Store {
+    /// A held decision's joint evidence is observed as cited, as an ask's used citations are.
     pub async fn record_decision(&self, d: NewDecision) -> Result<String> {
+        // Read before the transaction opens, so the write lock is not held across another table.
+        let generation = self.live_generation().await?;
         let mut tx = self.pool.begin().await?;
         let id = new_id();
         sqlx::query!(
@@ -113,6 +116,25 @@ impl Store {
             )
             .execute(&mut *tx)
             .await?;
+            if let Some(g) = &generation
+                && e.joint
+                && !d.not_held
+            {
+                crate::store::observations::insert(
+                    &mut *tx,
+                    &crate::store::observations::NewObservation {
+                        generation_id: g.id.clone(),
+                        query: d.question.clone(),
+                        query_vec: d.query_vec.clone(),
+                        embed_model: d.embed_model.clone(),
+                        artifact_id: Some(e.artifact_id.clone()),
+                        rank: n,
+                        source: crate::store::observations::Source::Cited,
+                        event_id: None,
+                    },
+                )
+                .await?;
+            }
         }
         tx.commit().await?;
         Ok(id)
@@ -387,5 +409,47 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[&made[0].id], made[0].created_at);
         assert!(s.created_at_among(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_held_decision_observes_its_joint_evidence_as_cited() {
+        use crate::store::generations::{GenerationParams, NewGeneration};
+        use crate::store::observations::Source;
+        let s = Store::memory().await.unwrap();
+        let generation = s
+            .record_generation(&NewGeneration {
+                params: GenerationParams::default(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        let mut d = sample();
+        // Bearing but packed out: weighed alone, not in the verdict.
+        d.evidence[2].joint = false;
+        s.record_decision(d).await.unwrap();
+        let obs = s
+            .observations_for_generation(&generation, 10)
+            .await
+            .unwrap();
+        assert_eq!(obs.len(), 1, "only what the joint read weighed");
+        assert_eq!(obs[0].artifact_id.as_deref(), Some("art-0"));
+        assert_eq!(obs[0].rank, Some(1), "its place in the evidence");
+        assert_eq!(obs[0].source, Source::Cited);
+        assert_eq!(obs[0].query, "Keep bge-m3?");
+
+        let mut n = sample();
+        n.not_held = true;
+        n.answers = None;
+        s.record_decision(n).await.unwrap();
+        assert_eq!(
+            s.observations_for_generation(&generation, 10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "a decision the base did not hold cites nothing"
+        );
     }
 }
