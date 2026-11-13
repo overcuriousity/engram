@@ -60,7 +60,8 @@ jobs:
           else
             changed=$(git ls-tree --name-only -r HEAD)
           fi
-          if echo "$changed" | grep -qvE '(\.md$|^docs/)'; then
+          # A here-string, not `echo |`: `grep -q` stops early, and under `pipefail` the broken pipe read as "docs only".
+          if grep -qvE '(\.md$|^docs/)' <<<"$changed"; then
             release=yes
           else
             release=no

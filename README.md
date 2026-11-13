@@ -86,7 +86,7 @@ Each requires `--user <SUBJECT>` and, where it writes, a stopped server.
 
 Every user gets their own SQLite database and Qdrant collection; settings and
 `server.workers` stay instance-wide. Set `auth.mode = "oidc"`: an unseen subject
-is provisioned on first sign-in if it matches `allowed_subs`, `allowed_emails` or
+is provisioned on first sign-in if it matches `allowed_subs` or
 `allowed_groups`. Empty allow-lists are refused unless `open_registration = true`.
 
 ```bash
