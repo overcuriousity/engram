@@ -9,6 +9,7 @@ pub mod client;
 pub mod corpus;
 pub mod corpus_view;
 pub mod day;
+pub mod decide;
 pub mod due;
 pub mod etag;
 pub mod extension;

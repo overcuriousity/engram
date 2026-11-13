@@ -1,0 +1,29 @@
+{# Judges the first question; with three or more answers a wrong verdict asks once which is right. #}
+<div id="decide-verdict" class="oc-row ask-verdict">
+  {% match verdict %}
+  {% when Some with (v) %}
+    {% if remaining.is_empty() %}
+    <span class="muted">judged <b>{{ v }}</b>{% if let Some(c) = correct %} · it is {{ c }}{% endif %}</span>
+    {% else %}
+    <span class="muted">Which is it?</span>
+    {% for (value, label) in remaining %}
+    <button class="oc-btn" type="button" hx-post="/ui/decide/{{ event_id }}/verdict"
+            hx-vals='{{ self.vals(value)|safe }}' hx-target="#decide-verdict" hx-swap="outerHTML">{{ label }}</button>
+    {% endfor %}
+    <button class="oc-btn" type="button" hx-post="/ui/decide/{{ event_id }}/verdict"
+            hx-vals='{{ self.vals("-")|safe }}' hx-target="#decide-verdict" hx-swap="outerHTML">Not sure</button>
+    {% endif %}
+    <button class="oc-btn" type="button" hx-post="/ui/decide/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"none"}' hx-target="#decide-verdict" hx-swap="outerHTML">Undo</button>
+  {% when None %}
+    <span class="muted">Was this right?</span>
+    <button class="oc-btn" type="button" hx-post="/ui/decide/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"right"}' hx-target="#decide-verdict" hx-swap="outerHTML">Right</button>
+    <button class="oc-btn" type="button" hx-post="/ui/decide/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"wrong"}' hx-target="#decide-verdict" hx-swap="outerHTML">Wrong</button>
+    {% if held %}
+    <button class="oc-btn" type="button" hx-post="/ui/decide/{{ event_id }}/verdict"
+            hx-vals='{"verdict":"nothing_here"}' hx-target="#decide-verdict" hx-swap="outerHTML">Nothing here</button>
+    {% endif %}
+  {% endmatch %}
+</div>

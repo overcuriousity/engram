@@ -251,6 +251,10 @@ body { overflow-x: hidden; }
 .rail-past { opacity: 0.7; }
 
 .ask-verdict { margin-top: 0.5rem; gap: 0.5rem; }
+.decision .standing { margin: var(--space-2) 0 0; font-weight: 600; }
+/* What one note says on its own; `against` marks a pick that differs from the verdict. */
+.rail-pick { font-size: var(--text-micro); }
+.rail-rest { margin: var(--space-2) 0 0; }
 
 .rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
 
