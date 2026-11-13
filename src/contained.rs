@@ -120,6 +120,11 @@ model = "embeddinggemma"
 dim = 768
 max_input_tokens = 2048
 
+[infer.decide]
+base_url = "http://127.0.0.1:9/v1"
+model = "clef-flash"
+context_tokens = 8192
+
 [infer.ask]
 tier = "device-ask"
 plan = false

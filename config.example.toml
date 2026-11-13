@@ -123,6 +123,18 @@ tier = "deep"
 # Tier for that planning call.
 # plan_tier = "efficient"
 
+# The decision model: Decide and background judgement run on it. Required.
+# Point it at a System One server (a small, fast, non-thinking model).
+[infer.decide]
+base_url = "http://localhost:8080/v1"
+model = "clef-flash:9b-q8_0-8192"
+# The server's real window per request, in tokens (at least 1024).
+context_tokens = 8192
+# timeout_secs = 30
+# Requests in flight at once; match the server's slots.
+# parallel = 1
+# api_key = ""
+
 # Optional reranker; style is "tei", "cohere" or "vllm".
 # [infer.rerank]
 # base_url = "http://localhost:8001"
