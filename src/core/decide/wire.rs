@@ -386,6 +386,11 @@ pub(super) fn read_text(questions: &[Question], read: &[(String, Answer)]) -> St
     to_text(&plain(questions, read))
 }
 
+/// A stream's `read` frame: the event carries no questions, so a choice's probabilities go by position.
+pub fn read_json(read: &[(String, Answer)]) -> serde_json::Value {
+    serde_json::to_value(plain(&[], read)).unwrap_or_default()
+}
+
 fn to_text(v: &impl serde::Serialize) -> String {
     // Maps of string keys and finite numbers: writing one to a string does not fail.
     serde_json::to_string(v).unwrap_or_default()

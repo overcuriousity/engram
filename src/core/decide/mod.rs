@@ -478,7 +478,7 @@ impl Core {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::core::Core;
     use crate::core::ingest::Capture;
@@ -504,7 +504,7 @@ mod tests {
         core
     }
 
-    fn deciding(
+    pub(crate) fn deciding(
         core: &mut Core,
         rule: impl Fn(&str, &[Question]) -> crate::error::Result<Answers> + Send + Sync + 'static,
     ) -> Arc<RuleDecider> {
@@ -535,7 +535,7 @@ mod tests {
     }
 
     /// `bears` by the marker; a noul says `yes`, a choice favours its first option, a score its first level.
-    fn marked(yes: f64) -> impl Fn(&str, &[Question]) -> crate::error::Result<Answers> {
+    pub(crate) fn marked(yes: f64) -> impl Fn(&str, &[Question]) -> crate::error::Result<Answers> {
         move |state, qs| {
             Ok(answers(qs, |q| match &q.kind {
                 _ if q.key == "bears" => Answer::Noul {
@@ -575,7 +575,7 @@ mod tests {
         ]
     }
 
-    async fn three_base() -> Core {
+    pub(crate) async fn three_base() -> Core {
         let notes = three();
         let refs: Vec<(&str, &str)> = notes.iter().map(|(t, x)| (*t, x.as_str())).collect();
         base(&refs).await
@@ -1102,7 +1102,7 @@ mod tests {
         );
     }
 
-    fn none_bear() -> impl Fn(&str, &[Question]) -> crate::error::Result<Answers> {
+    pub(crate) fn none_bear() -> impl Fn(&str, &[Question]) -> crate::error::Result<Answers> {
         |_, qs| {
             Ok(answers(qs, |q| Answer::Noul {
                 yes: if q.key == "bears" { 0.02 } else { 0.99 },

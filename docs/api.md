@@ -53,6 +53,7 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /search?q=&limit=&tags=&category=&explain=&door=` | List of hits. Each may carry `weak` (a loose match) and `past_cliff` (it sits below the point where relevance falls off). Absent means false. A client that draws a result list draws both: the divider goes above the first `past_cliff` row. `door=app` says a person is typing in the phone app: the search is recorded under them like the web's, waits for its id, and answers `event` beside `items` — what an open, a verdict and a gap name. With `explain`, `reranked` and a per-row `why_ranked` sentence come too. A row whose document goes on carries `continues_to`, the next passage's id. A row the judge found disagreeing with another note carries `disagrees_with`, a list of `Disagreement` (below); absent means none. |
 | `GET /search/stream`, `POST /ask/stream` | Server-sent events. `POST /ask` is the same answer in one piece. An answer written across a disagreement carries `disagreements`, a list of `Disagreement`, one per pair with both sides among the citations; absent means none. |
 | `GET /resurface?limit=` | List of hits worth seeing again. |
+| `POST /decide`, `POST /decide/stream` | A typed question answered from the notes that bear on it. Body: `q`, the question (required; it drives retrieval and whether a note bears); `questions`, System One's `{key: {type, instructions, criteria}}` in the caller's order — `choice` with criteria `{name: description}`, `score` with an array of levels lowest first, `noul` with none; at most eight, the key `bears` is reserved, absent is one `noul` keyed `verdict`, and a question without `instructions` asks `q`; `situation`, the caller's own state, at most 2000 tokens; `limit`, passages read (8, at most 16); `tags` and `category` as in search; `explain`. Answers `{ answers, prior, standing, evidence, read, dropped, model }`: `answers` is `{key: answer}` from the bearing notes read together, a choice's `probabilities` by option name in option order, with `swapped_agree`; `prior` is the same questions asked without the notes; `standing` is `{key: settled \| leaning \| split \| not_held}`; `evidence` is the notes that bore, strongest first, each `{ n, artifact_id, title, text, bears, joint, read }` with its own `read`; `read` counts the passages read and `dropped` the bearing ones the joint read had no room for. `not_held` is a `200` with `answers: null` and `evidence: []`. `explain: true` adds `state`, the joint read's exact input. The stream sends `retrieved` `{ passages }`, a `read` `{ rank, of, artifact_id, title, bears, bearing, read }` per passage as it is read (a choice's probabilities there by position), `done` with the same JSON as `POST /decide`, or `error` `{ error }`, after which it ends. A bad request is a `400` before anything is read. |
 | `GET /corpora?limit=&after=` | Paged list of corpus summaries, newest first. |
 | `GET /corpora/{id}` | One corpus with its text and its artifacts. |
 | `GET /corpora/{id}/file`, `…/image?original=1` | The bytes as captured; the preview by default for an image. |
@@ -76,7 +77,49 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /insights/machine`, `GET /insights/report` | What the machine is doing, and what the base did on its own — last night, the ranking, the pursuits line — in the sentences Insights says. Disclosure, not control. The report no longer carries `more_pairs`: no pair waits on anyone. |
 | `POST /transcribe` | Multipart, one part named `audio`: the recording. Answers the words in it as `text/plain`. Nothing is stored — dictation is typing, not capture. `404` where no speech model is configured. |
 | `POST /ask?door=app`, `POST /ask/stream?door=app` | As above, and the question is recorded under the person: the answer's `event_id` is what the three routes below name. |
+| `POST /decide?door=app`, `POST /decide/stream?door=app` | As above, and the decision is recorded under the person with every passage read: `event_id` is what `POST /decisions/{id}/verdict` names. Not recorded while `[learn]` is off. |
 | `POST /capture?from_ask=` | As the capture door, and what is stored records the question and the artifacts its answer was written from — the web's *edit first*. |
+
+A decision, as `POST /decide` takes and answers it:
+
+```json
+{
+  "q": "Should I keep the bge-m3 embedder?",
+  "questions": {
+    "verdict": {
+      "type": "choice",
+      "instructions": "Which embedder do the notes favour?",
+      "criteria": { "keep": "Stay on bge-m3", "switch": "Move to EmbeddingGemma" }
+    }
+  },
+  "situation": "The GPU has 12 GB.",
+  "limit": 8,
+  "tags": [],
+  "category": null,
+  "explain": false
+}
+```
+
+```json
+{
+  "answers":  { "verdict": { "type": "choice", "choice": "keep",
+                "probabilities": { "keep": 0.81, "switch": 0.19 },
+                "confidence": 0.62, "swapped_agree": true } },
+  "prior":    { "verdict": { "type": "choice", "choice": "keep",
+                "probabilities": { "keep": 0.55, "switch": 0.45 },
+                "confidence": 0.07 } },
+  "standing": { "verdict": "settled" },
+  "evidence": [ { "n": 1, "artifact_id": "…", "title": "…", "text": "…",
+                  "bears": 0.93, "joint": true,
+                  "read": { "verdict": { "type": "choice", "choice": "keep",
+                            "probabilities": { "keep": 0.9, "switch": 0.1 },
+                            "confidence": 0.8 } } } ],
+  "read": 8,
+  "dropped": 0,
+  "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+  "event_id": "…"
+}
+```
 
 ## Judging and undoing
 
@@ -106,6 +149,7 @@ The routes that used to ask for a decision are gone and answer `404`:
 | `POST /asks/{id}/verdict` | Body `{ verdict }` — `right`, `wrong`, `nothing_here`, or `none`. Answers `{ verdict }` as the bar words it. |
 | `POST /asks/{id}/carried` | Body `{ n }`: this excerpt carried the answer. A toggle; answers `{ carried, verdict }`. |
 | `POST /asks/{id}/keep` | Store the answer as a source. Answers `{ id, duplicate, parked, near_dupe_percent }`. |
+| `POST /decisions/{id}/verdict` | Body `{ verdict, correct }` — `right`, `wrong`, `nothing_here`, or `none` to take it back; `correct` is optional, read only with `wrong`, `{key: answer}` for the first question: an option name, a level index, or `"yes"` / `"no"`. Answers `{ verdict, correct }` as stored, the implied right answer filled in. *Right*, and *wrong* where the right answer is known (the other of two, or `correct`), stamp the notes whose own reading picks it confirmed and queue up to three that read against it, strongest first, as pending pairs with the strongest that agrees, for the pair judge; a pair already there is left as it is. *Nothing here* confirms nothing and makes the decision an open gap; on a decision not held, *wrong* closes the gap and *right* leaves it. No verdict deletes, retires or rewrites a note. `none` clears the verdict and the right answer; stamps and queued pairs stay. |
 | `POST /moments/{id}/date` | Body `{ at, tz }`: move a reminder, or date an undated one. `204`. |
 | `POST /artifacts/{id}/reminder` | Body `{ at, tz, rule }`: restate the open reminder, or make one by hand on an ordinary entry. `rule` is an RRULE in the subset or null for a one-off; one outside it is `400`. Making one withdraws an earlier *not a reminder*. `204`. |
 | `POST /artifacts/{id}/reminder/remove` | Take every open reminder off, the operator's own included, and record the refusal so a re-read does not file it again. `204`. |
