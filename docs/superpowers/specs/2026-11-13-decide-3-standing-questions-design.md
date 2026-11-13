@@ -61,8 +61,11 @@ What it is for, concretely:
 
 ## Constraints
 
-- At most eight standing questions per user. With spec 2's six capture
-  readings that is two requests per artifact at eight questions each.
+- At most eight standing questions per user: one more request per artifact,
+  beside the one for spec 2's four readings.
+- Standing questions are readings in spec 2's sense: stored in
+  `artifact_readings`, matched at `match_at`, never banded, never an unsure
+  row.
 - Instructions at most 500 characters, as magicshell validates.
 - The manifest; push goes through the channels `jobs/remind.rs` already uses.
 

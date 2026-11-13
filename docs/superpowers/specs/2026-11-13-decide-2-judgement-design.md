@@ -49,8 +49,10 @@ Thirteen call sites. What happens to each:
 ## Goals
 
 - No background judgement is made by a chat model.
-- Every judgement is a recorded decision with its probabilities, the band it
-  fell in, what was done, and what became of it.
+- Every judgement that can lead to an action is a recorded decision with its
+  probabilities, the band it fell in, what was done, and what became of it.
+  Judgements that only describe an artifact are *readings*: stored, used at a
+  fixed threshold, never banded and never put to the person.
 - Three bands per question: **act**, **ask**, **leave**. Thresholds start
   conservative and move with the person's undos and answers.
 - Every background writer call is preceded by a decision that it is wanted and
@@ -88,8 +90,9 @@ Thirteen call sites. What happens to each:
 ## Constraints
 
 - 8192 tokens per call as served; the budget is `decide::budget` from spec 1.
-- `[learn] mode`, `Autonomy`, `evolve.max_actions_per_day` and
-  `taken_back_before` gate actions exactly as today.
+- `[learn] mode`, `Core::may_act` with `evolve.max_actions_per_day`, and
+  `taken_back_before` gate actions exactly as today. (`Autonomy` is forced to
+  `Full` and no longer read; it is not a gate.)
 - Every action keeps its journal row and undo (`store/actions.rs`).
 - A change of decision model or of a question's wording is a new *era* for
   that question: earlier evidence about its thresholds stops counting.
@@ -125,24 +128,46 @@ One table, `decisions`:
 - subject_a, subject_b (artifact, pair, link or search-candidate ids)
 - answer JSON (probabilities as returned), top probability, pick
 - swapped_agree (null when not a choice or not swapped)
-- band: `act`, `ask`, `leave`, plus `leave` reasons `too_long`, `capped`,
-  `gated`
-- action_id (the journal row, when it acted)
-- outcome: null, `kept`, `undone`, `confirmed`, `corrected`; outcome_at
+- band: `act`, `ask`, `leave` (with reason `too_long` where that applies)
+- state: `waiting`, `done`, `lapsed`
+- outcome: null, `kept`, `undone`, `confirmed`, `corrected`, `refused`;
+  outcome_at
 - decided_at
 
-An action's undo writes `undone` here. A person answering an ask-band row
-writes `confirmed` (they picked the model's pick) or `corrected`.
+`decision_actions` joins a decision to its journal rows: a merge journals one
+row per source and `vacuous` retires two artifacts. Undoing any of them writes
+`undone` here. A person answering an ask-band row writes `confirmed` (they
+picked the model's pick) or `corrected`.
+
+Distinct, conflict and link verdicts write no journal row today and get none
+here. Their reversal is reopening: the unsure surface and the pair view offer
+"Ask again", which sets the pair or link back to pending.
 
 ### Bands
 
 For a question with thresholds `act_at` and `ask_at`, on the top probability:
 
-- **act**: top `>= act_at`, and for a `choice` the swapped read agreed, and
-  the existing gates allow the action. Otherwise it falls to ask.
+- **act**: top `>= act_at`, and for a `choice` the swapped read agreed. A
+  `choice` at `act_at` whose swapped read disagreed is ask.
 - **ask**: top `>= ask_at`. The decision is shown to the person.
 - **leave**: below. Recorded, nothing happens, the subject is asked again
   only when it changes or a new era begins.
+
+A band is what the model said; whether it can be carried out now is separate.
+
+- An act decision the gates refuse today (the daily cap, most often) is
+  `waiting`. Each tick applies waiting act decisions while the gates allow,
+  highest top first, after checking that the subjects have not changed since;
+  a changed subject is asked again. Nothing is re-asked merely for waiting.
+- An ask decision beyond the open-row cap is `waiting` and takes a row when
+  one frees, highest top first.
+- Waiting act decisions never become ask rows: the cap paces the base, it
+  does not hand its work to the person.
+
+The daily cap is 20 actions per job and decisions come by the hundred, so on
+a base with a backlog most act decisions wait at first. Insights shows the
+waiting count per question. Raising `evolve.max_actions_per_day` is the
+owner's lever; this spec does not move it.
 
 Starting values, all in config:
 
@@ -186,10 +211,10 @@ Unsure · 4
 
 - A row names the question in two or three words, the subjects (each opens),
   the weights, and one button per answer. A pick does what the act band would
-  have done, attributed to the operator, and has the same undo.
-- At most `decide.ask_open_max` (20) rows are open. A decision that would
-  exceed it is `leave` with reason `capped`. A row unanswered for
-  `decide.ask_lapse_days` (30) lapses to `leave`.
+  have done, attributed to the operator, at once (a person's pick is not
+  subject to the daily cap), with the same undo or "Ask again".
+- At most `decide.ask_open_max` (20) rows are open; the rest wait. A row
+  unanswered for `decide.ask_lapse_days` (30) lapses.
 - Open contradictions keep their existing pair view; this surface is for the
   torn, not for the conflicting.
 - The count joins the status line and `/api/v1/status`.
@@ -197,9 +222,12 @@ Unsure · 4
 
 ### Throughput
 
-Decision stages are not `GENERATORS`: they are not held back when generation
-is shut and do not wait out `pacing.cooldown_secs`. They share one budget,
-`decide.max_per_tick` (200), and yield to any interactive lease. The existing
+Dedupe and Reap judge and write in one unit today, and both are in
+`GENERATORS` (`store/jobs.rs:103`). Each is split: a decision unit, and a
+writer unit (merge, rescue) armed by an act decision. Only the writer units
+stay in `GENERATORS`. Decision units are not held back when generation is
+shut and do not wait out `pacing.cooldown_secs`; they take the background
+turn as spec 1 describes. They share one budget, `decide.max_per_tick` (200). The existing
 per-stage caps (`consolidate.max_dedupe_per_tick`, `associate.judge_per_sweep`,
 `reap.max_judged_per_run`) stay as keys, now capping decisions, with raised
 defaults (50, 100, 200). Writer caps (`reap.max_rescues_per_run`, the cooldown)
@@ -267,30 +295,45 @@ end), `background` (one explains what the other uses), `contradicts`,
 State: the retired artifact, its successor, up to five live neighbours. "Does
 the retired note state anything a reader could use that the live notes shown do
 not?" Yes at `act_at`: valuable, to the rescue writer. No at `act_at` (0.97,
-since burial is the one action that wipes text): bury. Between: ask.
+since burial deletes the point and moves the text to the graveyard): bury.
+Between: ask.
 
-### Capture readings: one request per artifact
+### Readings: one request per artifact
 
 Asked of every new artifact on both capture paths, and of existing ones in the
-idle pass (see "The scan").
+idle pass (see "The scan"). Readings go to `artifact_readings`, not to
+`decisions`: no bands, no unsure rows, no waiting.
 
-- `category`: choice over the eight `CATEGORIES`. Replaces the synthesizer's
-  field; also gives verbatim passages a category, which they lack today.
-- `pinned`: noul, "Is this something to keep permanently visible: a
-  standing rule, a credential location, an emergency procedure?" Acts only as
-  today's `pinned` does; `act_at` applies.
-- `asks_reminder`: noul, "Does this ask to be reminded of something?"
-- `has_date`: noul, "Does this mention a specific future date or deadline?"
+- `category`: choice over the eight `CATEGORIES`. The top pick is taken
+  whatever its probability, as the writer always supplied one. Replaces the
+  synthesizer's field; also gives verbatim passages a category.
+- `pinned`: noul, keeping today's meaning (`prompt.rs`: a decision or a
+  commitment). Taken at 0.90. Today it is honoured only on the judged path of
+  single-window captures; as a reading it applies to every artifact.
 - `time_bound`: noul, "Does this state something that will go out of date: a
   version, a price, a schedule, a temporary workaround?"
 - `self_contained`: noul, "Can this be understood without the document it
   came from?"
 
-The synthesizer's schema loses `category`, `pinned` and `links`. The judged
-schema (moments, `when`, RRULE) is requested only when `asks_reminder` or
-`has_date` is in the ask band or above on the window; otherwise the plain
-schema is used. Extracting the time itself stays with the writer: a decision
-model cannot write a date. A forced intent from the person overrides as today.
+`time_bound` and `self_contained` are taken at 0.5.
+
+### Window pre-read: before synthesis
+
+One request on the raw window, before the writer is called, where the judged
+path would run today (`jobs/window.rs:53`):
+
+- `asks_reminder`: noul, "Does this ask to be reminded of something?"
+- `has_date`: noul, "Does this mention a specific future date or deadline?"
+
+The judged schema (moments, `when`, RRULE) is requested when either is at
+0.3 or above, or when the window does not fit the decision context; otherwise
+the plain schema is used. The low line and the default are deliberate: a
+missed reminder is worse than a wasted schema. Extracting the time itself
+stays with the writer: a decision model cannot write a date. A forced intent
+from the person overrides as today.
+
+The artifact schemas lose `category`; the judged schema also loses `pinned`
+and `links`.
 
 Links that the synthesizer used to propose are replaced by `link_kind` asked
 between each new artifact and the neighbours it was shown.
@@ -305,11 +348,11 @@ Before a writer call:
   and the packed sources, "Do these excerpts contain the answer to these
   questions?" Below `ask_at` the pursuit closes unsatisfied without a call;
   between, it waits for more sources.
-- **Promote** (`jobs/promote.rs`): activation as today **and**
+- **Promote** (`jobs/promote.rs`): activation as today **and** the passage's
   `self_contained` below 0.5. A passage that is used and already stands alone
-  is not rewritten.
+  does not re-arm its window.
 
-After a writer call, for merge, rescue, condense, generate and promotion, one
+After a writer call, for merge, rescue, condense and generate, one
 request with two `noul` questions, state "Original(s)" then "Rewrite":
 
 - `complete`: "Does the rewrite state everything the originals state?"
@@ -321,8 +364,10 @@ decision row with outcome `refused`. For generate, only `adds_nothing` applies.
 A pair that does not fit is `too_long` and the literal checks alone decide, as
 today.
 
-Capture synthesis is checked per artifact against its window with
-`adds_nothing` only, where both fit.
+Capture synthesis, which is also what promotion runs, is checked per artifact
+against its window with `adds_nothing` only, where both fit. An artifact that
+fails is dropped the way one that fails the literal check is today; the
+window's verbatim passages remain.
 
 ## New refinement
 
@@ -347,9 +392,11 @@ for the current question versions, newest first, inside `max_per_tick`.
 Answers live in `artifact_readings` (artifact_id, question id and version,
 answer JSON, model, at). Uses:
 
-- `time_bound` joins the stale test in `core/search.rs`: an artifact is a
-  stale candidate when it is old, unused **and** time-bound, or as today when
-  the reading is missing. Detail pages mark a time-bound artifact older than
+- `time_bound` joins the stale test, which lives in the three vector stores
+  (`vector/qdrant.rs`, `sqlite.rs`, `memory.rs`, behind
+  `stale_candidates`) and so has to reach all three: an artifact is a stale
+  candidate when it is old, unused **and** time-bound, or as today when the
+  reading is missing. Detail pages mark a time-bound artifact older than
   `stale_after_days` "may be out of date".
 - `self_contained` feeds promotion (above).
 - `category` fills what is empty; it never overwrites a person's choice.
@@ -362,14 +409,28 @@ For each recorded search (`feedback.candidates` are stored with it), each
 candidate is asked `answers_query`, noul, state the artifact, "Would this note
 help someone who searched for: «q»?"
 
-- Stored as verdicts with a new `Labeller::Model`, never overwriting and
-  always overridden by the person's.
+- Stored per candidate in a new table, `search_labels` (event_id,
+  artifact_id, yes, question version, model). The person's verdict stays where
+  it is, one per search (`search_events.verdict`, `expect_id`), and is never
+  touched: its writers guard on `judged_at IS NULL`, so a model verdict there
+  would lock the person out.
+- A candidate is *relevant by the model* at `yes >= act_at`. For a search,
+  model recall@10 is the share of its relevant candidates ranked in the first
+  ten, and model MRR the reciprocal rank of the first. A search with no
+  relevant candidate is left out of both and counted.
 - Insights shows recall@10 and MRR twice: by the person's verdicts and by the
   model's.
-- The sweep (`eval/sweep.rs`) may count model labels only while, over at
-  least `decide.label_overlap_min` (30) candidates judged by both, they agree
-  with the person at `decide.label_agree_min` (0.85) or better. Below that
-  they are display only. The agreement figure is shown.
+- The person names one positive per search and no negatives, so agreement is
+  two figures over the searches the person judged: *hit rate*, the share
+  whose `expect_id` the model also calls relevant, and *selectivity*, the mean
+  share of candidates the model calls relevant. A model that says yes to
+  everything has a perfect hit rate and no selectivity.
+- The sweep (`eval/sweep.rs`) scores one expected artifact per query. For a
+  search the person did not judge it may take the candidate with the highest
+  `yes` as expected, only while, over at least `decide.label_overlap_min`
+  (30) person-judged searches, hit rate is at least `decide.label_agree_min`
+  (0.85) and selectivity at most `decide.label_select_max` (0.30). Otherwise
+  model labels are display only. Both figures are shown.
 - The same question replaces the similarity test where a gap is closed
   (`jobs/gaps.rs` `cover`) and where a pursuit counts as answered
   (`pursuit.rs` `answered_since`): a gap closes when a new artifact answers
@@ -381,7 +442,7 @@ help someone who searched for: «q»?"
 and parsers; `Core::judge`, `link_judge`, `reaper`; the `(attempt N)` cache
 defeat and the unreadable-judgement counters (a decision either parses or is an
 error to retry); `category`, `pinned`, `links` in the synthesizer schemas and
-in all eleven language prompts.
+in all ten language prompts.
 
 ## Stages
 
@@ -393,7 +454,8 @@ Each ships alone, in this order.
 2. **Replay.** `engram --replay-decisions --user S [--question ID]` runs the
    new questions over what the journal and the pairs already hold (past
    merges, supersedes, contradictions, discards, burials, link verdicts, each
-   with whether it was undone) and prints, per question, agreement with the
+   with whether it was undone; the graveyard keeps buried text, link verdicts
+   have no undo to compare with) and prints, per question, agreement with the
    past verdict, agreement with the person where they undid or confirmed, and
    the share that would fall in each band. Read-only. Its output goes into
    this file under "Measured", and wording and thresholds are fixed from it
@@ -419,6 +481,12 @@ Each ships alone, in this order.
 
 - One decision layer rather than per-stage swaps.
 - The three bands, their starting thresholds, the caps and the lapse.
+- Act decisions over the daily cap wait and are applied later; they are not
+  re-asked and not handed to the person.
+- Readings are not decisions: `category` takes its top pick, the others a
+  fixed line.
+- The pre-read line of 0.3 and the judged schema as the default when in doubt.
+- Relevance labels get their own table and two agreement figures.
 - Swapped agreement as a condition for acting on any `choice`.
 - `pair_relation` splits `replaced` into two directed options instead of a
   second question.
@@ -437,6 +505,8 @@ Each ships alone, in this order.
   gone.
 - Every action in the journal that came from a judgement links to a decision
   row, and undoing it sets that row's outcome.
+- With the daily cap reached, a further act decision waits, is applied on a
+  later tick without a second model call, and never appears as an unsure row.
 - With a scripted decider answering 0.99 on a choice whose reversed read
   disagrees, nothing acts and an unsure row appears.
 - With `[infer.decide]` set and no `[infer.synthesize]`, a duplicate pair ends

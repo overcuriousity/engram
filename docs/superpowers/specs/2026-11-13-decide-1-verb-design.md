@@ -60,7 +60,7 @@ Known and unknown:
 ## Non-goals
 
 - Images as state, and Jev's `box` type.
-- More than one question in the web UI. The API takes up to eight.
+- More than one question in the web UI. The API takes up to seven.
 - Saved or recurring questions (spec 3). Background use (spec 2).
 - Any change to magicshell. Its use of this API is its own spec; the contract
   here is written so that it can.
@@ -137,7 +137,8 @@ pub trait Decider: Send + Sync {
   score, probabilities, confidence }`, `Answer::Noul { yes }`. Probabilities are
   returned in the order the options were given.
 - Validation mirrors magicshell: 1 to 8 questions, keys `[a-z0-9_]{1,30}`,
-  2 to 8 options, 2 to 10 levels, unique option names.
+  2 to 8 options, 2 to 10 levels, unique option names. Its 8000-character cap
+  on state is not mirrored; the token budget below is the limit.
 - A request that would exceed `context_tokens` is refused before it is sent.
   `decide::budget(questions) -> usize` gives the tokens left for `state` after
   the questions and a 256-token margin.
@@ -149,8 +150,10 @@ pub trait Decider: Send + Sync {
 ### Pacing
 
 Decision calls pass `infer/gate.rs`. One made for a waiting person takes the
-interactive lease; a background one yields to it. Neither observes
-`pacing.cooldown_secs`, which exists for generations.
+interactive lease; a background one takes the background turn, so it never
+overlaps a generation, and yields to a lease. Neither observes
+`pacing.cooldown_secs`, which exists for generations. Whoever holds the lease
+or the turn may have up to `parallel` requests in flight.
 
 ### Swapped reads
 
@@ -268,6 +271,10 @@ Buttons:
   From: Reindex notes 09/14; Embedder comparison; GPU budget
   ```
 
+  A kept decision is stored as written. It is never synthesized, merged,
+  condensed or reaped, and spec 2's pair and link questions skip it, so its
+  text cannot reach an artifact that lacks the origin.
+
 ## REST
 
 `POST /api/v1/decide?door=`
@@ -294,7 +301,8 @@ Buttons:
 - `questions` is System One's own shape, so a client that already builds those
   (magicshell) passes them through. Absent: `{"verdict": {"type": "noul",
   "instructions": q}}`. A question without `instructions` uses `q`. The key
-  `bears` is reserved.
+  `bears` is reserved, and since a single read carries it, a caller may send
+  at most seven questions.
 - `situation` is the caller's own state, at most 2000 tokens.
 
 ```json
@@ -390,7 +398,8 @@ Each ships alone.
 - A prior call on every decision, for display.
 - Swapped reads for every `choice` joint read.
 - The reserved question key `bears` and its wording.
-- Kept decisions are excluded from Decide's own retrieval.
+- Kept decisions are excluded from Decide's own retrieval and from every
+  rewriting stage.
 - No chat-model fallback.
 - The API speaks System One's question shape rather than engram's own.
 
