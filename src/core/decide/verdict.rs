@@ -125,11 +125,16 @@ impl Core {
             .first()
             .ok_or_else(|| Error::Internal("a stored decision has no question".into()))?;
         // Not held: there is no pick to be right or wrong about, so no right answer.
-        let joint = d
-            .answers
-            .as_deref()
-            .filter(|_| !d.not_held)
-            .and_then(|a| wire::stored_answer(q, a));
+        let joint = d.answers.as_deref().filter(|_| !d.not_held).and_then(|a| {
+            let got = wire::stored_answer(q, a);
+            if got.is_none() {
+                tracing::warn!(
+                    decision = id,
+                    "a held decision's answer does not read; the verdict is stored without effects"
+                );
+            }
+            got
+        });
         let right = match &joint {
             Some(j) => right_answer(q, j, verdict, correct.as_ref())?,
             None => None,
@@ -147,7 +152,11 @@ impl Core {
                 .iter()
                 .filter(|e| e.bearing)
                 .filter_map(|e| {
-                    wire::stored_answer(q, &e.read).map(|a| (e.artifact_id.clone(), e.bears, a))
+                    let got = wire::stored_answer(q, &e.read);
+                    if got.is_none() {
+                        tracing::warn!(decision = id, artifact_id = %e.artifact_id, "a note's own reading does not read; it is left out of the verdict");
+                    }
+                    got.map(|a| (e.artifact_id.clone(), e.bears, a))
                 })
                 .collect();
             let s = sides(q, right, &reads);
@@ -697,6 +706,29 @@ mod tests {
                 assert_eq!(&a.text, text);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn right_then_wrong_stamps_both_sides_and_keeps_the_last_verdict() {
+        let core = test_core().await;
+        let (ids, id) = keep_or_switch(&core).await;
+        core.judge_decision(&id, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        core.judge_decision(&id, AskVerdict::Wrong, None)
+            .await
+            .unwrap();
+        for n in &ids {
+            assert!(stamped(&core, n).await);
+        }
+        // (C, A) from right; (A, C) is the same pair, and (B, C) is new from wrong.
+        assert_eq!(pair_count(&core).await, 2);
+        for a in &ids[..2] {
+            assert!(core.store.pair_between(a, &ids[2]).await.unwrap().is_some());
+        }
+        let s = core.store.decision(&id).await.unwrap().unwrap();
+        assert_eq!(s.verdict, Some(AskVerdict::Wrong));
+        assert_eq!(s.correct.as_deref(), Some(r#"{"verdict":"switch"}"#));
     }
 
     #[tokio::test]

@@ -1770,6 +1770,8 @@ async fn decide_stream(
     use tokio_stream::StreamExt as _;
 
     let req = body.into_request()?;
+    // As the pipeline normalises them, so a read names the options `done` names.
+    let questions = crate::core::decide::normalised_questions(&req)?;
     let core = tenant.core.clone();
     let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Api);
     let events = async_stream::stream! {
@@ -1778,7 +1780,7 @@ async fn decide_stream(
         while let Some(ev) = s.next().await {
             // Terminal: the `try_stream!` producer ends at its first error.
             yield Ok::<_, Error>(match ev {
-                Ok(e) => decide_sse_event(e).unwrap_or_else(|e| error_frame("decide", &e)),
+                Ok(e) => decide_sse_event(e, &questions).unwrap_or_else(|e| error_frame("decide", &e)),
                 Err(e) => error_frame("decide", &e),
             });
         }
@@ -1789,7 +1791,10 @@ async fn decide_stream(
         .into_response())
 }
 
-fn decide_sse_event(ev: crate::core::decide::DecideEvent) -> Result<SseEvent> {
+fn decide_sse_event(
+    ev: crate::core::decide::DecideEvent,
+    questions: &[crate::infer::decide::Question],
+) -> Result<SseEvent> {
     use crate::core::decide::DecideEvent::*;
     let (name, data) = match ev {
         Retrieved { passages } => ("retrieved", serde_json::json!({ "passages": passages })),
@@ -1802,7 +1807,7 @@ fn decide_sse_event(ev: crate::core::decide::DecideEvent) -> Result<SseEvent> {
                 "title": r.title,
                 "bears": r.bears,
                 "bearing": r.bearing,
-                "read": crate::core::decide::wire::read_json(&r.read),
+                "read": crate::core::decide::wire::read_json(questions, &r.read),
             }),
         ),
         Done(d) => (
@@ -4114,7 +4119,7 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The body as written: `json!` would sort a choice's options, and their order is meaning.
+    /// The body as written, so a choice's option order is the test's own and not a JSON map's.
     fn post_text(uri: &str, token: &str, body: &str) -> Request<Body> {
         Request::builder()
             .uri(uri)
@@ -4306,6 +4311,35 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_read_frame_names_a_choices_options() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), false).await;
+        let res = app
+            .oneshot(post_text(
+                "/api/v1/decide/stream",
+                &token,
+                r#"{"q":"Keep?","questions":{"verdict":{"type":"choice","criteria":{" switch ":"Move","keep":"Stay"}}}}"#,
+            ))
+            .await
+            .unwrap();
+        let body = crate::web::test_support::body_of(res).await;
+        let frames = sse_frames(&body);
+        let reads: Vec<_> = frames.iter().filter(|(n, _)| n == "read").collect();
+        assert_eq!(reads.len(), 3, "{body}");
+        for (_, r) in reads {
+            let keys: Vec<&String> = r["read"]["verdict"]["probabilities"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{r}"))
+                .keys()
+                .collect();
+            assert_eq!(
+                keys,
+                ["switch", "keep"],
+                "named, trimmed, in option order: {r}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn api_decide_stream_ends_on_an_error_frame() {
         let (app, token) = deciding_app(
             |_, _| Err(crate::error::Error::Internal("the rule erred".into())),
@@ -4399,6 +4433,16 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, v) = judge(
+            id.clone(),
+            serde_json::json!({"verdict": "wrong", "correct": {"other": "c"}}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a key that is not the question's: {v}"
+        );
 
         let (status, _) = judge("nope".into(), serde_json::json!({"verdict": "right"})).await;
         assert_eq!(status, StatusCode::NOT_FOUND);

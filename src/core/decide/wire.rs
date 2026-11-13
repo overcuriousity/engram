@@ -159,7 +159,7 @@ impl DecideBody {
 }
 
 /// A stored decision's questions, read back from the shape `questions_json` wrote.
-pub(super) fn stored_questions(text: &str) -> Result<Vec<Question>> {
+pub(crate) fn stored_questions(text: &str) -> Result<Vec<Question>> {
     serde_json::from_str::<InOrder<RawQuestion>>(text)
         .map_err(|e| crate::error::Error::Internal(format!("a stored decision's questions: {e}")))?
         .0
@@ -386,9 +386,9 @@ pub(super) fn read_text(questions: &[Question], read: &[(String, Answer)]) -> St
     to_text(&plain(questions, read))
 }
 
-/// A stream's `read` frame: the event carries no questions, so a choice's probabilities go by position.
-pub fn read_json(read: &[(String, Answer)]) -> serde_json::Value {
-    serde_json::to_value(plain(&[], read)).unwrap_or_default()
+/// A stream's `read` frame, in the shape `done` gives each evidence's `read`.
+pub fn read_json(questions: &[Question], read: &[(String, Answer)]) -> serde_json::Value {
+    serde_json::to_value(plain(questions, read)).unwrap_or_default()
 }
 
 fn to_text(v: &impl serde::Serialize) -> String {

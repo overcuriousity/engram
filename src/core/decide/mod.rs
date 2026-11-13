@@ -104,8 +104,8 @@ fn rejected(detail: String) -> Error {
     }
 }
 
-/// Trimmed and defaulted, so the decision records the questions exactly as the model was asked them.
-fn normalise(req: &DecideRequest, counter: &TokenCounter) -> Result<Asked> {
+/// The questions as the model is asked them, so a stream can name a choice's options as `done` does.
+pub(crate) fn normalised_questions(req: &DecideRequest) -> Result<Vec<Question>> {
     let q = trim(&req.q).to_string();
     if q.is_empty() {
         return Err(refuse("the question is empty."));
@@ -151,6 +151,13 @@ fn normalise(req: &DecideRequest, counter: &TokenCounter) -> Result<Asked> {
         )));
     }
     validate(&questions)?;
+    Ok(questions)
+}
+
+/// Trimmed and defaulted, so the decision records the questions exactly as the model was asked them.
+fn normalise(req: &DecideRequest, counter: &TokenCounter) -> Result<Asked> {
+    let questions = normalised_questions(req)?;
+    let q = trim(&req.q).to_string();
     let situation = req
         .situation
         .as_deref()
