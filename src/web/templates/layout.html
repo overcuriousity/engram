@@ -19,7 +19,7 @@
   <link rel="stylesheet" href="{{ crate::web::assets::url("app.css") }}">
   <script src="{{ crate::web::assets::url("vendor/htmx.min.js") }}" defer></script>
   <script src="{{ crate::web::assets::url("vendor/htmx-ext-sse.js") }}" defer></script>
-  {%- for m in ["prefs", "notices", "dialog", "menu", "keys", "copy", "busy", "live", "rows"] %}
+  {%- for m in ["prefs", "notices", "dialog", "menu", "keys", "copy", "busy", "live", "rows", "decide"] %}
   <script type="module" src="{{ crate::web::assets::url(&format!("js/{m}.js")) }}"></script>
   {%- endfor %}
   <script src="{{ crate::web::assets::url("app.js") }}" defer></script>
@@ -86,6 +86,7 @@
       <dt><kbd>↑</kbd> <kbd>↓</kbd></dt><dd>Move through results</dd>
       <dt><kbd>↵</kbd></dt><dd>Open</dd>
       <dt><kbd>Ctrl</kbd> <kbd>↵</kbd></dt><dd>Ask</dd>
+      <dt><kbd>Alt</kbd> <kbd>↵</kbd></dt><dd>Decide</dd>
       <dt><kbd>Ctrl</kbd> <kbd>⇧</kbd> <kbd>↵</kbd></dt><dd>Capture</dd>
       <dt><kbd>?</kbd></dt><dd>Show shortcuts</dd>
       <dt><kbd>Esc</kbd></dt><dd>Close</dd>

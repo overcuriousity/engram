@@ -1439,6 +1439,7 @@ mod tests {
         let held = body_of(res).await;
         for region in [
             r#"id="ask-verb-slot""#,
+            r#"id="decide-verb-slot""#,
             r#"id="keyhint-slot""#,
             r#"id="box-hint""#,
             r#"id="pane-idle""#,
@@ -1447,7 +1448,7 @@ mod tests {
         }
         assert_eq!(
             held.matches(r#"hx-swap-oob="true""#).count(),
-            4,
+            5,
             "every region names its own target, or it lands nowhere: {held}"
         );
         assert!(
@@ -1484,6 +1485,40 @@ mod tests {
             to.contains("why") && to.contains("reindex"),
             "with the question still in it: {to}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_workspace_offers_decide_once_the_base_holds_something() {
+        let html = workspace_held("/ui").await;
+        assert!(html.contains(r#"data-verb="decide""#), "{html}");
+        let row = html.split(r#"id="decide-row""#).nth(1).expect("the row");
+        assert!(row.split('>').next().unwrap().contains("hidden"), "{row}");
+        assert!(
+            html.contains(r#"name="decide-kind" value="noul" checked"#),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_base_has_the_slot_and_no_button() {
+        let html = workspace("/ui").await;
+        assert!(html.contains(r#"id="decide-verb-slot""#), "{html}");
+        assert!(!html.contains(r#"data-verb="decide""#), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_held_bundle_swaps_the_decide_verb_in() {
+        let html = workspace_held("/ui/held").await;
+        assert!(
+            html.contains(r#"id="decide-verb-slot" hx-swap-oob="true""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-verb="decide""#), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_shortcut_is_listed() {
+        assert!(workspace("/ui").await.contains("<dd>Decide</dd>"));
     }
 
     #[tokio::test]

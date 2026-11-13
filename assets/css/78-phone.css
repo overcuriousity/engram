@@ -68,6 +68,8 @@
   /* The box starts at one row and grows up to the same cap. */
   .regions-rail-focus-source .region-bar .verbs { margin-top: 0.4rem; gap: 0.4rem; }
   .regions-rail-focus-source .region-bar .verbs .oc-btn { min-height: 40px; }
+  .decide-option, .decide-level { display: flex; flex-basis: 100%; }
+  .decide-option .oc-input, .decide-level .oc-input { flex: 1 1 auto; min-height: 44px; }
   .regions-rail-focus-source .region-bar .box { max-height: 40vh; }
 
   /* Clear of both bars; the shell's 5.5rem clears only the tab bar. */
