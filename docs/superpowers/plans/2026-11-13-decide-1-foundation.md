@@ -21,7 +21,7 @@
 - No new crates. `unsafe` stays denied.
 - Before every commit: `cargo test`, `cargo test --features contained --lib`, `cargo clippy --all-targets -- -D warnings`, `cargo clippy --all-targets --features contained -- -D warnings`. Task 9 also: `shellcheck scripts/*.sh`.
 - Comments follow the codebase: one short line saying why, none saying what.
-- All of spec 1 ships as one PR. Work on one branch off `master`, `feat/decide`, not on `docs/decision-model-specs`; this plan is part 1 of 4 on it and opens no PR of its own.
+- All of spec 1 ships as one PR. Work on one branch, `feat/decide`, cut from `docs/decision-model-specs` (master plus these specs and plans, so they travel with the code); this plan is part 1 of 4 on it and opens no PR of its own.
 
 ## Decisions this plan makes (the spec left them open)
 
