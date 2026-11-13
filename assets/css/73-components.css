@@ -140,7 +140,6 @@ mark {
 .raw-unbounded { max-height: none; }
 .offline { max-width: 26rem; margin: 6rem auto; padding: 0 var(--space-4); text-align: center; }
 
-
 /* A decision's weights: inline SVG, since the CSP forbids inline styles. Never animated. */
 .bars { display: grid; grid-template-columns: auto 1fr auto; gap: var(--space-2); align-items: center; margin-top: var(--space-3); }
 .bar { display: contents; }
@@ -151,3 +150,4 @@ mark {
 .bar-prior { fill: var(--color-fg-primary); }
 .bar-weight { font-variant-numeric: tabular-nums; text-align: right; }
 .bar-legend { margin: var(--space-1) 0 0; }
+.bar-key { display: inline-block; width: 0.1875rem; height: 0.75rem; vertical-align: middle; }

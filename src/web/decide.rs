@@ -215,7 +215,8 @@ pub fn rail_fragment(d: &Decision) -> Result<String> {
 /// "Decided from 6 of 8"
 pub fn rail_head(d: &Decision) -> String {
     if d.not_held() {
-        format!("None of {} bore on it", d.read)
+        // The rest line under the rows says how many did not bear.
+        "Nothing decided".to_string()
     } else {
         format!("Decided from {} of {}", d.evidence.len(), d.read)
     }
@@ -358,7 +359,14 @@ async fn decide_stream(
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
             // Terminal: the `try_stream!` producer ends at its first error.
-            yield Ok::<_, Error>(ev.and_then(|e| sse_event(e, &q)).unwrap_or_else(|e| error_event(&e)));
+            match ev.and_then(|e| sse_event(e, &q)) {
+                Ok(e) => yield Ok::<_, Error>(e),
+                // An error ends the stream, a render failure too.
+                Err(e) => {
+                    yield Ok(error_event(&e));
+                    break;
+                }
+            }
         }
     };
     // Kept alive: sixteen reads on a slow model outlast a proxy's idle timeout.
@@ -673,6 +681,12 @@ mod tests {
         assert!(h.contains("Settled."));
         assert!(!h.contains('%') && !h.to_lowercase().contains("likely"));
         assert_eq!(h.matches("without notes</p>").count(), 1, "labelled once");
+        let legend = &h[h.find("bar-legend").unwrap()..];
+        assert!(
+            legend.contains(r#"<rect class="bar-prior""#),
+            "the legend shows the mark"
+        );
+        assert!(!h.contains('▲'));
         assert!(h.contains(r#"hx-post="/ui/decide/01EV/verdict""#));
         assert!(!h.contains("Keep"));
     }
@@ -712,6 +726,7 @@ mod tests {
         );
         assert!(r.contains("2 more did not bear on it"));
         assert_eq!(rail_head(&d), "Decided from 6 of 8");
+        assert_eq!(rail_head(&not_held()), "Nothing decided");
         let mut one = d.clone();
         one.read = 7;
         assert!(

@@ -12,7 +12,7 @@
     </div>
     {% endfor %}
   </div>
-  <p class="muted bar-legend">▲ without notes</p>
+  <p class="muted bar-legend"><svg class="bar-key" viewBox="0 0 1 4" preserveAspectRatio="none" aria-hidden="true"><rect class="bar-prior" width="1" height="4"/></svg> without notes</p>
   <p class="standing">{{ standing }}</p>
   {% else %}
   <div class="oc-notice oc-notice--info" role="status">{{ crate::web::icons::icon("info", 16) }}<span class="oc-notice__text">Nothing here: the base does not hold this</span></div>
