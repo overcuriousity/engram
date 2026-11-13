@@ -248,12 +248,12 @@ oldest first. The subjects themselves are never cut. If they do not fit, the
 decision is `leave` / `too_long`; Insights shows the count. The builder may
 later judge long members passage by passage; not in this spec.
 
-### When the role is absent
+### The role is required
 
-Dedupe, link judging, reaping, capture classification and everything in
-"New refinement" do not run. Each says "not configured" where it would have
-appeared, as the embed-only floor does for synthesis, and boot logs one line.
-The owner accepts that a base without `[infer.decide]` stops judging.
+`[infer.decide]` is required (spec 1; owner's decision, 2026-11-13): judgement
+has no other backend, so a config without it is refused at start. There is no
+"not configured" state for any stage here. An endpoint that is down is a
+failed decision unit, retried by the queue like any other.
 
 ## The questions
 
@@ -402,6 +402,41 @@ same port with different numbers are not near-duplicates.
 - `per_point` stays the fan-out. A pair is asked once per era and again when
   either member changes.
 
+### What Decide's verdicts feed
+
+Spec 1 records every decision a person asks for (`decide_events`, and one
+`decide_evidence` row per passage read) and, when the person judges it, the
+verdict and the right answer. That is the only place where a person labels the
+decision model's own output on their own notes. Four uses:
+
+- **Pairs.** A judged decision queues each note that read against the right
+  answer as a pending pair with the strongest note that agreed. These pairs
+  are put to `pair_relation` whatever their similarity; `scan_min` does not
+  apply to them. They follow the rule for pairs below `review_min`: nothing
+  acts on its own. And the person's word binds the outcome: a replacement that
+  would retire the note the person confirmed is an ask row, never an act.
+- **Thresholds of Decide.** `decide.settled_at` is tuned like an `act_at`,
+  per era, from held decisions the person judged: a `settled` decision judged
+  wrong counts as an undo, one judged right as kept. Same minimum, target and
+  step as below; bounded to `[0.70, 0.95]`. `decide.split_at` and
+  `decide.bears_min` are not moved; Insights shows what would move them: the
+  share of `split` decisions judged right, of held decisions judged "nothing
+  here" (`bears` said yes too easily), and of not-held decisions judged wrong
+  (`bears` or retrieval missed).
+- **Relevance.** `decide_evidence` rows are labels of the question `bears` on
+  (question, artifact). They stay where they are and count as model labels
+  beside `search_labels`. A decision judged right makes its agreeing notes
+  person-confirmed positives; one judged "nothing here" makes its bearing
+  notes person-refuted. Both join the agreement figures under "Relevance
+  labels", which until now had one positive per judged search and no
+  negatives.
+- **Gaps.** A decision the base did not hold, or judged "nothing here", is a
+  gap of kind `decide`. It closes as the others do under this spec: when a new
+  artifact answers its question at `act_at`.
+
+A decision is recorded with the model and the wording of `bears` in force, so
+a new era sets its labels aside like any other evidence.
+
 ### The scan
 
 The idle pass asks the capture readings of every live artifact that lacks them
@@ -482,10 +517,10 @@ Each ships alone, in this order.
 3. **Dedupe, links, reap** move; the chat judging code is deleted.
 4. **Capture readings** and the synthesizer schema cut.
 5. **Writer gates**, before and after.
-6. **Wider pair net.**
+6. **Wider pair net**, and the pairs Decide's verdicts queue.
 7. **The scan** and its uses.
-8. **Relevance labels.**
-9. **Tuning** of `act_at` and `ask_at`.
+8. **Relevance labels**, with Decide's reads and verdicts beside them.
+9. **Tuning** of `act_at`, `ask_at` and Decide's `settled_at`.
 
 ## Left to the builder
 
@@ -515,6 +550,7 @@ Each ships alone, in this order.
 - The post-write checks, and that they add to the literal checks rather than
   replace them.
 - `scan_min` 0.70 and "nothing acts on its own below `review_min`".
+- What Decide's verdicts feed, and that only `settled_at` is tuned from them.
 - Model relevance labels count toward sweeps only above a measured agreement.
 - The judged synthesis schema is requested only when a reading calls for it.
 
@@ -529,10 +565,13 @@ Each ships alone, in this order.
   later tick without a second model call, and never appears as an unsure row.
 - With a scripted decider answering 0.99 on a choice whose reversed read
   disagrees, nothing acts and an unsure row appears.
-- With `[infer.decide]` set and no `[infer.synthesize]`, a duplicate pair ends
+- With no `[infer.synthesize]`, a duplicate pair ends
   as an unsure row with keep-one buttons and no chat call is attempted.
 - A writer result scoring below `refuse_below` on `adds_nothing` is not
   stored.
+- A pair queued by a judged decision is put to `pair_relation` below
+  `scan_min`, and a replacement that would retire the confirmed note becomes
+  an unsure row.
 - The replay has run on the owner's base and "Measured" is filled in.
 - The checks in `AGENTS.md` pass.
 

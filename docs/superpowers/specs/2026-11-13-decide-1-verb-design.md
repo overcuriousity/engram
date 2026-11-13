@@ -49,7 +49,7 @@ Known and unknown:
 
 ## Goals
 
-- An optional `[infer.decide]` role and a `Decider` trait that specs 2 and 3
+- A required `[infer.decide]` role and a `Decider` trait that specs 2 and 3
   reuse unchanged.
 - Decide in the web UI beside Search and Ask: one question, answered yes/no,
   from named options, or on a scale.
@@ -74,8 +74,6 @@ Known and unknown:
   the verdict.
 - **A verdict from the model's own prior.** If no passage bears on the
   question there is no verdict, whatever the model would say unprompted.
-- **Self-confirmation.** A decision kept as a note must never be evidence for a
-  later decision.
 - **Advice.** Decide answers what the notes support. Copy and docs do not
   suggest it for questions the base cannot hold ("should I take the job").
 
@@ -83,9 +81,11 @@ Known and unknown:
 
 - The manifest (`AGENTS.md`), profile everyday: few words on the page, no
   decorative motion, keyboard reachable, phone layout from 390 px.
-- A role that is not configured is absent, not broken: no Decide button, no
-  MCP tool, `404` on the routes, a log line at boot. Same pattern as
-  `Core::asks()` and `PkdbTools::routes`.
+- The role is required (owner's decision, 2026-11-13: spec 2 moves the judge
+  onto the decision model, and the judge is not optional). A config without
+  `[infer.decide]` is refused at start with a message that names the block.
+  Every door therefore always has Decide; an endpoint that is down is an error
+  when asked, and a warning at boot.
 - Token counts use `infer::budget` with the bundled Qwen tokenizer; Clef-flash
   is Qwen-based.
 - Nothing here writes model-generated text.
@@ -108,7 +108,7 @@ The owner handed the how to the designer; approach 2 is the designer's pick.
 ### Role
 
 ```toml
-# Optional decision model; without it Decide and background judgement are absent.
+# The decision model. Required: Decide and background judgement run on it.
 [infer.decide]
 base_url = "http://localhost:8080/v1"
 model = "clef-flash:9b-q8_0-8192"
@@ -175,8 +175,7 @@ Input: the question text `q`, typed questions (default: one `noul` whose
 instructions are `q`), an optional caller `situation`, the usual filters.
 
 1. **Retrieve.** `search_with` on `q`, `limit` passages (default 8, max 16),
-   reranked as configured, retired artifacts excluded, artifacts whose origin
-   is a kept decision excluded.
+   reranked as configured, retired artifacts excluded.
 2. **Prior.** One call with the situation alone as state (or a fixed "No
    information." when there is none). Kept for display only.
 3. **Single reads.** One call per passage, `parallel` at a time, each result
@@ -226,8 +225,8 @@ split_at = 0.34
 
 ## Web UI
 
-`Decide` joins `Search`, `Ask`, `Capture` in the verbs row, shown only when the
-role is configured and the base holds something (as `_ask_verb.html` does).
+`Decide` joins `Search`, `Ask`, `Capture` in the verbs row, shown once the
+base holds something (as `_ask_verb.html` does for Ask).
 Pressing it with a question in the box opens the answer row below the box;
 yes/no is selected, so a second press (or Enter) runs it.
 
@@ -252,7 +251,7 @@ Pane                                        Rail · Decided from 6 of 8
   switch to gemma  ███░░░░░░░░░░░░  19       3 GPU budget            switch
                    ▲ without notes: 55       4 Qdrant sizing           keep
   Settled.                                   …
-  [Right] [Wrong] [Nothing here] [Keep]      2 more did not bear on it
+  [Right] [Wrong] [Nothing here]             2 more did not bear on it
 ```
 
 - One bar per option or level; yes/no draws two. Weights are whole numbers
@@ -272,22 +271,42 @@ Pane                                        Rail · Decided from 6 of 8
   `EventSource`), with events `retrieved`, `read` (one per passage), `done`,
   `error`. `/api/v1/decide/stream` sends the same frames.
 
-Buttons:
+Buttons, under a verdict: **Right**, **Wrong**, **Nothing here**, then **Undo**.
+Under "Nothing here: the base does not hold this" only **Right** and **Wrong**.
+There is no Keep: a decision is a reading of the notes, not a note (owner's
+decision, 2026-11-13).
 
-- **Right / Wrong / Nothing here / Undo** work as under an answer. "Nothing
-  here" records a gap. Verdicts are stored against the decision.
-- **Keep** captures the decision as a note, composed from a template, never by
-  a model, with origin `decide`:
+### What a verdict does
 
-  ```
-  Decided 2026-11-13: Should I keep the bge-m3 embedder?
-  keep 81 · switch to gemma 19 · settled
-  From: Reindex notes 09/14; Embedder comparison; GPU budget
-  ```
+A press is the person's word on the question, and the base learns from it. The
+*right answer* is the verdict's pick after **Right**, and after **Wrong** the
+other answer where there are only two (yes / no, two options, two levels).
+With three or more, the bar asks once, "Which is it?", with a button per
+remaining answer and "Not sure"; without an answer the right one stays unknown
+and only the verdict is stored.
 
-  A kept decision is stored as written. It is never synthesized, merged,
-  condensed or reaped, and spec 2's pair and link questions skip it, so its
-  text cannot reach an artifact that lacks the origin.
+A note *agrees* when its own reading picks the right answer, and *reads
+against* it otherwise.
+
+| Press | Now | Kept for spec 2 |
+|---|---|---|
+| Right | Notes that agree are stamped confirmed (`Core::verify`), as a right answer stamps its citations. | A confirmed example. |
+| Wrong, right answer known | Notes that agree with the right answer are stamped confirmed. Nothing is retired. | A corrected example with the right answer. |
+| Either, and a note reads against | Each such note, strongest bearing first and at most three, is queued as a pending pair with the strongest note that agrees, for the pair judge to rule on contradiction or replacement. | The pairs reach `pair_relation`; see spec 2. |
+| Nothing here | The decision is an open gap. Nothing is confirmed. | The notes that bore are refuted as relevant. |
+| Right, on a decision not held | The gap stands. | A confirmed miss of the base. |
+| Wrong, on a decision not held | The base does hold it: the gap closes. | A miss of retrieval or of `bears`. |
+
+- A queued pair carries no similarity (zero, as a pair found through a link
+  does) and a detail saying it came from a decision. A pair that already
+  exists is left as it is.
+- **Undo** clears the verdict and the right answer and reopens or closes the
+  gap accordingly. Confirmation stamps and queued pairs stay: the stamp is
+  what a right answer leaves too, and the pair judge rules on the notes, not
+  on the press.
+- Nothing here deletes, retires or rewrites a note on a verdict alone.
+- Independently of any press, the notes a held verdict was weighed from are
+  marked cited when it is recorded, as an answer's citations are.
 
 ## REST
 
@@ -342,17 +361,19 @@ Buttons:
 - `not_held`: `answers` is `null`, `evidence` is empty, `prior` and `standing`
   are present, status 200.
 - `explain: true` adds `state`, the exact joint-read state, for a bench.
-- Follow-ups mirror Ask: `POST /decisions/{id}/verdict {verdict}` and
-  `POST /decisions/{id}/keep`.
-- Role not configured: 404. Errors: `{"error": "…"}`.
+- Follow-up: `POST /decisions/{id}/verdict {"verdict": "right" | "wrong" |
+  "nothing_here" | "none", "correct": {key: answer}}`. `correct` is optional
+  and read only with `wrong`: an option name, a level index, or `"yes"` /
+  `"no"`. The reply is `{"verdict", "correct"}` as stored, with the implied
+  right answer filled in.
+- Errors: `{"error": "…"}`.
 - `docs/api.md` gains the section.
 
 ## MCP
 
 `decide { q, options?: [{name, description?}], levels?: [string], situation? }`.
 Neither `options` nor `levels`: yes/no. Returns markdown: the weights, the
-standing, the numbered evidence with each passage's own pick. Removed from the
-routes when the role is absent.
+standing, the numbered evidence with each passage's own pick.
 
 ## CLI
 
@@ -371,12 +392,16 @@ evidence saved for `--show`. Exit `1` on `not_held`, `2` on error.
 Only where an ask would be recorded (`learn` on, the same doors).
 
 - `decide_events`: id, question, questions JSON, situation, filters, answers
-  JSON, prior JSON, standing, model, read, dropped, created_at, verdict,
-  judged_at, kept_artifact_id.
-- `decide_evidence`: event_id, n, artifact_id, bears, read JSON, joint.
+  JSON, prior JSON, standing, model, read, dropped, the query vector and its
+  model (a gap is found by it), created_at, verdict, correct JSON, judged_at,
+  dismissed_at.
+- `decide_evidence`: one row for **every** passage read, bearing or not:
+  event_id, rank, artifact_id, bears, bearing, joint, n (its place in the
+  evidence, null when it did not bear), read JSON. Every decision is thereby a
+  set of relevance labels for its question.
 
-A judged decision is a labelled example. Spec 2 reads these tables for
-calibration; nothing in this spec does.
+A judged decision is a labelled example. Spec 2 reads these tables to tune
+the thresholds and to measure `bears`; this spec only writes them.
 
 ## Stages
 
@@ -410,16 +435,15 @@ Each ships alone.
 - A prior call on every decision, for display.
 - Swapped reads for every `choice` joint read.
 - The reserved question key `bears` and its wording.
-- Kept decisions are excluded from Decide's own retrieval and from every
-  rewriting stage.
+- What each verdict does to the base, and that none of it retires a note.
 - No chat-model fallback.
 - The API speaks System One's question shape rather than engram's own.
 
 ## Done when
 
-- With `[infer.decide]` unset, nothing in any door mentions Decide and the
-  test suite passes unchanged.
-- With it set, the same question returns the same structure through UI, REST,
+- A config without `[infer.decide]` is refused at start, and the refusal names
+  the block.
+- The same question returns the same structure through UI, REST,
   MCP and CLI.
 - A question the base holds nothing on returns `not_held` and no answers, with
   a scripted decider that would have answered 0.99.
