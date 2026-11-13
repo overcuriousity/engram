@@ -125,6 +125,9 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
         cfg.infer.embed.api_key.as_deref(),
     )
     .await;
+    let d = &cfg.infer.decide;
+    engram::infer::openai::probe("decide", &d.base_url, d.api_key.as_deref()).await;
+    tracing::info!(model = %d.model, context_tokens = d.context_tokens, parallel = d.parallel, "decision model");
     if let Some(r) = &cfg.infer.rerank {
         engram::infer::openai::probe_path(
             "rerank",

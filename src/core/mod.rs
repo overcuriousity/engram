@@ -17,6 +17,7 @@ pub mod sitting;
 
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
+use crate::infer::decide::{Decider, HttpDecider};
 use crate::infer::openai::{
     HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer, HttpTranscriber,
 };
@@ -107,6 +108,8 @@ pub struct Core {
     /// passages.
     pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
+    /// Always there: `[infer.decide]` is required.
+    pub decider: Arc<dyn Decider>,
     pub reranker: Option<Arc<dyn Reranker>>,
     /// `[infer.rerank].apply`; meaningless without a reranker.
     pub rerank_apply: Vec<crate::config::RerankApply>,
@@ -386,6 +389,7 @@ impl Core {
                 ) as Arc<dyn Synthesizer>
             }),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
+            decider: Arc::new(HttpDecider::new(&cfg.infer.decide).with_counter(counter.clone())),
             reranker: cfg
                 .infer
                 .rerank
@@ -547,8 +551,8 @@ impl Core {
 pub mod test_support {
     use super::*;
     use crate::infer::fake::{
-        FailingReranker, FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
-        FakeTranscriber,
+        FailingReranker, FakeCompleter, FakeDecider, FakeDescriber, FakeEmbedder, FakeReranker,
+        FakeSynthesizer, FakeTranscriber,
     };
     use crate::vector::memory::MemoryVectors;
 
@@ -703,6 +707,7 @@ pub mod test_support {
             vectors: Arc::new(MemoryVectors::new()),
             synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
+            decider: Arc::new(FakeDecider::default()),
             reranker,
             rerank_apply: vec![
                 crate::config::RerankApply::Ask,
@@ -1026,6 +1031,26 @@ mod tests {
         });
         let core = Core::from_config(&cfg, vectors, store);
         assert!(core.reranker.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_core_decides_with_the_configured_window_and_model() {
+        let store = crate::store::Store::memory().await.unwrap();
+        let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        cfg.infer.decide.context_tokens = 4096;
+        cfg.infer.decide.model = "m".into();
+        let core = Core::from_config(&cfg, vectors, store);
+        assert_eq!(core.decider.context_tokens(), 4096);
+        assert_eq!(core.decider.model(), "m");
+    }
+
+    #[tokio::test]
+    async fn the_test_core_decides_with_the_fake() {
+        assert_eq!(
+            test_support::test_core().await.decider.model(),
+            "fake-decider"
+        );
     }
 
     #[test]

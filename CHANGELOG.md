@@ -5,7 +5,11 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 
 ## [Unreleased]
 
+### Added
+- `scripts/probe-decide.sh` measures a decision endpoint.
+
 ### Changed
+- **`[infer.decide]` is required.** engram needs a decision model (System One, `POST {base_url}/systemone`); a config without the block is refused at start. Copy it from `config.example.toml`.
 - engram follows the overcuriousity dev manifest v2026.11.1, profile everyday; deviations are listed in `AGENTS.md`.
 - Pages, the extension panel and the READMEs say less: labels and short glosses only.
 - The interface uses the manifest's tokens, Atkinson Hyperlegible Next and Lucide icons; theme and text size are stored per user.
