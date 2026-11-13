@@ -1,6 +1,7 @@
 //! Decide: the caller's questions about a state, answered as probabilities by a decision model.
 
 use crate::error::{Error, Result};
+use crate::infer::budget::TokenCounter;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 
@@ -136,6 +137,23 @@ pub fn validate(questions: &[Question]) -> Result<()> {
     Ok(())
 }
 
+pub const MARGIN_TOKENS: usize = 256;
+
+/// Tokens left for `state`: the window, less the questions, less the margin. Saturates at 0.
+pub fn budget(counter: &TokenCounter, context_tokens: usize, questions: &[Question]) -> usize {
+    context_tokens.saturating_sub(counter.count(&wire::questions_json(questions)) + MARGIN_TOKENS)
+}
+
+/// `validate`, then the fit. Every Decider calls it before anything else.
+pub fn check(counter: &TokenCounter, context_tokens: usize, state: &str, questions: &[Question]) -> Result<()> {
+    validate(questions)?;
+    let (n, b) = (counter.count(state), budget(counter, context_tokens, questions));
+    if n > b {
+        return Err(refuse(format!("the state is {n} tokens and {b} fit")));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +231,41 @@ mod tests {
     fn the_refusal_names_the_question() {
         let Err(Error::Validation(m)) = validate(&[choice("pick_me", &["a"])]) else { panic!() };
         assert!(m.contains("pick_me") && m.starts_with("decide: "), "{m}");
+    }
+
+    fn noul_q() -> [Question; 1] {
+        [Question::noul("verdict", "Is it?")]
+    }
+    #[test]
+    fn the_budget_is_the_window_less_questions_and_margin() {
+        let c = TokenCounter::default();
+        let qs = noul_q();
+        assert_eq!(budget(&c, 8192, &qs), 8192 - c.count(&wire::questions_json(&qs)) - 256);
+    }
+    #[test]
+    fn a_window_smaller_than_its_questions_leaves_nothing() {
+        assert_eq!(budget(&TokenCounter::default(), 100, &noul_q()), 0);
+    }
+    #[test]
+    fn a_state_at_the_budget_fits_and_one_past_it_does_not() {
+        let c = TokenCounter::default();
+        let qs = noul_q();
+        let b = budget(&c, 2048, &qs);
+        let mut state = String::new();
+        while c.count(&state) < b {
+            state.push('x');
+        }
+        assert_eq!(c.count(&state), b);
+        assert!(check(&c, 2048, &state, &qs).is_ok());
+        while c.count(&state) <= b {
+            state.push('x');
+        }
+        let n = c.count(&state);
+        let Err(Error::Validation(m)) = check(&c, 2048, &state, &qs) else { panic!() };
+        assert!(m.contains(&n.to_string()) && m.contains(&b.to_string()), "{m}");
+    }
+    #[test]
+    fn check_refuses_invalid_questions_first() {
+        assert!(matches!(check(&TokenCounter::default(), 2048, "x", &[]), Err(Error::Validation(_))));
     }
 }
