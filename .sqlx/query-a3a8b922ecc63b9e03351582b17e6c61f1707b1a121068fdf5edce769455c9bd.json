@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO decide_evidence (event_id, rank, artifact_id, bears, bearing, joint, n, read)\n                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "a3a8b922ecc63b9e03351582b17e6c61f1707b1a121068fdf5edce769455c9bd"
+}

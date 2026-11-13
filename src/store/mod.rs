@@ -6,6 +6,7 @@ pub mod auth;
 pub mod context;
 pub mod control;
 pub mod corpora;
+pub mod decisions;
 pub mod eval_runs;
 pub mod feedback;
 pub mod gaps;

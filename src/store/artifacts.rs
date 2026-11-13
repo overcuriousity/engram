@@ -1703,6 +1703,30 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Ids it does not know are absent from the map.
+    pub async fn created_at_among(
+        &self,
+        artifact_ids: &[String],
+    ) -> Result<std::collections::HashMap<String, i64>> {
+        if artifact_ids.is_empty() {
+            return Ok(Default::default());
+        }
+        let marks = std::iter::repeat_n("?", artifact_ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        // Only a counted run of `?` is spliced; values are bound.
+        // runtime: one placeholder per item in the IN list.
+        let mut q = sqlx::query_as::<_, (String, i64)>(sqlx::AssertSqlSafe(format!(
+            "SELECT id, created_at FROM artifacts WHERE id IN ({marks})"
+        )));
+        for id in artifact_ids {
+            q = q.bind(id);
+        }
+        Ok(q.fetch_all(&self.pool).await?.into_iter().collect())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

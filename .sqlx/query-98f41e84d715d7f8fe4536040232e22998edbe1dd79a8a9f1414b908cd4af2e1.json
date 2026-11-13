@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decide_events SET judged_at = ?, verdict = ?, correct = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "98f41e84d715d7f8fe4536040232e22998edbe1dd79a8a9f1414b908cd4af2e1"
+}
