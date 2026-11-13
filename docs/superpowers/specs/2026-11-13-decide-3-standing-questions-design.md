@@ -61,8 +61,10 @@ What it is for, concretely:
 
 ## Constraints
 
-- At most eight standing questions per user: one more request per artifact,
-  beside the one for spec 2's four readings.
+- At most eight standing questions per user. They ride in the same request
+  as spec 2's readings: on the owner's server a question added to a state
+  already being read costs about 0.1 s, while a separate request would read
+  the artifact again.
 - Standing questions are readings in spec 2's sense: stored in
   `artifact_readings`, matched at `match_at`, never banded, never an unsure
   row.
@@ -111,7 +113,7 @@ Would match 6 of 20 tried
   no  41   Kitchen measurements
   no  12   Qdrant sizing
   …
-[ Save ]   Asking the whole base takes about 2 min (1,840 notes).
+[ Save ]   Asking the whole base takes about 15 min (1,840 notes).
 ```
 
 - **Try** asks the question of 20 artifacts: the 12 nearest to the question's
@@ -119,7 +121,11 @@ Would match 6 of 20 tried
   where matching starts.
 - Each tried row opens the artifact. The person adjusts the wording and tries
   again; nothing is stored until Save.
-- The estimate is the note count times the measured time per reading.
+- The estimate is the note count times the measured time per reading: about
+  half a second for a note of passage size on the owner's server, so a trial
+  of 20 takes about ten seconds and shows its rows as they arrive. The
+  backfill of a new question re-reads every artifact once; it runs in the
+  scan, inside spec 2's `max_per_tick`, and yields to the person.
 - With no trial run, Save runs one first.
 
 ## Where the answers show

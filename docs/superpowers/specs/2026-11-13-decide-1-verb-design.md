@@ -10,7 +10,7 @@ File and line references come from a read of `522f26aa`; verify before relying.
 Search returns passages. Ask returns prose. Neither returns a *verdict*: which
 of these options do my notes support, and how firmly. Decision models answer
 exactly that: they take a situation and typed questions and return a probability
-for each allowed answer, in tens of milliseconds, with no text.
+for each allowed answer, with no text, at a fraction of a chat model's cost.
 
 engram's part is the situation. It has the retrieval; the decision model has
 the judgement. Decide puts the two together: the person (or an agent, or
@@ -42,9 +42,10 @@ Known and unknown:
   concentrated the distribution is, not whether it is right.
 - Clef-flash is weak at many-class classification (vendor benchmark:
   CLINC150 macro-F1 67 against 97 for Clef). Keep option sets small.
-- Not documented anywhere read: limits on questions or options per request,
-  behaviour on German text, option-order bias, parallel slots in llama.cpp.
-  Stage 0 measures them.
+- The owner's instance was probed on 2026-11-13; see "Measured". The two
+  facts that shape this design: a call costs about 1.1 ms per input token
+  (not the vendor's 39 ms), and requests run one at a time. Time is spent on
+  state tokens; an extra question on the same state costs about 0.1 s.
 
 ## Goals
 
@@ -60,7 +61,7 @@ Known and unknown:
 ## Non-goals
 
 - Images as state, and Jev's `box` type.
-- More than one question in the web UI. The API takes up to seven.
+- More than one question in the web UI. The API takes up to eight.
 - Saved or recurring questions (spec 3). Background use (spec 2).
 - Any change to magicshell. Its use of this API is its own spec; the contract
   here is written so that it can.
@@ -115,8 +116,8 @@ model = "clef-flash:9b-q8_0-8192"
 context_tokens = 8192
 timeout_secs = 30
 # api_key = ""
-# Requests in flight at once; match the server's slots.
-parallel = 4
+# Requests in flight at once; match the server's slots. The owner's has one.
+parallel = 1
 ```
 
 Not tier-based: a decision endpoint is not a chat endpoint.
@@ -136,16 +137,20 @@ pub trait Decider: Send + Sync {
 - `Answer::Choice { pick, probabilities, confidence }`, `Answer::Score {
   score, probabilities, confidence }`, `Answer::Noul { yes }`. Probabilities are
   returned in the order the options were given.
-- Validation mirrors magicshell: 1 to 8 questions, keys `[a-z0-9_]{1,30}`,
-  2 to 8 options, 2 to 10 levels, unique option names. Its 8000-character cap
-  on state is not mirrored; the token budget below is the limit.
+- Validation: 1 to 16 questions (the server took 64), keys
+  `[a-z0-9_]{1,30}`, 2 to 8 options, 2 to 10 levels (the server enforces 10),
+  unique option names, `instructions` never empty (the server requires them).
+  magicshell's 8000-character cap on state is not mirrored; the token budget
+  below is the limit.
 - A request that would exceed `context_tokens` is refused before it is sent.
   `decide::budget(questions) -> usize` gives the tokens left for `state` after
   the questions and a 256-token margin.
 - `HttpDecider`, plus `FakeDecider` (fixed answers) and `ScriptedDecider`
   (queue, records requests) in `infer/fake.rs`.
-- Retries follow `infer/retry.rs`. A reply that does not parse is an error,
-  never a guess.
+- Retries follow `infer/retry.rs`; `429` is retried with backoff (the owner's
+  proxy answers it to a burst). The server reports an oversized input as
+  `500`, which is why the client refuses first. A reply that does not parse is
+  an error, never a guess.
 
 ### Pacing
 
@@ -157,30 +162,34 @@ or the turn may have up to `parallel` requests in flight.
 
 ### Swapped reads
 
-A `choice` asked with its options reversed can answer differently. A *swapped
-read* asks twice, forward and reversed, and returns the mean distribution and
-whether both picks agreed. It is a helper on top of `Decider`, used wherever a
-choice decides something.
+A `choice` asked with its options reversed can answer differently (measured:
+the same pick, but 0.50 one way and 0.76 the other). A *swapped read* puts the
+question into the request twice, options forward and reversed, and returns the
+mean distribution and whether both picks agreed. One request, about 0.1 s
+more. It is a helper on top of `Decider`, used wherever a choice decides
+something.
 
 ## How a decision is made
 
 Input: the question text `q`, typed questions (default: one `noul` whose
 instructions are `q`), an optional caller `situation`, the usual filters.
 
-1. **Retrieve.** `search_with` on `q`, `limit` passages (default 16, max 32),
+1. **Retrieve.** `search_with` on `q`, `limit` passages (default 8, max 16),
    reranked as configured, retired artifacts excluded, artifacts whose origin
    is a kept decision excluded.
 2. **Prior.** One call with the situation alone as state (or a fixed "No
    information." when there is none). Kept for display only.
-3. **Single reads.** One call per passage, `parallel` at a time. State: the
+3. **Single reads.** One call per passage, `parallel` at a time, each result
+   sent on as it arrives so the rail fills while the person waits. State: the
    situation, then the one excerpt with its title and capture date. Questions:
    the caller's, plus `bears`, a `noul`: "Does this excerpt contain information
    that helps answer the question: «q»?".
 4. **Evidence.** Passages with `bears >= decide.bears_min` (0.5), strongest
    first. None: standing `not_held`, no joint read, no answers.
-5. **Joint read.** Evidence packed strongest-first into the state budget;
-   what does not fit is counted as `dropped`. The caller's questions are asked
-   once; a `choice` gets a swapped read. This is the verdict.
+5. **Joint read.** Evidence packed strongest-first into
+   `decide.joint_tokens` (2500, never more than the state budget); what does
+   not fit is counted as `dropped`. The caller's questions are asked once; a
+   `choice` gets a swapped read. This is the verdict.
 6. **Standing**, per question, on the joint answer. *Top* is the largest
    probability (for `noul`, the larger of yes and no).
    - `split`: the swapped picks disagree, or evidence passages whose own pick
@@ -202,11 +211,14 @@ Excerpt 1: <title> (captured 2026-09-14)
 Excerpt 2: …
 ```
 
-Cost at defaults: 1 prior, 16 single reads, 1 or 2 joint reads. Stage 0 says
-what that is in seconds on the owner's server.
+Cost at defaults on the owner's server: prior 0.2 s, eight single reads of a
+400-token passage about 0.6 s each, a joint read of up to 2500 tokens about
+2.7 s. Roughly 8 s, of which the person watches the evidence arrive for 5.
+The defaults are a time budget: tokens read, times 1.1 ms.
 
 ```toml
 [decide]
+joint_tokens = 2500
 bears_min = 0.5
 settled_at = 0.80
 split_at = 0.34
@@ -233,14 +245,14 @@ yes/no is selected, so a second press (or Enter) runs it.
 Result, in the pane, with the evidence in the rail:
 
 ```
-Pane                                        Rail · Decided from 6 of 16
+Pane                                        Rail · Decided from 6 of 8
   Should I keep the bge-m3 embedder?
                                              1 Reindex notes 09/14     keep
   keep             ████████████░░░  81       2 Embedder comparison     keep
   switch to gemma  ███░░░░░░░░░░░░  19       3 GPU budget            switch
                    ▲ without notes: 55       4 Qdrant sizing           keep
   Settled.                                   …
-  [Right] [Wrong] [Nothing here] [Keep]      10 more did not bear on it
+  [Right] [Wrong] [Nothing here] [Keep]      2 more did not bear on it
 ```
 
 - One bar per option or level; yes/no draws two. Weights are whole numbers
@@ -254,9 +266,11 @@ Pane                                        Rail · Decided from 6 of 16
 - `Split` lists both sides in the rail, grouped by pick.
 - Bars are a new component in `73-components.css`; each has a text equivalent
   for screen readers. No animation.
-- Progress while running: "Reading 16 passages…", then the result. Transport
-  follows Ask (park, then `EventSource`), with events `retrieved`, `evidence`,
-  `done`, `error`.
+- While running, rail rows appear one by one as passages are read, each with
+  its pick or "does not bear"; the pane says "Reading 3 of 8", then "Weighing
+  6 together", then the result. Transport follows Ask (park, then
+  `EventSource`), with events `retrieved`, `read` (one per passage), `done`,
+  `error`. `/api/v1/decide/stream` sends the same frames.
 
 Buttons:
 
@@ -290,7 +304,7 @@ Buttons:
     }
   },
   "situation": "The GPU has 12 GB.",
-  "limit": 16,
+  "limit": 8,
   "tags": [],
   "category": null,
   "explain": false
@@ -301,8 +315,7 @@ Buttons:
 - `questions` is System One's own shape, so a client that already builds those
   (magicshell) passes them through. Absent: `{"verdict": {"type": "noul",
   "instructions": q}}`. A question without `instructions` uses `q`. The key
-  `bears` is reserved, and since a single read carries it, a caller may send
-  at most seven questions.
+  `bears` is reserved. A caller may send at most eight questions.
 - `situation` is the caller's own state, at most 2000 tokens.
 
 ```json
@@ -319,7 +332,7 @@ Buttons:
                   "read": { "verdict": { "type": "choice", "choice": "keep",
                             "probabilities": { "keep": 0.9, "switch": 0.1 },
                             "confidence": 0.8 } } } ],
-  "read": 16,
+  "read": 8,
   "dropped": 0,
   "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
   "event_id": "…"
@@ -369,13 +382,10 @@ calibration; nothing in this spec does.
 
 Each ships alone.
 
-0. **Probe.** A script in `scripts/` (magicshell's `probe.sh` is the model)
-   that, against the configured endpoint, measures: latency for a 400-token and
-   a 7000-token state; time for 16 requests in parallel; the largest question
-   count and option count accepted; the same three questions in German; and how
-   often a reversed option order changes the pick over a small fixed set. Its
-   output goes into this file under "Measured". Defaults above are adjusted to
-   it before stage 2.
+0. **Probe.** Done by hand on 2026-11-13; see "Measured". What remains is to
+   keep it: a script in `scripts/` (magicshell's `probe.sh` is the model) that
+   repeats those measurements against the configured endpoint, so a new server
+   or quantization can be checked in a minute.
 1. **Foundation.** Role, config, `Decider`, HTTP client, fakes, swapped reads,
    budget, boot log line, `--print-config`.
 2. **Core and REST.** `Core::decide`, storage, `/api/v1/decide` and follow-ups,
@@ -395,6 +405,8 @@ Each ships alone.
 ## Calls made by the designer
 
 - Approach 2, and the three thresholds with their defaults.
+- Eight passages and a 2500-token joint read by default, from the measured
+  cost per token: about 8 s a decision.
 - A prior call on every decision, for display.
 - Swapped reads for every `choice` joint read.
 - The reserved question key `bears` and its wording.
@@ -414,8 +426,50 @@ Each ships alone.
 - A request that cannot fit the context is refused locally; a test proves no
   HTTP call was made.
 - The checks in `AGENTS.md` pass, including the browser layout test at 390 px.
-- "Measured" is filled in.
+- The probe script reproduces "Measured" on the owner's endpoint.
 
 ## Measured
 
-Empty until stage 0 has run.
+On the owner's instance, 2026-11-13: `clef-flash:9b-q8_0-8192`, answering as
+`ggml-org/Clef-Flash-GGUF:Q8_0`. Synthetic notes, small samples: indications,
+not benchmarks.
+
+**Cost**
+
+| Input tokens | Seconds |
+|---|---|
+| 146 (near-empty state, one question) | 0.21 |
+| 572 | 0.53 |
+| 2585 | 2.4 |
+| 5025 | 5.1 |
+| 7770 | 8.7 |
+
+- About 1.1 ms per input token; a request has about 140 tokens of overhead.
+- Questions are cheap once the state is read: 1, 2, 4 questions on a
+  2585-token state took 2.45, 2.53, 2.77 s. 64 questions on a short state: 6 s.
+- No caching between requests: the same state with a new question costs the
+  same again.
+- No parallelism: 16 requests of 572 tokens took 11.3 s one at a time, 9.8 s
+  four at a time, 10.0 s eight at a time. Sixteen at once drew `429`s.
+- The first call after idle took 7 s.
+- Identical requests return identical numbers.
+
+**Limits**
+
+- 64 questions and 32 options were accepted. Score levels above 10 are refused
+  (`400`). `instructions` is required (`400` without). An empty state is fine.
+- 12,345 tokens of input: `500`, "input … is too large to process".
+
+**Behaviour**
+
+- `bears` separates cleanly: 0.94 to 0.97 on passages that answer the question,
+  0.02 on unrelated ones, the same in German.
+- With no information the model still leans: asked which of three ports a
+  service uses, it gave the first-listed option 0.77. With the two relevant
+  notes and an unrelated one it gave the newer note's port 0.98. This is why
+  nothing bearing means no verdict, and why the prior is shown.
+- Option order moved a correct pick's probability between 0.50 and 0.76; it
+  did not change a pick in ten pairs.
+- German notes with English questions scored within 0.05 of the English ones.
+- A fact placed at the start, middle or end of a 4400-token state was found
+  equally (0.96, 0.96, 0.97; a false variant 0.01 to 0.04).

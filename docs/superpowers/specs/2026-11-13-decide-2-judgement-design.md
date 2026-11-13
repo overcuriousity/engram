@@ -16,13 +16,15 @@ sure it was. Because the calls are expensive they are rationed: five dedupe
 judgements per tick, ten link judgements per sweep, twenty reap judgements a
 day, and only pairs above 0.88 cosine are looked at at all.
 
-A decision model makes the same judgement in tens of milliseconds and returns a
-probability with it. Two things follow.
+A decision model makes the same judgement in about half a second on the
+owner's server (measured: a pair of short notes, both option orders, 0.54 s),
+writes nothing that has to be parsed and repaired, and returns a probability
+with it. Two things follow.
 
 - **Judgement leaves the chat model entirely.** The chat model keeps the one
   thing only it can do, writing text, and writes only after a decision says
   the text is wanted and only if a second decision says the text is faithful.
-- **Judgement stops being rationed.** The base can afford to look at far more
+- **Judgement is rationed far less.** The base can afford to look at far more
   of itself, and a probability on every judgement means it can act when sure,
   ask the person when torn, and leave the rest alone.
 
@@ -169,7 +171,10 @@ a base with a backlog most act decisions wait at first. Insights shows the
 waiting count per question. Raising `evolve.max_actions_per_day` is the
 owner's lever; this spec does not move it.
 
-Starting values, all in config:
+Starting values, all in config. They are placeholders: on ten probe pairs
+correct picks came back between 0.50 and 0.95, so 0.90 as it stands would send
+almost everything to ask. The replay (stage 2) sets each question's real
+starting values before anything acts.
 
 ```toml
 [decide.bands]
@@ -227,10 +232,13 @@ Dedupe and Reap judge and write in one unit today, and both are in
 writer unit (merge, rescue) armed by an act decision. Only the writer units
 stay in `GENERATORS`. Decision units are not held back when generation is
 shut and do not wait out `pacing.cooldown_secs`; they take the background
-turn as spec 1 describes. They share one budget, `decide.max_per_tick` (200). The existing
+turn as spec 1 describes. They share one budget, `decide.max_per_tick` (60):
+at roughly a second a decision that is about a minute of the server per tick,
+and the server runs one request at a time, so a tick stops when a person's
+request takes the lease. The existing
 per-stage caps (`consolidate.max_dedupe_per_tick`, `associate.judge_per_sweep`,
 `reap.max_judged_per_run`) stay as keys, now capping decisions, with raised
-defaults (50, 100, 200). Writer caps (`reap.max_rescues_per_run`, the cooldown)
+defaults (20, 30, 50). Writer caps (`reap.max_rescues_per_run`, the cooldown)
 are untouched.
 
 ### When something does not fit
@@ -304,7 +312,8 @@ Asked of every new artifact on both capture paths, and of existing ones in the
 idle pass (see "The scan"). Readings go to `artifact_readings`, not to
 `decisions`: no bands, no unsure rows, no waiting.
 
-- `category`: choice over the eight `CATEGORIES`. The top pick is taken
+- `category`: choice over the eight `CATEGORIES`, each with a one-line
+  description (bare names scored poorly in the probe). The top pick is taken
   whatever its probability, as the writer always supplied one. Replaces the
   synthesizer's field; also gives verbatim passages a category.
 - `pinned`: noul, keeping today's meaning (`prompt.rs`: a decision or a
@@ -315,7 +324,11 @@ idle pass (see "The scan"). Readings go to `artifact_readings`, not to
 - `self_contained`: noul, "Can this be understood without the document it
   came from?"
 
-`time_bound` and `self_contained` are taken at 0.5.
+`time_bound` and `self_contained` are taken at 0.5. In the probe
+`self_contained` separated a fragment (0.23) from whole notes (0.70 to 0.82);
+`time_bound` as worded did not work (a dated port move 0.14, a reminder
+0.75) and must be reworded and shown to work in the replay, or dropped along
+with its uses.
 
 ### Window pre-read: before synthesis
 
@@ -358,8 +371,12 @@ request with two `noul` questions, state "Original(s)" then "Rewrite":
 - `complete`: "Does the rewrite state everything the originals state?"
 - `adds_nothing`: "Does the rewrite state only what the originals state?"
 
-Both at `act_at` or the write is refused exactly as a lost literal is refused
-today (`merge::losses`, `verify::missing_numbers`, which stay). A refusal is a
+The write is refused when either is below `decide.refuse_below` (0.25),
+exactly as a lost literal is refused today. A refusal line, not a pass line:
+in the probe a faithful rewrite scored only 0.55 on `complete` and 0.87 on
+`adds_nothing`, while one that dropped a sentence scored 0.03 and one that
+added a fact 0.04. The check catches the bad; it cannot certify the good.
+(Literal checks as today: `merge::losses`, `verify::missing_numbers`, which stay.) A refusal is a
 decision row with outcome `refused`. For generate, only `adds_nothing` applies.
 A pair that does not fit is `too_long` and the literal checks alone decide, as
 today.
@@ -414,6 +431,8 @@ help someone who searched for: «q»?"
   it is, one per search (`search_events.verdict`, `expect_id`), and is never
   touched: its writers guard on `judged_at IS NULL`, so a model verdict there
   would lock the person out.
+- Twenty candidates are about ten seconds of the server per recorded search,
+  so labelling runs oldest-unlabelled first inside `max_per_tick` and may lag.
 - A candidate is *relevant by the model* at `yes >= act_at`. For a search,
   model recall@10 is the share of its relevant candidates ranked in the first
   ten, and model MRR the reciprocal rank of the first. A search with no
@@ -481,6 +500,7 @@ Each ships alone, in this order.
 
 - One decision layer rather than per-stage swaps.
 - The three bands, their starting thresholds, the caps and the lapse.
+- Post-write checks refuse below a low line instead of requiring a high one.
 - Act decisions over the daily cap wait and are applied later; they are not
   re-asked and not handed to the person.
 - Readings are not decisions: `category` takes its top pick, the others a
@@ -511,10 +531,45 @@ Each ships alone, in this order.
   disagrees, nothing acts and an unsure row appears.
 - With `[infer.decide]` set and no `[infer.synthesize]`, a duplicate pair ends
   as an unsure row with keep-one buttons and no chat call is attempted.
-- A writer result that fails `adds_nothing` is not stored.
+- A writer result scoring below `refuse_below` on `adds_nothing` is not
+  stored.
 - The replay has run on the owner's base and "Measured" is filled in.
 - The checks in `AGENTS.md` pass.
 
 ## Measured
+
+### Probe, 2026-11-13
+
+On the owner's instance, with synthetic notes and one case per row:
+indications only. Cost and limits are in spec 1's "Measured".
+
+`pair_relation` as drafted, forward and reversed option order in one request,
+0.5 s a pair:
+
+| Pair | Expected | Forward | Reversed |
+|---|---|---|---|
+| same fact, reworded | duplicate | duplicate 0.87 | duplicate 0.82 |
+| older, then a dated move | b_replaces_a | b_replaces_a 0.77 | b_replaces_a 0.78 |
+| the same, members swapped | a_replaces_b | a_replaces_b 0.86 | a_replaces_b 0.92 |
+| two different ports, no dates to tell | conflict | conflict 0.50 | conflict 0.76 |
+| unrelated | distinct | distinct 0.94 | distinct 0.95 |
+| two empty stubs | vacuous | distinct 0.49 | vacuous 0.35 |
+
+The first four in German: the same picks, within 0.05.
+
+- Picks were right in nine of ten; `vacuous` was the miss and split under the
+  swap, which is the swap doing its job.
+- Probabilities for right picks ran from 0.50 to 0.95. Thresholds cannot be
+  guessed; they have to come from the replay.
+
+Post-write check (`complete`, `adds_nothing`): faithful 0.55 / 0.87, one
+sentence dropped 0.03 / 0.41, one fact added 0.60 / 0.04.
+
+Readings: `asks_reminder` 0.97 on a reminder, 0.00 to 0.01 elsewhere.
+`self_contained` 0.23 on a fragment, 0.70 to 0.82 on whole notes. `time_bound`
+unreliable as worded. `category` with bare option names: right on a
+configuration and a procedure, "other" at low confidence on the rest.
+
+### Replay
 
 Empty until stage 2 has run.
