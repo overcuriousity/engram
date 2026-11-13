@@ -1,6 +1,6 @@
 //! `Decider` over System One's `POST /systemone`.
 
-use super::{check, wire, Answers, Decider, Question};
+use super::{Answers, Decider, Question, check, wire};
 use crate::config::DecideRole;
 use crate::error::{Error, Result};
 use crate::infer::budget::TokenCounter;
@@ -49,7 +49,10 @@ impl Decider for HttpDecider {
             role: "decide",
             detail: "the decider is closed".into(),
         })?;
-        let text = transiently(DECIDE_RETRY_BUDGET, || self.ep.post_text("systemone", body.clone())).await?;
+        let text = transiently(DECIDE_RETRY_BUDGET, || {
+            self.ep.post_text("systemone", body.clone())
+        })
+        .await?;
         wire::parse_response(&text, questions)
     }
 
@@ -71,7 +74,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn fixture() -> Value {
-        let f = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/systemone/response-noul.json");
+        let f = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/systemone/response-noul.json"
+        );
         serde_json::from_str(&std::fs::read_to_string(f).unwrap()).unwrap()
     }
     fn noul_ok() -> String {
@@ -91,7 +97,9 @@ mod tests {
         }
     }
     async fn serve(server: &MockServer, r: ResponseTemplate, times: Option<u64>) {
-        let m = Mock::given(method("POST")).and(path("/systemone")).respond_with(r);
+        let m = Mock::given(method("POST"))
+            .and(path("/systemone"))
+            .respond_with(r);
         match times {
             Some(n) => m.expect(n).mount(server).await,
             None => m.mount(server).await,
@@ -102,7 +110,9 @@ mod tests {
     }
     fn assert_noul(a: &Answers) {
         // The fixture goes through serde_json's default float parse, which is off by an ulp.
-        let Answer::Noul { yes } = a.answers["wet"] else { panic!("{:?}", a.answers["wet"]) };
+        let Answer::Noul { yes } = a.answers["wet"] else {
+            panic!("{:?}", a.answers["wet"])
+        };
         assert!((yes - 0.9784768909885947).abs() < 1e-12, "{yes}");
         assert_eq!(a.input_tokens, 140);
     }
@@ -117,7 +127,10 @@ mod tests {
             .expect(1)
             .mount(&s)
             .await;
-        let a = HttpDecider::new(&role(&s)).decide("", &[wet()]).await.unwrap();
+        let a = HttpDecider::new(&role(&s))
+            .decide("", &[wet()])
+            .await
+            .unwrap();
         assert_noul(&a);
     }
     #[tokio::test]
@@ -134,7 +147,9 @@ mod tests {
         serve(&s, ResponseTemplate::new(200), Some(0)).await;
         let mut r = role(&s);
         r.context_tokens = 1024;
-        let e = HttpDecider::new(&r).decide(&"word ".repeat(4000), &[wet()]).await;
+        let e = HttpDecider::new(&r)
+            .decide(&"word ".repeat(4000), &[wet()])
+            .await;
         assert!(matches!(e, Err(Error::Validation(_))));
     }
     #[tokio::test]
@@ -153,7 +168,12 @@ mod tests {
             .mount(&s)
             .await;
         serve(&s, ok(), None).await;
-        assert_noul(&HttpDecider::new(&role(&s)).decide("", &[wet()]).await.unwrap());
+        assert_noul(
+            &HttpDecider::new(&role(&s))
+                .decide("", &[wet()])
+                .await
+                .unwrap(),
+        );
         assert_eq!(s.received_requests().await.unwrap().len(), 2);
     }
     #[tokio::test]
@@ -161,14 +181,25 @@ mod tests {
         let s = MockServer::start().await;
         serve(&s, ResponseTemplate::new(500), None).await;
         let e = HttpDecider::new(&role(&s)).decide("", &[wet()]).await;
-        assert!(matches!(e, Err(Error::Inference { role: "decide", .. })), "{e:?}");
+        assert!(
+            matches!(e, Err(Error::Inference { role: "decide", .. })),
+            "{e:?}"
+        );
     }
     #[tokio::test]
     async fn a_reply_that_does_not_parse_is_refused_once() {
         let s = MockServer::start().await;
-        serve(&s, ResponseTemplate::new(200).set_body_string("not json"), Some(1)).await;
+        serve(
+            &s,
+            ResponseTemplate::new(200).set_body_string("not json"),
+            Some(1),
+        )
+        .await;
         let e = HttpDecider::new(&role(&s)).decide("", &[wet()]).await;
-        assert!(matches!(e, Err(Error::InferenceRejected { role: "decide", .. })), "{e:?}");
+        assert!(
+            matches!(e, Err(Error::InferenceRejected { role: "decide", .. })),
+            "{e:?}"
+        );
     }
     #[tokio::test]
     async fn the_key_is_sent_as_a_bearer() {
@@ -190,7 +221,12 @@ mod tests {
         let mut r = role(&s);
         r.api_key = Some("".into());
         HttpDecider::new(&r).decide("", &[wet()]).await.unwrap();
-        assert!(s.received_requests().await.unwrap()[0].headers.get("authorization").is_none());
+        assert!(
+            s.received_requests().await.unwrap()[0]
+                .headers
+                .get("authorization")
+                .is_none()
+        );
     }
     #[tokio::test]
     async fn one_slot_means_one_request_at_a_time() {

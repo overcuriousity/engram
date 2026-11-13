@@ -6,9 +6,11 @@ use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 
 pub mod http;
+pub mod swapped;
 pub mod wire;
 
 pub use http::HttpDecider;
+pub use swapped::{decide_swapped, swapped_questions, SwappedAnswers};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Question {
