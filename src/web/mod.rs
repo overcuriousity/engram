@@ -112,6 +112,7 @@ pub fn router(state: AppState) -> Router {
         .merge(assets::assets_router())
         .merge(auth_routes::auth_router())
         .merge(workspace::routes())
+        .merge(decide::routes())
         .merge(ui::ui_router())
         .merge(settings::routes())
         .merge(corpus::routes())

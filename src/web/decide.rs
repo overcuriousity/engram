@@ -1,12 +1,28 @@
 //! Decide in the workspace: a decision as bars and a standing, the notes it rests on in the rail.
 
 use askama::Template;
+use axum::extract::{Form, Path, State};
+use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+use axum::response::{Html, IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
 
 use crate::core::decide::standing::pick;
-use crate::core::decide::{Decision, Evidence, PassageRead, Standing};
+use crate::core::decide::verdict::Correct;
+use crate::core::decide::wire::{DecideBody, stored_answer, stored_questions};
+use crate::core::decide::{
+    DecideEvent, Decision, Evidence, PassageRead, Standing, Verdict, normalised_questions,
+};
 use crate::error::{Error, Result};
 use crate::infer::decide::{Answer, Kind, Question};
+use crate::store::asks::AskVerdict;
+use crate::store::decisions::StoredDecision;
+use crate::store::feedback::Door;
+use crate::tenants::Tenant;
 use crate::web::markdown::stand_in_title;
+use crate::web::state::AppState;
+use crate::web::ui_error::UiResult;
+use crate::web::workspace::verdict_label;
 
 pub struct Bar {
     pub label: String,
@@ -291,6 +307,186 @@ pub fn verdict_bar(d: &Decision, verdict: Option<&str>, correct: Option<&str>) -
 
 pub fn verdict_fragment(bar: &VerdictBar) -> Result<String> {
     bar.render().map_err(|e| Error::Internal(e.to_string()))
+}
+
+pub fn routes() -> Router<AppState> {
+    Router::new()
+        // The POST parks the question and returns an id; an `EventSource` spends it.
+        .route("/ui/decide", post(decide_submit))
+        .route("/ui/decide/{id}/stream", get(decide_stream))
+        .route("/ui/decide/{id}/verdict", post(decide_verdict))
+}
+
+/// `/api/v1/decide`'s body; the web asks one question.
+async fn decide_submit(
+    State(st): State<AppState>,
+    tenant: Tenant,
+    Json(body): Json<DecideBody>,
+) -> UiResult<Response> {
+    let req = body.into_request()?;
+    if req.questions.len() > 1 {
+        return Err(
+            Error::Validation("decide: the web asks one question at a time.".into()).into(),
+        );
+    }
+    // Refused before anything is parked.
+    normalised_questions(&req)?;
+    let id = st.decide_handoff_park(req, &tenant.user.subject);
+    Ok(Json(serde_json::json!({ "id": id })).into_response())
+}
+
+/// As `ask_stream`: unknown, spent, expired or another subject's id is one answer.
+async fn decide_stream(
+    State(st): State<AppState>,
+    tenant: Tenant,
+    Path(handoff): Path<String>,
+) -> UiResult<Response> {
+    use tokio_stream::StreamExt as _;
+
+    let req = st
+        .decide_handoff_take(&handoff, &tenant.user.subject)
+        .ok_or(Error::NotFound)?;
+    // As the pipeline normalises them, so a row names the options `done` names.
+    let q = normalised_questions(&req)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::Internal("a decision without a question".into()))?;
+    let core = tenant.core.clone();
+    let origin = Door::Ui.by(tenant.user.subject);
+    let events = async_stream::stream! {
+        let s = core.decide_events(&req, origin);
+        tokio::pin!(s);
+        while let Some(ev) = s.next().await {
+            // Terminal: the `try_stream!` producer ends at its first error.
+            yield Ok::<_, Error>(ev.and_then(|e| sse_event(e, &q)).unwrap_or_else(|e| error_event(&e)));
+        }
+    };
+    // Kept alive: sixteen reads on a slow model outlast a proxy's idle timeout.
+    Ok(Sse::new(events)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// JSON for every payload but `error`: SSE frames data by line.
+fn sse_event(ev: DecideEvent, q: &Question) -> Result<SseEvent> {
+    let (name, data) = match ev {
+        DecideEvent::Retrieved { passages } => {
+            ("retrieved", serde_json::json!({ "passages": passages }))
+        }
+        DecideEvent::Read(r) => (
+            "read",
+            serde_json::json!({
+                "rank": r.rank,
+                "of": r.of,
+                "bearing": r.bearing,
+                "row": reading_row(&r, q)?,
+            }),
+        ),
+        DecideEvent::Done(d) => (
+            "done",
+            serde_json::json!({
+                "event_id": d.event_id,
+                "html": decision_fragment(&d, None)?,
+                "rail": rail_fragment(&d)?,
+                "rail_head": rail_head(&d),
+            }),
+        ),
+    };
+    Ok(SseEvent::default().event(name).data(data.to_string()))
+}
+
+fn error_event(e: &Error) -> SseEvent {
+    if e.status().is_server_error() {
+        tracing::error!(error = %e, "decide stream failed");
+    }
+    SseEvent::default().event("error").data(e.client_message())
+}
+
+#[derive(serde::Deserialize)]
+struct VerdictForm {
+    verdict: String,
+    /// With `wrong`: an option name, a level index, `yes`, `no`, or `-` for not sure.
+    #[serde(default)]
+    correct: Option<String>,
+}
+
+fn correction(q: &Question, c: &str) -> Result<Correct> {
+    Ok(match (&q.kind, c) {
+        (Kind::Score { .. }, _) => {
+            Correct::Level(c.parse().map_err(|_| {
+                Error::Validation("decide: a level is corrected by its index.".into())
+            })?)
+        }
+        (_, "yes") => Correct::Yes,
+        (_, "no") => Correct::No,
+        _ => Correct::Option(c.to_string()),
+    })
+}
+
+/// As much of the decision as the bar reads, from what was stored.
+fn recorded(s: &StoredDecision) -> Result<Decision> {
+    let questions = stored_questions(&s.questions)?;
+    let answers = match (&s.answers, questions.first()) {
+        (Some(a), Some(q)) if !s.not_held => stored_answer(q, a).map(|answer| {
+            vec![(
+                q.key.clone(),
+                Verdict {
+                    answer,
+                    swapped_agree: None,
+                },
+            )]
+        }),
+        _ => None,
+    };
+    Ok(Decision {
+        question: s.question.clone(),
+        questions,
+        answers,
+        prior: vec![],
+        standing: vec![],
+        evidence: vec![],
+        read: 0,
+        dropped: 0,
+        model: String::new(),
+        event_id: Some(s.id.clone()),
+        state: None,
+        reads: vec![],
+    })
+}
+
+/// The rules are `Core::judge_decision`'s; the answer is the re-rendered bar.
+async fn decide_verdict(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Form(f): Form<VerdictForm>,
+) -> UiResult<Response> {
+    let stored = tenant
+        .core
+        .store
+        .decision(&id)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let d = recorded(&stored)?;
+    let judged = match f.verdict.as_str() {
+        "none" => tenant.core.unjudge_decision(&id).await?,
+        v => {
+            let verdict = AskVerdict::parse(v)
+                .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
+            let correct = match (verdict, f.correct.as_deref(), d.questions.first()) {
+                (AskVerdict::Wrong, Some(c), Some(q)) if c != "-" => Some(correction(q, c)?),
+                _ => None,
+            };
+            tenant.core.judge_decision(&id, verdict, correct).await?
+        }
+    };
+    let verdict = judged.verdict.map(verdict_label);
+    // "Not sure" stores the verdict alone; the bar does not ask again.
+    let correct = judged
+        .correct
+        .or_else(|| (f.correct.as_deref() == Some("-")).then(|| "-".to_string()));
+    let mut bar = verdict_bar(&d, verdict.as_deref(), correct.as_deref());
+    bar.held = !stored.not_held;
+    Ok(Html(verdict_fragment(&bar)?).into_response())
 }
 
 #[cfg(test)]
@@ -713,5 +909,270 @@ mod tests {
         assert!(h.contains(r#"hx-vals='{"verdict":"wrong","correct":"a\u0027b"}'"#));
         assert!(h.contains(r#"hx-vals='{"verdict":"wrong","correct":"c\u003cd\u0026"}'"#));
         assert!(h.contains(">a&#39;b<") && h.contains(">c&#60;d&#38;<"));
+    }
+
+    use crate::core::decide::DecideRequest;
+    use crate::core::decide::tests::{deciding, marked, three_base};
+    use crate::web::test_support::{app_with_cookie, body_of, form, json_of};
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    async fn deciding_app(
+        rule: impl Fn(&str, &[Question]) -> crate::error::Result<crate::infer::decide::Answers>
+        + Send
+        + Sync
+        + 'static,
+    ) -> (axum::Router, String, crate::core::Core) {
+        let mut core = three_base().await;
+        core.learn.enabled = true;
+        deciding(&mut core, rule);
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        (app, cookie, core)
+    }
+
+    async fn post_decide(
+        app: &axum::Router,
+        cookie: &str,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/ui/decide")
+                    .method("POST")
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn park(app: &axum::Router, cookie: &str, body: serde_json::Value) -> String {
+        let res = post_decide(app, cookie, body).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        json_of(res).await["id"]
+            .as_str()
+            .expect("an id")
+            .to_string()
+    }
+
+    async fn stream(app: &axum::Router, cookie: &str, id: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/ui/decide/{id}/stream"))
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// `(event, data)` in order; data as sent.
+    fn frames(body: &str) -> Vec<(String, String)> {
+        body.split("\n\n")
+            .filter_map(|f| {
+                let event = f.lines().find_map(|l| l.strip_prefix("event:"))?.trim();
+                let data = f.lines().find_map(|l| l.strip_prefix("data:"))?.trim();
+                Some((event.to_string(), data.to_string()))
+            })
+            .collect()
+    }
+
+    async fn decided(app: &axum::Router, cookie: &str, body: serde_json::Value) -> String {
+        let id = park(app, cookie, body).await;
+        let body = body_of(stream(app, cookie, &id).await).await;
+        let (_, done) = frames(&body).pop().unwrap();
+        let done: serde_json::Value =
+            serde_json::from_str(&done).unwrap_or_else(|_| panic!("{body}"));
+        done["event_id"].as_str().expect("recorded").to_string()
+    }
+
+    async fn verdict(app: &axum::Router, cookie: &str, id: &str, body: &str) -> String {
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/decide/{id}/verdict"), cookie, body))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        body_of(res).await
+    }
+
+    fn three_options() -> serde_json::Value {
+        serde_json::json!({"q": "Keep bge-m3?", "questions": {"verdict": {"type": "choice",
+            "criteria": {"keep": "", "switch": "", "wait": ""}}}})
+    }
+
+    #[tokio::test]
+    async fn a_parked_decision_is_spent_once_and_only_by_its_owner() {
+        let st = crate::web::test_support::state_over(
+            crate::core::test_support::test_core().await,
+            crate::config::AuthMode::Local,
+        )
+        .await;
+        let req = DecideRequest {
+            q: "Keep?".into(),
+            ..Default::default()
+        };
+        let id = st.decide_handoff_park(req, "alice");
+        assert!(st.decide_handoff_take(&id, "bob").is_none());
+        assert_eq!(st.decide_handoff_take(&id, "alice").unwrap().q, "Keep?");
+        assert!(st.decide_handoff_take(&id, "alice").is_none(), "spent");
+    }
+
+    #[tokio::test]
+    async fn posting_a_question_parks_it_and_returns_an_id() {
+        let (app, cookie, _) = deciding_app(marked(0.9)).await;
+        let id = park(&app, &cookie, serde_json::json!({"q": "Keep bge-m3?"})).await;
+        assert!(!id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_question_is_refused() {
+        let (app, cookie, _) = deciding_app(marked(0.9)).await;
+        let res = post_decide(&app, &cookie, serde_json::json!({"q": "  "})).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn two_questions_are_refused_in_the_web_ui() {
+        let (app, cookie, _) = deciding_app(marked(0.9)).await;
+        let body = serde_json::json!({"q": "Keep?", "questions": {
+            "a": {"type": "noul"}, "b": {"type": "noul"}}});
+        let res = post_decide(&app, &cookie, body).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn the_stream_sends_rows_as_they_are_read_and_then_the_result() {
+        let (app, cookie, _) = deciding_app(marked(0.9)).await;
+        let id = park(&app, &cookie, serde_json::json!({"q": "Keep bge-m3?"})).await;
+        let res = stream(&app, &cookie, &id).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+        let f = frames(&body);
+        let names: Vec<&str> = f.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["retrieved", "read", "read", "read", "done"],
+            "{body}"
+        );
+        let v = |i: usize| serde_json::from_str::<serde_json::Value>(&f[i].1).unwrap();
+        assert_eq!(v(0), serde_json::json!({"passages": 3}));
+        for i in 1..4 {
+            let r = v(i);
+            assert_eq!(r["of"], 3);
+            assert!(r["rank"].is_number() && r["bearing"].is_boolean(), "{r}");
+            assert!(r["row"].as_str().unwrap().contains("rail-row"), "{r}");
+        }
+        let done = v(4);
+        assert!(done["html"].as_str().unwrap().contains("bar-track"));
+        assert!(done["rail"].as_str().unwrap().contains("rail-row"));
+        assert_eq!(done["rail_head"], "Decided from 2 of 3");
+        assert!(done["event_id"].is_string(), "{done}");
+    }
+
+    #[tokio::test]
+    async fn a_spent_id_is_not_found() {
+        let (app, cookie, _) = deciding_app(marked(0.9)).await;
+        let id = park(&app, &cookie, serde_json::json!({"q": "Keep bge-m3?"})).await;
+        body_of(stream(&app, &cookie, &id).await).await;
+        assert_eq!(
+            stream(&app, &cookie, &id).await.status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            stream(&app, &cookie, "nope").await.status(),
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn an_error_ends_the_stream_in_one_sentence() {
+        let (app, cookie, _) =
+            deciding_app(|_, _| Err(crate::error::Error::Internal("the rule erred".into()))).await;
+        let id = park(&app, &cookie, serde_json::json!({"q": "Keep bge-m3?"})).await;
+        let body = body_of(stream(&app, &cookie, &id).await).await;
+        let (name, data) = frames(&body).pop().unwrap();
+        assert_eq!(name, "error", "{body}");
+        assert!(
+            !data.contains("the rule erred"),
+            "an internal error stays in the log"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verdict_is_judged_and_undone_from_the_bar() {
+        let (app, cookie, _) = deciding_app(marked(0.9)).await;
+        let id = decided(&app, &cookie, serde_json::json!({"q": "Keep bge-m3?"})).await;
+        let h = verdict(&app, &cookie, &id, "verdict=right").await;
+        assert!(
+            h.contains("judged <b>right</b>") && h.contains(">Undo<"),
+            "{h}"
+        );
+        let h = verdict(&app, &cookie, &id, "verdict=none").await;
+        assert!(
+            h.contains(">Right<") && h.contains(">Wrong<") && h.contains(">Nothing here<"),
+            "{h}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_on_three_options_asks_then_takes_the_answer() {
+        let (app, cookie, core) = deciding_app(marked(0.9)).await;
+        let id = decided(&app, &cookie, three_options()).await;
+        let h = verdict(&app, &cookie, &id, "verdict=wrong").await;
+        assert!(
+            h.contains("Which is it?") && h.contains(">switch<") && h.contains(">wait<"),
+            "{h}"
+        );
+        let h = verdict(&app, &cookie, &id, "verdict=wrong&correct=switch").await;
+        assert!(
+            h.contains("it is switch") && !h.contains("Which is it?"),
+            "{h}"
+        );
+        let d = core.store.decision(&id).await.unwrap().unwrap();
+        assert_eq!(d.correct.as_deref(), Some(r#"{"verdict":"switch"}"#));
+        let h = verdict(&app, &cookie, &id, "verdict=wrong&correct=-").await;
+        assert!(
+            h.contains("judged <b>wrong</b>") && !h.contains("it is"),
+            "{h}"
+        );
+        assert!(!h.contains("Which is it?"), "{h}");
+    }
+
+    #[tokio::test]
+    async fn a_level_is_corrected_by_its_index() {
+        let (app, cookie, core) = deciding_app(marked(0.9)).await;
+        let body = serde_json::json!({"q": "How soon?", "questions": {"verdict": {"type": "score",
+            "criteria": ["can wait", "this month", "now"]}}});
+        let id = decided(&app, &cookie, body).await;
+        let h = verdict(&app, &cookie, &id, "verdict=wrong&correct=2").await;
+        assert!(h.contains("it is now"), "{h}");
+        let d = core.store.decision(&id).await.unwrap().unwrap();
+        assert_eq!(d.correct.as_deref(), Some(r#"{"verdict":2}"#));
+    }
+
+    #[tokio::test]
+    async fn a_right_verdict_from_the_bar_confirms_the_agreeing_notes() {
+        let (app, cookie, core) = deciding_app(marked(0.9)).await;
+        let id = decided(&app, &cookie, serde_json::json!({"q": "Keep bge-m3?"})).await;
+        let d = core.store.decision(&id).await.unwrap().unwrap();
+        let bearing: Vec<String> = d
+            .evidence
+            .iter()
+            .filter(|e| e.bearing)
+            .map(|e| e.artifact_id.clone())
+            .collect();
+        assert!(!bearing.is_empty());
+        verdict(&app, &cookie, &id, "verdict=right").await;
+        for a in &bearing {
+            let got = core.store.get_artifact(a).await.unwrap();
+            assert!(got.last_verified_at.is_some(), "{a} was not confirmed");
+        }
     }
 }

@@ -169,7 +169,7 @@ pub(crate) fn stored_questions(text: &str) -> Result<Vec<Question>> {
 }
 
 /// `q`'s answer in a stored `{key: answer}`, as `AnswerOut` wrote it; `None` when it does not read.
-pub(super) fn stored_answer(q: &Question, text: &str) -> Option<Answer> {
+pub(crate) fn stored_answer(q: &Question, text: &str) -> Option<Answer> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     let a = v.get(&q.key)?;
     let f = |k: &str| a.get(k).and_then(serde_json::Value::as_f64);

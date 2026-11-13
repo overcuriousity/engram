@@ -79,6 +79,7 @@ async fn two_tenant_app() -> (axum::Router, Signed, Signed, tempfile::TempDir) {
             ))),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     };
     (engram::web::router(state), a, b, dir)
 }

@@ -108,6 +108,7 @@ async fn seeded() -> Seeded {
             deployment: dep.clone(),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     };
     let app = engram::web::app(state, &dep)
         .layer(MockConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4000))));

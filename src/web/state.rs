@@ -24,10 +24,18 @@ pub struct AppState {
     /// `EventSource` is GET-only, and a mutating GET is replayable; a one-shot id is not.
     /// Each entry is answered for the subject who parked it alone.
     pub ask_handoff: Arc<Mutex<HashMap<String, ParkedAsk>>>,
+    /// Decide's, parked and spent as an ask's is.
+    pub decide_handoff: Arc<Mutex<HashMap<String, ParkedDecide>>>,
 }
 
 pub struct ParkedAsk {
     pub req: crate::core::ask::AskRequest,
+    pub subject: String,
+    pub at: Instant,
+}
+
+pub struct ParkedDecide {
+    pub req: crate::core::decide::DecideRequest,
     pub subject: String,
     pub at: Instant,
 }
@@ -59,6 +67,42 @@ impl AppState {
         subject: &str,
     ) -> Option<crate::core::ask::AskRequest> {
         let mut m = self.ask_handoff.lock().ok()?;
+        if m.get(id).is_some_and(|p| p.subject != subject) {
+            return None;
+        }
+        let p = m.remove(id)?;
+        (Instant::now().duration_since(p.at) < ASK_HANDOFF_TTL).then_some(p.req)
+    }
+
+    /// As `ask_handoff_park`.
+    pub fn decide_handoff_park(
+        &self,
+        req: crate::core::decide::DecideRequest,
+        subject: &str,
+    ) -> String {
+        let id = crate::store::new_id();
+        if let Ok(mut m) = self.decide_handoff.lock() {
+            let now = Instant::now();
+            m.retain(|_, p| now.duration_since(p.at) < ASK_HANDOFF_TTL);
+            m.insert(
+                id.clone(),
+                ParkedDecide {
+                    req,
+                    subject: subject.to_string(),
+                    at: now,
+                },
+            );
+        }
+        id
+    }
+
+    /// As `ask_handoff_take`: one shot, and only for the subject who parked it.
+    pub fn decide_handoff_take(
+        &self,
+        id: &str,
+        subject: &str,
+    ) -> Option<crate::core::decide::DecideRequest> {
+        let mut m = self.decide_handoff.lock().ok()?;
         if m.get(id).is_some_and(|p| p.subject != subject) {
             return None;
         }

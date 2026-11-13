@@ -25,6 +25,7 @@ pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> ax
             ))),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     })
 }
 
@@ -54,6 +55,7 @@ pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web
             deployment: crate::web::test_support::deployment_for(mode),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     }
 }
 
@@ -76,6 +78,7 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
             ))),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     };
     let cookie = session_cookie(&control, &state.auth.deployment, "user-1").await;
     (crate::web::router(state.clone()), cookie)

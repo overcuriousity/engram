@@ -210,6 +210,7 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
             deployment: deployment.clone(),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     };
 
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
