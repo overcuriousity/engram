@@ -48,6 +48,41 @@ Thirteen call sites. What happens to each:
 | `jobs/synthesize.rs:163` title, `jobs/gaps.rs:313` gap label, `jobs/describe.rs:33` image | chat | unchanged |
 | `core/ask/plan.rs:34`, `core/ask/mod.rs:281` | chat, interactive | unchanged, out of scope |
 
+## Corrections from the code (2026-11-13)
+
+Found while planning, on a read of `bafcb1a1`. Where this section and the text
+below disagree, this section holds.
+
+- **There is no pair view.** The pair routes were removed and a test keeps them
+  gone. Contradictions are shown read-only, as "Disagrees with…" on search rows
+  and answers, and stay there. "Ask again" is offered on the Unsure block only.
+- **`pinned` is not stored today.** The synthesizer's flag is parsed and
+  dropped; the only pin that ranks is a tag a person sets. The `pinned` reading
+  is stored and has no effect until the owner decides it should.
+- **A capture artifact that loses a literal is flagged and kept, not dropped.**
+  The new `adds_nothing` check does drop, as written below: an artifact that
+  states what its source does not is worse than one missing a literal, and the
+  passages remain.
+- **Nothing records who set a category.** A column for that is added, so a
+  reading can leave a person's choice alone.
+- **Rescue has no literal check today.** The after-write check is its first.
+- **A bare similarity files no pair today.** `relate` records a pair only when
+  one text contains the other or both come from one document. The wider net
+  therefore also files pairs that only similarity suggests, and all of those
+  are restricted like pairs below `review_min`, whatever their score.
+- **The reap judge's reason is used, not only shown:** in the graveyard, the
+  journal and the rescue prompt. All three lose it; the rescue prompt gets a
+  fixed line.
+- **Reap is scheduled on "is there a pair judge".** That check is rewritten,
+  not deleted.
+- **Decide's reads add one agreement figure, not two.** A note is evidence
+  only when `bears` said yes, so "the model also called it relevant" holds by
+  construction. Insights shows how many bearing notes a person ruled on held
+  up.
+- **The tuner has no record of its own.** Threshold moves get a table.
+- **Names.** Spec 1 owns `/decisions/{id}` for what a person asked; the Unsure
+  rows live under `/unsure`.
+
 ## Goals
 
 - No background judgement is made by a chat model.
