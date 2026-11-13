@@ -3,6 +3,7 @@
 /* Above 40rem, whatever app.js's `installNudge` decides. */
 .installnudge { display: none; }
 .back { display: none; }
+.oc-fab { display: none; }
 
 /* Appears at exactly the width that hides the rail (a container query, like that rule). */
 @container shell (width <= 60rem) {
@@ -93,6 +94,17 @@
     background: var(--color-bg-surface);
   }
   .oc-tabbar a { min-height: var(--tabbar-h); white-space: nowrap; }
+
+  /* Capture, bottom right above the tab bar; on Search the box is the capture. */
+  .oc-fab {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    position: fixed; z-index: var(--z-rail);
+    right: max(var(--space-4), env(safe-area-inset-right));
+    bottom: calc(var(--tabbar-h) + var(--space-4) + env(safe-area-inset-bottom));
+    min-height: 3rem; padding: 0 var(--space-4); box-shadow: var(--shadow-float);
+  }
+  body:has(.installnudge:not([hidden])) .oc-fab { display: none; }
+  body:has(.oc-fab) .shell { padding-bottom: 10rem; }
 
   /* 16px, or iOS zooms on focus and a standalone window cannot zoom back; `.box` has its own rule. */
   .box { font-size: 1rem; }

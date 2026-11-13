@@ -65,6 +65,9 @@
     <a href="/ui/insights"{% if self.section() == "insights" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("history", 20) }}<span>Insights</span></a>
     <a href="/ui/settings"{% if self.section() == "settings" %} aria-current="page"{% endif %}>{{ crate::web::icons::icon("settings", 20) }}<span>Settings</span></a>
   </nav>
+  {% if self.section() != "search" %}
+  <a class="oc-btn oc-btn--primary oc-fab" href="/ui/capture">{{ crate::web::icons::icon("plus", 16) }}<span>Capture</span></a>
+  {% endif %}
   <div class="installnudge" hidden role="status">
     <p>Add engram to your home screen.
       <span data-install-how hidden>Share, then Add to Home Screen.</span></p>

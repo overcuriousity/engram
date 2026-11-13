@@ -5829,6 +5829,47 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs node and a headless Chrome; see `test_support::measure`"]
+    async fn wide_windows_get_list_and_detail_then_a_third_region() {
+        use askama::Template as _;
+
+        let (app, cookie, _core) = app_session_and_core().await;
+        let page = get_body(&app, &cookie, "/ui?q=engram").await;
+        let rail = ResultsTemplate {
+            results: vec![ranked(true)],
+            terms: "engram".into(),
+            ..Default::default()
+        }
+        .render()
+        .expect("the rail fragment");
+        let page = page
+            .replace(
+                r#"<div id="results" role="listbox" aria-label="Results">"#,
+                &format!(r#"<div id="results" role="listbox" aria-label="Results">{rail}"#),
+            )
+            .replace(
+                r#"class="regions regions-rail-focus-source"#,
+                r#"class="pane-open regions regions-rail-focus-source"#,
+            );
+        assert!(page.contains(r#"class="region-rail rail">"#), "{page}");
+        assert!(page.contains(r#"class="region-side" data-off"#), "{page}");
+        let pages = [("results".to_string(), page)];
+
+        let p = &crate::web::test_support::measure(&pages, "1500")["pages"][0];
+        crate::web::test_support::nothing_is_broken(&serde_json::json!({"pages": [p]}), "1500");
+        let near = |v: &serde_json::Value, want: f64| (v.as_f64().unwrap() - want).abs() < 0.1;
+        assert!(near(&p["railRem"], 28.0), "the list at 1500px: {p}");
+        assert!(near(&p["focusPaneRem"], 52.0), "the detail at 1500px: {p}");
+        assert!(near(&p["sideRem"], 0.0), "no third region at 1500px: {p}");
+
+        let p = &crate::web::test_support::measure(&pages, "2560")["pages"][0];
+        crate::web::test_support::nothing_is_broken(&serde_json::json!({"pages": [p]}), "2560");
+        assert!(near(&p["railRem"], 28.0), "the list at 2560px: {p}");
+        assert!(near(&p["focusPaneRem"], 52.0), "the detail at 2560px: {p}");
+        assert!(near(&p["sideRem"], 22.0), "the due rail at 2560px: {p}");
+    }
+
+    #[tokio::test]
+    #[ignore = "needs node and a headless Chrome; see `test_support::measure`"]
     async fn a_result_wearing_every_badge_still_shows_its_title() {
         use askama::Template as _;
 
@@ -5862,7 +5903,10 @@ mod tests {
                 r#"<div id="pane" class="region-focus pane" hidden"#,
                 r#"<div id="pane" class="region-focus pane""#,
             )
-            .replace(r#"<div id="idle">"#, r#"<div id="idle" hidden>"#)
+            .replace(
+                r#"<div id="idle" class="region-side">"#,
+                r#"<div id="idle" class="region-side" data-off>"#,
+            )
             .replace(
                 r#"class="regions regions-rail-focus-source"#,
                 r#"style="--rail-w:15rem" class="pane-open regions regions-rail-focus-source"#,

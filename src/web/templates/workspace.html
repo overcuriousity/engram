@@ -93,8 +93,12 @@
   <input type="hidden" name="from_ask" value="{{ prefill_ask }}">
 </div>
 {% endif %}
-{# Hidden, not removed, on the first keystroke: a capture's reminder needs `#due` to swap into. #}
-<div id="idle"{% if !idle_state %} hidden{% endif %}>
+{% include "_keyhint.html" %}
+</div>
+
+{# Off, not removed, on the first keystroke: a capture's reminder needs `#due` to swap into.
+   `data-off`, not `hidden`, so that from 150rem it stays as the third region. #}
+<div id="idle" class="region-side"{% if !idle_state %} data-off{% endif %}>
   {# Gated on the state: a `load` inside a hidden parent still fires and would count an unseen impression. #}
   {% if recommend && idle_state %}
   <div id="context-offer" class="offer" hx-post="/ui/context" hx-trigger="load"
@@ -103,8 +107,6 @@
   <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
        data-send-tz hx-swap="outerHTML"></div>
   {{ idle|safe }}
-</div>
-{% include "_keyhint.html" %}
 </div>
 
 <div id="rail" class="region-rail rail"{% if idle_state %} hidden{% endif %}>

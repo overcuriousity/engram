@@ -352,6 +352,22 @@ pub(crate) fn nothing_is_broken(run: &serde_json::Value, width: &str) {
                 );
             }
         }
+        let fab = p["fabHeight"].as_f64().unwrap_or(0.0);
+        let in_search = ["search", "artifact"].contains(&p["name"].as_str().unwrap_or(""));
+        if signed_in && w < 768 && !in_search {
+            assert!(
+                fab >= 44.0,
+                "at {width}px the {} page has no capture button: {p}",
+                p["name"]
+            );
+        }
+        if w >= 768 || in_search {
+            assert!(
+                fab == 0.0,
+                "at {width}px the {} page shows the capture button",
+                p["name"]
+            );
+        }
         if signed_in && w >= 768 {
             assert!(
                 !shown,

@@ -969,7 +969,7 @@
   function hideIdle() {
     document.documentElement.classList.add('typing');
     var idle = document.getElementById('idle');
-    if (idle) idle.hidden = true;
+    if (idle) idle.setAttribute('data-off', '');
     show('rail', true);
     show('pane', true);
     show('kind-row', true);
@@ -995,7 +995,7 @@
     if (paneIsAsking() || (!force && paneIsBusy())) return;
     document.documentElement.classList.remove('typing');
     var idle = document.getElementById('idle');
-    if (idle) idle.hidden = false;
+    if (idle) idle.removeAttribute('data-off');
     show('rail', false);
     show('pane', false);
     show('kind-row', false);
@@ -1014,7 +1014,7 @@
   // `hideIdle` never runs on a server-rendered `/ui?q=…`, so the class is set here, off `#idle`.
   function syncIdle() {
     var idle = document.getElementById('idle');
-    if (idle) document.documentElement.classList.toggle('typing', idle.hidden);
+    if (idle) document.documentElement.classList.toggle('typing', idle.hasAttribute('data-off'));
   }
 
   // Only the fetch that lands after the dismissing keystroke: that card was never on screen.

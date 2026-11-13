@@ -435,7 +435,9 @@ body { overflow-x: hidden; }
 @container shell (width >= 60rem) {
   .regions-rail-focus-source { grid-template-rows: auto minmax(0, 1fr); }
   .regions-rail-focus-source > .region-rail,
-  .regions-rail-focus-source > .region-focus { align-self: stretch; min-height: 0; }
+  .regions-rail-focus-source > .region-focus,
+  .regions-rail-focus-source > .region-side { align-self: stretch; min-height: 0; }
+  .regions-rail-focus-source > .region-side { overflow-y: auto; }
 
   /* Each link in the chain needs `min-height: 0`, or one pane grows past the window. */
   .regions-rail-focus-source .rail { max-height: none; }
@@ -669,6 +671,11 @@ body { overflow-x: hidden; }
    `width: 100%`: a grid item with only `max-width` shrinks to its content. */
 html:not(.typing) .regions-rail-focus-source .region-bar {
   max-width: 52rem; width: 100%; margin-inline: auto;
+}
+@container shell (width < 150rem) {
+  html:not(.typing) .regions-rail-focus-source .region-side {
+    max-width: 52rem; width: 100%; margin-inline: auto;
+  }
 }
 
 /* A little way down on a roomy window, so the box does not read as a toolbar. */

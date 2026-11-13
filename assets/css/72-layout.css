@@ -23,6 +23,8 @@
 .regions > * { min-width: 0; }
 
 .region-bar { grid-column: 1 / -1; }
+.region-side { grid-column: 1 / -1; }
+.region-side[data-off] { display: none; }
 .region-rail { grid-column: rail; }
 .region-focus { grid-column: focus; }
 
@@ -33,6 +35,8 @@ body:has(.regions-rail-focus-source) {
 /* Not redundant: the auto margin defeats `stretch`, and the shell would shrink to its content. */
 body:has(.regions-rail-focus-source) > .shell {
   flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column;
+  /* The regions carry their own cap, so 150rem can be reached. */
+  max-width: none;
 }
 body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 0; }
 
@@ -94,16 +98,14 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
 .regions-split { grid-template-columns: minmax(0, 1fr); }
 .regions-split > * { grid-column: 1 / -1; }
 
-/* The source is not a third column: the pane renders artifact and source as one `.split`. */
-/* `--rail-w` is written by `resizableColumns` in app.js when a reader drags the boundary. */
+/* List and detail; the box is centred, not its tracks, so `--rail-w` (dragged in app.js) stays an offset from its left edge. */
 @container shell (width >= 90rem) {
-  .regions-rail-focus-source { grid-template-columns: [rail] var(--rail-w, 19rem) [focus] minmax(0, 1fr); }
-}
-
-/* The handle shows only where the 19rem track is in effect. */
-@container shell (width >= 90rem) {
+  .regions-rail-focus-source {
+    grid-template-columns: [rail] var(--rail-w, 28rem) [focus] minmax(0, 52rem);
+    width: 100%; max-width: calc(var(--rail-w, 28rem) + 53rem); margin-inline: auto;
+  }
   .regions-rail-focus-source:is(.pane-open, .answering) > .col-handle {
-    display: block; left: var(--rail-w, 19rem); width: 1rem;
+    display: block; left: var(--rail-w, 28rem); width: 1rem;
   }
 }
 
@@ -113,6 +115,19 @@ body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
   .regions-rail-focus-source:not(.pane-open):not(.answering) {
     grid-template-columns: [rail] minmax(0, 40rem) [focus] minmax(0, 1fr);
   }
+}
+
+/* The due rail beside them, kept through typing; chained like the rule above to outrank it. */
+@container shell (width >= 150rem) {
+  .regions-rail-focus-source,
+  .regions-rail-focus-source:not(.pane-open):not(.answering) {
+    grid-template-columns: [rail] var(--rail-w, 28rem) [focus] minmax(0, 52rem) [side] 22rem;
+    max-width: calc(var(--rail-w, 28rem) + 76rem);
+  }
+  .regions-rail-focus-source > .region-bar { grid-column: rail / side; }
+  .regions-rail-focus-source > .region-side,
+  .regions-rail-focus-source > .region-side[data-off] { display: block; grid-column: side; grid-row: 1 / -1; }
+  html.typing .regions-rail-focus-source #context-offer { display: none; }
 }
 
 /* A container query, so a half-width desktop window is one-up like a phone. */
