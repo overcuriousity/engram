@@ -3,7 +3,7 @@ export const LIMITS = { options: [2, 8], levels: [2, 10] };
 function options(row) {
   return row.options
     .map((o) => ({ name: o.name.trim(), description: o.description.trim() }))
-    .filter((o) => o.name || o.description);
+    .filter((o) => o.name);
 }
 
 function levels(row) {

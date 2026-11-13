@@ -51,3 +51,10 @@ test("progress counts reads, then weighs", () => {
   assert.equal(progressText(8, 8, 6), "Weighing 6 together");
   assert.equal(progressText(8, 8, 0), "");
 });
+
+test("an option with no name is no option", () => {
+  const row = { kind: "choice", options: [opt("a"), opt("", "only a description")], levels: [] };
+  assert.deepEqual(Object.keys(decideBody("Q", row).questions.verdict.criteria), ["a"]);
+  const three = { kind: "choice", options: [opt("", "x"), opt("", "y"), opt("a")], levels: [] };
+  assert.equal(problem("Q", three), "Name at least two options");
+});

@@ -176,7 +176,7 @@ body { overflow-x: hidden; }
 }
 .verbs-spacer { flex: 1 1 auto; }
 /* Hidden until Decide is chosen; an author `display` would beat `[hidden]`, so it is restored. */
-.decide-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); border: 0; padding: 0; margin: 0.5rem 0 0; }
+.decide-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); border: 0; padding: 0; margin: 0.5rem 0 0; min-width: 0; }
 .decide-row[hidden], .decide-list[hidden] { display: none; }
 .decide-list { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); flex-basis: 100%; }
 .decide-option { display: inline-flex; align-items: center; gap: var(--space-2); }

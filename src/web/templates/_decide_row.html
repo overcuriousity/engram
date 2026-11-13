@@ -6,28 +6,18 @@
   <label class="chip"><input type="radio" name="decide-kind" value="score"><span>scale</span></label>
   <div id="decide-options" class="decide-list" hidden>
     {%- for _ in 0..2 %}
-    <span class="decide-option">
-      <input class="oc-input" name="decide-option" maxlength="40" aria-label="Option">
-      <details><summary>describe</summary><input class="oc-input" name="decide-desc" aria-label="What this option means"></details>
-    </span>
+    {% include "_decide_option.html" %}
     {%- endfor %}
     <button class="oc-btn oc-btn--icon" type="button" data-decide-add="option" aria-label="Add an option">{{ crate::web::icons::icon("plus", 16) }}</button>
   </div>
   <div id="decide-levels" class="decide-list" hidden>
     <span class="muted">lowest first</span>
     {%- for _ in 0..2 %}
-    <span class="decide-level"><input class="oc-input" name="decide-level" aria-label="Level"></span>
+    {% include "_decide_level.html" %}
     {%- endfor %}
     <button class="oc-btn oc-btn--icon" type="button" data-decide-add="level" aria-label="Add a level">{{ crate::web::icons::icon("plus", 16) }}</button>
   </div>
   <p id="decide-problem" class="muted" role="status"></p>
-  <template id="decide-option-row">
-    <span class="decide-option">
-      <input class="oc-input" name="decide-option" maxlength="40" aria-label="Option">
-      <details><summary>describe</summary><input class="oc-input" name="decide-desc" aria-label="What this option means"></details>
-    </span>
-  </template>
-  <template id="decide-level-row">
-    <span class="decide-level"><input class="oc-input" name="decide-level" aria-label="Level"></span>
-  </template>
+  <template id="decide-option-row">{% include "_decide_option.html" %}  </template>
+  <template id="decide-level-row">{% include "_decide_level.html" %}  </template>
 </fieldset>
