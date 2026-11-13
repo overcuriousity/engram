@@ -1039,8 +1039,6 @@ mod tests {
 #[cfg(test)]
 mod decide_tests {
     use super::*;
-    use crate::infer::decide::{Answer, Answers, Decider, Kind, Question};
-    use std::collections::HashMap;
 
     fn choice(key: &str, names: &[&str]) -> Question {
         Question {

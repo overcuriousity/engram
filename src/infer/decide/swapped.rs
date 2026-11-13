@@ -86,8 +86,16 @@ pub async fn decide_swapped(
                 q.key
             )));
         }
-        // The twin lists the options backwards.
-        let mean: Vec<f64> = (0..n).map(|j| (fwd[j] + rev[n - 1 - j]) / 2.0).collect();
+        // The twin lists the options backwards; find each by name.
+        let twin: Vec<&str> = options.iter().rev().map(|(name, _)| name.trim()).collect();
+        let mut mean = Vec::with_capacity(n);
+        for (j, (name, _)) in options.iter().enumerate() {
+            let at = twin
+                .iter()
+                .position(|t| *t == name.trim())
+                .ok_or_else(|| rejected(format!("for \"{}\" lost option \"{name}\"", q.key)))?;
+            mean.push((fwd[j] + rev[at]) / 2.0);
+        }
         let best = (1..n).fold(0, |b, j| if mean[j] > mean[b] { j } else { b });
         agree.insert(q.key.clone(), fwd_pick == rev_pick);
         answers.insert(

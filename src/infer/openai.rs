@@ -197,10 +197,14 @@ impl Endpoint {
             .post(url(&self.base_url, path))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body);
-        self.send(req).await?.text().await.map_err(|e| Error::Inference {
-            role,
-            detail: e.to_string(),
-        })
+        self.send(req)
+            .await?
+            .text()
+            .await
+            .map_err(|e| Error::Inference {
+                role,
+                detail: e.to_string(),
+            })
     }
 
     async fn post_json(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {

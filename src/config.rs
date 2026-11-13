@@ -2660,7 +2660,7 @@ mod tests {
 
     macro_rules! minimal_without_decide {
         () => {
-r#"
+            r#"
 [server]
 bind = "127.0.0.1:8080"
 
@@ -3178,7 +3178,10 @@ mode = "off"
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         for (edit, key) in [
-            ("context_tokens = 8192\nparallel = 0", "infer.decide.parallel"),
+            (
+                "context_tokens = 8192\nparallel = 0",
+                "infer.decide.parallel",
+            ),
             ("context_tokens = 512", "infer.decide.context_tokens"),
         ] {
             let body = MINIMAL.replace("context_tokens = 8192\n", &format!("{edit}\n"));

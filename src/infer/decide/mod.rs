@@ -10,7 +10,7 @@ pub mod swapped;
 pub mod wire;
 
 pub use http::HttpDecider;
-pub use swapped::{decide_swapped, swapped_questions, SwappedAnswers};
+pub use swapped::{SwappedAnswers, decide_swapped, swapped_questions};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Question {
@@ -22,19 +22,33 @@ pub struct Question {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
     /// (name, description); an empty description sends the name.
-    Choice { options: Vec<(String, String)> },
+    Choice {
+        options: Vec<(String, String)>,
+    },
     /// Lowest first.
-    Score { levels: Vec<String> },
+    Score {
+        levels: Vec<String>,
+    },
     Noul,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Answer {
     /// Probabilities in option order.
-    Choice { pick: String, probabilities: Vec<f64>, confidence: f64 },
+    Choice {
+        pick: String,
+        probabilities: Vec<f64>,
+        confidence: f64,
+    },
     /// Probabilities in level order.
-    Score { score: f64, probabilities: Vec<f64>, confidence: f64 },
-    Noul { yes: f64 },
+    Score {
+        score: f64,
+        probabilities: Vec<f64>,
+        confidence: f64,
+    },
+    Noul {
+        yes: f64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -60,7 +74,11 @@ const LEVELS: std::ops::RangeInclusive<usize> = 2..=10;
 
 impl Question {
     pub fn noul(key: &str, instructions: &str) -> Self {
-        Question { key: key.into(), kind: Kind::Noul, instructions: instructions.into() }
+        Question {
+            key: key.into(),
+            kind: Kind::Noul,
+            instructions: instructions.into(),
+        }
     }
 }
 
@@ -90,7 +108,8 @@ fn refuse(sentence: String) -> Error {
 
 fn key_ok(k: &str) -> bool {
     (1..=MAX_KEY).contains(&k.chars().count())
-        && k.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        && k.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
 pub fn validate(questions: &[Question]) -> Result<()> {
@@ -104,10 +123,14 @@ pub fn validate(questions: &[Question]) -> Result<()> {
     for q in questions {
         let k = &q.key;
         if !key_ok(k) {
-            return Err(refuse(format!("question \"{k}\" needs a key of 1 to {MAX_KEY} lower-case letters, digits or _.")));
+            return Err(refuse(format!(
+                "question \"{k}\" needs a key of 1 to {MAX_KEY} lower-case letters, digits or _."
+            )));
         }
         if !keys.insert(k.as_str()) {
-            return Err(refuse(format!("question \"{k}\" shares its key with another.")));
+            return Err(refuse(format!(
+                "question \"{k}\" shares its key with another."
+            )));
         }
         if trim(&q.instructions).is_empty() {
             return Err(refuse(format!("question \"{k}\" has no instructions.")));
@@ -121,10 +144,14 @@ pub fn validate(questions: &[Question]) -> Result<()> {
                 for (name, _) in options {
                     let name = trim(name);
                     if name.is_empty() {
-                        return Err(refuse(format!("question \"{k}\" has an option without a name.")));
+                        return Err(refuse(format!(
+                            "question \"{k}\" has an option without a name."
+                        )));
                     }
                     if !names.insert(name) {
-                        return Err(refuse(format!("question \"{k}\" has the option \"{name}\" twice.")));
+                        return Err(refuse(format!(
+                            "question \"{k}\" has the option \"{name}\" twice."
+                        )));
                     }
                 }
             }
@@ -133,7 +160,9 @@ pub fn validate(questions: &[Question]) -> Result<()> {
                     return Err(refuse(format!("question \"{k}\" needs 2 to 10 levels.")));
                 }
                 if levels.iter().any(|l| trim(l).is_empty()) {
-                    return Err(refuse(format!("question \"{k}\" has a level without text.")));
+                    return Err(refuse(format!(
+                        "question \"{k}\" has a level without text."
+                    )));
                 }
             }
             Kind::Noul => {}
@@ -150,9 +179,17 @@ pub fn budget(counter: &TokenCounter, context_tokens: usize, questions: &[Questi
 }
 
 /// `validate`, then the fit. Every Decider calls it before anything else.
-pub fn check(counter: &TokenCounter, context_tokens: usize, state: &str, questions: &[Question]) -> Result<()> {
+pub fn check(
+    counter: &TokenCounter,
+    context_tokens: usize,
+    state: &str,
+    questions: &[Question],
+) -> Result<()> {
     validate(questions)?;
-    let (n, b) = (counter.count(state), budget(counter, context_tokens, questions));
+    let (n, b) = (
+        counter.count(state),
+        budget(counter, context_tokens, questions),
+    );
     if n > b {
         return Err(refuse(format!("the state is {n} tokens and {b} fit")));
     }
@@ -167,14 +204,21 @@ mod tests {
         Question {
             key: key.into(),
             instructions: "Which?".into(),
-            kind: Kind::Choice { options: names.iter().map(|n| (n.to_string(), String::new())).collect() },
+            kind: Kind::Choice {
+                options: names
+                    .iter()
+                    .map(|n| (n.to_string(), String::new()))
+                    .collect(),
+            },
         }
     }
     fn score(key: &str, levels: &[&str]) -> Question {
         Question {
             key: key.into(),
             instructions: "How much?".into(),
-            kind: Kind::Score { levels: levels.iter().map(|l| l.to_string()).collect() },
+            kind: Kind::Score {
+                levels: levels.iter().map(|l| l.to_string()).collect(),
+            },
         }
     }
     fn refused(qs: &[Question]) -> bool {
@@ -191,7 +235,9 @@ mod tests {
     }
     #[test]
     fn sixteen_pass_and_seventeen_do_not() {
-        let qs: Vec<Question> = (0..17).map(|i| Question::noul(&format!("q{i}"), "Is it?")).collect();
+        let qs: Vec<Question> = (0..17)
+            .map(|i| Question::noul(&format!("q{i}"), "Is it?"))
+            .collect();
         assert!(validate(&qs[..16]).is_ok());
         assert!(refused(&qs));
     }
@@ -201,12 +247,18 @@ mod tests {
             assert!(refused(&[Question::noul(bad, "Is it?")]), "{bad:?}");
         }
         for good in ["a", "a_1", &"k".repeat(30)] {
-            assert!(validate(&[Question::noul(good, "Is it?")]).is_ok(), "{good:?}");
+            assert!(
+                validate(&[Question::noul(good, "Is it?")]).is_ok(),
+                "{good:?}"
+            );
         }
     }
     #[test]
     fn two_questions_cannot_share_a_key() {
-        assert!(refused(&[Question::noul("a", "x?"), Question::noul("a", "y?")]));
+        assert!(refused(&[
+            Question::noul("a", "x?"),
+            Question::noul("a", "y?")
+        ]));
     }
     #[test]
     fn instructions_of_only_whitespace_are_refused() {
@@ -234,7 +286,9 @@ mod tests {
     }
     #[test]
     fn the_refusal_names_the_question() {
-        let Err(Error::Validation(m)) = validate(&[choice("pick_me", &["a"])]) else { panic!() };
+        let Err(Error::Validation(m)) = validate(&[choice("pick_me", &["a"])]) else {
+            panic!()
+        };
         assert!(m.contains("pick_me") && m.starts_with("decide: "), "{m}");
     }
 
@@ -245,7 +299,10 @@ mod tests {
     fn the_budget_is_the_window_less_questions_and_margin() {
         let c = TokenCounter::default();
         let qs = noul_q();
-        assert_eq!(budget(&c, 8192, &qs), 8192 - c.count(&wire::questions_json(&qs)) - 256);
+        assert_eq!(
+            budget(&c, 8192, &qs),
+            8192 - c.count(&wire::questions_json(&qs)) - 256
+        );
     }
     #[test]
     fn a_window_smaller_than_its_questions_leaves_nothing() {
@@ -266,11 +323,19 @@ mod tests {
             state.push('x');
         }
         let n = c.count(&state);
-        let Err(Error::Validation(m)) = check(&c, 2048, &state, &qs) else { panic!() };
-        assert!(m.contains(&n.to_string()) && m.contains(&b.to_string()), "{m}");
+        let Err(Error::Validation(m)) = check(&c, 2048, &state, &qs) else {
+            panic!()
+        };
+        assert!(
+            m.contains(&n.to_string()) && m.contains(&b.to_string()),
+            "{m}"
+        );
     }
     #[test]
     fn check_refuses_invalid_questions_first() {
-        assert!(matches!(check(&TokenCounter::default(), 2048, "x", &[]), Err(Error::Validation(_))));
+        assert!(matches!(
+            check(&TokenCounter::default(), 2048, "x", &[]),
+            Err(Error::Validation(_))
+        ));
     }
 }

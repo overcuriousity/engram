@@ -1,6 +1,6 @@
 //! System One's request and response, byte-compatible with magicshell (`tests/fixtures/systemone`).
 
-use super::{trim, Answer, Answers, Kind, Question};
+use super::{Answer, Answers, Kind, Question, trim};
 use crate::error::{Error, Result};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
@@ -17,7 +17,11 @@ fn question_json(q: &Question) -> String {
                 .iter()
                 .map(|(name, description)| {
                     let (name, description) = (trim(name), trim(description));
-                    let description = if description.is_empty() { name } else { description };
+                    let description = if description.is_empty() {
+                        name
+                    } else {
+                        description
+                    };
                     format!("{}:{}", json_str(name), json_str(description))
                 })
                 .collect();
@@ -45,15 +49,25 @@ pub fn questions_json(questions: &[Question]) -> String {
 
 /// Compact; keys in the order model, state, questions; criteria entry by entry.
 pub fn request_json(model: &str, state: &str, questions: &[Question]) -> String {
-    format!("{{\"model\":{},\"state\":{},\"questions\":{}}}", json_str(model), json_str(state), questions_json(questions))
+    format!(
+        "{{\"model\":{},\"state\":{},\"questions\":{}}}",
+        json_str(model),
+        json_str(state),
+        questions_json(questions)
+    )
 }
 
 fn bad(what: &str) -> Error {
-    Error::InferenceRejected { role: "decide", detail: format!("the answer {what}") }
+    Error::InferenceRejected {
+        role: "decide",
+        detail: format!("the answer {what}"),
+    }
 }
 
 fn number(v: Option<&Value>, what: &str) -> Result<f64> {
-    v.and_then(Value::as_f64).filter(|f| f.is_finite()).ok_or_else(|| bad(&format!("has no number for {what}")))
+    v.and_then(Value::as_f64)
+        .filter(|f| f.is_finite())
+        .ok_or_else(|| bad(&format!("has no number for {what}")))
 }
 
 fn unit(v: Option<&Value>, what: &str) -> Result<f64> {
@@ -69,7 +83,10 @@ fn probabilities(a: &Map<String, Value>, names: &[String]) -> Result<Vec<f64>> {
     let Some(Value::Object(table)) = a.get("probabilities") else {
         return Err(bad("has no probabilities"));
     };
-    names.iter().map(|n| unit(table.get(n), &format!("probability \"{n}\""))).collect()
+    names
+        .iter()
+        .map(|n| unit(table.get(n), &format!("probability \"{n}\"")))
+        .collect()
 }
 
 /// `body` is the response text. Probabilities are put in option or level order; the endpoint sorts a choice's by name.
@@ -114,18 +131,31 @@ pub fn parse_response(body: &str, questions: &[Question]) -> Result<Answers> {
                     confidence: number(a.get("confidence"), "confidence")?,
                 }
             }
-            Kind::Noul => Answer::Noul { yes: unit(a.get("noul"), "noul")? },
+            Kind::Noul => Answer::Noul {
+                yes: unit(a.get("noul"), "noul")?,
+            },
         };
         answers.insert(q.key.clone(), answer);
     }
-    let model = body.get("model").and_then(Value::as_str).unwrap_or_default().to_owned();
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     let input_tokens = body
         .get("usage")
         .and_then(|u| u.get("input_tokens"))
         .and_then(Value::as_number)
-        .and_then(|n| n.as_u64().or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64)))
+        .and_then(|n| {
+            n.as_u64()
+                .or_else(|| n.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))
+        })
         .unwrap_or(0);
-    Ok(Answers { answers, model, input_tokens })
+    Ok(Answers {
+        answers,
+        model,
+        input_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -145,7 +175,10 @@ mod tests {
             })
             .collect();
         paths.sort();
-        paths.iter().map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap()).collect()
+        paths
+            .iter()
+            .map(|p| serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap())
+            .collect()
     }
 
     fn text(v: &Value) -> String {
@@ -161,12 +194,28 @@ mod tests {
             .map(|q| {
                 let kind = match q["type"].as_str().unwrap() {
                     "choice" => Kind::Choice {
-                        options: q["options"].as_array().unwrap().iter().map(|o| (text(&o["name"]), text(&o["description"]))).collect(),
+                        options: q["options"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|o| (text(&o["name"]), text(&o["description"])))
+                            .collect(),
                     },
-                    "score" => Kind::Score { levels: q["levels"].as_array().unwrap().iter().map(|l| text(&l["text"])).collect() },
+                    "score" => Kind::Score {
+                        levels: q["levels"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|l| text(&l["text"]))
+                            .collect(),
+                    },
                     _ => Kind::Noul,
                 };
-                Question { key: text(&q["key"]), kind, instructions: text(&q["text"]) }
+                Question {
+                    key: text(&q["key"]),
+                    kind,
+                    instructions: text(&q["text"]),
+                }
             })
             .collect();
         (text(&run["state"]), questions)
@@ -178,7 +227,10 @@ mod tests {
         assert!(all.len() >= 7, "{}", all.len());
         for f in &all {
             let (state, qs) = run_of(f);
-            assert_eq!(request_json(f["model"].as_str().unwrap(), &state, &qs), f["expected_json"].as_str().unwrap());
+            assert_eq!(
+                request_json(f["model"].as_str().unwrap(), &state, &qs),
+                f["expected_json"].as_str().unwrap()
+            );
         }
     }
 
@@ -195,21 +247,38 @@ mod tests {
             let expected = &f["expected"];
             let got = parse_response(&body, &qs);
             if expected.get("error").is_some() {
-                assert!(matches!(got, Err(Error::InferenceRejected { role: "decide", .. })), "{f}");
+                assert!(
+                    matches!(got, Err(Error::InferenceRejected { role: "decide", .. })),
+                    "{f}"
+                );
                 continue;
             }
             let a = got.unwrap_or_else(|e| panic!("{e}: {f}"));
             assert_eq!(a.model, expected["model"].as_str().unwrap());
             assert_eq!(a.input_tokens, expected["inputTokens"].as_u64().unwrap());
             for (key, want) in expected["answers"].as_object().unwrap() {
-                let floats = |v: &Value| v.as_array().unwrap().iter().map(|x| x.as_f64().unwrap()).collect::<Vec<_>>();
+                let floats = |v: &Value| {
+                    v.as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|x| x.as_f64().unwrap())
+                        .collect::<Vec<_>>()
+                };
                 match &a.answers[key] {
-                    Answer::Choice { pick, probabilities, confidence } => {
+                    Answer::Choice {
+                        pick,
+                        probabilities,
+                        confidence,
+                    } => {
                         assert_eq!(pick, want["choice"].as_str().unwrap());
                         assert_eq!(*probabilities, floats(&want["probabilities"]));
                         assert_eq!(*confidence, want["confidence"].as_f64().unwrap());
                     }
-                    Answer::Score { score, probabilities, confidence } => {
+                    Answer::Score {
+                        score,
+                        probabilities,
+                        confidence,
+                    } => {
                         assert_eq!(*score, want["score"].as_f64().unwrap());
                         assert_eq!(*probabilities, floats(&want["probabilities"]));
                         assert_eq!(*confidence, want["confidence"].as_f64().unwrap());
@@ -225,11 +294,20 @@ mod tests {
         let q = Question {
             key: "v".into(),
             instructions: "Does «this» say \"yes\"?\nReally?".into(),
-            kind: Kind::Choice { options: vec![("ja – klar".into(), "tab\there".into()), ("nein".into(), String::new())] },
+            kind: Kind::Choice {
+                options: vec![
+                    ("ja – klar".into(), "tab\there".into()),
+                    ("nein".into(), String::new()),
+                ],
+            },
         };
-        let v: Value = serde_json::from_str(&request_json("m", "Zustand: \"ß\"\n\u{2028}", &[q])).unwrap();
+        let v: Value =
+            serde_json::from_str(&request_json("m", "Zustand: \"ß\"\n\u{2028}", &[q])).unwrap();
         assert_eq!(v["state"], "Zustand: \"ß\"\n\u{2028}");
-        assert_eq!(v["questions"]["v"]["instructions"], "Does «this» say \"yes\"?\nReally?");
+        assert_eq!(
+            v["questions"]["v"]["instructions"],
+            "Does «this» say \"yes\"?\nReally?"
+        );
         assert_eq!(v["questions"]["v"]["criteria"]["ja – klar"], "tab\there");
         assert_eq!(v["questions"]["v"]["criteria"]["nein"], "nein");
     }
@@ -240,24 +318,40 @@ mod tests {
         let choice = [Question {
             key: "c".into(),
             instructions: "Which?".into(),
-            kind: Kind::Choice { options: vec![("a".into(), String::new()), ("b".into(), String::new())] },
+            kind: Kind::Choice {
+                options: vec![("a".into(), String::new()), ("b".into(), String::new())],
+            },
         }];
         for (qs, body) in [
-            (&noul, json!({"answers": {"n": {"type": "noul", "noul": 1.2}}})),
-            (&noul, json!({"answers": {"n": {"type": "noul", "noul": -0.1}}})),
+            (
+                &noul,
+                json!({"answers": {"n": {"type": "noul", "noul": 1.2}}}),
+            ),
+            (
+                &noul,
+                json!({"answers": {"n": {"type": "noul", "noul": -0.1}}}),
+            ),
             (
                 &choice,
                 json!({"answers": {"c": {"type": "choice", "choice": "a", "probabilities": {"a": 1.5, "b": 0.1}, "confidence": 0.5}}}),
             ),
         ] {
             let got = parse_response(&body.to_string(), qs);
-            assert!(matches!(got, Err(Error::InferenceRejected { role: "decide", .. })), "{body}");
+            assert!(
+                matches!(got, Err(Error::InferenceRejected { role: "decide", .. })),
+                "{body}"
+            );
         }
     }
 
     #[test]
     fn the_state_is_sent_untrimmed() {
-        let v: Value = serde_json::from_str(&request_json("m", "  x \n", &[Question::noul("n", "Is it?")])).unwrap();
+        let v: Value = serde_json::from_str(&request_json(
+            "m",
+            "  x \n",
+            &[Question::noul("n", "Is it?")],
+        ))
+        .unwrap();
         assert_eq!(v["state"], "  x \n");
     }
 }

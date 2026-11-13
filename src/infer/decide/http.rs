@@ -176,7 +176,7 @@ mod tests {
         );
         assert_eq!(s.received_requests().await.unwrap().len(), 2);
     }
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_500_is_an_inference_error() {
         let s = MockServer::start().await;
         serve(&s, ResponseTemplate::new(500), None).await;
