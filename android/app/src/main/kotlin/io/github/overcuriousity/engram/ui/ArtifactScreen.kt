@@ -13,12 +13,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -120,7 +118,7 @@ fun ArtifactScreen(
             // its own now, and the rest are facts about the text that a press
             // does not change. The detail stays: it says which number or path
             // no source carries.
-            if (c.flags.isNotEmpty()) Flag(c.flags.joinToString(", "), c.flagDetail ?: "")
+            if (c.flags.isNotEmpty()) Notice(c.flags.joinToString(", "), c.flagDetail ?: "")
             Decisions(
                 chunk = c,
                 decided = decided,
@@ -132,7 +130,16 @@ fun ArtifactScreen(
                     decide(Decision(ArtifactAnswer.Reactivate)) { engram.outbox.enqueueArtifactOp(c.id, op) }
                 },
                 onDelete = { decide(Decision(ArtifactAnswer.Delete)) { engram.outbox.enqueueArtifactDelete(c.id) } },
-                onUndo = { row -> scope.launch { if (engram.outbox.undo(row)) decided = null } },
+                onUndo = { row ->
+                    scope.launch {
+                        val delivered = !engram.outbox.undo(row)
+                        if (delivered && decided?.answer == ArtifactAnswer.Delete) {
+                            engram.outbox.enqueueCall("Artifact · restored", "POST", Api.artifactRestore(c.id))
+                            Sync.kick(engram.app)
+                        }
+                        if (!delivered || decided?.answer == ArtifactAnswer.Delete) decided = null
+                    }
+                },
                 onWinner = onArtifact,
             )
 
@@ -315,9 +322,7 @@ fun answersFor(status: String, supersededBy: String?): List<ArtifactAnswer> = wh
 
 /**
  * The flag over a hidden artifact and the row of answers under it. Words, not
- * icons: what "Hide" hides from, and that the artifact survives it, lived in a
- * tooltip on the web, and this screen has no hover. Delete asks first, and
- * says what the asking is for: hiding can be undone and this cannot.
+ * icons: this screen has no hover. Every answer acts at once and offers Undo.
  */
 @Composable
 fun Decisions(
@@ -329,44 +334,32 @@ fun Decisions(
     onUndo: (String) -> Unit,
     onWinner: (String) -> Unit,
 ) {
-    var confirm by rememberSaveable { mutableStateOf(false) }
     if (decided != null) {
         val words = when (decided.answer) {
             ArtifactAnswer.Hide -> "Hidden from results · the artifact is kept"
             ArtifactAnswer.Reactivate -> "Back in results"
-            ArtifactAnswer.Delete -> "Deleted · gone from both stores once delivered"
+            ArtifactAnswer.Delete -> "Deleted · in Trash for 30 days"
         }
-        Flag(words, if (decided.answer == ArtifactAnswer.Delete) "Nothing can put it back after that." else "Delivered when the server can be reached.") {
+        Notice(words, tone = Tone.Ok) {
             decided.row?.let { row -> TextButton(onClick = { onUndo(row) }) { Text("Undo") } }
         }
         return
     }
     chunk.supersededBy?.let { winner ->
-        Flag("Hidden from results", "Something near-identical and newer was kept instead.") {
+        Notice("Hidden from results", "A newer near-copy was kept.") {
             TextButton(onClick = { onWinner(winner) }) { Text("The one kept") }
         }
     }
     if (chunk.supersededBy == null && chunk.status == "deprecated") {
-        Flag("Hidden as stale", "Search will not return it and Ask will not read from it; it is still stored.")
+        Notice("Hidden as stale", "Out of search and Ask; still stored.")
     }
     val answers = answersFor(chunk.status, chunk.supersededBy)
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
         if (ArtifactAnswer.Hide in answers) TextButton(onClick = onHide) { Text("Hide from results") }
         if (ArtifactAnswer.Reactivate in answers) TextButton(onClick = onReactivate) { Text(if (chunk.supersededBy != null) "Put it back" else "Reactivate") }
         Spacer(Modifier.weight(1f))
-        // At the far end, so the one control that cannot be undone is never
-        // flush against one that can.
-        TextButton(onClick = { confirm = true }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+        TextButton(onClick = onDelete, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
     }
-    if (confirm) AlertDialog(
-        onDismissRequest = { confirm = false },
-        title = { Text("Delete this artifact for good?") },
-        text = { Text("It goes from both stores, anything written from it loses it as a source, and none of that can be undone. Hide keeps the artifact and only takes it out of results.") },
-        confirmButton = {
-            TextButton(onClick = { confirm = false; onDelete() }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
-        },
-        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Keep it") } },
-    )
 }
 
 /** A disclosure: closed by default, a line that opens. */
@@ -374,23 +367,8 @@ fun Decisions(
 fun Fold(summary: String, content: @Composable () -> Unit) {
     var open by rememberSaveable(summary) { mutableStateOf(false) }
     Column {
-        Text("${if (open) "▾" else "▸"} $summary", Modifier.clickable { open = !open }.padding(vertical = 6.dp), style = MaterialTheme.typography.labelMedium, color = muted())
+        Text("${if (open) "▾" else "▸"} $summary", Modifier.clickable { open = !open }.touchTarget().padding(vertical = 6.dp), style = MaterialTheme.typography.labelMedium, color = muted())
         if (open) content()
-    }
-}
-
-@Composable
-private fun Flag(head: String, body: String, actions: @Composable () -> Unit = {}) {
-    Surface(
-        color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f),
-        shape = MaterialTheme.shapes.medium,
-        modifier = Modifier.fillMaxWidth().padding(16.dp, 6.dp),
-    ) {
-        Column(Modifier.padding(12.dp, 8.dp)) {
-            Text(head, style = MaterialTheme.typography.labelLarge)
-            Text(body, style = MaterialTheme.typography.bodySmall, color = muted())
-            Row { actions() }
-        }
     }
 }
 

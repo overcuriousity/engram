@@ -52,4 +52,14 @@ class WordsTest {
         assertEquals("", offerLine(o.copy(rung = "random"), berlin))
         assertEquals("", offerLine(o.copy(rung = "a rung from next year"), berlin))
     }
+
+    @Test fun no_string_is_longer_than_a_gloss() {
+        val xml = java.io.File("src/main/res/values/strings.xml").readText()
+        val strings = Regex("""<string name="([^"]+)">([^<]*)</string>""").findAll(xml).map { it.groupValues[1] to it.groupValues[2] }.toList()
+        assertTrue(strings.isNotEmpty())
+        for ((name, text) in strings) {
+            assertTrue(name, text.split(Regex("\\s+")).size <= 12)
+            assertFalse(name, '!' in text)
+        }
+    }
 }

@@ -61,7 +61,6 @@ fun InsightsScreen(
         ReadFrame(insights) { i ->
             if (i.held.corpora == 0L) {
                 Text("Nothing is held yet", Modifier.padding(16.dp, 8.dp), style = MaterialTheme.typography.titleMedium)
-                Text("This page measures what the base holds and says what it did on its own. The measures wait on there being something in it.", Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted())
                 return@ReadFrame
             }
             SectionHead("What this memory is like")
@@ -73,8 +72,8 @@ fun InsightsScreen(
             }
             val r = i.retrieval
             Measure("Retrieval", null, when {
-                r == null -> "not recording searches, so there is nothing to measure"
-                r.judged == 0L -> "nothing judged yet — answer *Was this what you were looking for?* under a result"
+                r == null -> "not recording searches"
+                r.judged == 0L -> "nothing judged yet"
                 else -> "from ${r.judged} judged search${if (r.judged != 1L) "es" else ""}"
             }) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text("recall@10 — right result in the top 10", style = MaterialTheme.typography.bodySmall); Text(r?.recallAt10?.let { "%.2f".format(it) } ?: "—", style = MaterialTheme.typography.labelMedium) }
@@ -84,7 +83,7 @@ fun InsightsScreen(
         ReadFrame(report) { rep ->
             rep.sleep?.let { s ->
                 SectionHead("Last night")
-                if (s.runs.isEmpty()) Text("The base has not slept yet: it sleeps after ${s.idleMins} quiet minutes, on the retention sweep's tick.", Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted())
+                if (s.runs.isEmpty()) Text("Not slept yet · sleeps after ${s.idleMins} quiet minutes", Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted())
                 s.runs.forEach { Text("· $it", Modifier.padding(16.dp, 2.dp), style = MaterialTheme.typography.bodyMedium) }
                 if (s.unrehearsedCount > 0) Column(Modifier.padding(16.dp, 0.dp)) {
                     Fold("unrehearsed (${s.unrehearsedCount}) — nothing has asked for these") {
@@ -166,7 +165,6 @@ fun MachineView(m: Machine) {
             }
             if (m.retrying.isNotEmpty()) {
                 Text("Retrying", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.labelLarge)
-                Text("Work that hit something and is waiting to try again. Nothing here needs you.", style = MaterialTheme.typography.bodySmall, color = muted())
                 m.retrying.forEach { Text("${it.stage} · ${it.targetId} · ${it.attempts} attempts · next ${it.due} · ${it.lastError}", style = MaterialTheme.typography.labelSmall, color = muted()) }
             }
             if (!wrong && m.retrying.isEmpty()) Text("Nothing retrying.", style = MaterialTheme.typography.bodySmall, color = muted())

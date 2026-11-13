@@ -89,9 +89,7 @@ fun disagreementWords(d: Disagreement): String =
 
 @Composable
 fun Badge(text: String, color: androidx.compose.ui.graphics.Color) {
-    Box(Modifier.background(color.copy(alpha = 0.14f), MaterialTheme.shapes.small).padding(6.dp, 1.dp)) {
-        Text(text, style = MaterialTheme.typography.labelSmall, color = color)
-    }
+    Text(text, style = MaterialTheme.typography.labelSmall, color = color)
 }
 
 /** *Relevance falls off here.* A separator a screen reader announces, not a decoration. */
@@ -106,11 +104,7 @@ fun CliffRule() {
 
 @Composable
 fun NothingClose() {
-    Column(Modifier.fillMaxWidth().padding(16.dp, 8.dp).background(MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f), MaterialTheme.shapes.medium).padding(12.dp)) {
-        Text("Nothing matches closely", style = MaterialTheme.typography.labelLarge)
-        Spacer(Modifier.height(2.dp))
-        Text("The nearest artifacts, none of them close", style = MaterialTheme.typography.bodySmall, color = muted())
-    }
+    Notice("Nothing matches closely", "The nearest artifacts, none of them close")
 }
 
 /**
