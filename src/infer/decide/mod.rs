@@ -5,7 +5,10 @@ use crate::infer::budget::TokenCounter;
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 
+pub mod http;
 pub mod wire;
+
+pub use http::HttpDecider;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Question {
