@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT g.id AS \"id!\", g.title AS title, g.meta_json AS meta_json, g.reaped_at AS reaped_at\n               FROM graveyard g\n               JOIN artifacts a ON a.id = g.id\n              ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "meta_json",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "meta_json"
+          }
+        }
+      },
+      {
+        "name": "reaped_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "reaped_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "cd8806d809e56a3940576e37d32fb0abf92a92d871ca5f3002f23bd9f4a4a223"
+}

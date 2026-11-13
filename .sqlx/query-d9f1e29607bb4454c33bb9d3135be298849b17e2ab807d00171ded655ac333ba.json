@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT attempts FROM jobs WHERE stage = 'segment_window'",
+  "describe": {
+    "columns": [
+      {
+        "name": "attempts",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d9f1e29607bb4454c33bb9d3135be298849b17e2ab807d00171ded655ac333ba"
+}

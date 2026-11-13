@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT gap_id FROM gap_coverage",
+  "describe": {
+    "columns": [
+      {
+        "name": "gap_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gap_coverage",
+            "name": "gap_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "483423c74402d18710e61bad8e29c3043725b3a7e4e7597d6f5a58bc3d41089f"
+}

@@ -114,7 +114,29 @@ const PROBE = `
           }
         }
       });
+      var tab = document.querySelector('.oc-tabbar');
+      var tabShown = !!tab && getComputedStyle(tab).display !== 'none';
+      var tabItems = tab ? Array.prototype.map.call(tab.querySelectorAll('a'), function (a) {
+        return { label: a.textContent.trim(), height: a.getBoundingClientRect().height };
+      }) : [];
+      var rem = parseFloat(getComputedStyle(de).fontSize) || 16;
+      var focus = document.querySelector('.regions-focus');
+      var regions = Array.prototype.map.call(document.querySelectorAll('.regions > *'), function (el) {
+        return el.getBoundingClientRect().width / rem;
+      });
+      var width = function (sel) {
+        var el = document.querySelector(sel);
+        return el ? el.getBoundingClientRect().width / rem : 0;
+      };
+      var fab = document.querySelector('.oc-fab');
+      var fabHeight = fab ? fab.getBoundingClientRect().height : 0;
       fetch('/report', { method: 'POST', body: JSON.stringify({
+        tabShown: tabShown, tabItems: tabItems, fabHeight: fabHeight,
+        railRem: width('.region-rail'), focusPaneRem: width('.region-focus'), sideRem: width('.region-side'),
+        focusRem: focus ? Math.max.apply(null, [0].concat(Array.prototype.map.call(focus.children, function (c) {
+          return c.getBoundingClientRect().width / rem;
+        }))) : null,
+        widestRegionRem: regions.length ? Math.max.apply(null, regions) : 0,
         scrollWidth: de.scrollWidth, clientWidth: vw,
         over: over.slice(0, 12), squeezed: squeezed.slice(0, 12)
       })});
@@ -194,7 +216,7 @@ function next() {
       // the next measurement — and remembered, because a temp directory
       // nobody removes is one this test leaves behind on every run.
       '--user-data-dir=' + profile(),
-      'http://127.0.0.1:' + pending + '/page'
+      'http:' + '//127.0.0.1:' + pending + '/page'
     ],
     { stdio: 'ignore' }
   );

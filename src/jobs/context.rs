@@ -1,125 +1,61 @@
-//! What situations recur for which artifact.
-//!
-//! One pass over the log, no randomness, no model call. It joins three sources
-//! on `scope` and `at` — never on a stored id — agglomerates the situations an
-//! artifact was opened in, decays them, and writes the surviving centroids to
-//! the vector store as that artifact's `ctx` set.
-//!
-//! A full rebuild every run, from the raw bundles. That is what makes a change
-//! to the encoder a sweep rather than a migration, and it is why the sweep
-//! never reads what a previous run concluded.
+//! What situations recur for which artifact: one deterministic pass over the log, no model call.
+//! A full rebuild from raw bundles every run, so an encoder change is a sweep, not a migration.
 
 use crate::core::Core;
 use crate::error::Result;
 use crate::vector::cosine;
 
-/// How often this runs.
-///
-/// A constant rather than a setting, for the reason `REPAIR_INTERVAL_HOURS`
-/// gives: how often a faculty learns is not a preference, and `[recommend]` is
-/// one gate and a table of weights. Six hours means a situation recorded this
-/// morning is offered this evening, which is as fast as anything here needs to
-/// be — the patterns being learned are weekly.
+/// A constant, like `REPAIR_INTERVAL_HOURS`: the patterns learned are weekly, so six hours is fast
+/// enough.
 pub const INTERVAL_HOURS: u64 = 6;
 
-/// How long after a search an open still counts as that search's.
-///
-/// The bridge: where an open followed a search, the event inherits the search's
-/// identity, so a recurring search resolves to the artifact it led to rather
-/// than to a rerun of the query. Fifteen minutes, which is the same order as
-/// `pursuit.idle_secs` and deliberately not that key — pursuits may be off, and
-/// this must still work.
+/// An open this soon after a search inherits its identity. Deliberately not `pursuit.idle_secs`:
+/// pursuits may be off.
 pub const BRIDGE_SECS: i64 = 900;
 
-/// How far from an open a recorded situation may sit and still be that open's.
-///
-/// Half an hour either way. A page view records a situation; the opens that
-/// follow it belong to it. Wider than `BRIDGE_SECS` because a person can read
-/// for a while after arriving, and a situation is a slower thing than a query.
+/// Wider than `BRIDGE_SECS`: a person reads for a while after arriving.
 pub const MATCH_SECS: i64 = 1800;
 
-/// Centroids one artifact may carry, across every scope.
-///
-/// `max_clusters` bounds the situations per person per artifact; this bounds
-/// the array itself, which is shared by every scope that ever opened the
-/// artifact. On a base with one person it never binds. On one with many it is
-/// what keeps a popular artifact's multivector from growing with the user
-/// count — the heaviest survive, which is the same rule `min_weight` applies
-/// one level down.
+/// Bounds the one array every scope shares on an artifact's point; the heaviest survive.
 pub const MAX_SLOTS: usize = 16;
 
-/// One situation an artifact was opened in, ready to cluster.
 #[derive(Debug, Clone)]
 pub struct Member {
     pub vec: Vec<f32>,
-    /// Already decayed, and already multiplied by `self_weight` where this was
-    /// an open of something this feature offered.
+    /// Already decayed, and multiplied by `self_weight` for an open of this feature's own offer.
     pub weight: f64,
     pub at: i64,
-    /// The raw bundle, carried so the winner can be quoted.
     pub bundle: String,
 }
 
-/// One learned situation.
 #[derive(Debug, Clone)]
 pub struct Cluster {
     pub centroid: Vec<f32>,
     pub weight: f64,
-    /// How many events went into it, undecayed. `weight` says how much this
-    /// still counts; this says how often it happened, which is what the line
-    /// under the offer can put in words a person reads.
+    /// Undecayed: how often it happened, for the line under the offer.
     pub events: usize,
     pub last_at: i64,
-    /// `{"at": <unix>, "bundle": {…}}` for the member nearest the centroid.
     pub representative: String,
 }
 
-/// What one run did.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Report {
     pub standing: Standing,
-    /// Artifacts whose every situation had decayed away.
-    ///
-    /// The one count here that is work: a profile that existed before this run
-    /// and does not after it. Everything else this run touched, it rewrote to
-    /// what was already there.
+    /// The one count here that is work: a profile that existed before this run and not after.
     pub cleared: usize,
 }
 
-/// What the pass saw and re-derived, as opposed to what it changed.
-///
-/// Nested, and the nesting is what makes the empty-run backoff reachable for
-/// this sweep: `jobs::did_work` calls any non-zero flat number work, and all
-/// three of these are non-zero on every run over unchanged data. `run` is a
-/// full recompute — it reads every in-window event, re-clusters it and writes
-/// the same rows back — so `events`, `profiled` and `clusters` describe the
-/// window rather than the run, and at the top level they held the sweep at its
-/// configured period for the life of a dormant base.
-///
-/// Backing off is safe here only because a new open cancels the wait:
-/// `Core::record_context_event` arms this unit, which is what stops a
-/// situation written during a long backoff from waiting the rest of it out.
+/// Nested so `jobs::did_work` ignores them: a full recompute re-derives all three on every run.
+/// Backing off is safe because `Core::record_context_event` arms this unit.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Standing {
-    /// Opens in the window that had a situation to encode from.
     pub events: usize,
-    /// Artifacts left with at least one situation after this run.
     pub profiled: usize,
-    /// Clusters written across those artifacts.
     pub clusters: usize,
 }
 
-/// One deterministic pass, in event order.
-///
-/// An event joins the nearest cluster when cosine exceeds `merge_at`, otherwise
-/// it opens its own; when the count exceeds `max_clusters` the two nearest are
-/// merged. One pass and no randomness, because otherwise it is not testable —
-/// and because a recommendation whose reason changed between two sweeps over
-/// identical data could not be accounted for by anyone.
-///
-/// Members arrive already decayed. A cluster whose total weight falls below
-/// `min_weight` is dropped, which is what protects against the single accident:
-/// one event never reaches the threshold.
+/// One pass, no randomness, so a recommendation's reason is reproducible. A cluster below
+/// `min_weight` is dropped, so one accident never becomes a habit.
 pub fn agglomerate(
     members: &[Member],
     merge_at: f32,
@@ -130,9 +66,7 @@ pub fn agglomerate(
         centroid: Vec<f32>,
         weight: f64,
         last_at: i64,
-        /// Indices into `members`, so the representative can be chosen against
-        /// the *final* centroid rather than against whatever it was when each
-        /// member arrived.
+        /// Indices, so the representative is chosen against the final centroid.
         members: Vec<usize>,
     }
 
@@ -188,9 +122,7 @@ pub fn agglomerate(
         .into_iter()
         .filter(|c| c.weight >= min_weight)
         .map(|c| {
-            // The representative is the member nearest the *finished* centroid.
-            // Ties break on the index, so which of two equally central events
-            // is quoted does not depend on a float comparison going either way.
+            // Ties break on the index, so the choice never hangs on a float comparison.
             let rep = c
                 .members
                 .iter()
@@ -203,10 +135,8 @@ pub fn agglomerate(
                 .map(|(i, _)| i);
             let representative = rep
                 .map(|i| {
-                    // The bundle plus its stamp, because a bundle carries no
-                    // time of its own and the line says "like 08.08., 15:04".
-                    // Always valid JSON: a bundle that will not re-parse becomes
-                    // an empty object rather than corrupting the row.
+                    // A bundle carries no time of its own. A bundle that will not re-parse becomes
+                    // an empty object.
                     let bundle: serde_json::Value = serde_json::from_str(&members[i].bundle)
                         .unwrap_or_else(|_| serde_json::json!({}));
                     serde_json::json!({ "at": members[i].at, "bundle": bundle }).to_string()
@@ -221,8 +151,7 @@ pub fn agglomerate(
             }
         })
         .collect();
-    // Heaviest first: this is the order slots are allocated in, and `MAX_SLOTS`
-    // keeps the front of it.
+    // Heaviest first: the order slots are allocated in, and `MAX_SLOTS` keeps the front.
     out.sort_by(|a, b| {
         b.weight
             .partial_cmp(&a.weight)
@@ -232,7 +161,6 @@ pub fn agglomerate(
     out
 }
 
-/// Weighted mean, in place.
 fn blend(centroid: &mut [f32], have: f64, add: &[f32], w: f64) {
     let total = have + w;
     if total <= 0.0 {
@@ -244,10 +172,7 @@ fn blend(centroid: &mut [f32], have: f64, add: &[f32], w: f64) {
     }
 }
 
-/// The two nearest centroids, as `(keep, drop)` with `keep < drop`.
-///
-/// Quadratic, over at most `max_clusters + 1` vectors of 45 dimensions. That is
-/// a few hundred multiplications on a path that runs every six hours.
+/// Quadratic over at most `max_clusters + 1` vectors of 45 dimensions: cheap.
 fn closest_pair(centroids: &[&[f32]]) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, f32)> = None;
     for a in 0..centroids.len() {
@@ -261,22 +186,14 @@ fn closest_pair(centroids: &[&[f32]]) -> Option<(usize, usize)> {
     best.map(|(a, b, _)| (a, b))
 }
 
-/// The slice of an `at`-ordered log that falls in `[lo, hi]`.
-///
-/// The three sources come back ordered by time — `ORDER BY at, id` in each of
-/// the three queries — and the sweep asks each of them the same question once
-/// per interaction: what is near this moment. Scanning the whole vector for
-/// that made the pass quadratic, which on a base with a year of page views and
-/// a log that is never pruned is a background job doing hundreds of millions of
-/// string comparisons every six hours. Two `partition_point` calls answer it
-/// against the order the rows already arrive in.
+/// The sources arrive `ORDER BY at, id`; a linear scan per interaction made the pass quadratic over
+/// a year of logs.
 fn window<T>(v: &[T], at: impl Fn(&T) -> i64, lo: i64, hi: i64) -> &[T] {
     let start = v.partition_point(|x| at(x) < lo);
     let end = v.partition_point(|x| at(x) <= hi);
     &v[start..end.max(start)]
 }
 
-/// One pass: read the log, encode, cluster, write.
 pub async fn run(core: &Core) -> Result<Report> {
     let mut report = Report::default();
     if !core.recommends() {
@@ -286,23 +203,17 @@ pub async fn run(core: &Core) -> Result<Report> {
     let now = core.clock.now();
     let since = now - crate::store::context::RETAIN_DAYS * 86_400;
 
-    // Three sources, read whole. Bounded by the retention window rather than
-    // paged: the sweep rebuilds every profile from scratch, and a rebuild is
-    // only correct when it sees the whole window.
+    // Read whole within the retention window: a rebuild is only correct over the whole window.
     let interactions = core.store.interactions_between(since, now).await?;
     let contexts = core.store.context_events_since(since).await?;
-    // The bridge. `events_between` excludes the judge door already, which is
-    // right here too: a benchmark run is not a situation anybody was in.
+    // `events_between` excludes the judge door: a benchmark run is no one's situation.
     let searches = core.store.events_between(since, now).await?;
 
-    // (scope, artifact) -> the situations it was opened in.
     let mut by_pair: std::collections::BTreeMap<(String, String), Vec<Member>> =
         std::collections::BTreeMap::new();
 
     for i in &interactions {
-        // `dwell` is not an open, and `recommended_shown` is not an
-        // interaction at all — it is this feature's own offer, and counting it
-        // would profile every artifact it ever guessed at.
+        // `recommended_shown` is this feature's own offer; counting it would profile every guess.
         let self_made = match i.kind.as_str() {
             "opened" | "pivoted" => false,
             "recommended_open" => true,
@@ -311,9 +222,6 @@ pub async fn run(core: &Core) -> Result<Report> {
         let artifact_id = i.artifact_id.clone();
         let scope = i.scope.clone().unwrap_or_default();
 
-        // Where the open followed a search, the situation is the search's, not
-        // the open's: a recurring search resolves to the artifact it led to
-        // rather than to a rerun of the query.
         let anchor = window(&searches, |s| s.created_at, i.at - BRIDGE_SECS, i.at)
             .iter()
             .filter(|s| {
@@ -324,7 +232,6 @@ pub async fn run(core: &Core) -> Result<Report> {
             .max()
             .unwrap_or(i.at);
 
-        // The nearest recorded situation, within half an hour either way.
         let matched = window(
             &contexts,
             |c| c.at,
@@ -335,20 +242,16 @@ pub async fn run(core: &Core) -> Result<Report> {
         .filter(|c| c.scope.as_deref().unwrap_or_default() == scope)
         .min_by_key(|c| ((c.at - anchor).abs(), c.id));
 
-        // No bundle is not no event. `at` and `scope` were recorded from the
-        // beginning, and because an absent block is zeroed rather than
-        // defaulted, an old row feeds in with no special handling — weekday and
-        // hour contribute, device and network contribute nothing.
+        // No bundle is not no event: an absent block is zeroed, so old rows feed in with weekday
+        // and hour only.
         let (raw, at) = match matched {
             Some(c) => (c.bundle.clone(), c.at),
             None => ("{}".to_string(), anchor),
         };
         let bundle = crate::core::context::parse_bundle(&raw);
 
-        // Age decay, and the self-reinforcement guard as a multiplier. At
-        // `self_weight = 0` a `recommended_open` produces a weightless member,
-        // which the clusterer skips — so the first lucky guess cannot grow into
-        // a habit the system taught itself.
+        // At `self_weight = 0` an open of the offer weighs nothing, so a lucky guess cannot grow
+        // into a habit.
         let age_days = ((now - at).max(0) as f64) / 86_400.0;
         let decayed = 0.5f64.powf(age_days / cfg.half_life_days.max(0.1));
         let weight = decayed * if self_made { cfg.self_weight } else { 1.0 };
@@ -368,10 +271,7 @@ pub async fn run(core: &Core) -> Result<Report> {
         report.standing.events += 1;
     }
 
-    // Slots are numbered per *artifact*, not per (scope, artifact): the
-    // multivector is one array on one point, shared by every scope that has
-    // opened this artifact, so a slot numbered per scope would have two owners
-    // writing index 0.
+    // Numbered per artifact: the multivector is one array on one point shared by every scope.
     let mut per_artifact: std::collections::BTreeMap<String, Vec<(Option<String>, Cluster)>> =
         std::collections::BTreeMap::new();
     for ((scope, artifact_id), members) in by_pair {
@@ -389,8 +289,7 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    // Artifacts that had a profile and produced none this run. Their centroids
-    // must go, or a pattern that stopped months ago would still be offered.
+    // A pattern that stopped months ago must not still be offered.
     let mut stale: std::collections::BTreeSet<String> = core
         .store
         .artifacts_with_context_clusters()
@@ -424,11 +323,8 @@ pub async fn run(core: &Core) -> Result<Report> {
             })
             .collect();
 
-        // SQLite first, then the vector store. If the second write fails the
-        // table names clusters the index does not carry — which offers nothing
-        // and explains nothing, and the next run repairs it. The other order
-        // would offer an artifact with no reason to show for it, which is the
-        // one failure this must not have.
+        // SQLite first: a failed vector write then offers nothing and the next run repairs it; the
+        // other order offers an artifact with no reason to show.
         core.store
             .replace_context_clusters(&artifact_id, &rows)
             .await?;
@@ -470,15 +366,12 @@ mod tests {
     use crate::core::context::{Bundle, CTX_DIM, device_key, encoder_version, parse_bundle};
     use crate::core::test_support::{phone_bundle, recommending_core, seed_artifact};
 
-    /// 2026-08-21T13:52:00Z — a Friday, 15:52 in Berlin.
     const FRIDAY_SEVENTH: i64 = 1_787_320_320;
 
-    /// A Friday at ~15:00 Berlin time, `weeks_back` weeks before the seventh.
     fn friday(weeks_back: i64) -> i64 {
         FRIDAY_SEVENTH - weeks_back * 7 * 86_400 - 52 * 60
     }
 
-    /// One page view and the open that followed it.
     async fn seen_and_opened(core: &Core, aid: &str, at: i64, bundle: &Bundle, kind: &str) {
         let raw = serde_json::to_string(bundle).unwrap();
         let t = crate::core::context::local_time(at, bundle.tz.as_deref(), None);
@@ -529,7 +422,6 @@ mod tests {
         assert_eq!(c.encoder_version, encoder_version(&core.recommend.weights));
         assert_eq!(c.scope.as_deref(), Some("alice"));
 
-        // And the vector store agrees, which is what the read path queries.
         let hits = core
             .vectors
             .context_query(&c.centroid, 5, &Default::default())
@@ -540,9 +432,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_open_of_something_this_offered_raises_no_weight() {
-        // The named test the guard needs — the sitting has one saying it writes
-        // no activation, for the same reason. Without this, the first lucky
-        // guess grows into a habit the system taught itself.
         let core = recommending_core(FRIDAY_SEVENTH).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         seed_six_fridays(&core, &aid).await;
@@ -554,7 +443,6 @@ mod tests {
             .unwrap()[&aid][0]
             .weight;
 
-        // Six more Fridays, every one of them an open of the offer.
         for w in 1..=6 {
             seen_and_opened(
                 &core,
@@ -599,7 +487,6 @@ mod tests {
                 .is_empty()
         );
 
-        // The same base, a year later.
         let mut later = core.clone();
         later.clock = crate::core::context::Clock::Fixed(FRIDAY_SEVENTH + 365 * 86_400);
         let r = run(&later).await.unwrap();
@@ -625,9 +512,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_old_event_with_no_bundle_still_carries_a_weekday_and_an_hour() {
-        // The cold start, which is not a backfill path: it is the ordinary
-        // sweep reading older rows. Device and network contribute nothing
-        // because an absent block is zeroed rather than defaulted.
         let core = recommending_core(FRIDAY_SEVENTH).await;
         let aid = seed_artifact(&core, "recycling centre").await;
         for w in 1..=6 {
@@ -646,9 +530,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_people_get_two_profiles_on_one_artifact() {
-        // Slots are numbered per artifact and not per (scope, artifact): the
-        // multivector is one array on one point, so a slot numbered per scope
-        // would have two owners writing index 0.
         let core = recommending_core(FRIDAY_SEVENTH).await;
         let aid = seed_artifact(&core, "shared").await;
         seed_six_fridays(&core, &aid).await;
@@ -699,9 +580,6 @@ mod tests {
 
     #[test]
     fn six_fridays_and_one_monday_leave_one_situation() {
-        // The shape the whole feature is for. The outlier is real and
-        // recorded; it is simply not yet a pattern, and `min_weight` is what
-        // says so. Without it, one accident is a habit.
         let mut members: Vec<Member> = (0..6)
             .map(|i| member(vec![1.0, 0.02 * i as f32], 1.0, 1_000 + i))
             .collect();
@@ -715,9 +593,7 @@ mod tests {
 
     #[test]
     fn two_real_situations_are_two_clusters_not_their_mean() {
-        // The recycling centre looked up on Friday afternoons *and*
-        // occasionally on Monday mornings. A mean of them is a situation that
-        // never happened, and it would match neither.
+        // A mean of the two situations would match neither.
         let mut members: Vec<Member> = (0..4)
             .map(|i| member(vec![1.0, 0.0], 1.0, 1_000 + i))
             .collect();
@@ -731,9 +607,6 @@ mod tests {
 
     #[test]
     fn the_same_input_clusters_the_same_way_twice() {
-        // One pass and no randomness, because otherwise it is not testable —
-        // and because a recommendation that changed its reason between two
-        // sweeps over identical data would be unaccountable.
         let members: Vec<Member> = (0..12)
             .map(|i| {
                 member(
@@ -767,8 +640,6 @@ mod tests {
 
     #[test]
     fn a_cluster_quotes_the_member_nearest_its_centre() {
-        // What the display shows is a real event that happened, not a
-        // reconstruction of the average of several.
         let members = vec![
             member(vec![1.0, 0.0], 1.0, 1_000),
             member(vec![0.98, 0.2], 1.0, 1_001),
@@ -779,15 +650,12 @@ mod tests {
         let rep: serde_json::Value = serde_json::from_str(&out[0].representative).unwrap();
         assert!(rep["at"].is_i64(), "the stamp travels with the bundle");
         assert!(rep["bundle"].is_object());
-        // And it is one of the members, not something assembled.
         let at = rep["at"].as_i64().unwrap();
         assert!(members.iter().any(|m| m.at == at));
     }
 
     #[test]
     fn a_bundle_that_will_not_reparse_becomes_an_empty_one() {
-        // The row must always be valid JSON: the display reads it back, and a
-        // half-written bundle must not be able to break the page it explains.
         let mut m = member(vec![1.0, 0.0], 3.0, 1_000);
         m.bundle = "}{ not json".into();
         let out = agglomerate(&[m], 0.5, 5, 0.0);
@@ -809,9 +677,6 @@ mod tests {
 
     #[test]
     fn a_weightless_member_is_skipped_entirely() {
-        // What the self-reinforcement guard rides on: at `self_weight = 0` a
-        // `recommended_open` arrives weighing nothing and must not open a
-        // cluster of its own either.
         let members = vec![
             member(vec![1.0, 0.0], 3.0, 1_000),
             member(vec![0.0, 1.0], 0.0, 1_001),
@@ -828,10 +693,6 @@ mod tests {
 
     #[test]
     fn the_window_is_the_slice_and_nothing_either_side_of_it() {
-        // The sweep asks each of three ordered logs the same question once per
-        // interaction — what is near this moment — and scanning them whole made
-        // the pass quadratic over a 400-day window. The answer has to be the
-        // same slice a filter would have produced.
         let ats: Vec<i64> = vec![10, 20, 20, 30, 40, 50];
         let got = |lo, hi| -> Vec<i64> { window(&ats, |a| *a, lo, hi).to_vec() };
         assert_eq!(got(20, 40), vec![20, 20, 30, 40], "both bounds inclusive");
@@ -840,8 +701,6 @@ mod tests {
         assert_eq!(got(51, 100), Vec::<i64>::new(), "past the end");
         assert_eq!(got(0, 9), Vec::<i64>::new(), "before the start");
         assert_eq!(got(41, 41), Vec::<i64>::new(), "a gap");
-        // An empty log, and a window whose bounds have crossed — neither may
-        // panic on a slice index.
         assert_eq!(window::<i64>(&[], |a| *a, 0, 10).len(), 0);
         assert_eq!(got(40, 20).len(), 0);
     }

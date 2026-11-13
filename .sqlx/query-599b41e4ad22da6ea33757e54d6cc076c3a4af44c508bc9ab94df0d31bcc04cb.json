@@ -1,0 +1,35 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(SUM(tag = 'novel'), 0) AS novel,\n                    COALESCE(SUM(tag = 'known'), 0) AS known,\n                    COALESCE(SUM(tag = 'conflict'), 0) AS conflict\n               FROM integrations",
+  "describe": {
+    "columns": [
+      {
+        "name": "novel",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "known",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "conflict",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "599b41e4ad22da6ea33757e54d6cc076c3a4af44c508bc9ab94df0d31bcc04cb"
+}

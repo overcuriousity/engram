@@ -1,22 +1,5 @@
-//! One pacer in front of every inference call.
-//!
-//! Three jobs that all answer the same question — may a background call start
-//! now? The cooldown protects a desktop GPU from unbroken load. The turn keeps
-//! that answer true for the whole system rather than per worker. The
-//! interactive lease keeps the worker from piling work onto the endpoint while
-//! a person is waiting on `ask`. A dead endpoint is the job queue's backoff to
-//! handle: the turn already serialises the discovery to one call at a time.
-//!
-//! That last one is a load-bearing claim rather than an aside, and it holds
-//! only while nothing re-arms a unit that is already backing off. `enqueue`
-//! re-arms whatever state it finds, so anything automatic that runs on a timer
-//! has to use `rearm_idle_seq` instead — `Core::heal_store_drift` is the one
-//! that reaches embed jobs, and it did reset them, which is what turned an
-//! unreachable endpoint into a full-timeout call on every sweep, forever.
-//!
-//! It sits around calls rather than around jobs, so the two stages that make no
-//! inference call — planning a corpus into windows, and the consolidation sweep
-//! — never wait for a cooldown they did not earn.
+//! One pacer before every inference call: a cooldown for the GPU, one system-wide turn, and an interactive lease.
+//! A dead endpoint is the queue's backoff to handle, which holds only while timers use `rearm_idle_seq`, not `enqueue`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -25,9 +8,7 @@ use tokio::time::Instant;
 
 #[derive(Default)]
 struct GateState {
-    /// Interactive calls in flight. Background work waits while this is above
-    /// zero; a count rather than a flag because `ask` makes more than one call
-    /// and the UI can have two queries open.
+    /// A count, not a flag: `ask` makes more than one call and the UI can have two queries open.
     interactive: usize,
     last_finished: Option<Instant>,
 }
@@ -35,14 +16,7 @@ struct GateState {
 pub struct InferenceGate {
     state: Mutex<GateState>,
     resumed: Notify,
-    /// One background call at a time, held for the duration of the call.
-    ///
-    /// The cooldown on its own paces each worker without bounding the whole:
-    /// `server.workers` defaults to 2, and two workers read the same unchanged
-    /// `last_finished` in the same instant — neither has finished — and put two
-    /// generations on the one GPU. That is the load the cooldown is configured
-    /// to prevent, so the gap has to be between calls rather than between one
-    /// worker's calls.
+    /// System-wide, not per worker: two workers read the same `last_finished` and would both start.
     turn: Semaphore,
     cooldown: Duration,
 }
@@ -57,71 +31,36 @@ impl InferenceGate {
         }
     }
 
-    /// Returns the right to make one background inference call, once one may
-    /// start. Hold the permit for the duration of the call.
+    /// Hold the permit for the duration of the call.
     pub async fn background(&self) -> BackgroundPermit<'_> {
         self.acquire(true).await
     }
 
-    /// The same turn, without the cooldown on either side of it.
-    ///
-    /// For a call whose cost is not what the gap was configured against.
-    /// Embedding is the case it exists for: a 300M encoder answering a batch
-    /// in about a second, against the seconds-to-minutes of a generation on
-    /// the tier beside it. Serving thirty seconds in front of that call is the
-    /// pacer spending almost all of its budget on the one role that needs no
-    /// protecting — and at `synthesis = "earned"`, where nothing generates at
-    /// capture, that is most of what the pacer does.
-    ///
-    /// It still takes the turn, so a batch never runs alongside a generation:
-    /// they share a GPU, and one at a time is the part of the gate that bounds
-    /// load rather than merely spaces it. It still yields to an interactive
-    /// lease, because a person waiting on `ask` outranks a batch either way.
-    /// And it does not stamp `last_finished` on the way out: a call that never
-    /// earned the gap must not impose it on the next one.
+    /// The turn without the cooldown, for embedding: a seconds-long batch should not serve a generation's gap.
+    /// Still takes the turn and yields to the lease; does not stamp `last_finished`.
     pub async fn background_light(&self) -> BackgroundPermit<'_> {
         self.acquire(false).await
     }
 
-    /// The turn, then the wait, then the permit.
-    ///
-    /// `paced` is whether this call serves the cooldown before it and starts
-    /// one after it. The two travel together on purpose: a call exempt from
-    /// the gap it would otherwise wait out has not occupied the GPU in the way
-    /// the gap is measured against, so it has nothing to make the next caller
-    /// wait for.
+    /// `paced`: serve the cooldown before and start one after; a call exempt from one is exempt from both.
     async fn acquire(&self, paced: bool) -> BackgroundPermit<'_> {
-        // The turn is taken before the wait rather than after it, so whoever
-        // holds it re-reads the cooldown once the call ahead has finished.
-        // Checking first and taking the turn afterwards would let every waiter
-        // clear the same stale `last_finished` and then merely queue up.
-        let turn = self
-            .turn
-            .acquire()
-            .await
-            .expect("the gate's turn is never closed");
+        // Turn before the wait, so the holder re-reads the cooldown after the call ahead finishes.
+        let turn = self.turn.acquire().await.ok();
         loop {
-            // Built before the lock is taken and registered before it is
-            // dropped. `notify_waiters` wakes only waiters that are already
-            // registered and leaves no permit behind, so a lease ending in the
-            // gap between dropping the guard and first polling this would have
-            // woken nobody — and background work would have waited for the
-            // *next* question instead of for this one to end, which on a
-            // single-user base can be hours.
+            // Registered before the guard drops: `notify_waiters` wakes only registered waiters and leaves no permit.
             let resumed = self.resumed.notified();
             tokio::pin!(resumed);
 
-            // The lock is never held across an await: the wait is computed, the
-            // guard dropped, and only then slept on.
+            // The lock is never held across an await.
             let wait = {
-                let st = self.state.lock().expect("gate state");
+                let st = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if st.interactive > 0 {
                     resumed.as_mut().enable();
                     None
                 } else if !paced {
-                    // Nothing to serve. The turn is already held, and yielding
-                    // to the lease above is the whole of what a light call waits
-                    // for.
                     break;
                 } else {
                     let now = Instant::now();
@@ -133,8 +72,7 @@ impl InferenceGate {
             };
             match wait {
                 Some(d) => tokio::time::sleep(d).await,
-                // Held off by an interactive call, which has no deadline. The
-                // lease wakes us when it drops.
+                // No deadline; the lease wakes us when it drops.
                 None => resumed.await,
             }
         }
@@ -145,36 +83,34 @@ impl InferenceGate {
         }
     }
 
-    /// A lease for an interactive call. Returns immediately, always.
     pub fn interactive(self: &Arc<Self>) -> InteractiveLease {
-        self.state.lock().expect("gate state").interactive += 1;
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .interactive += 1;
         InteractiveLease {
             gate: Arc::clone(self),
         }
     }
 
-    /// A call ended — well, badly, or refused. It occupied the GPU either way,
-    /// so it starts the cooldown.
+    /// It occupied the GPU either way, so it starts the cooldown.
     pub fn call_finished(&self) {
-        self.state.lock().expect("gate state").last_finished = Some(Instant::now());
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_finished = Some(Instant::now());
     }
 }
 
-/// The right to make one background inference call, held for as long as the
-/// call runs.
-///
 pub struct BackgroundPermit<'a> {
     gate: &'a InferenceGate,
-    _turn: SemaphorePermit<'a>,
-    /// Whether this call starts a cooldown when it ends. False for a light
-    /// call, which served none going in.
+    // `None` only if the semaphore were closed, which nothing does.
+    _turn: Option<SemaphorePermit<'a>>,
     paced: bool,
 }
 
 impl BackgroundPermit<'_> {
-    /// The call ended, however it ended: the cooldown starts and the turn
-    /// passes on at the moment the call ended rather than whenever the caller
-    /// got around to saying so.
+    /// The cooldown starts when the call ended, not when the caller says so.
     pub fn finished(self) {
         if self.paced {
             self.gate.call_finished();
@@ -189,15 +125,13 @@ pub struct InteractiveLease {
 impl Drop for InteractiveLease {
     fn drop(&mut self) {
         {
-            let mut st = self.gate.state.lock().expect("gate state");
+            let mut st = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             st.interactive = st.interactive.saturating_sub(1);
-            // `last_finished` is deliberately not stamped. It was, and it made
-            // the cooldown restart on every interactive call — which for search
-            // means every keystroke's embed. A person paging through the UI held
-            // background work off forever: each page pushed the gap out again,
-            // and nothing here ages or bounds that. The cooldown paces batch
-            // work against the GPU, and the interactive lane is already the
-            // exception to it — `[pacing]` says so in as many words.
+            // No `last_finished` stamp: otherwise every search keystroke's embed restarts the cooldown and starves background work.
         }
         self.gate.resumed.notify_waiters();
     }
@@ -251,8 +185,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn an_interactive_call_never_waits_even_during_a_cooldown() {
-        // The point of the lane: a person is waiting, and the pacer exists to
-        // protect the GPU from batch work, not from them.
         let g = gate(600);
         g.call_finished();
         let started = tokio::time::Instant::now();
@@ -262,14 +194,8 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_person_paging_through_the_ui_cannot_starve_background_work() {
-        // The lease used to stamp `last_finished` on the way out, so every
-        // interactive call restarted the cooldown — and for search that is every
-        // keystroke's embed. Each page pushed the gap out again, with nothing here
-        // ageing the background work that was waiting, so on a long enough
-        // browsing session it never ran at all.
+        // Interactive calls must not restart the cooldown, or browsing starves background work.
         let g = gate(600);
-        // A background call has just ended, so the cooldown is what the waiter
-        // below is waiting on.
         g.call_finished();
         let t0 = tokio::time::Instant::now();
         let g2 = Arc::clone(&g);
@@ -278,8 +204,6 @@ mod tests {
             tokio::time::Instant::now()
         });
 
-        // Ten pages of results, each one an interactive call that begins and
-        // ends, spread across the cooldown the waiter is already serving.
         for _ in 0..10 {
             let lease = g.interactive();
             tokio::time::advance(Duration::from_secs(60)).await;
@@ -296,10 +220,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn two_workers_do_not_put_two_generations_on_the_gpu_at_once() {
-        // `server.workers` defaults to 2, and the cooldown alone is a check
-        // rather than a turn: both workers read the same unchanged
-        // `last_finished` — neither has finished — and both proceed. The gap the
-        // operator configured then bounds each worker rather than the endpoint.
+        // `server.workers` defaults to 2; a cooldown without the turn bounds each worker, not the endpoint.
         let g = gate(5);
         let first = g.background().await;
 
@@ -314,8 +235,7 @@ mod tests {
             "a second call started while the first was still running"
         );
 
-        // And the waiter serves out the cooldown from when that call *ended*,
-        // rather than from a stamp it read before it started.
+        // The cooldown runs from when the call ended, not from a stamp read before it.
         first.finished();
         let released = tokio::time::Instant::now();
         let acquired = second.await.unwrap();
@@ -324,8 +244,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_light_call_does_not_serve_the_cooldown() {
-        // Embedding is a 300M encoder next to a 9B generation. It takes its
-        // turn, but the gap in front of the heavy calls is not its to serve.
         let g = gate(600);
         g.call_finished();
         let started = tokio::time::Instant::now();
@@ -335,8 +253,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_light_call_does_not_start_a_cooldown_behind_it() {
-        // A call that never earned the gap must not impose it either: an embed
-        // batch between two generations would otherwise push the next one out.
         let g = gate(600);
         let permit = g.background_light().await;
         permit.finished();
@@ -347,9 +263,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_light_call_still_takes_its_turn() {
-        // Exempt from the gap, not from the one-at-a-time. The batch and the
-        // generation share a GPU, and that is the half of the gate that bounds
-        // load rather than spacing it.
+        // Exempt from the gap, not from one-at-a-time: they share a GPU.
         let g = gate(0);
         let heavy = g.background().await;
 
@@ -388,8 +302,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn a_failed_call_hands_the_turn_on() {
-        // The turn is released by the permit, so a call that errored must not
-        // hold the endpoint shut behind it.
         let g = gate(0);
         let permit = g.background().await;
         permit.finished();

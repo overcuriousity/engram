@@ -1,77 +1,51 @@
-<div class="card">
-  <div class="card-head">
-    <span class="card-title">Answer</span>
-    {% if abstained %}
-      <span class="card-meta"><span class="badge" title="The answer says the base does not hold this">nothing here</span></span>
-    {% endif %}
-    {% if truncated %}
-      <span class="card-meta"><span class="badge badge-warning">cut off at the answer length limit (ask.max_output_tokens)</span></span>
-    {% endif %}
-    {% if !unsupported.is_empty() %}
-      <span class="card-meta"><span class="badge badge-warning"
-        title="These appear in no cited excerpt. The model wrote them; the base does not hold them.">
-        {{ unsupported.len() }} literal{% if unsupported.len() != 1 %}s{% endif %} no excerpt supports</span></span>
-    {% endif %}
-    {% if retired_only %}
-      {# Not a warning about the answer's quality: the excerpts are as real as
-         any others and the base is what put them away. It is a warning about
-         where the reader is standing. #}
-      <span class="card-meta"><span class="badge badge-warning"
-        title="Nothing live matched. Every excerpt this answer was written from has been retired — a completed reminder, a superseded note — and is no longer part of what the base offers.">
-        written only from retired notes</span></span>
-    {% endif %}
-    {# Both sides were cited and the answer was told to give both readings;
-       the badge says so where the reader looks first. Neither side is picked. #}
-    {% for d in disagreements %}
-      <span class="card-meta"><span class="badge badge-warning" title="{{ d.detail.as_deref().unwrap_or("") }}">your notes disagree: {{ d.other_title.as_deref().unwrap_or("another note") }}</span></span>
-    {% endfor %}
-    {% if dropped > 0 %}
-      {# In words a reader uses. "excerpt(s) omitted for context budget" is
-         the accounting behind it, which belongs where an operator can still
-         find it and not on the face of the badge. #}
-      <span class="card-meta"><span class="badge badge-warning"
-        title="They did not fit the model's context window, so the answer was written without them.">
-        {{ dropped }} more excerpt{% if dropped != 1 %}s{% endif %} did not fit</span></span>
-    {% endif %}
-  </div>
+{% let warn = crate::web::icons::icon("triangle-alert", 16) %}
+<section class="answer">
+  <h2 class="oc-text-section">Answer</h2>
+  {% if abstained %}
+  <div class="oc-notice oc-notice--info" role="status">{{ crate::web::icons::icon("info", 16) }}<span class="oc-notice__text">Nothing here: the base does not hold this</span></div>
+  {% endif %}
+  {% if truncated %}
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">Cut off at the answer length limit (<code>ask.max_output_tokens</code>)</span></div>
+  {% endif %}
+  {% if !unsupported.is_empty() %}
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">{{ unsupported.len() }} literal{% if unsupported.len() != 1 %}s{% endif %} no excerpt supports</span></div>
+  {% endif %}
+  {% if retired_only %}
+  {# About where the reader stands, not the answer's quality: the base retired every excerpt. #}
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">Written only from retired notes</span></div>
+  {% endif %}
+  {# Both sides were cited and both readings given; neither is picked. #}
+  {% for d in disagreements %}
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">your notes disagree: {{ d.other_title.as_deref().unwrap_or("another note") }}{% if let Some(x) = d.detail %} · {{ x }}{% endif %}</span></div>
+  {% endfor %}
+  {% if dropped > 0 %}
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">{{ dropped }} more excerpt{% if dropped != 1 %}s{% endif %} did not fit</span></div>
+  {% endif %}
   <div class="md">{{ answer|safe }}</div>
-  {# Judged where it is read. Present only when the question was recorded. #}
   {{ verdict_bar|safe }}
-  {# A button, not a link to the capture box: keeping an answer stores it, here,
-     as an ordinary source — segmented, embedded, searchable like anything else.
-     The origin says a model wrote it and the metadata says from which question
-     and which artifacts, which is what makes a synthesised digest sitting beside
-     the wording it came from readable as what it is rather than a forgery. The
-     capture box is still a door for an operator who wants to rewrite it first;
-     it is no longer the only one, and it is no longer what "keep" means. #}
+  {# Keeping stores the answer as a model-written source with its question and citations. #}
   {% if let Some(id) = event_id %}
-  <div class="chips">
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ id }}/keep"
-            hx-target="closest .chips" hx-swap="outerHTML"
-            title="Store this answer as a source, with the question and the artifacts it was written from">Keep this answer</button>
-    <a class="btn btn-ghost btn-sm" href="/ui/capture?from_ask={{ id }}"
-       title="Open this answer in the capture box instead, to edit before it is stored">edit first</a>
+  <div class="oc-row answer-keep">
+    <button class="oc-btn" type="button" hx-post="/ui/ask/{{ id }}/keep"
+            hx-target="closest .answer-keep" hx-swap="outerHTML">Keep this answer</button>
+    <a href="/ui/capture?from_ask={{ id }}">Edit first</a>
   </div>
   {% endif %}
-</div>
-<h3>Artifacts used</h3>
+</section>
+<h3 class="oc-text-section">Artifacts used</h3>
 {% for r in citations %}
-<div class="card">
-  <div class="card-head{% if r.title.is_empty() %} card-head-bare{% endif %}">
-    {# No heading over an excerpt that has no name of its own — a passage
-       carries the heading of the section it was cut from, and the excerpt
-       below is what was cited. See `render_hit`. #}
-    {% if !r.title.is_empty() %}<span class="card-title">{{ r.title }}</span>{% endif %}
-    <span class="card-meta">{{ r.rank }}</span>
+<article class="cited">
+  <div class="cited-head">
+    {% if !r.title.is_empty() %}<span class="cited-title">{{ r.title }}</span>{% endif %}
+    <span class="oc-mono oc-muted">{{ r.rank }}</span>
   </div>
   <div class="md">{{ r.html|safe }}</div>
-  <div class="chips">
+  <div class="oc-row">
     {% if let Some(id) = event_id %}
-    <button class="btn btn-ghost btn-sm" hx-post="/ui/ask/{{ id }}/carried"
-            hx-vals='{"n":{{ loop.index }}}' hx-swap="outerHTML"
-            title="This excerpt carried the answer">Carried the answer</button>
+    <button class="oc-btn" type="button" aria-pressed="false" hx-post="/ui/ask/{{ id }}/carried"
+            hx-vals='{"n":{{ loop.index }}}' hx-swap="outerHTML">Carried the answer</button>
     {% endif %}
-    <a class="btn btn-ghost btn-sm" href="/ui/corpora/{{ r.corpus_id }}">source</a>
+    <a href="/ui/corpora/{{ r.corpus_id }}">Source</a>
   </div>
-</div>
+</article>
 {% endfor %}

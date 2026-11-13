@@ -1,0 +1,218 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT * FROM corpora ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "raw_text",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "raw_text"
+          }
+        }
+      },
+      {
+        "name": "origin",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "origin"
+          }
+        }
+      },
+      {
+        "name": "title_hint",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "title_hint"
+          }
+        }
+      },
+      {
+        "name": "content_hash",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "content_hash"
+          }
+        }
+      },
+      {
+        "name": "status",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "name": "coverage",
+        "ordinal": 8,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "coverage"
+          }
+        }
+      },
+      {
+        "name": "shingles",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "shingles"
+          }
+        }
+      },
+      {
+        "name": "near_dupe_of",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "near_dupe_of"
+          }
+        }
+      },
+      {
+        "name": "near_dupe_score",
+        "ordinal": 11,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "near_dupe_score"
+          }
+        }
+      },
+      {
+        "name": "source_url",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "source_url"
+          }
+        }
+      },
+      {
+        "name": "restored_at",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "restored_at"
+          }
+        }
+      },
+      {
+        "name": "retired_at",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "retired_at"
+          }
+        }
+      },
+      {
+        "name": "auto_reread_at",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "auto_reread_at"
+          }
+        }
+      },
+      {
+        "name": "metadata",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "metadata"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "95c75b17cd4a996e360ee3b5ccbd0f2e67e1978064ff2bdd78a406589cc55616"
+}

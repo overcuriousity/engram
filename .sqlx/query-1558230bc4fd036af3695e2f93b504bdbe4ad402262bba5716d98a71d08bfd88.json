@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT slug, subject AS \"subject!\" FROM users ORDER BY slug",
+  "describe": {
+    "columns": [
+      {
+        "name": "slug",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "slug"
+          }
+        }
+      },
+      {
+        "name": "subject!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "subject"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "1558230bc4fd036af3695e2f93b504bdbe4ad402262bba5716d98a71d08bfd88"
+}

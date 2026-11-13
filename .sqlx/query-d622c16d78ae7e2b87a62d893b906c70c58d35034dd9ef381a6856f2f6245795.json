@@ -1,0 +1,266 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", started, ended, stopped, generation_id, integrated, novel, known, conflicts, rehearsed, found, adopted, reverted, refused, undone, restored, interference, condensed, budget_used, budget, detail FROM sleep_runs ORDER BY started DESC, id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "started",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "started"
+          }
+        }
+      },
+      {
+        "name": "ended",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "ended"
+          }
+        }
+      },
+      {
+        "name": "stopped",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "stopped"
+          }
+        }
+      },
+      {
+        "name": "generation_id",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "generation_id"
+          }
+        }
+      },
+      {
+        "name": "integrated",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "integrated"
+          }
+        }
+      },
+      {
+        "name": "novel",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "novel"
+          }
+        }
+      },
+      {
+        "name": "known",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "known"
+          }
+        }
+      },
+      {
+        "name": "conflicts",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "conflicts"
+          }
+        }
+      },
+      {
+        "name": "rehearsed",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "rehearsed"
+          }
+        }
+      },
+      {
+        "name": "found",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "found"
+          }
+        }
+      },
+      {
+        "name": "adopted",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "adopted"
+          }
+        }
+      },
+      {
+        "name": "reverted",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "reverted"
+          }
+        }
+      },
+      {
+        "name": "refused",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "refused"
+          }
+        }
+      },
+      {
+        "name": "undone",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "undone"
+          }
+        }
+      },
+      {
+        "name": "restored",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "restored"
+          }
+        }
+      },
+      {
+        "name": "interference",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "interference"
+          }
+        }
+      },
+      {
+        "name": "condensed",
+        "ordinal": 17,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "condensed"
+          }
+        }
+      },
+      {
+        "name": "budget_used",
+        "ordinal": 18,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "budget_used"
+          }
+        }
+      },
+      {
+        "name": "budget",
+        "ordinal": 19,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "budget"
+          }
+        }
+      },
+      {
+        "name": "detail",
+        "ordinal": 20,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sleep_runs",
+            "name": "detail"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "d622c16d78ae7e2b87a62d893b906c70c58d35034dd9ef381a6856f2f6245795"
+}

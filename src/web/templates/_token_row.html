@@ -1,0 +1,11 @@
+<li id="token-{{ t.id }}">
+  <div class="oc-list__main">
+    <span class="oc-list__title">{{ t.name }}</span>
+    <span class="oc-list__meta">{% if t.revoked %}{{ crate::web::ui::status("none", "revoked") }}{% else %}{{ crate::web::ui::status("success", "active") }}{% endif %} · by {{ t.minted_by }} · created <span class="oc-mono">{{ t.created }}</span> · last used <span class="oc-mono">{{ t.last_used }}</span></span>
+  </div>
+  {% if !t.revoked %}
+  <button class="oc-btn oc-btn--danger" type="button"
+          hx-post="/ui/ops/tokens/{{ t.id }}/revoke"
+          hx-target="#token-{{ t.id }}" hx-swap="outerHTML">Revoke</button>
+  {% endif %}
+</li>

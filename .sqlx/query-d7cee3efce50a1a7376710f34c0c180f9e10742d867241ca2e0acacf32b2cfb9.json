@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO generations\n               (id, created_at, params, embed_recipe, chat_model, parent_id,\n                run_id, predicted, state)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'live')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "d7cee3efce50a1a7376710f34c0c180f9e10742d867241ca2e0acacf32b2cfb9"
+}

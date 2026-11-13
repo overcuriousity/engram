@@ -1,12 +1,5 @@
-//! The tenant registry: a subject in, a `Core` out.
-//!
-//! Provisioning is five steps and every one of them is idempotent, because a
-//! crash part-way through has to be recoverable by logging in again rather
-//! than by an operator with a shell. It is deliberately *not* transactional:
-//! three systems are involved — the control database, a file, and Qdrant — and
-//! nothing spans them. A Qdrant outage during a first login therefore fails
-//! loudly at the door, since half-provisioning presents to the user as a base
-//! whose searches come back empty.
+//! The tenant registry: a subject in, a `Core` out. Provisioning spans three systems and is not
+//! transactional, so every step is idempotent and logging in again recovers a crash.
 
 use crate::config::Config;
 use crate::core::Core;
@@ -16,18 +9,13 @@ use crate::store::control::{Control, User};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-/// One user's data: the core that reads and writes it, and who they are.
 #[derive(Clone)]
 pub struct Tenant {
     pub core: Core,
     pub user: User,
 }
 
-/// How a `Core` is built for a tenant.
-///
-/// The binary builds a Qdrant-backed one. The tests build an in-memory one,
-/// which is the whole reason this is a trait rather than a call to
-/// `QdrantVectors::connect` in the middle of `open`.
+/// How a `Core` is built for a tenant; a trait so tests can use in-memory vectors.
 #[async_trait::async_trait]
 pub trait VectorFactory: Send + Sync {
     async fn open(&self, alias: &str, dim: usize) -> Result<Arc<dyn crate::vector::VectorStore>>;
@@ -50,13 +38,8 @@ impl VectorFactory for QdrantFactory {
     }
 }
 
-/// The contained build's: the vectors go in the tenant's own database.
-///
-/// `vec_*` tables beside the artifacts, so a base is one file to keep rather
-/// than two. The registry names a collection `<prefix>_<slug>` (`alias`) and
-/// names the database `<slug>.db` (`db_path`); this undoes the first to arrive
-/// at the second, and refuses an alias that is not of that form rather than
-/// open a file of its own invention.
+/// The contained build's: vectors in the tenant's own database. Maps alias `<prefix>_<slug>` to
+/// `<slug>.db`, and refuses an alias of any other form.
 #[cfg(feature = "contained")]
 pub struct SqliteFactory {
     pub dir: std::path::PathBuf,
@@ -92,52 +75,18 @@ pub struct Tenants {
     control: Control,
     vectors: Arc<dyn VectorFactory>,
     /// Open cores, and the order they were last used in.
-    ///
-    /// A map plus a recency vector rather than an LRU crate: the cap is in the
-    /// tens, and a dependency for a linear scan over thirty-two entries is not
-    /// a trade worth making.
     open: Mutex<(HashMap<String, Tenant>, Vec<String>)>,
-    /// One provisioning at a time *per subject*, so two first requests racing
-    /// cannot both create the same collection. `INSERT OR IGNORE` makes the row
-    /// safe on its own; this is what makes the Qdrant call safe.
-    ///
-    /// Per subject and not one lock for the registry, because the section it
-    /// guards contains `open()` and `open()` contains a Qdrant round trip: a
-    /// single lock meant every worker's cache miss queued behind whichever
-    /// unrelated tenant happened to be opening, on a path that runs on every
-    /// eviction and once per user per repair tick. Two people opening two
-    /// different bases were never the race this exists for.
-    ///
-    /// Entries are never removed. There is one per subject the process has
-    /// opened, which is bounded by the user table, and dropping one the moment
-    /// it looks unused is how two callers end up holding two different mutexes
-    /// for the same subject.
+    /// One provisioning at a time per subject, so racing first requests cannot both create the
+    /// collection. Per subject since `open()` makes a Qdrant round trip; never removed.
     provisioning: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Subjects whose once-per-process opening work has already been done.
-    ///
-    /// `open` runs on every cache *miss* and not once per process: a registry
-    /// at its cap evicts and reopens, and the repair ticker walks every
-    /// registered user by name. Without this the full collection scroll behind
-    /// `heal_store_drift` rode along with each of those.
+    /// Subjects whose once-per-process opening work is done: `open` runs on every cache miss.
     first_opened: Mutex<HashSet<String>>,
-    /// The in-memory working state each subject keeps across eviction.
-    ///
-    /// Kept here and not on the `Core` it is handed to, because the `Core` is
-    /// the thing that goes away: `open` builds a fresh one on every cache miss,
-    /// so a sitting living there lasted exactly as long as its tenant's place
-    /// in the LRU. Past `store.max_open_tenants` active users that meant search
-    /// and ask carrying nothing for whoever was evicted between two requests,
-    /// against a `config.example.toml` that says eviction is transparent. See
-    /// `core::Working`.
-    ///
-    /// Unlike `provisioning` and `first_opened`, entries here *are* removed:
-    /// `Working::is_idle` says when nobody is serving the subject and nothing
-    /// warm is left to keep, and `working_for` drops those as it goes.
+    /// The working state each subject keeps across eviction, since `open` builds a fresh `Core` on
+    /// every miss. Dropped once `Working::is_idle`; see `working_for`.
     working: Mutex<HashMap<String, crate::core::Working>>,
-    /// Whether this registry holds one tenant that answers for every subject.
-    /// See `Tenants::single`.
+    live: Mutex<HashMap<String, crate::web::live::Live>>,
+    /// Whether one tenant answers for every subject; see `Tenants::single`.
     solo: bool,
-    /// The roles every core opened here serves in process, where any are.
     #[cfg(feature = "contained")]
     local: Option<crate::infer::local::LocalModels>,
 }
@@ -145,10 +94,8 @@ pub struct Tenants {
 /// Who is opening a tenant, which decides how much rides along with it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Trigger {
-    /// Somebody is at the door waiting for their own base.
     Request,
-    /// A worker claiming a unit, or the repair ticker walking the whole user
-    /// table. Nobody is waiting, and there may be a hundred of these in a row.
+    /// A worker claiming a unit, or the repair ticker walking the user table; nobody is waiting.
     Background,
 }
 
@@ -162,6 +109,7 @@ impl Tenants {
             first_opened: Mutex::new(HashSet::new()),
             provisioning: Mutex::new(HashMap::new()),
             working: Mutex::new(HashMap::new()),
+            live: Mutex::new(HashMap::new()),
             solo: false,
             #[cfg(feature = "contained")]
             local: None,
@@ -169,10 +117,7 @@ impl Tenants {
         }
     }
 
-    /// Whether this instance has anything to generate with, right now. Open on
-    /// a server, always. An engram carried on a phone shuts it, and opens it
-    /// while a model is reachable and the phone can afford the work; the queue
-    /// passes the generating stages over for as long as it is shut.
+    /// Whether this instance can generate now: always on a server; a phone gates it.
     pub fn generation(&self) -> Arc<std::sync::atomic::AtomicBool> {
         self.generation.clone()
     }
@@ -189,7 +134,6 @@ impl Tenants {
         std::path::Path::new(&self.cfg.store.dir).join(format!("{}.db", user.slug))
     }
 
-    /// Every core this registry opens has these roles served in process.
     #[cfg(feature = "contained")]
     pub fn with_local_models(mut self, models: crate::infer::local::LocalModels) -> Tenants {
         self.local = Some(models);
@@ -212,9 +156,6 @@ impl Tenants {
         self.open.lock().map(|g| g.0.len()).unwrap_or(0)
     }
 
-    /// Whether this subject is one the registry currently holds open. For the
-    /// test that says a whole-table pass does not change that; see
-    /// `get_transient`.
     #[cfg(test)]
     pub fn is_open(&self, subject: &str) -> bool {
         self.open
@@ -223,14 +164,11 @@ impl Tenants {
             .unwrap_or(false)
     }
 
-    /// How many subjects the registry is holding working memory for. For the
-    /// test that says that map is bounded; see `working_for`.
     #[cfg(test)]
     pub fn working_count(&self) -> usize {
         self.working.lock().map(|m| m.len()).unwrap_or(0)
     }
 
-    /// Whether this subject's working memory is still being held.
     #[cfg(test)]
     pub fn working_holds(&self, subject: &str) -> bool {
         self.working
@@ -239,17 +177,8 @@ impl Tenants {
             .unwrap_or(false)
     }
 
-    /// A registry that serves exactly one already-open tenant, whoever asks.
-    ///
-    /// What `auth.mode = "local"` is: one account, one base, no provisioning —
-    /// and what every test written against the single-user app gets, with a
-    /// real router and a real extractor in front of it. It answers for any
-    /// subject because in local mode there is only ever one person behind the
-    /// door, and the local username is not the same string as the subject the
-    /// data was written under.
-    ///
-    /// Isolation is not tested through this. `test_support::test_tenants`
-    /// builds a real registry, and that is what the cross-tenant tests use.
+    /// A registry that serves one already-open tenant whoever asks: `auth.mode = "local"`, where
+    /// the local username differs from the subject the data was written under.
     pub fn single(cfg: Arc<Config>, core: Core, user: User) -> Tenants {
         struct NoVectors;
         #[async_trait::async_trait]
@@ -271,12 +200,7 @@ impl Tenants {
         t
     }
 
-    /// The lock that serialises opening this one subject. See `provisioning`.
-    ///
-    /// A poisoned map is not a reason to open the same collection twice, so a
-    /// caller that finds one gets a private mutex and proceeds alone — which is
-    /// the same exclusion it would have had if it were the only caller, and the
-    /// only thing left to offer once the map cannot be read.
+    /// The lock that serialises opening this subject; a poisoned map yields a private mutex.
     fn provisioning_lock(&self, subject: &str) -> Arc<tokio::sync::Mutex<()>> {
         match self.provisioning.lock() {
             Ok(mut m) => m.entry(subject.to_string()).or_default().clone(),
@@ -291,8 +215,7 @@ impl Tenants {
         }
         let lock = self.provisioning_lock(subject);
         let _guard = lock.lock().await;
-        // Checked again under the lock: the racing caller may have finished
-        // while this one waited for it.
+        // Checked again under the lock: the racing caller may have finished meanwhile.
         if let Some(t) = self.cached(subject) {
             return Ok(t);
         }
@@ -302,11 +225,7 @@ impl Tenants {
         Ok(tenant)
     }
 
-    /// The worker door: a subject read off a claimed queue row.
-    ///
-    /// Never provisions. A subject that is not in `users` is a deleted user or
-    /// a bug, and inventing a tenant for it would create a database nobody
-    /// asked for and nobody will ever look at.
+    /// The worker door: never provisions, since a subject missing from `users` is deleted or a bug.
     pub async fn get(&self, subject: &str) -> Result<Tenant> {
         if let Some(t) = self.cached(subject) {
             return Ok(t);
@@ -322,26 +241,8 @@ impl Tenants {
         Ok(tenant)
     }
 
-    /// The same base, opened for a pass that walks *every* registered user.
-    ///
-    /// Two things `get` does that a whole-table walk must not. It holds the
-    /// tenant in the registry, and the registry is a fixed-size LRU: a pass
-    /// over five hundred users ends with the last `max_open_tenants` of them
-    /// resident — the last by `created_at`, which is an arbitrary set — and
-    /// every tenant somebody was actually using evicted behind it. And it bumps
-    /// recency for the ones already open, so even the survivors come out of the
-    /// pass ordered by the walk rather than by use.
-    ///
-    /// So: an open tenant is reused exactly as it is, without being touched,
-    /// and a closed one is opened and handed over without being kept. The
-    /// caller holds it for as long as it takes to repair that one base and then
-    /// drops it, which is what keeps the number of live SQLite pools and vector
-    /// clients at one rather than at one per registered user.
-    ///
-    /// The price is that a pass over a cold base opens and closes it every
-    /// tick. That is the cost every cache miss already paid, and the
-    /// alternative is letting an hourly repair decide what the instance keeps
-    /// in memory.
+    /// The same base for a pass over every user: an open tenant is reused untouched, a closed one
+    /// is not kept, so the walk neither evicts the LRU nor reorders it.
     pub async fn get_transient(&self, subject: &str) -> Result<Tenant> {
         if let Some(t) = self.cached_quiet(subject) {
             return Ok(t);
@@ -368,27 +269,22 @@ impl Tenants {
             .vectors
             .open(&self.alias(&user), self.cfg.infer.embed.dim)
             .await?;
-        // Before the core, because building one parses the tokenizer and this
-        // is an `async fn`: see `TokenCounter::warm`. Memoized, so every open
-        // after the first is a lookup.
+        // Before the core: building one parses the tokenizer, which `TokenCounter::warm` memoizes.
         crate::infer::budget::TokenCounter::warm(
             self.cfg.infer.tokenizer.as_deref(),
             std::path::Path::new(&self.cfg.store.dir),
         )
         .await;
-        let core =
+        let mut core =
             Core::from_config_with(&self.cfg, vectors, store, self.working_for(&user.subject));
+        core.live = self.live_for(&user.subject);
         #[cfg(feature = "contained")]
         let core = match &self.local {
             Some(models) => core.with_local_models(&self.cfg, models),
             None => core,
         };
-        // One `meta` read, before this core serves anything. `weak_below`
-        // reads an unmeasured line as the configured floor, and the floor is
-        // low enough that a base running at it calls unrelated things related
-        // — see `Core::adopt_measured_line`. A failure here leaves the floor
-        // standing, which is the state this call exists to shorten, not one it
-        // can make worse.
+        // Before serving: `weak_below` reads an unmeasured line as the configured floor, low
+        // enough to call unrelated things related. A failure leaves the floor standing.
         if let Err(e) = core.adopt_measured_line().await {
             tracing::warn!(
                 subject = %user.subject,
@@ -396,20 +292,8 @@ impl Tenants {
                 "could not read the stored weak line; the floor stands until the next pass"
             );
         }
-        // Every `Core` is built from the config file, so every one of them
-        // starts out ranking by what the file says — including the ones built
-        // for a base whose live generation supersedes it. Deciding that here,
-        // per open and awaited, is the only place it can be decided: a core
-        // that begins serving under file params while observations are written
-        // under the adopted generation never corrects itself, because the
-        // *base* has already recorded that it saw this file (`FILE_PARAMS_SEEN`)
-        // and every later boot agrees with the first.
-        //
-        // Not in `on_first_open`, where this used to sit. That claim is once
-        // per subject per process, and it is spent by whichever caller opens
-        // the base first — at boot, the repair ticker, on a transient core it
-        // drops immediately. Cheap enough to await: a `meta` read, the live
-        // generation, and a write only when the file actually moved.
+        // On every open, not only the first: a core started under file params while the live
+        // generation supersedes them never corrects itself (`FILE_PARAMS_SEEN`).
         if let Err(e) = generation_check(&core, &self.cfg).await {
             tracing::warn!(
                 subject = %user.subject,
@@ -421,18 +305,8 @@ impl Tenants {
         Ok(Tenant { core, user })
     }
 
-    /// This subject's working memory, surviving however many times the registry
-    /// has opened and evicted them.
-    ///
-    /// A poisoned map costs the sitting and nothing else: the caller gets fresh
-    /// state, which is what it would have had before this existed.
-    ///
-    /// Departed subjects are dropped on the way past. Without that this map is
-    /// a row per subject the process has ever opened — small rows, but the cap
-    /// exists precisely because an instance may have far more users than it
-    /// holds bases for. A row is dropped only when no `Core` is still holding
-    /// it and no sitting in it is still warm, so the eviction this whole field
-    /// exists to survive never takes one.
+    /// This subject's working memory across eviction; a poisoned map yields fresh state. Dropped
+    /// only when no `Core` holds it and no sitting is warm.
     fn working_for(&self, subject: &str) -> crate::core::Working {
         let Ok(mut map) = self.working.lock() else {
             return crate::core::Working::default();
@@ -441,8 +315,14 @@ impl Tenants {
         map.entry(subject.to_string()).or_default().clone()
     }
 
-    /// Whether this is the first time this process has opened `subject`.
-    /// Answers `true` exactly once per subject per process.
+    fn live_for(&self, subject: &str) -> crate::web::live::Live {
+        self.live
+            .lock()
+            .map(|mut m| m.entry(subject.to_string()).or_default().clone())
+            .unwrap_or_default()
+    }
+
+    /// Whether this is the first open of `subject` in this process; `true` exactly once.
     fn claim_first_open(&self, subject: &str) -> bool {
         self.first_opened
             .lock()
@@ -450,31 +330,8 @@ impl Tenants {
             .unwrap_or(false)
     }
 
-    /// What used to happen at boot, for the one base there was.
-    ///
-    /// Both of these are about a *collection* rather than an endpoint, so
-    /// neither can be answered once for the instance any more. They run here,
-    /// lazily, rather than for every registered user at startup: a hundred
-    /// users would otherwise mean a hundred full collection scrolls before the
-    /// port opens.
-    ///
-    /// Only the work that is genuinely once per process belongs here. What the
-    /// *core in hand* serves under does not — see the `generation_check` call
-    /// in `open`, which this used to swallow.
-    ///
-    /// Two guards keep that promise, and the name of this function is the
-    /// first of them. `open` is a cache *miss*, not a first sight: a registry
-    /// at its cap reopens the tenant it evicted an hour ago, so without
-    /// `claim_first_open` this would be per eviction rather than per process.
-    /// The second is `trigger`. The repair ticker opens every registered user
-    /// by name, and its first tick fires at boot — precisely the hundred
-    /// scrolls this is written to avoid, arriving through the back door. Only
-    /// a request scrolls; the ticker has `reconcile_stores_once` on its own
-    /// much longer period for the same work, over the same users.
-    ///
-    /// On the background queue, not awaited. A first request must not wait out
-    /// a scroll of the whole collection, and a base that cannot be reconciled
-    /// is still a base its owner can read.
+    /// Once-per-process collection work, lazily in the background: guarded by `claim_first_open`
+    /// (`open` runs per miss) and by `trigger`, so the boot repair tick scrolls nothing.
     fn on_first_open(&self, core: &Core, subject: &str, trigger: Trigger) {
         if !self.claim_first_open(subject) {
             return;
@@ -489,19 +346,15 @@ impl Tenants {
             if !reconcile {
                 return;
             }
-            // The two stores hold complementary halves of the same artifact and
-            // are written separately, so either can end up with an entry the
-            // other lacks: a crash between the two writes, or a restore of one
-            // from a backup taken at a different moment. Until something
-            // notices, one side's artifacts are simply missing.
+            // The two stores are written separately, so a crash or a partial restore can leave
+            // either side with entries the other lacks.
             if let Err(e) = core.heal_store_drift().await {
                 tracing::warn!(error = %e, "could not reconcile the two stores; the next pass retries");
             }
         });
     }
 
-    /// `cached`, without the recency bump. For a caller that is passing
-    /// through rather than serving somebody — see `get_transient`.
+    /// `cached`, without the recency bump; see `get_transient`.
     fn cached_quiet(&self, subject: &str) -> Option<Tenant> {
         let g = self.open.lock().ok()?;
         if self.solo {
@@ -543,10 +396,7 @@ impl Tenants {
 pub mod test_support {
     use super::*;
 
-    /// A registry over in-memory vectors and a temporary directory.
-    ///
-    /// The `TempDir` comes back with it: dropping it removes every tenant
-    /// database, so a test that keeps the registry keeps its files.
+    /// A registry over in-memory vectors; keep the `TempDir`, which holds every tenant database.
     pub async fn test_tenants(cap: usize) -> (Arc<Tenants>, tempfile::TempDir) {
         struct MemoryFactory;
         #[async_trait::async_trait]
@@ -575,12 +425,7 @@ pub mod test_support {
         )
     }
 
-    /// A registry whose vector store will not open.
-    ///
-    /// What a Qdrant outage looks like from inside the process: the row is
-    /// there, the file is there, and `open` fails anyway. Registered users are
-    /// the caller's to provision through `control()`, because provisioning
-    /// through the registry is one of the things that cannot work here.
+    /// A registry whose vector store will not open (a Qdrant outage); provision via `control()`.
     pub async fn unopenable_tenants() -> (Arc<Tenants>, tempfile::TempDir) {
         struct BrokenFactory;
         #[async_trait::async_trait]
@@ -608,7 +453,6 @@ pub mod test_support {
         )
     }
 
-    /// Two provisioned tenants over one queue.
     pub async fn two_tenants() -> (Arc<Tenants>, Tenant, Tenant, tempfile::TempDir) {
         let (tenants, dir) = test_tenants(8).await;
         let a = tenants.get_or_provision("sub-a", None).await.unwrap();
@@ -647,8 +491,8 @@ mod tests {
             .filter(|n| n.ends_with(".db"))
             .collect();
         assert_eq!(files, [format!("{}.db", t.user.slug)], "one base, one file");
-        let tables: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master WHERE name LIKE 'vec_%' AND type='table'",
+        let tables: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE name LIKE 'vec_%' AND type='table'"#
         )
         .fetch_all(&t.core.store.pool)
         .await
@@ -678,23 +522,19 @@ mod tests {
         assert_eq!(t.open_count(), 1, "the second request reused the open core");
     }
 
-    /// Every `Core` is built from the config file, so every one of them starts
-    /// out ranking by what the file says. Deciding the generation once per
-    /// process — which is what `on_first_open` does — left that standing on
-    /// every core built afterwards: the base went on writing observations
-    /// under the adopted generation while the core served the file's
-    /// parameters, and nothing ever corrected it, because `FILE_PARAMS_SEEN`
-    /// had already recorded that this file was seen.
-    ///
-    /// The claim is spent by whoever opens first, and at boot that is the
-    /// repair ticker, on a transient core it drops immediately.
     #[tokio::test]
     async fn a_reopened_tenant_serves_what_the_base_adopted_and_not_the_file() {
         use crate::store::generations::{GenerationParams, NewGeneration};
         // One resident tenant, so opening a second evicts the first.
         let (t, _dir) = test_tenants(1).await;
         let first = t.get_or_provision("sub-1", None).await.unwrap();
-        let file = GenerationParams::from(*first.core.ranking.read().unwrap());
+        let file = GenerationParams::from(
+            *first
+                .core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         let live = first
             .core
             .store
@@ -704,7 +544,6 @@ mod tests {
             .expect("opening the base names a generation");
         assert_eq!(live.params, file, "nothing has moved yet");
 
-        // What a quiet period does: adopt a child that ranks differently.
         let moved = GenerationParams {
             recency_weight: file.recency_weight + 0.2,
             ..file
@@ -725,16 +564,19 @@ mod tests {
             .unwrap();
         drop(first);
 
-        // A pass over every registered user, of the kind the repair ticker
-        // runs: it opens the base without keeping it, and used to be the one
-        // open that consumed the process's single claim on this subject.
+        // A whole-table pass, as the repair ticker runs: it must not consume the first-open claim.
         t.get_transient("sub-1").await.unwrap();
-        // And an eviction, which is the other way a serving core is rebuilt.
         t.get_or_provision("sub-2", None).await.unwrap();
 
         let back = t.get("sub-1").await.unwrap();
         assert_eq!(
-            GenerationParams::from(*back.core.ranking.read().unwrap()),
+            GenerationParams::from(
+                *back
+                    .core
+                    .ranking
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            ),
             moved,
             "the reopened core serves what the base adopted"
         );
@@ -783,22 +625,17 @@ mod tests {
         t.get_or_provision("sub-c", None).await.unwrap();
         assert_eq!(t.open_count(), 2);
 
-        // Reopening is transparent: the same slug, the same file.
         let again = t.get_or_provision("sub-a", None).await.unwrap();
         assert_eq!(again.user.slug, crate::store::control::slug_for("sub-a"));
         assert_eq!(t.control().users().await.unwrap().len(), 3);
     }
 
-    /// The sitting is what "eviction is transparent" has to mean to be worth
-    /// saying: stored data was never at risk, and the working memory search and
-    /// ask carry was, because `open` built a fresh `Core` on every cache miss.
     #[tokio::test]
     async fn an_evicted_tenant_comes_back_mid_sitting() {
         let (t, _dir) = test_tenants(1).await;
         let a = t.get_or_provision("sub-a", None).await.unwrap();
         a.core.sittings.queried("sid-1", "how to mount", 100, 1800);
 
-        // Somebody else's request takes the only slot.
         t.get_or_provision("sub-b", None).await.unwrap();
         assert_eq!(t.open_count(), 1);
 
@@ -810,14 +647,6 @@ mod tests {
         );
     }
 
-    /// And the bound on that, so holding working memory across eviction is not
-    /// a row per subject the process has ever served.
-    ///
-    /// A subject is dropped one open later than it becomes idle, and that is
-    /// deliberate rather than missed: `working_for` runs while the registry
-    /// still holds the tenant it is about to evict, so the first open after an
-    /// eviction still sees the outgoing `Core` holding its own state. The next
-    /// one sweeps it. The map is bounded either way, which is all this is for.
     #[tokio::test]
     async fn a_subject_with_nothing_warm_left_is_dropped_from_the_working_map() {
         let (t, _dir) = test_tenants(1).await;
@@ -828,8 +657,7 @@ mod tests {
         t.get_or_provision("sub-b", None).await.unwrap();
         assert!(t.working_holds("sub-a"), "a live sitting is not idle");
 
-        // The sitting goes cold. `read` is what expires it, as it would on any
-        // request that carried it.
+        // `read` is what expires the sitting.
         let a = t.get_or_provision("sub-a", None).await.unwrap();
         assert!(
             a.core
@@ -849,14 +677,10 @@ mod tests {
         assert_eq!(t.working_count(), 2);
     }
 
-    /// `open` is a cache miss, not a first sight. Past the cap it runs again
-    /// for a tenant this process has already opened — and what rides along
-    /// with it is a scroll of the whole collection.
     #[tokio::test]
     async fn the_first_open_work_is_claimed_once_per_process_however_often_a_tenant_reopens() {
         let (t, _dir) = test_tenants(1).await;
         t.get_or_provision("sub-a", None).await.unwrap();
-        // Evict it, then open it again.
         t.get_or_provision("sub-b", None).await.unwrap();
         assert_eq!(t.open_count(), 1);
         t.get_or_provision("sub-a", None).await.unwrap();
@@ -885,20 +709,12 @@ mod tests {
     }
 }
 
-/// Name the settings this tenant is retrieving under, so that what use leaves
-/// behind has something to be evidence *about*.
-///
-/// Beside `embed_recipe_check` and for the same reason: per tenant, answered
-/// from the config and the base together, and asked once when a base opens
-/// rather than on every request.
-///
-/// Both models are pinned, as one string. The ask model writes the citations
-/// and the synthesize model writes the artifacts they cite, so either changing
-/// shifts what the evidence means — and a composite says that without a second
-/// column to keep in step.
 pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
     let params = crate::store::generations::GenerationParams::from(
-        *core.ranking.read().expect("ranking lock"),
+        *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
     );
     let chat_model = format!(
         "ask={};synth={}",
@@ -916,31 +732,14 @@ pub async fn generation_check(core: &Core, cfg: &Config) -> Result<()> {
         cfg.evolve.autonomous.moves_ranking(),
     )
     .await?;
-    // Serve under it. Shared by every clone of this core, so the requests
-    // already being answered move with it — the same swap an adoption makes,
-    // arrived at from the other side.
-    *core.ranking.write().expect("ranking lock") = live.params.into();
+    // Shared by every clone of this core, so requests in flight move with it.
+    *core
+        .ranking
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = live.params.into();
     Ok(())
 }
 
-/// Say it out loud when the embedding recipe changed under a base that already
-/// has vectors in it.
-///
-/// `model`, `dim` and the three templates together decide what a stored vector
-/// means (`EmbedRole::fingerprint`). Change any of them and the vectors already
-/// in the collection describe the old recipe while every new query is rendered
-/// through the new one — a base that answers worse for no visible reason, with
-/// nothing in any log tying it to the config edit that caused it.
-///
-/// A warning and not a refusal: the operator may be mid-migration, and a base
-/// that will not open is worse than one that says what is wrong with it. The
-/// fingerprint is stored either way, so the warning is printed once rather than
-/// on every open.
-///
-/// Here rather than at startup because `meta` is per tenant, which is the whole
-/// reason it stayed out of the control database: it also holds the sweep
-/// cursors, and one shared row would have one tenant's recipe describing
-/// everybody's collection.
 pub async fn embed_recipe_check(core: &Core, cfg: &Config) -> Result<()> {
     const KEY: &str = "embed.recipe";
     let now = cfg.infer.embed.fingerprint();

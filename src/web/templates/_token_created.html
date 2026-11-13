@@ -1,5 +1,4 @@
-<div class="card">
-  <div class="card-head"><span class="card-title">Token created</span></div>
-  <p class="muted">Copy it now. It is stored only as a hash and cannot be shown again.</p>
-  <pre class="mono" style="user-select:all;margin:0">{{ token }}</pre>
+<div class="oc-stack" id="oc-token-minted">
+  <div class="oc-notice oc-notice--warning" role="status">{{ crate::web::icons::icon("triangle-alert", 16) }}<span class="oc-notice__text">Shown once. Copy it now.</span></div>
+  <div class="oc-row"><code class="oc-mono select-all">{{ token }}</code>{% let copy_label = "token" %}{% let copy_value = token.as_str() %}{% include "_copy.html" %}</div>
 </div>

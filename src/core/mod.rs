@@ -29,57 +29,24 @@ use std::sync::Arc;
 /// Entries kept in the query embedding cache.
 pub const QUERY_CACHE_CAPACITY: usize = 256;
 
-/// Where the measured weak line is kept between runs. Written by `calibrate`
-/// on every repair pass and read back by `adopt_measured_line` when a core is
-/// built, so a restart does not spend an hour at `weak_floor`.
+/// Read back by `adopt_measured_line`, so a restart does not spend an hour at `weak_floor`.
 const CALIBRATION_KEY: &str = "calibration.line";
 
-/// Bounded cache of query embeddings.
-///
-/// Search-as-you-type asks for `d`, `dd`, `dd i`, `dd if` inside one search,
-/// and the same questions come back across sessions. Each of those is a remote
-/// call before the vector store is touched at all, which for a local embedder
-/// is the dominant term in the latency the user feels.
-///
-/// Insertion-ordered rather than a true LRU: at this size the difference does
-/// not pay for the bookkeeping.
+/// Search-as-you-type embeds every prefix; insertion-ordered, since a true LRU does not pay at this
+/// size.
 pub struct QueryCache {
     capacity: usize,
     entries: std::collections::VecDeque<(String, Vec<f32>)>,
 }
 
-/// The in-memory working state one subject keeps, independent of any `Core`.
-///
-/// Both fields are documented on `Core` as "shared by every clone", and for the
-/// life of one `Core` they are. The registry is what broke that: `Tenants` caps
-/// how many bases it holds open and builds a fresh `Core::from_config` on every
-/// cache miss, so a user evicted between two requests came back with an empty
-/// sitting and a cold query cache — search and ask carrying nothing, on an
-/// instance whose own `config.example.toml` says eviction is transparent.
-///
-/// Held by subject in `Tenants` and handed back on reopen, which is what makes
-/// that sentence true. Nothing here is persistent state: a sitting exists only
-/// while it is warm and a cached embedding is a saved call, so losing this to a
-/// restart is nothing, and losing it to the cap was a working memory that
-/// silently stopped working past `store.max_open_tenants` active users.
+/// Per-subject working state, held by `Tenants` and handed back on reopen so eviction stays
+/// transparent.
 #[derive(Clone)]
 pub struct Working {
     pub sittings: Arc<crate::core::sitting::Sittings>,
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
-    /// Where "unrelated" stops, as `Core::line` reads it — held here so that
-    /// every `Core` this subject is served through shares one measurement.
-    ///
-    /// It is not working memory in the sense the two above are: it is a
-    /// measurement of the base, and `meta.calibration.line` is where it
-    /// actually lives. It is here because the hourly pass opens its own
-    /// transient `Core` (`background::open_for_pass`) to calibrate on, and an
-    /// atomic per `Core` meant that measurement was taken, written to `meta`,
-    /// and then dropped with the core that took it — leaving whichever core is
-    /// serving requests running at `weak_floor`, the configured 0.35, until
-    /// some later pass happened to find it in the registry. A capture landing
-    /// in that window answered every open gap it came within 0.40 of, and the
-    /// next pass, calibrating properly, deleted all of it again as being under
-    /// the line.
+    /// Held here so a transient `Core` (`background::open_for_pass`) shares its measurement with
+    /// the serving one.
     pub line: Arc<std::sync::atomic::AtomicU32>,
 }
 
@@ -94,14 +61,7 @@ impl Default for Working {
 }
 
 impl Working {
-    /// Whether this is worth keeping for a subject nobody is serving.
-    ///
-    /// Read by the registry to drop the entries of users who have gone away,
-    /// so holding working memory across eviction does not turn into a map with
-    /// a row per subject the process has ever seen. A sitting is the whole of
-    /// what would be missed — `Sittings` expires its own entries as they go
-    /// cold — and a query cache without one is a handful of saved embeddings
-    /// for a search nobody is running.
+    /// Lets the registry drop departed subjects; `Sittings` expires its own entries.
     pub fn is_idle(&self) -> bool {
         Arc::strong_count(&self.sittings) == 1 && self.sittings.is_empty()
     }
@@ -130,187 +90,97 @@ impl QueryCache {
     }
 }
 
-/// Live per-document locks, keyed by corpus id. Shared by every clone of
-/// `Core`: a per-clone map would lock nothing, the same way a per-clone gate
-/// would pace nothing.
+/// Shared by every clone of `Core`: a per-clone map would lock nothing.
 pub type CorpusLocks =
     Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
 
+pub const TRASH_RETENTION_SECS: i64 = 30 * 24 * 3600;
+pub const UNDO_MS: u32 = 6000;
+
 #[derive(Clone)]
 pub struct Core {
+    /// Tells open pages that the queue or the idle line moved.
+    pub live: crate::web::live::Live,
     pub store: Store,
     pub vectors: Arc<dyn VectorStore>,
-    /// `None` without `[infer.synthesize]`: the embed-only floor, where every
-    /// capture stays verbatim passages and no window is ever synthesized.
+    /// `None` without `[infer.synthesize]`: the embed-only floor, where captures stay verbatim
+    /// passages.
     pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
     pub reranker: Option<Arc<dyn Reranker>>,
-    /// Where the configured reranker is consulted — `[infer.rerank].apply`.
-    /// Meaningless without a reranker; both places when one is configured
-    /// without narrowing.
+    /// `[infer.rerank].apply`; meaningless without a reranker.
     pub rerank_apply: Vec<crate::config::RerankApply>,
     /// `None` when `[infer.ask]` is not configured: no ask page, no ask tool.
     pub completer: Option<Arc<dyn Completer>>,
-    /// The model that rules on duplicate pairs. Separate from `completer`
-    /// because judging is background work on the synthesize endpoint, not an
-    /// interactive answer: sharing one endpoint put sweep traffic in front of
-    /// the user's question and tuned one model for two unrelated tasks.
-    /// `None` with no synthesize role.
+    /// Rules on duplicate pairs, on the synthesize endpoint so sweep traffic stays off the ask
+    /// model.
     pub judge: Option<Arc<dyn Completer>>,
-    /// The model that rules on associative links. Same endpoint and same
-    /// settings as `judge`, separate because the response format each judge
-    /// sends is part of the completer: a link asked under the duplicate
-    /// grammar can only answer with a duplicate verdict. `None` with no
-    /// synthesize role.
+    /// Separate from `judge` because the response format is part of the completer.
     pub link_judge: Option<Arc<dyn Completer>>,
-    /// The model that names a knowledge gap from the questions in it. Same
-    /// endpoint as the judges, its own response shape, background only.
-    /// `None` with no synthesize role; gaps are then named by their terms.
+    /// Names a knowledge gap; `None` with no synthesize role, and gaps are then named by their
+    /// terms.
     pub gap_namer: Option<Arc<dyn Completer>>,
-    /// The judge that rules on a retired artifact: still worth something, or
-    /// nothing the live base does not already say. Same endpoint as the other
-    /// judges, its own response shape — the reap verdict is not a duplicate
-    /// verdict, and asking it under that grammar could only ever fail to
-    /// parse. `None` with no synthesize role.
+    /// Rules on a retired artifact; its own response shape. `None` with no synthesize role.
     pub reaper: Option<Arc<dyn Completer>>,
-    /// The model that writes an artifact from a pursuit. Same endpoint as the
-    /// judges, its own response shape, background only. `None` with no
-    /// synthesize role.
+    /// Writes an artifact from a pursuit. `None` with no synthesize role.
     pub generator: Option<Arc<dyn Completer>>,
-    /// The model that writes one artifact from a pair an operator asked to have
-    /// synthesized. Same endpoint as the judges, its own response shape.
-    ///
-    /// Separate from `judge` because it is not asked for a verdict: the press
-    /// was the verdict. Under the dedupe grammar the reply would have to carry
-    /// a `relation`, and the judge does not decide this class reliably — asked
-    /// twelve times about two artifacts describing one veterinary practice, it
-    /// wrote the same reasoning every time and split nine to three between
-    /// `distinct` and `duplicate`. `None` with no synthesize role.
+    /// Not `judge`: the press was the verdict, and the judge splits this class nine to three.
     pub pair_synthesizer: Option<Arc<dyn Completer>>,
-    /// The model that says, once, which subjects an answer still lacks — and
-    /// with it, whether an ask gets a fanned-out second round of retrieval at
-    /// all.
-    ///
-    /// `None` is the whole of the off switch: there is no completer to call, so
-    /// the disabled path cannot cost a call however the ask path is later
-    /// edited. It is `Some` whenever `infer.ask.plan` is on, which it is by
-    /// default.
+    /// `None` is the whole off switch for the fanned-out second round, so disabled costs no call.
     pub planner: Option<Arc<dyn Completer>>,
-    /// The vision model, when one is configured. `None` closes the image door.
+    /// `None` closes the image door.
     pub describer: Option<Arc<dyn Describer>>,
-    /// The speech model, when one is configured. `None` takes the microphone
-    /// off the search box. Nothing on any background path reads it: this is
-    /// the one model role that exists only for a control someone is holding.
+    /// `None` takes the microphone off the search box.
     pub transcriber: Option<Arc<dyn Transcriber>>,
     /// Passage size, already clamped to the embedder.
     pub chunk_tokens: usize,
     pub counter: Arc<TokenCounter>,
-    /// Writes that run off the request path. Shared by every clone of `Core`,
-    /// so draining one drains them all.
+    /// Shared by every clone of `Core`, so draining one drains them all.
     pub background: Arc<Background>,
-    /// Where this feature reads the time. `System` in the binary; the
-    /// recommendation tests set a fixed one so a seventh Friday at 14:52
-    /// exists on demand. Nothing else in the tree reads it.
+    /// `System` in the binary; recommendation tests fix it.
     pub clock: crate::core::context::Clock,
-    /// Shared by every clone of `Core`, like the background queue, and across
-    /// the tenant registry's evictions — see `Working`.
+    /// Shared by every clone and across registry evictions; see `Working`.
     pub query_cache: Arc<std::sync::Mutex<QueryCache>>,
-    /// Thresholds and budgets for duplicate hygiene. Read on the capture path
-    /// and by the sweep, so it lives here rather than being passed down.
     pub consolidate: crate::config::ConsolidateConfig,
-    /// The floor under the weak line. See `VectorConfig::weak_below` and
-    /// `Core::weak_below`.
+    /// The floor under the weak line; see `Core::weak_below`.
     pub weak_floor: f32,
-    /// Where "unrelated" stops under this base's embedder, as `f32` bits;
-    /// zero until `calibrate` has measured it or `adopt_measured_line` has
-    /// read the last measurement back. Shared by every clone of `Core` *and*
-    /// by every `Core` built for this subject — it lives on `Working`, which
-    /// the registry hands back on reopen. See `Working::line` for why that
-    /// matters and `core::gaps::unrelated_line` for what is measured.
+    /// The measured unrelated line as `f32` bits, zero until measured; lives on `Working`.
     pub line: Arc<std::sync::atomic::AtomicU32>,
-    /// The pinned tag's boost — a term the vector store folds into one score
-    /// and never reports back. Held here so the explanation reconstructs it
-    /// from the same configuration the store was built from, rather than from
-    /// a second reading that could drift. The recency terms used to sit beside
-    /// it; they travel in `ranking` now, because the idle pass moves them. See
-    /// `core::explain::scoring_terms`.
+    /// Held so the explanation reconstructs the score from the store's own configuration.
     pub pinned_boost: f32,
-    /// The one switch over everything learned from what happens here. Read on
-    /// the search path and by every sweep downstream of it, so it lives here
-    /// rather than being threaded down. See `LearnConfig`.
+    /// The one switch over everything learned from what happens here.
     pub learn: crate::config::LearnConfig,
-    /// How real searches are recorded for later judging. Read on the search
-    /// path, so it lives here rather than being threaded down.
     pub feedback: crate::config::FeedbackConfig,
-    /// What is written down about how a retrieval turned out. Read by
-    /// `jobs::observe` and by the sweep's pair gathering; never on a path a
-    /// person waits on.
+    /// Never read on a path a person waits on.
     pub evolve: crate::config::EvolveConfig,
-    /// Limits for the upload, link and extension capture paths. Read on the
-    /// request path, so it lives here rather than being threaded down.
     pub capture: crate::config::CaptureConfig,
-    /// Link learning, priming and association. Read on the search path and by
-    /// the sweep, so it lives here rather than being threaded down.
     pub associate: crate::config::AssociateConfig,
     pub activation: crate::config::ActivationConfig,
-    /// When a passage has earned its window a synthesis call. See
-    /// `PromoteConfig`.
     pub promote: crate::config::PromoteConfig,
-    /// Whether and how a run of searches may be written up. See
-    /// `PursuitConfig`.
     pub pursuit: crate::config::PursuitConfig,
-    /// What the queue does with work nobody is waiting on. Read by the repair
-    /// pass, which is where ageing happens.
     pub schedule: crate::config::ScheduleConfig,
     pub time: crate::config::TimeConfig,
     pub reap: crate::config::ReapConfig,
-    /// Whether and how the area under the search box is filled. Read by the
-    /// sweep and on the page-view path, so it lives here rather than being
-    /// threaded down.
+    /// Whether and how the area under the search box is filled.
     pub recommend: crate::config::RecommendConfig,
-    /// The vector background behind the pages. Read by the sample endpoint,
-    /// so it lives here rather than being threaded down.
     pub ui: crate::config::UiConfig,
-    /// Every live sitting, keyed by web session. Shared by every clone of
-    /// `Core`, like the background queue — a per-clone map would be a per-clone
-    /// working memory, which is no working memory at all. Shared across the
-    /// tenant registry's evictions too, for the same reason and by the same
-    /// argument: see `Working`.
+    /// Shared by every clone and across registry evictions; see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
-    /// The pacer every inference call passes through. Shared by every clone,
-    /// because a per-clone gate would pace nothing: the point is one queue of
-    /// calls in front of one GPU.
+    /// Shared by every clone: the point is one queue of calls in front of one GPU.
     pub gate: Arc<crate::infer::gate::InferenceGate>,
-    /// One lock per document, so the local writes that rearrange a document
-    /// cannot interleave with each other. Reach for it through `corpus_lock`.
+    /// One lock per document; reach for it through `corpus_lock`.
     pub corpus_locks: CorpusLocks,
-    /// Serializes every lifecycle transition against the sweep's marker
-    /// repair. Each transition is two writes to two stores plus a dirty
-    /// marker, none of it atomic; without mutual exclusion the repair can
-    /// read a stale row mid-reveal, write the old state back over the new
-    /// payload, and the reveal then clears the marker — row active, payload
-    /// hidden, and nothing left that would ever notice. Shared by every
-    /// clone, like the background queue.
+    /// Serializes lifecycle transitions (two stores plus a marker, not atomic) against the marker
+    /// repair.
     pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
-    /// How many uploads may be decoded at once. See
-    /// `image::MAX_CONCURRENT_DECODES`; shared by every clone, because a
-    /// per-clone permit would bound nothing.
+    /// See `image::MAX_CONCURRENT_DECODES`; shared, because a per-clone permit would bound nothing.
     pub decodes: Arc<tokio::sync::Semaphore>,
-    /// The ranking knobs the idle pass may move. Shared by every clone, like
-    /// the background queue: an adoption has to change the search the next
-    /// request runs, not the one this handler holds.
+    /// Shared, so an adoption changes the next request's search.
     pub ranking: Arc<std::sync::RwLock<crate::core::ranking::RankingParams>>,
 }
 
-/// What a job has written to the corpus on its own in the last twenty-four
-/// hours, against its daily pace. A bound on the blast radius, not a rate limit
-/// on finding.
-///
-/// One per job, not one for the base: dedupe, reap, promotion and the idle
-/// pass each call `Core::may_act` with their own name and spend only their own
-/// day — see `Store::actions_since`. A shared count meant condense, which runs
-/// last in the pass, found the day already spent on every day the base had
-/// been used.
+/// A job's writes to the corpus in the last 24 hours against its own daily pace; see
+/// `Store::actions_since`.
 #[derive(Debug, Clone, Copy)]
 pub struct Budget {
     pub used: u32,
@@ -336,17 +206,7 @@ impl Core {
         })
     }
 
-    /// Whether `job` may write to the corpus now: it is permitted to act at
-    /// all, and it has not spent its own day.
-    ///
-    /// Per job, because a shared count meant four independent units spent one
-    /// another's allowance and the one that ran last never had any — see
-    /// `Store::actions_since`. Each caller names itself, so nothing here has
-    /// to guess which budget a write belongs to.
-    ///
-    /// The base always runs as `"full"`, so the answer is whether the job has
-    /// spent its own day; the `acts_on_corpus` guard stays for a test that
-    /// builds a core below it.
+    /// Whether `job` may act at all and has not spent its own day.
     pub async fn may_act(&self, job: crate::store::actions::Job) -> crate::error::Result<bool> {
         if !self.evolve.autonomous.acts_on_corpus() {
             return Ok(true);
@@ -354,8 +214,7 @@ impl Core {
         Ok(!self.budget(job).await?.spent())
     }
 
-    /// Put the version a condensation retired back, and stamp the row. One
-    /// method, called by the button and by the base.
+    /// Put back the version a condensation retired; called by the button and by the base.
     pub async fn uncondense(
         &self,
         action_id: &str,
@@ -393,51 +252,26 @@ impl Core {
         f32::from_bits(self.line.load(std::sync::atomic::Ordering::Relaxed))
     }
 
-    /// Cosine similarity below which a result is unrelated to what was asked:
-    /// the measured line when there is one, the configured floor otherwise.
-    ///
-    /// Read by the search path to label weak hits, by the gap store to decide
-    /// what is a gap, by `gaps::cover` to decide what answers one, and by the
-    /// pursuit sweep to decide what was engaged. All one line, because they
-    /// are all the one question — is this near that — asked of one embedder.
+    /// The one "is this near that" line for search, gaps, `gaps::cover` and pursuit: measured, or
+    /// the floor.
     pub fn weak_below(&self) -> f32 {
         crate::core::gaps::line_above(self.weak_floor, self.measured_line())
     }
 
-    /// Cosine similarity at or above which two queries are about one thing.
-    /// The same measurement as `weak_below`, over a higher floor: a match has
-    /// to reach further than "not unrelated".
+    /// The same measurement as `weak_below`, over a higher floor.
     pub fn link_at(&self) -> f32 {
         crate::core::gaps::line_above(crate::core::gaps::GAP_LINK_AT, self.measured_line())
     }
 
-    /// Pin the weak line, for tests that assert on the labelling: the floor is
-    /// set and the measurement dropped, so `weak_below` returns exactly this.
+    /// For tests: sets the floor and drops the measurement.
     pub fn set_weak_below(&mut self, at: f32) {
         self.weak_floor = at;
         self.line = Arc::new(std::sync::atomic::AtomicU32::new(0));
     }
 
-    /// Take up the last measurement this base recorded, for a core that has
-    /// not been calibrated in this process yet.
-    ///
-    /// `calibrate` writes the line to `meta` on every pass and nothing read it
-    /// back at startup: `line` began at zero, which `weak_below` reads as
-    /// "unmeasured" and answers with `weak_floor` — the configured 0.35 —
-    /// however many times this base had measured 0.60 before the restart. That
-    /// is not a conservative fallback. Every reader of the line treats it as
-    /// "below this, two things are unrelated", so a line an eighth of the way
-    /// down from where it belongs makes unrelated things related: a capture
-    /// closes gaps it does not answer, a search calls weak hits good, and the
-    /// first repair pass after the restart deletes the lot for being under the
-    /// line it should have been holding all along.
-    ///
-    /// Never overwrites a measurement already in hand — a second core opened
-    /// for a subject the registry is already serving adopts nothing, because
-    /// what `Working::line` holds is at least as fresh as what is in `meta`.
-    ///
-    /// A base that has never been calibrated has no key and keeps the floor,
-    /// which is what the floor is for.
+    /// Without this, a restart reads `weak_floor` (0.35) and treats unrelated things as related
+    /// until the next pass. Never overwrites a measurement in hand, which is at least as fresh as
+    /// `meta`.
     pub async fn adopt_measured_line(&self) -> crate::error::Result<()> {
         if self.measured_line() > 0.0 {
             return Ok(());
@@ -455,12 +289,8 @@ impl Core {
         Ok(())
     }
 
-    /// Measure where "unrelated" stops from what this base holds — every
-    /// recorded query against the others and against a sample of stored
-    /// artifacts — and remember it, in memory for the readers above and in
-    /// the meta table for the next boot. Runs on the repair pass, so the line
-    /// follows the base as it grows and the embedder if it changes; a base
-    /// with too little recorded keeps the floors.
+    /// Measure where "unrelated" stops in this base and store it in memory and `meta`; runs on the
+    /// repair pass.
     pub async fn calibrate(&self) -> crate::error::Result<f32> {
         let queries = self.store.calibration_vecs(self.embedder.model()).await?;
         let artifacts: Vec<Vec<f32>> = self
@@ -488,10 +318,6 @@ impl Core {
         Ok(line)
     }
 
-    /// Build the running core from configuration. Lives here rather than in
-    /// `main`, so the evaluation harness drives exactly the `Core` the binary
-    /// does — a benchmark against a differently wired core measures the wrong
-    /// program.
     /// The same core with the named roles served by models in this process.
     #[cfg(feature = "contained")]
     pub fn with_local_models(
@@ -516,8 +342,7 @@ impl Core {
         if let (Some(path), Some(role)) = (&models.ask, cfg.infer.ask.as_ref()) {
             self.completer = Some(Arc::new(LocalCompleter::new(path.clone(), role)));
         }
-        // No role in the config stands behind this one: the file is the whole
-        // of it, and its presence is what opens the microphone's door.
+        // No config role stands behind this: the file's presence opens the microphone.
         if let Some(path) = &models.speech {
             self.transcriber = Some(Arc::new(crate::infer::local::LocalTranscriber::new(
                 path.clone(),
@@ -531,32 +356,25 @@ impl Core {
         Core::from_config_with(cfg, vectors, store, Working::default())
     }
 
-    /// `from_config`, over working memory that already exists.
-    ///
-    /// The registry's door. See `Working`: a reopened tenant is the same user
-    /// mid-sitting, and building this state fresh is what made the cap visible
-    /// to them.
+    /// The registry's door: a reopened tenant keeps its working memory.
     pub fn from_config_with(
         cfg: &Config,
         vectors: Arc<dyn VectorStore>,
         store: Store,
         working: Working,
     ) -> Core {
-        // Chunk size is capped by what the embedder accepts, with headroom for
-        // token-count estimation error.
+        // Headroom for token-count estimation error.
         let max_artifact_tokens = (cfg.infer.embed.max_input_tokens as f32 * 0.8) as usize;
 
         let synth = cfg.infer.synthesize.as_ref();
-        // Built before the roles, not inside the struct literal, because the
-        // request side has to budget with the same counter the windowing side
-        // sizes with. Two counters that disagree is a prompt sized to N real
-        // tokens and estimated at 0.6N — room the endpoint does not have, and a
-        // non-retryable 400 on every sweep. See `HttpSynthesizer::counter`.
+        // One counter for request budgeting and windowing, or prompts are sized at 0.6N and refused
+        // with a 400.
         let counter = Arc::new(TokenCounter::load(
             cfg.infer.tokenizer.as_deref(),
             std::path::Path::new(&cfg.store.dir),
         ));
         Core {
+            live: Default::default(),
             evolve: cfg.evolve.clone(),
             store,
             vectors,
@@ -638,9 +456,7 @@ impl Core {
                 ),
             )),
             weak_floor: cfg.vector.weak_below,
-            // From the subject's working memory, not a fresh atomic: see
-            // `Working::line`. A core built for one pass and dropped after it
-            // still hands its measurement to whichever core is serving.
+            // See `Working::line`.
             line: working.line,
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
@@ -667,92 +483,50 @@ impl Core {
         }
     }
 
-    /// Exclusive access to one document's artifact rows, for as long as the
-    /// guard is held.
-    ///
-    /// Windows became independently schedulable units, which means two workers
-    /// can be inside two windows of one document at once — where before, one job
-    /// owned the whole thing. The two local writes that rearrange a document are
-    /// not safe against each other: `write_segment_artifacts` deletes a window's
-    /// artifacts and inserts their replacements, while `finish` renumbers every
-    /// ordinal in the document. Interleaved, they leave duplicate or gapped
-    /// ordinals and a status that depends on which finished last. It converges on
-    /// the next settle, and until then the document is wrong.
-    ///
-    /// Never hold this across an inference call. The whole point of splitting a
-    /// document into units was to stop one window blocking the rest, and a lock
-    /// held around `segment` would hand that back — serialised, and for minutes.
-    /// Every holder does local SQLite work, which SQLite serialises anyway.
-    ///
-    /// `tokio::sync::Mutex` because a waiter must yield its thread rather than
-    /// park a worker on it.
+    /// Exclusive access to one document's artifact rows; segment writes and `finish` renumbering
+    /// must not interleave. Never hold this across an inference call. `tokio` mutex, so a waiter
+    /// yields its thread.
     pub async fn corpus_lock(&self, corpus_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
-            let mut locks = self.corpus_locks.lock().expect("corpus locks");
-            // Entries nobody is holding or waiting on are dropped rather than
-            // accumulating one per document for the life of the process. A
-            // holder's guard owns its `Arc`, and so does a task that has cloned
-            // one and not yet locked it, so anything still in use counts above
-            // one and survives.
+            let mut locks = self
+                .corpus_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Anything still held or about to be locked has a strong count above one.
             locks.retain(|_, l| Arc::strong_count(l) > 1);
             Arc::clone(locks.entry(corpus_id.to_string()).or_default())
         };
         lock.lock_owned().await
     }
 
-    /// Whether the associative layer — links and priming — is actually live,
-    /// not merely configured on.
-    ///
-    /// Links are learned from recorded searches (`search_events`), and nothing
-    /// is recorded while `[learn]` is off. Kept as a named predicate rather
-    /// than inlined: every site that primes, associates, bumps activation from
-    /// a search, or renders "seen together" asks this one question, and the
-    /// name says which question it is.
+    /// Links are learned from recorded searches, and nothing is recorded while `[learn]` is off.
     pub fn associating(&self) -> bool {
         self.learn.enabled
     }
 
-    /// May the idle pass move ranking — adopt a generation, take one back, step
-    /// a ladder?
-    ///
-    /// Only under `[learn] mode = "full"`. `learning` is the mode the harness is
-    /// run in before anything learned is allowed to move a rank: a pass that
-    /// adopted a generation while the sweep measured would be measuring a
-    /// ranking its own inputs had already moved. `off` learns nothing, and a
-    /// generation adopted on probes is learning. The corpus half of the pass is
-    /// not this question — dedupe, reap, condense and the retraction of corpus
-    /// actions curate under every mode.
+    /// Only under `[learn] mode = "full"`; in `learning` the harness measures a ranking nothing has
+    /// moved.
     pub fn moves_ranking(&self) -> bool {
         self.evolve.autonomous.moves_ranking() && self.learn.mode == crate::config::LearnMode::Full
     }
 
-    /// Is there an ask model to call? `false` means no `[infer.ask]`: no ask
-    /// page, no nav entry, no MCP tool, no `/api/ask`.
+    /// `false` means no `[infer.ask]`: no ask page, no nav entry, no MCP tool, no `/api/ask`.
     pub fn asks(&self) -> bool {
         self.completer.is_some()
     }
 
-    /// Is there a synthesizer? `false` means no `[infer.synthesize]` — the
-    /// embed-only floor: capture stays verbatim, and the judged read and what
-    /// hangs off it (reminders, the journal's moments, promotion, the day
-    /// page's reading) are not configured. Every surface that would have shown
-    /// one says so through this.
+    /// `false` is the embed-only floor: no judged read, reminders, moments, promotion or day
+    /// reading.
     pub fn synthesizes(&self) -> bool {
         self.synthesizer.is_some()
     }
 
-    /// Does a reranker serve `place` at all? One is configured and the scope
-    /// covers it. The one spelling of that question: a guard added here — a
-    /// health check, a kill switch, a new scope — holds for every door.
+    /// The one spelling of the question, so a guard added here holds for every door.
     fn reranks(&self, place: crate::config::RerankApply) -> bool {
         self.reranker.is_some() && self.rerank_apply.contains(&place)
     }
 
-    /// Does a reranker serve the search path? `false` means the UI never fires
-    /// a refining pass and never claims one happened: with no reranker — or
-    /// one scoped to ask alone — a `rerank=true` request answers in vector
-    /// order, and saying "refined" over it would assert a confirmation that
-    /// never took place.
+    /// `false` means the UI never claims a refining pass happened.
     pub fn reranks_search(&self) -> bool {
         self.reranks(crate::config::RerankApply::Search)
     }
@@ -763,15 +537,7 @@ impl Core {
         self.reranks(crate::config::RerankApply::Ask)
     }
 
-    /// Is the area under the search box filled? `false` means the placeholder
-    /// is not rendered, the endpoint records nothing, and the sweep does not
-    /// run — one question, asked in one place.
-    ///
-    /// `[learn]` as well as `[recommend]`, and not as a second gate over the
-    /// faculty: the situations it clusters are opens recorded in the same log
-    /// everything else here reads, so with the log unwritten the sweep profiles
-    /// nothing and the ladder falls to its floor for ever. Saying so here is
-    /// what stops that being a silent state.
+    /// Needs `[learn]` too: without the log the sweep profiles nothing, silently.
     pub fn recommends(&self) -> bool {
         self.recommend.enabled && self.learn.enabled
     }
@@ -788,12 +554,7 @@ pub mod test_support {
 
     pub const TEST_DIM: usize = 8;
 
-    /// A core with the recommender and the learning layer on, and a clock
-    /// that does not move.
-    ///
-    /// `core::recommend` and `jobs::context` both need one and each had grown
-    /// its own — `core_at` and `recommending_core`, the same five lines under
-    /// two names.
+    /// A core with the recommender and the learning layer on, and a clock that does not move.
     pub async fn recommending_core(now: i64) -> Core {
         let mut core = test_core().await;
         core.recommend.enabled = true;
@@ -824,11 +585,7 @@ pub mod test_support {
         }
     }
 
-    /// One artifact with a vector point behind it.
-    ///
-    /// The point is not optional in either caller: `context_query` renders
-    /// from the payload, and `resurface` needs a `created_at` of 0 with
-    /// nothing shown against it.
+    /// The point is needed: `context_query` renders from the payload.
     pub async fn seed_artifact(core: &Core, title: &str) -> String {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let a = core
@@ -940,13 +697,13 @@ pub mod test_support {
     async fn build(synthesizer: Arc<dyn Synthesizer>, reranker: Option<Arc<dyn Reranker>>) -> Core {
         let store = Store::memory().await.unwrap();
         Core {
+            live: Default::default(),
             evolve: crate::config::EvolveConfig::default(),
             store,
             vectors: Arc::new(MemoryVectors::new()),
             synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             reranker,
-            // The shipped default: a configured reranker serves both places.
             rerank_apply: vec![
                 crate::config::RerankApply::Ask,
                 crate::config::RerankApply::Search,
@@ -959,17 +716,11 @@ pub mod test_support {
             })),
             reaper: Some(Arc::new(FakeCompleter::default())),
             generator: Some(Arc::new(FakeCompleter::default())),
-            // No default writer: a synthesis is only ever written for a pair a
-            // person pressed, and a test that means to exercise that path says
-            // so by setting this.
+            // Only a pair a person pressed is synthesized; tests of that path set this.
             pair_synthesizer: None,
-            // Off, unlike the shipped default: a test that wants a fan-out puts
-            // a completer here, and every other test gets one round and no
-            // extra call to account for.
+            // Off, unlike the shipped default, so other tests get one round and no extra call.
             planner: None,
             describer: Some(Arc::new(FakeDescriber::default())),
-            // Off, like the shipped default: the tests that want a microphone
-            // put one here, and every other test renders the page without one.
             transcriber: None,
             chunk_tokens: crate::config::DEFAULT_CHUNK_TOKENS,
             counter: Arc::new(TokenCounter::default()),
@@ -977,9 +728,7 @@ pub mod test_support {
             clock: crate::core::context::Clock::System,
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             consolidate: crate::config::ConsolidateConfig::default(),
-            // The shipped cap, so a test ranks what the binary ranks; recency
-            // off, because the fake embedder's ordering is the only thing a
-            // search test can assert against and an age boost over it is noise.
+            // Recency off: the fake embedder's ordering is all a search test can assert against.
             ranking: Arc::new(std::sync::RwLock::new(
                 crate::core::ranking::RankingParams {
                     recency_weight: 0.0,
@@ -987,44 +736,32 @@ pub mod test_support {
                     ..Default::default()
                 },
             )),
-            // The fake embedder's vectors are not a semantic space, so a
-            // realistic threshold would mark arbitrary results weak and every
-            // search test would be asserting against noise. Tests that care
-            // about the labelling set it themselves.
+            // The fake embedder's vectors are no semantic space; a realistic threshold would mark
+            // noise weak.
             weak_floor: 0.0,
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             pinned_boost: 0.15,
-            // Off in tests, whatever ships: the tests that need a log switch
-            // it on and the rest assert nothing is recorded.
             learn: crate::config::LearnConfig {
                 enabled: false,
                 ..Default::default()
             },
             feedback: crate::config::FeedbackConfig::default(),
             capture: crate::config::CaptureConfig::default(),
-            // Inert in most tests whatever it says, because `learn` is off and
-            // nothing has learned a link yet. The association tests seed one.
             associate: crate::config::AssociateConfig::default(),
             activation: crate::config::ActivationConfig::default(),
             promote: crate::config::PromoteConfig::default(),
             pursuit: crate::config::PursuitConfig::default(),
             schedule: crate::config::ScheduleConfig::default(),
-            // The fake embedder hashes text into eight dimensions, where two
-            // unrelated strings clear 0.80 by chance and the classifier fires on
-            // noise. Tests of the classifier hand it vectors directly.
             time: crate::config::TimeConfig::default(),
             reap: crate::config::ReapConfig::default(),
-            // Off, unlike the shipped default: `recommends()` is two flags and
-            // a test that leaves both alone must offer nothing. The
-            // recommendation tests switch both on.
+            // Off, unlike the shipped default: a test that leaves both flags alone must offer
+            // nothing.
             recommend: crate::config::RecommendConfig {
                 enabled: false,
                 ..Default::default()
             },
             ui: Default::default(),
             sittings: Arc::new(Default::default()),
-            // No cooldown: a test that wants pacing builds its
-            // own gate, and every other test would otherwise pay for one.
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,
             )),
@@ -1042,8 +779,6 @@ mod tests {
     use super::*;
     use crate::config::Config;
 
-    /// Deterministic stand-in for an embedder that puts everything close
-    /// together, the way bge-m3 does.
     fn crowded(n: usize) -> Vec<Vec<f32>> {
         let mut state = 0x2545_f491u32;
         let mut next = move || {
@@ -1059,10 +794,6 @@ mod tests {
             .collect()
     }
 
-    /// The weak line is measured, not configured: with enough recorded
-    /// queries the base says where unrelated stops, every clone of `Core`
-    /// reads the one measurement, and the next boot finds it in meta. With
-    /// too few, the configured floor stands.
     #[tokio::test]
     async fn the_weak_line_is_measured_from_the_base_and_shared() {
         let mut core = test_support::test_core().await;
@@ -1105,22 +836,10 @@ mod tests {
         );
     }
 
-    /// A core built over a base that has already measured its line starts
-    /// with that line, rather than at the floor until some later pass gets
-    /// round to it.
-    ///
-    /// The bug this is against: `calibrate` runs on the hourly pass, which
-    /// opens a *transient* core to run it on, so the measurement was written
-    /// to meta and then dropped with the core that took it. Whatever core was
-    /// serving requests went on reading `weak_below` as the 0.35 floor, and a
-    /// capture landing in that window closed every gap it came within 0.40 of
-    /// — all of which the next pass then deleted as being under the line.
     #[tokio::test]
     async fn a_core_starts_from_the_line_the_base_last_measured() {
         let mut core = test_support::test_core().await;
         core.weak_floor = 0.35;
-        // Nothing recorded: no key, the floor stands, and adopting is a no-op
-        // rather than a zero written over it.
         core.adopt_measured_line().await.unwrap();
         assert_eq!(core.weak_below(), 0.35);
 
@@ -1128,25 +847,17 @@ mod tests {
         core.adopt_measured_line().await.unwrap();
         assert_eq!(core.weak_below(), 0.6);
 
-        // A measurement in hand is never overwritten by a stored one: what the
-        // running process measured is at least as fresh as what is on disk.
         core.store.meta_set(CALIBRATION_KEY, "0.4").await.unwrap();
         core.adopt_measured_line().await.unwrap();
         assert_eq!(core.weak_below(), 0.6);
     }
 
-    /// Two cores built for one subject read one line, whichever of them
-    /// measured it. `Working` is what carries it across the two, and the
-    /// hourly pass's transient core is the one that matters: see
-    /// `background::open_for_pass`.
     #[tokio::test]
     async fn one_subjects_cores_share_the_measurement_whichever_took_it() {
         let store = crate::store::Store::memory().await.unwrap();
         let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         let working = Working::default();
-        // What the registry does on two cache misses for one subject — and
-        // what `open_for_pass` does beside whichever core is serving.
         let serving = Core::from_config_with(&cfg, vectors.clone(), store.clone(), working.clone());
         let passing = Core::from_config_with(&cfg, vectors, store, working);
         assert_eq!(serving.measured_line(), 0.0);
@@ -1160,20 +871,6 @@ mod tests {
         );
     }
 
-    /// Both halves of one decision, which is why they are asserted together.
-    ///
-    /// A new deployment is told to `cp config.example.toml config.toml`, so
-    /// this file is what a fresh base ranks by, and it ships primed: the
-    /// lowest rung of the lift, with the sitting taking part in it.
-    ///
-    /// The compiled lift is the same rung, so a base that never wrote the key
-    /// is primed too. What that costs is said in `boot_generation`: the file
-    /// params it compares are the *resolved* ones, so on the first boot after
-    /// the default moved, a base that never wrote `prime_lift` sees a changed
-    /// file and its live generation is restated to it — every knob the idle
-    /// pass had adopted on that base goes back to the file, once. The sitting
-    /// flip stays off in the binary: it is a second decision, taken in the
-    /// file.
     #[tokio::test]
     async fn the_example_config_and_the_compiled_default_ship_primed() {
         let cfg = Config::load(std::path::Path::new("config.example.toml").into()).unwrap();
@@ -1198,9 +895,6 @@ mod tests {
         assert!(!crate::config::default_sitting_prime());
     }
 
-    /// The one wiring decision `from_config` makes that is not a straight
-    /// field copy: rerank is optional, and an absent block must leave search
-    /// in vector order rather than defaulting to an endpoint.
     #[tokio::test]
     async fn the_example_config_carries_the_consolidation_defaults() {
         let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
@@ -1209,15 +903,6 @@ mod tests {
             cfg.consolidate.auto_supersede > cfg.consolidate.review_min,
             "superseding at or below the review threshold would hide distinct artifacts"
         );
-        // Autonomy is on: a shipped instance consolidates its own knowledge base
-        // without being asked. That is a deliberate choice and the largest risk
-        // in the design, and what bounds it is not this flag — it is that a
-        // value conflict is escalated rather than settled, that a merge which
-        // would drop a value is refused, that the originals are superseded
-        // rather than deleted, and that every merge has an undo.
-        //
-        // What stays bounded here is the *spend*. A rate rather than a
-        // per-sweep count, so it does not grow with the base.
         assert!(
             cfg.consolidate.max_dedupe_per_tick > 0 && cfg.consolidate.dedupe_interval_mins > 0,
             "the pass must have a rate, or it either never runs or is unbounded"
@@ -1226,13 +911,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_layer_is_one_switch_and_it_ships_on() {
-        // Recording searches, learning links and writing pursuits were three
-        // flags that only ever meant something together — two of their
-        // combinations were refused at startup and the third was a warning.
-        // One switch now, on by default: promotion reads activation, and
-        // activation only moves while the log is being written, so off is the
-        // deliberate act. The test core keeps it off so every other test
-        // starts from nothing recorded.
         assert!(crate::config::LearnConfig::default().enabled);
         let mut core = test_support::test_core().await;
         assert!(!core.learn.enabled);
@@ -1251,10 +929,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_offer_needs_the_log_as_well_as_its_own_switch() {
-        // The situations it clusters are opens recorded in the same log
-        // everything else reads. `[recommend]` alone over an unwritten log is
-        // a sweep that profiles nothing and a ladder that falls to its floor
-        // for ever — the inert state this predicate exists to make impossible.
         let mut core = test_support::test_core().await;
         core.recommend.enabled = true;
         assert!(!core.recommends(), "its own switch is not enough");
@@ -1274,8 +948,6 @@ mod tests {
             let _second = core2.corpus_lock("doc-a").await;
         });
 
-        // Another document is a different lock, so it must not be behind this
-        // one: two workers segmenting two documents was the point of units.
         let other = core.corpus_lock("doc-b").await;
         drop(other);
 
@@ -1290,25 +962,22 @@ mod tests {
 
     #[tokio::test]
     async fn locks_nobody_is_holding_do_not_accumulate() {
-        // One entry per document, kept for the life of the process, would be a
-        // slow leak on a base that ingests continuously.
         let core = test_support::test_core().await;
         for i in 0..50 {
             drop(core.corpus_lock(&format!("doc-{i}")).await);
         }
         let held = core.corpus_lock("doc-held").await;
         assert_eq!(
-            core.corpus_locks.lock().unwrap().len(),
+            core.corpus_locks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
             1,
             "released locks were kept"
         );
         drop(held);
     }
 
-    /// The whole of the off switch. Planning costs one model call on every
-    /// question, so `plan = false` must not merely skip the call — there must
-    /// be nothing to call, which is what `None` here means. The example config
-    /// is the shipped default, and this asserts the default it ships.
     #[tokio::test]
     async fn the_planner_is_wired_by_default_and_unwired_when_switched_off() {
         let store = crate::store::Store::memory().await.unwrap();
@@ -1335,9 +1004,7 @@ mod tests {
         let store = crate::store::Store::memory().await.unwrap();
         let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
 
-        // `Config` has no `Default`, and adding one just for a test would put
-        // a fake endpoint in the type. The committed example file is a real
-        // config and costs nothing to read.
+        // `Config` has no `Default`; the committed example file is a real config.
         let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
         assert!(
             cfg.infer.rerank.is_none(),
@@ -1363,9 +1030,6 @@ mod tests {
 
     #[test]
     fn a_config_still_setting_a_mode_is_refused_naming_the_reshape() {
-        // `synthesis = "off"` was a complete product state once. Since the
-        // 2026-09 capture reshape it is a removed key, and the refusal has to
-        // say what changed rather than parse silently into something else.
         let cfg_toml = r#"
         [server]
         bind = "127.0.0.1:8080"
@@ -1404,9 +1068,6 @@ mod contained_tests {
     use crate::store::feedback::Door;
     use crate::tenants::VectorFactory;
 
-    /// The whole of part 1 in one test: a capture goes in, the jobs run, and a
-    /// search finds it — with no Qdrant anywhere, and the base is still there
-    /// for a second store opened over the same file.
     #[tokio::test]
     async fn a_capture_is_found_again_with_only_a_file_for_a_vector_store() {
         let dir = tempfile::tempdir().unwrap();
@@ -1453,8 +1114,6 @@ mod contained_tests {
         );
     }
 
-    /// Part 1's test with the fake embedder gone: real vectors from a real
-    /// model, into a file, found by a query in another language.
     #[tokio::test]
     async fn a_german_capture_is_found_by_an_english_question_with_no_endpoint_anywhere() {
         let Some(dir) = std::env::var_os("ENGRAM_TEST_MODELS").map(std::path::PathBuf::from) else {

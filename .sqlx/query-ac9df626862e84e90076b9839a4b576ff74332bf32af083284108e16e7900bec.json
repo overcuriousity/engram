@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS n FROM artifacts\n              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "n",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ac9df626862e84e90076b9839a4b576ff74332bf32af083284108e16e7900bec"
+}

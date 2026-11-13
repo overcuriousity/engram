@@ -7,35 +7,20 @@ use crate::store::corpora::{
 use crate::store::jobs::Stage;
 use crate::store::now;
 
-/// The channel an image arrives through. Its own value, like `upload`, so
-/// the queue and the detail page can tell a photo from a paste.
+/// Its own value, so the queue and the detail page can tell a photo from a paste.
 pub const ORIGIN_IMAGE: &str = "image";
-/// The channel a PDF arrives through. Its own value for the same reason a
-/// photo has one: the queue and the detail page have to tell a document that
-/// was extracted from one that was typed.
+/// Its own value, so an extracted document is told apart from typed text.
 pub const ORIGIN_PDF: &str = "pdf";
 /// Text typed or pasted into the capture box.
 pub const ORIGIN_WEB: &str = "web";
 /// A page read from a pasted link, by this server, as a stranger.
 pub const ORIGIN_FETCH: &str = "fetch";
-/// A share from a phone's share sheet — the Android share target, the iOS
-/// Shortcut and the bookmarklet alike. One value for all three, because the
-/// distinction between them is one the operator cannot act on.
+/// The Android share target, the iOS Shortcut and the bookmarklet alike.
 pub const ORIGIN_SHARE: &str = "share";
-/// An answer the operator chose to keep. Its own value because a corpus whose
-/// text a model wrote must never read as one a person typed — that difference
-/// is the whole of what the keep-this-answer door concedes, and a bare literal
-/// in one handler is not where a distinction that load-bearing should live.
+/// Its own value: a corpus a model wrote must never read as one a person typed.
 pub const ORIGIN_ASK: &str = "ask";
-/// Bytes a file may weigh to be stored as text. The kind-specific ceilings
-/// are configuration because a photo and a book differ by an order of
-/// magnitude and an operator has to be able to say so; this one is not,
-/// because there is no such thing as a text file that large on purpose.
-///
-/// The same figure as `web::MAX_BODY_BYTES` and deliberately not that
-/// constant: that one bounds any request body whatever it holds, this one
-/// bounds one artifact however it arrived — through `/capture`, a share
-/// sheet, `/mcp` or a shell.
+/// Bounds one artifact however it arrived; the same figure as `web::MAX_BODY_BYTES`, which bounds a
+/// body.
 pub const MAX_TEXT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Why bytes offered as text were not taken as text.
@@ -48,26 +33,13 @@ pub enum NotText {
 }
 
 impl NotText {
-    /// The refusal for `Nul`, said once: the doors word `Undecodable`
-    /// themselves, but this one has a single cause and a single remedy.
+    /// The doors word `Undecodable` themselves; this one has a single cause and remedy.
     pub const NUL_MESSAGE: &str = "that text holds NUL bytes — it is probably UTF-16 saved \
          without a byte-order mark. Save it as UTF-8 and send it again.";
 }
 
-/// Bytes a door received as text, as the text they hold.
-///
-/// UTF-16 with a byte-order mark is decoded: Windows tools write it, and the
-/// mark says exactly how to read it. Anything else has to be UTF-8, and is
-/// refused rather than lossily converted — a corpus is quoted back verbatim,
-/// so text that arrived mangled is a fidelity loss nothing downstream can
-/// detect.
-///
-/// The NUL check is the case that refusal used to miss (engram#60). UTF-16LE
-/// *without* a mark is valid UTF-8 whenever the text is mostly ASCII — every
-/// other byte is a NUL, and NUL is a legal UTF-8 character — so it was stored
-/// as `D\0u\0 \0h\0a\0s\0t\0`, unsearchable and embedded that way. Guessing the
-/// byte order back from the NUL pattern would be a guess; refusing names the
-/// fix.
+/// UTF-16 with a BOM is decoded; anything else must be UTF-8 and is refused, never converted
+/// lossily. A NUL is refused: BOM-less UTF-16LE of ASCII text is valid UTF-8 full of NULs.
 pub fn decode_text(bytes: Vec<u8>) -> std::result::Result<String, NotText> {
     let text = match bytes.as_slice() {
         [0xFF, 0xFE, rest @ ..] => utf16(encoding_rs::UTF_16LE, rest)?,
@@ -90,19 +62,10 @@ fn utf16(
         .ok_or(NotText::Undecodable)
 }
 
-/// Longest note spent on a vision call. Context, not a document: the note is
-/// the lead line of the describe prompt, and an unbounded one swamps the
-/// description or overruns the request.
-///
-/// It bounds that copy and nothing else. A note is stored whole — it is an
-/// artifact like any other text, and `jobs::embed` cuts an oversize chunk into
-/// siblings rather than losing the tail of it. Truncating on the way in was a
-/// silent amputation with no receipt anywhere: the operator saw a note go in
-/// and had no way to learn that most of it had not.
+/// Bounds only the copy in the describe prompt; the note itself is stored whole.
 pub const MAX_NOTE_CHARS: usize = 2000;
 
-/// The user's context for a capture, cleaned: trimmed, `None` when there is
-/// nothing in it.
+/// Trimmed; `None` when there is nothing in it.
 fn clean_note(note: Option<String>) -> Option<String> {
     let n = note?.trim().to_string();
     if n.is_empty() {
@@ -115,18 +78,13 @@ fn clean_note(note: Option<String>) -> Option<String> {
 pub struct IngestOutcome {
     pub id: String,
     pub status: CorpusStatus,
-    /// True when the text was already stored byte for byte and no new source
-    /// was created.
+    /// The text was already stored byte for byte and no new source was created.
     pub duplicate: bool,
-    /// Set when the text is not identical to anything stored but close to
-    /// something that is. The capture is stored, read and searchable like any
-    /// other; this only says it was flagged for a person to replace, keep or
-    /// discard later.
+    /// Close to something stored: stored and searchable anyway, flagged for a person to decide
+    /// later.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub near_duplicate: Option<NearDuplicate>,
-    /// Set when this is a link that could not be read: why. The link and
-    /// what came with it are stored and searchable, and the page is tried
-    /// again in the background. See `Core::ingest_link`.
+    /// Why a link could not be read; it is stored anyway and retried. See `Core::ingest_link`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_unread: Option<String>,
 }
@@ -151,9 +109,8 @@ pub struct PdfCapture {
     pub filename: Option<String>,
     pub title_hint: Option<String>,
     pub note: Option<String>,
-    /// Which of the ten system prompts this document's reading is made with.
-    /// See `infer::lang`; `Lang::default()` is English, which is what every
-    /// door that knows no language sends.
+    /// See `infer::lang`; `Lang::default()` is English, which every door that knows no language
+    /// sends.
     pub lang: crate::infer::lang::Lang,
 }
 
@@ -164,25 +121,19 @@ pub struct ImageCapture {
     pub filename: Option<String>,
     pub title_hint: Option<String>,
     pub note: Option<String>,
-    /// Which of the ten system prompts this document's reading is made with.
-    /// See `infer::lang`; `Lang::default()` is English, which is what every
-    /// door that knows no language sends.
+    /// See `infer::lang`; `Lang::default()` is English, which every door that knows no language
+    /// sends.
     pub lang: crate::infer::lang::Lang,
 }
 
 /// One capture, whichever door it arrived through.
-///
-/// A struct rather than four positional arguments: `origin` and `source_url`
-/// are two different facts about the same event, and every existing caller
-/// that has nothing to say about the second should not have to say `None`.
 #[derive(Debug, Clone)]
 pub struct Capture {
     pub text: String,
     /// The channel: `web`, `mcp`, `extension`, `fetch`, `upload`.
     pub origin: String,
     pub title_hint: Option<String>,
-    /// Where the text was read. Provenance, never an instruction: nothing
-    /// downstream ever fetches this.
+    /// Provenance, never an instruction: nothing downstream fetches this.
     pub source_url: Option<String>,
     /// What the door knew beyond the text. Namespaced; see the schema comment.
     pub metadata: serde_json::Value,
@@ -221,8 +172,7 @@ impl Capture {
         self
     }
 
-    /// The IANA zone the door was in, so a date read out of the text is
-    /// resolved where it was written.
+    /// So a date read out of the text is resolved where it was written.
     pub fn with_tz(mut self, tz: Option<String>) -> Self {
         if let Some(t) = tz.filter(|t| !t.trim().is_empty()) {
             self.metadata["tz"] = serde_json::Value::String(t);
@@ -230,33 +180,14 @@ impl Capture {
         self
     }
 
-    /// The language the reading of this text is instructed in.
-    ///
-    /// Stamped here, at the door, and not read from the account when the job
-    /// runs: a job holds a `Core`, a `Core` is cached per tenant in a
-    /// fixed-size LRU and knows no subject, and a setting that only takes
-    /// effect on eviction is a setting nobody can trust. On the corpus it is
-    /// also the more truthful place — this is the language the capture was
-    /// made in, which is what the reading should follow.
+    /// Stamped at the door: a job's `Core` is cached per tenant and knows no subject.
     pub fn with_lang(mut self, lang: crate::infer::lang::Lang) -> Self {
         self.metadata["lang"] = serde_json::Value::String(lang.tag().to_string());
         self
     }
 
-    /// A door that already knows this is a reminder (`engram -r`, `?intent=`)
-    /// says so, and the judged synthesis call is told — `JUDGE` carries "the
-    /// capture door says this is: remind".
-    ///
-    /// A hint and not an override: the model reads the sentence and decides,
-    /// the same as for a capture that arrived with no door. What the hint does
-    /// buy is `judgement`'s undated branch — a forced reminder the model dates
-    /// nowhere is still armed, undated, for the band to ask about, where an
-    /// unforced one would be left as an ordinary capture. It does not skip a
-    /// classifier; there is no longer a classifier to skip.
-    ///
-    /// The one thing the door does decide is size. Only a single-window corpus
-    /// is judged at all, so a forced reminder over text that would split is
-    /// refused outright — see `refuse_a_reminder_too_large_to_judge`.
+    /// A hint to the judged read, not an override; a forced reminder too large to judge is refused
+    /// at the door.
     pub fn with_intent(mut self, intent: Option<crate::core::moments::Intent>) -> Self {
         if let Some(i) = intent {
             self.metadata["intent"] = serde_json::Value::String(i.as_str().into());
@@ -269,15 +200,8 @@ impl Capture {
         self
     }
 
-    /// The `ask` facts of an answer the operator chose to keep: which question
-    /// it answered, and which artifacts it was written from.
-    ///
-    /// Provenance, never an instruction — like `source_url`, nothing downstream
-    /// reads these to go and do anything. They exist so that a corpus whose
-    /// text a model wrote says so, and says what it was written from, however
-    /// much the operator edited before saving. Without them a kept answer is
-    /// indistinguishable from something a person typed, which is the one thing
-    /// this door must not become.
+    /// Provenance, never an instruction: a corpus a model wrote says so and what it was written
+    /// from.
     pub fn with_ask(
         mut self,
         ask_id: &str,
@@ -295,23 +219,8 @@ impl Capture {
         self
     }
 
-    /// The search this capture was typed from: the box searches while it is
-    /// typed, so the sentence on its way into the base was already recorded as
-    /// a query, and the page knows which one.
-    ///
-    /// Which is the whole point of storing it. That query found nothing —
-    /// nothing was there yet, which is why somebody is writing it down — and
-    /// `unmatched` reads a search with nothing near it as a hole in the base,
-    /// so the capture page filled up with the operator's own half-written
-    /// captures asked back at them. `jobs::gaps::cover` is supposed to catch
-    /// that when the capture settles, but it can only measure a distance, and
-    /// what gets stored is a synthesized artifact rather than the sentence. The
-    /// link is not a measurement: this text was written in answer to that
-    /// query, and the box is the only thing that can say so.
-    ///
-    /// An id off a page, so nothing here trusts it: the door checks that the
-    /// search belongs to the person capturing (see `Store::event_is_mine`), and
-    /// `cover` only ever matches it against that subject's own open gaps.
+    /// Links the capture to the search it was typed into, so that empty search does not become a
+    /// gap. The id comes off a page: the door checks `Store::event_is_mine`.
     pub fn with_search(mut self, event_id: &str) -> Self {
         self.metadata["search"] = serde_json::json!({ "event_id": event_id });
         self
@@ -327,8 +236,7 @@ pub fn typed_from(metadata: &serde_json::Value) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// What a link turned out to hold, read as far as this end reads it before
-/// storing: a page extracted, a PDF or an image as sent.
+/// What a link held: a page extracted, or a PDF or image as sent.
 #[derive(Debug)]
 pub(crate) enum ReadLink {
     Page {
@@ -339,8 +247,7 @@ pub(crate) enum ReadLink {
     Image(Vec<u8>),
 }
 
-/// The last path segment of a URL, when it reads as a file name. `plan.pdf`
-/// out of `/papers/plan.pdf`; nothing out of `/` or `/papers/`.
+/// `plan.pdf` out of `/papers/plan.pdf`; nothing out of `/` or `/papers/`.
 fn url_filename(url: &url::Url) -> Option<String> {
     url.path_segments()?
         .next_back()
@@ -354,8 +261,7 @@ pub const NO_SYNTHESIZER_REMINDER: &str = "reminders are not configured: a remin
      [infer.synthesize].";
 
 impl Core {
-    /// Store the text and queue processing. Deliberately makes no inference
-    /// call: capture must stay instant and must survive a dead endpoint.
+    /// No inference call: capture must stay instant and survive a dead endpoint.
     pub async fn ingest(
         &self,
         text: &str,
@@ -366,13 +272,7 @@ impl Core {
             .await
     }
 
-    /// Capture whatever a URL holds: a page is extracted and stored as a
-    /// `fetch` capture, a PDF or an image is stored for its reading stage.
-    /// The link is provenance on the corpus whichever it was.
-    ///
-    /// Every link door comes through here, so that what one can read the
-    /// others can too. A link that cannot be read is stored anyway — see
-    /// `ingest_link`.
+    /// Every link door comes through here; a link that cannot be read is stored anyway.
     pub async fn ingest_url(
         &self,
         url: &url::Url,
@@ -383,19 +283,8 @@ impl Core {
         self.ingest_link(url, title, note, None, lang).await
     }
 
-    /// `ingest_url`, with the text a share sheet sent beside the link.
-    ///
-    /// A link that cannot be read now — the site is down, answers an error,
-    /// serves a type nothing here reads, or a login wall too short to be the
-    /// page — used to be refused, and the link, the text beside it and the
-    /// note went with the refusal: nothing was stored and nothing was
-    /// searchable. Now the link and whatever came with it are stored as a
-    /// capture of their own, read and embedded like any other, and a `Fetch`
-    /// unit tries the page again; if it arrives it replaces that text.
-    ///
-    /// `shared` is only kept when the link cannot be read: the text a share
-    /// sheet sends is usually the page's title repeated, and the page is the
-    /// better capture of the two.
+    /// An unreadable link is stored with what came with it and retried by a `Fetch` unit.
+    /// `shared` is kept only then: a share sheet's text is usually the page's title again.
     pub async fn ingest_link(
         &self,
         url: &url::Url,
@@ -415,9 +304,8 @@ impl Core {
         }
     }
 
-    /// Fetch a link and, for a page, extract it. Everything that can refuse
-    /// a link happens here, so the one caller that stores a refused link and
-    /// the one that tries it again agree on what refused means.
+    /// Everything that can refuse a link is here, so storing and retrying agree on what refused
+    /// means.
     pub(crate) async fn read_link(&self, url: &url::Url) -> Result<ReadLink> {
         use crate::core::fetch::Fetched;
         Ok(match crate::core::fetch::fetch(url, &self.capture).await? {
@@ -452,10 +340,8 @@ impl Core {
                 markdown,
                 title: page_title,
             } => {
-                // A title the caller gave wins; the page's own is the fallback,
-                // ahead of the first heading `derive_title` would otherwise
-                // take — which, readability having dropped the `<h1>`, is the
-                // first *section* of the article.
+                // Readability drops the `<h1>`, so the page's title beats `derive_title`'s first
+                // heading.
                 self.ingest_capture(
                     Capture::new(markdown, ORIGIN_FETCH)
                         .with_lang(lang)
@@ -494,9 +380,7 @@ impl Core {
         }
     }
 
-    /// Store a link that could not be read as what is known of it: the link,
-    /// the text that came with it, the note, the title. Read and embedded
-    /// like any capture, and a `Fetch` unit armed to try the page again.
+    /// Stored and embedded like any capture, with a `Fetch` unit armed to retry the page.
     async fn hold_link(
         &self,
         url: &url::Url,
@@ -521,8 +405,7 @@ impl Core {
         c.metadata["fetch"] = serde_json::json!({
             "pending": true,
             "error": why,
-            // Whether the title is the person's: a page that arrives later may
-            // name itself only where nobody else did.
+            // A page arriving later may name itself only where nobody else did.
             "title_given": title.is_some(),
         });
         let mut out = self.ingest_capture(c).await?;
@@ -539,12 +422,7 @@ impl Core {
         Ok(out)
     }
 
-    /// A held link's page arrived: put it where the link was.
-    ///
-    /// A page replaces the text in place and the corpus is read again, so
-    /// the id every door already answered with stays good. A PDF or an image
-    /// needs its own reading stage and its bytes attached, so it becomes a
-    /// capture of its own and the held link is deleted.
+    /// A page replaces the text in place, keeping the id; a PDF or image becomes its own capture.
     pub(crate) async fn fill_held_link(&self, src: &Corpus, read: ReadLink) -> Result<()> {
         let url = src
             .source_url
@@ -579,9 +457,7 @@ impl Core {
         Ok(())
     }
 
-    /// A held link that is still unread after every try: left as it is,
-    /// searchable as the link, with the last reason on it. `reprocess(Fetch)`
-    /// tries again.
+    /// Left searchable as the link with the last reason; `reprocess(Fetch)` tries again.
     pub(crate) async fn give_up_on_link(&self, corpus_id: &str, why: &str) -> Result<()> {
         let src = self.store.get_corpus(corpus_id).await?;
         let mut meta = src.metadata.clone();
@@ -590,33 +466,19 @@ impl Core {
         self.store.set_corpus_metadata(corpus_id, &meta).await
     }
 
-    /// A door asking for a reminder over text too large to be judged as one.
-    ///
-    /// The judged synthesis call — the only reader of intent there is since the
-    /// reshape — runs on single-window corpora alone (`jobs::window`, `judging
-    /// = all.len() == 1`). A capture that splits is read window by window and
-    /// never judged, so `engram -r` over a long note used to embed the whole
-    /// thing, answer with a corpus id, and arm nothing: the operator asked for
-    /// a reminder, paid for the synthesis and the vectors, and got a document.
-    ///
-    /// Refused at the door rather than accepted and quietly downgraded, and
-    /// refused *before* the insert so nothing is stored or embedded. A reminder
-    /// is a sentence; a manual is a capture, and `-c` is the verb for it.
+    /// Only single-window corpora are judged, so a long forced reminder would arm nothing; refused
+    /// before the insert.
     fn refuse_a_reminder_too_large_to_judge(&self, c: &Capture) -> Result<()> {
         let remind = crate::core::moments::Intent::Remind;
         if c.metadata["intent"].as_str() != Some(remind.as_str()) {
             return Ok(());
         }
-        // The embed-only floor: a reminder is the judged read's, and there is
-        // no model to read it. Turned away here, before anything is stored, so
-        // the door says so instead of keeping a note that is never reminded.
+        // The embed-only floor: no model can read a reminder.
         if !self.synthesizes() {
             return Err(Error::Validation(NO_SYNTHESIZER_REMINDER.into()));
         }
         let lang = crate::infer::lang::of_corpus(&c.metadata);
-        // No budget at all: nothing can be judged in one pass, so a reminder
-        // cannot be either, and saying which knob is wrong is more use than
-        // splitting against a fiction.
+        // No budget at all: nothing can be judged in one pass.
         let Some(budget) = crate::jobs::synthesize::segment_budget(self, lang) else {
             return Err(Error::Validation(
                 crate::jobs::synthesize::no_budget_reason(self, lang),
@@ -637,6 +499,12 @@ impl Core {
 
     /// The same thing, for a door that also knows where the text was read.
     pub async fn ingest_capture(&self, c: Capture) -> Result<IngestOutcome> {
+        let out = self.ingest_capture_quiet(c).await;
+        self.live.changed();
+        out
+    }
+
+    async fn ingest_capture_quiet(&self, c: Capture) -> Result<IngestOutcome> {
         let text = c.text.as_str();
         let origin = c.origin.as_str();
         let title_hint = c.title_hint.as_deref();
@@ -650,10 +518,7 @@ impl Core {
 
         if let Some(existing) = self.store.find_by_hash(&content_hash(text)).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate ingest, returning existing source");
-            // The same bytes captured twice, the second time with "remind me"
-            // on them. The stored corpus is the right row and this call adds
-            // no text to the base — but it does carry a request, and returning
-            // the id alone armed nothing at all.
+            // The same bytes again with "remind me": no new text, but the request must still arm.
             if forced_remind {
                 self.ask_the_judged_read_for_a_reminder(&existing.id)
                     .await?;
@@ -662,23 +527,17 @@ impl Core {
             return Ok(IngestOutcome::existing(&existing));
         }
 
-        // Computed once, before the insert, so the same signature answers "is
-        // this a near-duplicate" and becomes the row's stored column.
+        // One signature answers the near-duplicate scan and becomes the stored column.
         let sig = crate::store::shingle::signature(text);
         let near = self
             .store
             .find_near_duplicate(&sig, self.consolidate.near_dupe_min)
             .await?;
 
-        // Queued either way, and flagged where it resembles something stored.
-        // It used to be parked — stored with no job until a person decided on
-        // Ops — and a capture nobody decided on was never searchable. Short
-        // notes scored as near-duplicates of what they were not, and went the same way. The
-        // pair judging downstream is what reconciles competing artifacts; the
-        // flag is left as a note on the capture, and asks nobody anything.
+        // Queued either way; a near-duplicate is only flagged, and pair judging reconciles
+        // downstream.
         let followup = match &near {
-            // A forced reminder is not flagged. "Remind me" has already said
-            // what it is, and a reminder repeated is a reminder, not a copy.
+            // A reminder repeated is a reminder, not a copy.
             Some(n) if !forced_remind => Followup::Flag {
                 of: n.corpus_id.clone(),
                 similarity: n.similarity,
@@ -699,21 +558,11 @@ impl Core {
             .await?
         {
             Insertion::Created(src) => src,
-            // Another capture of the same bytes landed while this one was
-            // scanning for near-duplicates. That scan reads every stored
-            // signature, so the window is wide enough to hit in practice — a
-            // double-submitted form is enough. The other writer owns the row
-            // and has already queued whatever it queued; saying "duplicate" is
-            // both true and the same answer this call would have given a
-            // moment earlier.
+            // A concurrent capture of the same bytes won the insert during the scan; the winner
+            // queued it.
             Insertion::Existing(existing) => {
                 tracing::info!(corpus_id = %existing.id, "concurrent duplicate ingest, returning the stored source");
-                // And the same request the `find_by_hash` branch above honours,
-                // for the same reason: the loser of the race adds no text, but
-                // it does carry "remind me", and returning the id alone armed
-                // nothing while the operator was told the capture succeeded.
-                // Two racing `engram -r` calls, or one double-submitted form,
-                // is enough.
+                // The race's loser still carries "remind me", as the `find_by_hash` branch honours.
                 if forced_remind {
                     self.ask_the_judged_read_for_a_reminder(&existing.id)
                         .await?;
@@ -741,17 +590,13 @@ impl Core {
             id: src.id,
             status: src.status,
             duplicate: false,
-            // What the doors read off this field is "flagged". A forced
-            // reminder is not flagged, so it is not reported as one.
+            // A forced reminder is not flagged, so it is not reported as one.
             near_duplicate: near.filter(|_| !forced_remind),
             link_unread: None,
         })
     }
 
-    /// The fork every capture reaches once its text is known: queued for
-    /// synthesis, and flagged beside what it resembles if it resembles
-    /// something. Never held: a flag is for a person to look at later, and
-    /// the capture is read and searchable meanwhile.
+    /// Queued for synthesis and flagged beside what it resembles; never held.
     pub(crate) async fn park_or_queue(
         &self,
         corpus_id: &str,
@@ -764,8 +609,7 @@ impl Core {
             },
             None => crate::store::corpora::Followup::Queue(Stage::Synthesize),
         };
-        // One transaction, the same one a text capture's insert uses: the
-        // status and the job it implies cannot be written apart.
+        // One transaction: the status and the job it implies cannot be written apart.
         self.store.apply_followup(corpus_id, followup).await?;
         if let Some(n) = near {
             tracing::info!(
@@ -778,35 +622,9 @@ impl Core {
         Ok(())
     }
 
-    /// The operator's sentence about a file, written where it can be found.
-    ///
-    /// Embedding runs over artifact chunks and never over metadata, so a note
-    /// left in `metadata["note"]` is invisible to search — on a PDF or a text
-    /// upload absolutely, and on a photograph only as whatever the vision
-    /// model happened to echo back.
-    ///
-    /// `corpus_span: None` is the point: the note is *about* the file and is no
-    /// line *of* it, so it claims no span and nothing tries to read it beside
-    /// lines it did not come from. `segment_idx: None` puts it ahead of every
-    /// window in `renumber_artifacts`, which orders by
-    /// `COALESCE(segment_idx, 0), ordinal, rowid` — so it settles at ordinal 0
-    /// with no help from either artifact writer.
-    ///
-    /// `Provenance::Note` is what keeps that survivable. A window-less row
-    /// otherwise reads as debris from an older segmentation, and the two
-    /// queries that sweep such rows would have deleted the note — or, with a
-    /// sentinel index instead, counted it as a window this corpus already owns
-    /// and refused to segment the document at all.
-    ///
-    /// The embed is armed here rather than left to `settle`. A scan with no
-    /// text layer parks as `failed` and never reaches settling, and that is
-    /// exactly the capture whose note is the only text anyone will ever have.
-    /// By the time this runs the corpus row is committed and its stages are
-    /// queued, so a store failure here is not a failed capture and must not be
-    /// reported as one: the browser would put the file back for a retry, the
-    /// retry would find the hash already stored and answer `duplicate` — which
-    /// correctly writes no note — and the operator would end up with the file
-    /// in the base and the note nowhere.
+    /// The note as an artifact, since embedding never reads metadata. No span and no segment, so it
+    /// sorts first; `Provenance::Note` keeps the sweeps of window-less rows off it. Armed here: a
+    /// scan without text never settles.
     async fn attach_note_artifact(&self, corpus_id: &str, note: Option<&str>) {
         if let Err(e) = self.write_note_artifact(corpus_id, note).await {
             tracing::error!(corpus_id, error = %e, "capture stored, but its note was not");
@@ -840,30 +658,9 @@ impl Core {
         Ok(())
     }
 
-    /// Store the image and queue the vision stage. Like `ingest_capture`, this
-    /// makes no inference call: the phone gets its answer the moment the bytes
-    /// are safe, and a dead vision endpoint costs a wait, not a photo.
-    /// Store the bytes and queue the reading. No gate: extraction is local, so
-    /// unlike the image door this one is open whatever `[infer]` holds.
-    ///
-    /// No decode permit either — there is no pixel work to bound — and no
-    /// preview, because rendering a first page needs pdfium and that is the ML
-    /// build's dependency, not this one's.
-    /// Store a file by reading what its bytes say it is: a PDF, an image, or
-    /// UTF-8 text. Nothing else — bytes we cannot read are refused rather than
-    /// stored as a corpus nobody can search.
-    ///
-    /// `origin` is the caller's, because the doors that reach this differ in
-    /// the one way a person later cares about: `/mcp` is an agent, `share` is
-    /// a phone's share sheet, `web` is the capture box. It used to be a
-    /// constant here, which was only ever true because there was one caller.
-    ///
-    /// The terminal client has no value of its own: it reaches `/capture` over
-    /// HTTP like any other client and declares nothing, so a corpus it stored
-    /// reads as `web`. Giving it one means a door=... parameter and an
-    /// allowlist to keep a client from claiming a door it is not, the way
-    /// `Door::from_client` does for search — worth writing when something
-    /// reads the distinction, and not before.
+    /// Store a file by what its bytes say it is: a PDF, an image, or UTF-8 text; anything else is
+    /// refused. `origin` is the caller's: `/mcp`, `share` and `web` differ in a way a person later
+    /// cares about.
     pub async fn ingest_file(
         &self,
         bytes: Vec<u8>,
@@ -925,8 +722,7 @@ impl Core {
         self.ingest_pdf_from(c, None).await
     }
 
-    /// The same, for a PDF read from a URL: the link is provenance on the
-    /// corpus, as it is for a fetched page.
+    /// The link is provenance on the corpus, as for a fetched page.
     pub async fn ingest_pdf_from(
         &self,
         c: PdfCapture,
@@ -939,31 +735,21 @@ impl Core {
             note,
             lang,
         } = c;
-        // The ceiling, imposed here rather than at each door.
-        //
-        // Every route that reaches this is layered at `max(pdf_max_bytes,
-        // image_max_bytes)` because one route serves both kinds, and a
-        // multipart part carries no ceiling of its own — so a 49 MB file part
-        // to `/capture` used to arrive unchecked no matter what
-        // `image_max_bytes` said. Those doors' comments already promised the
-        // ingest path re-imposed it; now it does.
+        // Here, not at each door: routes serving both kinds are layered at the larger ceiling.
         if bytes.len() > self.capture.pdf_max_bytes {
             return Err(Error::Validation(format!(
                 "that PDF is over the {} MB limit for a PDF capture",
                 self.capture.pdf_max_bytes / (1024 * 1024)
             )));
         }
-        // Hashed before anything else touches it: the same PDF sent twice
-        // costs one SHA-256 the second time, not an extraction.
+        // Hashed first: the same PDF twice costs one SHA-256, not an extraction.
         let hash = content_hash(&bytes);
         if let Some(existing) = self.store.find_by_hash(&hash).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate PDF, returning existing source");
             return Ok(IngestOutcome::existing(&existing));
         }
 
-        // The same `file` namespace the image door writes, so the corpus page
-        // reads both through one path. No width or height: a PDF has pages,
-        // and this build does not count them.
+        // The image door's `file` namespace; no page count in this build.
         let mut file = serde_json::json!({
             "size": bytes.len(),
             "mime": "application/pdf",
@@ -972,11 +758,8 @@ impl Core {
             file["name"] = serde_json::Value::String(n.to_string());
         }
         let mut metadata = serde_json::json!({ "file": file });
-        // The same key `Capture::with_lang` writes, and it has to be written
-        // here too: a PDF and an image never pass through `Capture` at all —
-        // they are stored attached, with metadata assembled by hand — so the
-        // stamp the reading job looks for would simply be missing, and every
-        // extracted or described document came back in English.
+        // PDFs and images bypass `Capture`, so the `Capture::with_lang` key must be written here
+        // too.
         metadata["lang"] = serde_json::json!(lang.tag());
         let note = clean_note(note);
         if let Some(n) = &note {
@@ -1004,9 +787,7 @@ impl Core {
             )
             .await?;
         Ok(match inserted {
-            // A file already in the base keeps the note it was captured with.
-            // Stacking a second one per re-upload is how a corpus grows a pile
-            // of near-identical captions nobody wrote twice on purpose.
+            // A file already in the base keeps its note; re-uploads do not stack captions.
             Insertion::Existing(c) => IngestOutcome::existing(&c),
             Insertion::Created(c) => {
                 self.attach_note_artifact(&c.id, note.as_deref()).await;
@@ -1025,17 +806,12 @@ impl Core {
         self.ingest_image_from(c, None).await
     }
 
-    /// The same, for an image read from a URL.
     pub async fn ingest_image_from(
         &self,
         c: ImageCapture,
         source_url: Option<String>,
     ) -> Result<IngestOutcome> {
-        // No vision role is not a refusal. The photo is stored with its note
-        // and its file facts, and `Stage::Describe` waits for the role rather
-        // than failing — the same wait it has always had for a role that goes
-        // away. Refused, as it was, a phone in contained mode (which has no
-        // vision section) had every shared photo held and never stored.
+        // No vision role is not a refusal: stored, and `Stage::Describe` waits for the role.
         if self.describer.is_none() {
             tracing::info!("no vision role: storing the image to be read when one is configured");
         }
@@ -1046,38 +822,27 @@ impl Core {
             note,
             lang,
         } = c;
-        // The ceiling, imposed here rather than at each door — see
-        // `ingest_pdf_from`. Checked before the hash and long before the
-        // decode permit, so an oversize photo costs neither a SHA-256 nor a
-        // walk over its pixels.
+        // Before the hash and the decode permit, so an oversize photo costs neither.
         if bytes.len() > self.capture.image_max_bytes {
             return Err(Error::Validation(format!(
                 "that image is over the {} MB limit for an image capture",
                 self.capture.image_max_bytes / (1024 * 1024)
             )));
         }
-        // Hashed and looked up before it is decoded: a photo sent twice costs
-        // one SHA-256 the second time, not a full decode and re-encode.
+        // Hashed before decoding: a photo sent twice costs one SHA-256.
         let hash = content_hash(&bytes);
         if let Some(existing) = self.store.find_by_hash(&hash).await? {
             tracing::info!(corpus_id = %existing.id, "duplicate image, returning existing source");
             return Ok(IngestOutcome::existing(&existing));
         }
-        // Decoding, EXIF, the preview and its re-encode are a synchronous walk
-        // over up to `image_max_bytes` of pixels. Held on a Tokio worker that
-        // is seconds during which search, health and the queue poll on that
-        // thread all wait; see `web::api::extract` for the same move.
-        //
-        // Held across the whole decode, and taken before it rather than inside
-        // it: the blocking pool is 512 threads deep, so without a permit the
-        // only bound on how much of this runs at once is how fast clients can
-        // post. See `image::MAX_CONCURRENT_DECODES`.
+        // Decoding is synchronous pixel work, so it runs blocking, under a permit taken before it
+        // starts: the blocking pool is 512 deep. See `image::MAX_CONCURRENT_DECODES`.
         let edge = self.capture.image_preview_edge;
         let permit = self
             .decodes
             .acquire()
             .await
-            .expect("the decode permit is never closed");
+            .map_err(|_| Error::Internal("the decode permit closed".into()))?;
         let decoded = tokio::task::spawn_blocking(move || {
             let prepared = super::image::prepare(&bytes, edge)?;
             Ok::<_, Error>((bytes, prepared))
@@ -1093,19 +858,15 @@ impl Core {
         if prepared.exif.as_object().is_some_and(|o| !o.is_empty()) {
             metadata["exif"] = prepared.exif.clone();
         }
-        // The same key `Capture::with_lang` writes, and it has to be written
-        // here too: a PDF and an image never pass through `Capture` at all —
-        // they are stored attached, with metadata assembled by hand — so the
-        // stamp the reading job looks for would simply be missing, and every
-        // extracted or described document came back in English.
+        // PDFs and images bypass `Capture`, so the `Capture::with_lang` key must be written here
+        // too.
         metadata["lang"] = serde_json::json!(lang.tag());
         let note = clean_note(note);
         if let Some(n) = &note {
             metadata["note"] = serde_json::Value::String(n.clone());
         }
-        // A filename is a file fact, not a name: `photo.jpg` and `image.png`
-        // are what a camera and a clipboard call everything. Seeding the title
-        // from it would disarm the one stage that can name the capture.
+        // A filename is not a name; seeding the title from `photo.jpg` would disarm the naming
+        // stage.
 
         let attachment = crate::store::attachments::NewFile {
             kind: "image",
@@ -1150,13 +911,10 @@ impl Core {
         })
     }
 
-    /// Put a capture parked by an older build into the pipeline: `raw` and a
-    /// `Synthesize` job, the flag left where it is. The one way out of
-    /// `needs_review`, which nothing writes any more.
+    /// The one way out of `needs_review`, which nothing writes any more.
     pub(crate) async fn release_parked(&self, corpus_id: &str) -> Result<()> {
-        // Status first, then the job: the order `apply_followup` keeps, so an
-        // interruption leaves a `raw` corpus with no unit, which is what the
-        // reconcile sweep looks for.
+        // Status first, then the job: an interruption leaves a `raw` corpus with no unit, which
+        // reconcile finds.
         self.store
             .set_corpus_status(corpus_id, CorpusStatus::Raw)
             .await?;
@@ -1166,53 +924,33 @@ impl Core {
         Ok(())
     }
 
-    /// Put a superseded artifact back in search.
-    ///
-    /// The payload flag first, then the row — the reverse of the order the
-    /// sweep wrote them, and for the same reason. The two stores cannot be
-    /// written atomically, so the intermediate state has to be one an operator
-    /// can act on: with the flag cleared and the row still set, the artifact is
-    /// listed on Ops with its restore button and the next press finishes the
-    /// job. Clearing the row first loses the only page that offers the undo
-    /// while the artifact is still hidden from search.
+    /// Payload flag first, then the row: a partial failure leaves it on Ops with its restore
+    /// button.
     pub async fn unsupersede(&self, artifact_id: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         self.unsupersede_locked(artifact_id).await
     }
 
-    /// The body of `unsupersede`, entered with `lifecycle_lock` already held —
-    /// `reactivate` routes here so a superseded artifact is not locked twice.
+    /// Entered with `lifecycle_lock` held; `reactivate` routes here so it is not locked twice.
     async fn unsupersede_locked(&self, artifact_id: &str) -> Result<()> {
         // Read before clearing: afterwards nothing says who was hiding it.
         let winner = self.store.get_artifact(artifact_id).await?.superseded_by;
-        // A buried artifact comes back out of the graveyard or not at all —
-        // the rule `reactivate` has always followed, and this path did not.
-        // Reached straight from the Ops restore button and from
-        // `undo_promotion`, the ordinary path below published an *active,
-        // empty* artifact: its text was wiped and its point deleted, so the
-        // payload write landed on a point that is no longer there and left a
-        // row `reap_candidates` can never take back — it asks for
-        // `reaped_at IS NULL` — while `repair_lifecycle_drift` went on
-        // deleting the missing point once a pass, for ever.
+        // A buried artifact comes back through the graveyard or not at all; its text and point are
+        // gone.
         if !self.exhume_locked(artifact_id, None).await? {
-            // Marked before either store is touched. This direction writes the
-            // payload first, so without it a crash between the two would leave
-            // drift no row write ever announced.
+            // Marked first: this direction writes the payload first, and a crash would leave
+            // unannounced drift.
             self.store.mark_lifecycle_dirty(artifact_id).await?;
             self.vectors
                 .set_lifecycle(artifact_id, ArtifactStatus::Active, None)
                 .await?;
             self.store.set_superseded_by(artifact_id, None).await?;
-            // Both stores agree now, so the marker the row write set has
-            // nothing left to describe. Cleared only here, never before the
-            // payload write.
+            // Cleared only after both stores agree.
             self.store
                 .clear_lifecycle_dirty(std::slice::from_ref(&artifact_id.to_string()))
                 .await?;
         }
-        // A restore out of a merge is an operator overruling the merge for
-        // this one source. Recorded on the lineage, or the sweep's
-        // unfinished-merge repair re-hides it on the next tick, every tick.
+        // Recorded on the lineage, or the unfinished-merge repair re-hides it every tick.
         if let Some(w) = winner
             && let Ok(wc) = self.store.get_artifact(&w).await
             && wc.provenance == crate::store::artifacts::Provenance::Merged
@@ -1221,19 +959,8 @@ impl Core {
         }
         self.reopen_the_pairs_that_were_waiting_on(artifact_id)
             .await;
-        // `uncovered` (src/core/moments.rs) filters `a.status = 'active'`, so
-        // an artifact hidden by dedupe takes its open reminder out of the
-        // Remind unit's sight — and if it was the only one owed, the unit
-        // disarms itself. Bringing the artifact back has to bring the arming
-        // back with it, or that reminder is never pushed at any rung again.
-        // Every other path that moves a moment or its artifact calls this;
-        // this one was the hole.
-        //
-        // Best-effort, as on the supersession path above and in
-        // `complete_moment`: the restore, the lineage mark and the `Embed`
-        // enqueue have all committed by here, so a transient SQLITE_BUSY on
-        // the re-arm reported a restore that *happened* as failed, and the
-        // operator retried it. The background sweep re-arms on its own tick.
+        // `uncovered` only sees active artifacts, so a restored artifact must re-arm its reminder.
+        // Best-effort: the restore has committed, and the background sweep re-arms on its own tick.
         if let Err(e) = self.store.rearm_remind().await {
             tracing::warn!(artifact_id, error = %e, "could not re-arm Remind after a restore");
         }
@@ -1241,27 +968,8 @@ impl Core {
         Ok(())
     }
 
-    /// Put the artifact's open questions back on the review queue, now that it
-    /// is answerable again.
-    ///
-    /// Restoring the artifact alone is half an undo. Its open pairs were
-    /// settled `Stale` when it left results, and `record_pair` is
-    /// `INSERT OR IGNORE`, so the sweep re-finds the same two artifacts and
-    /// files nothing. Without this, the contradiction an operator restored the
-    /// artifact to look at is gone for good, and nothing anywhere says it ever
-    /// existed.
-    ///
-    /// Only the settled rows, and that is the whole set. The other thing a
-    /// supersession does to a pair is move it onto the winner, which leaves no
-    /// row between these two artifacts at all — so the similarity sweep's
-    /// `record_pair` files a fresh one the next time it looks, exactly as it
-    /// would for a pair it had never seen. A settled row is the only kind that
-    /// blocks that.
-    ///
-    /// Logged rather than returned, like the follow in `supersede`: the restore
-    /// itself has happened by this point, and reporting failure would tell the
-    /// caller the artifact is still hidden when it is not. What is left behind
-    /// is a `Stale` row, which is what the next restore of either side reopens.
+    /// Reopen the `Stale` pairs its supersession settled; `record_pair` is `INSERT OR IGNORE` and
+    /// would file nothing. Logged, not returned: the restore has already happened.
     async fn reopen_the_pairs_that_were_waiting_on(&self, artifact_id: &str) {
         match self.store.reopen_stale_pairs(artifact_id).await {
             Ok(0) => {}
@@ -1276,20 +984,8 @@ impl Core {
         }
     }
 
-    /// Put a promoted window back: its passages active, the artifacts the
-    /// promotion wrote deprecated, the segment `verbatim` again — and marked
-    /// `no_promote`, so it stays that way. The links copied onto the artifacts
-    /// and the activation they were handed stay where they are — both sides
-    /// describe the same corpus lines, and the asymmetry is accepted rather
-    /// than fixed.
-    ///
-    /// The mark is what makes this an undo rather than a pause. The passages
-    /// keep the activation that armed the promotion, and `maybe_promote` reads
-    /// activation at the bump: restoring `verbatim` alone would let the next
-    /// open of any restored passage promote the window again, immediately,
-    /// leaving the operator with the same promotion and a set of deprecated
-    /// artifacts beside it. Only a re-split clears the mark — a window whose
-    /// text changed is a different window.
+    /// Undo a promotion and mark the window `no_promote`, or the passages' activation would promote
+    /// it again. Only a re-split clears the mark. Copied links and activation stay.
     pub async fn undo_promotion(&self, corpus_id: &str, idx: i64) -> Result<()> {
         use crate::store::artifacts::Provenance;
         let rows = self.store.artifacts_for_segment(corpus_id, idx).await?;
@@ -1318,21 +1014,8 @@ impl Core {
         Ok(())
     }
 
-    /// Move an already-hidden artifact from one winner to another.
-    ///
-    /// Not `supersede`, which refuses a side that is not active — and both sides
-    /// here are exactly that: the artifact is already superseded, and it is
-    /// being re-pointed precisely because its current winner is about to be
-    /// hidden too.
-    ///
-    /// A supersession chain is what this exists to prevent. `A -> B -> C` leaves
-    /// the reader who opens A at an artifact that is not in results either, and
-    /// nothing in the UI can follow the second hop. The sweep avoids chains by
-    /// grouping with union-find before it decides anything; the merge path
-    /// cannot, because the group it is collapsing was already partly collapsed
-    /// by an earlier merge.
-    ///
-    /// Row before payload, like `supersede`.
+    /// Re-point an already-superseded artifact, so a merge never leaves an `A -> B -> C` chain. Row
+    /// before payload.
     pub async fn repoint_supersession(&self, artifact_id: &str, winner_id: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let winner = self.store.get_artifact(winner_id).await?;
@@ -1354,18 +1037,13 @@ impl Core {
         Ok(())
     }
 
-    /// Hide `loser_id` in favour of `winner_id`. Row before payload, matching
-    /// the sweep's existing auto-supersede order (`jobs::consolidate`): the
-    /// intermediate state after a partial failure is one an operator can act
-    /// on, since the artifact is already listed on Ops with its `superseded_by`
-    /// set, even if the search-side flag has not caught up yet.
+    /// Row before payload, as the sweep's auto-supersede does, so a partial failure is visible on
+    /// Ops.
     pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
         self.supersede_with(loser_id, winner_id, None).await
     }
 
-    /// `supersede`, journaling what a corpus job did. The row rides the same
-    /// transaction as the hiding, so nothing can read a hidden artifact with
-    /// no row, or a row for an artifact still live.
+    /// The journal row rides the hiding's transaction.
     pub async fn supersede_with(
         &self,
         loser_id: &str,
@@ -1373,12 +1051,8 @@ impl Core {
         journal: Option<crate::store::actions::NewAction>,
     ) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        // Neither side may be retired. `set_superseded_by` writes
-        // `status = 'superseded'` unconditionally, so superseding an artifact
-        // an operator deprecated would silently overwrite that decision with
-        // one nothing distinguishes from the sweep's own work. And a deprecated
-        // *winner* is worse: the loser gets hidden in favour of an artifact
-        // that is itself out of results, so the answer disappears entirely.
+        // Neither side may be retired: `set_superseded_by` overwrites status, and a deprecated
+        // winner hides the answer.
         for (id, role) in [(loser_id, "loser"), (winner_id, "winner")] {
             let status = self.store.get_artifact(id).await?.status;
             if status != ArtifactStatus::Active {
@@ -1397,13 +1071,8 @@ impl Core {
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&loser_id.to_string()))
             .await?;
-        // Every other question about the loser now belongs to the winner. Done
-        // after the artifact is hidden, and its failure is logged rather than
-        // returned: the supersession itself has happened by this point, so
-        // reporting failure would tell `jobs::try_supersede` the artifact
-        // "stays active" when it does not. What is left behind is stale pairs,
-        // which the sweep's repair pass
-        // (`jobs::consolidate::follow_supersessions`) moves on the next tick.
+        // Logged, not returned: the supersession has happened; `follow_supersessions` moves stale
+        // pairs next tick.
         match self.store.follow_supersession(loser_id, winner_id).await {
             Ok(f) if f.settled() == 0 => {}
             Ok(f) => tracing::info!(
@@ -1416,12 +1085,8 @@ impl Core {
                 tracing::warn!(loser_id, winner_id, error = %e, "could not move the loser's open pairs")
             }
         }
-        // And the loser's open moments, for the same reason and with the same
-        // best-effort handling: the supersession has happened, and a reminder
-        // that failed to move is a reminder still on a hidden artifact — which
-        // is where it already was. `rearm_remind` after it, because the earliest
-        // owed instant in the base may have just changed: a row that was
-        // invisible to `uncovered` is visible again on the winner.
+        // Best-effort likewise; then `rearm_remind`, since moved rows are visible again on the
+        // winner.
         match self.store.carry_moments(loser_id, winner_id).await {
             Ok(0) => {}
             Ok(n) => {
@@ -1443,16 +1108,8 @@ impl Core {
         Ok(())
     }
 
-    /// Flag an artifact stale with no specific replacement. Unlike `supersede`,
-    /// there is no winning artifact on the other end — an operator judged the
-    /// content itself no longer current.
-    ///
-    /// Row before payload. SQLite is the source of truth, so the state a
-    /// partial failure leaves — row deprecated, still in results — is the one
-    /// the sweep's drift repair (`jobs::consolidate::repair_lifecycle_drift`)
-    /// finishes by pushing the row's status into the payload. Writing the
-    /// payload first would instead hide the artifact behind a row that still
-    /// says active, and the repair, reading the row, would undo it.
+    /// Row before payload: SQLite is the source of truth, so drift repair finishes a partial
+    /// failure.
     pub async fn deprecate(&self, id: &str) -> Result<()> {
         self.deprecate_with(id, None).await
     }
@@ -1464,16 +1121,8 @@ impl Core {
         journal: Option<crate::store::actions::NewAction>,
     ) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
-        // A superseded artifact is already out of search, and `deprecate` does
-        // not clear `superseded_by`, so this would leave a row that is both:
-        // listed on Ops under "deprecated" *and* under "hidden as near
-        // identical", with a detail page that renders only the supersession
-        // branch and therefore never offers the button that undoes it. The
-        // payload would carry `status: deprecated, superseded_by: <winner>`, a
-        // combination nothing else in the system produces. The Ops page does not
-        // render the button in that state, but the route is reachable directly
-        // and this is a public API — so the rule lives here, next to
-        // `supersede`'s own guard.
+        // A superseded artifact stays superseded: deprecating it too yields a state with no undo
+        // button.
         if self.store.get_artifact(id).await?.superseded_by.is_some() {
             return Err(Error::Validation(format!(
                 "cannot deprecate: {id} is already hidden in favour of another artifact; \
@@ -1493,22 +1142,9 @@ impl Core {
         Ok(())
     }
 
-    /// Take a reaped artifact back out of the graveyard, entered with
-    /// `lifecycle_lock` already held. `false` where the artifact was not reaped
-    /// after all, or where the grave is already empty — the caller then carries
-    /// on down its ordinary path.
-    ///
-    /// Every restore has to come through here, because a burial wiped the text
-    /// *and* deleted the point: the ordinary path would publish an empty row
-    /// and write a payload onto a point that no longer exists. The text is
-    /// restored first, then the row is moved, then the point is rebuilt by
-    /// `Embed` — which writes the whole payload, status included, so there is no
-    /// `set_lifecycle` to make here and nothing for the drift repair to finish.
-    ///
-    /// `status` is the caller's to name. A reactivation means active; a restore
-    /// out of a supersession says nothing about deprecation and leaves whatever
-    /// status the row already carried. It is set before the `Embed` is queued,
-    /// so the payload that job writes is the one the caller decided on.
+    /// Entered with `lifecycle_lock` held. `false` where it was not reaped or the grave is empty.
+    /// Text restored, then row, then `Embed` rebuilds the point; `status` is set before the `Embed`
+    /// is queued.
     async fn exhume_locked(&self, id: &str, status: Option<ArtifactStatus>) -> Result<bool> {
         if self.store.get_artifact(id).await?.reaped_at.is_none() || !self.store.exhume(id).await? {
             return Ok(false);
@@ -1517,13 +1153,8 @@ impl Core {
             self.store.set_artifact_status(id, s).await?;
         }
         self.store.set_superseded_by(id, None).await?;
-        // Last, and after both setters. `exhume` clears `lifecycle_dirty`
-        // deliberately — until the `Embed` below lands there is no point for
-        // the drift repair to write a payload onto — but `set_artifact_status`
-        // and `set_superseded_by` each raise it again in their own statement,
-        // so the flag was `1` by the time this returned and the repair wrote
-        // onto the point the burial had deleted. Clearing it here is the
-        // ordering that makes `exhume`'s comment true.
+        // After both setters, which each raise `lifecycle_dirty` again; the point does not exist
+        // until `Embed` lands.
         self.store
             .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
@@ -1532,33 +1163,13 @@ impl Core {
         Ok(true)
     }
 
-    /// Move an artifact back to active.
-    ///
-    /// An artifact that was hidden by a supersession is handed to
-    /// `unsupersede`, which clears `superseded_by` on both sides. Flipping the
-    /// status alone would leave the row pointing at its winner while the
-    /// payload no longer does, so Ops would keep listing it as hidden and the
-    /// next consolidation sweep would re-apply `Superseded` to the vector
-    /// store — undoing the operator without saying so.
-    ///
-    /// Payload before row, as `unsupersede` does it and for the same reason:
-    /// this direction *reveals*, so the intermediate state has to be the
-    /// visible one. Clearing the row first would leave the artifact hidden by a
-    /// payload nothing on the page explains — off the Ops deprecated list,
-    /// because the row now says active, and so out of reach of the very button
-    /// that would fix it. With the payload cleared first the artifact is back
-    /// in results immediately, still listed on Ops as deprecated, and one more
-    /// press finishes the job.
+    /// A superseded artifact goes through `unsupersede`. Payload before row, so the intermediate
+    /// state is visible.
     pub async fn reactivate(&self, id: &str) -> Result<()> {
         let _guard = self.lifecycle_lock.lock().await;
         let art = self.store.get_artifact(id).await?;
-        // A buried artifact that was *also* hidden by a supersession is both
-        // things at once, and the exhume answers only the first. Returning
-        // here skipped `unsupersede_locked`'s lineage mark, so a deprecated,
-        // merged and buried source restored from Insights came back active
-        // and was re-hidden by the unfinished-merge repair on the next sweep
-        // tick, and the one after that. `exhume_locked` has already cleared
-        // `superseded_by`, so the winner has to be read before it runs.
+        // Read before `exhume_locked` clears it: a buried and superseded artifact still needs the
+        // lineage mark.
         let winner = art.superseded_by.clone();
         if self.exhume_locked(id, Some(ArtifactStatus::Active)).await? {
             if let Some(w) = winner
@@ -1568,9 +1179,7 @@ impl Core {
                 self.store.mark_source_restored(id).await?;
             }
             self.reopen_the_pairs_that_were_waiting_on(id).await;
-            // Best-effort for the reason `unsupersede_locked` gives: the
-            // exhume has committed, and failing here calls a restore that
-            // happened a failure.
+            // Best-effort: the exhume has committed.
             if let Err(e) = self.store.rearm_remind().await {
                 tracing::warn!(artifact_id = id, error = %e, "could not re-arm Remind after an exhume");
             }
@@ -1579,7 +1188,7 @@ impl Core {
         if art.superseded_by.is_some() {
             return self.unsupersede_locked(id).await;
         }
-        // As in `unsupersede`: payload first, so the marker has to go first.
+        // As in `unsupersede`: payload first, so the marker goes first.
         self.store.mark_lifecycle_dirty(id).await?;
         self.vectors
             .set_lifecycle(id, ArtifactStatus::Active, None)
@@ -1591,10 +1200,7 @@ impl Core {
             .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
         self.reopen_the_pairs_that_were_waiting_on(id).await;
-        // Same reason as `unsupersede_locked`: the Remind unit only sees
-        // moments on active artifacts, and an artifact coming back active may
-        // be the one whose reminder disarmed it. Best-effort there and here —
-        // the reactivation is already written.
+        // Best-effort: the reactivation is already written.
         if let Err(e) = self.store.rearm_remind().await {
             tracing::warn!(artifact_id = id, error = %e, "could not re-arm Remind after a reactivation");
         }
@@ -1602,11 +1208,7 @@ impl Core {
         Ok(())
     }
 
-    /// A judged answer is the confirmation "Still accurate" used to ask a
-    /// person for. Best-effort: the verdict is the person's and is already
-    /// recorded; a stamp that cannot be written costs the stamp, not the
-    /// verdict. Out-of-results artifacts are skipped — confirming something
-    /// search will not return changes nothing it ranks.
+    /// Best-effort; artifacts out of results are skipped.
     pub async fn confirm_cited(&self, ids: &[String]) {
         for id in ids {
             match self.store.get_artifact(id).await {
@@ -1623,15 +1225,12 @@ impl Core {
         }
     }
 
-    /// Record a verdict on an answer. A right answer also confirms the notes
-    /// it drew on; wrong or empty ones say nothing about their sources, which
-    /// may have been fine and merely not the ones needed.
+    /// A right answer also confirms the notes it drew on; wrong or empty ones say nothing about
+    /// them.
     pub async fn judge_ask(&self, id: &str, verdict: crate::store::asks::AskVerdict) -> Result<()> {
         self.store.judge_ask(id, verdict).await?;
         if verdict == crate::store::asks::AskVerdict::Right {
-            // Best-effort past this point, as `confirm_cited` is: the verdict
-            // is written, and failing the press over the stamps would tell the
-            // person it did not take when it did.
+            // Best-effort past this point: the verdict is written.
             match self.store.used_citations(id).await {
                 Ok(cited) => self.confirm_cited(&cited).await,
                 Err(e) => tracing::warn!(
@@ -1644,29 +1243,15 @@ impl Core {
         Ok(())
     }
 
-    /// Stamp an artifact as confirmed accurate now — what search ranking's
-    /// recency decay reads.
-    ///
-    /// Also zeroes `hit_count`: `stale_max_hits` is "retrieved at most this
-    /// many times *since*" the last verification, and a lifetime counter would
-    /// mean one appearance in a marked search result kept an artifact off the
-    /// review list forever.
-    /// A failed vector write puts the row back the way it was. Nothing else
-    /// reconciles this pair: `repair_lifecycle_drift` only examines artifacts
-    /// that are non-active on one side or the other, so an artifact that is
-    /// active on both but stamped on only one is invisible to it — it would keep
-    /// ranking as stale and keep appearing on the review list while the row
-    /// claimed it had just been confirmed, and the operator would have no way to
-    /// tell that from a press that simply did not take. Rolling back leaves both
-    /// stores saying the same (old) thing and surfaces the error, so pressing
-    /// again is a repair rather than a guess.
+    /// Stamp an artifact confirmed now; also zeroes `hit_count`, which counts since the last
+    /// verification. A failed vector write rolls the row back: drift repair never sees an
+    /// active-on-both mismatch.
     pub async fn verify(&self, id: &str) -> Result<()> {
         let at = now();
         let previous = self.store.get_artifact(id).await?.last_verified_at;
         self.store.set_last_verified_at(id, at).await?;
         if let Err(e) = self.vectors.set_last_verified_at(id, at, true).await {
-            // A row that never had a stamp has nothing to roll back to, and
-            // clearing the column is not available here.
+            // A row that never had a stamp has nothing to roll back to.
             if let Some(previous) = previous
                 && let Err(undo) = self.store.set_last_verified_at(id, previous).await
             {
@@ -1683,20 +1268,9 @@ impl Core {
         Ok(())
     }
 
-    /// Notice when the two stores disagree about which artifacts exist.
-    ///
-    /// They hold complementary halves of the same artifact and are written
-    /// separately, so either can end up with an entry the other lacks: a crash
-    /// between the two writes, a restore of one store from a backup taken at a
-    /// different moment, an operator pointing a process at the wrong
-    /// `store.path`. A row that says `embedded` with no point is sent back
-    /// through the pipeline that writes it. A point with no row is only
-    /// reported: SQLite is the source of truth, and the fix is to restore both
-    /// stores from the same moment, not to rebuild rows out of payloads.
-    ///
-    /// The point list is read *first* and the row list second, so an artifact
-    /// captured while this runs is either absent from the scroll or present in
-    /// the newer row list — never mistaken for an orphan.
+    /// Rows `embedded` with no point are re-armed; points with no row are only reported (SQLite is
+    /// the truth). Points are read before rows, so an artifact captured meanwhile is never mistaken
+    /// for an orphan.
     pub async fn heal_store_drift(&self) -> Result<()> {
         let points = self.vectors.all_artifact_ids().await?;
         let rows = self.store.list_all_artifact_ids().await?;
@@ -1713,11 +1287,8 @@ impl Core {
 
         let mut requeued = 0usize;
         for id in &drift.missing_points {
-            // Idle-only. This runs on every sweep, so `enqueue` — which re-arms
-            // whatever state it finds — would wind a unit that is failing
-            // against a dead endpoint back to zero attempts every tick. Its
-            // backoff would never climb, and the queue's backoff is what stands
-            // in for a circuit breaker here: see `infer::gate`.
+            // Idle-only: `enqueue` would reset a failing unit's attempts every tick, and the
+            // backoff is the breaker.
             self.store
                 .rearm_idle_seq(Stage::Embed, "artifact", id, 0)
                 .await?;
@@ -1732,54 +1303,78 @@ impl Core {
         Ok(())
     }
 
-    /// Delete an artifact from both stores, on purpose.
-    ///
-    /// The vector point goes first, so an interrupted delete leaves a row
-    /// whose point is gone — which `heal_store_drift` answers by re-embedding,
-    /// so the artifact survives intact instead of half-existing, and pressing
-    /// delete again finishes it.
+    /// Takes an artifact out of every read, keeping it restorable for 30 days.
+    pub async fn trash_artifact(&self, id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        self.store.trash_artifact(id, crate::store::now()).await?;
+        self.vectors
+            .set_lifecycle(id, ArtifactStatus::Trashed, None)
+            .await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
+            .await?;
+        drop(_guard);
+        // Whatever this was hiding is freed, as a delete frees it.
+        self.heal_dangling_supersessions().await?;
+        tracing::info!(artifact_id = id, "moved an artifact to trash");
+        Ok(())
+    }
+
+    /// Takes an artifact out of Trash with the status and supersession it had.
+    pub async fn restore_artifact(&self, id: &str) -> Result<()> {
+        let _guard = self.lifecycle_lock.lock().await;
+        let status = self.store.trashed_from(id).await?.ok_or(Error::NotFound)?;
+        let superseded_by = self.store.get_artifact(id).await?.superseded_by;
+        // Payload first, as every reveal does: a crash in between leaves it visible, not lost.
+        self.store.mark_lifecycle_dirty(id).await?;
+        self.vectors
+            .set_lifecycle(id, status, superseded_by.as_deref())
+            .await?;
+        self.store.untrash_artifact(id).await?;
+        self.store
+            .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
+            .await?;
+        tracing::info!(artifact_id = id, "restored an artifact from trash");
+        Ok(())
+    }
+
+    /// Deletes for good what has been in Trash longer than `older_than_secs`.
+    pub async fn purge_trash(&self, older_than_secs: i64) -> Result<u64> {
+        let mut n = 0;
+        for id in self
+            .store
+            .trashed_before(crate::store::now() - older_than_secs)
+            .await?
+        {
+            self.delete_artifact(&id).await?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// The point goes first, so an interrupted delete is re-embedded by `heal_store_drift` and can
+    /// be retried.
     pub async fn delete_artifact(&self, id: &str) -> Result<()> {
         self.store.get_artifact(id).await?;
         self.vectors
             .delete_artifacts(std::slice::from_ref(&id.to_string()))
             .await?;
         self.store.delete_artifact(id).await?;
-        // This artifact may have been the reason another one is hidden, and a
-        // keeper that no longer exists leaves its loser out of search in favour
-        // of nothing.
+        // This may have been the keeper hiding another artifact.
         self.heal_dangling_supersessions().await?;
         tracing::info!(artifact_id = id, "deleted an artifact");
         Ok(())
     }
 
-    /// Put back anything that was hidden in favour of an artifact which has
-    /// since been deleted. Cheap — one query, and vector writes only for the
-    /// rows it actually frees — so it runs after every deletion.
-    ///
-    /// Payload before row, exactly as `unsupersede` does it, and for the same
-    /// reason. Clearing the rows first would leave every artifact whose vector
-    /// write then failed hidden from search with `superseded_by` already NULL:
-    /// off the Ops list, past the sweep's self-heal branch — which only repairs
-    /// the opposite skew — and unreachable by any button. This runs first in a
-    /// sweep, when Qdrant being unavailable is precisely the case at hand.
-    ///
-    /// One failure does not abandon the rest: each artifact is independent, and
-    /// the ones that can be freed should be. The state a failure leaves behind
-    /// is the recoverable one, so the next deletion or sweep finishes the job.
+    /// Un-hide anything superseded by a since-deleted artifact; runs after every deletion.
+    /// Payload before row, as `unsupersede`; one failure does not stop the rest.
     pub(crate) async fn heal_dangling_supersessions(&self) -> Result<()> {
-        // Under the lifecycle lock like every other transition: this path
-        // reveals payload-first, and interleaving with the sweep's repair —
-        // which reads rows and writes payloads — is exactly the sequence that
-        // hides an artifact with no marker left to find it by.
+        // Under the lifecycle lock: a payload-first reveal interleaved with the repair hides an
+        // artifact unmarked.
         let _guard = self.lifecycle_lock.lock().await;
         let mut first_err = None;
         for id in self.store.dangling_superseded().await? {
-            // Marked before the payload write, as `unsupersede` does and for
-            // the same reason: this direction writes the payload first, so
-            // without it a crash between the two stores would leave drift no
-            // row write ever announced. A payload write that fails below
-            // leaves the marker standing — correctly: the failed reveal is
-            // then findable drift, and the heal retries on the next sweep.
+            // Marked before the payload write; a failed write leaves the marker as findable drift.
             self.store.mark_lifecycle_dirty(&id).await?;
             if let Err(e) = self
                 .vectors
@@ -1795,14 +1390,7 @@ impl Core {
                 continue;
             }
             self.store.set_superseded_by(&id, None).await?;
-            // Cleared here as everywhere else, because `set_superseded_by`
-            // raises the marker in the same statement as the change it
-            // describes. This path writes the payload first and the row second,
-            // so by now the two already agree — and a marker left standing would
-            // have the next sweep's `repair_lifecycle_drift` rewrite a payload
-            // that is correct, on a base whose stores are in agreement, which is
-            // the one condition that function's own comment says would mean a
-            // bug somewhere.
+            // `set_superseded_by` raises the marker; both stores already agree here, so clear it.
             self.store
                 .clear_lifecycle_dirty(std::slice::from_ref(&id))
                 .await?;
@@ -1828,20 +1416,9 @@ impl Core {
         Ok(())
     }
 
-    /// Everything a rerun of the pipeline from `raw_text` has to forget first.
-    /// Shared by re-segment and re-read; the comment on each line is the reason
-    /// the line exists.
+    /// What a rerun from `raw_text` has to forget first; shared by re-segment and re-read.
     async fn forget_derived_work(&self, id: &str) -> Result<()> {
-        // Re-segmenting replaces every chunk, so the old vectors and rows go
-        // first.
-        //
-        // Except the note, which is not derived work: nothing a rerun does can
-        // produce the sentence a person typed about the document, so deleting
-        // it here would make it unsearchable for good while the caption on the
-        // page went on claiming otherwise. Its vector went with the corpus, so
-        // it is put back in line for a new one — armed here rather than left to
-        // `settle`, for the same reason the door arms it: a re-read that parks
-        // as `failed` never reaches settling.
+        // Except the note, which no rerun can reproduce; it is re-armed for a new vector here.
         self.vectors.delete_by_corpus(id).await?;
         for c in self.store.artifacts_for_corpus(id).await? {
             if c.provenance == crate::store::artifacts::Provenance::Note {
@@ -1853,60 +1430,22 @@ impl Core {
         self.store
             .rearm_idle_seq(Stage::Embed, "corpus", id, 0)
             .await?;
-        // The window rows are the segment job's memory of what it has already
-        // done. Leaving them behind means the rerun finds every window `done`,
-        // segments nothing, and lands on a source with no chunks at all.
-        // Re-windowing is also the point of a reprocess after a model or budget
-        // change.
+        // Window rows are the segment job's memory; left behind, the rerun segments nothing.
         self.store.clear_segments(id).await?;
-        // The measure those windows produced goes with them. It is not just
-        // stale: the reconciliation sweep identifies a document whose last
-        // window resolved but whose `settle` never ran by having no coverage,
-        // so a value left over from the previous run reads as "already
-        // finished". A rerun that dies in exactly that window would then be
-        // stuck in `segmenting` for good — nothing resolves again to trigger
-        // `settle`, and the one sweep that repairs it has been told there is
-        // nothing to repair.
+        // Reconcile reads no coverage as "settle never ran"; a stale value would hide a stuck
+        // rerun.
         self.store.set_corpus_coverage(id, None).await?;
-        // And the units that name those windows, which outlive them. Planning
-        // arms idle-only, so a unit still queued from the run being replaced
-        // would carry its attempts into the rerun — the person who asked for
-        // another try would get a window that gives up after one.
+        // Window units outlive their rows and would carry their attempts into the rerun.
         self.store.delete_window_jobs(id).await?;
-        // The title unit is armed once per corpus and never again, so that a
-        // document the model will not name stops costing calls. The row is
-        // what remembers that, which also means a corpus left unnamed by a
-        // transient failure could never be named again — including by the
-        // person who noticed and asked for the rerun. An explicit reprocess is
-        // exactly the case that rule is not meant to cover.
+        // The title unit is armed once per corpus; an explicit reprocess may try again.
         self.store.delete_job(Stage::Title, id).await?;
-        // Reprocessing a parked capture is a decision to process it, so the
-        // park has to be lifted with it. Leaving the flag set means a fully
-        // synthesized and embedded corpus sits on the review queue forever,
-        // where the discard button now deletes real work.
+        // Reprocessing a parked capture lifts the park, or real work sits on the review queue.
         self.store.set_near_dupe(id, None, None).await?;
         Ok(())
     }
 
-    /// Hand a corpus that already stands back to the judged read, as a door
-    /// that asked for a reminder on text the base already holds.
-    ///
-    /// The same route `set_reminder(on = true)` takes, and refused for the
-    /// same reason on a capture that splits: a multi-window corpus is read
-    /// window by window and never judged.
-    /// The hole a capture answered, closed against a corpus that was already
-    /// stored.
-    ///
-    /// The other half of what the `forced_remind` calls beside it are for: a
-    /// capture whose bytes the base already holds adds no text, and so reaches
-    /// no embed job, no `settle_corpus` and no `jobs::gaps::cover` — while the
-    /// page that sent it has already swapped the hole's row away on the 2xx.
-    /// Left here, the hole came back on the next load. The link the box
-    /// carries is a claim about what was written and not a measurement, so it
-    /// holds whether or not this call stored anything.
-    ///
-    /// On the background handle and best-effort, like every other coverage
-    /// check: a capture that is stored is stored.
+    /// Close the gap this capture answered when its bytes were already stored and no `cover` runs.
+    /// Best-effort, on the background handle.
     fn close_the_gap_this_answered(&self, corpus_id: &str, metadata: &serde_json::Value) {
         let Some(event) = typed_from(metadata).map(str::to_string) else {
             return;
@@ -1928,10 +1467,7 @@ impl Core {
         crate::core::moments::allow_intent(&mut meta, intent);
         self.store.set_corpus_metadata(corpus_id, &meta).await?;
         let windows = self.store.segments_for_corpus(corpus_id).await?;
-        // Nothing has read it yet — the concurrent-duplicate door arrives
-        // before the writer that won the race has split anything. The intent
-        // now stands on the corpus, and the judged read still to come is the
-        // one that sees it; there is no window here to re-read.
+        // Nothing has read it yet; the judged read still to come will see the intent.
         if windows.is_empty() {
             tracing::info!(
                 corpus_id,
@@ -1948,13 +1484,7 @@ impl Core {
             return Ok(());
         }
         let idx = windows[0].idx;
-        // The mark an undone promotion leaves, honoured here as `jobs::promote`
-        // and `jobs::passages` honour it. Re-reading this window is a promotion
-        // — it writes artifacts and `supersede_covered` hides the passages
-        // under them — so arming it here silently performed the very act the
-        // operator undid, and did it worse: the deprecated artifacts of the
-        // first promotion fail `in_results()`, so what lands is a second
-        // generation beside them.
+        // An undone promotion's mark: re-reading this window would promote it again.
         if self.store.segment_no_promote(corpus_id, idx).await? {
             tracing::info!(
                 corpus_id,
@@ -1974,21 +1504,10 @@ impl Core {
             .await
     }
 
-    /// The window `set_reminder(id, true)` would hand back to the judged read,
-    /// or `None` where there is nothing to hand back.
-    ///
-    /// Four conditions, and they were spelled out inside `set_reminder` alone
-    /// while `web::due::not_a_reminder` decided whether to *offer* the undo on
-    /// the first of them — so a capture of several windows, or one whose
-    /// promotion an operator had undone, was offered "Not a reminder — undo",
-    /// and pressing it restored nothing and said nothing. One predicate, asked
-    /// by both, is what keeps the button's promise the same as the method's.
-    ///
-    /// Reads only: a caller that merely asks changes no metadata and arms no
-    /// unit.
+    /// The window `set_reminder(id, true)` would hand back, asked by the band too so the undo keeps
+    /// its promise.
     async fn reminder_reread(&self, artifact_id: &str) -> Result<Option<i64>> {
-        // Nothing to hand it back to: with no `[infer.synthesize]` there is no
-        // judged read, so the band offers no undo it could not honour.
+        // No `[infer.synthesize]`, no judged read.
         if !self.synthesizes() {
             return Ok(None);
         }
@@ -1997,20 +1516,7 @@ impl Core {
         let Some(cid) = art.corpus_id.as_deref() else {
             return Ok(None);
         };
-        // A capture that splits into windows is read window by window and
-        // never judged (`jobs::window`, `judging = all.len() == 1`), the same
-        // reason `refuse_a_reminder_too_large_to_judge` turns a long
-        // `engram -r` away at the door. Pressing the button here used to
-        // re-promote the whole document and produce no judgement and no
-        // moment at all; nothing is armed and the caller is told so.
-        //
-        // `!= 1` and not `> 1`. Zero is the same answer as many and for a
-        // nearer reason: there is no window to hand back, so arming one for a
-        // `segment_idx` the artifact still carries would queue a unit against
-        // a segment that does not exist — and returning `true` would have the
-        // page report a reminder armed that nothing will ever judge. The
-        // sibling `ask_the_judged_read_for_a_reminder` has always spelled the
-        // empty case out; this one guarded only the long-capture half of it.
+        // Only a single-window capture is judged; zero windows has nothing to hand back either.
         let windows = self.store.segments_for_corpus(cid).await?.len();
         if windows != 1 {
             tracing::info!(
@@ -2020,9 +1526,7 @@ impl Core {
             );
             return Ok(None);
         }
-        // Nothing to re-read: an artifact with no window cannot be handed back
-        // to the judged call, and saying it was armed something was a claim
-        // about a job that was never queued.
+        // An artifact with no window cannot be handed back.
         let Some(idx) = art.segment_idx else {
             tracing::info!(
                 artifact_id,
@@ -2030,9 +1534,7 @@ impl Core {
             );
             return Ok(None);
         };
-        // The same mark, for the same reason — see
-        // `ask_the_judged_read_for_a_reminder`. Read before any metadata is
-        // written, so a refusal changes nothing at all.
+        // Read before any metadata is written, so a refusal changes nothing.
         if self.store.segment_no_promote(cid, idx).await? {
             tracing::info!(
                 corpus_id = cid,
@@ -2044,45 +1546,19 @@ impl Core {
         Ok(Some(idx))
     }
 
-    /// Whether "is a reminder" has anything to do on this artifact. What the
-    /// band asks before offering the undo; `reminder_reread` is the answer.
+    /// What the band asks before offering the undo.
     pub async fn can_be_a_reminder(&self, artifact_id: &str) -> Result<bool> {
         Ok(self.reminder_reread(artifact_id).await?.is_some())
     }
 
-    /// "This is not a reminder", with an undo, and it sticks.
-    ///
-    /// Being wrong here costs: a reminder that should not be one is a row on
-    /// the band, an armed unit and a push to somebody's phone. The only way to make one stay gone across a
-    /// re-embed was to mark it *done*, which is the wrong verb for a thing
-    /// that was never a task and the wrong record to leave in the base.
-    ///
-    /// `off` deletes every row on the artifact the stage is responsible for —
-    /// see `delete_refused_due` for why the re-read's guards must not apply to
-    /// a person; `on` withdraws the refusal and hands the artifact back to the
-    /// stage, which reads the note again exactly as it did the first time.
-    /// Nothing here rewrites text.
-    ///
-    /// Returns whether the refusal actually removed anything, so a caller can
-    /// tell the difference between a row that went and a row that stayed.
+    /// `off` deletes the rows the stage owns and records a durable refusal; `on` withdraws it and
+    /// re-reads. Returns whether the refusal removed anything.
     pub async fn set_reminder(&self, artifact_id: &str, on: bool) -> Result<bool> {
         let art = self.store.get_artifact(artifact_id).await?;
         let intent = crate::core::moments::Intent::Remind;
         let Some(cid) = art.corpus_id.as_deref() else {
-            // A merge belongs to no corpus by construction, and `off` used to
-            // return here having done nothing at all — while `carry_moments`
-            // deliberately moves a root's open due row *onto* the merge. So
-            // the band could show a reminder whose "Not a reminder" answered
-            // `false`: no banner, no error, nothing deleted, and the row went
-            // on pushing at 48 h, 12 h, 3 h, 30 min and zero for ever.
-            //
-            // The row is what pushes, so `off` deletes it. What cannot be
-            // recorded is the durable refusal in the corpus metadata, and
-            // nothing needs it: that refusal exists to survive a re-read, and
-            // a merge is never read from a note again. `on` is the half that
-            // genuinely has nothing to do — there is no window to hand back —
-            // and it keeps saying so, which is what tells the band not to
-            // offer an undo it could not honour.
+            // A merge has no corpus, but `carry_moments` moves due rows onto it: `off` still
+            // deletes them.
             if on {
                 return Ok(false);
             }
@@ -2093,20 +1569,14 @@ impl Core {
         let src = self.store.get_corpus(cid).await?;
         let mut meta = src.metadata.clone();
         if on {
-            // Asked as one question, so the band's undo and this method cannot
-            // disagree about it — see `reminder_reread`.
+            // One question, shared with the band's undo; see `reminder_reread`.
             let Some(idx) = self.reminder_reread(artifact_id).await? else {
                 return Ok(false);
             };
             crate::core::moments::allow_intent(&mut meta, intent);
             self.store.set_corpus_metadata(cid, &meta).await?;
-            // Hand the note back to the judged read: re-run its window's
-            // synthesis, which is where time is read since the reshape.
-            //
-            // Armed the way every automatic arming is. `enqueue_seq` rewrites
-            // a row in any state, `running` included, and a second worker then
-            // claims the window the first is inside: two writes of the
-            // segment's artifacts and two runs of `supersede_covered`.
+            // Armed as every automatic arming is: `enqueue_seq` would rewrite a `running` row and
+            // double the work.
             self.store.reset_segment(cid, idx, true).await?;
             self.store
                 .rearm_idle_seq(
@@ -2129,11 +1599,7 @@ impl Core {
         let src = self.store.get_corpus(id).await?;
         match stage {
             Stage::Synthesize => {
-                // Re-segmenting starts from `raw_text`, and an image whose read
-                // has not landed has none. Flipping it to `raw` would have
-                // synthesis fail on empty text and the pending read then find
-                // a corpus that is no longer `describing` — a photo never
-                // read, by way of a button that promised to process it.
+                // An image whose read has not landed has no `raw_text` to re-segment.
                 if src.status == CorpusStatus::Describing
                     || (src.origin == ORIGIN_IMAGE && src.raw_text.trim().is_empty())
                 {
@@ -2141,9 +1607,7 @@ impl Core {
                         "this image has not been read yet — re-read it instead".into(),
                     ));
                 }
-                // Same situation, same answer: re-segmenting starts from
-                // `raw_text`, and a PDF whose extraction has not landed has
-                // none.
+                // Likewise a PDF whose extraction has not landed.
                 if src.status == CorpusStatus::Extracting
                     || (src.origin == ORIGIN_PDF && src.raw_text.trim().is_empty())
                 {
@@ -2155,8 +1619,7 @@ impl Core {
                 self.store
                     .set_corpus_status(&src.id, CorpusStatus::Raw)
                     .await?;
-                // The artifacts just deleted may have been the surviving half of
-                // a consolidated pair; whatever they hid comes back.
+                // The deleted artifacts may have been the surviving half of a pair.
                 self.heal_dangling_supersessions().await?;
                 self.store
                     .enqueue(Stage::Synthesize, "corpus", &src.id)
@@ -2169,19 +1632,13 @@ impl Core {
                     .set_corpus_status(&src.id, CorpusStatus::Embedding)
                     .await?;
             }
-            // Consolidation and association both look at the whole collection,
-            // so there is no such thing as reprocessing one corpus through
-            // either. Saying so beats silently queueing a sweep the caller did
-            // not ask for.
+            // Both look at the whole collection; one corpus cannot be reprocessed through them.
             Stage::Consolidate | Stage::Associate => {
                 return Err(Error::Validation(
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
-            // Units the queue arms for itself, one per artifact or inference
-            // call. An operator reprocesses a document, not one of its windows:
-            // asking for `synthesize` re-windows the whole thing and arms them
-            // all, and `embed` re-arms a `relate` unit per artifact behind it.
+            // Units the queue arms for itself; an operator reprocesses a document, not a window.
             Stage::SegmentWindow
             | Stage::Title
             | Stage::Dedupe
@@ -2196,9 +1653,7 @@ impl Core {
                         .into(),
                 ));
             }
-            // The pursuit sweep looks at every recorded search, not at one
-            // corpus; retention, dedupe arming and the context sweep look at
-            // the whole collection for the same reason.
+            // These sweeps look at every recorded search or the whole collection, not one corpus.
             Stage::Pursuit
             | Stage::Retention
             | Stage::ArmDedupe
@@ -2209,8 +1664,6 @@ impl Core {
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));
             }
-            // A captured link can always be fetched again: one held because
-            // it could not be read, or a page that has changed since.
             Stage::Fetch => {
                 if src.origin != ORIGIN_FETCH || src.source_url.is_none() {
                     return Err(Error::Validation(
@@ -2226,10 +1679,7 @@ impl Core {
                 self.store.set_corpus_metadata(&src.id, &meta).await?;
                 self.store.enqueue(Stage::Fetch, "corpus", &src.id).await?;
             }
-            // A stored PDF can always be read again — with the ML build, or
-            // after a docling upgrade. The extraction and everything derived
-            // from it are replaced wholesale, because an artifact of the old
-            // reading has no span in the new one.
+            // Replaced wholesale: an artifact of the old reading has no span in the new one.
             Stage::Extract => {
                 if src.origin != ORIGIN_PDF || !self.store.has_attachment(&src.id).await? {
                     return Err(Error::Validation(
@@ -2251,14 +1701,9 @@ impl Core {
                     .enqueue(Stage::Extract, "corpus", &src.id)
                     .await?;
             }
-            // A stored image can always be read again — with a better model, or
-            // after the endpoint that refused it is fixed. The reading and
-            // everything derived from it are replaced wholesale, because a
-            // chunk of the old reading has no span in the new one.
+            // Replaced wholesale: a chunk of the old reading has no span in the new one.
             Stage::Describe => {
-                // Origin, not just "has an attachment": a PDF has one too, and
-                // sending one through here would wipe its extraction and hand
-                // the vision model a preview it does not have.
+                // Origin, not attachment: a PDF has one too, and has no preview.
                 if src.origin != ORIGIN_IMAGE || !self.store.has_attachment(&src.id).await? {
                     return Err(Error::Validation(
                         "only a captured image can be re-read".into(),
@@ -2289,19 +1734,7 @@ impl Core {
     }
 }
 
-/// Whether a capture's coverage is final — whether what no artifact carried is
-/// a loss rather than a window nobody has read yet.
-///
-/// `synthesize::plan` writes every window up front in state `pending`, so a
-/// capture still being read has segment rows and no artifacts for most of them.
-/// Measured then, every unread line looks uncovered, and the page said so: it
-/// named lines that were about to arrive as never reached, and offered to pay
-/// for reading them a second time.
-///
-/// These are the states synthesis sets once every window has resolved. `partial`
-/// and `failed` are in the list on purpose — they are where a real loss lives,
-/// and gating on `ready` alone would hide the section from exactly the captures
-/// that have something to show it.
+/// Whether unread lines are a loss rather than windows still pending; `partial` and `failed` count.
 pub(crate) fn coverage_final(status: &CorpusStatus) -> bool {
     matches!(
         status,
@@ -2310,33 +1743,19 @@ pub(crate) fn coverage_final(status: &CorpusStatus) -> bool {
 }
 
 impl Core {
-    /// Read one passage again.
-    ///
-    /// The window holding that line, not the line itself: a window is wider than
-    /// the passage, and that is what lets the model read it in its surroundings
-    /// rather than stripped of them. One model call.
-    ///
-    /// Nothing already written from this capture is replaced. What comes back is
-    /// added, and anything it repeats is folded by the dedupe sweep like any other
-    /// near duplicate.
-    ///
-    /// True where a read was queued. False for every reason there was nothing to
-    /// re-read — a capture still being read, a restored placeholder, artifacts
-    /// with no spans, or a band that is not a loss — so the phone can say so.
+    /// Re-read the window holding these lines, one model call; nothing written is replaced.
+    /// False wherever there is nothing to re-read, so the phone can say so.
     pub async fn reread_uncovered(&self, cid: &str, from: i64, to: i64) -> Result<bool> {
         // A re-read is a model call, and the embed-only floor has no model.
         if !self.synthesizes() {
             return Ok(false);
         }
-        // A page left open while the capture was still being read would otherwise
-        // offer to re-read lines that are merely not written yet.
+        // A capture still being read has lines merely not written yet.
         let s = self.store.get_corpus(cid).await?;
         if !coverage_final(&s.status) {
             return Ok(false);
         }
-        // The same cut the page renders, from the same inputs — and the same two
-        // reasons it renders nothing red: a restored placeholder's text is its own
-        // artifacts, and an artifact with no span may have come from anywhere.
+        // The same cut the page renders; placeholders and span-less artifacts render nothing red.
         let chunks = self.store.artifacts_for_corpus(cid).await?;
         if s.restored_at.is_some() || chunks.iter().any(|c| c.corpus_span.is_none()) {
             return Ok(false);
@@ -2384,11 +1803,7 @@ impl Core {
     }
 }
 
-/// Where the two stores disagree about which artifacts exist.
-///
-/// One truth for "what disagrees", read by the sweep (`heal_store_drift`) and
-/// by `--restore` / `--verify-stores`, so the report a restore prints is the
-/// same set the next sweep would act on.
+/// One definition, read by `heal_store_drift` and by `--restore` / `--verify-stores`.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Drift {
     /// Points no row names: unreachable content, only ever reported or pruned.
@@ -2452,21 +1867,13 @@ mod tests {
         assert!(d.orphan_points.is_empty());
     }
 
-    /// The per-kind ceilings, imposed on the path rather than at each door.
-    ///
-    /// The doors are layered at `max(pdf_max_bytes, image_max_bytes)` because
-    /// one route serves both kinds, and a multipart part carries no ceiling of
-    /// its own — so `/capture` used to walk a 49 MB photo
-    /// through a full decode however small `image_max_bytes` was set.
     #[tokio::test]
     async fn a_file_over_its_kind_s_ceiling_is_refused() {
         let mut core = test_core().await;
         core.capture.image_max_bytes = 1024 * 1024;
         core.capture.pdf_max_bytes = 2 * 1024 * 1024;
 
-        // PNG magic and then padding: never a decodable image, which is the
-        // assertion. The ceiling is checked before the hash and long before
-        // the decode permit, so these bytes are refused on their weight alone.
+        // Never a decodable image: refused on weight alone, before the hash and the decode permit.
         let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
         png.resize(2 * 1024 * 1024, 0);
         let err = core
@@ -2497,8 +1904,6 @@ mod tests {
             .expect_err("an oversize PDF is refused");
         assert!(err.to_string().contains("2 MB limit"), "{err}");
 
-        // And text, whose ceiling is not configuration: `/corpora/upload`
-        // refuses text over 8 MB and a `file` part used to sail past it.
         let text = vec![b'a'; MAX_TEXT_BYTES + 1];
         let err = core
             .ingest_file(
@@ -2514,8 +1919,6 @@ mod tests {
         assert!(err.to_string().contains("8 MB limit"), "{err}");
     }
 
-    /// The two link doors share one path, and the path decides by what the
-    /// URL held: a page is extracted here, a PDF is stored for `Stage::Extract`.
     #[tokio::test]
     async fn a_url_holding_a_page_is_captured_with_its_provenance() {
         use wiremock::matchers::{method, path};
@@ -2629,8 +2032,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_pdf_door_is_open_without_any_model_configured() {
-        // Unlike the image door, which refuses without `[infer.vision]`:
-        // extraction is local, so nothing gates it.
         let core = crate::core::test_support::test_core_without_vision().await;
         assert!(core.ingest_pdf(a_pdf_capture()).await.is_ok());
     }
@@ -2709,10 +2110,6 @@ mod tests {
         }
     }
 
-    /// `MAX_IMAGE_EDGE` and `MAX_DECODE_BYTES` bound one image and say nothing
-    /// about ten at once. Decoding runs on a 512-thread blocking pool through
-    /// no gate at all, so without a permit the ceiling on resident pixels is
-    /// however many uploads a client cares to have in flight.
     #[tokio::test]
     async fn only_so_many_uploads_are_decoded_at_once() {
         let core = test_core().await;
@@ -2738,7 +2135,6 @@ mod tests {
         waiting.abort();
 
         drop(held);
-        // And once they are free again it goes through as usual.
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             core.ingest_image(an_image(12)),
@@ -2810,12 +2206,10 @@ mod tests {
     async fn re_segmenting_an_image_that_has_not_been_read_is_refused() {
         let core = test_core().await;
         let id = core.ingest_image(an_image(3)).await.unwrap().id;
-        // Still describing.
         assert!(matches!(
             core.reprocess(&id, Stage::Synthesize).await,
             Err(Error::Validation(_))
         ));
-        // Failed before any text was read.
         crate::jobs::describe::park_failed(&core, &id, "HTTP 400")
             .await
             .unwrap();
@@ -2823,7 +2217,6 @@ mod tests {
             core.reprocess(&id, Stage::Synthesize).await,
             Err(Error::Validation(_))
         ));
-        // The describe job and the status are untouched either way.
         assert!(core.store.live_job(Stage::Describe, &id).await.unwrap());
         assert_eq!(
             core.store.get_corpus(&id).await.unwrap().status,
@@ -2903,10 +2296,6 @@ mod tests {
         ));
     }
 
-    /// `describe` is guarded by origin, not by "has an attachment": a PDF has
-    /// one too, and letting it through would clear the extraction and every
-    /// artifact behind it before handing the vision model a preview a PDF is
-    /// stored without.
     #[tokio::test]
     async fn a_pdf_cannot_be_re_read_through_the_vision_stage() {
         let core = test_core().await;
@@ -2931,14 +2320,7 @@ mod tests {
 
     #[tokio::test]
     async fn healing_a_dangling_supersession_leaves_no_unfinished_write_behind() {
-        // `set_superseded_by` raises `lifecycle_dirty` in the same statement as
-        // the change it describes, and every other caller clears it once the
-        // payload write is acknowledged. This path writes the payload *first*,
-        // so the two stores already agree by the time the row is written — and a
-        // marker left standing has the next sweep's `repair_lifecycle_drift`
-        // rewrite a payload that is already correct, on a base in agreement.
-        // That function returns a count precisely so that a repair firing on
-        // such a base is visible rather than hiding behind a correct end state.
+        // `repair_lifecycle_drift` returns a count so a repair on an agreeing base is visible.
         let core = test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(
             &core,
@@ -3070,8 +2452,6 @@ mod tests {
             .await
             .unwrap();
         let src = core.store.get_corpus(&out.id).await.unwrap();
-        // The channel and the location are two different facts. Overloading
-        // one with the other loses the channel and leaves the URL unqueryable.
         assert_eq!(src.origin, "extension");
         assert_eq!(
             src.source_url.as_deref(),
@@ -3087,7 +2467,6 @@ mod tests {
         assert_eq!(src.source_url, None);
     }
 
-    /// A body long enough to have a stable shingle signature.
     fn manual(marker: &str) -> String {
         (0..200)
             .map(|i| format!("step {i}: run the {marker} command and read its output"))
@@ -3097,14 +2476,6 @@ mod tests {
 
     #[tokio::test]
     async fn reprocessing_forgets_the_previous_runs_coverage() {
-        // The reconciliation sweep identifies a document whose last window
-        // resolved but whose `settle` never ran by its having no coverage. A
-        // reprocess that left the previous run's measure behind made its own
-        // rerun the one case the repair could not see: if that rerun died in
-        // exactly that window, nothing would resolve again to trigger `settle`,
-        // and the sweep would read the stale number as "already finished". The
-        // document sits in `segmenting` for good — never renumbered, never
-        // embedded, never in search.
         let core = test_core().await;
         let out = core
             .ingest("alpha para\n\nbeta para", "web", None)
@@ -3130,18 +2501,13 @@ mod tests {
 
     #[tokio::test]
     async fn reprocessing_gives_every_window_its_attempts_back() {
-        // Planning arms idle-only now, so the window units are the one piece of
-        // the previous run that a reprocess would otherwise inherit: a rerun
-        // asked for by a person would start its windows four attempts in and
-        // give up on them almost at once. `clear_segments` drops the rows the
-        // units name but not the units, which outlive them.
         let core = test_core().await;
         let out = core
             .ingest("alpha para\n\nbeta para", "web", None)
             .await
             .unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        sqlx::query("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
+        sqlx::query!("UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'")
             .execute(&core.store.control.pool)
             .await
             .unwrap();
@@ -3150,7 +2516,7 @@ mod tests {
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
 
         let attempts: Vec<i64> =
-            sqlx::query_scalar("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
+            sqlx::query_scalar!("SELECT attempts FROM jobs WHERE stage = 'segment_window'")
                 .fetch_all(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -3166,16 +2532,10 @@ mod tests {
 
     #[tokio::test]
     async fn reprocessing_gives_a_corpus_that_was_never_named_another_chance() {
-        // A title unit is armed once per corpus and never again, so that a
-        // document the model will not name stops costing four calls a day
-        // forever. The row is what remembers that — and it outlived a
-        // reprocess, so a corpus left unnamed by an endpoint that was briefly
-        // down could never be named again, including by the person who noticed
-        // and asked for the rerun.
         let core = test_core().await;
         let src = core.ingest(&manual("mount"), "web", None).await.unwrap();
         for _ in 0..200 {
-            sqlx::query("UPDATE jobs SET run_after = 0 WHERE state = 'pending'")
+            sqlx::query!("UPDATE jobs SET run_after = 0 WHERE state = 'pending'")
                 .execute(&core.store.control.pool)
                 .await
                 .unwrap();
@@ -3183,10 +2543,8 @@ mod tests {
                 break;
             }
         }
-        // Capture names locally now, so the title unit is armed by putting
-        // the corpus in the state the unit exists for: unnamed at settle.
-        sqlx::query("UPDATE corpora SET title_hint = NULL WHERE id = ?")
-            .bind(&src.id)
+        // Capture names locally, so put the corpus in the state the title unit exists for.
+        sqlx::query!("UPDATE corpora SET title_hint = NULL WHERE id = ?", &src.id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -3208,8 +2566,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_near_identical_capture_is_flagged_and_still_read_and_embedded() {
-        // It used to be parked: stored with no job until a person decided on
-        // Insights, and a capture nobody decided on was never searchable.
         let core = test_core().await;
         let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
         crate::jobs::test_support::drain(&core).await;
@@ -3245,9 +2601,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_capture_an_older_build_parked_is_released_by_the_sweep() {
-        // `needs_review` with no job is what an older build wrote. Nothing
-        // writes it now; the reconcile sweep puts what is left of it into
-        // the pipeline, the flag kept.
         let core = test_core().await;
         let first = core.ingest(&manual("mount"), "web", None).await.unwrap();
         crate::jobs::test_support::drain(&core).await;
@@ -3301,8 +2654,6 @@ mod tests {
 
     #[tokio::test]
     async fn reprocessing_a_flagged_capture_clears_its_flag() {
-        // Reprocessing is a decision about the capture, and the flag goes
-        // with it.
         let core = test_core().await;
         core.ingest(&manual("mount"), "web", None).await.unwrap();
         while core.store.claim_job().await.unwrap().is_some() {}
@@ -3353,8 +2704,6 @@ mod tests {
 
     #[tokio::test]
     async fn ingest_is_not_blocked_by_a_dead_chunker() {
-        // The whole point of deferred processing: a broken inference endpoint
-        // must not turn into a failed capture.
         let mut core = test_core().await;
         core.synthesizer = Some(std::sync::Arc::new(
             crate::infer::fake::FakeSynthesizer::failing("endpoint down"),
@@ -3375,10 +2724,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_captures_of_the_same_text_at_once_both_get_an_answer() {
-        // The duplicate check and the insert are separated by a scan over every
-        // stored signature, so a double-submitted form is enough to have both
-        // calls pass the check. The loser used to hit the UNIQUE constraint and
-        // surface as a 500 on a capture that was, in fact, a duplicate.
         let core = test_core().await;
         let (a, b) = tokio::join!(
             core.ingest("filed twice at once", "web", None),
@@ -3468,9 +2813,6 @@ mod tests {
 
     #[tokio::test]
     async fn reprocessing_re_segments_instead_of_finding_every_window_done() {
-        // The window rows say what the segment job has already finished.
-        // Keeping them across a reprocess left the rerun with nothing pending,
-        // no chunks, and a source marked failed.
         let core = test_core().await;
         let out = core
             .ingest("alpha para\n\nbeta para", "web", None)
@@ -3511,7 +2853,6 @@ mod tests {
         );
     }
 
-    /// One point for `artifact_id`, with nothing set beyond what a write needs.
     fn point(artifact_id: &str, corpus_id: &str) -> crate::vector::VectorPoint {
         crate::vector::VectorPoint {
             sparse: Default::default(),
@@ -3525,7 +2866,6 @@ mod tests {
         }
     }
 
-    /// A corpus with one artifact in it, and the ids of both.
     async fn one_artifact(core: &crate::core::Core) -> (String, String) {
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -3544,10 +2884,6 @@ mod tests {
 
     #[tokio::test]
     async fn deprecating_an_already_superseded_artifact_is_refused() {
-        // `set_artifact_status` leaves `superseded_by` alone, so this used to
-        // produce a row that is deprecated *and* hidden in favour of a winner:
-        // listed in both Ops tables, rendered only as a supersession, and so out
-        // of reach of the button that would undo it.
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -3584,10 +2920,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_that_claims_it_is_embedded_with_no_point_is_requeued() {
-        // The other direction. A row still `pending` is not drift — that is
-        // every artifact that was just captured — so only a row claiming `done`
-        // counts, and the repair is to send it back through the pipeline that
-        // writes points rather than to delete the row.
         let core = test_core().await;
         let (_, artifact) = one_artifact(&core).await;
         core.store
@@ -3609,13 +2941,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_drift_repair_leaves_a_retrying_embed_units_backoff_alone() {
-        // The sweep runs this every tick, and a unit that is failing against a
-        // dead endpoint is `pending` with `run_after` in the future. Re-arming
-        // it unconditionally winds `attempts` back to zero, so the backoff
-        // never climbs and the sweep hands the same dead endpoint another
-        // full-timeout call on every tick, forever. The queue's backoff is the
-        // only thing standing in for the circuit breaker, and this is what
-        // used to reset it.
+        // A failing unit is `pending` with `run_after` in the future; re-arming would reset its
+        // backoff.
         let core = test_core().await;
         let (_, artifact) = one_artifact(&core).await;
         core.store
@@ -3631,20 +2958,21 @@ mod tests {
             .await
             .unwrap();
         let before: (i64, i64) =
-            sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
-                .bind(job.id)
+            sqlx::query!("SELECT attempts, run_after FROM jobs WHERE id = ?", job.id)
                 .fetch_one(&core.store.control.pool)
                 .await
+                .map(|r| (r.attempts, r.run_after))
                 .unwrap();
         assert!(before.0 > 0 && before.1 > 0, "the unit is not backing off");
 
         core.heal_store_drift().await.unwrap();
 
-        let after: (i64, i64) = sqlx::query_as("SELECT attempts, run_after FROM jobs WHERE id = ?")
-            .bind(job.id)
-            .fetch_one(&core.store.control.pool)
-            .await
-            .unwrap();
+        let after: (i64, i64) =
+            sqlx::query!("SELECT attempts, run_after FROM jobs WHERE id = ?", job.id)
+                .fetch_one(&core.store.control.pool)
+                .await
+                .map(|r| (r.attempts, r.run_after))
+                .unwrap();
         assert_eq!(
             after, before,
             "the drift repair cleared a retrying unit's backoff"
@@ -3653,9 +2981,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_point_whose_row_is_gone_is_reported_and_left_alone() {
-        // SQLite is the source of truth; a point with no row is drift to be
-        // restored from a snapshot, not a row to be rebuilt from a payload —
-        // and never a point to delete, since the vectors may be the last copy.
         let core = test_core().await;
         let (corpus, artifact) = one_artifact(&core).await;
         core.vectors
@@ -3674,8 +2999,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_still_waiting_to_embed_is_not_drift() {
-        // Everything just ingested has a row and no point. Treating that as
-        // drift would re-queue the entire backlog on every sweep.
         let core = test_core().await;
         let (_, artifact) = one_artifact(&core).await;
         core.heal_store_drift().await.unwrap();
@@ -3739,9 +3062,6 @@ mod tests {
 
     #[tokio::test]
     async fn without_a_vision_role_the_image_is_stored_to_be_read_later() {
-        // Refused, as it was, every photo shared from a phone in contained
-        // mode was held and never stored. The note on it is findable now; the
-        // picture is read when a vision role is configured.
         let core = crate::core::test_support::test_core_without_vision().await;
         let out = core
             .ingest_image(ImageCapture {
@@ -3783,10 +3103,6 @@ mod tests {
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 
-    /// A note is no longer truncated on the way into storage. It is an
-    /// artifact like any other, and `embed::run_with_limit` splits an oversize
-    /// chunk into siblings — so length is the embedder's problem, not a silent
-    /// amputation at the door.
     #[tokio::test]
     async fn a_long_note_is_stored_whole_and_a_blank_one_is_dropped() {
         let core = test_core().await;
@@ -3903,9 +3219,6 @@ mod tests {
         );
     }
 
-    /// The sentence most worth searching on must be an artifact, not a
-    /// caption. Embedding runs over artifact chunks and never over metadata,
-    /// so a note that stays in `metadata["note"]` cannot be found at all.
     #[tokio::test]
     async fn a_note_on_a_pdf_becomes_a_span_less_artifact_on_its_corpus() {
         let core = test_core().await;
@@ -3934,7 +3247,6 @@ mod tests {
         assert_eq!(n.title, None);
     }
 
-    /// One helper, three doors, so a fourth cannot forget it.
     #[tokio::test]
     async fn every_door_that_takes_a_note_writes_it_as_an_artifact() {
         let describer = std::sync::Arc::new(crate::infer::fake::FakeDescriber::default());
@@ -3995,9 +3307,6 @@ mod tests {
         );
     }
 
-    /// A scan with no text layer parks as `failed` and never reaches `settle`,
-    /// which is what normally arms the embed. Without arming it here, the one
-    /// thing a person typed about an unreadable document waits forever.
     #[tokio::test]
     async fn a_note_arms_the_embed_so_an_unread_capture_still_becomes_findable() {
         let core = test_core().await;
@@ -4024,7 +3333,6 @@ mod tests {
         );
     }
 
-    /// Re-uploading the same file must not stack a second note on it.
     #[tokio::test]
     async fn a_duplicate_upload_writes_no_second_note() {
         let core = test_core().await;
@@ -4061,9 +3369,6 @@ mod tests {
         );
     }
 
-    /// A note is not derived work. A reprocess replaces everything the pipeline
-    /// made from the document; the sentence a person typed about it is the one
-    /// thing in the corpus no rerun can produce again.
     #[tokio::test]
     async fn a_reprocess_keeps_the_note_and_queues_it_for_a_fresh_vector() {
         let core = test_core().await;
@@ -4108,8 +3413,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_forced_remind_is_a_reminder_and_keeps_its_origin() {
-        // `engram -r "Heute den Bericht abgeben"` opens like a diary entry and
-        // is a reminder anyway: the door said so.
         let core = test_core().await;
         let out = core
             .ingest_capture(
@@ -4128,11 +3431,6 @@ mod tests {
         );
     }
 
-    /// The band offers "Not a reminder — undo" on `can_be_a_reminder`, and it
-    /// used to decide on `corpus_id.is_some()` alone. `set_reminder(id, true)`
-    /// refuses on three more conditions, so the button appeared on captures it
-    /// could not honour, reported success and restored nothing — which is
-    /// precisely what the optional undo exists to prevent.
     #[tokio::test]
     async fn the_undo_is_offered_only_where_the_reminder_can_actually_come_back() {
         use crate::store::artifacts::NewArtifact;
@@ -4155,8 +3453,6 @@ mod tests {
             "one window, read from a note: there is something to hand back"
         );
 
-        // A corpus is not enough on its own. This one belongs to no window, so
-        // there is nothing for the judged read to be handed.
         let src = core
             .store
             .insert_corpus("a note nothing segmented", "web", None)
@@ -4190,13 +3486,6 @@ mod tests {
         );
     }
 
-    /// A restore out of a merge is an operator overruling the merge for this
-    /// one source, and the lineage has to record it or `merge::finish`'s
-    /// unfinished-merge repair re-hides the source on the next sweep tick, and
-    /// the one after that. `unsupersede_locked` records it; `reactivate`'s
-    /// exhume branch returned before ever reaching that code, so an artifact
-    /// that was deprecated *and* merged *and* buried — the shape the Insights
-    /// restore button reaches — came back and was hidden again immediately.
     #[tokio::test]
     async fn a_buried_merge_source_restored_from_insights_stays_restored() {
         use crate::store::artifacts::{ArtifactStatus, NewMerged};
@@ -4233,7 +3522,6 @@ mod tests {
             "the merge may hide its source, to begin with"
         );
 
-        // Hidden by the merge, then retired and buried.
         core.store
             .set_superseded_by(&root, Some(&merged.id))
             .await
@@ -4242,20 +3530,22 @@ mod tests {
             .set_artifact_status(&root, ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        // Old enough for the sweep, and the merge old enough not to be the
-        // "fresh merge" the age guard holds a root back for.
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 1_000)
-            .bind(&root)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE artifacts SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 1_000)
-            .bind(&merged.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - 1_000,
+            &root
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ? WHERE id = ?",
+            crate::store::now() - 1_000,
+            &merged.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         core.store
             .bury(
                 &root,
@@ -4288,17 +3578,11 @@ mod tests {
                 .is_empty(),
             "and the repair may never hide it again"
         );
-        // And it is not left marked dirty. `exhume` clears the flag on purpose
-        // — the burial deleted the point, and until the `Embed` lands there is
-        // nothing for the drift repair to write a payload onto — but
-        // `set_artifact_status` and `set_superseded_by` each raise it again in
-        // their own statement, so it was `1` by the time `reactivate`
-        // returned and the repair wrote onto the deleted point.
-        let dirty: i64 = sqlx::query_scalar("SELECT lifecycle_dirty FROM artifacts WHERE id = ?")
-            .bind(&root)
-            .fetch_one(&core.store.pool)
-            .await
-            .unwrap();
+        let dirty: i64 =
+            sqlx::query_scalar!("SELECT lifecycle_dirty FROM artifacts WHERE id = ?", &root)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
         assert_eq!(
             dirty, 0,
             "the point arrives with the embed, payload and all"
@@ -4307,8 +3591,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_forced_reminder_is_never_flagged_beside_what_it_resembles() {
-        // "Remind me" has said what it is; a reminder repeated is a reminder,
-        // not a copy to drop.
         let core = test_core().await;
         let first: String = (1..=30)
             .map(|n| format!("Schritt {n}: die Unterlagen für den Termin durchsehen.\n"))
@@ -4318,8 +3600,7 @@ mod tests {
 
         let again = first.replacen("Schritt 7:", "Schritt sieben:", 1);
         let again = again.as_str();
-        // Read before the capture, or the row this very call stores is the
-        // one that answers.
+        // Read before the capture, or the row this call stores answers.
         assert!(
             core.store
                 .find_near_duplicate(
@@ -4360,9 +3641,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_reminder_on_text_already_captured_is_armed_on_the_stored_row() {
-        // `engram -r` over bytes the base already holds returns the stored
-        // corpus, which is right — and used to arm nothing at all, so the
-        // request the door carried was dropped in silence.
         let core = test_core().await;
         let text = "Rechnung am Freitag verschicken.";
         let first = core.ingest(text, "web", None).await.unwrap();
@@ -4395,10 +3673,6 @@ mod tests {
 
     #[tokio::test]
     async fn is_a_reminder_arms_nothing_on_a_capture_read_window_by_window() {
-        // The judged read runs on single-window corpora alone. On a long
-        // capture the button re-ran the whole promotion and produced no
-        // judgement and no moment; and on an artifact belonging to no window
-        // it armed nothing while answering that it had.
         let core = test_core().await;
         let long = "Der Bericht behandelt die Migration im Detail. ".repeat(400);
         let out = core.ingest(&long, "web", None).await.unwrap();
@@ -4423,12 +3697,6 @@ mod tests {
         );
     }
 
-    /// A reminder is read in one pass or not at all.
-    ///
-    /// Only a single-window corpus reaches the judged synthesis call
-    /// (`jobs::window`), so `engram -r` over a long note was synthesized window
-    /// by window, embedded whole, answered with a corpus id — and armed
-    /// nothing. Refused at the door instead, before anything is stored.
     #[tokio::test]
     async fn a_reminder_too_large_to_be_judged_is_refused_at_the_door() {
         let core = test_core().await;
@@ -4453,14 +3721,11 @@ mod tests {
             "nothing stored, nothing embedded"
         );
 
-        // The same text without the door is an ordinary capture and goes.
         core.ingest_capture(Capture::new(&long, "ui"))
             .await
             .unwrap();
     }
 
-    /// The embed-only floor turns a reminder away at the door and says why,
-    /// rather than storing a note nothing will ever remind.
     #[tokio::test]
     async fn a_reminder_with_no_synthesizer_is_refused_as_not_configured() {
         let core = crate::core::test_support::test_core_without_synthesizer().await;
@@ -4479,19 +3744,9 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        // Without the door it is an ordinary capture, and goes.
         core.ingest_capture(Capture::new(text, "ui")).await.unwrap();
     }
 
-    /// A reminder read onto a passage, and the passage superseded under it.
-    ///
-    /// `supersede` says every other question about the loser now belongs to the
-    /// winner — the open pairs move, the links move, the engagement moves. Time
-    /// did not. A note that is nothing but a reminder leaves the model nothing
-    /// it is allowed to write, so the judgement anchors to the verbatim passage
-    /// itself; when a later promotion superseded that passage the row went
-    /// dark, because `uncovered` reads `a.status = 'active'`. No push at any
-    /// rung, nothing on the day page, and nothing anywhere saying it had gone.
     #[tokio::test]
     async fn superseding_an_artifact_carries_the_reminder_standing_on_it() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -4527,8 +3782,6 @@ mod tests {
         assert_eq!(open[0].moment.at, Some(at));
     }
 
-    /// And it never becomes a second row: a winner that already carries the
-    /// instant keeps the one it has.
     #[tokio::test]
     async fn a_carried_moment_never_doubles_an_instant_the_winner_holds() {
         use crate::store::moments::{Kind, NewMoment, Source};
@@ -4603,8 +3856,6 @@ mod decode_text_tests {
         assert_eq!(decode_text(utf16(false, true)).as_deref(), Ok(LINE));
     }
 
-    /// The live artifact: `D.u...h.a.s.t...` — UTF-16LE with no mark, which is
-    /// valid UTF-8 and used to be stored that way.
     #[test]
     fn utf16_without_a_byte_order_mark_is_refused_not_stored() {
         let ascii: Vec<u8> = "Du hast"

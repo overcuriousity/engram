@@ -1,18 +1,9 @@
-//! `--show`: one artifact, read in full.
-//!
-//! The ranked list clips every hit to a couple of lines, which is right for a
-//! list and useless for reading. This is the door that never clips: whatever
-//! the artifact holds is what is printed.
+//! `--show`: one artifact, read in full and never clipped.
 
 use crate::cli::endpoint::Endpoint;
 use crate::error::Result;
 
-/// What the reading door renders, which is less than the API answers with.
-///
-/// Deserialised into its own shape rather than into `store::artifacts::Chunk`:
-/// the client renders a title, a body and a provenance line, and a struct that
-/// named every column would have to be kept in step with a schema it never
-/// reads.
+/// What the reading door renders; its own shape so it need not track the chunk schema.
 #[derive(serde::Deserialize, Debug)]
 pub struct Detail {
     pub id: String,
@@ -31,8 +22,7 @@ pub struct SourceRef {
     pub source_url: Option<String>,
 }
 
-/// The form a pipe, a test and a script see: no colour, no glyph outside
-/// ASCII, and the whole body.
+/// The form a pipe, a test and a script see: no colour, ASCII only, the whole body.
 pub fn render_plain(d: &Detail) -> String {
     let mut out = String::new();
     out.push_str(d.title.as_deref().unwrap_or("(untitled)"));
@@ -53,8 +43,7 @@ pub fn render_plain(d: &Detail) -> String {
         out.push_str(&format!("tags: {}\n", d.tags.join(", ")));
     }
     out.push('\n');
-    // Whole, and unwrapped: the terminal knows its own width, and a client that
-    // rewrapped would destroy the one thing this door promises.
+    // Unwrapped: the terminal knows its own width.
     out.push_str(&d.text);
     if !d.text.ends_with('\n') {
         out.push('\n');
@@ -62,14 +51,8 @@ pub fn render_plain(d: &Detail) -> String {
     out
 }
 
-/// Ask for one artifact and print it.
-///
-/// The rank and the prefix are resolved here, against the list `-s` left
-/// behind, so the server only ever receives an id.
-///
-/// `last` is passed rather than loaded, for the reason `Face::decide` takes its
-/// facts as arguments: a test that read the developer's own state file would
-/// pass or fail on what they last searched for.
+/// Ask for one artifact and print it; rank and prefix resolve here against `-s`'s list.
+/// `last` is passed in so a test never reads the developer's own state file.
 pub async fn run(
     e: &Endpoint,
     which: &str,
@@ -82,9 +65,7 @@ pub async fn run(
             Ok(0)
         }
         None => {
-            // `1`, the same code `-s` answers with when it found nothing: a
-            // shell branches on "it is not there" the same way whichever door
-            // asked.
+            // `1`, as `-s` answers when it found nothing.
             eprintln!("no artifact {id}");
             Ok(1)
         }
@@ -92,10 +73,6 @@ pub async fn run(
 }
 
 /// The artifact behind an id, or `None` when there is none.
-///
-/// Split from `run` because what a reading is *of* is the thing worth
-/// asserting, and it cannot be asserted through a function whose only output
-/// is stdout and an exit code.
 pub async fn fetch(e: &Endpoint, id: &str) -> Result<Option<Detail>> {
     let http = crate::cli::endpoint::client()?;
     let res = http
@@ -126,8 +103,6 @@ pub async fn fetch(e: &Endpoint, id: &str) -> Result<Option<Detail>> {
 mod tests {
     use super::*;
 
-    /// End to end against the real router: the rank the list printed reaches
-    /// the right artifact, and its body arrives whole.
     #[tokio::test]
     async fn a_rank_from_the_last_search_reads_the_artifact_it_named() {
         let (url, token, core) = crate::cli::test_support::serve_test_app().await;
@@ -161,9 +136,7 @@ mod tests {
 
         assert_eq!(run(&e, "2", Some(held.clone())).await.unwrap(), 0);
 
-        // Which one it actually read. The exit code alone would pass on an
-        // off-by-one, and an off-by-one is the whole risk in a one-based list
-        // indexed into a zero-based vector.
+        // Which one it read: an off-by-one is the risk in a one-based list.
         let id = crate::cli::last::resolve("2", Some(&held)).unwrap();
         let got = fetch(&e, &id).await.unwrap().expect("the second hit");
         assert_eq!(got.id, made[1].id, "rank 2 on screen is the second hit");
@@ -175,8 +148,6 @@ mod tests {
         );
     }
 
-    /// The same code `-s` answers with when it found nothing, so a shell
-    /// branches on it the same way.
     #[tokio::test]
     async fn an_id_that_is_not_there_exits_one() {
         let (url, token, _core) = crate::cli::test_support::serve_test_app().await;
@@ -204,8 +175,6 @@ mod tests {
         }
     }
 
-    /// The whole reason this door exists. A rendering that clips is the
-    /// rendering `-s` already has.
     #[test]
     fn the_body_is_printed_whole_however_long_it_is() {
         let long: String = (1..=40).map(|n| format!("line {n}\n")).collect();
@@ -227,8 +196,6 @@ mod tests {
         assert!(out.contains("forensik"), "{out}");
     }
 
-    /// A merged artifact belongs to no corpus, and a corpus deleted since
-    /// leaves its artifacts readable. Neither is a reason to print nothing.
     #[test]
     fn an_artifact_with_no_document_behind_it_still_reads() {
         let mut d = detail("body");

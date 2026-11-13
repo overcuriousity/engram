@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT retired_at FROM corpora WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "retired_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "retired_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7bff68261d4c2b950d697747febcc57c6c308ef2d9a39314a21937648d7b96a6"
+}

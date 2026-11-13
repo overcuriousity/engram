@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT vec IS NOT NULL FROM graveyard WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "vec IS NOT NULL",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cc6660bbe66e9c6732a954719a9b96e4c6f37d38f0991c5fa98e1de5802e9f43"
+}

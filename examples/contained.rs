@@ -1,11 +1,5 @@
-//! The contained core, run on a desktop: what the phone runs, reachable by
-//! anything that wants to talk to it. Prints the origin and the token and
-//! serves until interrupted.
-//!
-//!     cargo run --features contained --example contained -- /tmp/engram-contained [models-dir]
-//!
-//! `ENGRAM_ASK_URL` and `ENGRAM_ASK_MODEL` name an endpoint, as Settings does
-//! on the phone, and the gate on generation is opened as a charging phone's is.
+//! The contained core on a desktop; prints the origin and token and serves until interrupted.
+//! `ENGRAM_ASK_URL` / `ENGRAM_ASK_MODEL` name an endpoint, and generation is gated open as when charging.
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,7 +12,10 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let mut args = std::env::args().skip(1);
-    let dir = std::path::PathBuf::from(args.next().expect("a data directory"));
+    let dir = std::path::PathBuf::from(
+        args.next()
+            .ok_or_else(|| anyhow::anyhow!("usage: contained <data-dir> [models-dir]"))?,
+    );
     let models = args.next().map(std::path::PathBuf::from);
     let pick = |name: &str| {
         models

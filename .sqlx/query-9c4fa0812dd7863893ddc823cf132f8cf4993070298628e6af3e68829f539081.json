@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT g.id AS \"id!\", g.vec AS \"vec!\" FROM graveyard g\n                   JOIN artifacts a ON a.id = g.id\n                  WHERE g.vec IS NOT NULL AND g.embed_model = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "vec!",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "vec"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "9c4fa0812dd7863893ddc823cf132f8cf4993070298628e6af3e68829f539081"
+}

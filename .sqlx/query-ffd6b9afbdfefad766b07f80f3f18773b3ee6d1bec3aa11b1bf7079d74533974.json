@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT text FROM graveyard WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "text",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "text"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ffd6b9afbdfefad766b07f80f3f18773b3ee6d1bec3aa11b1bf7079d74533974"
+}

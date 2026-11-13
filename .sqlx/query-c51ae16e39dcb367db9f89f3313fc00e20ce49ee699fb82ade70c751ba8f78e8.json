@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM sweep_runs WHERE id NOT IN (\n               SELECT id FROM sweep_runs ORDER BY started_at DESC, id DESC LIMIT ?\n             )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "c51ae16e39dcb367db9f89f3313fc00e20ce49ee699fb82ade70c751ba8f78e8"
+}

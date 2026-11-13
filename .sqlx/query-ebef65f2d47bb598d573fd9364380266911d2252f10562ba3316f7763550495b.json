@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT activation, activated_at FROM artifacts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "activation",
+        "ordinal": 0,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "activation"
+          }
+        }
+      },
+      {
+        "name": "activated_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "activated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ebef65f2d47bb598d573fd9364380266911d2252f10562ba3316f7763550495b"
+}

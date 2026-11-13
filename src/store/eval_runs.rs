@@ -1,28 +1,11 @@
-//! What an idle pass found, kept.
-//!
-//! The insights page's recall and MRR are read from the ranks the searches
-//! actually gave, which is the measurement of the ranking that produced them.
-//! A pass asks the other question — what *these* pairs would score under
-//! other settings — and the answer is only worth anything beside the settings
-//! that produced it. Hence a row per pass rather than a number on a page. A
-//! generation the pass adopted or refused names its row, which is the whole
-//! of what the row is for: the journal behind a move, never an offer.
+//! Idle-pass evaluations, one row per pass, kept beside the settings they ran under.
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
-/// The knobs a pass ran under, as stored.
-///
-/// The same values a generation holds, serialised the same way, so it is the
-/// same type and not a copy of it: a knob added to one is a knob the other has
-/// to store or the two records stop being comparable, which is the whole point
-/// of writing them down beside a recall figure. Named here because a run is
-/// what this module is about, and `run.base_params` reads better than
-/// `run.base_generation_params` at every call site.
+/// The same type as a generation's params, so the two records stay comparable.
 pub type RunParams = super::generations::GenerationParams;
 
-/// One pair that moved, named by the leading characters of its own query.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiffRow {
     pub query: String,
@@ -64,43 +47,43 @@ pub struct EvalRun {
 impl Store {
     pub async fn record_eval_run(&self, run: &NewEvalRun) -> Result<String> {
         let id = new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO eval_runs
                (id, created_at, judged_count, pairs_used, pairs_skipped,
                 base_params, base_recall, base_mrr,
                 best_params, best_recall, best_mrr,
                 diff)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            now(),
+            run.judged_count,
+            run.pairs_used,
+            run.pairs_skipped,
+            json(&run.base)?,
+            run.base_recall,
+            run.base_mrr,
+            json(&run.best)?,
+            run.best_recall,
+            run.best_mrr,
+            json(&run.diff)?
         )
-        .bind(&id)
-        .bind(now())
-        .bind(run.judged_count)
-        .bind(run.pairs_used)
-        .bind(run.pairs_skipped)
-        .bind(json(&run.base)?)
-        .bind(run.base_recall)
-        .bind(run.base_mrr)
-        .bind(json(&run.best)?)
-        .bind(run.best_recall)
-        .bind(run.best_mrr)
-        .bind(json(&run.diff)?)
         .execute(&self.pool)
         .await?;
         Ok(id)
     }
 
-    /// The most recent pass, quiet or not.
     pub async fn latest_eval_run(&self) -> Result<Option<EvalRun>> {
-        let row = sqlx::query("SELECT * FROM eval_runs ORDER BY created_at DESC, id DESC LIMIT 1")
-            .fetch_optional(&self.pool)
+        let row = sqlx::query_as!(
+            crate::store::eval_runs::EvalRunRow,
+            r#"SELECT id AS "id!", created_at AS "created_at!", judged_count AS "judged_count!", pairs_used AS "pairs_used!", pairs_skipped AS "pairs_skipped!", base_params AS "base_params!", base_recall AS "base_recall!", base_mrr AS "base_mrr!", best_params AS "best_params!", best_recall AS "best_recall!", best_mrr AS "best_mrr!", diff AS "diff!" FROM eval_runs ORDER BY created_at DESC, id DESC LIMIT 1"#
+        ).fetch_optional(&self.pool)
             .await?;
         row.map(hydrate).transpose()
     }
 }
 
-/// A row this binary cannot read is a broken row, not an empty one: a pass
-/// silently rehydrated with default settings would be measured against a
-/// baseline nobody ever ran.
+/// A row this binary cannot parse is an error: defaulting its settings would
+/// measure against a baseline nobody ran.
 fn parse<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T> {
     serde_json::from_str(raw).map_err(|e| Error::Store(format!("eval_runs: {e}")))
 }
@@ -109,20 +92,36 @@ fn json<T: serde::Serialize>(v: &T) -> Result<String> {
     serde_json::to_string(v).map_err(|e| Error::Store(format!("eval_runs: {e}")))
 }
 
-fn hydrate(row: sqlx::sqlite::SqliteRow) -> Result<EvalRun> {
+/// A row as `hydrate` reads it, for `query_as!`.
+pub(crate) struct EvalRunRow {
+    pub id: String,
+    pub created_at: i64,
+    pub judged_count: i64,
+    pub pairs_used: i64,
+    pub pairs_skipped: i64,
+    pub base_params: String,
+    pub base_recall: f64,
+    pub base_mrr: f64,
+    pub best_params: String,
+    pub best_recall: f64,
+    pub best_mrr: f64,
+    pub diff: String,
+}
+
+fn hydrate(row: EvalRunRow) -> Result<EvalRun> {
     Ok(EvalRun {
-        id: row.get("id"),
-        created_at: row.get("created_at"),
-        judged_count: row.get("judged_count"),
-        pairs_used: row.get("pairs_used"),
-        pairs_skipped: row.get("pairs_skipped"),
-        base_params: parse(row.get("base_params"))?,
-        base_recall: row.get("base_recall"),
-        base_mrr: row.get("base_mrr"),
-        best_params: parse(row.get("best_params"))?,
-        best_recall: row.get("best_recall"),
-        best_mrr: row.get("best_mrr"),
-        diff: parse(row.get("diff"))?,
+        id: row.id,
+        created_at: row.created_at,
+        judged_count: row.judged_count,
+        pairs_used: row.pairs_used,
+        pairs_skipped: row.pairs_skipped,
+        base_params: parse(&row.base_params)?,
+        base_recall: row.base_recall,
+        base_mrr: row.base_mrr,
+        best_params: parse(&row.best_params)?,
+        best_recall: row.best_recall,
+        best_mrr: row.best_mrr,
+        diff: parse(&row.diff)?,
     })
 }
 
@@ -172,8 +171,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_latest_run_is_the_last_word() {
-        // A pass over more evidence says whatever it says last, including
-        // when what it says is nothing; the rows before it stay as written.
         let store = Store::memory().await.unwrap();
         assert!(store.latest_eval_run().await.unwrap().is_none());
         let old = store.record_eval_run(&sample(true)).await.unwrap();
@@ -187,8 +184,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_run_reads_back_with_the_settings_and_the_pairs_that_moved() {
-        // The provenance rule, made structural: a number without the settings
-        // that produced it cannot be compared against anything.
         let store = Store::memory().await.unwrap();
         store.record_eval_run(&sample(true)).await.unwrap();
         let run = store.latest_eval_run().await.unwrap().unwrap();

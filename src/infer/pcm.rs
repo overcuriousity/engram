@@ -1,15 +1,8 @@
-//! A recording, as a speech model wants it: sixteen thousand mono samples a
-//! second, in ±1.
-//!
-//! The phone's own microphone door already records exactly that, as 16-bit
-//! PCM in a WAV, so for it this is a read and a scale. Everything else here is
-//! for whatever else reaches the route: another rate, two channels, float
-//! samples. A compressed container is refused in words — there is no codec in
-//! this build, by design.
+//! A recording as a speech model wants it: 16 kHz mono in ±1. Compressed containers are refused:
+//! this build has no codec, by design.
 
 use crate::error::{Error, Result};
 
-/// The rate Whisper hears at.
 pub const RATE: u32 = 16_000;
 
 fn refused(why: impl std::fmt::Display) -> Error {
@@ -19,7 +12,7 @@ fn refused(why: impl std::fmt::Display) -> Error {
 }
 
 pub fn samples_16k(audio: &[u8], mime: &str) -> Result<Vec<f32>> {
-    // The type as declared, without parameters: `audio/wav; codecs=1` is a WAV.
+    // `audio/wav; codecs=1` is a WAV.
     let kind = mime
         .split(';')
         .next()
@@ -127,7 +120,6 @@ mod tests {
             .collect()
     }
 
-    /// Upward zero crossings a second: a tone's frequency, without an FFT.
     fn hz(samples: &[f32], rate: u32) -> f32 {
         let crossings = samples
             .windows(2)

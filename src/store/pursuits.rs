@@ -1,17 +1,10 @@
-//! What happens after a result list renders, and the pursuits it is grouped
-//! into at analysis.
-//!
-//! An interaction carries no pursuit id: the clustering decides which pursuit
-//! a search event belongs to, and an interaction is joined to that event by
-//! time and scope when the sweep runs. Re-clustering never rewrites these rows.
+//! Interactions after a result list renders, and the pursuits they are grouped into.
+//! Interactions carry no pursuit id; the sweep joins them by time and scope.
 
 use super::Store;
 use crate::error::{Error, Result};
-use sqlx::Row;
 
-/// The identity of a pursuit: when the sitting opened and what was asked in
-/// it. Queries are normalised and sorted first, so the same sitting re-read
-/// after a crash hashes the same however the clusterer happened to order it.
+/// Queries are normalised and sorted, so a re-read after a crash hashes the same.
 fn pursuit_id(opened_at: i64, queries: &[String]) -> String {
     use sha2::{Digest, Sha256};
     let mut keys: Vec<String> = queries
@@ -25,7 +18,6 @@ fn pursuit_id(opened_at: i64, queries: &[String]) -> String {
     ))
 }
 
-/// One thing done with a result: opened, or reached from another artifact.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Interaction {
     pub id: i64,
@@ -40,7 +32,6 @@ pub struct Interaction {
     pub at: i64,
 }
 
-/// A coherent thing that was wanted, and what came of it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pursuit {
     pub id: String,
@@ -54,7 +45,6 @@ pub struct Pursuit {
     pub artifact_id: Option<String>,
 }
 
-/// Shown against clicked, for one rung of the ladder.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct OfferRate {
     pub rung: String,
@@ -62,21 +52,38 @@ pub struct OfferRate {
     pub opened: i64,
 }
 
-fn row_to_pursuit(r: &sqlx::sqlite::SqliteRow) -> Pursuit {
+#[derive(sqlx::FromRow)]
+pub(crate) struct PursuitRow {
+    pub id: Option<String>,
+    pub opened_at: i64,
+    pub closed_at: Option<i64>,
+    pub state: String,
+    pub reason: Option<String>,
+    pub queries: String,
+    pub sources: String,
+    pub artifact_id: Option<String>,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub query_vec: Option<Vec<u8>>,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub vec_dim: i64,
+    #[allow(dead_code, reason = "filled by query_as!, unread here")]
+    pub embed_model: Option<String>,
+}
+
+fn row_to_pursuit(r: PursuitRow) -> Pursuit {
     Pursuit {
-        id: r.get("id"),
-        opened_at: r.get("opened_at"),
-        closed_at: r.get("closed_at"),
-        state: r.get("state"),
-        reason: r.get("reason"),
-        queries: serde_json::from_str(&r.get::<String, _>("queries")).unwrap_or_default(),
-        sources: serde_json::from_str(&r.get::<String, _>("sources")).unwrap_or_default(),
-        artifact_id: r.get("artifact_id"),
+        id: r.id.unwrap_or_default(),
+        opened_at: r.opened_at,
+        closed_at: r.closed_at,
+        state: r.state,
+        reason: r.reason,
+        queries: serde_json::from_str(&r.queries).unwrap_or_default(),
+        sources: serde_json::from_str(&r.sources).unwrap_or_default(),
+        artifact_id: r.artifact_id,
     }
 }
 
 impl Store {
-    /// One interaction, stamped `at`. `kind` is `opened` or `pivoted`.
     pub async fn record_interaction(
         &self,
         artifact_id: &str,
@@ -85,24 +92,21 @@ impl Store {
         scope: Option<&str>,
         at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO interaction_events (artifact_id, kind, via, scope, at)
              VALUES (?, ?, ?, ?, ?)",
+            artifact_id,
+            kind,
+            via,
+            scope,
+            at
         )
-        .bind(artifact_id)
-        .bind(kind)
-        .bind(via)
-        .bind(scope)
-        .bind(at)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// How long an artifact stayed open, in seconds. The weakest signal there
-    /// is — long means useful or means confusing, a tab left open means
-    /// engaged or means lunch — so it is a tiebreak in the sweep and never
-    /// decisive.
+    /// The weakest signal there is, so the sweep uses it only as a tiebreak.
     pub async fn record_dwell(
         &self,
         artifact_id: &str,
@@ -110,29 +114,21 @@ impl Store {
         scope: Option<&str>,
         at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)
              VALUES (?, 'dwell', ?, ?, ?)",
+            artifact_id,
+            secs.to_string(),
+            scope,
+            at
         )
-        .bind(artifact_id)
-        .bind(secs.to_string())
-        .bind(scope)
-        .bind(at)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// What this base offered, and whether it was taken.
-    ///
-    /// `kind` is `recommended_shown` or `recommended_open`. Both live in
-    /// `interaction_events` because both are things that happened after a page
-    /// rendered — but neither counts as an ordinary open: the context sweep
-    /// reads `recommended_open` at `recommend.self_weight` and ignores
-    /// `recommended_shown` entirely, and the pursuit sweep skips the latter too.
-    ///
-    /// `detail` carries the rung and the winning cluster as JSON, which is what
-    /// makes the Ops hit rate a breakdown rather than one number.
+    /// Neither counts as an ordinary open: the context sweep weighs `recommended_open` at
+    /// `recommend.self_weight` and ignores `recommended_shown`; the pursuit sweep skips it too.
     pub async fn record_recommendation(
         &self,
         artifact_id: &str,
@@ -141,114 +137,82 @@ impl Store {
         scope: Option<&str>,
         at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)
              VALUES (?, ?, ?, ?, ?)",
+            artifact_id,
+            kind,
+            detail,
+            scope,
+            at
         )
-        .bind(artifact_id)
-        .bind(kind)
-        .bind(detail)
-        .bind(scope)
-        .bind(at)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// What was offered and what was taken, by rung, since `since`.
-    ///
-    /// The only number that can later settle whether the block weights are
-    /// right. They are chosen, not measured, and fitting them before this data
-    /// exists would be guessing with extra steps — so this is the instrument,
-    /// and it goes on Ops, which is where mechanisms whose effect nobody can
-    /// otherwise see belong.
+    /// The instrument for later fitting the block weights, which are chosen, not measured.
     pub async fn offer_rates(&self, since: i64) -> Result<Vec<OfferRate>> {
-        let rows = sqlx::query(
-            "SELECT json_extract(detail, '$.rung') AS rung,
+        let rows = sqlx::query!(
+            r#"SELECT json_extract(detail, '$.rung') AS "rung?: String",
                     SUM(kind = 'recommended_shown') AS shown,
                     SUM(kind = 'recommended_open')  AS opened
                FROM interaction_events
               WHERE at >= ? AND kind IN ('recommended_shown', 'recommended_open')
-              GROUP BY rung
-              ORDER BY shown DESC, rung",
+              GROUP BY 1
+              ORDER BY shown DESC, 1"#,
+            since
         )
-        .bind(since)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .iter()
             .map(|r| OfferRate {
-                rung: r
-                    .get::<Option<String>, _>("rung")
-                    .unwrap_or_else(|| "unknown".into()),
-                shown: r.get("shown"),
-                opened: r.get("opened"),
+                rung: r.rung.clone().unwrap_or_else(|| "unknown".into()),
+                shown: r.shown,
+                opened: r.opened,
             })
             .collect())
     }
 
-    /// Interactions with `from < at <= to`, oldest first.
+    /// `from < at <= to`, oldest first.
     pub async fn interactions_between(&self, from: i64, to: i64) -> Result<Vec<Interaction>> {
-        let rows = sqlx::query(
-            "SELECT id, artifact_id, kind, via, detail, scope, at FROM interaction_events
-              WHERE at > ? AND at <= ? ORDER BY at, id",
+        let rows = sqlx::query!(
+            r#"SELECT id, artifact_id AS "artifact_id!", kind, via, detail, scope, at FROM interaction_events
+              WHERE at > ? AND at <= ? ORDER BY at, id"#,
+            from,
+            to
         )
-        .bind(from)
-        .bind(to)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| Interaction {
-                id: r.get("id"),
-                artifact_id: r.get("artifact_id"),
-                kind: r.get("kind"),
-                via: r.get("via"),
-                detail: r.get("detail"),
-                scope: r.get("scope"),
-                at: r.get("at"),
+                id: r.id,
+                artifact_id: r.artifact_id,
+                kind: r.kind,
+                via: r.via,
+                detail: r.detail,
+                scope: r.scope,
+                at: r.at,
             })
             .collect())
     }
 
-    /// Drop interactions past keeping.
-    ///
-    /// The table had no sweep at all, only the manual `purge_pursuits`, while
-    /// the situations it is read beside got `context::RETAIN_DAYS` from the
-    /// start. That was survivable while a row meant an open; it stopped being
-    /// so when the offer began writing a `recommended_shown` per page view, so
-    /// the table grew with browsing rather than with use — and the context
-    /// sweep reads the whole window into memory every six hours.
-    ///
-    /// The same window as the situations, and for the same reason: the sweep
-    /// pairs the two, and an interaction kept past the situation it happened in
-    /// profiles nothing. Nothing else reads further back — `offer_rates` asks
-    /// for a month, and the pursuit sweep works from a cursor.
+    /// The same window as the situations: the sweep pairs the two, and `recommended_shown`
+    /// rows grow with every page view.
     pub async fn expire_interactions(&self, retain_days: i64) -> Result<u64> {
         let cutoff = crate::store::now() - retain_days * 86_400;
-        Ok(sqlx::query("DELETE FROM interaction_events WHERE at < ?")
-            .bind(cutoff)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        Ok(
+            sqlx::query!("DELETE FROM interaction_events WHERE at < ?", cutoff)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
     }
 
-    /// A new pursuit, `open`. Returns its id.
-    ///
-    /// Idempotent by identity rather than by insertion order: the id is the
-    /// cluster itself — when it opened and what was asked — so the same
-    /// sitting swept twice is the same row twice. The sweep needs that. It
-    /// writes a pursuit per cluster and advances its cursor once at the end,
-    /// so a failure in the middle of the loop leaves rows written under a
-    /// cursor that never moved, and the retry re-reads the same events and
-    /// re-clusters them identically. Without this the operator would find the
-    /// sitting listed once per crash on Ops, each copy able to arm its own
-    /// generation.
-    /// `query_vec` is the leading clustered query's vector and the model that
-    /// produced it, carried forward because a pursuit that closes unsatisfied
-    /// is a gap and a gap is a question plus the vector it was found by. The
-    /// sweep is holding both already; re-embedding the words later would be a
-    /// call spent on a vector that has been computed once.
+    /// Idempotent by identity: the sweep advances its cursor only at the end, so a retry
+    /// re-clusters the same events and must not duplicate them.
     pub async fn insert_pursuit(
         &self,
         opened_at: i64,
@@ -265,63 +229,59 @@ impl Store {
             ),
             _ => (Vec::new(), 0, None),
         };
-        sqlx::query(
+        sqlx::query!(
             "INSERT OR IGNORE INTO pursuits
                (id, opened_at, state, queries, sources, query_vec, vec_dim, embed_model)
              VALUES (?, ?, 'open', ?, ?, ?, ?, ?)",
+            &id,
+            opened_at,
+            serde_json::to_string(queries).unwrap_or_else(|_| "[]".into()),
+            serde_json::to_string(sources).unwrap_or_else(|_| "[]".into()),
+            blob,
+            dim,
+            model
         )
-        .bind(&id)
-        .bind(opened_at)
-        .bind(serde_json::to_string(queries).unwrap_or_else(|_| "[]".into()))
-        .bind(serde_json::to_string(sources).unwrap_or_else(|_| "[]".into()))
-        .bind(blob)
-        .bind(dim)
-        .bind(model)
         .execute(&self.pool)
         .await?;
         Ok(id)
     }
 
-    /// Close a pursuit with a state and a one-line reason.
     pub async fn close_pursuit(&self, id: &str, state: &str, reason: &str, at: i64) -> Result<()> {
-        sqlx::query("UPDATE pursuits SET state = ?, reason = ?, closed_at = ? WHERE id = ?")
-            .bind(state)
-            .bind(reason)
-            .bind(at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// The generation landed: name the artifact, state `generated`.
-    pub async fn set_pursuit_artifact(&self, id: &str, artifact_id: &str, at: i64) -> Result<()> {
-        sqlx::query(
-            "UPDATE pursuits SET artifact_id = ?, state = 'generated', closed_at = ? WHERE id = ?",
+        sqlx::query!(
+            "UPDATE pursuits SET state = ?, reason = ?, closed_at = ? WHERE id = ?",
+            state,
+            reason,
+            at,
+            id
         )
-        .bind(artifact_id)
-        .bind(at)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// The vector the pursuit's leading query was found by, and the model that
-    /// produced it. `None` when the sweep had none to store, or when the row is
-    /// gone.
-    ///
-    /// Kept off [`Pursuit`] because every other reader of a pursuit is drawing
-    /// a list — Ops, the insights page — and a 768-float blob per row is a page
-    /// of vectors nobody displays. The one caller that needs it asks for one.
+    pub async fn set_pursuit_artifact(&self, id: &str, artifact_id: &str, at: i64) -> Result<()> {
+        sqlx::query!(
+            "UPDATE pursuits SET artifact_id = ?, state = 'generated', closed_at = ? WHERE id = ?",
+            artifact_id,
+            at,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Kept off [`Pursuit`]: list readers do not need a 768-float blob per row.
     pub async fn pursuit_vec(&self, id: &str) -> Result<Option<(Vec<f32>, String)>> {
-        let row = sqlx::query("SELECT query_vec, embed_model FROM pursuits WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query!(
+            r#"SELECT query_vec AS "query_vec!", embed_model FROM pursuits WHERE id = ?"#,
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(row) = row else { return Ok(None) };
-        let blob: Vec<u8> = row.get("query_vec");
-        let model: Option<String> = row.get("embed_model");
+        let blob: Vec<u8> = row.query_vec;
+        let model: Option<String> = row.embed_model;
         let v = crate::store::feedback::blob_to_vec(&blob);
         match model {
             Some(m) if !v.is_empty() => Ok(Some((v, m))),
@@ -330,58 +290,56 @@ impl Store {
     }
 
     pub async fn get_pursuit(&self, id: &str) -> Result<Pursuit> {
-        let row = sqlx::query("SELECT * FROM pursuits WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::NotFound)?;
-        Ok(row_to_pursuit(&row))
+        let row = sqlx::query_as!(
+            crate::store::pursuits::PursuitRow,
+            "SELECT * FROM pursuits WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        Ok(row_to_pursuit(row))
     }
 
-    /// Newest first. What Ops lists.
     pub async fn recent_pursuits(&self, limit: i64) -> Result<Vec<Pursuit>> {
-        let rows = sqlx::query("SELECT * FROM pursuits ORDER BY opened_at DESC LIMIT ?")
-            .bind(limit.max(0))
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(row_to_pursuit).collect())
+        let rows = sqlx::query_as!(
+            crate::store::pursuits::PursuitRow,
+            "SELECT * FROM pursuits ORDER BY opened_at DESC LIMIT ?",
+            limit.max(0)
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_pursuit).collect())
     }
 
     /// A day's sittings, oldest first — the day page's read.
     pub async fn pursuits_between(&self, from: i64, to: i64) -> Result<Vec<Pursuit>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::pursuits::PursuitRow,
             "SELECT * FROM pursuits WHERE opened_at >= ? AND opened_at < ? ORDER BY opened_at",
+            from,
+            to
         )
-        .bind(from)
-        .bind(to)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_pursuit).collect())
+        Ok(rows.into_iter().map(row_to_pursuit).collect())
     }
 
-    /// How many pursuits are in one state, with no page over it.
-    ///
-    /// `recent_pursuits` answers a page for a list to be drawn from. Counting
-    /// that page reported the page size as a total the moment a base held more
-    /// pursuits than the page held rows.
+    /// Not `recent_pursuits().len()`, which caps at the page size.
     pub async fn count_pursuits(&self, state: &str) -> Result<i64> {
-        use sqlx::Row;
         Ok(
-            sqlx::query("SELECT COUNT(*) AS n FROM pursuits WHERE state = ?")
-                .bind(state)
+            sqlx::query_scalar!("SELECT COUNT(*) AS n FROM pursuits WHERE state = ?", state)
                 .fetch_one(&self.pool)
-                .await?
-                .get("n"),
+                .await?,
         )
     }
 
-    /// Forget every pursuit and every interaction. Rows dropped.
     pub async fn purge_pursuits(&self) -> Result<u64> {
-        let a = sqlx::query("DELETE FROM interaction_events")
+        let a = sqlx::query!("DELETE FROM interaction_events")
             .execute(&self.pool)
             .await?
             .rows_affected();
-        let b = sqlx::query("DELETE FROM pursuits")
+        let b = sqlx::query!("DELETE FROM pursuits")
             .execute(&self.pool)
             .await?
             .rows_affected();
@@ -431,11 +389,6 @@ mod tests {
 
     #[tokio::test]
     async fn interactions_past_the_window_are_dropped_and_the_rest_are_kept() {
-        // The table had no sweep of any kind. That was survivable while a row
-        // meant somebody opened something; it stopped being so when the offer
-        // began writing a `recommended_shown` per search-page view, because the
-        // context sweep reads the whole window into memory every six hours and
-        // the window had no end.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let a = s

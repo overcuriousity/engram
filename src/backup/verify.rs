@@ -1,10 +1,5 @@
-//! Whether the stores agree: `engram --verify-stores [--user S]`, and the
-//! check that ends every `--restore`. One table and one word (spec §5).
-//!
-//! Alone it writes nothing. At the end of a restore it also reconciles: points
-//! no row names are pruned and embedded rows without a point are re-armed —
-//! the two halves of `heal_store_drift`, run now so the report can say what it
-//! did, and computed by the same `store_drift`.
+//! `engram --verify-stores` and the end of every `--restore` (spec §5). A restore also reconciles
+//! via the same `store_drift` as `heal_store_drift`.
 
 use super::generations::{AliasState, Generations};
 use crate::config::Config;
@@ -15,11 +10,9 @@ use crate::store::control::{Control, User};
 use crate::store::jobs::Stage;
 use std::path::Path;
 
-/// One cell of the table.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Cell {
     Pass(String),
-    /// Restored, with `n` embeds queued to close the gap.
     Repair(u64, String),
     Fail(String),
 }
@@ -33,19 +26,14 @@ pub struct TenantRow {
 #[derive(Debug)]
 pub struct VerifyReport {
     pub tenants: Vec<TenantRow>,
-    /// `.db` files in `store.dir` the control database does not name. Listed
-    /// and left alone, and they do not decide the verdict: a full restore
-    /// over a base with a user created after the backup would otherwise fail
-    /// for ever on a file that is somebody's data.
+    /// Listed but not part of the verdict: a user created after the backup would fail it for ever.
     pub stray: Vec<String>,
-    /// Whether this check wrote (pruned and re-armed) or only looked.
     pub reconciled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Pass,
-    /// Everything is in place; this many embeds are queued.
     Repair(u64),
     Fail,
 }
@@ -114,11 +102,7 @@ impl std::fmt::Display for VerifyReport {
     }
 }
 
-/// Check every user the control database names, or the one `user` names (a
-/// slug or a subject). With `reconcile`, prune and re-arm as well.
-///
-/// `reembed`: a restore that skipped the snapshots on purpose. The recipe the
-/// tenant database recorded is then expected to differ, and is not a failure.
+/// `reembed`: the snapshots were skipped on purpose, so a different recipe is not a failure.
 pub async fn verify(
     cfg: &Config,
     user: Option<&str>,
@@ -167,8 +151,6 @@ pub async fn verify(
     })
 }
 
-/// `*.db` in `store.dir` whose stem is no user's slug, the control database
-/// itself aside when it lives there.
 fn stray_files(cfg: &Config, users: &[User]) -> Result<Vec<String>> {
     let dir = Path::new(&cfg.store.dir);
     let control = Path::new(&cfg.store.control_path).canonicalize().ok();
@@ -196,8 +178,7 @@ fn stray_files(cfg: &Config, users: &[User]) -> Result<Vec<String>> {
     Ok(stray)
 }
 
-/// The spec §5 rows for one tenant. A row that cannot be checked because an
-/// earlier one failed is left out rather than guessed at; the failure says why.
+/// A row whose predecessor failed is left out rather than guessed at.
 async fn tenant(
     cfg: &Config,
     control: &Control,
@@ -274,7 +255,6 @@ async fn tenant(
     cells
 }
 
-/// The last three rows: rows without points, points without rows, parity.
 async fn drift(
     store: &Store,
     alias: &str,
@@ -394,7 +374,7 @@ mod tests {
         let c = Control::connect(&base.cfg.store.control_path)
             .await
             .unwrap();
-        let n = sqlx::query_scalar("SELECT COUNT(*) FROM jobs")
+        let n = sqlx::query_scalar!("SELECT COUNT(*) FROM jobs")
             .fetch_one(&c.pool)
             .await
             .unwrap();
@@ -423,8 +403,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_database_no_user_names_is_listed_and_does_not_decide_the_verdict() {
-        // A full restore over a base with a user created after the backup
-        // leaves that user's file behind; failing on it would fail for ever.
         let base = backed_up().await;
         std::fs::copy(base.db(0), base.store_dir.join("zz-later.db")).unwrap();
         let r = check(&base, false).await;
@@ -519,16 +497,15 @@ mod tests {
 
     #[tokio::test]
     async fn points_that_do_not_match_the_embedded_rows_fail() {
-        // A point for a row SQLite does not call embedded: neither drift set
-        // names it, and only the count shows it.
+        // Neither drift set names this point; only the count shows it.
         let base = backed_up().await;
         let other: String = {
             let c = sqlx::sqlite::SqlitePoolOptions::new()
                 .connect(&format!("sqlite://{}", base.db(0).display()))
                 .await
                 .unwrap();
-            let id = sqlx::query_scalar(
-                "SELECT id FROM artifacts WHERE embed_state <> 'embedded' LIMIT 1",
+            let id = sqlx::query_scalar!(
+                r#"SELECT id AS "id!" FROM artifacts WHERE embed_state <> 'embedded' LIMIT 1"#
             )
             .fetch_one(&c)
             .await

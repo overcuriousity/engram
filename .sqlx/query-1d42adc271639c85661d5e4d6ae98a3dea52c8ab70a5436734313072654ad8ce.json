@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET created_at = ? WHERE stage = 'relate'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "1d42adc271639c85661d5e4d6ae98a3dea52c8ab70a5436734313072654ad8ce"
+}

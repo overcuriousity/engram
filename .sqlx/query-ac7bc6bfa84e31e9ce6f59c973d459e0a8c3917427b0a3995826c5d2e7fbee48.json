@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM artifacts\n              WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'\n                AND reaped_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ac7bc6bfa84e31e9ce6f59c973d459e0a8c3917427b0a3995826c5d2e7fbee48"
+}

@@ -1,32 +1,10 @@
-//! The ask page's stream driver, in a real browser.
-//!
-//! Ignored by default: this needs `node` and a headless Chrome, neither of
-//! which `cargo test` may assume. Run it with
-//!
-//! ```text
-//! cargo test --test browser_ask -- --ignored
-//! ```
-//!
-//! It exists because the most consequential line in `assets/app.js` —
-//! `source.close()` — guards a behaviour that only a browser performs. An
-//! `EventSource` left open reconnects on its own when the stream ends, and the
-//! reconnect asks the question again: a model call nobody requested, and on a
-//! metered endpoint a second bill. Nothing in the Rust suite can see that, and
-//! the browser reports it as success. So the harness counts stream requests
-//! against a fake server and these tests assert the count.
-//!
-//! `web::ui::tests::the_stream_driver_closes_the_event_source_on_every_exit`
-//! is the cheap always-run half of this: it fails if the calls are deleted from
-//! the source. This is the half that proves they do what they are there for.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! The ask stream driver in headless Chrome (`--ignored`: needs `node` and Chrome). An `EventSource`
+//! left open reconnects and re-asks, a second model call, so the harness counts stream requests.
 
 use std::path::PathBuf;
 use std::process::Command;
 
-/// The headless browser to drive, or `None` when the machine has none.
-///
-/// `ENGRAM_CHROME` first, so a machine with a browser in an unusual place can
-/// say where. Playwright's download is checked next because a developer working
-/// on this repo's front end is likely to have it already.
 fn chrome() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("ENGRAM_CHROME") {
         return Some(PathBuf::from(p));
@@ -40,9 +18,7 @@ fn chrome() -> Option<PathBuf> {
                     let bin = e
                         .path()
                         .join("chrome-headless-shell-linux64/chrome-headless-shell");
-                    // The build number Playwright ends the directory name with
-                    // — `chromium_headless_shell-1148` is build 1148 — and
-                    // zero for a name that ends in anything else.
+                    // Playwright's build number from the directory suffix (`chromium_headless_shell-1148`), else zero.
                     let build = e
                         .file_name()
                         .to_string_lossy()
@@ -53,11 +29,7 @@ fn chrome() -> Option<PathBuf> {
                     bin.exists().then_some((build, bin))
                 })
                 .collect();
-            // Newest install wins, so an old download is not preferred
-            // forever. By the build number and not by the name: sorting the
-            // paths themselves is lexicographic, which puts
-            // `chromium_headless_shell-999` after `-1148` and pins the oldest
-            // install forever — exactly what this line is here to prevent.
+            // Newest build wins, by number: sorting paths puts `-999` after `-1148`.
             found.sort();
             if let Some((_, p)) = found.pop() {
                 return Some(p);
@@ -80,7 +52,6 @@ fn chrome() -> Option<PathBuf> {
     None
 }
 
-/// One run of the harness, as JSON.
 fn drive(scenario: &str) -> serde_json::Value {
     let root = env!("CARGO_MANIFEST_DIR");
     let chrome = chrome().expect(
@@ -102,11 +73,6 @@ fn drive(scenario: &str) -> serde_json::Value {
     serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"))
 }
 
-/// The stream is opened once and closed when the answer is done.
-///
-/// The count is the assertion. A driver that forgets to close would still show
-/// the right answer on the page — and then quietly ask the question a second
-/// time about three seconds later, which is why the harness waits six.
 #[test]
 #[ignore = "needs node and a headless Chrome; see the module comment"]
 fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
@@ -130,8 +96,6 @@ fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
         !result.contains("lost"),
         "the finished answer was overwritten by a connection error: {result}"
     );
-    // The two transient regions gave way to the rendered answer, and the
-    // finished answer announced itself once.
     assert_eq!(report["liveHidden"], true, "{report}");
     assert_eq!(report["reasoningHidden"], true, "{report}");
     assert!(
@@ -145,18 +109,16 @@ fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
         !report["statusText"].as_str().unwrap().is_empty(),
         "nothing announced the finished answer: {report}"
     );
-    // The planned queries survived round two's statistics landing after them.
+    // The planned queries survive round two's statistics landing after them.
     assert_eq!(
         report["progressText"],
         "Looking further: more about bravo, charlie \u{2014} searched 3, showing 2",
         "{report}"
     );
-    // The rail arrived with its ids, and a citation click marked its excerpt.
     assert_eq!(report["railIds"][1], "cite-2", "{report}");
     assert_eq!(report["activeId"], "cite-2", "{report}");
     assert_eq!(report["formAsking"], false, "{report}");
-    // The verdict bar came in through `innerHTML`, which htmx does not watch;
-    // its buttons only work because the driver hands the fragment to htmx.
+    // `innerHTML` is unwatched by htmx; the buttons work only because the driver hands the fragment over.
     assert_eq!(
         out["verdictRequests"], 1,
         "the verdict button in the streamed answer was inert: {out}"
@@ -168,12 +130,6 @@ fn one_ask_opens_one_stream_and_leaves_none_open_behind_it() {
     assert_eq!(report["errors"].as_array().unwrap().len(), 0, "{report}");
 }
 
-/// A double-tap on Ask leaves exactly one stream, and the answer survives it.
-///
-/// Two submits made before the first POST resolves used to open two streams,
-/// the second overwriting the only reference to the first. The orphan could not
-/// be closed, and its error — which arrives the moment its stream ends — ran
-/// the failure path, wiping the answer the second ask was still writing.
 #[test]
 #[ignore = "needs node and a headless Chrome; see the module comment"]
 fn a_second_ask_supersedes_the_first_rather_than_racing_it() {

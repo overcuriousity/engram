@@ -1,11 +1,4 @@
-//! The push registration, over the API: what an app needs before it
-//! registers with a distributor, and where it puts what the distributor
-//! handed back.
-//!
-//! Under `/api/v1/push`. A person still types an endpoint into Settings by
-//! hand; these are the same row arrived at programmatically, which is why
-//! the Settings page says which device registered — the two ways in are
-//! both visible there.
+//! The push registration over the API, under `/api/v1/push`; Settings shows which device registered.
 
 use crate::error::{Error, Result};
 use crate::tenants::Tenant;
@@ -14,9 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::routing::{get, put};
 use axum::{Json, Router};
 
-/// The instance's VAPID public key, which a connector hands to its
-/// distributor as the `applicationServerKey` — before it has an endpoint to
-/// register, which is why this needs nothing but a credential.
+/// Handed to the distributor as `applicationServerKey` before there is an endpoint, so it needs only a credential.
 async fn vapid(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     let keys = tenant.core.store.control.vapid().await?;
     Ok(Json(serde_json::json!({ "public_key": keys.public })))
@@ -29,12 +20,7 @@ pub struct Registration {
     pub auth: String,
 }
 
-/// Register, or re-register: a connector's endpoint changes, and the row is
-/// replaced rather than added to. The keys are decoded here so a bad one is
-/// refused at the door with its field named, and the endpoint is vetted the
-/// way the Settings field is — a push goes out from the server's network
-/// position, and an address on the server's own machine is not a push
-/// service.
+/// Replaces the row; keys are decoded so a bad one is named, and the endpoint is vetted as in Settings.
 async fn register(
     tenant: Tenant,
     headers: HeaderMap,
@@ -60,14 +46,12 @@ async fn register(
         "registered_at": tenant.core.clock.now(),
     });
     control.set_notify(&tenant.user.subject, &notify).await?;
-    // A channel just configured is what makes the unit worth arming — the
-    // same re-arm the Settings form makes.
+    // A channel just configured makes the unit worth arming, as the Settings form does.
     tenant.core.store.rearm_remind().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Unregister. Answers the same whether or not a row stood: the state the
-/// caller asked for is the state it gets.
+/// Answers the same whether or not a row stood.
 async fn unregister(tenant: Tenant) -> Result<StatusCode> {
     let control = &tenant.core.store.control;
     let mut notify = control.notify(&tenant.user.subject).await?;
@@ -178,7 +162,6 @@ mod tests {
         );
         assert!(notify["unifiedpush"]["registered_at"].is_i64());
 
-        // Registering again replaces: the connector's endpoint moved.
         let again = a_registration("https://push.example/up/2");
         app.clone()
             .oneshot(req(
@@ -201,7 +184,6 @@ mod tests {
         );
         assert_eq!(notify["unifiedpush"]["p256dh"], again["p256dh"]);
 
-        // And the row reads back as a keyed target.
         let targets = crate::jobs::remind::notify_targets(&notify);
         assert!(matches!(
             &targets[..],

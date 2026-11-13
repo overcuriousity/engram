@@ -12,19 +12,25 @@ pub mod day;
 pub mod due;
 pub mod etag;
 pub mod extension;
+pub mod icons;
 pub mod insights;
 pub mod judge;
 pub mod lineage_view;
+pub mod live;
 pub mod markdown;
+pub mod notice;
 pub mod ops;
 pub mod page;
 pub mod pair;
+pub mod prefs;
 pub mod push;
+pub mod security;
 pub mod settings;
 pub mod state;
 pub mod tenant;
 #[cfg(test)]
 pub(crate) mod test_support;
+pub mod trash;
 pub mod ui;
 pub mod ui_error;
 pub mod vbg;
@@ -38,28 +44,18 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::get;
 use state::AppState;
 
-/// Largest capture the server accepts.
-///
-/// Inherited from axum's 2 MB default until now, which was a number nobody
-/// picked. Sized for a long chapter of prose with headroom, and small enough
-/// that a runaway upload is refused rather than buffered.
+/// Sized for a long chapter of prose; a runaway upload is refused rather than buffered.
 pub const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
-/// A browser landing on a page it has no session for should end up in front
-/// of the identity provider, not staring at `{"error":"unauthorized"}` with
-/// no way to act on it.
-///
-/// This rewrites a 401 and nothing else. An unmatched path is a 404 and stays
-/// one — which is why the bare domain needs a route of its own rather than
-/// relying on this: a request that matches nothing never reaches the
-/// authentication that would have produced the 401 to rewrite. See `/` in
-/// `ui::ui_router`.
-///
-/// API tokens and the MCP endpoint need the real status code — a script
-/// cannot follow a redirect into an interactive OIDC login — so this only
-/// rewrites a plain page load: a GET outside `/api` and `/mcp`, and not an
-/// htmx fetch, which always carries `HX-Request` and expects a fragment or a
-/// real error, never a full-page redirect.
+/// `--theme-color` from 00-tokens.css, for the one place a token cannot reach: a meta tag.
+pub const THEME_LIGHT: &str = "#f8f6f1";
+pub const THEME_DARK: &str = "#0e1015";
+
+pub const API_PER_MINUTE: u32 = 600;
+pub const API_BURST: u32 = 120;
+
+/// Rewrites a 401 on a plain page load into the login redirect, and nothing else.
+/// Not under `/api` or `/mcp`, and not an htmx fetch: those need the real status.
 async fn redirect_unauthenticated_browsers(req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     let is_page_load = req.method() == Method::GET
@@ -67,9 +63,7 @@ async fn redirect_unauthenticated_browsers(req: Request, next: Next) -> Response
         && !path.starts_with("/api/")
         && path != "/mcp";
 
-    // Kept before the request is consumed: after the login this is the page to
-    // come back to, and losing it means every bounced deep link lands on
-    // Search instead. `auth_routes::safe_next` decides whether it is followed.
+    // Kept before the request is consumed; `auth_routes::safe_next` decides whether it is followed.
     let went_to: String = req
         .uri()
         .path_and_query()
@@ -85,27 +79,8 @@ async fn redirect_unauthenticated_browsers(req: Request, next: Next) -> Response
     res
 }
 
-/// Say what an HTML response depends on, and that it is nobody's to keep.
-///
-/// Half the UI's routes answer one URL with two different bodies, chosen by a
-/// request header: `/ui/artifacts/{id}` returns the standalone page to a
-/// browser and the bare fragment to htmx, and several others do the same. The
-/// rail's links carry `hx-push-url="true"`, so that URL is in the address bar
-/// having only ever been fetched as a fragment — and nothing said so. A
-/// history navigation is precisely where a browser may reuse a stored response
-/// without revalidating, so pressing Back rendered the fragment as a whole
-/// document: no `<head>`, no stylesheet, the page in Times New Roman with the
-/// icons at their intrinsic size. `Vary` is what tells a cache that the header
-/// is part of the key.
-///
-/// `no-store` beside it, because the negotiation is not the only reason. Every
-/// one of these pages is one person's own base rendered into HTML, and without
-/// this it sits in the disk cache under their profile after they sign out.
-/// `private` says the same thing to anything in between.
-///
-/// `text/html` only, and never over a `Cache-Control` a handler set for itself:
-/// the assets router serves the stylesheet and the tokenizer under a year-long
-/// `max-age`, and that is the whole reason those files are cheap.
+/// `Vary: HX-Request`: one URL answers page or fragment, and Back may reuse a cached fragment as a page.
+/// `private, no-store`: each page is one person's base. Only `text/html`, never over a handler's own `Cache-Control`.
 async fn declare_html_uncacheable(req: Request, next: Next) -> Response {
     use axum::http::header;
     let mut res = next.run(req).await;
@@ -124,13 +99,13 @@ async fn declare_html_uncacheable(req: Request, next: Next) -> Response {
             header::HeaderValue::from_static("private, no-store"),
         );
     }
-    // Appended rather than set: a handler that already varies on something of
-    // its own keeps it.
+    // Appended, so a handler's own `Vary` is kept.
     h.append(header::VARY, header::HeaderValue::from_static("HX-Request"));
     res
 }
 
 pub fn router(state: AppState) -> Router {
+    let sessions = crate::auth::session_layer(state.tenants.control(), &state.auth.deployment);
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(assets::assets_router())
@@ -140,6 +115,9 @@ pub fn router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(corpus::routes())
         .merge(artifact::routes())
+        .merge(trash::routes())
+        .merge(prefs::routes())
+        .route("/ui/live", get(live::live))
         .merge(ops::routes())
         .merge(pair::pair_router())
         .merge(extension::extension_router())
@@ -153,14 +131,35 @@ pub fn router(state: AppState) -> Router {
             api::api_router(
                 state.config.capture.image_max_bytes,
                 state.config.capture.pdf_max_bytes,
-            ),
+            )
+            .layer(security::rate_limit(API_PER_MINUTE, API_BURST)),
         )
         .fallback(ui::not_found)
         .layer(axum::middleware::from_fn(redirect_unauthenticated_browsers))
         .layer(axum::middleware::from_fn(declare_html_uncacheable))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_BYTES))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            prefs::render_prefs,
+        ))
+        .layer(sessions)
         .layer(tower_http::trace::TraceLayer::new_for_http())
+        .layer(
+            tower_http::sensitive_headers::SetSensitiveResponseHeadersLayer::new([
+                axum::http::header::SET_COOKIE,
+            ]),
+        )
+        .layer(
+            tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new([
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::COOKIE,
+            ]),
+        )
         .with_state(state)
+}
+
+pub fn app(state: AppState, dep: &security::Deployment) -> Router {
+    security::secure(router(state), dep)
 }
 
 #[cfg(test)]
@@ -169,12 +168,6 @@ mod tests {
     use axum::body::Body;
     use tower::ServiceExt;
 
-    /// The one URL that answers with two different documents, and what has to
-    /// be said about it. Without `Vary` a browser is entitled to reuse the
-    /// fragment htmx fetched — and history navigation is exactly where it does
-    /// — so pressing Back after following a link out of the workspace rendered
-    /// the bare partial as a whole page: no `<head>`, no stylesheet, the app in
-    /// Times New Roman.
     #[tokio::test]
     async fn a_page_that_answers_two_ways_says_what_it_answers_to() {
         let core = crate::core::test_support::test_core().await;
@@ -208,14 +201,9 @@ mod tests {
                     .any(|v| v.to_str().unwrap_or("").eq_ignore_ascii_case("HX-Request")),
                 "hx={hx}: the header the body depends on has to be in the cache key: {h:?}"
             );
-            // And nobody's to keep either way: this is one person's own base
-            // rendered into HTML, and it outlived their session in the disk
-            // cache.
             assert_eq!(h["cache-control"], "private, no-store", "hx={hx}");
         }
 
-        // The stylesheet is not a page and keeps the year-long `max-age` that
-        // is the whole reason it is cheap.
         let res = app
             .oneshot(
                 axum::http::Request::builder()
@@ -247,23 +235,15 @@ mod tests {
             r.body(Body::empty()).unwrap()
         };
 
-        // The bare domain is the workspace itself now, not a redirect to it:
-        // there is one page, so there is nothing left to redirect to.
         let res = app.clone().oneshot(get(Some(&cookie))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{res:?}");
 
-        // And with no session at all: `/` is still a route, so the rejection
-        // it produces is one the middleware can turn into a login — which is
-        // what an unmatched path never was.
         let res = app.oneshot(get(None)).await.unwrap();
         assert_ne!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
     }
 
     #[tokio::test]
     async fn housekeeping_is_one_name_and_one_url() {
-        // /ui/housekeeping is the name a reader was shown for a while, and it
-        // goes straight to the page — one hop, not a chain through the
-        // /ui/ops shim.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
@@ -304,11 +284,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_missing_asset_is_a_missing_asset_and_not_a_login() {
-        // The fallback is the whole application's, not the UI router's, so a
-        // stylesheet nobody routed arrived at the page — which for a browser
-        // with no session is a 401, which the redirect middleware then turns
-        // into the login screen. A 303 to `/auth/login` in place of a 404 on a
-        // `<link>` is not a missing stylesheet, it is a mystery.
+        // The fallback is the whole application's, so an unrouted stylesheet must be a 404, not a login redirect.
         let core = crate::core::test_support::test_core().await;
         let (app, _cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
@@ -344,8 +320,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_post_to_a_path_nobody_routed_is_not_handed_a_page() {
-        // Nobody types a POST into a browser bar, so there is nobody to show a
-        // page to; whatever sent it wants the status.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
@@ -366,9 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_api_path_is_still_not_a_web_page() {
-        // The fallback is for people typing URLs. An agent asking the API for
-        // a route that does not exist must not be handed a login-shaped HTML
-        // document to parse.
+        // An API caller must not be handed a login-shaped HTML document.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
@@ -391,9 +363,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_unknown_path_is_behind_a_session_like_every_other_page() {
-        // The fallback took no `Identity`, so the one path nobody had routed
-        // was the one path that rendered the whole nav to a visitor with no
-        // session.
         let core = crate::core::test_support::test_core().await;
         let app = crate::web::test_support::router(core, None).await;
         let res = app
@@ -415,9 +384,6 @@ mod tests {
             "an unknown path rendered rather than bouncing: {res:?}"
         );
 
-        // And the API answer is unchanged: a caller with no credentials asking
-        // for a route that does not exist is told the route does not exist,
-        // not sent to an interactive login it cannot follow.
         let res = app
             .oneshot(
                 axum::http::Request::builder()
@@ -452,8 +418,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_page_nothing_serves_is_still_a_404() {
-        // The bare domain gets a door; a typo does not get a redirect that
-        // pretends the page exists.
         let core = crate::core::test_support::test_core().await;
         let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
         let res = app
@@ -469,34 +433,59 @@ mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND, "{res:?}");
     }
 
+    #[tokio::test]
+    async fn authorization_and_cookie_headers_are_marked_sensitive() {
+        let inner = axum::Router::new()
+            .route(
+                "/",
+                axum::routing::get(|h: axum::http::HeaderMap| async move {
+                    format!(
+                        "{} {}",
+                        h["authorization"].is_sensitive(),
+                        h["cookie"].is_sensitive()
+                    )
+                }),
+            )
+            .layer(
+                tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer::new([
+                    axum::http::header::AUTHORIZATION,
+                    axum::http::header::COOKIE,
+                ]),
+            );
+        let res = inner
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/")
+                    .header("authorization", "Bearer x")
+                    .header("cookie", "a=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 100).await.unwrap();
+        assert_eq!(&body[..], b"true true");
+        let src = include_str!("mod.rs");
+        let code = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
+        assert!(code.contains("SetSensitiveRequestHeadersLayer::new(["));
+        assert!(code.contains("SetSensitiveResponseHeadersLayer::new(["));
+    }
+
     #[test]
     fn the_body_limit_is_deliberate_and_large_enough_for_a_chapter() {
-        // axum's default is 2 MB and was never chosen. A long chapter of prose
-        // is well under this; a book-sized paste is refused with a message.
         assert_eq!(MAX_BODY_BYTES, 8 * 1024 * 1024);
     }
 
-    /// No page is wider than the window it is read in, and nothing on one is
-    /// crushed to a column of single characters.
-    ///
-    /// 375 is the narrow half of what a phone is; 700 is the band above the tab
-    /// bar's breakpoint and below the one that puts two regions side by side;
-    /// 1500 is the first width at which the workspace is three-up, which is the
-    /// arrangement most of the layout exists for and none of it was measuring.
     #[tokio::test]
-    #[ignore = "needs node and a headless Chrome; see the note above"]
+    #[ignore = "needs node and a headless Chrome; see web::test_support"]
     async fn no_page_runs_off_the_side_of_a_phone() {
         let pages = crate::web::test_support::every_page().await;
-        for width in ["375", "700", "1500"] {
+        for width in ["390", "700", "1280", "1500", "2560"] {
             let run = crate::web::test_support::measure(&pages, width);
             crate::web::test_support::nothing_is_broken(&run, width);
         }
     }
 
-    /// The Web Share Target door is gone (engram#97): its POST could never
-    /// carry the `SameSite=Lax` session cookie, so every share was lost. The
-    /// Android app is the phone's door now, and even a signed-in POST here
-    /// must find nothing to store into.
     #[tokio::test]
     async fn the_retired_share_door_answers_nothing() {
         let core = crate::core::test_support::test_core().await;

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT provenance FROM artifacts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "provenance",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "provenance"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9b8a040ba5f999b9bbcceea41c47002cf79dc8518ebabba8c466fc535fd6022c"
+}

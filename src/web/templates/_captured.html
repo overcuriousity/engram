@@ -1,45 +1,6 @@
-{# Nothing, on the ordinary path.
-
-   This used to answer every press with a receipt line, a sentence explaining
-   what "segmenting 3/7" counts towards, and `_queue.html` polling itself
-   beside them. All three landed in `#capture-result`, which is a child of
-   `.region-bar` — and on a phone that bar is fixed to the bottom of the
-   viewport with no height bound. The bar grew by three blocks it had no room
-   for, and because it is anchored at its bottom the overflow left through the
-   *top* of the screen, taking the textarea with it. A fixed element does not
-   scroll, so the box was simply gone until a reload.
-
-   The fix is not to make the bar cope. It is that a press has no business
-   putting a page's worth of blocks into the one element the operator types
-   into. Capture clears the box, enqueues the reading and updates the line that
-   says what was last kept — `_idle_foot.html`, swapped out of band by the same
-   `submit` that refreshes the rail. That line names the capture and links to
-   it, which is the acknowledgment; a second one directly above the box was
-   never carrying anything the first did not. The queue is on Insights, where
-   it is read by somebody who came to look at it.
-
-   What is left here is the two things that are not receipts: a state the
-   operator has to know about, and an action only reachable here. #}
-{% if duplicate || near_dupe_of.is_some() %}
-<div class="card">
-  <div class="card-head">
-    <span class="card-title">
-      {% if duplicate %}Already stored{% else %}Looks like something stored{% endif %}
-    </span>
-  </div>
-  {% if duplicate %}
-  <p class="muted">
-    This text is already in the base, so nothing was processed a second time.
-  </p>
-  {% endif %}
-  {% if let Some(other) = near_dupe_of %}
-  <p class="muted">
-    This looks {{ near_dupe_percent }}% like
-    <a href="/ui/corpora/{{ other }}">an existing source</a>. It is stored and
-    searchable like any other capture; what the two repeat, the base merges or
-    hides on its own, with an undo <a href="/ui/insights">on Insights</a>.
-  </p>
-  {% endif %}
-  <a href="/ui/corpora/{{ id }}">View source</a>
-</div>
+{# Only what a receipt cannot say: a duplicate, or a near-duplicate. The bar this lands in is fixed on phones and must not grow. #}
+{% if duplicate %}
+<div class="oc-notice oc-notice--info" role="status">{{ crate::web::icons::icon("info", 16) }}<span class="oc-notice__text">Already stored; not processed again · <a href="/ui/corpora/{{ id }}">View source</a></span></div>
+{% else if let Some(other) = near_dupe_of %}
+<div class="oc-notice oc-notice--info" role="status">{{ crate::web::icons::icon("info", 16) }}<span class="oc-notice__text">Stored and searchable · {{ near_dupe_percent }}% like <a href="/ui/corpora/{{ other }}">a kept source</a> · <a href="/ui/insights">undo the merge</a></span></div>
 {% endif %}

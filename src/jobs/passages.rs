@@ -1,5 +1,5 @@
-//! Capture without synthesis: a window becomes verbatim passages sized to the
-//! embedder, each under the heading the document gave it.
+//! Capture without synthesis: a window becomes verbatim passages sized to the embedder, under the
+//! document's headings.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -12,16 +12,13 @@ use crate::store::segments::SegmentState;
 /// A document's name, derived locally: longer than this is a paragraph.
 pub const TITLE_MAX: usize = 80;
 
-/// Below this many characters (whitespace aside) a passage is an orphan: too
-/// short to carry a claim, and its near-empty embedding sits close to every
-/// query, so it ranks first exactly where the base has least to offer.
+/// A near-empty embedding sits close to every query, so an orphan ranks first where the base has
+/// least to offer.
 pub const MIN_PASSAGE_CHARS: usize = 40;
 
-/// One verbatim slice of a window: the retrieval unit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Passage {
-    /// The heading this text sits under, as the document wrote it. Never
-    /// inferred.
+    /// As the document wrote it; never inferred.
     pub title: Option<String>,
     pub text: String,
     pub start_line: i64,
@@ -43,14 +40,8 @@ fn opens_with_heading(text: &str) -> bool {
         .is_some_and(is_heading)
 }
 
-/// Which neighbour orphan `i` of `texts` belongs to, if any.
-///
-/// The preceding passage, since a cut leaves the tail of a sentence whose head
-/// is there; the following one when there is no preceding one. Never across a
-/// heading: an orphan holding one would retitle the passage above it, and a
-/// passage opening with one is a boundary the document drew, so text in front
-/// of it is the end of the section before. An orphan with neither neighbour
-/// open to it stays — that is a short section, not a cut.
+/// The preceding passage, else the following one; never across a heading, which is a boundary the
+/// document drew.
 fn orphan_home(texts: &[&str], i: usize) -> Option<usize> {
     let back = i > 0 && !texts[i].lines().any(is_heading);
     let forward = i + 1 < texts.len() && !opens_with_heading(texts[i + 1]);
@@ -61,18 +52,15 @@ fn orphan_home(texts: &[&str], i: usize) -> Option<usize> {
     }
 }
 
-/// The next merge to make over `texts`: `(orphan, home)`, or `None` once no
-/// orphan has a home. One at a time, because each merge changes the
-/// neighbours of the next.
+/// One at a time: each merge changes the neighbours of the next.
 pub(crate) fn next_orphan_merge(texts: &[&str]) -> Option<(usize, usize)> {
     (0..texts.len())
         .filter(|&i| is_orphan(texts[i]))
         .find_map(|i| orphan_home(texts, i).map(|h| (i, h)))
 }
 
-/// Fold every orphan in `inner` into its neighbour. The window's slices are
-/// contiguous, so joining two neighbours in order is exactly the source they
-/// cover: no text is dropped and the line ranges still partition the window.
+/// The slices are contiguous, so joining neighbours drops no text and keeps the line ranges
+/// partitioning the window.
 fn merge_orphans(mut inner: Vec<Window>) -> Vec<Window> {
     while let Some((i, h)) = {
         let texts: Vec<&str> = inner.iter().map(|w| w.text.as_str()).collect();
@@ -87,24 +75,12 @@ fn merge_orphans(mut inner: Vec<Window>) -> Vec<Window> {
     inner
 }
 
-/// "## Recovering deleted entries" → "Recovering deleted entries".
-///
-/// A link left in the heading is reduced to its words, and whitespace runs to
-/// one space. The HTML extractor already keeps in-page anchors out of a
-/// heading; this is the belt for every other way a heading reaches here — a
-/// pasted markdown document, another extractor — so that a title is never
-/// `[](#NAME)NAME [top](#top_of_page)` whatever wrote it.
+/// "## Recovering deleted entries" → "Recovering deleted entries"; links reduced to their words,
+/// whitespace runs to one space.
 pub fn heading_title(line: &str) -> String {
     let bare = line.trim().trim_start_matches('#');
-    // Read to a fixed point, because the shapes nest. An image inside a link —
-    // `## [![Logo](logo.png)](/)`, which is how a doc site or a Wikipedia
-    // heading hangs an icon off an anchor — cannot come out of one pass: the
-    // pass anchors on the *inner* `[`, so it emits the outer `[` as prose and
-    // leaves the outer `](/)` standing, and the title came out `[Logo](/)`,
-    // a stray bracket and an unstripped link. One more reading over that is an
-    // ordinary link and reduces it to `Logo`. Bounded rather than `loop`:
-    // each pass that changes anything strictly shortens the line, and a
-    // heading nested deeper than this is not a heading anybody wrote.
+    // To a fixed point: an image inside a link (`## [![Logo](logo.png)](/)`) needs two passes.
+    // Bounded, as every changing pass shortens the line.
     let mut title = bare.to_string();
     for _ in 0..4 {
         let next = strip_links(&title);
@@ -116,34 +92,24 @@ pub fn heading_title(line: &str) -> String {
     title.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// One pass of `[text](target)` → `text` over a heading. See `heading_title`
-/// for why it is run more than once.
 fn strip_links(bare: &str) -> String {
     let mut out = String::with_capacity(bare.len());
     let mut rest = bare;
-    // `[text](target)` → `text`. Anything that is not exactly that shape is
-    // left as written: a bracket in prose is not a link.
+    // Anything not exactly `[text](target)` is left as written: a bracket in prose is not a link.
     while let Some(first) = rest.find('[') {
         let Some(close_rel) = rest[first..].find("](") else {
             break;
         };
         let close = first + close_rel;
-        // The link opens at the LAST bracket before `](`, not the first one on
-        // the line. Anchored on the first, a plain bracket standing in prose
-        // ahead of a real link swallowed everything between the two:
-        // `Arrays [0] and [the docs](…)` came out `Arrays 0] and [the docs`.
+        // The LAST `[` before `](`, or a prose bracket ahead of a real link swallows the words
+        // between.
         let open = rest[..close].rfind('[').unwrap_or(first);
-        // A markdown image is a link with a `!` in front. The alt text is the
-        // words; the `!` is syntax, and `![diagram](a.png) Overview` has no
-        // business becoming `!diagram Overview`.
+        // A markdown image's `!` is syntax, not a word.
         let text_end = match rest[..open].ends_with('!') {
             true => open - 1,
             false => open,
         };
-        // Parens nest. A bare `find(')')` stopped at the inner one of
-        // `[Loop device](https://en.wikipedia.org/wiki/Loop_device_(computing))`
-        // and left the outer `)` standing in the title as `See Loop device)`,
-        // and Wikipedia headings are exactly what this path is handed.
+        // Parens nest: Wikipedia URLs end in `_(computing))`.
         let mut depth = 0usize;
         let target = rest[close + 2..].char_indices().find_map(|(i, c)| match c {
             '(' => {
@@ -168,22 +134,9 @@ fn strip_links(bare: &str) -> String {
     out
 }
 
-/// Split one window into passages sized to the embedder.
-///
-/// The same splitter that made the window, called again with the retrieval
-/// budget. Passage spans partition `start_line..=end_line` and never cross
-/// the window: promotion later supersedes a whole number of them.
-///
-/// Titles: a passage that contains a heading is titled by the first one it
-/// contains; a passage without one takes the last heading seen above it in
-/// this window. `is_heading` knows Markdown `#` headings only, so plain text
-/// yields untitled passages — nothing is inferred to fill the gap.
-///
-/// The splitter cuts at the budget, and when a sentence or an unbroken line
-/// is longer than what is left of it, it descends to words: the leftover words
-/// came out as a passage of their own, `is needed.`, embedded and ranked like
-/// anything else. Such orphans are folded into a neighbour before titling; see
-/// `MIN_PASSAGE_CHARS`.
+/// Spans partition the window and never cross it: promotion supersedes whole passages. A passage is
+/// titled by its first heading, else the last one above it; plain text stays untitled. Orphans are
+/// folded in before titling (`MIN_PASSAGE_CHARS`).
 pub fn split_passages(
     window: &Window,
     counter: &TokenCounter,
@@ -203,9 +156,8 @@ pub fn split_passages(
         if let Some(h) = own.iter().rev().find(|l| is_heading(l)) {
             last_heading = Some(heading_title(h));
         }
-        // Window line k is document line `window.start_line + k - 1`. Clamped,
-        // because a hard-cut long line can put more text lines in the window's
-        // text than the document has.
+        // Clamped: a hard-cut long line can put more lines in the window's text than the document
+        // has.
         let start =
             (window.start_line + p.start_line - 1).clamp(window.start_line, window.end_line);
         let end = (window.start_line + p.end_line - 1).clamp(start, window.end_line);
@@ -219,21 +171,13 @@ pub fn split_passages(
     out
 }
 
-/// The whole of capture: split into windows, write them `verbatim`, split
-/// each window into passages, write those, name the document without a model,
-/// and finish the corpus. No inference call anywhere on this path — the one
-/// call a small capture gets is *armed* here and made by the window job.
-///
-/// Idempotent per segment: a process that dies between two segments' inserts
-/// re-runs this, and a segment that already owns rows is left alone.
+/// No inference call: the one call a small capture gets is armed here. Idempotent per segment: a
+/// segment that already owns rows is left alone.
 pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     let lang = crate::infer::lang::of_corpus(&src.metadata);
-    // Against the prompt this corpus will be synthesized with: the split
-    // decides how much text one call is handed, so it has to be measured
-    // against the same overhead that call will carry — and where that leaves
-    // nothing, there is no size to cut to. Failed with the cause, rather than
-    // windows cut to a budget no call can honour.
+    // Measured against the prompt this corpus will be synthesized with; with no room left there is
+    // no size to cut to.
     let Some(budget) = super::synthesize::segment_budget(core, lang) else {
         let reason = super::synthesize::no_budget_reason(core, lang);
         tracing::error!(corpus_id, %reason, "cannot plan windows");
@@ -262,9 +206,8 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     core.store.upsert_segments(corpus_id, &rows).await?;
     core.store.mark_segments_verbatim(corpus_id).await?;
 
-    // Under the document lock like every other local rearrangement of a
-    // corpus's rows, held through `finish` the way `settle` holds it: a
-    // promotion's write must not interleave with the renumbering.
+    // Under the document lock through `finish`: a promotion's write must not interleave with the
+    // renumbering.
     let _corpus = core.corpus_lock(corpus_id).await;
     for (idx, w) in windows.iter().enumerate() {
         let idx = idx as i64;
@@ -282,8 +225,7 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
             .map(|(i, p)| NewArtifact {
                 ordinal: i as i64,
                 text: p.text,
-                // Found, not claimed: a passage *is* these lines — it was cut
-                // from them, and its text is theirs verbatim.
+                // Found, not claimed: a passage is these lines verbatim.
                 corpus_span: Some(CorpusSpan::located(p.start_line, p.end_line)),
                 title: p.title,
                 category: None,
@@ -304,30 +246,12 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     }
 
     tracing::info!(corpus_id, windows = windows.len(), "captured verbatim");
-    // Renumbers, measures coverage (green: the passages partition the
-    // document), arms the embed and moves the corpus on. The same function a
-    // synthesized corpus reaches through its last window's settle.
     super::synthesize::finish(core, corpus_id).await?;
 
-    // The size fork. One window = the whole capture fits one synthesis call:
-    // arm that call now instead of waiting for use to earn it. `keep_artifacts`
-    // puts the window job on its promotion path — append, embed inline,
-    // supersede the covered passages — so a failed or slow call leaves the
-    // verbatim capture searchable and the job retryable. Guarded like
-    // promotion is: a window already read, or put back by an operator's undo,
-    // is not re-armed by a re-run of capture.
-    //
-    // Counted off the *stored* rows and not off `windows`. `upsert_segments`
-    // leaves the split alone once a window owns artifacts, so a re-run over a
-    // corpus captured under a different `context_tokens` recomputes one window
-    // where the base still holds ten — and everything downstream reads the
-    // stored rows: `window::run` and the judged read both do. Armed on the
-    // fresh count, "the whole capture fits one call" was asserted of a
-    // document that does not, and window 0 was promoted alone with its
-    // passages superseded under it. Half a document promoted, nobody asking.
+    // One stored window means the capture fits one call, so arm it now on the promotion path
+    // (`keep_artifacts`). Counted off stored rows: `upsert_segments` keeps an old split, and arming
+    // on a fresh count would promote half a document.
     let stored_windows = core.store.segment_progress(corpus_id).await?.1;
-    // Never on the embed-only floor: with no `[infer.synthesize]` there is no
-    // call to arm, and every capture stays verbatim.
     if core.synthesizer.is_some()
         && stored_windows == 1
         && core.store.segment_state(corpus_id, 0).await? == Some(SegmentState::Verbatim)
@@ -347,7 +271,6 @@ pub async fn capture_verbatim(core: &Core, corpus_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// One orphan folded, or to be folded, into its neighbour.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrphanMerge {
     pub orphan_id: String,
@@ -355,15 +278,8 @@ pub struct OrphanMerge {
     pub into_id: String,
 }
 
-/// The repair for a base captured before `split_passages` folded orphans:
-/// the same rule over the passages already stored.
-///
-/// Each orphan's text is joined to its neighbour in document order, the
-/// neighbour's span widened to cover both and its embed re-queued, and the
-/// orphan deleted from both stores. Only live verbatim passages are touched,
-/// and only within one window and one unbroken run of them: a superseded or
-/// reaped row is a boundary, as a window edge is. `dry_run` reports the same
-/// list and writes nothing. Idempotent: a second run finds nothing.
+/// Repairs a base captured before `split_passages` folded orphans. Only live passages within one
+/// window and one unbroken run; a superseded or reaped row is a boundary. Idempotent.
 pub async fn merge_orphan_passages(
     core: &Core,
     corpus_id: &str,
@@ -384,7 +300,6 @@ pub async fn merge_orphan_passages(
     let mut done = Vec::new();
     let mut i = 0;
     while i < rows.len() {
-        // One run: consecutive live passages of one window.
         let mut j = i;
         while j < rows.len() && live(&rows[j]) && rows[j].segment_idx == rows[i].segment_idx {
             j += 1;
@@ -402,10 +317,12 @@ pub async fn merge_orphan_passages(
             } else {
                 format!("{}{}", home.text, orphan.text)
             };
-            let (a, b) = (
-                orphan.corpus_span.as_ref().unwrap(),
-                home.corpus_span.as_ref().unwrap(),
-            );
+            let (Some(a), Some(b)) = (orphan.corpus_span.as_ref(), home.corpus_span.as_ref())
+            else {
+                return Err(crate::error::Error::Internal(
+                    "a passage without a span".into(),
+                ));
+            };
             let span =
                 CorpusSpan::located(a.start_line.min(b.start_line), a.end_line.max(b.end_line));
             if !dry_run {
@@ -431,15 +348,8 @@ pub async fn merge_orphan_passages(
     Ok(done)
 }
 
-/// A corpus title with no model: the first heading, else the first non-empty
-/// line, cut to `TITLE_MAX` characters. `None` for whitespace.
-///
-/// Cut at a word, through the same `truncate_at_word` every other shortened
-/// label goes through. This used to be `chars().take(TITLE_MAX)`, which is the
-/// hard cut that function exists to replace — and because a derived title is
-/// stored as `title_hint` and then displayed verbatim, it is the one that
-/// reached the screen: the Recent list and the day page carried names ending
-/// "the registrar does not au" with nothing to say they had been shortened.
+/// The first heading, else the first non-empty line, cut at a word to `TITLE_MAX`; it is displayed
+/// verbatim. `None` for whitespace.
 pub fn derive_title(raw_text: &str) -> Option<String> {
     let line = raw_text
         .lines()
@@ -523,23 +433,18 @@ mod tests {
         let w = window(&body, 1);
         let p = split_passages(&w, &TokenCounter::default(), 40);
         assert!(p.len() >= 2, "{}", p.len());
-        // The heading opens its own passage, which holds the heading line
-        // verbatim and is titled by it; the intro line before it stands alone
-        // and untitled.
         let k = p
             .iter()
             .position(|x| x.text.contains("## Mounting"))
             .expect("a passage holds the heading");
         assert_eq!(p[k].title.as_deref(), Some("Mounting"));
         assert_eq!(p[0].title, None, "{p:?}");
-        // The continuation takes the carried heading as title, not as text.
         assert_eq!(p[k + 1].title.as_deref(), Some("Mounting"));
         assert!(
             !p[k + 1].text.contains("## Mounting"),
             "{:?}",
             p[k + 1].text
         );
-        // And every heading line appears exactly once across the passages.
         let total = p.iter().filter(|x| x.text.contains("## Mounting")).count();
         assert_eq!(total, 1);
     }
@@ -560,10 +465,6 @@ mod tests {
         );
     }
 
-    /// engram#61. A run-on line longer than the budget — a PDF paragraph
-    /// reflowed onto one line — is cut at words, and the leftover words were a
-    /// passage of their own: `is needed.`, ten characters ranked first for a
-    /// query matching nothing.
     #[test]
     fn a_budget_cut_tail_is_folded_into_the_passage_it_was_cut_from() {
         let text = format!(
@@ -572,7 +473,6 @@ mod tests {
         );
         let w = window(&text, 7);
         let counter = TokenCounter::default();
-        // The cut itself, as the segmenter makes it.
         let raw = split_into_segments(&w.text, &counter, 32);
         assert_eq!(raw.last().unwrap().text, "is needed.", "{raw:?}");
 
@@ -583,8 +483,6 @@ mod tests {
             p.iter().map(|x| &x.text).collect::<Vec<_>>()
         );
         assert!(p.last().unwrap().text.ends_with("and is needed."), "{p:?}");
-        // Nothing dropped, nothing doubled, and the spans still cover the
-        // window from end to end without leaving it.
         let joined: String = p.iter().map(|x| x.text.as_str()).collect();
         assert_eq!(joined, text);
         assert_eq!(p[0].start_line, w.start_line);
@@ -595,7 +493,6 @@ mod tests {
         }
     }
 
-    /// A short note is a note, not an orphan: nothing to fold it into.
     #[test]
     fn a_window_shorter_than_the_minimum_is_still_one_passage() {
         let w = window("short note", 3);
@@ -610,18 +507,14 @@ mod tests {
         let long = "a passage long enough to stand on its own, easily.";
         assert_eq!(next_orphan_merge(&[long, "is needed."]), Some((1, 0)));
         assert_eq!(next_orphan_merge(&["is needed.", long]), Some((0, 1)));
-        // A heading-led orphan's body is ahead of it, so it goes forward.
         assert_eq!(
             next_orphan_merge(&[long, "## Recover\n", long]),
             Some((1, 2))
         );
-        // Text in front of a heading ends the section before it; at a window's
-        // start there is no such section here to join, so it stands.
         assert_eq!(
             next_orphan_merge(&["intro line\n", "## Mounting\nbody"]),
             None
         );
-        // An orphan holding a heading would retitle the passage above it.
         assert_eq!(next_orphan_merge(&[long, "ok.\n## Next"]), None);
         assert_eq!(next_orphan_merge(&["short note"]), None);
     }
@@ -636,14 +529,10 @@ mod tests {
             derive_title("plain first line\nsecond").as_deref(),
             Some("plain first line")
         );
-        // One unbroken token has no word to break at, so it takes the hard cut
-        // — plus the ellipsis, which is what says it was cut at all.
         let long = "x".repeat(200);
         let cut = derive_title(&long).unwrap();
         assert_eq!(cut.chars().count(), TITLE_MAX + 1);
         assert!(cut.ends_with('…'), "{cut}");
-        // Ordinary prose breaks at a space instead. This is the case the old
-        // `chars().take` got wrong, and the one that reached the screen.
         let prose = "Remind me to renew the domain before 14 November 2026. \
                      The registrar does not auto-renew because the card expired.";
         let cut = derive_title(prose).unwrap();
@@ -653,8 +542,6 @@ mod tests {
         );
         assert_eq!(derive_title("   \n\t\n"), None);
         assert_eq!(heading_title("###   Deep heading  "), "Deep heading");
-        // A link is its words, an empty one is nothing, and runs of spaces are
-        // one — the man7 heading shape, arriving from any extractor at all.
         assert_eq!(
             heading_title("## [](#NAME)NAME         [top](#top_of_page)"),
             "NAME top"
@@ -664,49 +551,31 @@ mod tests {
             "See the docs"
         );
         assert_eq!(heading_title("## Arrays [0] and [1]"), "Arrays [0] and [1]");
-        // A bracket in prose standing *before* a real link on the same line.
-        // Anchored on the first `[`, the stripper read from it all the way to
-        // the link's `](` and ate the words in between: this came out
-        // `Arrays 0] and [the docs`.
         assert_eq!(
             heading_title("## Arrays [0] and [the docs](https://x.test/a)"),
             "Arrays [0] and the docs"
         );
-        // An image is a link with a `!` in front. The alt text is words; the
-        // `!` is syntax, and `!diagram Overview` is neither.
         assert_eq!(
             heading_title("## ![diagram](a.png) Overview"),
             "diagram Overview"
         );
-        // A parenthesised URL — the Wikipedia disambiguation shape, which is
-        // most of what this path is handed. Stopping at the first `)` left the
-        // outer one behind as `See Loop device)`.
         assert_eq!(
             heading_title(
                 "## See [Loop device](https://en.wikipedia.org/wiki/Loop_device_(computing))"
             ),
             "See Loop device"
         );
-        // An image inside a link — a logo or an icon hung off an anchor, which
-        // is how a doc site and a Wikipedia infobox heading are both built.
-        // One pass anchors on the inner `[`, so it emitted the outer one as
-        // prose and left the outer `](/)` standing: `[Logo](/)`, a stray
-        // bracket and an unstripped link, in a title.
         assert_eq!(heading_title("## [![Logo](logo.png)](/)"), "Logo");
         assert_eq!(
             heading_title("## [![Logo](logo.png)](/) Reference"),
             "Logo Reference"
         );
-        // And the nesting is not the only thing on the line.
         assert_eq!(
             heading_title("## See [![icon](i.png)](https://x.test/a) for more"),
             "See icon for more"
         );
     }
 
-    /// The embed-only floor. A capture small enough for one call is the one
-    /// that would arm synthesis at capture; with no synthesizer it stays the
-    /// passages it was written as, and no model unit is queued for it.
     #[tokio::test]
     async fn a_small_capture_with_no_synthesizer_stays_verbatim() {
         let core = crate::core::test_support::test_core_without_synthesizer().await;
@@ -750,9 +619,7 @@ mod tests {
             "recover words ".repeat(600)
         );
         let out = core.ingest(&text, "web", None).await.unwrap();
-        // The Synthesize job is what capture queued; run it. Multi-window on
-        // purpose: this test is about the pure verbatim path, and a capture
-        // small enough for one call would arm its synthesis at capture.
+        // Multi-window on purpose: a one-call capture would arm its synthesis at capture.
         assert!(crate::jobs::run_one(&core).await.unwrap());
 
         let s = core.store.get_corpus(&out.id).await.unwrap();
@@ -776,7 +643,6 @@ mod tests {
                 .all(|c| c.provenance == crate::store::artifacts::Provenance::Passage)
         );
         assert!(rows.iter().all(|c| c.corpus_span.is_some()));
-        // Green by construction: every line is claimed.
         assert_eq!(s.coverage.map(|c| (c * 100.0).round() as i64), Some(100));
         assert!(
             core.store
@@ -784,7 +650,6 @@ mod tests {
                 .await
                 .unwrap()
         );
-        // No model unit was armed.
         for w in &segs {
             assert!(
                 !core
@@ -852,10 +717,6 @@ mod tests {
         );
     }
 
-    /// The repair over a base written before the guard: orphans already
-    /// stored are folded into their neighbour, re-queued for embedding, and
-    /// their own rows and vectors removed. Dry-run first, then for real, then
-    /// once more to show it is idempotent.
     #[tokio::test]
     async fn stored_orphans_are_merged_into_their_neighbour_and_removed() {
         use crate::store::artifacts::EmbedState;
@@ -877,7 +738,6 @@ mod tests {
             .unwrap();
         let long_a = "a passage long enough to stand on its own, easily.\n";
         let long_b = "another passage that is long enough to be one too.\n";
-        // The two shapes from engram#61, each the tail of the passage above.
         let rows = [
             (long_a, 1, 1),
             (".\n\nwerden\n", 2, 2),
@@ -960,10 +820,6 @@ mod tests {
         );
     }
 
-    /// The note is written at capture and the passages arrive later, each
-    /// numbered from 0 within its own window. Renumbering has to put the note
-    /// first and push the document down by one — with no change to this
-    /// writer, which is the whole reason the note carries no `segment_idx`.
     #[tokio::test]
     async fn a_note_sorts_ahead_of_the_document_it_annotates() {
         let core = crate::core::test_support::test_core().await;

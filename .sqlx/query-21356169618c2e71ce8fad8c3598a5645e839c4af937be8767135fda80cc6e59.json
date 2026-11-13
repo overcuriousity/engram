@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT preview FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "preview",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "preview"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "21356169618c2e71ce8fad8c3598a5645e839c4af937be8767135fda80cc6e59"
+}

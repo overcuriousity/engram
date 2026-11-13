@@ -3,12 +3,9 @@ use crate::error::{Error, Result};
 use sqlx::Row;
 use std::collections::HashMap;
 
-/// Every artifact id: what the store-drift heal compares against the vectors,
-/// and what a backup counts as `artifacts`. One string for both, so the two
-/// cannot disagree about what an artifact is.
+/// One string for the drift heal and the backup count, so they agree on what an artifact is.
 pub(crate) const ALL_ARTIFACT_IDS: &str = "SELECT id FROM artifacts";
-/// Artifacts whose row claims a vector — see `list_embedded_artifact_ids`.
-/// A backup's `embedded` count is this query, for the reason above.
+/// A backup's `embedded` count is this query, for the same reason.
 pub(crate) const EMBEDDED_ARTIFACT_IDS: &str =
     "SELECT id FROM artifacts WHERE embed_state = 'embedded' AND reaped_at IS NULL";
 
@@ -37,13 +34,11 @@ impl EmbedState {
     }
 }
 
-/// One row of the graveyard as the Reaped section lists it.
 #[derive(Debug, Clone)]
 pub struct Grave {
     pub id: String,
     pub title: Option<String>,
     pub reaped_at: i64,
-    /// The judge's reason, out of `meta_json`.
     pub reason: Option<String>,
 }
 
@@ -55,6 +50,8 @@ pub enum ArtifactStatus {
     Active,
     Deprecated,
     Superseded,
+    /// Deleted by a person and restorable for 30 days; out of every read.
+    Trashed,
 }
 
 impl ArtifactStatus {
@@ -63,36 +60,21 @@ impl ArtifactStatus {
             ArtifactStatus::Active => "active",
             ArtifactStatus::Deprecated => "deprecated",
             ArtifactStatus::Superseded => "superseded",
+            ArtifactStatus::Trashed => "trashed",
         }
     }
     pub fn parse(s: &str) -> ArtifactStatus {
         match s {
             "deprecated" => ArtifactStatus::Deprecated,
             "superseded" => ArtifactStatus::Superseded,
+            "trashed" => ArtifactStatus::Trashed,
             _ => ArtifactStatus::Active,
         }
     }
 }
 
-/// Where an artifact's text came from.
-///
-/// `Captured` text was written by synthesis over one window of one corpus, so
-/// it has a corpus, a span, and lines to render beside it. `Merged` text was
-/// written by the dedupe pass out of two or more captured artifacts; it has no
-/// corpus and no span, and names its sources through `artifact_sources`
-/// instead.
-///
-/// Nothing may treat the two alike. `verify` cannot check a merged artifact
-/// against a segment that does not exist, and the detail pane cannot render
-/// corpus lines for a span it does not have — so both branch on this rather
-/// than on `corpus_id.is_none()`. A null says a field is absent; this says what
-/// the row *is*, which is what a reader needs in order to know why.
-///
-/// `Passage` text is a verbatim slice of a segment, sized to the embedder —
-/// the retrieval unit at `synthesis = "off"` and `"earned"`; it has a corpus
-/// and a span like captured text, and no model ever touched it. `Synthesized`
-/// text was written from a pursuit; like a merge it has no corpus of its own
-/// and names its sources through `artifact_sources`.
+/// Branch on this, never on `corpus_id.is_none()`. `Captured` and `Passage` have a corpus
+/// and span; `Merged` and `Synthesized` have neither and name sources via `artifact_sources`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Provenance {
@@ -100,10 +82,7 @@ pub enum Provenance {
     Captured,
     Merged,
     Synthesized,
-    /// What a person typed about a file when they captured it. Source text
-    /// like `Captured`, but owned by no window: it is *about* the document and
-    /// is no line *of* it, so the two queries that treat a window-less row as
-    /// debris from an older segmentation must leave it alone.
+    /// Owned by no window, so queries treating window-less rows as debris must spare it.
     Note,
 }
 
@@ -126,30 +105,15 @@ impl Provenance {
             _ => Provenance::Captured,
         }
     }
-    /// A model wrote this text. Such a row is never its own root: handing it
-    /// back as one is how a paraphrase of a paraphrase reaches a prompt as an
-    /// original. The test is "not source text" rather than "is merged", so the
-    /// next value added defaults to safe rather than to wrong.
+    /// Never its own root. "Not source text" rather than "is merged", so a new variant is safe.
     pub fn is_model_written(&self) -> bool {
         matches!(self, Provenance::Merged | Provenance::Synthesized)
     }
-    /// The text is the document's own, verbatim (`Passage`) or as the one
-    /// synthesis rewrite of it (`Captured` — its own root by convention).
     pub fn is_source_text(&self) -> bool {
         !self.is_model_written()
     }
-    /// Whether the stored title is a name somebody wrote about *this* text.
-    ///
-    /// A `Passage` always has one and it is never its own: `split_passages`
-    /// gives each slice the heading of the section it was cut from and carries
-    /// the last heading above it down, so one heading stands over as many
-    /// passages as the section is long. It names the section. A `Note` has no
-    /// heading at all — the operator typed a sentence, not a title.
-    ///
-    /// Everything else was named by the model that wrote the text, in the same
-    /// call that wrote it. Note that this does not line up with
-    /// `is_model_written`: `Captured` is the synthesis rewrite of a window and
-    /// carries a real name, and it is source text.
+    /// A `Passage` title is its section's heading and a `Note` has none; everything else was
+    /// named by the model that wrote it. Not the same split as `is_model_written`.
     pub fn names_its_own_text(&self) -> bool {
         !matches!(self, Provenance::Passage | Provenance::Note)
     }
@@ -159,48 +123,24 @@ impl Provenance {
 pub struct CorpusSpan {
     pub start_line: i64,
     pub end_line: i64,
-    /// How these lines came to be these lines.
-    ///
-    /// Every span addresses the document the same way and renders the same,
-    /// and for showing an artifact beside its source that is all anyone needs.
-    /// It stops being all anyone needs the moment a span is read as *evidence*
-    /// — `promote::supersede_covered` takes verbatim passages out of results on
-    /// the strength of one — because the three roads through
-    /// `window::resolve_span` do not carry the same weight, and the third
-    /// carries none.
-    ///
-    /// Absent is `Unplaced`: a span written before this key existed says
-    /// nothing about where it came from, and not knowing has to fail in the
-    /// direction that leaves the verbatim passage standing.
+    /// Absent is `Unplaced`, so an old span fails towards leaving the verbatim passage standing.
     #[serde(default)]
     pub source: SpanSource,
 }
 
-/// What placed an artifact at its lines. See `CorpusSpan::source`.
 #[derive(Debug, Clone, Copy, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SpanSource {
-    /// The artifact's own words were found in the window's text at exactly
-    /// these lines. A passage is `Located` by construction: it was cut from
-    /// them. The strongest of the three, and the only one that survives a
-    /// paraphrase reflowing hard-wrapped source.
+    /// The strongest: the only one that survives a paraphrase reflowing hard-wrapped source.
     Located,
-    /// The model answered with `corpus_lines` and nothing verified it. Weak —
-    /// it is omitted more often than given, and a model that guesses guesses
-    /// per artifact — but it is still a claim about *which* lines, which is
-    /// the one thing being asked of it.
+    /// Weak, but still a claim about which lines.
     Claimed,
-    /// Nothing placed it. `locate_span` found none of the artifact in the
-    /// window and the model offered no usable hint, so the span became the
-    /// whole window: an address that is true of every artifact in it and
-    /// distinguishes none of them. What a heavily paraphrasing model hands
-    /// every artifact it writes.
+    /// Nothing placed it, so the span is the whole window and distinguishes no artifact in it.
     #[default]
     Unplaced,
 }
 
 impl CorpusSpan {
-    /// The artifact's words are at these lines; something checked.
     pub fn located(start_line: i64, end_line: i64) -> Self {
         Self {
             start_line,
@@ -209,7 +149,6 @@ impl CorpusSpan {
         }
     }
 
-    /// The model says the artifact's lines are these.
     pub fn claimed(start_line: i64, end_line: i64) -> Self {
         Self {
             start_line,
@@ -218,7 +157,6 @@ impl CorpusSpan {
         }
     }
 
-    /// Nobody placed it; these are the lines it fell back to.
     pub fn unplaced(start_line: i64, end_line: i64) -> Self {
         Self {
             start_line,
@@ -227,9 +165,7 @@ impl CorpusSpan {
         }
     }
 
-    /// Whether the span says anything about *which* lines in its window —
-    /// which is what separates a span that can corroborate a claim from one
-    /// that is true of the whole window and every artifact in it.
+    /// Whether the span can corroborate a claim, rather than being true of the whole window.
     pub fn places_the_artifact(&self) -> bool {
         self.source != SpanSource::Unplaced
     }
@@ -238,12 +174,10 @@ impl CorpusSpan {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Chunk {
     pub id: String,
-    /// `None` for a merged artifact, which belongs to no single corpus. Branch
-    /// on `provenance`, not on this: see `Provenance`.
+    /// Branch on `provenance`, not on this: see `Provenance`.
     pub corpus_id: Option<String>,
     pub provenance: Provenance,
-    /// How many artifacts a merge was written from, so a source deleted since
-    /// can be noticed. Zero for a captured artifact.
+    /// Zero for a captured artifact.
     pub source_count: i64,
     pub ordinal: i64,
     pub text: String,
@@ -254,71 +188,42 @@ pub struct Chunk {
     pub embed_state: EmbedState,
     pub embed_model: Option<String>,
     pub created_at: i64,
-    /// Bumped by every edit that invalidates the stored vector. Internal
-    /// bookkeeping between the editor and the embed job, so it is not part of
-    /// what the API hands out.
+    /// Internal bookkeeping between the editor and the embed job.
     #[serde(skip)]
     pub embed_rev: i64,
-    /// Which segmentation window produced this chunk. `None` for a merged
-    /// artifact, which no window produced.
     pub segment_idx: Option<i64>,
     /// Verification failures. Empty means every check passed.
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
-    /// The artifact this one lost a near-identical pair to. Set by the
-    /// consolidation sweep; the artifact stays stored and readable, and is only
-    /// kept out of ranking.
+    /// Set by consolidation; the artifact stays readable and is only kept out of ranking.
     pub superseded_by: Option<String>,
-    /// Conditions under which this artifact does not apply, as its source
-    /// stated them. Deliberately not part of what gets embedded: changing what
-    /// every vector is built from is a decision for the evaluation harness.
+    /// Not embedded: changing what vectors are built from is the evaluation harness's decision.
     pub caveats: Vec<String>,
-    /// Active, deprecated, or superseded. Kept in sync with `superseded_by`
-    /// by `set_superseded_by`; set directly by `set_artifact_status` for the
-    /// deprecate/reactivate actions, which have no artifact on the other end.
+    /// Kept in sync with `superseded_by` by `set_superseded_by`.
     pub status: ArtifactStatus,
-    /// When this artifact was last confirmed accurate. Defaults to
-    /// `created_at` at insert; this, not `created_at`, is what search ranking
-    /// decays against.
+    /// Defaults to `created_at`; this is what search ranking decays against.
     pub last_verified_at: Option<i64>,
-    /// For a synthesized artifact: the questions it was written for. Empty
-    /// everywhere else.
+    /// For a synthesized artifact: the questions it was written for.
     pub cues: Vec<String>,
-    /// When this artifact left `active`, cleared on the way back. What the
-    /// reap sweep's age rule reads.
+    /// Cleared on the way back to `active`. What the reap sweep's age rule reads.
     pub retired_at: Option<i64>,
-    /// When the reap sweep wiped this row's text into `graveyard`. A stub —
-    /// links intact, text gone — never a candidate again.
+    /// A stub, links intact and text gone, never a candidate again.
     pub reaped_at: Option<i64>,
 }
 
-/// Whether search may return an artifact: active and not hidden behind a
-/// winner. This is the predicate every consolidation decision gates on — what
-/// may win a cluster, be shown to the model, or be superseded — so it has
-/// exactly one spelling. A third lifecycle state changes this function, not a
-/// dozen call sites.
-///
-/// A free function rather than only `Chunk::in_results`, because the web layer
-/// asks the same question of a struct that is not a `Chunk` — `ui::
-/// ArtifactDetail`, which carries the two columns and not the chunk — and the
-/// copy it kept was a second spelling of exactly what this paragraph forbids.
+/// The one spelling of "active and not hidden" every consolidation decision gates on;
+/// free so `ui::ArtifactDetail` can ask it too.
 pub fn in_results(status: ArtifactStatus, superseded_by: Option<&str>) -> bool {
     status == ArtifactStatus::Active && superseded_by.is_none()
 }
 
 impl Chunk {
-    /// See [`in_results`].
     pub fn in_results(&self) -> bool {
         in_results(self.status, self.superseded_by.as_deref())
     }
 }
 
-/// A merged artifact being created.
-///
-/// Deliberately not `NewArtifact`. There is no corpus, no span, no segment and
-/// no position within a document, and a struct carrying those as `None` invites
-/// a caller to fill one in — which is exactly the claim a merged artifact must
-/// not make.
+/// Not `NewArtifact`: optional corpus and span fields would invite a merge to claim them.
 #[derive(Debug, Clone)]
 pub struct NewMerged {
     pub text: String,
@@ -328,9 +233,7 @@ pub struct NewMerged {
     pub caveats: Vec<String>,
 }
 
-/// Test-only, for the reason `NewArtifact`'s is: in production every field
-/// here is a decision, and a field added later must break every call site
-/// until somebody answers for it. A fixture has no such duty.
+/// Test-only: in production every field is a decision, so a new field must break every call site.
 #[cfg(test)]
 impl Default for NewMerged {
     fn default() -> Self {
@@ -344,12 +247,7 @@ impl Default for NewMerged {
     }
 }
 
-/// What `insert_sourced_artifact` writes, borrowed from whichever `New*` the
-/// caller holds.
-///
-/// A struct and not seven parameters: the two callers differ in two of the
-/// seven, and a positional list that long is one a reader has to count against
-/// the signature to check.
+/// A struct, not seven positional parameters.
 struct Sourced<'a> {
     provenance: Provenance,
     text: &'a str,
@@ -357,12 +255,10 @@ struct Sourced<'a> {
     category: Option<&'a String>,
     tags: &'a [String],
     caveats: &'a [String],
-    /// Empty for a merge, which is asked nothing and so cites no question.
+    /// Empty for a merge, which is asked nothing.
     cues: &'a [String],
 }
 
-/// An artifact written from a pursuit: what was asked, and what was engaged
-/// with. Inserted through `insert_synthesized_artifact`.
 #[derive(Debug, Clone)]
 pub struct NewSynthesized {
     pub text: String,
@@ -370,20 +266,10 @@ pub struct NewSynthesized {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub caveats: Vec<String>,
-    /// The pursuit's queries: why this was written, shown on its page.
     pub cues: Vec<String>,
 }
 
-/// Test-only, and deliberately not a `derive`.
-///
-/// In production every field here is a decision: a field added to this struct
-/// must break every call site until somebody answers for it, which is the same
-/// rule `Stage::class` states about its match arms. A blanket `Default` is the
-/// struct-literal form of a wildcard arm and would take that check away.
-///
-/// A fixture has no such duty. It says the one or two fields the test is
-/// about and lets the rest be nothing, which is what a hundred and thirty
-/// call sites in this crate were spelling out in full.
+/// Test-only, not a `derive`: a blanket `Default` would stop a new field breaking call sites.
 #[cfg(test)]
 impl Default for NewArtifact {
     fn default() -> Self {
@@ -412,70 +298,85 @@ pub struct NewArtifact {
     pub caveats: Vec<String>,
 }
 
-pub(crate) fn row_to_artifact(r: &sqlx::sqlite::SqliteRow) -> Chunk {
-    let tags_json: String = r.get("tags");
-    let span_json: Option<String> = r.get("corpus_span");
-    let flags_json: Option<String> = r.get("flags");
-    Chunk {
-        id: r.get("id"),
-        corpus_id: r.get("corpus_id"),
-        provenance: Provenance::parse(r.get::<String, _>("provenance").as_str()),
-        source_count: r.get("source_count"),
-        ordinal: r.get("ordinal"),
-        text: r.get("text"),
-        corpus_span: span_json.and_then(|s| serde_json::from_str(&s).ok()),
-        title: r.get("title"),
-        category: r.get("category"),
-        tags: serde_json::from_str(&tags_json).unwrap_or_default(),
-        embed_state: EmbedState::parse(r.get::<String, _>("embed_state").as_str()),
-        embed_model: r.get("embed_model"),
-        created_at: r.get("created_at"),
-        embed_rev: r.get("embed_rev"),
-        segment_idx: r.get("segment_idx"),
-        flags: flags_json
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
-        flag_detail: r.get("flag_detail"),
-        superseded_by: r.get("superseded_by"),
-        caveats: r
-            .get::<Option<String>, _>("caveats")
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
-        status: ArtifactStatus::parse(r.get::<String, _>("status").as_str()),
-        last_verified_at: r.get("last_verified_at"),
-        cues: r
-            .try_get::<Option<String>, _>("cues")
-            .ok()
-            .flatten()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default(),
-        retired_at: r.try_get("retired_at").ok().flatten(),
-        reaped_at: r.try_get("reaped_at").ok().flatten(),
+#[derive(sqlx::FromRow)]
+pub(crate) struct ArtifactRow {
+    pub id: Option<String>,
+    pub corpus_id: Option<String>,
+    pub provenance: String,
+    pub source_count: i64,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub lifecycle_dirty: i64,
+    pub ordinal: i64,
+    pub text: String,
+    pub corpus_span: Option<String>,
+    pub title: Option<String>,
+    pub category: Option<String>,
+    pub tags: String,
+    pub embed_state: String,
+    pub embed_model: Option<String>,
+    pub created_at: i64,
+    pub embed_rev: i64,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub updated_at: i64,
+    pub segment_idx: Option<i64>,
+    pub flags: Option<String>,
+    pub flag_detail: Option<String>,
+    pub superseded_by: Option<String>,
+    pub caveats: String,
+    pub status: String,
+    pub last_verified_at: Option<i64>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub activation: f64,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub activated_at: i64,
+    pub cues: String,
+    pub retired_at: Option<i64>,
+    pub reaped_at: Option<i64>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub trashed_at: Option<i64>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub trashed_from: Option<String>,
+}
+
+impl From<ArtifactRow> for Chunk {
+    fn from(r: ArtifactRow) -> Chunk {
+        let json = |s: &str| serde_json::from_str(s).unwrap_or_default();
+        Chunk {
+            id: r.id.unwrap_or_default(),
+            corpus_id: r.corpus_id,
+            provenance: Provenance::parse(&r.provenance),
+            source_count: r.source_count,
+            ordinal: r.ordinal,
+            text: r.text,
+            corpus_span: r.corpus_span.and_then(|s| serde_json::from_str(&s).ok()),
+            title: r.title,
+            category: r.category,
+            tags: json(&r.tags),
+            embed_state: EmbedState::parse(&r.embed_state),
+            embed_model: r.embed_model,
+            created_at: r.created_at,
+            embed_rev: r.embed_rev,
+            segment_idx: r.segment_idx,
+            flags: r.flags.as_deref().map(json).unwrap_or_default(),
+            flag_detail: r.flag_detail,
+            superseded_by: r.superseded_by,
+            caveats: json(&r.caveats),
+            status: ArtifactStatus::parse(&r.status),
+            last_verified_at: r.last_verified_at,
+            cues: json(&r.cues),
+            retired_at: r.retired_at,
+            reaped_at: r.reaped_at,
+        }
     }
 }
 
+pub(crate) fn row_to_artifact(r: ArtifactRow) -> Chunk {
+    Chunk::from(r)
+}
+
 impl Store {
-    /// The write both `insert_merged_artifact` and `insert_synthesized_artifact`
-    /// make, which is the same write twice over: an artifact belonging to no
-    /// corpus, its roots resolved through `roots_of`, and its lineage rows, all
-    /// inside one transaction.
-    ///
-    /// One transaction, not two writes. An artifact of either kind with no
-    /// lineage rows is one whose detail pane can render nothing and whose
-    /// sources nobody can recover — and the re-merge rule reads exactly those
-    /// rows to avoid ever rewriting from text a model produced. Splitting the
-    /// writes makes that state reachable by a crash, and nothing afterwards
-    /// could tell it from an artifact whose sources were all deleted.
-    ///
-    /// `sources` may name artifacts that are themselves merged or generated.
-    /// They are flattened to their own captured roots here, so
-    /// `artifact_sources.root_id` only ever names a `captured` artifact — the
-    /// invariant the whole anti-drift rule rests on — and `via_id` keeps the
-    /// chain reconstructible at any depth.
-    ///
-    /// `cues` is written for both, empty for a merge. The column is
-    /// `NOT NULL DEFAULT '[]'`, so naming it changes no stored byte; it saves
-    /// the two callers a statement each that differed in one column.
+    /// One transaction, so no crash leaves an artifact without lineage. Sources are flattened to
+    /// captured roots, so `root_id` only names captured artifacts; `via_id` keeps the chain.
     async fn insert_sourced_artifact(&self, new: Sourced<'_>, sources: &[String]) -> Result<Chunk> {
         let Sourced {
             provenance,
@@ -486,46 +387,22 @@ impl Store {
             caveats,
             cues,
         } = new;
-        // Resolved before the transaction opens: this is a read, and holding a
-        // write transaction across it buys nothing.
+        // Resolved before the transaction opens: holding a write lock across a read buys nothing.
         let resolved = self.roots_of(sources).await?;
-        // The roots actually about to be written, deduped the way the table
-        // dedupes them: `artifact_sources` is keyed on (child_id, root_id), so
-        // two sources sharing a root produce one row.
-        //
-        // Counting `sources` instead counted the inputs, which for a merge of a
-        // merge is fewer than the roots — M2 = merge(M1(a,b), c) recorded two
-        // against three rows. `merged_missing_a_source` asks whether the count
-        // exceeds the surviving rows, so deleting a root left 2 > 2, false, and
-        // the orphan flag never fired for a merge of a merge at all. That is
-        // precisely the case the counter was added for.
+        // The roots about to be written, deduped as the table keys them: M2 = merge(M1(a,b), c)
+        // must count three, or `merged_missing_a_source` never fires for it.
         let root_ids: std::collections::BTreeSet<&String> = resolved.values().flatten().collect();
 
-        // A merge's roots must all be captured artifacts, and this is the one
-        // place that can check it off the resolution it is about to write.
-        //
-        // Checked rather than assumed. A merge over passages rewrites the
-        // verbatim substrate into text that belongs to no corpus and carries no
-        // span, and hides the wording someone captured behind it. On the base
-        // this was written for, every one of the merge path's root rows named a
-        // passage, silently, for as long as it ran.
-        //
-        // Here and not as a constraint on `artifact_sources`: the same table
-        // carries a synthesis's passage sources, where naming a passage is
-        // correct and intended — which is why the rule reads the provenance
-        // being written rather than applying to every caller.
-        //
-        // Before the transaction opens, so a refused merge starts none.
-        //
-        // `Validation` and not `Internal` (`src/error.rs`): the caller sent a
-        // root it may not merge, which is a refused request and not a broken
-        // server.
+        // A merge's roots must be captured, not passages: checked here, not as a table constraint,
+        // since a synthesis may cite passages. `Validation`: a refused request, not a fault.
         if provenance == Provenance::Merged {
             for root in &root_ids {
-                let p: String = sqlx::query_scalar("SELECT provenance FROM artifacts WHERE id = ?")
-                    .bind(root.as_str())
-                    .fetch_one(&self.pool)
-                    .await?;
+                let p: String = sqlx::query_scalar!(
+                    "SELECT provenance FROM artifacts WHERE id = ?",
+                    root.as_str()
+                )
+                .fetch_one(&self.pool)
+                .await?;
                 if Provenance::parse(&p) != Provenance::Captured {
                     return Err(crate::error::Error::Validation(format!(
                         "a merge root must be a captured artifact; {root} is {p}"
@@ -562,40 +439,38 @@ impl Store {
             retired_at: None,
             reaped_at: None,
         };
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO artifacts (id, corpus_id, provenance, source_count, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at, cues)
              VALUES (?, NULL, ?, ?, 0, ?, NULL, ?, ?, ?, ?, NULL, ?, NULL, ?, ?, ?, 1.0, ?, ?)",
+            &c.id,
+            c.provenance.as_str(),
+            c.source_count,
+            &c.text,
+            &c.title,
+            &c.category,
+            serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()),
+            c.embed_state.as_str(),
+            c.created_at,
+            serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()),
+            c.status.as_str(),
+            c.last_verified_at,
+            c.created_at,
+            serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into())
         )
-        .bind(&c.id)
-        .bind(c.provenance.as_str())
-        .bind(c.source_count)
-        .bind(&c.text)
-        .bind(&c.title)
-        .bind(&c.category)
-        .bind(serde_json::to_string(&c.tags).unwrap())
-        .bind(c.embed_state.as_str())
-        .bind(c.created_at)
-        .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
-        .bind(c.status.as_str())
-        .bind(c.last_verified_at)
-        .bind(c.created_at)
-        .bind(serde_json::to_string(&c.cues).unwrap_or_else(|_| "[]".into()))
-        .execute(&mut *tx)
+            .execute(&mut *tx)
         .await?;
 
         for (via, roots) in &resolved {
             for root in roots {
-                // OR IGNORE because two sources can share a root: merging M(a,b)
-                // with a itself is a component the sweep can legitimately build,
-                // and it names `a` twice.
-                sqlx::query(
+                // OR IGNORE: merging M(a,b) with `a` itself names `a` twice.
+                sqlx::query!(
                     "INSERT OR IGNORE INTO artifact_sources (child_id, root_id, via_id, created_at)
                      VALUES (?, ?, ?, ?)",
+                    &c.id,
+                    root,
+                    via,
+                    created_at
                 )
-                .bind(&c.id)
-                .bind(root)
-                .bind(via)
-                .bind(created_at)
                 .execute(&mut *tx)
                 .await?;
             }
@@ -604,10 +479,7 @@ impl Store {
         Ok(c)
     }
 
-    /// Write a merged artifact and its lineage in one transaction.
-    ///
-    /// Every root must be a captured artifact — refused, not assumed, by
-    /// `insert_sourced_artifact`, which is also where the write itself is.
+    /// Every root must be captured; `insert_sourced_artifact` refuses otherwise.
     pub async fn insert_merged_artifact(
         &self,
         new: &NewMerged,
@@ -628,10 +500,7 @@ impl Store {
         .await
     }
 
-    /// Write an artifact generated from a pursuit. Like a merge it has no
-    /// corpus of its own and names its sources through `artifact_sources`;
-    /// unlike a merge it supersedes nothing — its sources stay active and
-    /// keep ranking, and its roots need not be captured artifacts.
+    /// Unlike a merge it supersedes nothing, and its roots need not be captured.
     pub async fn insert_synthesized_artifact(
         &self,
         new: &NewSynthesized,
@@ -652,31 +521,26 @@ impl Store {
         .await
     }
 
-    /// Generated artifacts still in results, newest first. What Ops lists.
     pub async fn synthesized_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts
               WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL
               ORDER BY created_at DESC LIMIT ?",
+            limit.max(0)
         )
-        .bind(limit.max(0))
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// How many artifacts a pursuit wrote, with no page over it. The predicate
-    /// is `synthesized_artifacts`', which answers a page for a table to be
-    /// drawn from and cannot be counted for a total.
     pub async fn count_synthesized_artifacts(&self) -> Result<i64> {
-        use sqlx::Row;
-        Ok(sqlx::query(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) AS n FROM artifacts
-              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL",
+              WHERE provenance = 'synthesized' AND status = 'active' AND superseded_by IS NULL"
         )
         .fetch_one(&self.pool)
-        .await?
-        .get("n"))
+        .await?)
     }
 
     pub async fn insert_artifacts(
@@ -688,9 +552,7 @@ impl Store {
             .await
     }
 
-    /// `insert_artifacts`, saying what kind of row is being written. Capture at
-    /// `off`/`earned` writes passages through this; everything else keeps the
-    /// captured default.
+    /// Capture at `off`/`earned` writes passages through this.
     pub async fn insert_artifacts_with_provenance(
         &self,
         corpus_id: &str,
@@ -727,27 +589,27 @@ impl Store {
                 retired_at: None,
                 reaped_at: None,
             };
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO artifacts (id, corpus_id, provenance, ordinal, text, corpus_span, title, category, tags, embed_state, embed_model, created_at, segment_idx, caveats, status, last_verified_at, activation, activated_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 1.0, ?)",
+                &c.id,
+                &c.corpus_id,
+                provenance.as_str(),
+                c.ordinal,
+                &c.text,
+                c.corpus_span.as_ref().and_then(|s| serde_json::to_string(s).ok()),
+                &c.title,
+                &c.category,
+                serde_json::to_string(&c.tags).unwrap_or_else(|_| "[]".into()),
+                c.embed_state.as_str(),
+                c.created_at,
+                c.segment_idx,
+                serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()),
+                c.status.as_str(),
+                c.last_verified_at,
+                c.created_at
             )
-            .bind(&c.id)
-            .bind(&c.corpus_id)
-            .bind(provenance.as_str())
-            .bind(c.ordinal)
-            .bind(&c.text)
-            .bind(c.corpus_span.as_ref().map(|s| serde_json::to_string(s).unwrap()))
-            .bind(&c.title)
-            .bind(&c.category)
-            .bind(serde_json::to_string(&c.tags).unwrap())
-            .bind(c.embed_state.as_str())
-            .bind(c.created_at)
-            .bind(c.segment_idx)
-            .bind(serde_json::to_string(&c.caveats).unwrap_or_else(|_| "[]".into()))
-            .bind(c.status.as_str())
-            .bind(c.last_verified_at)
-            .bind(c.created_at)
-            .execute(&mut *tx)
+                .execute(&mut *tx)
             .await?;
             out.push(c);
         }
@@ -756,67 +618,61 @@ impl Store {
     }
 
     pub async fn get_artifact(&self, id: &str) -> Result<Chunk> {
-        let row = sqlx::query("SELECT * FROM artifacts WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or(Error::NotFound)?;
-        Ok(row_to_artifact(&row))
+        let row = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(Error::NotFound)?;
+        Ok(row_to_artifact(row))
     }
 
-    /// Every row a window owns, whatever its status, in ordinal order. The
-    /// promotion path reads this to see what it is superseding and, on a
-    /// retry, what it already wrote.
+    /// The promotion path reads this to see what it supersedes and, on retry, what it wrote.
     pub async fn artifacts_for_segment(&self, corpus_id: &str, idx: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts WHERE corpus_id = ? AND segment_idx = ? ORDER BY ordinal",
+            corpus_id,
+            idx
         )
-        .bind(corpus_id)
-        .bind(idx)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// Set an artifact's activation outright, stamped `at`. Promotion uses it
-    /// to hand a new artifact the access its passages earned; everything else
-    /// goes through `bump_activation`, which adds.
+    /// Promotion hands a new artifact its passages' access; all else uses `bump_activation`.
     pub async fn set_activation(&self, id: &str, value: f64, at: i64) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?")
-            .bind(value)
-            .bind(at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET activation = ?, activated_at = ? WHERE id = ?",
+            value,
+            at,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    /// Has a person ever said this artifact was the answer? A `hit` verdict
-    /// naming it, on any recorded search.
+    /// A `hit` verdict naming it, on any recorded search.
     pub async fn artifact_confirmed(&self, id: &str) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM search_events WHERE verdict = 'hit' AND expect_id = ?",
+            id
         )
-        .bind(id)
         .fetch_one(&self.pool)
         .await?
             > 0)
     }
 
-    /// The rows for these ids, in no particular order; ids that name nothing
-    /// are simply absent. One query for a page of hits.
+    /// Ids that name nothing are absent.
     pub async fn artifacts_by_ids(&self, ids: &[String]) -> Result<Vec<Chunk>> {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        // Deduplicated and chunked, because the callers hand this whatever
-        // their own walk produced. `dedupe::run` passes every root of both
-        // members flattened together, which repeats an id whenever two members
-        // share a source and is bounded by nothing: the pre-merge check it
-        // feeds has no count-based cap by design. One `?` per id past
-        // SQLITE_MAX_VARIABLE_NUMBER — 999 on the builds predating 3.32 — is a
-        // prepare error, not a slow query, so the same 500 the pair repair
-        // chunks at is used here (`store::pairs::stale_unreachable_pairs`).
+        // Deduplicated and chunked at 500: callers pass unbounded lists, and past
+        // SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32) the prepare fails.
         let mut seen = std::collections::HashSet::with_capacity(ids.len());
         let unique: Vec<&String> = ids.iter().filter(|id| seen.insert(*id)).collect();
         let mut out = Vec::with_capacity(unique.len());
@@ -824,24 +680,24 @@ impl Store {
             let holes = std::iter::repeat_n("?", chunk.len())
                 .collect::<Vec<_>>()
                 .join(",");
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
+            // runtime: the IN list has one placeholder per id.
+            let mut q = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(format!(
                 "SELECT * FROM artifacts WHERE id IN ({holes})"
             )));
             for id in chunk {
                 q = q.bind(*id);
             }
-            out.extend(q.fetch_all(&self.pool).await?.iter().map(row_to_artifact));
+            out.extend(
+                q.fetch_all(&self.pool)
+                    .await?
+                    .into_iter()
+                    .map(row_to_artifact),
+            );
         }
         Ok(out)
     }
 
-    /// The caveats of many artifacts in one query, keyed by id.
-    ///
-    /// For the ask path, which needs the caveats of every hit and nothing else
-    /// from the row: one lookup per hit is cheap, but a follow-up round packs
-    /// the merged list again, and a dozen sequential round trips in front of
-    /// every model call adds up. An id with no row — deleted since it was
-    /// retrieved — is simply absent from the map.
+    /// An id deleted since retrieval is absent from the map.
     pub async fn caveats_for(&self, ids: &[String]) -> Result<HashMap<String, Vec<String>>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
@@ -849,6 +705,7 @@ impl Store {
         let holes = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT id, caveats FROM artifacts WHERE id IN ({holes})"
         )));
@@ -869,54 +726,37 @@ impl Store {
             .collect())
     }
 
-    /// The nearest *active* artifact either side of `ordinal` in the same
-    /// corpus — not the rows at `ordinal ± 1`.
-    ///
-    /// The answer to a question is often the paragraph after the one that
-    /// matched, and `ordinal` is a continuous per-corpus sequence, which is
-    /// what makes this a lookup instead of a search. But after a promotion the
-    /// sequence interleaves superseded passages with what replaced them, and
-    /// "the row next door" is then often a hidden one; the reader wants the
-    /// next thing still in the document. An edge returns the one side that
-    /// exists; `status = 'active'` keeps deprecated and superseded artifacts
-    /// out, exactly as an ordinary search would.
+    /// Skips superseded rows that a promotion interleaved into the ordinals.
     pub async fn adjacent_artifacts(&self, corpus_id: &str, ordinal: i64) -> Result<Vec<Chunk>> {
-        let before = sqlx::query(
+        let before = sqlx::query_as!(
+            ArtifactRow,
             "SELECT * FROM artifacts
              WHERE corpus_id = ? AND ordinal < ? AND status = 'active'
              ORDER BY ordinal DESC LIMIT 1",
+            corpus_id,
+            ordinal
         )
-        .bind(corpus_id)
-        .bind(ordinal)
         .fetch_optional(&self.pool)
         .await?;
-        let after = sqlx::query(
+        let after = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts
              WHERE corpus_id = ? AND ordinal > ? AND status = 'active'
              ORDER BY ordinal ASC LIMIT 1",
+            corpus_id,
+            ordinal
         )
-        .bind(corpus_id)
-        .bind(ordinal)
         .fetch_optional(&self.pool)
         .await?;
         Ok(before
-            .iter()
-            .chain(after.iter())
+            .into_iter()
+            .chain(after)
             .map(row_to_artifact)
             .collect())
     }
 
-    /// For each of `ids`, the next *active* artifact in the same document —
-    /// one read for a whole result list rather than one per row.
-    ///
-    /// What the rail needs to say "this one continues". Absent means the
-    /// artifact ends its document, or belongs to none: a merged artifact has no
-    /// `corpus_id` and therefore no reading order to continue in, and the join
-    /// drops it rather than reaching into another document's ordinals.
-    ///
-    /// A correlated subquery rather than a second round trip per hit. The rail
-    /// is drawn on every keystroke of a search-while-typing box, and N+1 reads
-    /// down a ten-row list is the shape that turns a lookup into a cost.
+    /// A merge has no `corpus_id` and so no reading order; a correlated subquery, because the
+    /// rail redraws on every keystroke.
     pub async fn continuations_of(&self, ids: &[String]) -> Result<HashMap<String, String>> {
         if ids.is_empty() {
             return Ok(HashMap::new());
@@ -924,6 +764,7 @@ impl Store {
         let holes = std::iter::repeat_n("?", ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT a.id AS id,
                     (SELECT n.id FROM artifacts n
@@ -948,43 +789,28 @@ impl Store {
     }
 
     pub async fn artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query("SELECT * FROM artifacts WHERE corpus_id = ? ORDER BY ordinal")
-            .bind(corpus_id)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
-    }
-
-    /// How many chunks a source produced, without loading any of them.
-    ///
-    /// The queue fragment wants the number and nothing else, and it asks for
-    /// ten sources every three seconds while anything is in flight — reading
-    /// every artifact's full text to call `.len()` on the result was the bulk
-    /// of that poll.
-    pub async fn count_artifacts_for_corpus(&self, corpus_id: &str) -> Result<i64> {
-        Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM artifacts WHERE corpus_id = ?")
-                .bind(corpus_id)
-                .fetch_one(&self.pool)
-                .await?,
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE corpus_id = ? ORDER BY ordinal",
+            corpus_id
         )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// Artifacts in results whose text or title holds every one of `terms`,
-    /// read from SQLite rather than the vector store: the keyword fallback
-    /// `Core::search` uses for what the index cannot answer.
-    ///
-    /// `unembedded_only` narrows it to what has no vector yet — a capture
-    /// seconds old, a chunk the embedder refused, everything while the
-    /// embedder is down. Search reads only the vector store, so without this
-    /// those were invisible until their embed landed. Otherwise every artifact
-    /// in results is a candidate: the whole base, for when the query itself
-    /// cannot be embedded.
-    ///
-    /// A scan, not an index: `LIKE` over one person's base, capped by
-    /// `limit`, on a path that only runs when the index cannot answer or has
-    /// something missing. Case-insensitive for ASCII, which is what SQLite's
-    /// `LIKE` is; newest first.
+    /// The queue fragment polls ten sources every three seconds.
+    pub async fn count_artifacts_for_corpus(&self, corpus_id: &str) -> Result<i64> {
+        Ok(sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM artifacts WHERE corpus_id = ?",
+            corpus_id
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Keyword fallback from SQLite for what the index cannot answer. `unembedded_only` limits
+    /// it to rows with no vector yet. ASCII case-insensitive `LIKE`, newest first.
     pub async fn keyword_matches(
         &self,
         terms: &[String],
@@ -1007,9 +833,9 @@ impl Store {
             );
         }
         sql.push_str(" ORDER BY created_at DESC, id LIMIT ?");
-        // `AssertSqlSafe`: what is interpolated is a fixed clause repeated
-        // once per term; every value is bound.
-        let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
+        // Only a fixed clause repeated per term is interpolated; every value is bound.
+        // runtime: one LIKE clause per search term.
+        let mut q = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(sql));
         for t in terms {
             let escaped = t
                 .replace('\\', "\\\\")
@@ -1019,30 +845,26 @@ impl Store {
             q = q.bind(pattern.clone()).bind(pattern);
         }
         let rows = q.bind(limit as i64).fetch_all(&self.pool).await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// Chunks of a source still waiting for a vector. The embed job batches
-    /// these into one inference call, so it needs them as rows, not a count.
+    /// The embed job batches these into one call, so it needs rows, not a count.
     pub async fn pending_artifacts_for_corpus(&self, corpus_id: &str) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending' ORDER BY ordinal",
-        )
-        .bind(corpus_id)
-        .fetch_all(&self.pool)
+            corpus_id
+        ).fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// Is every chunk still waiting to be embedded already armed as its own
-    /// unit? True means the source has been taken off the batch path and onto
-    /// the per-chunk one, and re-arming its batch would only spend another call
-    /// discovering the same refusal.
+    /// True means the source is on the per-chunk path; re-arming its batch would only fail again.
     pub async fn pending_artifacts_are_isolated(&self, corpus_id: &str) -> Result<bool> {
-        let pending: Vec<String> = sqlx::query_scalar(
-            "SELECT id FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending'",
+        let pending: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE corpus_id = ? AND embed_state = 'pending'"#,
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_all(&self.pool)
         .await?;
         let armed = self
@@ -1058,68 +880,58 @@ impl Store {
         Ok(pending.iter().all(|id| armed.contains(id)))
     }
 
-    /// Put every chunk of a source back in the embed queue's path. Re-embedding
-    /// only happens for rows that say they still need it, so asking for it has
-    /// to say so first.
-    ///
-    /// The revision bump is what makes this safe to run while a worker is
-    /// mid-batch on the same source: that worker's `mark_embedded` no longer
-    /// matches, so it cannot clear the pending state this just set.
-    ///
-    /// `updated_at` is deliberately left alone. It answers whether the text on
-    /// screen is the text that was captured, and re-embedding changes no text —
-    /// a model change or a `--reindex` would otherwise stamp every artifact in
-    /// the corpus as edited today, which is the one thing the column is there
-    /// to deny.
+    /// The revision bump stops a mid-batch worker's `mark_embedded` from clearing this.
+    /// `updated_at` is untouched: re-embedding changes no text.
     pub async fn reset_embed_state(&self, corpus_id: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts
              SET embed_state = 'pending', embed_model = NULL, embed_rev = embed_rev + 1
              WHERE corpus_id = ?",
+            corpus_id
         )
-        .bind(corpus_id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Set or clear the category. Deliberately does not touch `embed_state`:
-    /// the embedding model is never shown a category, so the stored vector is
-    /// still correct.
+    /// Leaves `embed_state`: the embedder never sees a category.
     pub async fn update_artifact_category(&self, id: &str, category: Option<&str>) -> Result<()> {
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET category = ? WHERE id = ?")
-                .bind(category)
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE artifacts SET category = ? WHERE id = ?",
+                category,
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
-    /// Replace the tag list. An empty list is a clear, not a no-op.
+    /// An empty list is a clear.
     pub async fn update_artifact_tags(&self, id: &str, tags: &[String]) -> Result<()> {
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET tags = ? WHERE id = ?")
-                .bind(serde_json::to_string(tags).unwrap_or_else(|_| "[]".into()))
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE artifacts SET tags = ? WHERE id = ?",
+                serde_json::to_string(tags).unwrap_or_else(|_| "[]".into()),
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
-    /// The title is part of the text handed to the embedder, so setting or
-    /// clearing it invalidates the vector the same way changing the body does.
+    /// The title is part of the embedded text, so this invalidates the vector.
     pub async fn update_artifact_title(&self, id: &str, title: Option<&str>) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts
                  SET title = ?, embed_state = 'pending', embed_model = NULL,
                      embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
+                title,
+                super::now(),
+                id
             )
-            .bind(title)
-            .bind(super::now())
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
@@ -1127,35 +939,33 @@ impl Store {
 
     pub async fn update_artifact_text(&self, id: &str, text: &str) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts
                  SET text = ?, embed_state = 'pending', embed_model = NULL,
                      embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
+                text,
+                super::now(),
+                id
             )
-            .bind(text)
-            .bind(super::now())
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
     }
 
-    /// A passage that has taken in its neighbour's text: new text and the span
-    /// that now covers both, with the vector invalidated as any text edit does.
     /// The caller queues the embed, as with `update_artifact_text`.
     pub async fn absorb_passage(&self, id: &str, text: &str, span: &CorpusSpan) -> Result<()> {
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts
                  SET text = ?, corpus_span = ?, embed_state = 'pending', embed_model = NULL,
                      embed_rev = embed_rev + 1, updated_at = ?
                  WHERE id = ?",
+                text,
+                serde_json::to_string(span).unwrap_or_default(),
+                super::now(),
+                id
             )
-            .bind(text)
-            .bind(serde_json::to_string(span).unwrap())
-            .bind(super::now())
-            .bind(id)
             .execute(&self.pool)
             .await?,
         )
@@ -1168,41 +978,33 @@ impl Store {
         Ok(())
     }
 
-    /// Report a chunk indexed, but only if it has not been edited since the
-    /// embed job read it.
-    ///
-    /// Returns whether the mark landed. `false` means a newer revision exists
-    /// and the vector just written describes text that is already stale; the
-    /// chunk stays pending, so it will be embedded again from the current row.
-    ///
-    /// That relies on an invariant worth keeping: whoever bumps the revision
-    /// also queues the work. `update_artifact_text`, `update_artifact_title` and
-    /// `reset_embed_state` are only ever called alongside an `enqueue`, so a
-    /// chunk left pending here always has a job coming for it.
+    /// `false` when a newer revision exists; the chunk stays pending. Whoever bumps the
+    /// revision also enqueues, so a pending chunk always has a job coming.
     pub async fn mark_embedded(&self, id: &str, model: &str, rev: i64) -> Result<bool> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifacts SET embed_state = 'embedded', embed_model = ?
              WHERE id = ? AND embed_rev = ?",
+            model,
+            id,
+            rev
         )
-        .bind(model)
-        .bind(id)
-        .bind(rev)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
     }
 
     pub async fn mark_embed_failed(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET embed_state = 'failed' WHERE id = ?")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET embed_state = 'failed' WHERE id = ?",
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn delete_artifact(&self, id: &str) -> Result<()> {
-        let res = sqlx::query("DELETE FROM artifacts WHERE id = ?")
-            .bind(id)
+        let res = sqlx::query!("DELETE FROM artifacts WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         if res.rows_affected() == 0 {
@@ -1211,92 +1013,67 @@ impl Store {
         Ok(())
     }
 
-    /// The chunks a window's next write replaces.
-    ///
-    /// Chunks with no window at all are included: leaving them out would append
-    /// the new segmentation beside the old one instead of replacing it. They
-    /// are swept by whichever window writes first, and there are none left by
-    /// the second.
-    ///
-    /// Except a `note`, which is window-less because it belongs to no window
-    /// and not because it is left over from an older split. Sweeping it made
-    /// the first window see the corpus as already written and skip every
-    /// passage, so a captured file with an annotation was never chunked at
-    /// all.
+    /// Window-less chunks are included so a re-split replaces rather than appends, except a
+    /// `note`, which belongs to no window.
     pub async fn artifact_ids_for_segment(
         &self,
         corpus_id: &str,
         segment_idx: i64,
     ) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT id FROM artifacts WHERE corpus_id = ? AND provenance != 'note'
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE corpus_id = ? AND provenance != 'note'
                AND (segment_idx = ? OR segment_idx IS NULL)
-             ORDER BY ordinal",
+             ORDER BY ordinal"#,
+            corpus_id,
+            segment_idx
         )
-        .bind(corpus_id)
-        .bind(segment_idx)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(|r| r.get("id")).collect())
+        Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
-    /// Open a gap of `by` ordinals after `ordinal`, so chunks inserted into it
-    /// keep reading order without renumbering the whole source.
+    /// Chunks inserted into the gap keep reading order without renumbering the source.
     pub async fn make_room_after(&self, corpus_id: &str, ordinal: i64, by: i64) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts SET ordinal = ordinal + ? WHERE corpus_id = ? AND ordinal > ?",
+            by,
+            corpus_id,
+            ordinal
         )
-        .bind(by)
-        .bind(corpus_id)
-        .bind(ordinal)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Give a source one continuous ordinal sequence again.
-    ///
-    /// Chunks are inserted per window and numbered within it, so until this
-    /// runs a source has three chunks numbered 0. Ordering by window and then
-    /// by the within-window number reproduces reading order.
+    /// Ordering by window, then by within-window number, reproduces reading order.
     pub async fn renumber_artifacts(&self, corpus_id: &str) -> Result<()> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT id FROM artifacts WHERE corpus_id = ?
              ORDER BY COALESCE(segment_idx, 0), ordinal, rowid",
+            corpus_id
         )
-        .bind(corpus_id)
         .fetch_all(&self.pool)
         .await?;
         let mut tx = self.pool.begin().await?;
-        for (n, r) in rows.iter().enumerate() {
-            sqlx::query("UPDATE artifacts SET ordinal = ? WHERE id = ?")
-                .bind(n as i64)
-                .bind(r.get::<String, _>("id"))
-                .execute(&mut *tx)
-                .await?;
+        for (n, r) in rows.into_iter().enumerate() {
+            sqlx::query!(
+                "UPDATE artifacts SET ordinal = ? WHERE id = ?",
+                n as i64,
+                r.id
+            )
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(())
     }
 
-    /// Record that this artifact lost a near-identical pair. `None` undoes it.
-    /// `status` moves in lockstep: superseded when a winner is set, active
-    /// when it's cleared — the one place that keeps the two columns
-    /// consistent, so callers of `unsupersede`/`heal_dangling_supersessions`
-    /// need no changes of their own.
+    /// `status` moves in lockstep; this is the one place keeping the two columns consistent.
     pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
         self.set_superseded_by_with(artifact_id, by, None).await
     }
 
-    /// The same, with the journal row for it written in the same transaction.
-    ///
-    /// Not two statements. `supersede_with` and `deprecate_with` both promise
-    /// that nothing can read a hidden artifact with no row, and both retract
-    /// rules and the Insights disclosure are built on that promise: a hidden
-    /// artifact with no open row is invisible to `open_action_on`, so it can
-    /// never be restored and is never disclosed. A separate insert afterwards
-    /// leaves exactly that state behind whenever it fails. `bury` has always
-    /// journaled inside its own transaction; these two now do too.
+    /// One transaction: a hidden artifact with no open journal row can never be restored.
     pub async fn set_superseded_by_with(
         &self,
         artifact_id: &str,
@@ -1308,27 +1085,21 @@ impl Store {
         } else {
             ArtifactStatus::Active
         };
-        // The marker rides the same statement as the change it describes. Two
-        // statements could be interrupted between, which is the exact failure
-        // this is here to catch — a lifecycle change that never reached the
-        // payload and that nothing afterwards knows to look for.
-        // `retired_at` rides the same statement for the same reason. Stamped
-        // through COALESCE so a loser re-pointed at a new winner keeps the
-        // clock of its first retirement; cleared when the row returns to
-        // active, so a reactivated artifact never walks into the reap sweep
-        // on a stale one.
-        let res = sqlx::query(
+        // The marker and `retired_at` ride the statement they describe. COALESCE keeps the first
+        // retirement's clock; it clears on reactivation.
+        let mut tx = self.pool.begin().await?;
+        let res = sqlx::query!(
             "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1,
                     retired_at = CASE WHEN ? THEN COALESCE(retired_at, ?) ELSE NULL END
              WHERE id = ?",
+            by,
+            status.as_str(),
+            by.is_some(),
+            now(),
+            artifact_id
         )
-        .bind(by)
-        .bind(status.as_str())
-        .bind(by.is_some())
-        .bind(now())
-        .bind(artifact_id);
-        let mut tx = self.pool.begin().await?;
-        let res = res.execute(&mut *tx).await?;
+        .execute(&mut *tx)
+        .await?;
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
@@ -1339,38 +1110,30 @@ impl Store {
         Ok(())
     }
 
-    /// Set an artifact's lifecycle status directly — used for deprecate and
-    /// reactivate, which (unlike supersede) have no winning artifact on the
-    /// other end. Does not touch `superseded_by`; callers that mean to clear
-    /// a supersession should use `set_superseded_by(id, None)` instead.
+    /// Does not touch `superseded_by`; use `set_superseded_by(id, None)` to clear one.
     pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
         self.set_artifact_status_with(id, status, None).await
     }
 
-    /// The same, with the journal row for it written in the same transaction;
-    /// see `set_superseded_by_with`.
     pub async fn set_artifact_status_with(
         &self,
         id: &str,
         status: ArtifactStatus,
         journal: Option<&crate::store::actions::NewAction>,
     ) -> Result<()> {
-        // Marked dirty in the same statement, like `set_superseded_by`. See
-        // `dirty_lifecycle_artifacts`.
-        // The same `retired_at` protocol as `set_superseded_by`: stamped on
-        // the way out of `active`, cleared on the way back, in the statement
-        // that moves the status.
+        // Marks dirty and stamps `retired_at` in the statement that moves the status, as
+        // `set_superseded_by` does.
         let mut tx = self.pool.begin().await?;
         self.expect_updated(
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE artifacts SET status = ?, lifecycle_dirty = 1,
                         retired_at = CASE WHEN ? THEN COALESCE(retired_at, ?) ELSE NULL END
                  WHERE id = ?",
+                status.as_str(),
+                status != ArtifactStatus::Active,
+                now(),
+                id
             )
-            .bind(status.as_str())
-            .bind(status != ArtifactStatus::Active)
-            .bind(now())
-            .bind(id)
             .execute(&mut *tx)
             .await?,
         )?;
@@ -1381,134 +1144,134 @@ impl Store {
         Ok(())
     }
 
-    /// Artifacts whose lifecycle row has changed since the payload was last
-    /// written. The drift repair's whole work list.
-    ///
-    /// This replaced a pair of capped scans over every non-active artifact.
-    /// Merging makes hidden artifacts grow monotonically — every merge hides at
-    /// least two, permanently — so those scans were on course to be truncated
-    /// forever, repairing a shifting window of an ever-growing set while
-    /// reporting success either way. What needs repairing is the writes that
-    /// did not finish, and that set is almost always empty.
-    pub async fn dirty_lifecycle_artifacts(&self, limit: usize) -> Result<Vec<Chunk>> {
-        let rows =
-            sqlx::query("SELECT * FROM artifacts WHERE lifecycle_dirty = 1 ORDER BY id LIMIT ?")
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+    pub async fn trash_artifact(&self, id: &str, at: i64) -> Result<()> {
+        self.expect_updated(
+            sqlx::query!(
+                "UPDATE artifacts SET trashed_from = status, status = 'trashed', trashed_at = ?,
+                        lifecycle_dirty = 1
+                 WHERE id = ? AND status <> 'trashed'",
+                at,
+                id
+            )
+            .execute(&self.pool)
+            .await?,
+        )
     }
 
-    /// Mark an artifact's lifecycle as in flight before either store is
-    /// written.
-    ///
-    /// For `supersede` and `deprecate` this is redundant — the row write sets
-    /// the marker itself, and it comes first. The reveal direction is why this
-    /// exists: `reactivate` and `unsupersede` write the *payload* first, on
-    /// purpose, so that a half-finished reveal leaves the artifact visible
-    /// rather than hidden behind a payload no page explains. Without marking
-    /// up front, a crash between the two stores leaves drift that no row write
-    /// ever announced, and the marker would miss the one direction whose
-    /// intermediate state it was most needed for.
+    pub async fn trashed_from(&self, id: &str) -> Result<Option<ArtifactStatus>> {
+        let row: Option<Option<String>> = sqlx::query_scalar!(
+            "SELECT trashed_from FROM artifacts WHERE id = ? AND status = 'trashed'",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|s| ArtifactStatus::parse(s.as_deref().unwrap_or("active"))))
+    }
+
+    pub async fn untrash_artifact(&self, id: &str) -> Result<()> {
+        self.expect_updated(
+            sqlx::query!(
+                "UPDATE artifacts SET status = COALESCE(trashed_from, 'active'),
+                        trashed_from = NULL, trashed_at = NULL, lifecycle_dirty = 1
+                 WHERE id = ? AND status = 'trashed'",
+                id
+            )
+            .execute(&self.pool)
+            .await?,
+        )
+    }
+
+    pub async fn trash(&self) -> Result<Vec<(Chunk, i64)>> {
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE status = 'trashed' ORDER BY trashed_at DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let at = r.trashed_at.unwrap_or(0);
+                (row_to_artifact(r), at)
+            })
+            .collect())
+    }
+
+    /// Ids in Trash since before `cutoff`.
+    pub async fn trashed_before(&self, cutoff: i64) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE status = 'trashed' AND trashed_at < ?"#,
+            cutoff
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Only writes that did not finish: hidden artifacts only ever grow, so scanning them all
+    /// would be truncated forever.
+    pub async fn dirty_lifecycle_artifacts(&self, limit: usize) -> Result<Vec<Chunk>> {
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
+            "SELECT * FROM artifacts WHERE lifecycle_dirty = 1 ORDER BY id LIMIT ?",
+            limit as i64
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_artifact).collect())
+    }
+
+    /// Needed for the reveal direction, which writes the payload first; a crash between the
+    /// stores would otherwise leave unannounced drift.
     pub async fn mark_lifecycle_dirty(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET lifecycle_dirty = 1 WHERE id = ?")
-            .bind(id)
+        sqlx::query!("UPDATE artifacts SET lifecycle_dirty = 1 WHERE id = ?", id)
             .execute(&self.pool)
             .await?;
         Ok(())
     }
 
-    /// Clear the marker once the payload write has been acknowledged.
-    ///
-    /// Never before it. Clearing first turns a failed payload write into
-    /// permanent drift with nothing left that knows to look for it, which is
-    /// precisely the state this mechanism exists to make impossible.
+    /// Never before the payload write is acknowledged, or a failure becomes permanent drift.
     pub async fn clear_lifecycle_dirty(&self, ids: &[String]) -> Result<()> {
         for id in ids {
-            sqlx::query("UPDATE artifacts SET lifecycle_dirty = 0 WHERE id = ?")
-                .bind(id)
+            sqlx::query!("UPDATE artifacts SET lifecycle_dirty = 0 WHERE id = ?", id)
                 .execute(&self.pool)
                 .await?;
         }
         Ok(())
     }
 
-    /// Stamp an artifact as confirmed accurate now — what search ranking's
-    /// recency decay reads.
     pub async fn set_last_verified_at(&self, id: &str, at: i64) -> Result<()> {
         self.expect_updated(
-            sqlx::query("UPDATE artifacts SET last_verified_at = ? WHERE id = ?")
-                .bind(at)
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE artifacts SET last_verified_at = ? WHERE id = ?",
+                at,
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
-    /// Every artifact id. What the store-drift heal compares against Qdrant.
     pub async fn list_all_artifact_ids(&self) -> Result<Vec<String>> {
+        // runtime: shares its statement with the backup's counts, so the two cannot drift.
         let rows = sqlx::query(ALL_ARTIFACT_IDS).fetch_all(&self.pool).await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-    /// Ids of artifacts whose row claims a vector was written for them.
-    ///
-    /// The heal uses this rather than `list_all_artifact_ids` for the
-    /// SQLite-has-it/vectors-do-not direction, because an artifact still waiting
-    /// on its embed job has no point *correctly* — that is the normal state of
-    /// everything just ingested, not drift. Nor is a `failed` row: the embedder
-    /// refused that text, and re-queueing it every sweep is a retry loop with no
-    /// end. Only a row that says `embedded` while the vector store holds nothing
-    /// is a write that went missing.
-    ///
-    /// And a reaped row is not that either, which is why `reaped_at IS NULL`
-    /// belongs here rather than only in the sweeps. `bury` leaves `embed_state`
-    /// alone on purpose — nothing about a burial is an embed — so the stub goes
-    /// on saying `embedded` while `reap_one` has deleted its point. Read as
-    /// drift, that queued an `Embed` every pass; the stub still carries a
-    /// title, so the embed *succeeded*, writing a fresh point for an artifact
-    /// whose text is in the graveyard and undoing the burial's own invariant,
-    /// at one embedding call per reaped artifact for ever. `exhume` is what
-    /// puts a point back, and it sets `embed_state` itself.
+    /// Pending and `failed` rows are not drift. Reaped stubs are excluded: `bury` keeps
+    /// `embed_state`, and re-embedding a stub would undo the burial every pass.
     pub async fn list_embedded_artifact_ids(&self) -> Result<Vec<String>> {
+        // runtime: shares its statement with the backup's counts, so the two cannot drift.
         let rows = sqlx::query(EMBEDDED_ARTIFACT_IDS)
             .fetch_all(&self.pool)
             .await?;
         Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
     }
 
-    /// Live, embedded artifacts whose `Relate` unit was never armed — the
-    /// backstop for an arming that failed after the embed committed. A row
-    /// survives its completion, so "no job at all" is exactly "never asked".
-    ///
-    /// Neither passages nor merges are anchors, and both exclusions belong
-    /// here rather than only in `embed::mark_indexed`. A backstop for "never
-    /// asked" cannot distinguish an arming that failed from one that was
-    /// deliberately withheld: every merged artifact now has no relate row *by
-    /// design*, so a filter on passages alone would arm one for each of them on
-    /// the next repair tick and undo the rule the embed path applies. The
-    /// reason merges are not anchors is spelled out there.
-    ///
-    /// Walked in windows behind a cursor, rather than always from the oldest
-    /// artifact forward. The "never asked" test lives in the other database
-    /// now, so it cannot be a `WHERE` clause any more and the `LIMIT` has to be
-    /// applied after it — which means a fixed window over the *oldest* rows,
-    /// and on any base with a history that window is entirely artifacts asked
-    /// about long ago. Every pass would filter all of them out, return nothing,
-    /// and look at exactly the same rows an hour later: a backstop permanently
-    /// blind to everything behind the window, which is everything that has
-    /// been captured since. The cursor is what makes the pass move.
-    ///
-    /// Reaching the end clears it, so the walk wraps and nothing is out of
-    /// reach for longer than one lap. It advances to the end of the window
-    /// examined and not to the last id returned, so a pass always makes
-    /// progress even when the whole window was already armed; a window holding
-    /// more unarmed artifacts than the caller asked for leaves the remainder
-    /// to the next lap, which is what a backstop is for.
+    /// Passages and merges are never anchors. Walked behind a wrapping cursor: the "never
+    /// asked" test lives in the other database, so the `LIMIT` applies after it.
     pub async fn list_unrelated_artifact_ids(&self, limit: usize) -> Result<Vec<String>> {
         const CURSOR: &str = "repair.relate_backstop_after";
-        // Over-fetched against the caller's limit, for the reason it always
-        // was: an unknown share of any window is already armed.
+        // An unknown share of any window is already armed.
         let window = (limit as i64).saturating_mul(8).max(1);
         let after = self.meta_get(CURSOR).await?.and_then(|s| {
             let (at, id) = s.split_once(':')?;
@@ -1518,36 +1281,30 @@ impl Store {
             Some((ts, id)) => (*ts, id.as_str()),
             None => (i64::MIN, ""),
         };
-        let rows = sqlx::query(
-            "SELECT a.id, a.created_at FROM artifacts a
+        let rows = sqlx::query!(
+            r#"SELECT a.id AS "id!", a.created_at FROM artifacts a
               WHERE a.status = 'active' AND a.superseded_by IS NULL
                 AND a.embed_state = 'embedded'
                 AND a.provenance <> 'passage' AND a.provenance <> 'merged'
                 AND (a.created_at > ? OR (a.created_at = ? AND a.id > ?))
               ORDER BY a.created_at ASC, a.id ASC
-              LIMIT ?",
+              LIMIT ?"#,
+            ts,
+            ts,
+            from,
+            window
         )
-        .bind(ts)
-        .bind(ts)
-        .bind(from)
-        .bind(window)
         .fetch_all(&self.pool)
         .await?;
-        // A short window is the end of the walk: start again from the oldest
-        // next time, so an artifact that lost its unit while the cursor was
-        // already past it is found on the next lap.
+        // A short window ends the walk; the next lap starts from the oldest again.
         let next = match rows.last() {
             Some(r) if (rows.len() as i64) == window => {
-                format!(
-                    "{}:{}",
-                    r.get::<i64, _>("created_at"),
-                    r.get::<String, _>("id")
-                )
+                format!("{}:{}", r.created_at, r.id)
             }
             _ => String::new(),
         };
         self.meta_set(CURSOR, &next).await?;
-        let candidates: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
+        let candidates: Vec<String> = rows.into_iter().map(|r| r.id).collect();
         let armed = self
             .control
             .targets_with_jobs(
@@ -1565,104 +1322,65 @@ impl Store {
             .collect())
     }
 
-    /// Artifacts hidden in favour of a keeper that no longer exists.
-    ///
-    /// `superseded_by` is a plain column with no foreign key, so deleting a
-    /// corpus — or reprocessing one, which deletes and re-creates every
-    /// artifact under new ids — can leave the losing side of a pair pointing at
-    /// nothing. That artifact is hidden from search forever, in favour of a
-    /// copy that is gone: the surviving text becomes invisible, which is the
-    /// exact loss consolidation exists to avoid.
-    ///
-    /// A read, not a write: the caller clears the vector payload before the
-    /// row, so that a failure between the two leaves the artifact listed on Ops
-    /// rather than hidden with nothing pointing at it. See
-    /// `Core::heal_dangling_supersessions`.
-    ///
-    /// A reaped row is never a candidate. `bury` leaves `superseded_by`
-    /// standing on purpose — the stub keeps every column other rows thread
-    /// into — so deleting the winner made the loser look exactly like an
-    /// artifact hidden in favour of nothing. It is not: there is no surviving
-    /// text to reveal, the text is in the graveyard. Healing it set
-    /// `status = 'active'` and cleared `retired_at`, which put a permanently
-    /// active *empty* artifact into corpus, lineage and Ops that
-    /// `reap_candidates` — `AND reaped_at IS NULL` — could never take back.
-    /// Undoing a burial is `Store::exhume`, and it is a decision somebody
-    /// makes, not a repair.
+    /// No foreign key on `superseded_by`, so a deleted keeper leaves its loser hidden. A read:
+    /// the caller clears the payload first. Reaped stubs are excluded; `exhume` undoes a burial.
     pub async fn dangling_superseded(&self) -> Result<Vec<String>> {
-        let rows = sqlx::query(
-            "SELECT id FROM artifacts
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!" FROM artifacts
               WHERE superseded_by IS NOT NULL
                 AND reaped_at IS NULL
-                AND superseded_by NOT IN (SELECT id FROM artifacts)",
+                AND status <> 'trashed'
+                AND superseded_by NOT IN (SELECT id FROM artifacts WHERE status <> 'trashed')"#
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+        Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
-    /// Artifacts hidden in favour of this one.
-    ///
-    /// What a supersession chain is made of. When the winner is itself
-    /// superseded, everything pointing at it has to be re-pointed or the reader
-    /// who opens one of these is sent to an artifact that is not in results
-    /// either — a dead end no page can follow.
+    /// A superseded winner's losers must be re-pointed, or they lead to a dead end.
     pub async fn artifacts_superseded_by(&self, winner_id: &str) -> Result<Vec<String>> {
-        let rows = sqlx::query("SELECT id FROM artifacts WHERE superseded_by = ?")
-            .bind(winner_id)
-            .fetch_all(&self.pool)
-            .await?;
-        Ok(rows.iter().map(|r| r.get::<String, _>("id")).collect())
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!" FROM artifacts WHERE superseded_by = ?"#,
+            winner_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.id).collect())
     }
 
-    /// Artifacts currently hidden by consolidation, newest first.
     pub async fn superseded_artifacts(&self, limit: i64) -> Result<Vec<Chunk>> {
-        // Not a buried row: the graveyard lists those, with the one undo that
-        // can put the text back. See `artifacts_by_status`.
-        let rows = sqlx::query(
+        // Not a buried row: the graveyard lists those.
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts WHERE superseded_by IS NOT NULL AND reaped_at IS NULL
               ORDER BY created_at DESC LIMIT ?",
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// Artifacts currently carrying one lifecycle status, newest first. Used
-    /// for the Ops "deprecated" list — superseded artifacts have their own
-    /// query (`superseded_artifacts`) since that one also needs the winner.
     pub async fn artifacts_by_status(
         &self,
         status: ArtifactStatus,
         limit: i64,
     ) -> Result<Vec<Chunk>> {
-        // Not a buried row. `bury` keeps the status, because what hid the
-        // artifact is still true, so a buried stub still reads `deprecated` —
-        // and Insights listed it twice: once here as hidden and still at its
-        // own link, once from the graveyard as out of the index.
-        //
-        // Not a superseded one either, for the same reason and against the
-        // same list: `deprecate` and a supersession are independent, so an
-        // artifact can carry both, and `superseded_artifacts` already lists
-        // those — with the winner named, which this query cannot say. Two
-        // rows came back about one artifact under one `kind`, and a client
-        // that reads `subject_id` as the row's identity answered one of them
-        // and lost the other.
-        let rows = sqlx::query(
+        // Neither buried nor superseded rows: each is listed elsewhere, and twice confused clients.
+        let rows = sqlx::query_as!(
+            crate::store::artifacts::ArtifactRow,
             "SELECT * FROM artifacts
               WHERE status = ? AND reaped_at IS NULL AND superseded_by IS NULL
               ORDER BY created_at DESC LIMIT ?",
+            status.as_str(),
+            limit
         )
-        .bind(status.as_str())
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// Record what verification found. An empty list clears the flags, so a
-    /// re-checked chunk does not keep a warning it no longer earns.
+    /// An empty list clears, so a re-checked chunk sheds a stale warning.
     pub async fn set_artifact_flags(
         &self,
         id: &str,
@@ -1674,12 +1392,14 @@ impl Store {
         } else {
             Some(serde_json::to_string(flags).unwrap_or_else(|_| "[]".into()))
         };
-        sqlx::query("UPDATE artifacts SET flags = ?, flag_detail = ? WHERE id = ?")
-            .bind(json)
-            .bind(detail)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET flags = ?, flag_detail = ? WHERE id = ?",
+            json,
+            detail,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1687,84 +1407,37 @@ impl Store {
         self.set_artifact_flags(id, &[], None).await
     }
 
-    /// `Chunk::in_results`, answered from two columns instead of the full row.
-    ///
-    /// For callers that triage many artifacts and read the text of few —
-    /// `arm_dedupe` walks up to 200 pairs per tick and skips most of them, and
-    /// paying two full-row fetches (text included) per skipped pair was the
-    /// bulk of the tick's work. `None` means the row is gone, which is its own
-    /// answer rather than an error: a pair cascades away mid-loop and the
-    /// caller moves on.
+    /// Two columns, not the full row: `arm_dedupe` checks 200 pairs per tick. `None` means gone.
     pub async fn artifact_in_results(&self, id: &str) -> Result<Option<bool>> {
-        let row = sqlx::query(
-            "SELECT status = 'active' AND superseded_by IS NULL AS live
-               FROM artifacts WHERE id = ?",
+        let row = sqlx::query!(
+            r#"SELECT status = 'active' AND superseded_by IS NULL AS "live!: bool"
+               FROM artifacts WHERE id = ?"#,
+            id
         )
-        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.get::<bool, _>("live")))
+        Ok(row.map(|r| r.live))
     }
 
-    /// Record that an operator reviewed a merge's lost sources and accepted it
-    /// as a merge of what remains. `source_count` comes down to the surviving
-    /// lineage count, so the orphan scan's comparison goes quiet — without
-    /// this, clearing the flag lasts exactly one sweep, because the row still
-    /// answers "lost a source" and is flagged all over again.
+    /// Without lowering `source_count`, the orphan flag returns on the next sweep.
     pub async fn accept_source_loss(&self, id: &str) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "UPDATE artifacts
                 SET source_count = (SELECT COUNT(*) FROM artifact_sources WHERE child_id = ?)
               WHERE id = ? AND provenance = 'merged'",
+            id,
+            id
         )
-        .bind(id)
-        .bind(id)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// The retired artifacts the reap sweep may put in front of the judge, as
-    /// one predicate over an `artifacts art` — shared verbatim by
-    /// `reap_candidates`, which nominates on it, and by `bury`, which re-checks
-    /// it at the instant it wipes the text.
-    ///
-    /// One string and not two, because the two drifting apart *is* the defect
-    /// this guards against. `bury` used to re-check status and `reaped_at`
-    /// alone, which are the two clauses an operator's restore moves; the
-    /// reminder guard and the fresh-merge guard were missing, and those are
-    /// moved by an ordinary reminder being set and by a merge landing.
-    /// `nominees` reads a whole page up front and the sweep then spends one
-    /// model call per row, so minutes pass between the two reads — long enough
-    /// for either, and the verdict was applied anyway.
-    ///
-    /// Binds three copies of `now - min_age_secs`, in order: the retirement
-    /// age, then the two halves of the fresh-merge exclusion.
-    ///
-    /// `art` and not the bare table name: the reminder clause joins `artifacts`
-    /// a second time, and inside that subquery an unaliased `artifacts.corpus_id`
-    /// resolves to the *inner* copy — which made the comparison trivially true
-    /// and every open reminder anywhere in the base hold back every candidate
-    /// in it.
-    ///
-    /// And the moment's note is `COALESCE(m.origin_corpus_id, live.corpus_id)`,
-    /// the expression `has_open_reminder_for_corpus` asks the same question
-    /// through. Reading `live.corpus_id` alone was the same drift this doc
-    /// comment warns about, one column over: a merge carries an open moment
-    /// onto a merged artifact, whose `corpus_id` is NULL, so the comparison
-    /// answered NULL, the guard passed, and reap wiped the text a reminder
-    /// still being pushed had been read out of.
-    ///
-    /// The candidate's side of that comparison is a set and not a column, for
-    /// the third turn of the same screw. `artifacts.corpus_id` is NULL for
-    /// every merged row — the schema says so, and says why — so
-    /// `= art.corpus_id` answered NULL for exactly the candidates a merge
-    /// produces, the `NOT EXISTS` was vacuously true, and a superseded merge
-    /// past `min_age_secs` was reaped with a live root still carrying the open
-    /// reminder its text had been read out of. What a merged candidate belongs
-    /// to is its captured roots' corpora, which `artifact_sources` names; a
-    /// captured candidate has only its own, and the join finds nothing to add.
+    /// Shared verbatim by `reap_candidates` and `bury`'s re-check, so they cannot drift; binds
+    /// three copies of `now - min_age_secs`. Aliased `art` because the reminder clause joins
+    /// `artifacts` again, and a merged candidate's corpora come from `artifact_sources`.
     const REAPABLE: &str = "(art.status != 'active' OR art.superseded_by IS NOT NULL)
+                AND art.status != 'trashed'
                 AND art.reaped_at IS NULL
                 AND art.retired_at IS NOT NULL AND art.retired_at < ?
                 AND NOT EXISTS (SELECT 1 FROM moments m
@@ -1792,43 +1465,12 @@ impl Store {
                      AND s.via_id IS NOT NULL
                 )";
 
-    /// The retired artifacts the reap sweep may put in front of the judge:
-    /// out of `active` for at least `min_age_secs`, not already reaped, and
-    /// named by no open reminder — a note somebody still expects to be pushed
-    /// must keep its text whatever a model thinks of it. Oldest retirement
-    /// first, so the backlog drains in the order it accumulated.
-    ///
-    /// `kind = 'due'` and not every kind, for the same reason
-    /// `has_open_reminder_for_corpus` says so: an event is a date the prose
-    /// mentions, nobody ever completes it, and counting it here would make
-    /// every artifact a date was read out of permanently un-reapable.
-    ///
-    /// And the reminder that holds a row back is the note's, on an artifact
-    /// that is still active — `has_open_reminder_for_corpus`' question, asked
-    /// in SQL. It used to be any open due row on the candidate itself, which
-    /// is a row nobody can ever reach: every candidate is retired by
-    /// definition, every query that lists a reminder says `status = 'active'`,
-    /// and so a reminder on a retired artifact has no band, no Done button and
-    /// no way of ever being closed. It excluded its artifact from the sweep
-    /// permanently. What is worth protecting is the note a person is still
-    /// being reminded about, and that is what this asks.
-    ///
-    /// Age reads `retired_at` and nothing else. A retired row whose stamp is
-    /// NULL predates the column; `stamp_unaged_retired` gives it a fresh clock
-    /// and this query simply does not see it until that clock runs.
-    /// The fresh-merge rule is here and not in the caller for one reason: the
-    /// `LIMIT` runs before any filtering the caller can do, so a rule applied
-    /// afterwards throws away part of the page and the sweep judges fewer rows
-    /// than it was asked to — and, because the ordering is stable, it selects
-    /// the same blocked rows on every run and never reaches the backlog behind
-    /// them. A rule SQLite can state has to be stated to SQLite.
-    ///
-    /// One rule is left to the caller because it cannot be written here at
-    /// all: whether a candidate has been *seen* since it was retired lives on
-    /// the vector point, not in this database. See `jobs::reap::nominees`,
-    /// which over-fetches to absorb it.
+    /// Open reminders on the note's active artifacts hold a row back (`kind = 'due'` only).
+    /// Age reads `retired_at` alone. Rules SQLite can state are here, before the `LIMIT`;
+    /// "seen since retired" lives on the vector point (see `jobs::reap::nominees`).
     pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+        // runtime: shares the REAPABLE predicate with the graveyard insert.
+        let rows = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifacts art
               WHERE {}
               ORDER BY art.retired_at ASC
@@ -1841,73 +1483,36 @@ impl Store {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(row_to_artifact).collect())
+        Ok(rows.into_iter().map(row_to_artifact).collect())
     }
 
-    /// Give every retired row that predates `retired_at` a clock starting now.
-    /// The migration-free backfill: a fresh stamp is merely slow, where an
-    /// invented historical one would hand the reaper rows it was never told
-    /// to wait on.
+    /// A fresh stamp is merely slow; an invented historical one would reap too early.
     pub async fn stamp_unaged_retired(&self) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE artifacts SET retired_at = ?
-              WHERE (status != 'active' OR superseded_by IS NOT NULL)
+              WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'
                 AND retired_at IS NULL",
+            now()
         )
-        .bind(now())
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
     }
 
-    /// Start a retired row's clock over from now.
-    ///
-    /// `set_superseded_by` deliberately will not do this: a loser re-pointed
-    /// at a new winner keeps the clock of its first retirement, so a chain of
-    /// supersessions cannot keep a row out of the sweep forever. A rescue is
-    /// the one event that has to, because it is the sweep acting *on* the row:
-    /// the candidate now has a living rewrite, and the next sweep should judge
-    /// it against that rewrite an age later, not on the very next interval.
-    /// Without this the rescued row stayed older than `min_age_days`, sorted
-    /// first by `ORDER BY retired_at ASC`, and bought one judge call — and on
-    /// a second `valuable` verdict one more synthesized rewrite of the same
-    /// content — every run.
+    /// Only a rescue restarts the clock; otherwise the rescued row is judged every run.
     pub async fn restamp_retired(&self, id: &str) -> Result<()> {
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL")
-            .bind(now())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL",
+            now(),
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    /// Copy a row's text into the graveyard, then wipe it — one transaction,
-    /// copy first, so no failure order can destroy text that was not saved.
-    /// The stub keeps every column other rows hold threads into (`id`,
-    /// `status`, `superseded_by`, title, lineage); the `AFTER UPDATE OF text`
-    /// trigger empties the FTS entry on its own.
-    ///
-    /// The row has to still be a candidate at the instant it is buried, and not
-    /// merely at the instant it was nominated. `nominees` reads a whole page up
-    /// front and the sweep then spends one model call per row, so an operator
-    /// who reactivates an artifact while its judgement is in flight would have
-    /// a verdict about a retired row wipe the text of a live one. The predicate
-    /// is `reap_candidates`' own — `Self::REAPABLE`, the same string, so that
-    /// the two cannot drift; missing it, this answers `NotFound` and
-    /// `reap::run` logs a burial that did not happen, which is the right
-    /// outcome for a verdict that has been overtaken.
-    ///
-    /// Which is why `min_age_secs` is a parameter rather than a thing this
-    /// could look up: the caller's own value, so the re-check asks the question
-    /// the nomination asked. A reminder set on the note, a merge landing on the
-    /// artifact and a rescue restamping `retired_at` all move it in the minutes
-    /// the model call takes, and each of them now stops the burial.
-    ///
-    /// `vec` and `embed_model` are what the point carried, kept beside the
-    /// text so a search given up on can be compared with what was buried.
-    /// `journal` is the corpus journal's row for this burial, written in the
-    /// same transaction: a buried artifact with no row is what the journal
-    /// exists to end.
+    /// Copy first, then wipe, in one transaction; the FTS trigger empties the entry. Re-checks
+    /// `REAPABLE` with the caller's `min_age_secs`, since minutes pass during the model call.
     pub async fn bury(
         &self,
         id: &str,
@@ -1920,6 +1525,7 @@ impl Store {
         let reaped_at = now();
         let cutoff = reaped_at - min_age_secs;
         let mut tx = self.pool.begin().await?;
+        // runtime: shares the REAPABLE predicate with the graveyard insert and the bury update.
         let res = sqlx::query(sqlx::AssertSqlSafe(format!(
             "INSERT INTO graveyard (id, title, text, meta_json, reaped_at, vec, embed_model)
              SELECT art.id, art.title, art.text, ?, ?, ?, ? FROM artifacts art
@@ -1939,15 +1545,12 @@ impl Store {
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
-        // `lifecycle_dirty` rides the same transaction as the wipe: set as a
-        // separate statement afterwards, a crash in the window left a stub
-        // whose Qdrant point still held the reaped text, and the drift repair
-        // only scans marked rows — nothing else would ever notice.
-        sqlx::query(
+        // `lifecycle_dirty` rides the wipe's transaction, or a crash leaves the text in Qdrant.
+        sqlx::query!(
             "UPDATE artifacts SET text = '', reaped_at = ?, lifecycle_dirty = 1 WHERE id = ?",
+            reaped_at,
+            id
         )
-        .bind(reaped_at)
-        .bind(id)
         .execute(&mut *tx)
         .await?;
         crate::store::actions::insert(&mut *tx, journal).await?;
@@ -1955,33 +1558,24 @@ impl Store {
         Ok(())
     }
 
-    /// What is in the graveyard, newest burial first, at most `limit`.
-    ///
-    /// Only graves whose stub is still there, as `graveyard_vectors` reads it
-    /// and for the reader's half of the same reason: this list is the Restore
-    /// button, and an artifact whose row was deleted with its corpus has
-    /// nothing to restore into. The text stays in the table — a grave is
-    /// permanent so that no reap verdict is ever wrong invisibly — it is just
-    /// no longer offered as an undo that cannot happen.
+    /// Only graves whose stub exists: this list is the Restore button.
     pub async fn graveyard_list(&self, limit: i64) -> Result<Vec<Grave>> {
-        sqlx::query(
-            "SELECT g.id AS id, g.title AS title, g.meta_json AS meta_json,
-                    g.reaped_at AS reaped_at
+        sqlx::query!(
+            r#"SELECT g.id AS "id!", g.title AS title, g.meta_json AS meta_json, g.reaped_at AS reaped_at
                FROM graveyard g
                JOIN artifacts a ON a.id = g.id
-              ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?",
+              ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?"#,
+            limit
         )
-        .bind(limit)
         .fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(|r| {
-            let meta: serde_json::Value =
-                serde_json::from_str(&r.get::<String, _>("meta_json")).unwrap_or_default();
+            let meta: serde_json::Value = serde_json::from_str(&r.meta_json).unwrap_or_default();
             Ok(Grave {
-                id: r.get("id"),
-                title: r.get("title"),
-                reaped_at: r.get("reaped_at"),
+                id: r.id,
+                title: r.title,
+                reaped_at: r.reaped_at,
                 reason: meta
                     .get("reason")
                     .and_then(|v| v.as_str())
@@ -1991,56 +1585,26 @@ impl Store {
         .collect()
     }
 
-    /// Every buried vector made by `embed_model`: `(artifact_id, vec)`. The
-    /// graveyard is small — a bounded number of burials a day — so a
-    /// give-up is compared with all of it in Rust rather than through the
-    /// vector store, which no longer holds the point.
-    ///
-    /// Only graves whose stub is still there. A grave is permanent by design
-    /// and carries no foreign key, so deleting the artifact — or the corpus it
-    /// belonged to — leaves the text and its open `Reap` row behind with
-    /// nothing to put back. `retract::rule_two` would pick such an orphan as
-    /// its best hidden candidate, and `reactivate` answers `NotFound`: the `?`
-    /// took the whole pass down *before* the cursor was stamped, so every
-    /// give-up recorded after it was re-read and re-failed on the next lap,
-    /// for ever. An artifact that cannot be restored is not a candidate for
-    /// restoring it.
+    /// Compared in Rust: the graveyard is small. Only graves whose stub exists, or
+    /// `retract::rule_two` picks an orphan that cannot be restored.
     pub async fn graveyard_vectors(&self, embed_model: &str) -> Result<Vec<(String, Vec<f32>)>> {
-        Ok(sqlx::query(
-            "SELECT g.id AS id, g.vec AS vec FROM graveyard g
+        Ok(sqlx::query!(
+            r#"SELECT g.id AS "id!", g.vec AS "vec!" FROM graveyard g
                    JOIN artifacts a ON a.id = g.id
-                  WHERE g.vec IS NOT NULL AND g.embed_model = ?",
+                  WHERE g.vec IS NOT NULL AND g.embed_model = ?"#,
+            embed_model
         )
-        .bind(embed_model)
         .fetch_all(&self.pool)
         .await?
-        .iter()
-        .map(|r| {
-            (
-                r.get::<String, _>("id"),
-                crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("vec")),
-            )
-        })
+        .into_iter()
+        .map(|r| (r.id, crate::store::feedback::blob_to_vec(&r.vec)))
         .collect())
     }
 
-    /// Point a still-reapable candidate at the rewrite the sweep made for it.
-    ///
-    /// `bury`'s guard, applied to the other verdict. `rescue_one` works from a
-    /// `Chunk` snapshot `nominees` took a whole page ago and then spends a
-    /// judge call and a generation call on it, and `set_superseded_by` — which
-    /// it must use, because `core.supersede()` rightly refuses a retired loser
-    /// — has no both-active guard of its own to be stopped by. An operator who
-    /// reactivates an artifact during those minutes had it silently re-retired
-    /// on the strength of a verdict about the row as it used to be, and pointed
-    /// at model-written text.
-    ///
-    /// Same predicate, same string, same reason as `bury`: `NotFound` when the
-    /// row has been overtaken, and the caller says so and leaves the rewrite
-    /// standing on its own. `min_age_secs` is the caller's, so the re-check
-    /// asks the question the nomination asked.
+    /// `bury`'s guard for the other verdict: the snapshot is minutes old by now.
     pub async fn supersede_if_reapable(&self, id: &str, by: &str, min_age_secs: i64) -> Result<()> {
         let cutoff = now() - min_age_secs;
+        // runtime: shares the REAPABLE predicate with the graveyard insert and the bury update.
         let res = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1,
                     retired_at = COALESCE(retired_at, ?)
@@ -2064,87 +1628,70 @@ impl Store {
         Ok(())
     }
 
-    /// Take a buried artifact's text back out of the graveyard — the undo the
-    /// graveyard exists to make possible.
-    ///
-    /// One transaction, and the grave row is deleted only where the artifact
-    /// row was actually restored, so no order of failures loses the text: a
-    /// crash before the commit leaves the burial exactly as it was, and the
-    /// grave is still there to try again from.
-    ///
-    /// `embed_state` goes back to `pending` and `embed_rev` moves, because
-    /// burial deleted the vector point and the caller enqueues `Embed` to
-    /// write a fresh one. `lifecycle_dirty` is deliberately *cleared* rather
-    /// than set: a dirty row asks the drift repair to write a payload, and
-    /// until that embed lands there is no point to write it onto. The whole
-    /// payload arrives with the point.
-    ///
-    /// `false` where there was no grave, or where the row is not reaped after
-    /// all — a restore that has already happened is not an error.
+    /// One transaction; the grave row goes only where the artifact was restored.
+    /// `lifecycle_dirty` is cleared: there is no point to write a payload onto until the embed.
     pub async fn exhume(&self, id: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let Some(row) = sqlx::query("SELECT text FROM graveyard WHERE id = ?")
-            .bind(id)
+        let Some(row) = sqlx::query!("SELECT text FROM graveyard WHERE id = ?", id)
             .fetch_optional(&mut *tx)
             .await?
         else {
             return Ok(false);
         };
-        let text: String = row.get("text");
-        let res = sqlx::query(
+        let text: String = row.text;
+        let res = sqlx::query!(
             "UPDATE artifacts
                 SET text = ?, reaped_at = NULL, embed_state = 'pending',
                     embed_model = NULL, embed_rev = embed_rev + 1,
                     lifecycle_dirty = 0, updated_at = ?
               WHERE id = ? AND reaped_at IS NOT NULL",
+            &text,
+            super::now(),
+            id
         )
-        .bind(&text)
-        .bind(super::now())
-        .bind(id)
         .execute(&mut *tx)
         .await?;
         if res.rows_affected() == 0 {
             return Ok(false);
         }
-        sqlx::query("DELETE FROM graveyard WHERE id = ?")
-            .bind(id)
+        sqlx::query!("DELETE FROM graveyard WHERE id = ?", id)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
         Ok(true)
     }
 
-    /// One grave, for tests: `(text, meta_json, reaped_at)`. The page reads
-    /// `graveyard_list`.
     pub async fn graveyard_row(&self, id: &str) -> Result<Option<(String, String, i64)>> {
-        let row = sqlx::query("SELECT text, meta_json, reaped_at FROM graveyard WHERE id = ?")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|r| (r.get("text"), r.get("meta_json"), r.get("reaped_at"))))
+        let row = sqlx::query!(
+            "SELECT text, meta_json, reaped_at FROM graveyard WHERE id = ?",
+            id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| (r.text, r.meta_json, r.reaped_at)))
     }
 
     /// How many retired rows still hold their text — the standing count the
     /// status line shows beside what the last sweep did.
     pub async fn retired_unreaped_count(&self) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM artifacts
-              WHERE (status != 'active' OR superseded_by IS NOT NULL)
-                AND reaped_at IS NULL",
+              WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'
+                AND reaped_at IS NULL"
         )
         .fetch_one(&self.pool)
         .await?)
     }
 
     async fn count_by_embed_state(&self, corpus_id: &str, state: &str) -> Result<i64> {
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "SELECT COUNT(*) AS n FROM artifacts WHERE corpus_id = ? AND embed_state = ?",
+            corpus_id,
+            state
         )
-        .bind(corpus_id)
-        .bind(state)
         .fetch_one(&self.pool)
         .await?;
-        Ok(row.get("n"))
+        Ok(row.n)
     }
 
     pub async fn pending_embed_count(&self, corpus_id: &str) -> Result<i64> {
@@ -2160,7 +1707,6 @@ impl Store {
 mod tests {
     use super::*;
 
-    /// The journal row a burial writes; the tests here are about the burial.
     fn reap_row(id: &str) -> crate::store::actions::NewAction {
         crate::store::actions::NewAction {
             job: crate::store::actions::Job::Reap,
@@ -2192,12 +1738,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_captured_artifact_is_captured_and_names_its_corpus() {
-        // `provenance` is the discriminator every consumer branches on, never
-        // `corpus_id IS NULL`. A null is an absence; a kind is an assertion,
-        // and the failure modes merging can produce want to hang off an
-        // assertion — `verify` cannot check a merged artifact against a segment
-        // that does not exist, and the detail pane cannot render lines for a
-        // span it does not have.
+        // `provenance` is the discriminator every consumer branches on, never `corpus_id IS NULL`.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s.insert_artifacts(&src.id, &[nc(0, "one")]).await.unwrap();
@@ -2214,7 +1755,6 @@ mod tests {
         );
     }
 
-    /// One passage in a corpus of its own, for the root-provenance cases.
     async fn a_passage(s: &Store) -> String {
         let src = s.insert_corpus("skript", "web", None).await.unwrap();
         let mut p = nc(0, "Spuren sind materielle Veraenderungen.");
@@ -2228,12 +1768,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_whose_root_is_a_passage_is_refused() {
-        // The invariant `insert_merged_artifact` documents and the live base
-        // violated in every one of its 135 merge-lineage rows. A merge over
-        // passages rewrites the verbatim substrate into text that belongs to no
-        // corpus and carries no span, and hides the wording someone captured
-        // behind it — the outcome `schema.sql` and the README's fidelity rule
-        // exist to prevent.
         let s = Store::memory().await.unwrap();
         let root = a_passage(&s).await;
 
@@ -2253,9 +1787,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_synthesized_artifact_may_still_name_passage_sources() {
-        // Why the check is on the merge path and not on `artifact_sources`. A
-        // synthesis draws on passages by design, and eleven rows in the live
-        // base are exactly that; a table constraint would break it.
+        // A synthesis draws on passages by design, so a table constraint would break it.
         let s = Store::memory().await.unwrap();
         let root = a_passage(&s).await;
 
@@ -2276,9 +1808,6 @@ mod tests {
         assert!(made.is_ok(), "synthesis over passages is what synthesis is");
     }
 
-    /// One query for every hit's caveats: each id maps to its own list, an id
-    /// with no row is absent rather than an error, and nothing asked for is
-    /// confused with anything else in the table.
     #[tokio::test]
     async fn caveats_for_reads_many_artifacts_in_one_query() {
         let s = Store::memory().await.unwrap();
@@ -2307,9 +1836,6 @@ mod tests {
         assert!(s.caveats_for(&[]).await.unwrap().is_empty());
     }
 
-    /// The answer is often in the artifact next to the one that matched, and
-    /// `ordinal` is already a continuous per-corpus sequence, so this is a
-    /// lookup rather than a search.
     #[tokio::test]
     async fn adjacent_artifacts_returns_the_ordinals_either_side() {
         let s = Store::memory().await.unwrap();
@@ -2322,8 +1848,6 @@ mod tests {
         assert_eq!(ordinals, vec![1, 3]);
     }
 
-    /// The first artifact has no left neighbour, and asking for ordinal -1 must
-    /// return the one row that exists rather than an error or nothing.
     #[tokio::test]
     async fn adjacent_artifacts_at_the_edge_returns_only_the_side_that_exists() {
         let s = Store::memory().await.unwrap();
@@ -2336,8 +1860,6 @@ mod tests {
         assert_eq!(got[0].ordinal, 1);
     }
 
-    /// Reaching sideways must not resurrect what the lifecycle took out of
-    /// results: a deprecated neighbour is not an answer.
     #[tokio::test]
     async fn adjacent_artifacts_skips_a_neighbour_that_is_not_active() {
         let s = Store::memory().await.unwrap();
@@ -2374,22 +1896,6 @@ mod tests {
         assert_eq!(left[0].text, "window zero");
     }
 
-    /// A chunk with no window is swept with whichever window is being
-    /// replaced; a note with no window is not.
-    ///
-    /// The `OR segment_idx IS NULL` half of `artifact_ids_for_segment`, which
-    /// had no test of its own. It was covered only by a pipeline test that
-    /// manufactured a pre-window database by nulling the column and deleting
-    /// the segment rows, and that test rotted with the 2026-09 capture
-    /// reshape and was permanently ignored. The rule it was guarding is a
-    /// property of this one query, so it is asked of the query directly and
-    /// cannot rot with a pipeline again.
-    ///
-    /// Both halves matter and they pull opposite ways. Without the sweep a
-    /// re-segmentation appends a second copy of every window-less chunk beside
-    /// the first. With it and no note exemption, the first window sees the
-    /// corpus as already written and skips every passage, so a captured file
-    /// carrying an annotation is never chunked at all.
     #[tokio::test]
     async fn a_windowless_chunk_is_swept_with_the_window_and_a_note_is_not() {
         let s = Store::memory().await.unwrap();
@@ -2398,12 +1904,10 @@ mod tests {
         owned.segment_idx = Some(1);
         let mut elsewhere = nc(1, "written for window two");
         elsewhere.segment_idx = Some(2);
-        // No window: written before the column existed.
         let orphan = nc(2, "written before windows existed");
         s.insert_artifacts(&src.id, &[owned, elsewhere, orphan])
             .await
             .unwrap();
-        // A note belongs to no window because it belongs to the capture.
         s.insert_artifacts_with_provenance(
             &src.id,
             &[nc(3, "what the person said about the file")],
@@ -2520,22 +2024,18 @@ mod tests {
 
     #[tokio::test]
     async fn re_embedding_a_corpus_is_not_an_edit() {
-        // `updated_at` answers whether the text on screen is the text that was
-        // captured. Re-embedding changes no text — it is a model change or a
-        // `--reindex` — so stamping it here would mark every artifact in the
-        // corpus as edited today, which is the one thing the column exists to
-        // deny.
+        // Re-embedding changes no text, so `updated_at` must not move.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let c = s.insert_artifacts(&src.id, &[nc(0, "x")]).await.unwrap()[0].clone();
 
         s.reset_embed_state(&src.id).await.unwrap();
 
-        let stamp: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
-            .bind(&c.id)
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let stamp: i64 =
+            sqlx::query_scalar!("SELECT updated_at FROM artifacts WHERE id = ?", &c.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
         assert_eq!(stamp, 0, "a re-embed reported itself as an edit");
         let got = s.artifacts_for_corpus(&src.id).await.unwrap();
         assert_eq!(
@@ -2547,10 +2047,6 @@ mod tests {
 
     #[tokio::test]
     async fn editing_an_artifact_stamps_when_it_changed() {
-        // The one question the base could not previously answer about itself.
-        // `created_at` says when it arrived and `last_verified_at` says when
-        // someone vouched for it; neither says whether the text on screen is
-        // the text that was captured.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let c = s
@@ -2559,20 +2055,20 @@ mod tests {
             .unwrap()
             .remove(0);
 
-        let before: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
-            .bind(&c.id)
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let before: i64 =
+            sqlx::query_scalar!("SELECT updated_at FROM artifacts WHERE id = ?", &c.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
         assert_eq!(before, 0, "a fresh row has never been edited");
 
         s.update_artifact_text(&c.id, "after").await.unwrap();
 
-        let after: i64 = sqlx::query_scalar("SELECT updated_at FROM artifacts WHERE id = ?")
-            .bind(&c.id)
-            .fetch_one(&s.pool)
-            .await
-            .unwrap();
+        let after: i64 =
+            sqlx::query_scalar!("SELECT updated_at FROM artifacts WHERE id = ?", &c.id)
+                .fetch_one(&s.pool)
+                .await
+                .unwrap();
         assert!(after > 0, "an edit says when it happened");
     }
 
@@ -2621,10 +2117,7 @@ mod tests {
 
     #[tokio::test]
     async fn listing_dangling_supersessions_does_not_clear_them() {
-        // The healing order depends on this being a read. If listing also
-        // cleared the rows, a vector write that then failed would leave the
-        // artifact hidden with `superseded_by` already NULL: off the Ops list,
-        // past the sweep's self-heal branch, and unreachable by any button.
+        // Listing must not clear: a failed vector write would leave the artifact hidden and lost.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
@@ -2681,8 +2174,6 @@ mod tests {
 
     #[tokio::test]
     async fn liveness_is_answerable_without_fetching_the_row() {
-        // What `arm_dedupe` reads 200 times per tick, most of them for pairs
-        // it goes on to skip — two columns, never the text.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
@@ -2708,20 +2199,17 @@ mod tests {
             s.artifact_in_results(&made[1].id).await.unwrap(),
             Some(false)
         );
-        // A missing row is its own answer, not an error: the caller treats a
-        // cascaded-away pair differently from a store that is unwell.
+        // A cascaded-away pair is not a store fault.
         assert_eq!(s.artifact_in_results("no-such-id").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn the_fts_index_is_gone() {
-        // The lexical half of search lives in Qdrant now. This asserts the
-        // SQLite index and its three write triggers were actually dropped,
-        // rather than left behind to be paid for on every artifact write.
+        // The lexical half lives in Qdrant; the SQLite index and triggers must be gone.
         let s = Store::memory().await.unwrap();
-        let leftovers: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM sqlite_master
-             WHERE name = 'artifacts_fts' OR name LIKE 'artifacts_a%'",
+        let leftovers: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master
+             WHERE name = 'artifacts_fts' OR name LIKE 'artifacts_a%'"#
         )
         .fetch_all(&s.pool)
         .await
@@ -2758,7 +2246,6 @@ mod tests {
         assert_eq!(made[0].provenance, Provenance::Passage);
         let read = s.get_artifact(&made[0].id).await.unwrap();
         assert_eq!(read.provenance, Provenance::Passage);
-        // The old entry point still writes captured rows.
         let cap = s
             .insert_artifacts(&src.id, &[nc(1, "captured")])
             .await
@@ -2783,10 +2270,6 @@ mod tests {
         assert_eq!(texts, vec!["a", "c"]);
     }
 
-    /// One `?` per id, and the callers hand this whatever their own walk
-    /// produced: `dedupe::run` flattens every root of both members together,
-    /// which repeats a shared source and is capped by nothing. Past
-    /// SQLITE_MAX_VARIABLE_NUMBER that is a prepare error, not a slow query.
     #[tokio::test]
     async fn a_long_repetitive_list_of_ids_is_still_one_answer() {
         let s = Store::memory().await.unwrap();
@@ -2823,12 +2306,6 @@ mod tests {
         assert_eq!(ids, vec![c[0].id.clone()]);
     }
 
-    /// Nor a merge, and for a reason the passage case does not carry: a merge
-    /// is *never* armed by the embed path (`embed::mark_indexed`), so the
-    /// backstop's own test — no relate row means the arming was lost — is true
-    /// of every merge on the base. Filtering passages alone therefore hands one
-    /// back on the very next repair tick and makes each merge an anchor again,
-    /// which is exactly the walk the withholding was added to stop.
     #[tokio::test]
     async fn the_relate_backstop_never_lists_a_merge_either() {
         let s = Store::memory().await.unwrap();
@@ -2861,12 +2338,6 @@ mod tests {
         assert_eq!(ids.len(), 2, "it should still list the two captured rows");
     }
 
-    /// The backstop has to be able to see past its own window.
-    ///
-    /// A relate row survives its completion — that is the whole mechanism, "no
-    /// job at all" meaning "never asked" — so on a base with any history the
-    /// oldest artifacts are all armed. A fixed window over them comes back
-    /// empty every pass, for ever, and everything behind it is out of reach.
     #[tokio::test]
     async fn the_relate_backstop_walks_past_a_window_that_is_already_armed() {
         let s = Store::memory().await.unwrap();
@@ -2875,10 +2346,8 @@ mod tests {
         for a in s.insert_artifacts(&src.id, &made).await.unwrap() {
             s.mark_embedded(&a.id, "fake", 0).await.unwrap();
         }
-        // In the order the walk takes them, so "the first window" means
-        // something whatever ids were minted.
         let ordered: Vec<String> =
-            sqlx::query_scalar("SELECT id FROM artifacts ORDER BY created_at, id")
+            sqlx::query_scalar!(r#"SELECT id AS "id!" FROM artifacts ORDER BY created_at, id"#)
                 .fetch_all(&s.pool)
                 .await
                 .unwrap();
@@ -2901,8 +2370,6 @@ mod tests {
         );
     }
 
-    /// And the walk wraps: an artifact that loses its unit while the cursor is
-    /// already past it is found on the next lap rather than never.
     #[tokio::test]
     async fn the_relate_backstop_starts_over_when_it_runs_out() {
         let s = Store::memory().await.unwrap();
@@ -2923,10 +2390,7 @@ mod tests {
         }
         assert!(s.list_unrelated_artifact_ids(8).await.unwrap().is_empty());
 
-        // The arming that went missing, behind a cursor that has already been
-        // everywhere.
-        sqlx::query("DELETE FROM jobs WHERE target_id = ?")
-            .bind(&ids[0])
+        sqlx::query!("DELETE FROM jobs WHERE target_id = ?", &ids[0])
             .execute(&s.control.pool)
             .await
             .unwrap();
@@ -2938,8 +2402,6 @@ mod tests {
         );
     }
 
-    /// The rail says a hit continues, and the whole list has to be answered in
-    /// one read rather than one per row.
     #[tokio::test]
     async fn continuations_of_names_the_next_active_artifact_for_a_whole_list() {
         let s = Store::memory().await.unwrap();
@@ -2955,8 +2417,6 @@ mod tests {
         assert_eq!(got.get(&made[1].id), Some(&made[2].id));
     }
 
-    /// The last passage of a document continues nowhere, and the rail must say
-    /// nothing rather than offer a link to the end of the list.
     #[tokio::test]
     async fn continuations_of_omits_the_last_artifact_of_a_document() {
         let s = Store::memory().await.unwrap();
@@ -2973,8 +2433,6 @@ mod tests {
         );
     }
 
-    /// The same lifecycle rule as everywhere else on this path: what results
-    /// hide is not what the document continues into.
     #[tokio::test]
     async fn continuations_of_steps_over_a_row_that_is_not_active() {
         let s = Store::memory().await.unwrap();
@@ -2991,8 +2449,6 @@ mod tests {
         assert_eq!(got.get(&made[0].id), Some(&made[2].id));
     }
 
-    /// A merged artifact belongs to no corpus, so it has no reading order to
-    /// continue in. Asking must not invent one out of another document's rows.
     #[tokio::test]
     async fn continuations_of_says_nothing_about_a_merged_artifact() {
         let s = Store::memory().await.unwrap();
@@ -3134,8 +2590,6 @@ mod tests {
         assert_eq!(read.cues, vec!["how do I a and b".to_string()]);
         // Its sources stay active: a generation supersedes nothing.
         assert!(s.get_artifact(&made[0].id).await.unwrap().in_results());
-        // A generation written from the generation: roots are still a and b,
-        // reached through G1.
         let gen2 = s
             .insert_synthesized_artifact(
                 &NewSynthesized {
@@ -3167,10 +2621,7 @@ mod tests {
 
     #[tokio::test]
     async fn retirement_stamps_retired_at_and_reactivation_clears_it() {
-        // The reap sweep's age rule reads this stamp; a transition that forgot
-        // to write it would leave an artifact retired forever without ever
-        // becoming a candidate, and one that forgot to clear it would let a
-        // reactivated artifact walk into the reaper with a stale clock.
+        // The age rule reads this stamp; it must be written on retire and cleared on reactivate.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
@@ -3219,26 +2670,26 @@ mod tests {
         );
     }
 
-    /// Push an artifact's retirement into the past, as if it happened then.
     async fn backdate_retired_at(s: &Store, id: &str, secs_ago: i64) {
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(now() - secs_ago)
-            .bind(id)
-            .execute(&s.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            now() - secs_ago,
+            id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
     }
 
-    /// An open reminder on the artifact, the shape the reap rules must respect.
     async fn insert_open_moment(s: &Store, artifact_id: &str) {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
              VALUES (?, ?, 'due', ?, 'UTC', 'set', ?)",
+            new_id(),
+            artifact_id,
+            now() + 3_600,
+            now()
         )
-        .bind(new_id())
-        .bind(artifact_id)
-        .bind(now() + 3_600)
-        .bind(now())
         .execute(&s.pool)
         .await
         .unwrap();
@@ -3261,18 +2712,12 @@ mod tests {
                 .unwrap();
         }
         backdate_retired_at(&s, &made[0].id, 100 * 86_400).await;
-        // made[1] keeps its fresh stamp — too young.
-        // A reminder on a retired artifact is on no band and has no button: it
-        // can never be completed, and counting it kept this row out of the
-        // sweep permanently.
+        // made[1] keeps its fresh stamp: too young.
         backdate_retired_at(&s, &made[2].id, 100 * 86_400).await;
         insert_open_moment(&s, &made[2].id).await;
 
-        // A second note, whose live artifact still carries an open reminder.
-        // The retired one beside it is what the rule is actually for: somebody
-        // is still being reminded about this note, so its text stays.
-        // Its own text: `insert_corpus` deduplicates on content, and a second
-        // "raw" would be the same note again rather than a second one.
+        // A second note whose live artifact still carries an open reminder; distinct text, since
+        // `insert_corpus` deduplicates on content.
         let other = s.insert_corpus("another note", "web", None).await.unwrap();
         let pair = s
             .insert_artifacts(
@@ -3298,13 +2743,6 @@ mod tests {
         );
     }
 
-    /// The reminder guard asks `has_open_reminder_for_corpus`' question in
-    /// SQL, so it has to ask it the same way: the moment's note is
-    /// `COALESCE(m.origin_corpus_id, live.corpus_id)`. Reading `live.corpus_id`
-    /// alone meant a merge — which carries an open moment onto a merged
-    /// artifact, whose `corpus_id` is NULL — made the comparison answer NULL,
-    /// the guard pass, and reap wipe the text a reminder still being pushed
-    /// had been read out of.
     #[tokio::test]
     async fn a_reminder_carried_onto_a_merged_artifact_still_holds_its_note_back() {
         let s = Store::memory().await.unwrap();
@@ -3321,7 +2759,6 @@ mod tests {
             .unwrap();
         backdate_retired_at(&s, &made[1].id, 100 * 86_400).await;
 
-        // The merge's output: an artifact of no single note.
         let merged = s
             .insert_merged_artifact(
                 &NewMerged {
@@ -3339,18 +2776,16 @@ mod tests {
             "a merged artifact belongs to no one note, which is the whole point"
         );
 
-        // The open reminder rides onto it, remembering the note it was read
-        // out of.
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, origin_corpus_id, created_at)
              VALUES (?, ?, 'due', ?, 'UTC', 'set', ?, ?)",
+            new_id(),
+            &merged,
+            now() + 3_600,
+            &src.id,
+            now()
         )
-        .bind(new_id())
-        .bind(&merged)
-        .bind(now() + 3_600)
-        .bind(&src.id)
-        .bind(now())
-        .execute(&s.pool)
+            .execute(&s.pool)
         .await
         .unwrap();
 
@@ -3380,14 +2815,6 @@ mod tests {
         assert_eq!(s.get_artifact(&made[1].id).await.unwrap().text, "retired");
     }
 
-    /// And the candidate's side of that comparison is a set, not a column.
-    ///
-    /// `artifacts.corpus_id` is NULL for every merged row — the schema says so
-    /// and says why — so `= art.corpus_id` answered NULL for exactly the
-    /// candidates a merge produces. The `NOT EXISTS` was vacuously true, and a
-    /// superseded merge past `min_age_secs` was nominated and buried with a
-    /// live root still carrying the open reminder its text had been read out
-    /// of. What a merged candidate belongs to is its captured roots' corpora.
     #[tokio::test]
     async fn a_superseded_merge_is_held_back_by_the_reminder_on_the_note_it_was_made_from() {
         let s = Store::memory().await.unwrap();
@@ -3399,8 +2826,6 @@ mod tests {
             .insert_artifacts(&src.id, &[nc(0, "folded in"), nc(1, "still standing")])
             .await
             .unwrap();
-        // The reminder is on the note, in the ordinary way: an active artifact
-        // of the corpus, nothing merged about it.
         insert_open_moment(&s, &made[1].id).await;
 
         let merged = s
@@ -3419,7 +2844,6 @@ mod tests {
             s.get_artifact(&merged).await.unwrap().corpus_id.is_none(),
             "which is the NULL the guard used to compare against"
         );
-        // The merge is later superseded by something else and ages out.
         s.set_artifact_status(&merged, ArtifactStatus::Deprecated)
             .await
             .unwrap();
@@ -3456,12 +2880,13 @@ mod tests {
         s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        // Simulate a row retired before the column existed.
-        sqlx::query("UPDATE artifacts SET retired_at = NULL WHERE id = ?")
-            .bind(&made[0].id)
-            .execute(&s.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = NULL WHERE id = ?",
+            &made[0].id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
         assert_eq!(s.stamp_unaged_retired().await.unwrap(), 1);
         assert!(
             s.get_artifact(&made[0].id)
@@ -3484,10 +2909,6 @@ mod tests {
         );
     }
 
-    /// The two clauses `bury`'s re-check used to be missing. `nominees` reads a
-    /// page up front and the sweep spends a model call per row, so minutes pass
-    /// between the nomination and the burial — long enough for a reminder to be
-    /// set on the note, and the burial went ahead anyway.
     #[tokio::test]
     async fn a_reminder_set_while_the_judgement_was_in_flight_stops_the_burial() {
         let s = Store::memory().await.unwrap();
@@ -3500,10 +2921,8 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(&s, &made[1].id, 100 * 86_400).await;
-        // Nominated: the sweep would take it.
         assert_eq!(s.reap_candidates(90 * 86_400, 20).await.unwrap().len(), 1);
 
-        // And then somebody sets a reminder on the note, on its live artifact.
         insert_open_moment(&s, &made[0].id).await;
         assert!(
             s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
@@ -3527,10 +2946,6 @@ mod tests {
         assert_eq!(s.get_artifact(&made[1].id).await.unwrap().text, "retired");
     }
 
-    /// A reaped row says `embedded` while its point is deleted, by design —
-    /// nothing about a burial is an embed. Read as drift, that queued an
-    /// `Embed` per pass, and the stub still has a title, so the embed succeeded
-    /// and wrote a point for text that is in the graveyard.
     #[tokio::test]
     async fn a_reaped_row_is_not_drift_for_the_heal_to_re_embed() {
         let s = Store::memory().await.unwrap();
@@ -3567,12 +2982,6 @@ mod tests {
         );
     }
 
-    /// The Insights undo list folds seven queries into one list of rows, and
-    /// two of them draw hidden artifacts. `deprecate` and a supersession are
-    /// independent, so an artifact can carry both — and both rows came back
-    /// under the one `kind` the list gives them, about one subject. A client
-    /// that reads `subject_id` as the row's identity answered one and lost the
-    /// other; the page showed the same artifact twice.
     #[tokio::test]
     async fn a_deprecated_artifact_that_is_also_superseded_is_listed_once() {
         let s = Store::memory().await.unwrap();
@@ -3602,9 +3011,7 @@ mod tests {
 
     #[tokio::test]
     async fn burying_an_artifact_that_is_live_again_does_nothing() {
-        // `nominees` reads a page up front and the sweep then spends one model
-        // call per row, so a verdict can land on an artifact somebody has since
-        // put back. Unguarded, the burial wiped the text of a live row.
+        // The verdict can land on an artifact somebody has since put back.
         let s = Store::memory().await.unwrap();
         let src = s.insert_corpus("raw", "web", None).await.unwrap();
         let made = s
@@ -3614,7 +3021,6 @@ mod tests {
         s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        // Reactivated while the judgement was in flight.
         s.set_artifact_status(&made[0].id, ArtifactStatus::Active)
             .await
             .unwrap();
@@ -3632,7 +3038,6 @@ mod tests {
         assert!(row.reaped_at.is_none());
         assert!(s.graveyard_row(&made[0].id).await.unwrap().is_none());
 
-        // And a row already buried is not buried twice.
         s.set_artifact_status(&made[0].id, ArtifactStatus::Deprecated)
             .await
             .unwrap();
@@ -3647,12 +3052,6 @@ mod tests {
         ));
     }
 
-    /// A buried stub keeps `superseded_by` on purpose, which made it look
-    /// exactly like an artifact hidden in favour of nothing once the winner was
-    /// deleted. Healing it set `status = 'active'` and cleared `retired_at`,
-    /// putting a permanently active *empty* artifact into the base that
-    /// `reap_candidates` — which requires `reaped_at IS NULL` — could never
-    /// take back.
     #[tokio::test]
     async fn a_buried_stub_is_not_resurrected_by_the_dangling_heal() {
         let s = Store::memory().await.unwrap();
@@ -3668,7 +3067,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The keeper goes; the loser's pointer now names nothing.
         s.delete_artifact(&keeper).await.unwrap();
         assert!(
             s.dangling_superseded().await.unwrap().is_empty(),
@@ -3679,9 +3077,6 @@ mod tests {
         assert_ne!(row.status, ArtifactStatus::Active);
     }
 
-    /// Undoing a burial is a decision somebody makes, and it has to bring the
-    /// text back with it — an empty row returned to search is the loss the
-    /// graveyard exists to prevent.
     #[tokio::test]
     async fn exhuming_restores_the_text_and_asks_for_a_fresh_embedding() {
         let s = Store::memory().await.unwrap();

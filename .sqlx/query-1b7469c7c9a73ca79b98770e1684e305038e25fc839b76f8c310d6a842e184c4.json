@@ -1,0 +1,158 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT * FROM artifact_links WHERE a_id = ? AND b_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "a_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "a_id"
+          }
+        }
+      },
+      {
+        "name": "b_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "b_id"
+          }
+        }
+      },
+      {
+        "name": "weight",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "name": "bumped_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "bumped_at"
+          }
+        }
+      },
+      {
+        "name": "queries",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "queries"
+          }
+        }
+      },
+      {
+        "name": "cues",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "cues"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "judged_rev_a",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "judged_rev_a"
+          }
+        }
+      },
+      {
+        "name": "judged_rev_b",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "judged_rev_b"
+          }
+        }
+      },
+      {
+        "name": "judge_attempts",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "judge_attempts"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "1b7469c7c9a73ca79b98770e1684e305038e25fc839b76f8c310d6a842e184c4"
+}

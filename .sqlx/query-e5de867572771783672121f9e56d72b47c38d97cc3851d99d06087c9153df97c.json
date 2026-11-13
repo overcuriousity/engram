@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT code_hash FROM pair_grants",
+  "describe": {
+    "columns": [
+      {
+        "name": "code_hash",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pair_grants",
+            "name": "code_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e5de867572771783672121f9e56d72b47c38d97cc3851d99d06087c9153df97c"
+}

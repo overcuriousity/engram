@@ -1,0 +1,24 @@
+/* The vector background, drawn by app.js. `pointer-events: none`: it covers the viewport. */
+#vec-bg {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: -1;
+  /* The ceiling; app.js sets `typing` on <html> while the box holds text, to step it back. */
+  opacity: 0.72;
+  transition: opacity 400ms ease;
+}
+html.typing #vec-bg { opacity: 0.18; }
+
+/* On wide idle pages, a clearing under the column and the field in a ring around it. */
+@media (width >= 62rem) {
+  html:not(.typing) body:has(.regions-rail-focus-source) #vec-bg {
+    /* Louder, since the mask removes the densest part. */
+    opacity: 0.88;
+    /* Centred on the column, which sits above the window's middle. */
+    mask-image: radial-gradient(ellipse 60% 70% at 50% 40%,
+      transparent 0 20%, black 48%, black 78%, transparent 100%);
+  }
+}

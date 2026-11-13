@@ -1,21 +1,9 @@
-//! The corpus journal: what the base did to itself, and what it took back.
-//!
-//! Every action a corpus job takes on its own writes one row per subject:
-//! what was hidden, buried or created, in favour of what, on what evidence.
-//! An undo — a person's button, or the base on what use showed — stamps the
-//! row rather than deleting it. The record the ranking side has in
-//! `generations`, for the corpus: "why is this hidden" and "what did the base
-//! do to itself" always have an answer.
-//!
-//! The rows are also the memory. An action taken back on a subject is not
-//! taken again on that subject by that job, and the action sites read this
-//! before they act — the corpus side's `tried_candidates`.
+//! The corpus journal: one row per subject a corpus job acted on. An undo stamps the row;
+//! an action taken back on a subject is not taken again by that job.
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
-/// Which job acted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Job {
     Dedupe,
@@ -49,7 +37,6 @@ impl Job {
     }
 }
 
-/// What was done to the subject.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// An original folded into a merge; `survivor_id` is the merge.
@@ -64,9 +51,7 @@ pub enum Kind {
     Promote,
     /// A reminder or event filed from a reading; the subject is the moment.
     Moment,
-    /// Rewritten shorter as a new version of itself; subject and survivor
-    /// are the same artifact, and `evidence_json.version` names the version
-    /// retired.
+    /// Subject and survivor are the same; `evidence_json.version` names the version retired.
     Condense,
 }
 
@@ -97,7 +82,6 @@ impl Kind {
     }
 }
 
-/// Who took an action back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UndoneBy {
     /// A person pressed something.
@@ -131,8 +115,7 @@ pub struct NewAction {
     pub survivor_id: Option<String>,
     pub detail: Option<String>,
     pub evidence: serde_json::Value,
-    /// The pair's cosine, for the dedupe kinds; read by the review
-    /// threshold's bands.
+    /// The pair's cosine, for the dedupe kinds; read by the review threshold's bands.
     pub pair_score: Option<f32>,
 }
 
@@ -152,34 +135,43 @@ pub struct Action {
     pub undone_reason: Option<String>,
 }
 
-const COLUMNS: &str = "id, at, job, kind, subject_id, survivor_id, detail, evidence_json, \
-                       pair_score, undone_at, undone_by, undone_reason";
+/// A row as `read` reads it, for `query_as!`.
+pub(crate) struct ActionRow {
+    pub id: String,
+    pub at: i64,
+    pub job: String,
+    pub kind: String,
+    pub subject_id: String,
+    pub survivor_id: Option<String>,
+    pub detail: Option<String>,
+    pub evidence_json: String,
+    pub pair_score: Option<f64>,
+    pub undone_at: Option<i64>,
+    pub undone_by: Option<String>,
+    pub undone_reason: Option<String>,
+}
 
-fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Action> {
-    let job: String = r.get("job");
-    let kind: String = r.get("kind");
+fn read(r: ActionRow) -> Result<Action> {
+    let job: String = r.job;
+    let kind: String = r.kind;
     Ok(Action {
-        id: r.get("id"),
-        at: r.get("at"),
+        id: r.id,
+        at: r.at,
         job: Job::parse(&job).ok_or_else(|| Error::Store(format!("corpus_actions: job {job}")))?,
         kind: Kind::parse(&kind)
             .ok_or_else(|| Error::Store(format!("corpus_actions: kind {kind}")))?,
-        subject_id: r.get("subject_id"),
-        survivor_id: r.get("survivor_id"),
-        detail: r.get("detail"),
-        evidence_json: r.get("evidence_json"),
-        pair_score: r.get("pair_score"),
-        undone_at: r.get("undone_at"),
-        undone_by: r
-            .get::<Option<String>, _>("undone_by")
-            .as_deref()
-            .and_then(UndoneBy::parse),
-        undone_reason: r.get("undone_reason"),
+        subject_id: r.subject_id,
+        survivor_id: r.survivor_id,
+        detail: r.detail,
+        evidence_json: r.evidence_json,
+        pair_score: r.pair_score.map(|x| x as f32),
+        undone_at: r.undone_at,
+        undone_by: r.undone_by.as_deref().and_then(UndoneBy::parse),
+        undone_reason: r.undone_reason,
     })
 }
 
-/// Write one row through whatever executor the caller has, so a site that
-/// acts inside a transaction can journal inside the same one.
+/// Takes any executor, so a site inside a transaction can journal in the same one.
 pub(crate) async fn insert<'e, E>(ex: E, a: &NewAction) -> Result<String>
 where
     E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
@@ -187,20 +179,20 @@ where
     let id = new_id();
     let evidence = serde_json::to_string(&a.evidence)
         .map_err(|e| Error::Store(format!("corpus_actions: {e}")))?;
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO corpus_actions
            (id, at, job, kind, subject_id, survivor_id, detail, evidence_json, pair_score)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        &id,
+        now(),
+        a.job.as_str(),
+        a.kind.as_str(),
+        &a.subject_id,
+        &a.survivor_id,
+        &a.detail,
+        evidence,
+        a.pair_score
     )
-    .bind(&id)
-    .bind(now())
-    .bind(a.job.as_str())
-    .bind(a.kind.as_str())
-    .bind(&a.subject_id)
-    .bind(&a.survivor_id)
-    .bind(&a.detail)
-    .bind(evidence)
-    .bind(a.pair_score)
     .execute(ex)
     .await?;
     Ok(id)
@@ -211,20 +203,12 @@ impl Store {
         insert(&self.pool, a).await
     }
 
-    /// Open rows — not taken back — of these kinds, oldest first, at most
-    /// `limit` in all.
     pub async fn open_actions(&self, kinds: &[Kind], limit: usize) -> Result<Vec<Action>> {
         self.open_actions_after(kinds, &super::Cursor::default(), limit)
             .await
     }
 
-    /// The same, from a position rather than from the beginning.
-    ///
-    /// A reader with a limit needs this: an open row leaves the set only by
-    /// being taken back, which is the rare case, so a reader that always
-    /// starts at the oldest row sees the same `limit` rows on every pass and
-    /// never reaches anything written since. Rule 1 walks forward on this
-    /// cursor and wraps.
+    /// Open rows rarely leave the set: a limited reader must page forward to reach new rows.
     pub async fn open_actions_after(
         &self,
         kinds: &[Kind],
@@ -233,20 +217,20 @@ impl Store {
     ) -> Result<Vec<Action>> {
         let mut out = Vec::new();
         for kind in kinds {
-            let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-                "SELECT {COLUMNS} FROM corpus_actions
+            let rows = sqlx::query_as!(
+                crate::store::actions::ActionRow,
+                r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions
                   WHERE kind = ? AND undone_at IS NULL
                     AND (at > ? OR (at = ? AND id > ?))
-                  ORDER BY at ASC, id ASC LIMIT ?"
-            )))
-            .bind(kind.as_str())
-            .bind(after.at)
-            .bind(after.at)
-            .bind(&after.id)
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
+                  ORDER BY at ASC, id ASC LIMIT ?"#,
+                kind.as_str(),
+                after.at,
+                after.at,
+                &after.id,
+                limit as i64
+            ).fetch_all(&self.pool)
             .await?;
-            for r in &rows {
+            for r in rows {
                 out.push(read(r)?);
             }
         }
@@ -255,58 +239,39 @@ impl Store {
         Ok(out)
     }
 
-    /// The open row on this subject of this kind, if any.
     pub async fn action(&self, id: &str) -> Result<Option<Action>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM corpus_actions WHERE id = ?"
-        )))
-        .bind(id)
-        .fetch_optional(&self.pool)
+        sqlx::query_as!(
+            crate::store::actions::ActionRow,
+            r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions WHERE id = ?"#,
+            id
+        ).fetch_optional(&self.pool)
         .await?
-        .as_ref()
         .map(read)
         .transpose()
     }
 
     pub async fn open_action_on(&self, subject_id: &str, kind: Kind) -> Result<Option<Action>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM corpus_actions
+        sqlx::query_as!(
+            crate::store::actions::ActionRow,
+            r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions
               WHERE subject_id = ? AND kind = ? AND undone_at IS NULL
-              ORDER BY at DESC, id DESC LIMIT 1"
-        )))
-        .bind(subject_id)
-        .bind(kind.as_str())
-        .fetch_optional(&self.pool)
+              ORDER BY at DESC, id DESC LIMIT 1"#,
+            subject_id,
+            kind.as_str()
+        ).fetch_optional(&self.pool)
         .await?
-        .as_ref()
         .map(read)
         .transpose()
     }
 
-    /// What one job wrote to the corpus on its own after `at`, undone or not:
-    /// an action counts because it was taken, whoever took it back.
-    ///
-    /// Per job, and that is the whole of the fix. One shared count over every
-    /// row but `moment` made four independent autonomous units spend one
-    /// another's allowance: ten promotions — a person reading their own base
-    /// attentively for a week — stood dedupe, reap and condense down until the
-    /// window moved, and condense, which runs last in the idle pass, found the
-    /// week already spent in every week anything else had happened. A budget
-    /// whose meaning depends on what some other job did is not a bound anybody
-    /// can reason about, and its failure is silent: a spent budget is an
-    /// ordinary state that logs at info and waits.
-    ///
-    /// So each job carries its own week. `Job::Promote` is still counted
-    /// rather than exempt — a promotion is the base acting on the corpus
-    /// unasked, which is exactly what the cap is a bound on — but it can now
-    /// only ever exhaust its own.
+    /// Undone or not. Counted per job: a shared count let one job's actions spend another's budget.
     pub async fn actions_since(&self, job: Job, at: i64) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM corpus_actions
               WHERE at > ? AND job = ? AND kind != 'moment'",
+            at,
+            job.as_str()
         )
-        .bind(at)
-        .bind(job.as_str())
         .fetch_one(&self.pool)
         .await?)
     }
@@ -314,18 +279,17 @@ impl Store {
     /// Whether an action of this kind on this subject was ever taken back —
     /// the memory an action site reads before acting again.
     pub async fn action_was_undone(&self, subject_id: &str, kind: Kind) -> Result<bool> {
-        Ok(sqlx::query_scalar::<_, i64>(
+        Ok(sqlx::query_scalar!(
             "SELECT 1 FROM corpus_actions
               WHERE subject_id = ? AND kind = ? AND undone_at IS NOT NULL LIMIT 1",
+            subject_id,
+            kind.as_str()
         )
-        .bind(subject_id)
-        .bind(kind.as_str())
         .fetch_optional(&self.pool)
         .await?
         .is_some())
     }
 
-    /// Stamp the open rows on `subject_id` of `kind`. Rows stamped.
     pub async fn undo_action_on(
         &self,
         subject_id: &str,
@@ -333,57 +297,49 @@ impl Store {
         by: UndoneBy,
         reason: &str,
     ) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?
               WHERE subject_id = ? AND kind = ? AND undone_at IS NULL",
+            now(),
+            by.as_str(),
+            reason,
+            subject_id,
+            kind.as_str()
         )
-        .bind(now())
-        .bind(by.as_str())
-        .bind(reason)
-        .bind(subject_id)
-        .bind(kind.as_str())
         .execute(&self.pool)
         .await?
         .rows_affected())
     }
 
-    /// Stamp every open *merge* row whose survivor is `survivor_id`: a merge's
-    /// originals, taken back together.
-    ///
-    /// Only the merge rows. A merge is an ordinary artifact once it exists, so
-    /// it can later win a supersession — and that row names it as `survivor_id`
-    /// too. Stamping it here would report an undo that never happened, hide the
-    /// still-superseded loser from both retract rules (`open_action_on` returns
-    /// nothing for a stamped row), and make dedupe refuse it forever as
-    /// `TAKEN_BACK`.
+    /// Only merge rows: a merge can later win a supersession, and stamping that row would report
+    /// an undo that never happened and make dedupe refuse the loser forever.
     pub async fn undo_actions_under(
         &self,
         survivor_id: &str,
         by: UndoneBy,
         reason: &str,
     ) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?
               WHERE survivor_id = ? AND kind = 'merge' AND undone_at IS NULL",
+            now(),
+            by.as_str(),
+            reason,
+            survivor_id
         )
-        .bind(now())
-        .bind(by.as_str())
-        .bind(reason)
-        .bind(survivor_id)
         .execute(&self.pool)
         .await?
         .rows_affected())
     }
 
-    /// Newest first, for disclosure.
     pub async fn recent_actions(&self, limit: usize) -> Result<Vec<Action>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM corpus_actions ORDER BY at DESC, id DESC LIMIT ?"
-        )))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+        sqlx::query_as!(
+            crate::store::actions::ActionRow,
+            r#"SELECT id AS "id!", at AS "at!", job AS "job!", kind AS "kind!", subject_id AS "subject_id!", survivor_id AS "survivor_id?", detail AS "detail?", evidence_json AS "evidence_json!", pair_score AS "pair_score?", undone_at AS "undone_at?", undone_by AS "undone_by?", undone_reason AS "undone_reason?" FROM corpus_actions ORDER BY at DESC, id DESC LIMIT ?"#,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
@@ -406,14 +362,6 @@ mod tests {
         assert_eq!(store.actions_since(Job::Sleep, i64::MAX).await.unwrap(), 0);
     }
 
-    /// Each job carries its own week, so none of them can stand another down.
-    ///
-    /// One shared count over every row but `moment` is what this replaces.
-    /// Ten of anything reached the default cap: ten promotions is a person
-    /// reading their own base attentively, and it silently stopped dedupe,
-    /// reap and condense for the rest of the week. Condense, which runs last
-    /// in the idle pass, therefore found the week already spent in every week
-    /// the base had been used at all.
     #[tokio::test]
     async fn one_job_s_writes_never_spend_another_job_s_week() {
         let store = Store::memory().await.unwrap();
@@ -424,8 +372,7 @@ mod tests {
             (Job::Judgement, Kind::Discard),
             (Job::Reap, Kind::Reap),
             (Job::Promote, Kind::Promote),
-            // A reminder read out of a note is the reading itself, not the
-            // base rearranging anything, and it is exempt in every job.
+            // A reminder read out of a note is exempt in every job: it rearranges nothing.
             (Job::Judgement, Kind::Moment),
         ]
         .into_iter()
@@ -566,7 +513,6 @@ mod tests {
     async fn taking_a_merge_back_leaves_a_supersession_the_merge_won() {
         let store = Store::memory().await.unwrap();
         store.record_action(&merge_of("a", "m")).await.unwrap();
-        // `m` exists now, so it can win a supersession of its own.
         store
             .record_action(&NewAction {
                 kind: Kind::Supersede,
@@ -626,8 +572,7 @@ mod tests {
         for subject in ["a", "b", "c"] {
             store.record_action(&merge_of(subject, "m")).await.unwrap();
         }
-        // All three in the same second, which is the whole clock: the id has
-        // to break the tie or the second row is never reached.
+        // Same second for all three: the id must break the tie or the second row is never reached.
         let first = store.open_actions(&[Kind::Merge], 1).await.unwrap();
         let at = super::super::Cursor {
             at: first[0].at,

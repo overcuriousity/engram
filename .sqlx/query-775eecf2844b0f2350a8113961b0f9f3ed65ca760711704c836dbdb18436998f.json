@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET retired_at = ?\n              WHERE (status != 'active' OR superseded_by IS NOT NULL) AND status != 'trashed'\n                AND retired_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "775eecf2844b0f2350a8113961b0f9f3ed65ca760711704c836dbdb18436998f"
+}

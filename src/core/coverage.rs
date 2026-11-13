@@ -1,17 +1,9 @@
 //! Which lines of a capture any artifact claims, and which nothing was written from.
-//!
-//! Pure over the text and the spans, so the corpus page and the reconcile
-//! sweep cut a document in exactly the same places.
+//! Pure over text and spans, so the corpus page and the reconcile sweep cut identically.
 
 use crate::store::artifacts::CorpusSpan;
 
-/// A capture the queue calls low-coverage: measured, and below the line
-/// `verify::LOW_COVERAGE` draws.
-///
-/// One rule for the two places that act on it — the queue row that offers a
-/// person the re-read, and the reconcile sweep that does it unasked — so the
-/// sweep never re-reads a capture the page would call well read. Unmeasured is
-/// not low: a capture with no coverage yet has not been judged at all.
+/// Shared by the queue row and the reconcile sweep; unmeasured (`None`) is not low.
 pub fn low_coverage(coverage: Option<f64>) -> bool {
     coverage.is_some_and(|c| c < crate::infer::verify::LOW_COVERAGE)
 }
@@ -19,46 +11,26 @@ pub fn low_coverage(coverage: Option<f64>) -> bool {
 pub struct CorpusLine {
     pub number: i64,
     pub text: String,
-    /// Inside the chunk's span, as opposed to the context around it.
     pub in_span: bool,
 }
 
-/// One stretch of the source, and which artifacts claim to have been written
-/// from it.
+/// A stretch of source lines and the artifacts claiming them.
 pub struct Band {
     pub from: i64,
     pub to: i64,
     pub lines: Vec<CorpusLine>,
-    /// Ids of the artifacts claiming these lines, in the order given. Empty
-    /// means nothing claims them, which is what makes this a gap.
+    /// Empty means nothing claims these lines: a gap.
     pub artifact_ids: Vec<String>,
 }
 
 impl Band {
-    /// Nothing was written from these lines. The whole point of banding: a
-    /// passage the base cannot answer a question about, and one that can be
-    /// told to read itself again.
     pub fn gap(&self) -> bool {
         self.artifact_ids.is_empty()
     }
 }
 
-/// Cut the source wherever the set of artifacts claiming it changes.
-///
-/// The corpus page's central arrangement: a band of source beside what came of
-/// it. Overlaps become their own bands rather than being merged — where two
-/// artifacts both claim a line, both are shown against it, which is the truth
-/// and needs no tie-break.
-///
-/// This asks whether any artifact *claims* a line, which is a different
-/// question from whether the line's wording survived into one. That second
-/// question is `verify::content_coverage`, and it answers it as a fraction: a
-/// faithfully rewritten line is a line whose wording did not survive and whose
-/// content did, and marking it as missed made a hundred single-line warnings
-/// out of one well-read document.
-///
-/// `highlight` is the `?from=&to=` deep link. Banding must not cost the page
-/// its "open at these lines".
+/// Cut the source wherever the set of claiming artifacts changes; overlaps become their own bands.
+/// Claims, not wording: whether a line's wording survived is `verify::content_coverage`.
 pub fn bands(
     raw_text: &str,
     spans: &[(String, CorpusSpan)],
@@ -74,11 +46,7 @@ pub fn bands(
             .map(|(id, _)| id.clone())
             .collect();
 
-        // A blank line claims nothing and means nothing. Left to itself it
-        // would cut a band in two, or open a red sliver between two paragraphs
-        // with no content in it to have missed. It continues whatever band it
-        // follows; at the head of a document there is nothing to continue, so
-        // it starts one.
+        // A blank line continues the band it follows, so it never splits one or opens an empty gap.
         if text.trim().is_empty()
             && let Some(last) = out.last()
         {
@@ -119,7 +87,6 @@ mod tests {
         }
     }
 
-    /// `(from, to, ids)` for each band, which is what every case below asserts.
     fn shape(bs: &[Band]) -> Vec<(i64, i64, Vec<&str>)> {
         bs.iter()
             .map(|b| {
@@ -143,8 +110,6 @@ mod tests {
 
     #[test]
     fn an_overlap_is_its_own_band() {
-        // Three bands, not a merge and not a tie-break: the middle really is
-        // claimed by both, and saying so is the only honest arrangement.
         let out = bands(
             "a\nb\nc\nd\ne",
             &[("x".into(), span(1, 3)), ("y".into(), span(3, 5))],
@@ -172,8 +137,6 @@ mod tests {
 
     #[test]
     fn blank_lines_between_two_spans_join_the_band_before_them() {
-        // A red sliver between two paragraphs would be noise with nothing to
-        // re-read: there is no content there to have missed.
         let out = bands(
             "a\n\n\nb",
             &[("x".into(), span(1, 1)), ("y".into(), span(4, 4))],
@@ -203,7 +166,6 @@ mod tests {
 
     #[test]
     fn the_highlight_marks_its_lines_wherever_they_fall() {
-        // The `?from=&to=` deep link an artifact's "open at these lines" uses.
         let out = bands("a\nb\nc", &[("x".into(), span(1, 3))], Some((2, 3)));
         let marked: Vec<i64> = out[0]
             .lines

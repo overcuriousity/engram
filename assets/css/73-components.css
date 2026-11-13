@@ -1,0 +1,142 @@
+.chips { display: flex; gap: 0.25rem; flex-wrap: wrap; margin-top: 0.625rem; align-items: center; }
+
+.md { font-size: var(--text-prose); }
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md h2, .md h3, .md h4 { font-size: var(--text-section); margin: 1rem 0 0.375rem;
+  color: var(--color-fg-primary); text-transform: none; letter-spacing: 0; }
+.md pre {
+  background: var(--color-bg-surface); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm); padding: 0.625rem 0.75rem;
+  overflow-x: auto; font-size: var(--text-dense);
+}
+.md code { background: var(--color-bg-surface); padding: 1px 4px;
+           border-radius: var(--radius-sm); font-size: 0.85em; }
+.md pre code { background: none; padding: 0; }
+/* A verbatim passage keeps its line breaks but not code chrome; `anywhere` breaks long leader-dot runs. */
+.md pre.verbatim {
+  background: none; border: 0; border-radius: 0; padding: 0;
+  font-family: inherit; font-size: inherit;
+  white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: visible;
+}
+.md math[display="block"] { margin: 0.5rem 0; overflow-x: auto; overflow-y: hidden; }
+.md table { border-collapse: collapse; width: 100%; font-size: var(--text-ui); }
+.md th, .md td { border: 1px solid var(--color-border); padding: 0.375rem 0.5rem; text-align: left; }
+.md blockquote { margin: 0.5rem 0; padding-left: 0.75rem;
+                 border-left: 2px solid var(--color-border-strong); color: var(--color-fg-secondary); }
+
+/* A literal no cited excerpt carries; tinted, so it stays legible inside code. */
+mark.unsupported {
+  background: var(--color-warning-dim); color: inherit;
+  border-bottom: 1px dashed var(--color-warning); padding: 0 0.1em;
+}
+
+.muted { color: var(--color-fg-muted); font-size: var(--text-ui); }
+.hint { margin: 0.375rem 0 0; font-size: var(--text-dense); line-height: 1.45; }
+.gloss { color: var(--color-fg-secondary); font-size: var(--text-micro); font-weight: normal; }
+
+.stack { display: flex; flex-direction: column; gap: 0.75rem; }
+.spinner { visibility: hidden; color: var(--color-fg-muted); font-size: var(--text-micro); }
+.htmx-request .spinner, .htmx-request.spinner { visibility: visible; }
+
+/* Takes `currentColor`, so it follows a `data-theme` override an <img> could not see. */
+.mark { display: block; flex: none; color: inherit; }
+.oc-topbar__logo .mark { width: 22px; height: 22px; }
+.brand-lockup .mark { width: 40px; height: 40px; }
+
+.brand-lockup { display: flex; align-items: center; gap: 0.55rem; margin-bottom: 0.25rem; }
+.brand-name { font-size: var(--text-page); font-weight: 600; letter-spacing: -0.02em; }
+
+.facet-label { flex: none; width: 2.5rem; padding-top: 3px; }
+
+/* The radio input is the state, hidden only from sight, so keyboard and form submission still work. */
+.chip { display: inline-flex; cursor: pointer; }
+.chip input {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%);
+}
+.chip > span {
+  display: inline-block; padding: 2px 8px; font-size: var(--text-micro);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); color: var(--color-fg-secondary);
+}
+.chip:hover > span { background: var(--color-bg-hover); }
+.chip input:checked + span {
+  background: var(--color-accent-dim); color: var(--color-accent);
+  border-color: var(--color-accent-muted);
+}
+.chip input:focus-visible + span { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+
+/* Primary, not `inherit`: muted text over the tint fell to 4.43:1. Both theme selectors, so the toggle wins. */
+mark {
+  background: var(--color-accent-dim); color: var(--color-fg-primary);
+  border-radius: 2px; padding: 0 1px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) mark { background: var(--color-warning-dim); }
+}
+:root[data-theme="dark"] mark { background: var(--color-warning-dim); }
+
+.clampable.is-clamped { max-height: 14rem; overflow: hidden; position: relative; }
+.clampable.is-clamped::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 3rem;
+  background: linear-gradient(to bottom, transparent, var(--color-bg-elevated));
+}
+
+/* Reserved space above the block: a verbatim `<pre>` would put the button on its first sentence. */
+.codewrap { position: relative; padding-top: 1.6rem; }
+.copy {
+  position: absolute; top: 0; right: 0;
+  font-family: var(--font-mono); font-size: var(--text-micro); cursor: pointer;
+  padding: 3px 7px; border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); color: var(--color-fg-secondary);
+  border: 1px solid var(--color-border-strong);
+}
+.copy:hover { color: var(--color-fg-primary); background: var(--color-bg-hover); }
+
+/* Scrolling boxes fade at the bottom instead of cutting through a line, and the fade retracts at the end.
+   `--edge` is a registered property so it can animate; without timeline support it stays 0px (no mask). */
+@property --edge {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@supports (animation-timeline: scroll(self)) {
+  .rail,
+  .raw,
+  .reasoning,
+  .split > :first-child,
+  .split > :first-child > .artifact-main {
+    mask-image: linear-gradient(to bottom, currentColor calc(100% - var(--edge)), transparent);
+    animation: scroll-edge linear both;
+    animation-timeline: scroll(self);
+  }
+
+  /* Held for most of the travel, so the fade is gone by the last line. */
+  @keyframes scroll-edge {
+    0%, 88% { --edge: 2.5rem; }
+    100%    { --edge: 0px; }
+  }
+
+  /* No reduced-motion carve-out: the mask follows the reader's own scroll. */
+}
+
+/* A nameless artifact's opening text must not read as a name; see `ui::RowLabel`. */
+.name-opening { font-weight: 400; color: var(--color-fg-secondary); }
+
+/* Replacements for the inline styles the CSP forbids. */
+.edit-form { margin-top: var(--space-3); }
+
+.textarea-tall { min-height: 12rem; }
+.textarea-mid { min-height: 8rem; }
+
+.login { margin-block: var(--space-6); }
+.qr { max-width: 256px; }
+.break-all { word-break: break-all; }
+.inline-form { display: inline; }
+.select-all { user-select: all; }
+.capture-photo { max-width: 100%; height: auto; border-radius: var(--radius-md); }
+.raw-unbounded { max-height: none; }
+.offline { max-width: 26rem; margin: 6rem auto; padding: 0 var(--space-4); text-align: center; }
+

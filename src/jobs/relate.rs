@@ -1,21 +1,5 @@
-//! What else is this artifact already saying?
-//!
-//! One artifact, its own neighbours, one query. `VectorStore::neighbours`
-//! addresses the point by id, so the vector is looked up in the index and no
-//! embedding call is paid, and it already excludes superseded and deprecated
-//! points. Coverage is 1, independent of N, at one round trip per artifact.
-//!
-//! Completeness argument: for a pair (X, Y), the member embedded **second**
-//! finds the other. When X's unit runs, Y is either already indexed — X finds
-//! it — or it is not, and Y finds X when its own unit runs. Embedded in the
-//! same batch, both units run after the shared upsert and both see each other.
-//! No pair falls through, provided both units run; the sweep remains as the
-//! backstop for the ones that did not.
-//!
-//! A separate unit rather than a tail on `embed_batch`: a failing Qdrant query
-//! would otherwise fail the embed job, whose retry pays for the embedding all
-//! over again. Two failure domains, two units — the same reasoning that split
-//! the judge calls out of the sweep.
+//! An artifact's own neighbours, by point id: no embedding call; superseded and deprecated skipped.
+//! Of any pair the member embedded second finds the other; the sweep backstops missed units.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -23,11 +7,7 @@ use crate::store::artifacts::{Chunk, Provenance};
 use crate::store::jobs::Stage;
 use crate::store::pairs::PairState;
 
-/// Queue a neighbour query for this artifact.
-///
-/// Idle-only, like every other automatic arming: a re-embed can reach this
-/// while an earlier unit is still queued, and `enqueue` would wind that unit's
-/// attempts back to zero underneath it.
+/// Idle-only: `enqueue` would wind a still-queued unit's attempts back to zero.
 pub async fn arm(core: &Core, artifact_id: &str, seq: i64) -> Result<()> {
     core.store
         .rearm_idle_seq(Stage::Relate, "artifact", artifact_id, seq)
@@ -36,18 +16,12 @@ pub async fn arm(core: &Core, artifact_id: &str, seq: i64) -> Result<()> {
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let me = core.store.get_artifact(artifact_id).await?;
-    // Neither a passage nor a merge is anchored: see `embed::mark_indexed` for
-    // why each is withheld. Said here too, so a unit armed some other way —
-    // the sweep's repair pass, an operator, a re-embed — files nothing.
-    //
-    // `Merged` and not `is_model_written()`, the same distinction the embed
-    // path draws: a synthesis is ordinary dedupe material and stays an anchor.
+    // Neither a passage nor a merge is anchored (`embed::mark_indexed`), whoever armed the unit. A
+    // synthesis stays an anchor.
     if me.provenance == Provenance::Passage || me.provenance == Provenance::Merged {
         return Ok(());
     }
-    // A retired artifact has no duplicates worth recording. Every pair naming
-    // it would be skipped by `classify_pair` anyway, so this saves the query
-    // rather than changing the outcome.
+    // Saves the query only: `classify_pair` would skip every pair naming a retired artifact.
     if !me.in_results() {
         tracing::debug!(
             artifact_id,
@@ -61,15 +35,17 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         .vectors
         .neighbours(artifact_id, core.consolidate.per_point)
         .await?;
-    // The live generation's, not the file's: a base with autonomy on moves
-    // this threshold on what its lowest band earned. Read once, before any
-    // await, so the lock is never held across one.
-    let review_min = core.ranking.read().expect("ranking lock").review_min;
+    // The live generation's threshold, which autonomy moves; read before any await so the lock is
+    // never held across one.
+    let review_min = core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .review_min;
 
     for h in hits {
-        // `similarity` and not `score`. `review_min` is a cosine, and `score`
-        // is a fused rank everywhere else in this trait — `neighbours` fills
-        // the cosine in precisely so this comparison means what it reads as.
+        // `similarity`, not `score`: `review_min` is a cosine, and `score` is a fused rank
+        // elsewhere in this trait.
         let Some(similarity) = h.similarity else {
             tracing::warn!(
                 artifact_id,
@@ -81,22 +57,15 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         if similarity < review_min {
             continue;
         }
-        // Ordinary rather than an error: the vector store can list a point
-        // SQLite has already dropped, because a delete lags its reindex.
+        // Ordinary: the vector store can list a point SQLite has dropped, as a delete lags its
+        // reindex.
         let Ok(other) = core.store.get_artifact(&h.payload.artifact_id).await else {
             tracing::debug!(artifact_id = %h.payload.artifact_id, "neighbour is gone");
             continue;
         };
-        // Warn and carry on, as the sweep does. One unwritable pair row is no
-        // reason to drop the other neighbours, and the next run finds it again.
+        // One unwritable pair row is no reason to drop the other neighbours.
         match classify_pair(core, &me, &other, similarity).await {
-            // `me` was the contained side and is now hidden. It is read once,
-            // before the loop, so every later neighbour would be judged against
-            // a status that is no longer true — `Core::supersede` re-reads both
-            // sides and refuses the second attempt, so nothing is corrupted, but
-            // each remaining neighbour costs a round trip and a warning about an
-            // ordinary outcome. A hidden artifact has no duplicates worth
-            // recording; that is the same rule the top of this function applies.
+            // `me` is now hidden, and has no duplicates worth recording.
             Ok(true) => {
                 tracing::debug!(artifact_id, "hidden as a duplicate; leaving its neighbours");
                 break;
@@ -110,49 +79,26 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Is the whole of one artifact inside the other, whitespace aside?
-///
-/// Not a similarity — containment. A score says two texts are alike; this says
-/// one of them adds nothing, which is now the only ground on which any pair is
-/// hidden without asking anyone: the `auto_supersede` band settles nothing on
-/// the score alone any more (see `classify_pair`).
+/// Containment, not similarity: the only ground on which a pair is hidden without asking.
 fn contains_normalized(long: &str, short: &str) -> bool {
     let n = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     !short.trim().is_empty() && n(long).contains(&n(short))
 }
 
-/// Turn one scored pair into one decision. Nothing here calls a model: every
-/// rule is local, and the ones that settle a pair outright — an exhausted
-/// side, two rows from one window, containment — are why most near pairs cost
-/// nothing at all. `auto_supersede` is not among them: it orders
-/// `pairs_to_judge` and no longer hides anything by itself.
-///
-/// Returns whether `a` itself was hidden by the decision, which is the caller's
-/// signal that the artifact it is scanning neighbours for is no longer live.
+/// Every rule is local; `auto_supersede` only orders `pairs_to_judge`. Returns whether `a` itself
+/// was hidden.
 async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<bool> {
     if a.id == b.id {
         return Ok(false);
     }
-    // Only two live artifacts have a question worth a queue slot, a model call,
-    // or a supersede. A retired artifact must not win against a live one, and a
-    // pair that is already resolved has nothing left to decide.
+    // Only two live artifacts have a question worth a queue slot, a call or a supersede.
     if [a, b].iter().any(|c| !c.in_results()) {
         return Ok(false);
     }
 
-    // Two rows from one window are not a pair. Neighbours under one heading
-    // are similar for how they were built, not for what they say; and a
-    // promoted artifact beside the passage it left standing is the window
-    // job's decision — the majority rule — already made. Sending that pair to
-    // the judge would spend a call to merge, and so hide behind model text,
-    // exactly the verbatim passage promotion just decided to keep.
-    //
-    // Both of those cases have a passage on at least one side, which is what
-    // the last clause asks. Two *written* rows from one window are the case
-    // neither reason covers: one synthesis call emitting the same passage
-    // twice is a defect in its output, not a decision anything made, and
-    // excluding it would leave the containment rule below unable to reach the
-    // very case it was written for. So model-written pairs fall through.
+    // Two rows from one window with a passage on either side are alike for how they were built, and
+    // the window job already decided. Two written rows fall through, so containment can catch a
+    // call that repeated itself.
     if a.corpus_id.is_some()
         && a.corpus_id == b.corpus_id
         && a.segment_idx.is_some()
@@ -162,23 +108,8 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         return Ok(false);
     }
 
-    // No free band any more. A pair at or above `auto_supersede` used to be
-    // filed as near-identical and hidden by the sweep on the score alone; it
-    // now falls through to `record_pair` like everything else, where
-    // `pairs_to_judge` orders by score and so asks about it first.
-
-    // One synthesis call emitting the same passage twice: the shorter text is
-    // wholly inside the longer, and both came out of the same document — the
-    // same window of it, when the call repeated itself inside one window, which
-    // is why the exclusion above lets a written pair through. That is a defect
-    // in one artifact rather than two sources saying different things, and
-    // nothing is lost by hiding it — the survivor says everything it said, Ops
-    // lists it, and one press undoes it.
-    //
-    // Same corpus is the whole of the condition. Two documents that share a
-    // sentence are two sources, and hiding one of those on a 0.9 similarity is
-    // exactly what `auto_supersede` refuses to do. A merged artifact has no
-    // corpus, so `is_some` also keeps two merges from matching on `None == None`.
+    // Same corpus is the whole condition: two documents sharing a sentence are two sources.
+    // `is_some` keeps two merges from matching on `None`.
     if a.corpus_id.is_some() && a.corpus_id == b.corpus_id {
         let (long, short) = if a.text.len() >= b.text.len() {
             (a, b)
@@ -186,24 +117,9 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
             (b, a)
         };
         if contains_normalized(&long.text, &short.text) {
-            // The row first, and the row is also the check. The rule is
-            // deterministic — these two texts satisfy it every time either
-            // artifact is related again — so a row that is already settled
-            // carries a decision this rule must not re-derive, most importantly
-            // a person's Restore after an earlier hide.
-            //
-            // `record_settled_pair` only writes over `pending`, so the write
-            // answers that question itself: `false` means a settled row is
-            // already there and this pair is not ours to act on. Asking first
-            // and writing after the hide left two windows, and the second one
-            // mattered — a crash between the hide and the row left the artifact
-            // hidden with nothing recording why. It was then invisible to the
-            // `in_results` guard above, so nothing re-derived it, and invisible
-            // to this check, so the next relate unit after an operator pressed
-            // Restore hid it again: exactly the failure this row exists to
-            // prevent. Written first, a crash in the same window leaves a
-            // settled row over a duplicate that is still visible, which costs a
-            // listing and hides nothing.
+            // The row is written first and is also the check: `record_settled_pair` writes only
+            // over `pending`, so a settled decision, a person's Restore included, is never
+            // re-derived, and a crash never leaves a hide unrecorded.
             if !core
                 .store
                 .record_settled_pair(&a.id, &b.id, score, PairState::NoConflict)
@@ -226,9 +142,7 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
             {
                 return Ok(short.id == a.id);
             }
-            // The hide did not happen, so the row saying it did must not stand:
-            // it would leave this pair settled over two artifacts that are both
-            // still visible, and nothing would ever look at it again.
+            // The hide did not happen, so the row saying it did must not stand.
             if let Err(e) = core
                 .store
                 .unsettle_pair(&a.id, &b.id, PairState::NoConflict)
@@ -245,13 +159,8 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         }
     }
 
-    // The other half of the same-window rule. A written pair from one window
-    // was let through above so containment could reach it; containment did not
-    // fire, so what is left is two rows that merely resemble each other — and
-    // resemblance inside one window is what the rule at the top calls a fact
-    // about how they were built. Filing it would put the window job's own
-    // output in front of the judge as a merge candidate, which is the cost the
-    // exclusion exists to avoid. Containment is the whole of what gets through.
+    // A written same-window pair that containment did not settle merely resembles itself: not
+    // filed.
     if a.corpus_id.is_some()
         && a.corpus_id == b.corpus_id
         && a.segment_idx.is_some()
@@ -260,51 +169,15 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         return Ok(false);
     }
 
-    // Everything else is a question for the dedupe pass.
-    //
-    // `may_disagree` used to gate this, filing a pair with no differing values
-    // as `NoConflict` and leaving both artifacts in every result set. That was
-    // right for the question it was written for — "do these two contradict?" —
-    // and is backwards for deduplication: a pair stating the same values in
-    // different words is the *cleanest* thing there is to merge, and the old
-    // rule made it the one case the model was never shown.
-    //
-    // It survives as a prior in the prompt and as the input to the merge
-    // verification. It is no longer an admission gate. See the design, §6.5.
-    // A passage is the verbatim substrate, not a claim anyone made twice.
-    // Passages under one heading are alike for how they were cut, and passages
-    // from different documents on one subject are alike because the subject is
-    // taught more than once — neither is duplication. The narrow rule above
-    // asks for one corpus and one `segment_idx` and so covers only the first;
-    // this is the same statement `run` already makes about the asking side (a
-    // passage never queries), applied to the side that gets filed.
-    //
-    // Below the containment block on purpose: a passage wholly inside another
-    // in the same corpus is still superseded, deterministically and without a
-    // call. What ends here is the model question, not the hygiene.
+    // Passages are verbatim substrate, alike for how they were cut or because a subject is taught
+    // twice. Below the containment block on purpose: only the model question ends here.
     if a.provenance == Provenance::Passage || b.provenance == Provenance::Passage {
         return Ok(false);
     }
 
-    // A score says two texts are alike. Duplication says one of them adds
-    // nothing, and those are different claims — the comment above
-    // `contains_normalized` states the distinction plainly. On a base of two
-    // hundred documents teaching one subject, "alike" is the ordinary condition
-    // and says nothing at all about duplication: twenty-three of the thirty-
-    // three pairs the live base ever filed were two scripts covering one topic.
-    //
-    // So the cosine admits nothing on its own. One of two things has to hold:
-    // one text is wholly inside the other, or both came out of one document.
-    // Containment is what keeps the real cross-corpus case working — the same
-    // document ingested twice — while two scripts that merely cover one subject
-    // are refused.
-    //
-    // Refused, and nothing is written. Not a pair, and not a link either: a
-    // link means two artifacts were *used* together, `bump_link` takes the cue
-    // that bound them, and a bump derived from a cosine would put an
-    // observation about text into a table whose every other row is an
-    // observation about behaviour. Two documents on one subject link on their
-    // own, from the first search that shows them together.
+    // Alike is not duplicate: on a base teaching one subject, most near pairs are two sources on
+    // one topic. The cosine admits nothing alone: containment or one shared document must hold.
+    // Nothing is written, not even a link, which records use, not text.
     let (longer, shorter) = if a.text.len() >= b.text.len() {
         (a, b)
     } else {
@@ -327,12 +200,6 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::jobs::consolidate::tests::seed;
 
-    /// A merge is not an anchor, and the guard has to be here and not only in
-    /// `embed::mark_indexed`. The embed path withholds the arming; the sweep's
-    /// repair pass arms a unit for anything that has none, which after that
-    /// withholding is every merge on the base. Without this the merge is an
-    /// anchor again one tick later, and files the pair that becomes the next
-    /// merge.
     #[tokio::test]
     async fn a_merge_armed_by_the_repair_pass_still_files_nothing() {
         let core = test_core().await;
@@ -373,8 +240,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_finds_its_duplicate_the_moment_it_is_embedded() {
-        // Asking one artifact for its own neighbours costs one Qdrant query,
-        // no embedding call, and is exact.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -401,9 +266,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_is_found_by_whichever_member_is_embedded_second() {
-        // The completeness argument, and the reason the sweep can stop being
-        // the primary detector. Running both units must not double-file: the
-        // pair row is unique on (a_id, b_id) whichever way round it is seen.
+        // The pair row is unique on (a_id, b_id), whichever side finds it.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -435,8 +298,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_review_threshold_is_the_live_generation_s_not_the_file_s() {
-        // A neighbour at cosine 0.86: below the shipped 0.88, above a rung
-        // the base may step down to.
+        // A neighbour at cosine 0.86: below the shipped 0.88, above a rung the base may step down
+        // to.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -446,7 +309,13 @@ mod tests {
             ],
         )
         .await;
-        assert_eq!(core.ranking.read().unwrap().review_min, 0.88);
+        assert_eq!(
+            core.ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .review_min,
+            0.88
+        );
 
         run(&core, &ids[1]).await.unwrap();
         assert!(
@@ -458,7 +327,10 @@ mod tests {
             "below the threshold, nothing is asked"
         );
 
-        core.ranking.write().unwrap().review_min = 0.84;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .review_min = 0.84;
         run(&core, &ids[1]).await.unwrap();
         assert_eq!(
             core.store
@@ -514,11 +386,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_that_is_not_indexed_yet_is_not_an_error() {
-        // `neighbours` answers an unknown point with an empty list rather than
-        // failing, and this unit is armed from the embed path — but a
-        // re-arming, a restore, or a hand-queued job can reach it before the
-        // vector exists. Failing here would burn the unit's attempts on a state
-        // that resolves itself.
+        // A re-arming or hand-queued job can arrive before the vector exists; failing would burn
+        // attempts on a state that resolves itself.
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -542,8 +411,6 @@ mod tests {
         )
     }
 
-    /// One passage under a corpus of its own. `seed_rows` writes `captured`
-    /// rows, and the case under test is two passages from two documents.
     async fn seed_passage(core: &Core, corpus: &str, text: &str) -> String {
         let src = core.store.insert_corpus(corpus, "web", None).await.unwrap();
         core.store
@@ -564,11 +431,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_passages_from_different_documents_about_one_subject_are_not_a_pair() {
-        // The guard this joins asked for one corpus AND one `segment_idx`, so
-        // it never saw two passages from two documents — on the live base it
-        // fired on none of thirty-three pairs. Thirteen scripts teaching one
-        // subject produced passages at 0.89 to 0.93 that duplicate nothing, and
-        // they were merged into one synthetic document.
         let core = test_core().await;
         let a_id = seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
         let b_id = seed_passage(
@@ -594,8 +456,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_with_a_passage_on_either_side_is_never_filed() {
-        // Eleven of the live base's thirty-three pairs were a passage against a
-        // captured artifact, so the rule cannot be about two passages only.
         let core = test_core().await;
         let passage =
             seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
@@ -621,10 +481,6 @@ mod tests {
 
     #[tokio::test]
     async fn cross_corpus_similarity_alone_does_not_reach_the_model() {
-        // Twenty-three of the live base's thirty-three pairs were this: two
-        // documents covering one subject at 0.89 to 0.93, duplicating nothing.
-        // Thirteen scripts agreeing is evidence that the claim is standard, and
-        // a merge erases that they agreed.
         let core = test_core().await;
         let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
             &core,
@@ -654,9 +510,6 @@ mod tests {
 
     #[tokio::test]
     async fn containment_across_corpora_still_reaches_the_model() {
-        // The case the corroborant keeps working: one document ingested twice.
-        // Containment is the predicate that says one side adds nothing, which
-        // is what duplication means — a score only says they are alike.
         let core = test_core().await;
         let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
             &core,
@@ -688,10 +541,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_refused_pair_does_not_bump_a_link() {
-        // The link graph stays an observation about use. `bump_link` takes the
-        // cue that bound two artifacts, and the README calls the graph one
-        // learned from co-retrieval; a bump derived from a cosine would leave
-        // the recommendation surface unable to tell the two apart.
         let core = test_core().await;
         let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
             &core,
@@ -718,10 +567,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_repeated_passage_inside_one_corpus_is_still_superseded_by_containment() {
-        // What the new guard must not take away. Containment inside one corpus
-        // is deterministic, costs no call, and is the only ground on which
-        // anything is hidden unasked — so the guard sits below that block, not
-        // above it. Placed above, this hygiene disappears silently.
+        // Containment inside one corpus must stay reachable above the passage guard.
         let core = test_core().await;
         let src = core
             .store
@@ -764,12 +610,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_pair_with_no_differing_values_is_queued_not_closed() {
-        // The polarity change. `may_disagree` admits a pair only when both
-        // sides state values AND those values differ, which is backwards for
-        // deduplication: the pairs it discarded are the cleanest merge
-        // candidates. Two artifacts at 0.93 saying the same thing in different
-        // words used to be filed "nothing to decide", and both stayed in every
-        // result set forever.
+        // A pair stating the same values in different words is the cleanest merge candidate, not
+        // "nothing to decide".
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -811,11 +653,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_hidden_by_its_first_neighbour_stops_there() {
-        // `me` is read once, before the loop. The first neighbour that contains
-        // it hides it, and every neighbour after that would be judged against a
-        // status that is no longer true: `Core::supersede` re-reads both sides
-        // and refuses, so the row is never wrong, but the attempt costs a round
-        // trip and logs a warning about an entirely ordinary outcome.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -839,9 +676,7 @@ mod tests {
             Some(ids[1].as_str()),
             "the contained artifact should have been hidden by its nearest neighbour"
         );
-        // The third neighbour is near but contains nothing, so on the stale
-        // read it reaches `record_pair` and files a question about an artifact
-        // that is already hidden — a pair no one will ever be asked to settle.
+        // On the stale read the third neighbour would file a pair about an already-hidden artifact.
         assert!(
             core.store
                 .pair_state_between(&ids[0], &ids[2])
@@ -854,9 +689,8 @@ mod tests {
 
     #[tokio::test]
     async fn recording_the_same_pair_twice_changes_nothing() {
-        // Both producers find the same pair, and the sweep re-finds it on every
-        // run. If the second recording counted, the tallies would grow forever
-        // and a dismissed pair would come back.
+        // Both producers and every sweep re-find the pair; counting each would bring a dismissed
+        // pair back.
         let core = test_core().await;
         let ids = seed(
             &core,
@@ -882,10 +716,6 @@ mod tests {
 
     #[tokio::test]
     async fn two_rows_from_one_window_are_never_a_pair() {
-        // A promoted artifact and the passage it left standing in the same
-        // window look like a duplicate pair and are not one: overlap inside a
-        // window is the window job's decision, already made. A passage on
-        // either side is what marks that case, and what this pins.
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let na = |o: i64, t: &str, seg: i64| crate::store::artifacts::NewArtifact {
@@ -895,7 +725,6 @@ mod tests {
             segment_idx: Some(seg),
             ..Default::default()
         };
-        // One written row and the verbatim passage beside it, in one window.
         let written = core
             .store
             .insert_artifacts(&src.id, &[na(0, "mount the disk first", 0)])
@@ -919,8 +748,8 @@ mod tests {
         for c in same.iter().chain(other.iter()) {
             crate::jobs::embed::run(&core, &c.id).await.unwrap();
         }
-        // Relate the same-window pair only: identical text under one title
-        // embeds identically, so without the exclusion this is a 1.0 pair.
+        // Identical text under one title embeds identically: without the exclusion this is a 1.0
+        // pair.
         run(&core, &same[0].id).await.unwrap();
         let pending = core
             .store
@@ -934,9 +763,6 @@ mod tests {
             }),
             "same-window pair was filed: {pending:?}"
         );
-        // Across windows of the same corpus a pair is still a question —
-        // unless containment settles it, which identical text does; so the
-        // cross-window pair is settled or pending, never nothing.
         let settled = core
             .store
             .pairs_by_state(PairState::NoConflict, 10)
@@ -953,10 +779,6 @@ mod tests {
 
     #[tokio::test]
     async fn one_call_emitting_a_passage_twice_is_still_caught_inside_a_window() {
-        // The case the same-window exclusion must not swallow: no passage on
-        // either side, so nothing here is the window job's decision — just one
-        // synthesis call that wrote the same text twice, the shorter wholly
-        // inside the longer. Containment settles it and hides the copy.
         let core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
@@ -1010,10 +832,8 @@ mod tests {
         )
         .await;
         run(&core, &ids[1]).await.unwrap();
-        // Nobody is hidden…
         assert!(core.store.get_artifact(&ids[0]).await.unwrap().in_results());
         assert!(core.store.get_artifact(&ids[1]).await.unwrap().in_results());
-        // …and the pair is pending, first in line by score.
         let to_judge = core.store.pairs_to_judge(10).await.unwrap();
         assert_eq!(to_judge.len(), 1, "{to_judge:?}");
         assert!(

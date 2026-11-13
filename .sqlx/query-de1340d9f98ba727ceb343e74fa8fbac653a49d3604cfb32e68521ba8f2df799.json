@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO artifact_sources (child_id, root_id, via_id, created_at)\n                     VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "de1340d9f98ba727ceb343e74fa8fbac653a49d3604cfb32e68521ba8f2df799"
+}

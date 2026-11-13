@@ -3,13 +3,9 @@
 <title>engram</title>
 <link rel="stylesheet" href="panel.css">
 <main>
-  <!-- Shown only while unpaired. A form rather than a `prompt()`, because
-       `permissions.request` is only granted while the browser still counts a
-       click as a user gesture: pairing has to end at a button, and a prompt
-       spends the gesture that opened it. -->
   <section id="pairing" hidden>
     <label for="origin">engram address</label>
-    <input id="origin" type="url" placeholder="https://engram.example" autocomplete="off">
+    <input id="origin" type="url" placeholder="engram.example" autocomplete="off">
     <button id="pair" class="primary" type="button">Pair</button>
   </section>
 
@@ -34,7 +30,7 @@
   <p id="status" hidden></p>
   <p id="thinking" hidden></p>
 
-  <button id="back" class="quiet" type="button" hidden>← back to results</button>
+  <button id="back" class="quiet" type="button" hidden>← Results</button>
   <div id="results"></div>
 
   <section id="recent" hidden>

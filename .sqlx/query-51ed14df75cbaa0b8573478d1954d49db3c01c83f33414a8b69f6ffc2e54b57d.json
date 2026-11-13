@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(created_at) FROM search_events WHERE door <> 'judge'",
+  "describe": {
+    "columns": [
+      {
+        "name": "MAX(created_at)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "51ed14df75cbaa0b8573478d1954d49db3c01c83f33414a8b69f6ffc2e54b57d"
+}

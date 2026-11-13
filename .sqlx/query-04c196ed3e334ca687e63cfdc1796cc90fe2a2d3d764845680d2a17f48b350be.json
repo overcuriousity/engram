@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT content_hash FROM corpora WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "content_hash",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "content_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "04c196ed3e334ca687e63cfdc1796cc90fe2a2d3d764845680d2a17f48b350be"
+}

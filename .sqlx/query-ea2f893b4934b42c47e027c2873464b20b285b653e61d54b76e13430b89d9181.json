@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO instance (id, vapid_private, vapid_public, created_at) VALUES (1, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "ea2f893b4934b42c47e027c2873464b20b285b653e61d54b76e13430b89d9181"
+}

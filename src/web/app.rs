@@ -1,13 +1,9 @@
-//! Pairing the app in one scan.
-//!
-//! A page behind a session draws a QR code; the app scans it and is paired.
-//! What the picture carries is a grant, not a token — `auth::grants` says
-//! why — and the app trades it for a token through the claim route below.
+//! Pairing the app in one scan: the QR carries a grant (see `auth::grants`), traded for a token by the claim route.
 
 use crate::error::Error;
 use crate::tenants::Tenant;
 use crate::web::auth_routes::HtmlTemplate;
-use crate::web::pair::{request_origin, urlencode};
+use crate::web::pair::urlencode;
 use crate::web::state::AppState;
 use crate::web::ui_error::UiResult;
 use askama::Template;
@@ -17,10 +13,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 
-/// The URI the QR carries. `o` is where the phone will point, `c` the grant,
-/// `v` this server's version so the app can say *older than I expect*
-/// rather than fail strangely, and `f` the operator-named certificate
-/// fingerprint, when there is one.
+/// `o` origin, `c` grant, `v` server version, `f` the operator-named certificate fingerprint.
 pub fn pair_uri(origin: &str, code: &str, fingerprint: Option<&str>) -> String {
     let mut uri = format!(
         "engram://pair?o={}&c={}&v={}",
@@ -35,9 +28,7 @@ pub fn pair_uri(origin: &str, code: &str, fingerprint: Option<&str>) -> String {
     uri
 }
 
-/// The QR as inline SVG. Error-correction level M: the code is under 200
-/// characters and a laptop screen is a clean surface, so H would only make
-/// the modules smaller for nothing.
+/// Error-correction level M: the code is under 200 characters and a screen is a clean surface.
 fn qr_svg(uri: &str) -> Result<String, Error> {
     let code = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M)
         .map_err(|e| Error::Internal(format!("qr: {e}")))?;
@@ -52,37 +43,28 @@ fn qr_svg(uri: &str) -> Result<String, Error> {
 #[template(path = "app.html")]
 struct AppTemplate {
     origin: String,
-    /// The URI and its picture, present only on the render that follows the
-    /// press. `None` on a GET, for the reason `extension.rs` gives: a
-    /// credential that appears whenever a page is opened is one nobody
-    /// remembers asking for.
+    /// Present only on the render after the press; a credential drawn on every GET is one nobody asked for.
     code: Option<(String, String)>,
 }
 
 impl AppTemplate {
-    /// Reached from Settings, and its token is revoked there.
     fn section(&self) -> &'static str {
         "settings"
     }
 }
 
-async fn app_page(_tenant: Tenant, headers: HeaderMap) -> Response {
+async fn app_page(_tenant: Tenant, State(st): State<AppState>) -> Response {
     HtmlTemplate(AppTemplate {
-        origin: request_origin(&headers).unwrap_or_default(),
+        origin: st.auth.deployment.base(),
         code: None,
     })
     .into_response()
 }
 
-async fn app_grant(
-    tenant: Tenant,
-    State(st): State<AppState>,
-    headers: HeaderMap,
-) -> UiResult<Response> {
-    let origin = request_origin(&headers).unwrap_or_default();
+async fn app_grant(tenant: Tenant, State(st): State<AppState>) -> UiResult<Response> {
+    let origin = st.auth.deployment.base();
     let code = crate::auth::grants::mint(&tenant.core.store.control, &tenant.user.subject).await?;
-    // Validated at load, so `Err` here is unreachable; `ok().flatten()`
-    // rather than an unwrap because a page must not panic over config.
+    // Validated at load; `ok().flatten()` so a page cannot panic over config.
     let fingerprint = st.config.server.fingerprint().ok().flatten();
     let uri = pair_uri(&origin, &code, fingerprint.as_deref());
     let svg = qr_svg(&uri)?;
@@ -97,16 +79,12 @@ async fn app_grant(
 pub struct Claim {
     #[serde(default)]
     pub code: String,
-    /// How the app names itself — it is the token's name in Settings, and
-    /// the only thing telling two phones apart there.
+    /// The token's name in Settings, and the only thing telling two phones apart there.
     #[serde(default)]
     pub device: String,
 }
 
-/// Spend a scanned code for a token. No bearer: the code is the credential.
-///
-/// The device name is checked before the grant is touched, so a malformed
-/// request does not burn a code the person then has to press for again.
+/// No bearer: the code is the credential. The device name is checked first, so a malformed request does not burn the code.
 async fn claim(
     State(st): State<AppState>,
     headers: HeaderMap,
@@ -135,9 +113,15 @@ async fn claim(
     ))
 }
 
-/// The API side, mounted under `/api/v1`.
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/pair/claim", post(claim))
+    use crate::web::auth_routes::{SIGN_IN_BURST, SIGN_IN_PER_MINUTE};
+    Router::new().route(
+        "/pair/claim",
+        post(claim).layer(crate::web::security::rate_limit(
+            SIGN_IN_PER_MINUTE,
+            SIGN_IN_BURST,
+        )),
+    )
 }
 
 pub fn app_router() -> Router<AppState> {
@@ -219,10 +203,10 @@ mod tests {
         let body = crate::web::test_support::body_of(res).await;
         assert!(!body.contains("engram://"), "a GET drew a code");
         assert!(
-            body.contains("https://engram.test"),
+            body.contains("http://127.0.0.1:8080"),
             "the page says where the phone will point"
         );
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pair_grants")
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM pair_grants")
             .fetch_one(&core.store.control.pool)
             .await
             .unwrap();
@@ -239,14 +223,11 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let body = crate::web::test_support::body_of(res).await;
-        // Askama escapes the query's `&` as `&#38;` in the text form; the
-        // browser shows the URI with plain ampersands.
         assert!(
-            body.contains("engram://pair?o=https%3A%2F%2Fengram.test&#38;c="),
+            body.contains("engram://pair?o=http%3A%2F%2F127.0.0.1%3A8080&#38;c="),
             "no URI for this origin in: {body}"
         );
         assert!(body.contains("<svg"), "no picture");
-        // The picture is not the credential.
         assert!(!body.contains("engram_"), "a token was drawn on the page");
     }
 
@@ -260,7 +241,6 @@ mod tests {
             .unwrap()
     }
 
-    /// Press the button and read the code out of the page.
     async fn press_and_read_code(app: &axum::Router, cookie: &str) -> String {
         let res = app
             .clone()
@@ -295,7 +275,6 @@ mod tests {
         let token = body["token"].as_str().expect("a token").to_string();
         assert!(token.starts_with("engram_"));
 
-        // The token opens the door the app will post to.
         let res = app
             .clone()
             .oneshot(crate::web::api::tests::raw_post(
@@ -308,7 +287,6 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED);
 
-        // And it is listed under the device's name, with its user agent.
         let listed = core.store.control.list_tokens("user-1").await.unwrap();
         let row = listed
             .iter()
@@ -338,12 +316,14 @@ mod tests {
         let (app, cookie) = crate::web::test_support::app_with_cookie(core.clone()).await;
         let code = press_and_read_code(&app, &cookie).await;
         // Age the row directly: the clock is not the test's to move.
-        sqlx::query("UPDATE pair_grants SET expires_at = ? WHERE code_hash = ?")
-            .bind(crate::store::now() - 1)
-            .bind(crate::auth::grants::hash_code(&code))
-            .execute(&core.store.control.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE pair_grants SET expires_at = ? WHERE code_hash = ?",
+            crate::store::now() - 1,
+            crate::auth::grants::hash_code(&code)
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
         let res = app
             .clone()
             .oneshot(claim_req(
@@ -374,7 +354,6 @@ mod tests {
             let res = app.clone().oneshot(claim_req(body)).await.unwrap();
             assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         }
-        // The grant survived the malformed requests.
         let res = app
             .oneshot(claim_req(
                 serde_json::json!({ "code": code, "device": "phone" }),

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET judged_at = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6e6a13198be9efef3b1d2ab149f1c65e196deca7c45023edf4ffde85b0c76d47"
+}

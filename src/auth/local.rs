@@ -15,8 +15,7 @@ pub fn hash_password(password: &str) -> Result<String> {
 
 pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> Option<Identity> {
     if username != cfg.username {
-        // Still run the hash so a wrong username and a wrong password take
-        // the same time.
+        // Hash anyway so wrong username and wrong password take the same time.
         let _ = verify_secret(password, &cfg.password_hash);
         return None;
     }
@@ -24,8 +23,6 @@ pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> O
         Some(Identity {
             subject: cfg.username.clone(),
             email: None,
-            // The session does not exist yet: this is the check that decides
-            // whether to create one.
             session: None,
         })
     } else {
@@ -33,19 +30,7 @@ pub fn check_credentials(cfg: &LocalConfig, username: &str, password: &str) -> O
     }
 }
 
-/// Local mode is a development shortcut: a single username and password with
-/// no identity provider behind it. Exposing it on a routable interface turns
-/// it into the production authentication mechanism by accident, so a
-/// non-loopback bind is refused unless the operator opts in on the command
-/// line.
-pub fn assert_bind_is_safe(bind: &str, override_flag: bool) -> Result<()> {
-    if override_flag {
-        tracing::warn!(
-            bind,
-            "local auth exposed on a non-loopback address by explicit override"
-        );
-        return Ok(());
-    }
+pub fn assert_bind_is_safe(bind: &str) -> Result<()> {
     let host = bind.rsplit_once(':').map(|(h, _)| h).unwrap_or(bind);
     let host = host.trim_start_matches('[').trim_end_matches(']');
 
@@ -59,9 +44,7 @@ pub fn assert_bind_is_safe(bind: &str, override_flag: bool) -> Result<()> {
         Ok(())
     } else {
         Err(Error::Validation(format!(
-            "auth.mode = \"local\" cannot bind to {bind}: local auth is a development mode with a \
-             single hardcoded credential. Use auth.mode = \"oidc\", bind to 127.0.0.1, or pass \
-             --i-know-this-is-insecure if you accept the risk."
+            "auth.mode = \"local\" cannot bind to {bind}; bind to loopback behind a proxy or use oidc."
         )))
     }
 }
@@ -93,33 +76,27 @@ mod tests {
 
     #[test]
     fn local_mode_refuses_a_non_loopback_bind() {
-        // A dev shortcut reachable from the network is production auth by
-        // accident. Refuse rather than warn.
-        assert!(assert_bind_is_safe("0.0.0.0:8080", false).is_err());
-        assert!(assert_bind_is_safe("192.168.1.10:8080", false).is_err());
-        assert!(assert_bind_is_safe("[::]:8080", false).is_err());
+        // A network-reachable dev shortcut is production auth by accident.
+        assert!(assert_bind_is_safe("0.0.0.0:8080").is_err());
+        assert!(assert_bind_is_safe("192.168.1.10:8080").is_err());
+        assert!(assert_bind_is_safe("[::]:8080").is_err());
     }
 
     #[test]
     fn local_mode_allows_loopback() {
-        assert!(assert_bind_is_safe("127.0.0.1:8080", false).is_ok());
-        assert!(assert_bind_is_safe("localhost:8080", false).is_ok());
-        assert!(assert_bind_is_safe("[::1]:8080", false).is_ok());
-    }
-
-    #[test]
-    fn the_override_flag_permits_it_explicitly() {
-        assert!(assert_bind_is_safe("0.0.0.0:8080", true).is_ok());
+        assert!(assert_bind_is_safe("127.0.0.1:8080").is_ok());
+        assert!(assert_bind_is_safe("localhost:8080").is_ok());
+        assert!(assert_bind_is_safe("[::1]:8080").is_ok());
     }
 
     #[test]
     fn an_unparsable_bind_is_treated_as_unsafe() {
-        assert!(assert_bind_is_safe("not a bind address", false).is_err());
+        assert!(assert_bind_is_safe("not a bind address").is_err());
     }
 
     #[test]
     fn a_hostname_that_merely_starts_with_localhost_is_not_loopback() {
         // "localhost.evil.com" resolves wherever its owner wants.
-        assert!(assert_bind_is_safe("localhost.evil.com:8080", false).is_err());
+        assert!(assert_bind_is_safe("localhost.evil.com:8080").is_err());
     }
 }

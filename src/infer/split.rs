@@ -1,16 +1,5 @@
-//! Windowing, by the industry's splitter instead of a hand-rolled one.
-//!
-//! `text-splitter` does the boundary work — markdown structure first, then
-//! paragraphs, sentences, and a hard cut as the last resort — sized by the
-//! same [`TokenCounter`] every other budget in the system uses. What this
-//! module owns is the translation back to engram's coordinates: a window is
-//! addressed by 1-based, inclusive source lines, because spans are addresses
-//! the lineage and corpus views dereference against the stored text.
-//!
-//! The old splitter carried the governing heading into continuation windows.
-//! That retired with it: the crate's structural boundaries replace the need,
-//! and the synthesis prompt's context blocks already carry the document
-//! opening for reference resolution.
+//! Windowing via `text-splitter`, sized by [`TokenCounter`], translated back to 1-based inclusive
+//! source lines, since spans are addresses the lineage and corpus views dereference.
 
 use super::budget::TokenCounter;
 use text_splitter::{ChunkConfig, MarkdownSplitter};
@@ -28,29 +17,8 @@ pub struct Window {
     pub end_line: i64,
 }
 
-/// Split `text` into windows that each fit `budget` counter-tokens.
-///
-/// The returned line ranges partition `1..=lines(text)` with no gaps, and —
-/// the part that took two bugs to get right — each window's `text` is exactly
-/// the source those lines hold. A window is the slice *between* two splitter
-/// boundaries, not the chunk the splitter hands back: the crate trims
-/// separators off a chunk, and a trimmed body under an untrimmed range is a
-/// window whose line *k* is not `start_line + k - 1`, which is the one thing
-/// everything downstream assumes. `"\n\n# Notes\nalpha"` used to give the first
-/// window `start_line: 1` over a body beginning at `# Notes`, so the passage
-/// holding the heading was addressed two lines above itself — and leading
-/// blank lines are routine out of HTML and PDF extraction, which nothing trims
-/// at ingest.
-///
-/// Boundaries are snapped back to the start of their line for the same reason.
-/// `text-splitter` descends to sentence level, so a chunk can end mid-paragraph
-/// and mid-line; the window then ends at the line before, and the whole of the
-/// straddled line goes to the successor that already claims it. The one case
-/// that cannot be line-aligned is a hard cut *inside* a single long line: there
-/// the fragments are kept as they are, both windows name that one line, and
-/// `split_passages`' clamp is what keeps the spans inside the document. Line
-/// alignment there would hand each fragment's window the whole line and put the
-/// same text in the base as many times as it was cut.
+/// Line ranges partition the text and each window's `text` is exactly those lines: a window is the slice between
+/// boundaries snapped to line starts. A hard cut inside one long line is the exception: both windows name it.
 pub fn split_into_segments(text: &str, counter: &TokenCounter, budget: usize) -> Vec<Window> {
     if text.trim().is_empty() {
         return vec![];
@@ -61,51 +29,21 @@ pub fn split_into_segments(text: &str, counter: &TokenCounter, budget: usize) ->
         return vec![];
     }
     let line_of = |off: usize| text[..off].bytes().filter(|b| *b == b'\n').count() as i64 + 1;
-    // The first byte of the line `off` falls in.
     let line_start = |off: usize| text[..off].rfind('\n').map(|p| p + 1).unwrap_or(0);
     let total_lines = text.lines().count().max(1) as i64;
-    // Where each window begins, decided once and read by both sides of every
-    // boundary. It has to be one decision: a window ended at `line_start(next)`
-    // while its successor began at the raw `next`, so the bytes between the two
-    // — the head of the straddled line, which is the whole reason the boundary
-    // is snapped back — belonged to no window at all. A blockquote arrived
-    // without its `> `, an indented code block without its four spaces, and
-    // the successor's `start_line` named a line whose first byte it did not
-    // hold, so `segment_text(start_line, end_line)` no longer reproduced
-    // `Window::text`. The invariant this module's doc states held only for the
-    // first window.
+    // One decision per boundary, read by both neighbours, or the straddled line's head belongs to no window.
     let froms: Vec<usize> =
         offsets
             .iter()
             .enumerate()
             .fold(Vec::with_capacity(offsets.len()), |mut acc, (i, off)| {
-                // The first window claims the head of the document, whatever the
-                // splitter trimmed off it — and now carries it, so the claim is
-                // true.
+                // The first window claims the head of the document, whatever the splitter trimmed.
                 let from = if i == 0 {
                     0
                 } else {
                     let snapped = line_start(*off);
-                    // A hard cut inside one long line cannot be snapped: both
-                    // windows then name that line and take the fragments as they
-                    // are. See the doc above.
-                    //
-                    // Compared against where the predecessor's own *content*
-                    // begins, not against where its window begins. The two are
-                    // the same everywhere but the first window, which claims
-                    // the head of the document from byte zero however much the
-                    // splitter trimmed off it — so with leading blank lines
-                    // `acc[0]` was 0 while the first chunk started on line 5,
-                    // and snapping the second boundary back to that same line 5
-                    // cleared a bar that was standing in the wrong place. Window
-                    // zero collapsed to the whitespace and window one carried
-                    // two chunks: `"\n\n\n\n"` before a long line came back as
-                    // one token and then 513 against a budget of 256, twice the
-                    // input the context reservation is sized for, and a
-                    // synthesis call spent on four newlines. Leading blanks are
-                    // routine out of HTML and PDF extraction — see the note at
-                    // the top of this function, which is about the same four
-                    // characters.
+                    // Compare against the predecessor's content start, not its window start: they differ for window 0
+                    // when leading blank lines were trimmed, which would collapse it to whitespace.
                     let prev = acc[i - 1].max(line_start(offsets[i - 1]));
                     if snapped > prev { snapped } else { *off }
                 };
@@ -119,10 +57,7 @@ pub fn split_into_segments(text: &str, counter: &TokenCounter, budget: usize) ->
         let (slice, end) = match offsets.get(i + 1) {
             Some(next) => {
                 let to = froms[i + 1];
-                // Snapped: the successor opens at a line start, so this window
-                // stops at the line before it. Unsnapped — the one case that
-                // cannot be aligned — is a hard cut inside a single long line,
-                // and then both windows name that line.
+                // Unsnapped means a hard cut inside one long line; both windows then name it.
                 if to == line_start(*next) {
                     (&text[from..to], line_of(*next) - 1)
                 } else {
@@ -140,11 +75,7 @@ pub fn split_into_segments(text: &str, counter: &TokenCounter, budget: usize) ->
     out
 }
 
-/// The exact lines of a stored window, one-based and inclusive.
-///
-/// Takes line numbers rather than a `Window` because windows live in the
-/// database between job runs: the row may be stale, and clamping beats
-/// panicking on data.
+/// Takes line numbers because the row may be stale; clamping beats panicking on data.
 pub fn segment_text(text: &str, start_line: i64, end_line: i64) -> String {
     if start_line < 1 || end_line < start_line {
         return String::new();
@@ -184,18 +115,6 @@ mod tests {
         }
     }
 
-    /// Leading blank lines used to buy the document one wasted window and its
-    /// successor two chunks' worth of text.
-    ///
-    /// The first window claims the head of the document from byte zero, so its
-    /// recorded start is not where the splitter's first chunk begins. The
-    /// snapping guard compared the second boundary against that zero, found it
-    /// clear, and snapped the boundary onto the very line the first chunk
-    /// opens on — leaving window zero holding nothing but the blank lines and
-    /// window one holding both chunks. Four newlines out of a PDF extraction
-    /// are enough, and what came back was a window at twice the budget: past
-    /// what the context reservation is sized for, with a synthesis call spent
-    /// on the whitespace beside it.
     #[test]
     fn leading_blank_lines_do_not_collapse_the_first_window() {
         let counter = TokenCounter::default();
@@ -204,36 +123,22 @@ mod tests {
             for budget in [64, 128, 256] {
                 let w = split_into_segments(&text, &counter, budget);
                 for win in &w {
-                    // The splitter's own overshoot is a token or two; twice the
-                    // budget is a window carrying a neighbour's chunk.
+                    // Splitter overshoot is a token or two; twice the budget means a neighbour's chunk.
                     assert!(
                         counter.count(&win.text) <= budget + budget / 2,
                         "lead {lead:?} budget {budget}: a window of {} tokens",
                         counter.count(&win.text)
                     );
                 }
-                // And the text still reconstructs, which is what the snapping
-                // is for in the first place.
                 let joined: String = w.iter().map(|x| x.text.as_str()).collect();
                 assert_eq!(joined, text, "lead {lead:?} budget {budget}");
             }
         }
     }
 
-    /// The invariant the module doc states, asserted where it used to break:
-    /// a window's text is exactly the source its line range holds.
-    ///
-    /// The boundary the crate hands back can land mid-line, and it is snapped
-    /// to the start of that line — but only the predecessor was snapped, so the
-    /// head of the straddled line fell into the gap between the two windows.
-    /// Markdown is where it shows: a blockquote arrived without its `> `, an
-    /// indented code block without its indentation, and the model was shown
-    /// text that is not the text that was stored.
     #[test]
     fn a_straddled_line_reaches_the_window_that_claims_it() {
-        // Short structural lines between long paragraphs: the splitter opens a
-        // chunk on each, and trims the marker off the front of it, so the
-        // boundary lands mid-line with the whole line still to come.
+        // The splitter trims markers off chunk starts, so the boundary lands mid-line.
         let text = format!(
             "# Notes\n\n{}\n\n> a quoted aside.\n\n{}\n\n    indented_code(arg)\n\n{}\n",
             "first paragraph words. ".repeat(24),
@@ -243,19 +148,13 @@ mod tests {
         for budget in [40, 60, 80, 120] {
             let w = split_into_segments(&text, &TokenCounter::default(), budget);
             for (i, win) in w.iter().enumerate() {
-                // The one documented exception: a hard cut inside a single
-                // long line leaves two windows naming that line, and neither
-                // holds the whole of it. Everywhere else the ranges abut, and
-                // an overlap is exactly how that case announces itself.
+                // Only a hard cut in one long line may overlap; everywhere else ranges abut.
                 let cut = i > 0 && w[i - 1].end_line >= win.start_line
                     || w.get(i + 1).is_some_and(|n| win.end_line >= n.start_line);
                 if cut {
                     continue;
                 }
-                // Both sides through `lines()`, because a window carries the
-                // separator that ends it and a line range cannot; what is
-                // being asserted is the lines, which is what the span
-                // addresses.
+                // Through `lines()`: a window carries its trailing separator, a line range cannot.
                 assert_eq!(
                     segment_text(&text, win.start_line, win.end_line),
                     win.text.lines().collect::<Vec<_>>().join("\n"),

@@ -1,10 +1,5 @@
-//! `engram --backup DIR [--offline]` and `engram --backup-check DIR`.
-//!
-//! Order, from the spec §2: the control database first; the users enumerated
-//! from that copy, so a user provisioned meanwhile is absent from both halves;
-//! then per tenant the vectors before the database, so anything that lands in
-//! the gap is a row without a point — the skew `heal_store_drift` repairs —
-//! and the manifest last, so a directory without one is an aborted backup.
+//! `engram --backup` (spec §2): control first, users from that copy, vectors before each database,
+//! manifest last. A row landing in the gap has no point, which `heal_store_drift` repairs.
 
 use super::manifest::{
     self, Backend, DbEntry, EmbedRecipe, FileEntry, Manifest, Mode, TenantEntry, VectorEntry,
@@ -19,9 +14,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// Opens a tenant's alias without creating it. `QdrantFactory` calls
-/// `ensure_collection`, which would answer a missing collection by making an
-/// empty one and backing that up; a backup has to report it instead.
+/// `QdrantFactory` would create a missing collection and back up the empty one.
 pub struct QdrantSource {
     pub cfg: VectorConfig,
 }
@@ -39,7 +32,6 @@ impl VectorFactory for QdrantSource {
     }
 }
 
-/// What a backup did, one line per tenant.
 #[derive(Debug)]
 pub struct Report {
     pub dir: PathBuf,
@@ -48,7 +40,6 @@ pub struct Report {
 }
 
 impl Report {
-    /// Whether any tenant the control copy names is missing from the archive.
     pub fn partial(&self) -> bool {
         self.tenants.iter().any(|(_, r)| r.is_err())
     }
@@ -98,7 +89,6 @@ impl std::fmt::Display for Report {
     }
 }
 
-/// `--backup`, against the configured Qdrant.
 pub async fn take(cfg: &Config, dir: &Path, offline: bool) -> Result<Report> {
     let source = QdrantSource {
         cfg: cfg.vector.clone(),
@@ -106,7 +96,6 @@ pub async fn take(cfg: &Config, dir: &Path, offline: bool) -> Result<Report> {
     take_with(cfg, dir, offline, Backend::Qdrant, &source).await
 }
 
-/// `take`, over any vector store: the tests use in-memory ones.
 pub async fn take_with(
     cfg: &Config,
     dir: &Path,
@@ -178,7 +167,6 @@ pub async fn take_with(
     })
 }
 
-/// One tenant: vectors, then the database, then the counts from the copies.
 /// On failure nothing of this tenant is left in the archive.
 async fn tenant(
     cfg: &Config,
@@ -247,8 +235,7 @@ async fn tenant(
     r
 }
 
-/// Written beside, synced, then renamed into place: `manifest.json` either
-/// exists whole or not at all.
+/// Renamed into place so `manifest.json` exists whole or not at all.
 fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     let tmp = dir.join(".manifest.json.tmp");
     let io = |e: std::io::Error| Error::Store(format!("{}: {e}", tmp.display()));
@@ -259,7 +246,6 @@ fn write_manifest(dir: &Path, m: &Manifest) -> Result<()> {
     std::fs::rename(&tmp, dir.join(manifest::FILE)).map_err(io)
 }
 
-/// `--backup-check`: the manifest parses and every file it names is intact.
 pub fn check(dir: &Path) -> Result<Manifest> {
     let m = Manifest::load(dir)?;
     m.verify(dir)?;
@@ -277,9 +263,6 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
-    /// Memory stores by alias; any other alias fails to open, the way an
-    /// absent Qdrant alias fails to export. Records, per open, whether a
-    /// manifest was already in the archive.
     struct Fixture {
         stores: HashMap<String, Arc<dyn VectorStore>>,
         archive: PathBuf,
@@ -308,7 +291,6 @@ mod tests {
         _stores: Vec<crate::store::Store>,
     }
 
-    /// Two tenants with three artifacts each, the control database on disk.
     async fn two_tenants() -> Base {
         let tmp = tempfile::tempdir().unwrap();
         let store_dir = tmp.path().join("store");
@@ -444,7 +426,6 @@ mod tests {
     #[tokio::test]
     async fn a_tenant_without_an_alias_makes_the_archive_partial_and_the_rest_is_kept() {
         let base = two_tenants().await;
-        // Only the first tenant has vectors; the second's alias is absent.
         let fx = vectors_for(&base, &base.slugs[..1]).await;
         let report = take_with(&base.cfg, &base.archive, false, Backend::Qdrant, &fx)
             .await

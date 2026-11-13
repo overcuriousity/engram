@@ -1,0 +1,16 @@
+<button type="button" class="oc-btn oc-btn--danger" data-oc-dialog-open="{{ tc_id }}">{{ tc_open }}</button>
+<dialog id="{{ tc_id }}" class="oc-dialog" aria-labelledby="{{ tc_id }}-title">
+  <form class="oc-dialog__body" data-oc-confirm-name="{{ tc_name }}"
+        hx-post="{{ tc_action }}" hx-target="#{{ tc_id }}-error" hx-swap="innerHTML">
+    <h2 class="oc-dialog__title" id="{{ tc_id }}-title">{{ tc_title }}</h2>
+    <div class="oc-field">
+      <label for="{{ tc_id }}-name">Type <span class="mono">{{ tc_name }}</span> to confirm</label>
+      <input class="oc-input" id="{{ tc_id }}-name" name="name" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    </div>
+    <div id="{{ tc_id }}-error" aria-live="polite"></div>
+    <div class="oc-dialog__actions">
+      <button type="button" class="oc-btn" data-oc-dialog-close>Cancel</button>
+      <button type="submit" class="oc-btn oc-btn--danger" disabled>{{ tc_label }}</button>
+    </div>
+  </form>
+</dialog>

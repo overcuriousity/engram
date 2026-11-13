@@ -1,18 +1,14 @@
-use crate::auth::{
-    SESSION_COOKIE, SESSION_TTL_SECS, clear_session_cookie, cookie_value, set_session_cookie,
-};
 use crate::config::AuthMode;
 use crate::error::{Error, Result};
 use crate::web::state::AppState;
 use askama::Template;
 use axum::Router;
 use axum::extract::{Form, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
-/// askama 0.16 no longer ships an axum integration crate, so templates get a
-/// thin wrapper of their own.
+/// askama 0.16 ships no axum integration, so templates get a thin wrapper.
 pub struct HtmlTemplate<T>(pub T);
 
 impl<T: Template> IntoResponse for HtmlTemplate<T> {
@@ -32,8 +28,7 @@ impl<T: Template> IntoResponse for HtmlTemplate<T> {
 struct LoginTemplate {
     oidc: bool,
     error: Option<String>,
-    /// The page that asked for this login, already checked by `safe_next`.
-    /// Handed back through the form so signing in returns there.
+    /// Already checked by `safe_next`; carried through the form so signing in returns there.
     next: Option<String>,
 }
 
@@ -43,18 +38,8 @@ struct LoginQuery {
     go: Option<String>,
 }
 
-/// Where to land after signing in, when the destination can be trusted.
-///
-/// The destination is user input on every path it travels — a query parameter
-/// the middleware wrote, a hidden form field, a value carried across an OIDC
-/// round trip — and a redirect that follows anything it is handed is a
-/// phishing hop off this site. Only a page of this UI is accepted, by the same
-/// rule `ui::ReturnTo` uses: inside `/ui/`, and never `/ui//host`, which a
-/// browser reads as protocol-relative and resolves somewhere else entirely.
-///
-/// `None` means the caller's default, which is the page the app starts on. The
-/// older `go=1` — a flag meaning "begin the login", not a place — lands there
-/// too, without a special case.
+/// Only a page inside `/ui/` and never `/ui//host`, which a browser reads as protocol-relative.
+/// `None` means the caller's default, which `go=1` also lands on.
 fn safe_next(raw: Option<&str>) -> Option<String> {
     match raw {
         Some(p) if p.starts_with("/ui/") && !p.starts_with("/ui//") => Some(p.to_string()),
@@ -62,7 +47,6 @@ fn safe_next(raw: Option<&str>) -> Option<String> {
     }
 }
 
-/// Where a login ends when nothing better was asked for.
 const AFTER_LOGIN: &str = "/ui/search";
 
 async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> Result<Response> {
@@ -75,9 +59,7 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
                 .ok_or_else(|| Error::Validation("oidc not configured".into()))?;
             if q.go.is_some() {
                 let (url, mut pending) = client.authorize_url()?;
-                // Held with the rest of the in-flight attempt: the provider
-                // hands back only `state`, so there is nowhere else to keep it
-                // across the round trip.
+                // The provider hands back only `state`, so the destination is kept with the pending attempt.
                 pending.next = safe_next(q.go.as_deref());
                 st.auth.pending.put(pending);
                 return Ok(Redirect::to(&url).into_response());
@@ -102,13 +84,16 @@ async fn login_page(State(st): State<AppState>, Query(q): Query<LoginQuery>) -> 
 struct LoginForm {
     username: String,
     password: String,
-    /// The page that asked for the login. Survives a mistyped password: the
-    /// form is re-rendered with it, or one typo costs the destination.
+    /// Survives a mistyped password, since the form is re-rendered with it.
     #[serde(default)]
     next: Option<String>,
 }
 
-async fn login_submit(State(st): State<AppState>, Form(f): Form<LoginForm>) -> Result<Response> {
+async fn login_submit(
+    State(st): State<AppState>,
+    session: tower_sessions::Session,
+    Form(f): Form<LoginForm>,
+) -> Result<Response> {
     // Only reachable in local mode; in OIDC mode there is no password to post.
     let AuthMode::Local = st.auth.mode else {
         return Err(Error::NotFound);
@@ -129,7 +114,7 @@ async fn login_submit(State(st): State<AppState>, Form(f): Form<LoginForm>) -> R
             .into_response());
     };
 
-    start_session(&st, &identity, safe_next(f.next.as_deref())).await
+    start_session(&session, &identity, safe_next(f.next.as_deref())).await
 }
 
 #[derive(serde::Deserialize)]
@@ -142,7 +127,11 @@ struct CallbackQuery {
     error: Option<String>,
 }
 
-async fn callback(State(st): State<AppState>, Query(q): Query<CallbackQuery>) -> Result<Response> {
+async fn callback(
+    State(st): State<AppState>,
+    session: tower_sessions::Session,
+    Query(q): Query<CallbackQuery>,
+) -> Result<Response> {
     if let Some(e) = q.error {
         tracing::warn!(error = %e, "identity provider returned an error");
         return Err(Error::Unauthorized);
@@ -164,63 +153,66 @@ async fn callback(State(st): State<AppState>, Query(q): Query<CallbackQuery>) ->
         .take(&state_param)
         .ok_or(Error::Unauthorized)?;
     let identity = client.exchange(&pending, &code, &state_param).await?;
-    // Re-checked on the way out as well as on the way in: what comes back out
-    // of the pending store is only as trustworthy as what went into it.
+    bind_to_issuer(&st, &identity, client.issuer()).await?;
+    // Re-checked on the way out: the pending store is only as trustworthy as its input.
     let next = safe_next(pending.next.as_deref());
-    start_session(&st, &identity, next).await
+    start_session(&session, &identity, next).await
+}
+
+/// A subject is one person only under the issuer that first vouched for it.
+async fn bind_to_issuer(
+    st: &AppState,
+    identity: &crate::auth::Identity,
+    issuer: &str,
+) -> Result<()> {
+    let control = st.tenants.control();
+    if control
+        .issuer_of(&identity.subject)
+        .await?
+        .is_some_and(|bound| bound != issuer)
+    {
+        tracing::warn!(subject = %identity.subject, "sign-in from another issuer refused");
+        return Err(Error::Forbidden);
+    }
+    control
+        .provision(&identity.subject, identity.email.as_deref())
+        .await?;
+    if !control.bind_issuer(&identity.subject, issuer).await? {
+        return Err(Error::Forbidden);
+    }
+    Ok(())
 }
 
 async fn start_session(
-    st: &AppState,
+    session: &tower_sessions::Session,
     identity: &crate::auth::Identity,
     next: Option<String>,
 ) -> Result<Response> {
-    let sid = crate::store::new_id();
-    st.tenants
-        .control()
-        .insert_session(
-            &sid,
-            &identity.subject,
-            identity.email.as_deref(),
-            SESSION_TTL_SECS,
-        )
-        .await?;
-    Ok((
-        StatusCode::SEE_OTHER,
-        [
-            (
-                header::SET_COOKIE,
-                set_session_cookie(&sid, st.auth.secure_cookies),
-            ),
-            (
-                header::LOCATION,
-                next.unwrap_or_else(|| AFTER_LOGIN.to_string()),
-            ),
-        ],
-    )
-        .into_response())
+    crate::auth::sign_in(session, identity).await?;
+    Ok(Redirect::to(&next.unwrap_or_else(|| AFTER_LOGIN.to_string())).into_response())
 }
 
-async fn logout(State(st): State<AppState>, headers: axum::http::HeaderMap) -> Result<Response> {
-    if let Some(h) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok())
-        && let Some(sid) = cookie_value(h, SESSION_COOKIE)
-    {
-        // Delete the row, not just the cookie: a copied cookie must stop working.
-        st.tenants.control().delete_session(&sid).await?;
-    }
-    Ok((
-        StatusCode::SEE_OTHER,
-        [
-            (header::SET_COOKIE, clear_session_cookie()),
-            (header::LOCATION, "/auth/login".to_string()),
-        ],
-    )
-        .into_response())
+async fn logout(session: tower_sessions::Session) -> Result<Response> {
+    // The record goes, not just the cookie: a copied cookie must stop working.
+    session
+        .flush()
+        .await
+        .map_err(|e| Error::Store(format!("session: {e}")))?;
+    Ok(Redirect::to("/auth/login").into_response())
 }
+
+pub const SIGN_IN_PER_MINUTE: u32 = 10;
+pub const SIGN_IN_BURST: u32 = 5;
 
 pub fn auth_router() -> Router<AppState> {
     Router::new()
-        .route("/auth/login", get(login_page).post(login_submit))
+        .route(
+            "/auth/login",
+            get(login_page).merge(post(login_submit).layer(crate::web::security::rate_limit(
+                SIGN_IN_PER_MINUTE,
+                SIGN_IN_BURST,
+            ))),
+        )
         .route("/auth/callback", get(callback))
         .route("/auth/logout", post(logout))
 }
@@ -264,8 +256,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
-        // Nobody signed out is offered Search · Insights · Settings, or an
-        // app to install, on the one page they can reach.
         let body = String::from_utf8(
             axum::body::to_bytes(res.into_body(), usize::MAX)
                 .await
@@ -274,9 +264,9 @@ mod tests {
         )
         .unwrap();
         for chrome in [
-            r#"class="tabbar""#,
+            r#"class="oc-tabbar""#,
             r#"class="installnudge""#,
-            r#"class="topbar""#,
+            r#"class="oc-topbar""#,
         ] {
             assert!(
                 !body.contains(chrome),
@@ -294,16 +284,13 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         let cookie = res.headers()["set-cookie"].to_str().unwrap();
-        assert!(cookie.contains("engram_session="));
+        assert!(cookie.contains("engram-session="));
         assert!(cookie.contains("HttpOnly"));
         assert_eq!(res.headers()["location"], "/ui/search");
     }
 
     #[tokio::test]
     async fn signing_in_lands_on_the_page_that_asked_for_the_login() {
-        // A bookmarked artifact with an expired session is the whole case:
-        // bouncing through the login and then landing on Search loses the page
-        // that was actually wanted.
         let res = local_app()
             .await
             .oneshot(form(
@@ -318,8 +305,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_login_will_not_be_talked_into_leaving_the_site() {
-        // The destination arrives as user input on every path it travels. A
-        // redirect that follows anything it is handed is a phishing hop.
+        // A redirect that follows user input is a phishing hop.
         for hostile in [
             "next=https%3A%2F%2Fevil.example%2F",
             "next=%2F%2Fevil.example%2F",
@@ -432,7 +418,6 @@ mod tests {
                 .contains("Max-Age=0")
         );
 
-        // The server-side row is gone, so the old cookie is worthless.
         let res = app
             .oneshot(
                 Request::builder()
@@ -444,6 +429,120 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn local_app_on(
+        dep: crate::web::security::Deployment,
+    ) -> (axum::Router, crate::web::state::AppState) {
+        let core = crate::core::test_support::test_core().await;
+        let mut st =
+            crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
+        st.auth = std::sync::Arc::new(crate::web::state::AuthContext {
+            mode: crate::config::AuthMode::Local,
+            local: Some(crate::config::LocalConfig {
+                username: "dev".into(),
+                password_hash: crate::auth::local::hash_password("hunter2").unwrap(),
+            }),
+            oidc: None,
+            pending: crate::auth::oidc::PendingStore::new(),
+            deployment: dep,
+        });
+        (crate::web::router(st.clone()), st)
+    }
+
+    fn on(public_url: &str, plain: bool) -> crate::web::security::Deployment {
+        crate::web::security::Deployment {
+            public_url: url::Url::parse(public_url).ok(),
+            allow_plain_http: plain,
+            ..crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_session_cookie_is_host_prefixed_secure_and_lax() {
+        let (app, _) = local_app_on(on("https://engram.example", false)).await;
+        let res = app
+            .oneshot(form("/auth/login", "username=dev&password=hunter2"))
+            .await
+            .unwrap();
+        let c = res.headers()["set-cookie"].to_str().unwrap();
+        assert!(c.starts_with("__Host-engram-session="), "{c}");
+        for flag in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/"] {
+            assert!(c.contains(flag), "{flag} missing: {c}");
+        }
+        assert!(!c.contains("Domain"), "{c}");
+    }
+
+    #[tokio::test]
+    async fn the_cookie_loses_secure_and_prefix_over_allowed_plain_http() {
+        let (app, _) = local_app_on(on("http://engram.lan", true)).await;
+        let res = app
+            .oneshot(form("/auth/login", "username=dev&password=hunter2"))
+            .await
+            .unwrap();
+        let c = res.headers()["set-cookie"].to_str().unwrap();
+        assert!(c.starts_with("engram-session="), "{c}");
+        assert!(!c.contains("Secure"), "{c}");
+        assert!(c.contains("HttpOnly") && c.contains("SameSite=Lax"), "{c}");
+    }
+
+    #[tokio::test]
+    async fn the_session_id_rotates_on_sign_in() {
+        let dep = on("https://engram.example", false);
+        let (app, st) = local_app_on(dep.clone()).await;
+        let before =
+            crate::web::test_support::session_cookie(st.tenants.control(), &dep, "someone").await;
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/login")
+                    .method("POST")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", &before)
+                    .body(Body::from("username=dev&password=hunter2"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let after = res.headers()["set-cookie"].to_str().unwrap();
+        let id = |c: &str| {
+            c.split(';')
+                .next()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1
+                .to_string()
+        };
+        assert_ne!(
+            id(&before),
+            id(after),
+            "the pre-sign-in id survived sign-in"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oidc_user_from_another_issuer_is_refused() {
+        let core = crate::core::test_support::test_core().await;
+        let st = crate::web::test_support::state_over(core, crate::config::AuthMode::Oidc).await;
+        let who = crate::auth::Identity {
+            subject: "sub-1".into(),
+            email: Some("same@example.com".into()),
+            session: None,
+        };
+        super::bind_to_issuer(&st, &who, "https://idp.example")
+            .await
+            .unwrap();
+        super::bind_to_issuer(&st, &who, "https://idp.example")
+            .await
+            .unwrap();
+        assert!(matches!(
+            super::bind_to_issuer(&st, &who, "https://other.example").await,
+            Err(crate::error::Error::Forbidden)
+        ));
     }
 
     #[tokio::test]

@@ -1,24 +1,12 @@
-//! The control plane: identity and scheduling.
-//!
-//! One database for the whole instance, holding what is about people rather
-//! than knowledge. Every knowledge table lives in a per-tenant database that
-//! never learns other tenants exist, which is what makes isolation structural:
-//! there is no query anywhere that could be written without a tenant filter,
-//! because no tenant filter exists.
+//! The control plane: identity and scheduling, one database per instance. Knowledge lives in
+//! per-tenant databases, so no tenant filter exists to forget.
 
 use crate::error::Result;
-use sqlx::Row;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 
-/// The tenant key: a hex SHA-256 prefix of the OIDC subject.
-///
-/// Not derived from the email, which can change, and not the subject itself,
-/// which may contain anything at all -- including characters that are neither
-/// a legal filename nor a legal Qdrant collection name. Sixteen hex digits is
-/// 64 bits: this is a naming scheme and not a secret, and the `UNIQUE` on
-/// `slug` turns the collision nobody will ever see into an error rather than
-/// into two people quietly sharing a database.
+/// A hex SHA-256 prefix of the OIDC subject: emails change and subjects may hold any
+/// character. `UNIQUE` on `slug` turns a collision into an error.
 pub fn slug_for(subject: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(subject.as_bytes());
@@ -34,18 +22,25 @@ pub struct User {
 }
 
 impl User {
-    fn from_row(r: &sqlx::sqlite::SqliteRow) -> User {
+    fn from_row(r: UserRow) -> User {
         User {
-            subject: r.get("subject"),
-            email: r.get("email"),
-            slug: r.get("slug"),
-            created_at: r.get("created_at"),
+            subject: r.subject,
+            email: r.email,
+            slug: r.slug,
+            created_at: r.created_at,
         }
     }
 }
 
-/// The instance's sender identity for Web Push, both halves base64url
-/// without padding: the private scalar and the uncompressed public point.
+/// The `users` columns a `User` is read from, for `query_as!`.
+struct UserRow {
+    subject: String,
+    email: Option<String>,
+    slug: String,
+    created_at: i64,
+}
+
+/// Both halves base64url without padding: the private scalar and the uncompressed public point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VapidKeys {
     pub private: String,
@@ -75,10 +70,7 @@ impl Control {
         Ok(control)
     }
 
-    /// Fresh in-memory control database, for the tests. One connection, for
-    /// the reason `Store::memory` gives: every `sqlite::memory:` connection is
-    /// a separate database, so a multi-connection pool would see different
-    /// data per query.
+    /// One connection: every `sqlite::memory:` connection is a separate database.
     pub async fn memory() -> Result<Control> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
@@ -93,12 +85,8 @@ impl Control {
         Ok(control)
     }
 
-    /// The one `instance` row, written on first boot and left alone after.
-    ///
-    /// A keypair is generated before the insert on every boot and thrown away
-    /// when the row already stands — `ON CONFLICT DO NOTHING` is what makes
-    /// two processes opening the same file agree on one sender. Generating a
-    /// P-256 key costs microseconds; a read-then-write would cost a race.
+    /// A keypair is generated every boot and discarded if the row exists: `ON CONFLICT DO NOTHING`
+    /// lets two processes on one file agree on one sender without a race.
     pub async fn ensure_instance(&self) -> Result<()> {
         use base64::Engine;
         use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
@@ -106,47 +94,53 @@ impl Control {
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
         let private = b64.encode(secret.to_bytes());
         let public = b64.encode(secret.public_key().to_sec1_point(false).as_bytes());
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO instance (id, vapid_private, vapid_public, created_at) \
              VALUES (1, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+            private,
+            public,
+            super::now()
         )
-        .bind(private)
-        .bind(public)
-        .bind(super::now())
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// The instance's VAPID keypair, as stored.
     pub async fn vapid(&self) -> Result<VapidKeys> {
-        let row = sqlx::query("SELECT vapid_private, vapid_public FROM instance WHERE id = 1")
+        let row = sqlx::query!("SELECT vapid_private, vapid_public FROM instance WHERE id = 1")
             .fetch_one(&self.pool)
             .await?;
         Ok(VapidKeys {
-            private: row.get("vapid_private"),
-            public: row.get("vapid_public"),
+            private: row.vapid_private,
+            public: row.vapid_public,
         })
     }
 
-    /// The schema, and the same refusal `Store::migrate` makes.
-    ///
-    /// `CREATE TABLE IF NOT EXISTS` leaves an existing table's columns exactly
-    /// as they are, so applying this file to a database written by an older
-    /// binary is silent: nothing fails until some query names a column that is
-    /// not there, at which point a bare `no such column` arrives from the
-    /// middle of a request. The tenant schema has refused that since it was
-    /// written; the control schema is the one that keeps growing — `class`,
-    /// then `empty_runs` — so it needs the guard more, not less.
-    ///
-    /// `ADDITIVE` is the same exception, and deliberately the same shape: a
-    /// column added beside the others with a default no existing row needs to
-    /// have been written with is added rather than refused. Anything not
-    /// named here still refuses, because a column whose default rewrites what
-    /// old rows mean is not something a boot path may guess about.
+    /// Refuses a database missing a column, as `Store::migrate` does: `CREATE TABLE IF NOT
+    /// EXISTS` keeps old columns silently. `ADDITIVE` columns with harmless defaults are added.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("control_schema.sql");
-        const ADDITIVE: [(&str, &str, &str); 4] = [
+        const ADDITIVE: [(&str, &str, &str); 8] = [
+            (
+                "users",
+                "theme",
+                "ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'system'",
+            ),
+            (
+                "users",
+                "density",
+                "ALTER TABLE users ADD COLUMN density TEXT NOT NULL DEFAULT 'default'",
+            ),
+            (
+                "api_tokens",
+                "scheme",
+                "ALTER TABLE api_tokens ADD COLUMN scheme INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
+                "users",
+                "issuer",
+                "ALTER TABLE users ADD COLUMN issuer TEXT NOT NULL DEFAULT ''",
+            ),
             (
                 "users",
                 "lang",
@@ -179,29 +173,8 @@ impl Control {
             )));
         }
 
-        // The mirror of `ADDITIVE`, and rarer: a column this schema used to
-        // have and no longer does. `CREATE TABLE IF NOT EXISTS` cannot take one
-        // away, and a leftover `NOT NULL` column with no default is not inert —
-        // it fails every `INSERT` that stopped naming it, which here is the one
-        // in `provision`, so the next person to sign in on an upgraded instance
-        // gets a 500 at the door.
-        //
-        // Only for a column nothing reads. `users.last_seen_at` was written by
-        // `provision` and by a `touch` no production path ever called, listed
-        // by nothing and read by nothing, so what this drops is a column whose
-        // every value was the row's own `created_at`. `users.can_judge` gated
-        // a button that let a person apply a tuning result by hand; the base
-        // tunes itself, and nothing reads the grant.
-        //
-        // After the refusal and not before it, which is the whole reason this
-        // sits down here rather than beside `ADDITIVE`. A drop is the one step
-        // in this function that cannot be undone: a control database missing
-        // some *other* column has to come out of a refused migration exactly as
-        // it went in, so that the operator can put the previous binary back.
-        // Dropping first and refusing second takes `last_seen_at` away from a
-        // base the old binary's `provision` still names, which strands them on
-        // both sides. `ADDITIVE` may run before the refusal because adding a
-        // column with a default is invisible to a binary that does not know it.
+        // Drops columns whose leftover `NOT NULL` would fail `provision`'s `INSERT`. Only after
+        // the refusal: a refused migration must leave the database as the previous binary needs it.
         const REMOVED: [(&str, &str, &str); 2] = [
             (
                 "users",
@@ -215,43 +188,108 @@ impl Control {
             ),
         ];
         super::drop_removed(&self.pool, &REMOVED).await?;
+        // runtime: the migrator runs against older schemas than the reference.
+        sqlx::query("DROP TABLE IF EXISTS sessions")
+            .execute(&self.pool)
+            .await?;
 
         sqlx::raw_sql(SCHEMA)
             .execute(&self.pool)
+            .await
+            .map_err(|e| crate::error::Error::Store(e.to_string()))?;
+        // runtime: the migrator runs against older schemas than the reference.
+        let removed = sqlx::query("DELETE FROM api_tokens WHERE scheme = 1")
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+        if removed > 0 {
+            tracing::warn!(
+                "{removed} API tokens from before this version were removed; mint new ones in Settings and pair clients again."
+            );
+        }
+        tower_sessions_sqlx_store::SqliteStore::new(self.pool.clone())
+            .migrate()
             .await
             .map_err(|e| crate::error::Error::Store(e.to_string()))?;
         self.backfill_job_class().await?;
         Ok(())
     }
 
-    /// Put the sweeps in the background class.
-    ///
-    /// `jobs.class` defaults to `0`, which is foreground — the safe direction
-    /// to be wrong in, and the wrong answer for every sweep. Not for a row
-    /// written before the column existed: `migrate` reads the columns before it
-    /// applies the schema and refuses a base without `jobs.class` outright, so
-    /// no such row ever reaches this. What it corrects is a row written by an
-    /// older binary for a stage that was foreground then and is background now
-    /// — pending work outlives an upgrade, and nothing else revisits its class.
-    ///
-    /// It runs on every connect rather than once: it is idempotent by
-    /// construction, since it only ever moves rows that are still `0` *and*
-    /// whose stage says they should not be, which is why
-    /// `applying_the_schema_twice_changes_nothing` still holds.
-    ///
-    /// It cannot tell such a row from one that aged (§4.4) and so undoes an
-    /// ageing across a restart. That costs a moment: the repair ticker's first
-    /// tick fires immediately at boot, the ageing predicate is still satisfied
-    /// by a row that had already aged, and it ages straight back.
+    pub async fn prefs(&self, subject: &str) -> Result<crate::web::prefs::Prefs> {
+        use crate::web::prefs::{Density, Prefs, Theme};
+        let row: Option<(String, String)> = sqlx::query!(
+            "SELECT theme, density FROM users WHERE subject = ?",
+            subject
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map(|o| o.map(|r| (r.theme, r.density)))?;
+        Ok(row
+            .map(|(t, d)| Prefs {
+                theme: Theme::parse(&t).unwrap_or_default(),
+                density: Density::parse(&d).unwrap_or_default(),
+            })
+            .unwrap_or_default())
+    }
+
+    pub async fn set_prefs(&self, subject: &str, p: crate::web::prefs::Prefs) -> Result<()> {
+        sqlx::query!(
+            "UPDATE users SET theme = ?, density = ? WHERE subject = ?",
+            p.theme.as_str(),
+            p.density.as_str(),
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn backfill_issuer(&self, issuer: &str, local_user: Option<&str>) -> Result<u64> {
+        Ok(sqlx::query!(
+            "UPDATE users SET issuer = ? WHERE issuer = '' AND subject IS NOT ?",
+            issuer,
+            local_user
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
+    }
+
+    pub async fn bind_issuer(&self, subject: &str, issuer: &str) -> Result<bool> {
+        sqlx::query!(
+            "UPDATE users SET issuer = ? WHERE subject = ? AND issuer = ''",
+            issuer,
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
+        let bound: Option<String> =
+            sqlx::query_scalar!("SELECT issuer FROM users WHERE subject = ?", subject)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(bound.is_some_and(|b| b == issuer))
+    }
+
+    pub async fn issuer_of(&self, subject: &str) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar!("SELECT issuer FROM users WHERE subject = ?", subject)
+                .fetch_optional(&self.pool)
+                .await?
+                .filter(|i| !i.is_empty()),
+        )
+    }
+
+    /// Fixes rows an older binary queued for stages that are background now. Idempotent, so it
+    /// runs on every connect; it also undoes ageing across a restart, which re-ages at once.
     async fn backfill_job_class(&self) -> Result<()> {
         let background: Vec<&str> = crate::store::jobs::Stage::ALL
             .iter()
             .filter(|s| s.class() == 1)
             .map(|s| s.as_str())
             .collect();
-        // The stage names are `&'static str` from our own enum, never anything
-        // a request supplied, so splicing the placeholders is splicing a count.
+        // The stage names are `&'static str` from our own enum, so only a count is spliced.
         let holes = vec!["?"; background.len()].join(", ");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE jobs SET class = 1 WHERE class = 0 AND stage IN ({holes})"
         )));
@@ -262,19 +300,17 @@ impl Control {
         Ok(())
     }
 
-    /// Idempotent by construction. Two concurrent first requests for the same
-    /// unseen subject both run this: `INSERT OR IGNORE` means one row, and the
-    /// `SELECT` afterwards means both callers get it.
+    /// Concurrent first calls: `INSERT OR IGNORE` makes one row; the `SELECT` returns it to both.
     pub async fn provision(&self, subject: &str, email: Option<&str>) -> Result<User> {
         let now = super::now();
-        sqlx::query(
+        sqlx::query!(
             "INSERT OR IGNORE INTO users (subject, email, slug, created_at)
              VALUES (?, ?, ?, ?)",
+            subject,
+            email,
+            slug_for(subject),
+            now
         )
-        .bind(subject)
-        .bind(email)
-        .bind(slug_for(subject))
-        .bind(now)
         .execute(&self.pool)
         .await?;
         self.user(subject)
@@ -283,56 +319,58 @@ impl Control {
     }
 
     pub async fn user(&self, subject: &str) -> Result<Option<User>> {
-        Ok(sqlx::query("SELECT * FROM users WHERE subject = ?")
-            .bind(subject)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(|r| User::from_row(&r)))
+        Ok(sqlx::query_as!(
+            UserRow,
+            r#"SELECT subject AS "subject!", email, slug, created_at FROM users WHERE subject = ?"#,
+            subject
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(User::from_row))
     }
 
     pub async fn users(&self) -> Result<Vec<User>> {
-        Ok(sqlx::query("SELECT * FROM users ORDER BY created_at")
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(User::from_row)
-            .collect())
+        Ok(sqlx::query_as!(
+            UserRow,
+            r#"SELECT subject AS "subject!", email, slug, created_at FROM users ORDER BY created_at"#
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(User::from_row)
+        .collect())
     }
 
-    /// Where this user's due reminders go. `{}` when nothing is configured.
-    /// The language this account's captures are read in, or `None` for
-    /// automatic — which is the default and means the browser decides.
+    /// The language this account's captures are read in, or `None` for automatic.
     pub async fn lang(&self, subject: &str) -> Result<Option<crate::infer::lang::Lang>> {
-        let raw: Option<String> = sqlx::query_scalar("SELECT lang FROM users WHERE subject = ?")
-            .bind(subject)
-            .fetch_optional(&self.pool)
-            .await?
-            .flatten();
-        // A stored tag this build does not know reads as automatic rather than
-        // as English: the operator chose *something*, and falling back to the
-        // browser is closer to that choice than overriding it.
+        let raw: Option<String> =
+            sqlx::query_scalar!("SELECT lang FROM users WHERE subject = ?", subject)
+                .fetch_optional(&self.pool)
+                .await?;
+        // An unknown stored tag reads as automatic, not English: closer to the operator's choice.
         Ok(raw.as_deref().and_then(crate::infer::lang::Lang::parse))
     }
 
-    /// Set it, or clear it back to automatic with `None`.
     pub async fn set_lang(
         &self,
         subject: &str,
         lang: Option<crate::infer::lang::Lang>,
     ) -> Result<()> {
-        sqlx::query("UPDATE users SET lang = ? WHERE subject = ?")
-            .bind(lang.map(|l| l.tag()).unwrap_or(""))
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE users SET lang = ? WHERE subject = ?",
+            lang.map(|l| l.tag()).unwrap_or(""),
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     pub async fn notify(&self, subject: &str) -> Result<serde_json::Value> {
-        let raw: Option<String> = sqlx::query_scalar("SELECT notify FROM users WHERE subject = ?")
-            .bind(subject)
-            .fetch_optional(&self.pool)
-            .await?;
+        let raw: Option<String> =
+            sqlx::query_scalar!("SELECT notify FROM users WHERE subject = ?", subject)
+                .fetch_optional(&self.pool)
+                .await?;
         Ok(raw
             .and_then(|r| serde_json::from_str(&r).ok())
             .filter(serde_json::Value::is_object)
@@ -340,42 +378,28 @@ impl Control {
     }
 
     pub async fn set_notify(&self, subject: &str, notify: &serde_json::Value) -> Result<()> {
-        sqlx::query("UPDATE users SET notify = ? WHERE subject = ?")
-            .bind(notify.to_string())
-            .bind(subject)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE users SET notify = ? WHERE subject = ?",
+            notify.to_string(),
+            subject
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    /// Remove a user and everything in the control plane that speaks for them:
-    /// their sessions, their API tokens, and — through `jobs`' foreign key —
-    /// their queued work.
-    ///
-    /// The credentials go with the row and not after it. `sessions` and
-    /// `api_tokens` carry no foreign key to `users`, so deleting only the user
-    /// left every unrevoked token working: `tokens::verify` scans
-    /// `active_tokens` without asking whether that subject still exists, and
-    /// the `Tenant` extractor behind it calls `get_or_provision` — which puts
-    /// the row back, recreates the database file, and re-creates the Qdrant
-    /// collection. The account the operator had just deleted came back, empty
-    /// and still authenticated.
-    ///
-    /// One transaction, so a failure part-way through cannot leave live
-    /// credentials for a user that is gone. The three statements run in that
-    /// order for the same reason: credentials first, identity last.
+    /// One transaction, credentials first, identity last. `sessions` and `api_tokens` have no
+    /// foreign key to `users`, and a live token would re-provision the deleted account.
     pub async fn delete_user(&self, subject: &str) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM sessions WHERE subject = ?")
-            .bind(subject)
+        // Session records are opaque to SQL, so every browser signs in again.
+        sqlx::query!("DELETE FROM tower_sessions")
             .execute(&mut *tx)
             .await?;
-        sqlx::query("DELETE FROM api_tokens WHERE subject = ?")
-            .bind(subject)
+        sqlx::query!("DELETE FROM api_tokens WHERE subject = ?", subject)
             .execute(&mut *tx)
             .await?;
-        let gone = sqlx::query("DELETE FROM users WHERE subject = ?")
-            .bind(subject)
+        let gone = sqlx::query!("DELETE FROM users WHERE subject = ?", subject)
             .execute(&mut *tx)
             .await?
             .rows_affected()
@@ -384,18 +408,8 @@ impl Control {
         Ok(gone)
     }
 
-    /// Which of `targets` this tenant has a job for at `stage`.
-    ///
-    /// The queue lives in a different database from the artifacts now, so the
-    /// four `NOT EXISTS (SELECT 1 FROM jobs ...)` clauses that used to ride
-    /// along with an `artifacts` scan cannot be written as joins any more.
-    /// They become this: the tenant names its candidates, and the queue says
-    /// which of them are spoken for. One extra round trip, and no
-    /// cross-database join to keep working.
-    ///
-    /// `states` empty means any state. `max_attempts` limits the answer to
-    /// rows that still have tries left, which is what separates "something is
-    /// going to do this" from "something gave up on this".
+    /// The queue lives in the control database, so this replaces a cross-database join.
+    /// `states` empty means any state; `max_attempts` keeps rows with tries left.
     pub async fn targets_with_jobs(
         &self,
         subject: &str,
@@ -405,15 +419,7 @@ impl Control {
         max_attempts: Option<i64>,
     ) -> Result<std::collections::HashSet<String>> {
         let mut found = std::collections::HashSet::new();
-        // Chunked well under SQLITE_MAX_VARIABLE_NUMBER, which is 999 on the
-        // builds that predate 3.32, for the same reason `stale_unreachable_pairs`
-        // and `stranded_merges` are. The callers here decide the length: the
-        // relate backstop hands over a window of `limit * 8` ids — four thousand
-        // for the one production call — and `pending_artifacts_are_isolated`
-        // hands over every pending chunk of a source, which nothing bounds at
-        // all. Unchunked, both fail outright with `too many SQL variables` on
-        // such a build, and both fail *quietly*: the backstop is a repair pass
-        // that only logs, so it would simply never run again.
+        // Chunked under SQLITE_MAX_VARIABLE_NUMBER (999 before 3.32); callers pass unbounded lists.
         for chunk in targets.chunks(500) {
             // Every placeholder here is a count, never a value: the ids are bound.
             let holes = vec!["?"; chunk.len()].join(", ");
@@ -428,6 +434,7 @@ impl Control {
             if max_attempts.is_some() {
                 sql.push_str(" AND attempts < ?");
             }
+            // runtime: one placeholder per item in the IN list.
             let mut q = sqlx::query_scalar::<_, String>(sqlx::AssertSqlSafe(sql))
                 .bind(subject)
                 .bind(stage.as_str());
@@ -445,14 +452,13 @@ impl Control {
         Ok(found)
     }
 
-    /// How many of this tenant's units at `stage` are still going to run.
     pub async fn live_count(&self, subject: &str, stage: crate::store::jobs::Stage) -> Result<i64> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM jobs
               WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')",
+            subject,
+            stage.as_str()
         )
-        .bind(subject)
-        .bind(stage.as_str())
         .fetch_one(&self.pool)
         .await?)
     }
@@ -461,6 +467,7 @@ impl Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     #[test]
     fn a_slug_is_stable_hex_and_safe_in_a_filename() {
@@ -471,12 +478,6 @@ mod tests {
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
-    /// The mirror of the tenant side's "must not have applied half the file".
-    ///
-    /// A drop is the one irreversible step in `migrate`, so a control database
-    /// that is refused has to come out of it exactly as it went in — otherwise
-    /// the operator cannot put the previous binary back either, and both
-    /// directions are broken at once.
     #[tokio::test]
     async fn a_refused_migration_must_not_have_dropped_a_column() {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -505,6 +506,7 @@ mod tests {
             "the operator has to be told which column is missing: {err}"
         );
 
+        // runtime: reads the live schema of the database at hand.
         let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('users')")
             .fetch_all(&control.pool)
             .await
@@ -519,12 +521,6 @@ mod tests {
         );
     }
 
-    /// The relate backstop hands over `limit * 8` ids — four thousand for its
-    /// one production call — and `pending_artifacts_are_isolated` hands over
-    /// however many chunks a source has. Unchunked, both fail with `too many
-    /// SQL variables` on a SQLite older than 3.32, and the backstop fails
-    /// silently: it is a repair pass that only logs, so it would simply stop
-    /// running.
     #[tokio::test]
     async fn asking_about_more_targets_than_sqlite_takes_parameters_for() {
         let c = Control::memory().await.unwrap();
@@ -580,13 +576,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_a_user_takes_their_credentials_with_it() {
-        // `sessions` and `api_tokens` carry no foreign key to `users`, so a
-        // delete that took only the row left every unrevoked token working —
-        // and `tokens::verify` does not ask whether the subject still exists.
-        // The `Tenant` extractor behind it calls `get_or_provision`, which puts
-        // the row back and recreates the database file and the collection: the
-        // account the operator had just deleted, back, empty, and still
-        // authenticated.
+        // A live token would re-provision the deleted account through `get_or_provision`.
         let c = Control::memory().await.unwrap();
         c.provision("sub-1", None).await.unwrap();
         c.provision("sub-2", None).await.unwrap();
@@ -596,12 +586,11 @@ mod tests {
         let (_, spared) = crate::auth::tokens::mint(&c, "laptop", "sub-2", None)
             .await
             .unwrap();
-        c.insert_session("sid-1", "sub-1", None, 3600)
-            .await
-            .unwrap();
-        c.insert_session("sid-2", "sub-2", None, 3600)
-            .await
-            .unwrap();
+        let dep = crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            8080,
+        )));
+        crate::web::test_support::session_cookie(&c, &dep, "sub-2").await;
 
         assert!(c.delete_user("sub-1").await.unwrap());
 
@@ -609,10 +598,8 @@ mod tests {
             crate::auth::tokens::verify(&c, &doomed).await,
             Err(crate::error::Error::Unauthorized)
         ));
-        assert!(c.get_session("sid-1").await.unwrap().is_none());
 
-        // The other tenant is untouched, which is the whole point of scoping
-        // the delete rather than clearing the tables.
+        // The other tenant is untouched: the delete is scoped, not a table clear.
         assert_eq!(
             crate::auth::tokens::verify(&c, &spared)
                 .await
@@ -620,7 +607,11 @@ mod tests {
                 .subject,
             "sub-2"
         );
-        assert!(c.get_session("sid-2").await.unwrap().is_some());
+        let sessions: i64 = sqlx::query_scalar!("SELECT count(*) FROM tower_sessions")
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0, "every browser signs in again");
     }
 
     #[tokio::test]
@@ -631,7 +622,6 @@ mod tests {
         assert_eq!(before.created_at, after.created_at);
     }
 
-    /// A pool with nothing in it, so a test can put an older schema there.
     async fn empty_pool() -> sqlx::SqlitePool {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
@@ -643,10 +633,6 @@ mod tests {
             .unwrap()
     }
 
-    /// `CREATE TABLE IF NOT EXISTS` leaves an existing table's columns alone,
-    /// so without this the first query naming the new column is where an
-    /// upgraded instance finds out — a bare `no such column`, from the middle
-    /// of somebody's request.
     #[tokio::test]
     async fn a_control_database_older_than_the_schema_refuses_at_boot() {
         let pool = empty_pool().await;
@@ -664,13 +650,6 @@ mod tests {
         assert!(e.contains("users.slug"), "{e}");
     }
 
-    /// The exception, and the same one `Store::migrate` makes: a column added
-    /// beside the others with a default no existing row needs to have been
-    /// written with is added, not refused.
-    /// The mirror of the additive case: a column the schema used to have and no
-    /// longer does has to go, or the `INSERT` in `provision` that stopped naming
-    /// it fails against a leftover `NOT NULL` with no default — which presents
-    /// as a 500 at the door for the next person to sign in after an upgrade.
     #[tokio::test]
     async fn an_instance_has_one_vapid_keypair_that_survives_a_reread() {
         use base64::Engine;
@@ -748,6 +727,7 @@ mod tests {
             .provision("sub-1", None)
             .await
             .expect("a sign-in still provisions");
+        // runtime: reads the live schema of the database at hand.
         let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('users')")
             .fetch_all(&control.pool)
             .await
@@ -791,7 +771,7 @@ mod tests {
             .migrate()
             .await
             .expect("an additive column is added");
-        let n: i64 = sqlx::query_scalar("SELECT count(empty_runs) FROM jobs")
+        let n: i64 = sqlx::query_scalar!("SELECT count(empty_runs) FROM jobs")
             .fetch_one(&control.pool)
             .await
             .unwrap();
@@ -806,23 +786,79 @@ mod tests {
         assert_eq!(c.users().await.unwrap().len(), 1);
     }
 
-    #[tokio::test]
-    async fn a_session_survives_in_the_control_database() {
-        let c = Control::memory().await.unwrap();
-        c.insert_session("sid-1", "sub-1", Some("a@example.org"), 3600)
+    const PRE_CONFORMANCE_SCHEMA: &str =
+        include_str!("../../tests/fixtures/control_schema_pre_conformance.sql");
+
+    async fn old_control_db() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.db");
+        let opts = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = sqlx::SqlitePool::connect_with(opts).await.unwrap();
+        sqlx::raw_sql(PRE_CONFORMANCE_SCHEMA)
+            .execute(&pool)
             .await
             .unwrap();
-        let s = c.get_session("sid-1").await.unwrap().expect("session");
-        assert_eq!(s.subject, "sub-1");
+        sqlx::raw_sql(
+            "INSERT INTO users (subject, email, slug, created_at) VALUES ('sub-1', 'a@example.org', 'slug1', 1);
+             INSERT INTO api_tokens (id, name, token_hash, subject, created_at) VALUES ('t1', 'laptop', '$argon2id$x', 'sub-1', 1);
+             INSERT INTO sessions (id, subject, email, expires_at, created_at) VALUES ('s1', 'sub-1', NULL, 9999999999, 1);",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn migrating_an_old_control_db_removes_scheme_1_tokens_and_keeps_users() {
+        let (_dir, path) = old_control_db().await;
+        let c = Control::connect(path.to_str().unwrap()).await.unwrap();
+        let tokens: i64 = sqlx::query_scalar!("SELECT count(*) FROM api_tokens")
+            .fetch_one(&c.pool)
+            .await
+            .unwrap();
+        assert_eq!(tokens, 0);
+        let u = c.user("sub-1").await.unwrap().expect("the user is kept");
+        assert_eq!(u.email.as_deref(), Some("a@example.org"));
+        let (_, fresh) = crate::auth::tokens::mint(&c, "new", "sub-1", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            crate::auth::tokens::verify(&c, &fresh)
+                .await
+                .unwrap()
+                .subject,
+            "sub-1"
+        );
+        c.migrate().await.unwrap();
+        assert!(
+            crate::auth::tokens::verify(&c, &fresh).await.is_ok(),
+            "a second migrate keeps new tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_old_sessions_table_is_dropped() {
+        let (_dir, path) = old_control_db().await;
+        let c = Control::connect(path.to_str().unwrap()).await.unwrap();
+        let tables: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE type = 'table'"#
+        )
+        .fetch_all(&c.pool)
+        .await
+        .unwrap();
+        assert!(!tables.iter().any(|t| t == "sessions"), "{tables:?}");
+        assert!(tables.iter().any(|t| t == "tower_sessions"), "{tables:?}");
     }
 
     #[tokio::test]
     async fn a_tenant_store_carries_the_control_handle() {
         let store = crate::store::Store::memory().await.unwrap();
         store.control.provision("sub-1", None).await.unwrap();
-        // Two: the one just provisioned, and the test subject every
-        // `Store::memory()` runs as so that `jobs.subject` has something to
-        // point at.
+        // Two: the one just provisioned, and the test subject every `Store::memory()` runs as.
         assert_eq!(store.control.users().await.unwrap().len(), 2);
     }
 

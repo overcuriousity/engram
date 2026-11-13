@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -73,7 +72,7 @@ fun CorpusScreen(
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
     val zone = ZoneId.systemDefault()
-    var confirm by remember { mutableStateOf<Confirm?>(null) }
+    var deleting by remember { mutableStateOf<String?>(null) }
     var said by remember { mutableStateOf<String?>(null) }
 
     fun owe(label: String, method: String, path: String, body: String? = null, then: () -> Unit = {}) {
@@ -118,10 +117,10 @@ fun CorpusScreen(
                 if (p != null && !p.restored && !p.unread) {
                     TextButton(onClick = { owe("Source · re-segmented", "POST", Api.corpusReprocess(id), Api.json("stage" to "segment")) }) { Text("Re-segment") }
                 }
-                if (p?.image == true) TextButton(onClick = { confirm = Confirm("Read the photo again?", "The current reading and its artifacts are replaced.") { owe("Photo · re-read", "POST", Api.corpusReprocess(id), Api.json("stage" to "describe")) } }) { Text("Re-read") }
-                if (p?.pdf == true) TextButton(onClick = { confirm = Confirm("Read the PDF again?", "The current extraction and its artifacts are replaced.") { owe("PDF · re-extracted", "POST", Api.corpusReprocess(id), Api.json("stage" to "extract")) } }) { Text("Re-extract") }
+                if (p?.image == true) TextButton(onClick = { owe("Photo · re-read", "POST", Api.corpusReprocess(id), Api.json("stage" to "describe")) }) { Text("Re-read") }
+                if (p?.pdf == true) TextButton(onClick = { owe("PDF · re-extracted", "POST", Api.corpusReprocess(id), Api.json("stage" to "extract")) }) { Text("Re-extract") }
                 TextButton(
-                    onClick = { confirm = Confirm("Delete this source and all its artifacts?", "Nothing can put them back.") { owe("Source · deleted", "DELETE", Api.corpusDelete(id)) { onGone() } } },
+                    onClick = { deleting = c.title ?: opening(c.text, 60).ifEmpty { c.origin } },
                     colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
                 ) { Text("Delete") }
             }
@@ -133,7 +132,7 @@ fun CorpusScreen(
                 if (p.meta.isNotEmpty()) MetaTable(p.meta)
                 if (p.exif.isNotEmpty()) Column(Modifier.padding(16.dp, 0.dp)) { Fold("All ${p.exif.size} EXIF tags") { MetaTable(p.exif, pad = false) } }
                 if (p.restored) {
-                    Note("Placeholder source", "This source was never captured here. Its artifacts were restored from the vector store after their rows went missing, and every artifact needs a source to belong to, so this row was written to hold them. The text below is those artifacts joined together — not the original document.")
+                    Notice("Placeholder source", "Restored artifacts, joined. Not the original document.")
                 }
                 p.coverage?.let { Text("$it of this capture's wording survived into an artifact.", Modifier.padding(16.dp, 4.dp), style = MaterialTheme.typography.bodySmall, color = muted()) }
                 if (p.promoted.isNotEmpty()) FlowRow(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalArrangement = Arrangement.spacedBy(0.dp)) {
@@ -160,39 +159,33 @@ fun CorpusScreen(
                         SectionHead("Transcription")
                         Text("The model's reading of the photo, not the source itself.", Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted())
                     }
-                    p.bands.forEach { b -> BandView(engram, id, b, byId, highlight, onArtifact, ::owe) { confirm = it } }
+                    p.bands.forEach { b -> BandView(engram, id, b, byId, highlight, onArtifact, ::owe) }
                 }
             }
             if (p != null && p.unplaced.isNotEmpty()) {
                 SectionHead("Not placed in the source")
                 Text(
-                    if (p.restored) "Restored from the vector store, so they name no lines of the text above — the text above is these artifacts joined back together."
-                    else "These artifacts name no lines of this capture, so they sit beside none of it: written before spans were recorded, or by something other than a window read.",
+                    if (p.restored) "Restored; they name no lines."
+                    else "They name no lines of this capture.",
                     Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted(),
                 )
                 p.unplaced.mapNotNull { byId[it] }.forEach { ArtifactCard(engram, it, onArtifact) }
             }
             if (p != null && p.writtenFrom.isNotEmpty()) {
                 SectionHead("Written from this source")
-                Text("Model-written artifacts with a source here. Each lists what it was written from on its own page.", Modifier.padding(16.dp, 0.dp), style = MaterialTheme.typography.bodySmall, color = muted())
                 p.writtenFrom.forEach { aid -> byId[aid]?.let { ArtifactCard(engram, it, onArtifact) } ?: LinkRow(aid, named = false) { onArtifact(aid) } }
             }
         }
         Waiting(page)
     }
-    confirm?.let { q ->
-        AlertDialog(
-            onDismissRequest = { confirm = null },
-            title = { Text(q.title) },
-            text = { Text(q.body) },
-            confirmButton = { TextButton(onClick = { confirm = null; q.then() }) { Text("Do it") } },
-            dismissButton = { TextButton(onClick = { confirm = null }) { Text("Cancel") } },
+    deleting?.let { name ->
+        TypedConfirm(
+            name, "Delete source and artifacts",
+            onConfirm = { deleting = null; owe("Source · deleted", "DELETE", Api.corpusDelete(id)) { onGone() } },
+            onDismiss = { deleting = null },
         )
     }
 }
-
-/** A question asked before something is done, and what doing it is. */
-data class Confirm(val title: String, val body: String, val then: () -> Unit)
 
 /** One band: the lines, then what was written from them — or the red head over lines nothing was. */
 @Composable
@@ -204,7 +197,6 @@ private fun BandView(
     highlight: Pair<Long, Long>?,
     onArtifact: (String) -> Unit,
     owe: (String, String, String, String?, () -> Unit) -> Unit,
-    ask: (Confirm) -> Unit,
 ) {
     Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).then(if (b.gap) Modifier.background(MaterialTheme.colorScheme.error.copy(alpha = 0.06f)) else Modifier)) {
         SelectionContainer {
@@ -223,15 +215,13 @@ private fun BandView(
                 Text("lines ${b.from}–${b.to} · nothing was written from these", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                 b.reread?.let { w ->
                     TextButton(onClick = {
-                        ask(Confirm("Read this passage again?", "One model call. Nothing already written from this capture is replaced — what comes back is added to it, and anything it repeats is folded by the dedupe sweep.") {
-                            owe("Passage · re-read", "POST", Api.corpusReread(corpusId), Api.json("from" to b.from, "to" to b.to)) {}
-                        })
+                        owe("Passage · re-read", "POST", Api.corpusReread(corpusId), Api.json("from" to b.from, "to" to b.to)) {}
                     }) { Text("Read this again — $w") }
                 }
             }
         }
         b.echoes.mapNotNull { byId[it] }.forEach { e ->
-            Text("↑ ${if (e.named) e.title else opening(e.text, 60)}", Modifier.clickable { onArtifact(e.id) }.padding(16.dp, 2.dp), style = MaterialTheme.typography.labelSmall, color = muted())
+            Text("↑ ${if (e.named) e.title else opening(e.text, 60)}", Modifier.clickable { onArtifact(e.id) }.touchTarget().padding(16.dp, 2.dp), style = MaterialTheme.typography.labelSmall, color = muted())
         }
         b.artifactIds.mapNotNull { byId[it] }.forEach { ArtifactCard(engram, it, onArtifact) }
     }
@@ -273,12 +263,3 @@ private fun MetaTable(rows: List<List<String>>, pad: Boolean = true) {
     }
 }
 
-@Composable
-private fun Note(head: String, body: String) {
-    Surface(color = MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f), shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth().padding(16.dp, 6.dp)) {
-        Column(Modifier.padding(12.dp, 8.dp)) {
-            Text(head, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Medium)
-            Text(body, style = MaterialTheme.typography.bodySmall, color = muted())
-        }
-    }
-}

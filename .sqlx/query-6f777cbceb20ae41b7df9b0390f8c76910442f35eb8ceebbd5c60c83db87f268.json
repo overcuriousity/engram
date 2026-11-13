@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT artifact_id FROM context_clusters",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "context_clusters",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f777cbceb20ae41b7df9b0390f8c76910442f35eb8ceebbd5c60c83db87f268"
+}

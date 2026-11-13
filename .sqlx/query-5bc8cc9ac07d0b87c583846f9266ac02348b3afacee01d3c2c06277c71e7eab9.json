@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_links SET state = ? WHERE a_id = ? AND b_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "5bc8cc9ac07d0b87c583846f9266ac02348b3afacee01d3c2c06277c71e7eab9"
+}

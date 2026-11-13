@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT status, COUNT(*) AS n FROM corpora GROUP BY status",
+  "describe": {
+    "columns": [
+      {
+        "name": "status",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "n",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "4a73666226910afd9eaea228cd23b78bc60e5a852bb34f0e31e37e55cb7c6e0d"
+}

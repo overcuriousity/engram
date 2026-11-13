@@ -1,0 +1,45 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", created_at,\n                                (SELECT COUNT(*) FROM search_candidates\n                                  WHERE event_id = search_events.id) AS \"pool!: i64\"\n                           FROM search_events\n                          WHERE id = ? AND door = ? AND scope IS ?\n                            AND judged_at IS NULL AND opened_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "pool!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "a866e6640ce89424700ffa8473b476a4862493c4baa354659c20fbfae0b99f62"
+}

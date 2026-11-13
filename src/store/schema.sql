@@ -138,7 +138,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
   retired_at       INTEGER,
   -- When the reap sweep wiped this row's text into `graveyard`. A stub row —
   -- links intact, text gone — never a candidate again.
-  reaped_at        INTEGER
+  reaped_at        INTEGER,
+  -- In Trash since then; `trashed_from` is the status it goes back to.
+  trashed_at       INTEGER,
+  trashed_from     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);

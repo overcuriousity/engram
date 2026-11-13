@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT attempts, run_after FROM jobs WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "attempts",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "run_after",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "run_after"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "699941c9271b78dbd4f3f8d579ba1a14663afd322b629895a76d1ef49ba1b263"
+}

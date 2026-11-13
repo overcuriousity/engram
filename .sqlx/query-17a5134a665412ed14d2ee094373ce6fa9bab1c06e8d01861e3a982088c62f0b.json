@@ -1,0 +1,35 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS n,\n                COALESCE(SUM(CASE WHEN strength > 0 THEN 1 ELSE 0 END), 0) AS positives,\n                CAST(COALESCE(SUM(CASE WHEN strength < 0 THEN -strength ELSE 0 END), 0) AS REAL)\n                    AS negatives\n           FROM observations\n          WHERE generation_id = ? AND excluded_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "n",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "positives",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "negatives",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "17a5134a665412ed14d2ee094373ce6fa9bab1c06e8d01861e3a982088c62f0b"
+}

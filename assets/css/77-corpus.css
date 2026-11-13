@@ -1,0 +1,55 @@
+
+/* The head keeps the 46rem reading measure; only the bands run the full width. */
+.src-top, .src-flat { max-width: 46rem; }
+
+/* `anywhere`: a title can be a URL with no spaces. */
+.src-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.625rem;
+}
+.src-head h1 { margin: 0; overflow-wrap: anywhere; }
+.src-top .actions { margin: 0.75rem 0 1rem; }
+
+/* `min()` in the track floor, so a phone gets one column instead of a sideways scroll. */
+.unplaced {
+  display: grid; gap: 0.75rem; align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(min(26rem, 100%), 1fr));
+  /* The same right edge as the bands. */
+  max-width: 93rem;
+}
+
+/* Ragged heights on purpose: this page exists to show the source, so none is folded. */
+/* Two reading measures and no wider. */
+.bands {
+  display: flex; flex-direction: column; gap: 0.75rem;
+  max-width: 93rem;
+}
+.band { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; align-items: start; }
+/* Here, not in 74-workspace.css: equal specificity, and this file comes later. */
+@media (width <= 62rem) { .band { grid-template-columns: 1fr; } }
+.band > * { min-width: 0; }
+.band-src {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); overflow-x: auto;
+}
+.band-src table { border-collapse: collapse; width: 100%;
+                  font-family: var(--font-mono); font-size: var(--text-dense); }
+.band-src td { padding: 1px 0.5rem 1px 2rem; vertical-align: top;
+               white-space: pre-wrap; overflow-wrap: anywhere; text-indent: -1.5rem; }
+.band-src td.ln {
+  width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
+  border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
+  padding: 1px 0.5rem; text-indent: 0;
+}
+.band-src tr.in td { background: var(--color-accent-dim); }
+
+/* Red means only that no artifact was written from these lines. */
+.band-gap .band-src { border-color: var(--color-danger); background: var(--color-danger-dim); }
+.band-gap-head {
+  display: flex; gap: 0.5rem; align-items: center; justify-content: space-between;
+  flex-wrap: wrap;
+}
+.band-gap-label { font-size: var(--text-dense); color: var(--color-danger); }
+
+.capture-figure { margin: var(--space-3) 0; }
+.capture-figure figcaption { font-size: var(--text-micro); margin-top: var(--space-1); }
+.artifact-row { border-top: 1px solid var(--color-border-subtle); padding-block: var(--space-3); }

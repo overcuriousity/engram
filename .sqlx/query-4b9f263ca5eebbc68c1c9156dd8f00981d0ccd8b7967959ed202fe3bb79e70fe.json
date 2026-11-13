@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pursuits SET artifact_id = ?, state = 'generated', closed_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "4b9f263ca5eebbc68c1c9156dd8f00981d0ccd8b7967959ed202fe3bb79e70fe"
+}

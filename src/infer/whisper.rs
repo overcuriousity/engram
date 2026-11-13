@@ -1,9 +1,6 @@
-//! whisper.cpp, through the four functions `vendor/whisper.cpp/engram_whisper.h`
-//! declares. The only `unsafe` in the speech path is in this file.
-//!
-//! It runs over the ggml that llama.cpp built — see `build.rs` — so there is
-//! nothing to initialise here and nothing to keep in step at run time: the
-//! matching was done when the two were compiled together.
+//! whisper.cpp through `vendor/whisper.cpp/engram_whisper.h`, over the ggml llama.cpp built (see `build.rs`).
+// FFI to the vendored whisper.cpp; nothing else in the crate may use unsafe.
+#![allow(unsafe_code)]
 
 use crate::error::{Error, Result};
 use std::ffi::{CStr, CString, c_char, c_float, c_int};
@@ -34,9 +31,7 @@ fn failed(detail: impl std::fmt::Display) -> Error {
     }
 }
 
-/// One loaded speech model. It owns a whisper context, which may move between
-/// threads and may not be used from two at once: `Send`, and `run` takes
-/// `&mut self`.
+/// The context may move between threads but not be shared: `Send`, and `run` takes `&mut self`.
 pub struct Whisper(*mut Raw);
 
 // The context has no thread affinity; whisper.cpp only forbids concurrent use,
@@ -58,8 +53,7 @@ impl Whisper {
         Ok(Whisper(raw))
     }
 
-    /// The words in `samples`, which are 16 kHz mono in ±1. `lang` is an
-    /// ISO-639-1 code, or `None` to let the model decide from the audio.
+    /// `samples` are 16 kHz mono in ±1; `lang` is ISO-639-1, or `None` to detect.
     pub fn run(&mut self, samples: &[f32], lang: Option<&str>, threads: i32) -> Result<String> {
         let n = c_int::try_from(samples.len()).map_err(|_| failed("the recording is too long"))?;
         let lang = lang
@@ -103,8 +97,7 @@ impl Drop for Whisper {
 pub(crate) mod tests {
     use super::*;
 
-    /// A file the speech tests need, or `None` with a line saying so. Gated the
-    /// way `local`'s model-backed tests are: one variable turns them all on.
+    /// One variable turns on all model-backed tests, as in `local`.
     pub(crate) fn file(name: &str) -> Option<std::path::PathBuf> {
         let path = std::env::var_os("ENGRAM_TEST_MODELS")
             .map(|d| std::path::PathBuf::from(d).join(name))
@@ -128,8 +121,6 @@ pub(crate) mod tests {
         let mut w = Whisper::open(&model).unwrap();
         let words = w.run(&samples, Some("en"), 4).unwrap().to_lowercase();
         assert!(words.contains("ask not what your country"), "{words}");
-        // And again on the same context: a model is loaded once per recording
-        // today, but nothing about it is single-use.
         let again = w.run(&samples, None, 4).unwrap().to_lowercase();
         assert!(again.contains("ask not what your country"), "{again}");
     }

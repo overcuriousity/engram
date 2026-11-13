@@ -1,46 +1,20 @@
-//! The one signal a plain search gives up on its own.
-//!
-//! A search nobody opened, followed by another search from the same person a
-//! short while later, is a search that did not answer. It is the only negative
-//! the search door produces without being asked, and it is deliberately weak:
-//! the rail shows snippets, so a search read and walked away from *satisfied*
-//! looks exactly like one given up on. What separates them is not time or
-//! attention but the second attempt — a failed recall is what issues another
-//! cue.
-//!
-//! `fold_onto` is not this signal and must not be read as one. It coalesces a
-//! typing burst into one event and overwrites the wordings inside it on
-//! purpose: what survives is the query that was actually meant. What it buys
-//! here is that consecutive stored events are already distinct search acts
-//! rather than keystrokes.
-//!
-//! Idempotent by watermark, the way `associate` reads the same log: a pass
-//! considers events after the last stamp and no later than `now - window`,
-//! because an event young enough to still gain a successor has not finished
-//! being what it is.
-//!
-//! And only from the doors where an open is recorded at all — see
-//! `Door::records_opens`. Everywhere else "nobody opened it" is not something
-//! the base learned, it is something it has no way of hearing.
+//! Give-ups: a search nobody opened, followed by another from the same person shortly after, is a
+//! weak negative.
+//! Read only after `now - window` and only from doors that record opens (`Door::records_opens`).
 
 use crate::core::Core;
 use crate::error::Result;
 use crate::store::observations::{NewObservation, Source};
 use sqlx::Row;
 
-/// Where the last pass stopped. A stamp, not a row.
+/// A stamp, not a row.
 const EVENTS_AFTER: &str = "observe.gave_up_after";
 
 pub async fn run(core: &Core) -> Result<usize> {
     let window = core.evolve.give_up_window_secs;
     if window <= 0 {
-        // Off, and the watermark still moves with the clock. Returning before
-        // it did left the stamp wherever the rule was switched off, so turning
-        // it back on read every unopened search made in between — a month of
-        // them, with no `LIMIT` under the query — and wrote each one down as a
-        // negative. That is the backfill the first pass below refuses,
-        // arriving by the switch instead. A search made while the rule was off
-        // was not read against the one after it then, and is not read later.
+        // Off, the watermark still moves with the clock, so switching back on reads nothing from
+        // the gap.
         core.store
             .meta_set(EVENTS_AFTER, &crate::store::now().to_string())
             .await?;
@@ -54,24 +28,8 @@ pub async fn run(core: &Core) -> Result<usize> {
         .await?
         .and_then(|s| s.parse().ok());
     let Some(after) = stamped else {
-        // The first pass sets the watermark and reads nothing.
-        //
-        // It used to default to `0`, which on any base that existed before
-        // this rule did meant one pass over the entire search history with no
-        // `LIMIT` under it. Every historic search nobody happened to open
-        // became a `-0.25` observation — and stamped with the generation that
-        // was live when the pass ran, because nothing then recorded which one
-        // had served them, though not one of those searches was ever served by
-        // it. `eval::lived` sums them into that generation's account and the
-        // next watch reverts a generation that did nothing wrong, while
-        // `jobs::retract` replays the same rows as evidence to exhume buried
-        // artifacts. On the shipped default of `feedback.retain_days = 0`
-        // nothing expires them either, so the whole of it stands for ever.
-        //
-        // A backfill was never the point: this rule reads a search against the
-        // one that followed it, which is a claim about the base as it is
-        // configured now. Starting from here loses nothing that was ever
-        // measurable.
+        // The first pass sets the watermark and reads nothing: a backfill would charge every
+        // historic unopened search to the live generation.
         core.store
             .meta_set(EVENTS_AFTER, &cutoff.to_string())
             .await?;
@@ -85,20 +43,8 @@ pub async fn run(core: &Core) -> Result<usize> {
         return Ok(0);
     }
 
-    // Only the doors where an open is recorded, and only where the searcher
-    // is named.
-    //
-    // `opened_at` is written in exactly one place — the artifact page, through
-    // `Store::open_event` — so on every other door a search is unopened
-    // because nothing there can say otherwise, not because nobody opened it.
-    // And `scope IS scope` matched NULL to NULL, which is what `Api` and
-    // `Mcp` both carry on purpose: a bearer token is not a person. The two
-    // together meant that on an API- or agent-driven base an agent's three
-    // searches in a minute wrote the first two down as negatives — they could
-    // never be opened, and unscoped they were all "the same person". Those
-    // negatives are not idle either: `eval::lived` sums them into the live
-    // generation's account, and `jobs::retract` replays them as evidence to
-    // exhume buried artifacts.
+    // Only doors that record opens (`Store::open_event`), and only a named searcher: `Api` and
+    // `Mcp` scope is NULL, and a token is not a person.
     let doors: Vec<&'static str> = crate::store::feedback::Door::ALL
         .iter()
         .filter(|d| d.records_opens())
@@ -108,13 +54,9 @@ pub async fn run(core: &Core) -> Result<usize> {
         return Ok(0);
     }
     let holes = vec!["?"; doors.len()].join(", ");
-    //
-    // A search with no generation beside it was recorded before anything
-    // wrote one down, and there is nothing honest to charge it to. A search
-    // already written down is not written down again: the watermark moves
-    // only after the whole pass, so a pass that failed between its inserts and
-    // its stamp handed the next one the same searches, and `eval::lived`
-    // counted each of those negatives twice.
+    // No generation recorded, nothing honest to charge. Already written searches are skipped: the
+    // watermark moves only after the pass.
+    // runtime: one placeholder per item in the IN list.
     let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT e.id AS id, e.query AS query, e.query_vec AS query_vec,
                 e.embed_model AS embed_model, e.generation_id AS generation_id
@@ -146,23 +88,15 @@ pub async fn run(core: &Core) -> Result<usize> {
         .fetch_all(&core.store.pool)
         .await?;
 
-    // One transaction for the whole batch, so a store error part way through
-    // leaves none of it behind. The `NOT EXISTS` above covers the other gap,
-    // between the commit and the stamp.
+    // One transaction for the batch; `NOT EXISTS` covers the gap between commit and stamp.
     let mut written = 0;
     let mut tx = core.store.pool.begin().await?;
     for r in &rows {
-        // No artifact and no rank: the claim is that the list did not answer,
-        // not that anything in it was wrong to be there.
+        // No artifact and no rank: the claim is that the list did not answer.
         crate::store::observations::insert(
             &mut *tx,
             &NewObservation {
                 // The generation that drew the list, not the one live now.
-                // This runs a window after the search at the earliest and
-                // hours after it on a quiet base; charged to whatever was live
-                // by then, an adoption or a restated file in between handed
-                // the new generation negatives for lists it never drew, and
-                // the watch reverted it on them.
                 generation_id: r.get("generation_id"),
                 query: r.get("query"),
                 query_vec: crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
@@ -209,11 +143,7 @@ mod tests {
             })
             .await
             .unwrap();
-        // A base the rule has already run on. The very first pass sets the
-        // watermark and reads nothing — see `the_first_pass_does_not_backfill`
-        // — so a fixture that seeds backdated searches has to stand for a base
-        // that is past that, or every test here would be measuring the
-        // bootstrap instead of the rule.
+        // Stands for a base past its first pass, which only sets the watermark.
         core.store
             .meta_set(EVENTS_AFTER, &(crate::store::now() - 100_000).to_string())
             .await
@@ -221,8 +151,6 @@ mod tests {
         (core, generation)
     }
 
-    /// A search recorded and then backdated, so a chain can be built without
-    /// waiting for one.
     async fn record_at(core: &Core, query: &str, ago: i64) -> String {
         let id = core
             .store
@@ -249,26 +177,17 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - ago)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            crate::store::now() - ago,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         id
     }
 
-    /// The first pass sets the watermark and writes nothing.
-    ///
-    /// It used to default to `0`, so on any base that existed before this rule
-    /// did the first pass walked the entire search history with no `LIMIT`
-    /// under it, and every historic search nobody happened to open became a
-    /// `-0.25` observation — stamped with the generation that is live *now*,
-    /// though not one of those searches was ever served by it. `eval::lived`
-    /// sums them into that generation's account and the next watch reverts a
-    /// generation that did nothing wrong, while `jobs::retract` replays the
-    /// same rows to exhume buried artifacts. Nothing expires them at the
-    /// shipped `feedback.retain_days = 0` either.
     #[tokio::test]
     async fn the_first_pass_does_not_backfill_the_history() {
         let core = crate::core::test_support::test_core().await;
@@ -282,7 +201,6 @@ mod tests {
             })
             .await
             .unwrap();
-        // A history: a chain that would be a give-up on any later pass.
         record_at(&core, "loop device", 4_000).await;
         record_at(&core, "mount loop image", 3_940).await;
 
@@ -295,17 +213,12 @@ mod tests {
                 .is_empty(),
             "a generation that served none of those searches was charged for them"
         );
-        // And the stamp is set, so the next pass starts from here rather than
-        // finding the same history again.
         assert!(
             core.store.meta_get(EVENTS_AFTER).await.unwrap().is_some(),
             "without a stamp the next pass backfills after all"
         );
 
-        // And a chain after the watermark is read as it always was — here
-        // still inside the window, which is the other half of the rule: an
-        // event young enough to gain a successor has not finished being what
-        // it is.
+        // Inside the window: an event young enough to gain a successor is not finished.
         record_at(&core, "wie mounte ich", 20).await;
         record_at(&core, "loop mount image", 5).await;
         assert_eq!(run(&core).await.unwrap(), 0, "still inside the window");
@@ -355,9 +268,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_an_hour_later_is_a_new_question_and_not_a_give_up() {
-        // Search, read something, leave the page open, come back to something
-        // else entirely. The window is what stops that being scored as the
-        // failure of a search that worked.
         let (core, generation) = base().await;
         record_at(&core, "loop device", 8_000).await;
         record_at(&core, "invoice due date", 8_000 - 3_600).await;
@@ -409,10 +319,6 @@ mod tests {
         );
     }
 
-    /// `open_event` is reachable from the web UI and nowhere else, so an API
-    /// or MCP search is unopened by construction. Unscoped as well — a bearer
-    /// token is not a person — it used to match every other unscoped event as
-    /// "the same person", which made a negative out of an agent asking twice.
     #[tokio::test]
     async fn a_search_on_a_door_that_cannot_record_an_open_is_never_a_give_up() {
         let (core, generation) = base().await;
@@ -422,21 +328,25 @@ mod tests {
             (Door::Cli, Some("me".to_string())),
         ] {
             let id = record_at(&core, "loop device", 4_000).await;
-            sqlx::query("UPDATE search_events SET door = ?, scope = ? WHERE id = ?")
-                .bind(door.as_str())
-                .bind(&scope)
-                .bind(&id)
-                .execute(&core.store.pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE search_events SET door = ?, scope = ? WHERE id = ?",
+                door.as_str(),
+                &scope,
+                &id
+            )
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
             let next = record_at(&core, "mount loop image", 3_940).await;
-            sqlx::query("UPDATE search_events SET door = ?, scope = ? WHERE id = ?")
-                .bind(door.as_str())
-                .bind(&scope)
-                .bind(&next)
-                .execute(&core.store.pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE search_events SET door = ?, scope = ? WHERE id = ?",
+                door.as_str(),
+                &scope,
+                &next
+            )
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
 
             core.store.meta_set(EVENTS_AFTER, "0").await.unwrap();
             assert_eq!(
@@ -455,9 +365,6 @@ mod tests {
         );
     }
 
-    /// A window of zero is the rule switched off, and the watermark goes on
-    /// moving while it is. Left where it was, switching the rule back on read
-    /// every search made in between and wrote each unopened one down.
     #[tokio::test]
     async fn switching_the_rule_off_and_on_again_does_not_read_what_happened_while_it_was_off() {
         let (core, generation) = base().await;
@@ -482,9 +389,6 @@ mod tests {
         );
     }
 
-    /// Charged to the generation that drew the list. The sweep reads a search
-    /// a window after it at the earliest, and an adoption in between is
-    /// ordinary.
     #[tokio::test]
     async fn a_give_up_is_charged_to_the_generation_that_served_the_search() {
         let (core, served) = base().await;
@@ -523,8 +427,6 @@ mod tests {
         );
     }
 
-    /// The watermark moves only after the whole pass, so a pass that stopped
-    /// between its inserts and its stamp hands the next one the same searches.
     #[tokio::test]
     async fn a_search_already_written_down_is_not_written_down_twice() {
         let (core, generation) = base().await;
@@ -532,7 +434,6 @@ mod tests {
         record_at(&core, "mount loop image", 3_940).await;
         assert_eq!(run(&core).await.unwrap(), 1);
 
-        // The stamp a pass that failed after its inserts would have left.
         core.store
             .meta_set(EVENTS_AFTER, &(crate::store::now() - 100_000).to_string())
             .await

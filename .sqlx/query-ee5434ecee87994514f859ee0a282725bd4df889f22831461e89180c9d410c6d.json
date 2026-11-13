@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id AS \"artifact_id!\", at, tag, nearest_id, nearest_score, detail\n               FROM integrations WHERE artifact_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "integrations",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "integrations",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "tag",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "integrations",
+            "name": "tag"
+          }
+        }
+      },
+      {
+        "name": "nearest_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "integrations",
+            "name": "nearest_id"
+          }
+        }
+      },
+      {
+        "name": "nearest_score",
+        "ordinal": 4,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "integrations",
+            "name": "nearest_score"
+          }
+        }
+      },
+      {
+        "name": "detail",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "integrations",
+            "name": "detail"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ee5434ecee87994514f859ee0a282725bd4df889f22831461e89180c9d410c6d"
+}

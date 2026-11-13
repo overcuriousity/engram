@@ -1,10 +1,5 @@
-//! What situation a page view happened in, and what the sweep made of them.
-//!
-//! Two tables with one rule between them: nothing here is joined by a stored
-//! id. A context event is matched to an open through `scope` and `at`, the way
-//! `interaction_events` is matched to a pursuit — so re-clustering never has to
-//! rewrite a row, and a sweep run under a new encoder starts from the raw
-//! bundles rather than from what the last one concluded.
+//! Page-view situations and the clusters the sweep learns from them. Nothing is joined by a
+//! stored id, so a sweep under a new encoder starts from the raw bundles.
 
 use super::{Store, now};
 use crate::error::Result;
@@ -12,22 +7,14 @@ use crate::store::feedback::{blob_to_vec, vec_to_blob};
 use sqlx::Row;
 use std::collections::HashMap;
 
-/// How long a situation is kept.
-///
-/// Not `feedback.retain_days`, and not a setting. A weekly pattern needs weeks
-/// and a monthly one needs months, so the window this feature needs is not the
-/// window an operator sets for their query log — and it is longer than either
-/// default. Housekeeping about how long the base may remember a Friday
-/// afternoon is not a preference; it is what the feature costs to work at all.
+/// Not a setting: weekly and monthly patterns need this long a window to be learnt at all.
 pub const RETAIN_DAYS: i64 = 400;
 
-/// One page view, as the browser described it.
 #[derive(Debug, Clone, Default)]
 pub struct ContextEvent {
     pub id: i64,
     pub scope: Option<String>,
     pub at: i64,
-    /// The bundle as received, JSON.
     pub bundle: String,
     pub device_key: Option<String>,
     /// The fractional local hour — 14.9 for 14:55, as the encoder reads it.
@@ -36,7 +23,6 @@ pub struct ContextEvent {
     pub tz: Option<String>,
 }
 
-/// One learned situation, as SQLite holds it.
 #[derive(Debug, Clone)]
 pub struct StoredCluster {
     pub scope: Option<String>,
@@ -44,7 +30,7 @@ pub struct StoredCluster {
     pub slot: i64,
     pub centroid: Vec<f32>,
     pub weight: f64,
-    /// How many events this was built from, undecayed. See the column comment.
+    /// Undecayed. See the column comment.
     pub events: i64,
     pub last_at: i64,
     pub encoder_version: i64,
@@ -52,138 +38,110 @@ pub struct StoredCluster {
 }
 
 impl Store {
-    /// Record one page view's situation. Returns the row's own id.
     pub async fn record_context(&self, ev: &ContextEvent) -> Result<i64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT INTO context_events
                  (scope, at, bundle, device_key, local_hour, weekday, tz)
              VALUES (?, ?, ?, ?, ?, ?, ?)",
+            &ev.scope,
+            ev.at,
+            &ev.bundle,
+            &ev.device_key,
+            ev.local_hour,
+            ev.weekday,
+            &ev.tz
         )
-        .bind(&ev.scope)
-        .bind(ev.at)
-        .bind(&ev.bundle)
-        .bind(&ev.device_key)
-        .bind(ev.local_hour)
-        .bind(ev.weekday)
-        .bind(&ev.tz)
         .execute(&self.pool)
         .await?;
         Ok(res.last_insert_rowid())
     }
 
-    /// Every situation recorded at or after `since`, oldest first.
-    ///
-    /// Unbounded on purpose, and bounded in practice by `RETAIN_DAYS`: the one
-    /// caller is the sweep, which rebuilds every profile from the raw bundles
-    /// and therefore needs all of them. Paging it would mean holding a cursor
-    /// across a rebuild that is only correct when it sees the whole window.
+    /// Unbounded on purpose, bounded by `RETAIN_DAYS`: the sweep rebuilds from the whole window.
     pub async fn context_events_since(&self, since: i64) -> Result<Vec<ContextEvent>> {
-        let rows = sqlx::query(
+        let rows = sqlx::query!(
             "SELECT id, scope, at, bundle, device_key, local_hour, weekday, tz
                FROM context_events
               WHERE at >= ?
               ORDER BY at, id",
+            since
         )
-        .bind(since)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| ContextEvent {
-                id: r.get("id"),
-                scope: r.get("scope"),
-                at: r.get("at"),
-                bundle: r.get("bundle"),
-                device_key: r.get("device_key"),
-                local_hour: r.get("local_hour"),
-                weekday: r.get("weekday"),
-                tz: r.get("tz"),
+                id: r.id,
+                scope: r.scope,
+                at: r.at,
+                bundle: r.bundle,
+                device_key: r.device_key,
+                local_hour: r.local_hour,
+                weekday: r.weekday,
+                tz: r.tz,
             })
             .collect())
     }
 
-    /// Drop situations past keeping. See `RETAIN_DAYS`.
     pub async fn expire_context_events(&self, retain_days: i64) -> Result<u64> {
         let cutoff = now() - retain_days * 86_400;
-        Ok(sqlx::query("DELETE FROM context_events WHERE at < ?")
-            .bind(cutoff)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        Ok(
+            sqlx::query!("DELETE FROM context_events WHERE at < ?", cutoff)
+                .execute(&self.pool)
+                .await?
+                .rows_affected(),
+        )
     }
 
-    /// One active artifact, drawn at random.
-    ///
-    /// The bottom of the ladder, and deliberately *not* `resurface`. That one
-    /// answers "what has been forgotten" — older than thirty days and unshown
-    /// for thirty days — so on a base anyone has just started using it returns
-    /// nothing at all, which is the one moment this is for. It also stamps what
-    /// it draws as seen, which would quietly drain the pool the search page's
-    /// own resurfacing lives on.
-    ///
-    /// This asks a simpler question and has no side effect: something to look
-    /// at, while the base has nothing to say about the situation. Nothing is
-    /// claimed about it, and the page prints no reason beside it.
+    /// Not `resurface`: that returns nothing on a new base and marks what it draws as seen.
     pub async fn random_artifact(&self) -> Result<Option<(String, Option<String>, String)>> {
-        let row = sqlx::query(
-            "SELECT id, title, text FROM artifacts
+        let row = sqlx::query!(
+            r#"SELECT id AS "id!", title, text FROM artifacts
               WHERE status = 'active' AND superseded_by IS NULL
-              ORDER BY RANDOM() LIMIT 1",
+              ORDER BY RANDOM() LIMIT 1"#
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| (r.get("id"), r.get("title"), r.get("text"))))
+        Ok(row.map(|r| (r.id, r.title, r.text)))
     }
 
-    /// Every artifact that currently has a profile.
-    ///
-    /// What the sweep needs in order to *clear* one: an artifact whose every
-    /// situation has decayed below `min_weight` produces no clusters this run,
-    /// so nothing in the run's own output names it, and without this its old
-    /// centroids would stand for ever — offering it on a pattern that stopped
-    /// months ago.
+    /// The sweep needs these to clear a profile whose clusters all decayed below `min_weight`.
     pub async fn artifacts_with_context_clusters(&self) -> Result<Vec<String>> {
         Ok(
-            sqlx::query_scalar("SELECT DISTINCT artifact_id FROM context_clusters")
+            sqlx::query_scalar!("SELECT DISTINCT artifact_id FROM context_clusters")
                 .fetch_all(&self.pool)
                 .await?,
         )
     }
 
-    /// Replace everything this artifact has learned, in one transaction.
-    ///
-    /// Wholesale, never merged. The sweep rebuilds a profile from the raw
-    /// bundles every run, so a merge would leave a slot from a previous run
-    /// standing beside fresh ones — and the multivector written from the fresh
-    /// ones would then not match the table the reason is read out of. An empty
-    /// list is a clear, which is what an artifact whose every cluster fell
-    /// below `min_weight` needs.
+    /// Wholesale, never merged: the multivector must match the table. An empty list clears.
     pub async fn replace_context_clusters(
         &self,
         artifact_id: &str,
         clusters: &[StoredCluster],
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM context_clusters WHERE artifact_id = ?")
-            .bind(artifact_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query!(
+            "DELETE FROM context_clusters WHERE artifact_id = ?",
+            artifact_id
+        )
+        .execute(&mut *tx)
+        .await?;
         for c in clusters {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO context_clusters
                      (scope, artifact_id, slot, centroid, weight, events,
                       last_at, encoder_version, representative)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                &c.scope,
+                artifact_id,
+                c.slot,
+                vec_to_blob(&c.centroid),
+                c.weight,
+                c.events,
+                c.last_at,
+                c.encoder_version,
+                &c.representative
             )
-            .bind(&c.scope)
-            .bind(artifact_id)
-            .bind(c.slot)
-            .bind(vec_to_blob(&c.centroid))
-            .bind(c.weight)
-            .bind(c.events)
-            .bind(c.last_at)
-            .bind(c.encoder_version)
-            .bind(&c.representative)
             .execute(&mut *tx)
             .await?;
         }
@@ -191,10 +149,7 @@ impl Store {
         Ok(())
     }
 
-    /// What these artifacts have learned, keyed by artifact, in slot order.
-    /// Ids with no clusters are absent from the answer rather than present and
-    /// empty — the read path asks for the ten the vector store returned and
-    /// needs to know which of them it can say nothing about.
+    /// Ids with no clusters are absent rather than empty.
     pub async fn context_clusters_of(
         &self,
         artifact_ids: &[String],
@@ -202,13 +157,11 @@ impl Store {
         if artifact_ids.is_empty() {
             return Ok(HashMap::new());
         }
-        // Built by hand because sqlx has no list binding for SQLite, and
-        // `AssertSqlSafe` because the string is assembled here — the values are
-        // bound and never spliced, and only the placeholders are generated.
-        // Same shape as `artifacts_by_ids`.
+        // sqlx has no list binding for SQLite; only placeholders are generated, values are bound.
         let holes = std::iter::repeat_n("?", artifact_ids.len())
             .collect::<Vec<_>>()
             .join(",");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT scope, artifact_id, slot, centroid, weight, events, last_at,
                     encoder_version, representative
@@ -289,8 +242,6 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_uses_this_features_own_window() {
-        // Not `feedback.retain_days`: an operator who shortens their query log
-        // is not asking the base to forget what Friday afternoon looks like.
         let store = Store::memory().await.unwrap();
         let day = 86_400;
         store
@@ -309,9 +260,6 @@ mod tests {
 
     #[tokio::test]
     async fn clusters_are_replaced_wholesale_not_merged() {
-        // The sweep is a full rebuild per artifact. A write that merged would
-        // leave a slot from a previous encoder standing beside fresh ones, and
-        // the multivector written from them would not match the table.
         let store = Store::memory().await.unwrap();
         let aid = seed_artifact(&store).await;
 
@@ -373,8 +321,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_with_no_clusters_is_absent_rather_than_empty() {
-        // The read path asks for the ten ids the store returned and expects to
-        // learn which of them it knows nothing about.
         let store = Store::memory().await.unwrap();
         let back = store
             .context_clusters_of(&["nobody".to_string()])
@@ -392,8 +338,7 @@ mod tests {
             .await
             .unwrap();
 
-        sqlx::query("DELETE FROM artifacts WHERE id = ?")
-            .bind(&aid)
+        sqlx::query!("DELETE FROM artifacts WHERE id = ?", &aid)
             .execute(&store.pool)
             .await
             .unwrap();
@@ -416,8 +361,6 @@ mod tests {
         }
     }
 
-    /// A corpus and one artifact in it, because `context_clusters.artifact_id`
-    /// is a foreign key and SQLite enforces it.
     async fn seed_artifact(store: &Store) -> String {
         let src = store.insert_corpus("raw", "web", None).await.unwrap();
         store

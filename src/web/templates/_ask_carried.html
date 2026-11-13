@@ -1,10 +1,5 @@
-{# One toggle per citation card. Swaps itself; the bar follows out-of-band
-   because saying an excerpt carried the answer is saying the answer was right. #}
-<button class="btn btn-ghost btn-sm{% if carried %} is-on{% endif %}"
+{# Swaps itself; the bar follows out of band, since carrying the answer means it was right. #}
+<button class="oc-btn" type="button" aria-pressed="{% if carried %}true{% else %}false{% endif %}"
         hx-post="/ui/ask/{{ event_id }}/carried" hx-vals='{"n":{{ n }}}'
-        hx-swap="outerHTML" title="This excerpt carried the answer">
-  {% if carried %}✓ carried the answer{% else %}carried the answer{% endif %}
-</button>
-{# Already carrying `hx-swap-oob` from the bar's own template, so it swaps
-   itself and no wrapper repeats its id. #}
+        hx-swap="outerHTML">{% if carried %}{{ crate::web::icons::icon("check", 16) }}{% endif %}<span>Carried the answer</span></button>
 {% if let Some(bar) = bar %}{{ bar|safe }}{% endif %}

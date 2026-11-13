@@ -1,10 +1,6 @@
-//! Pursuits: a coherent run of searches, what was engaged with, and — when the
-//! base did not answer or the answer was assembled by hand — the one artifact
-//! that earns.
-//!
-//! Local decides, the model only writes. The sweep (`run`) groups quiet
-//! searches by their stored vectors, scores engagement, and arms `Generate`
-//! for a pursuit that earned it; `generate` makes the one call.
+//! Pursuits: a coherent run of searches, what was engaged with, and the one artifact an unmet need
+//! earns.
+//! Local decides, the model only writes: `run` groups and scores, `generate` makes the one call.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -12,23 +8,16 @@ use crate::infer::prompt;
 use crate::store::artifacts::NewSynthesized;
 use crate::store::jobs::Stage;
 
-/// Write the artifact a pursuit earned. One call; supersedes nothing.
-///
-/// Idempotent: a pursuit that is no longer `open`, or already names an
-/// artifact, is left alone — a retry after a crash between the insert and the
-/// pursuit update must not write twice.
+/// One call, superseding nothing. Idempotent: a retry after a crash between insert and update must
+/// not write twice.
 pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     let p = core.store.get_pursuit(pursuit_id).await?;
     if p.state != "open" || p.artifact_id.is_some() {
         return Ok(());
     }
     let now = crate::store::now();
-    // Closed, not merely returned from. `periodic_units` no longer arms this
-    // stage without a generator, but a unit queued before that model was taken
-    // out of the config still arrives here — and a bare `Ok(())` left the
-    // pursuit `open` with no artifact and no reason, which is a row Ops shows
-    // for ever and nobody can act on. Every other exit from this function says
-    // why it took nothing; so does this one.
+    // Closed with a reason: a unit queued before the generator was removed must not leave an `open`
+    // row nobody can act on.
     let Some(generator) = core.generator.clone() else {
         core.store
             .close_pursuit(pursuit_id, "unsatisfied", "no generator configured", now)
@@ -36,13 +25,8 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         return Ok(());
     };
 
-    // The engaged artifacts resolved to what was captured, in engagement
-    // order. A synthesized artifact the operator pivoted through contributes
-    // its roots, never its own text: a synthesis is a consolidation of
-    // originals, and consolidating consolidations is how three generations
-    // drifted from web tracking to Petri nets while every literal checked
-    // out. `roots_of` answers a captured artifact with itself and a synthesis
-    // whose roots are all gone with nothing, which is the right amount.
+    // Engaged artifacts resolved to their captured roots: consolidating consolidations drifts
+    // off-subject while every literal checks out.
     let roots = core.store.roots_of(&p.sources).await?;
     let mut ids: Vec<String> = Vec::new();
     for id in &p.sources {
@@ -70,21 +54,9 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // A pursuit is swept once the operator has gone quiet, and the commonest
-    // thing they do between the last search and that quiet is answer the
-    // question themselves: they find nothing, go and capture the document that
-    // holds it, and read it. The engaged sources are then a record of what was
-    // clicked while the base was still empty, and writing them up produces an
-    // artifact about the wrong subject — or, worse, a refusal in the shape of
-    // one. So the question is asked of the base once more, with the vector the
-    // sweep already stored, and anything strong that arrived after the pursuit
-    // opened settles it: the need was met, by the operator, and there is
-    // nothing here to write.
-    //
-    // The engaged sources are excluded because they are what the searching
-    // *saw*; only what it could not see is news. Local throughout — one vector
-    // query, no model call — and any failure of it is left to the generation
-    // below rather than closing a pursuit on a search that did not run.
+    // The operator often answers the question themselves before the sweep runs, so ask the base
+    // once more with the stored vector, excluding the engaged sources. A failed probe is left to
+    // the generation below.
     if let Some(found) = answered_since(core, &p).await? {
         core.store
             .close_pursuit(
@@ -97,9 +69,8 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Packed to the window the way the dedupe judge packs: the questions and
-    // the system prompt always go out; sources are dropped from the tail when
-    // they would not fit.
+    // Packed like the dedupe judge: questions and system prompt always go; sources drop from the
+    // tail.
     let window = generator.context_tokens();
     let ceiling = generator.max_output_tokens();
     let system = core.counter.count(prompt::GENERATE_SYSTEM);
@@ -113,13 +84,8 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         if spent + ceiling.min(window / 2) <= window {
             break user;
         }
-        // Dropping the tail is what makes it fit, and `min_sources` is the
-        // floor below which a generation has too little to stand on. Reaching
-        // that floor still over budget is not a smaller prompt to try — it is
-        // a fact about how long these particular artifacts are. Sending it
-        // anyway spends a 400 and then `MAX_ATTEMPTS` more on byte-identical
-        // content, so the pursuit is closed here with the reason on it,
-        // the way `dedupe` refuses a pair that cannot fit one call.
+        // At `min_sources` and still over budget, retrying only spends `MAX_ATTEMPTS` calls on
+        // identical content, so close with the reason.
         if sources.len() <= core.pursuit.min_sources {
             core.store
                 .close_pursuit(
@@ -144,12 +110,8 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     permit.finished();
     let g = prompt::parse_generation(&reply?)?;
 
-    // The model was given what the operator engaged with, not what answers the
-    // question, and near misses are exactly what a search over a base that
-    // holds nothing on the subject returns. When it says so, the saying is not
-    // an artifact: storing it titles the refusal with the question, embeds it,
-    // and hands it back to the next search for those words. The pursuit closes
-    // unsatisfied, which is what it was — a gap, recorded as one.
+    // An abstention is not an artifact: stored, it would be handed back to the next search for
+    // those words. The pursuit closes unsatisfied, a gap.
     if prompt::abstained(&g.text) {
         core.store
             .close_pursuit(
@@ -181,8 +143,7 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
             &ids,
         )
         .await?;
-    // Drift is caught rather than prevented: a literal in the generated text
-    // that no source carries is flagged for whoever reads it.
+    // Drift is flagged, not prevented: a literal no source carries is marked for the reader.
     let missing = crate::infer::verify::missing_literals(&made.text, &made.caveats, &source_text);
     if let Some(first) = missing.first() {
         core.store
@@ -203,19 +164,12 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// How many hits past the engaged sources the freshness probe reads. The
-/// sources can lead the list they were engaged from, and every one of them is
-/// skipped, so a probe of `sources.len()` alone could come back with nothing
-/// left to judge.
+/// The engaged sources can lead the list and are all skipped, so a probe of `sources.len()` could
+/// leave nothing to judge.
 const ANSWER_PROBE_EXTRA: usize = 3;
 
-/// An artifact the searching never saw that now answers the pursuit's query:
-/// at or above `weak_below`, not one of the engaged sources, and created after
-/// the pursuit opened.
-///
-/// `None` when the pursuit has no stored vector, when it was embedded by a
-/// model the base has since moved off — a cosine between two models' spaces is
-/// not a distance — or when nothing new reaches the line.
+/// An unseen artifact created after the pursuit opened that now answers it at or above
+/// `weak_below`. `None` across embedding models: their cosines are not distances.
 async fn answered_since(
     core: &Core,
     p: &crate::store::pursuits::Pursuit,
@@ -233,9 +187,8 @@ async fn answered_since(
         .await?;
     let fresh: Vec<String> = hits
         .into_iter()
-        // `None` is "no opinion" rather than a low value — a lexical hit the
-        // dense half never returned — and closing a pursuit is a claim about
-        // distance, the same rule `gaps::cover` reads the line by.
+        // `None` is "no opinion", not a low value; closing is a claim about distance, as in
+        // `gaps::cover`.
         .filter(|h| h.similarity.is_some_and(|s| s >= core.weak_below()))
         .map(|h| h.payload.artifact_id)
         .filter(|id| !p.sources.contains(id))
@@ -252,43 +205,26 @@ async fn answered_since(
         .map(|c| c.id))
 }
 
-/// Cursor: the moment everything up to which has been grouped into pursuits.
 pub const PURSUIT_AFTER: &str = "pursuit.events_after";
 
-/// How far back one sweep may look, whatever the cursor says.
-///
-/// A ceiling rather than a budget: pursuits are swept every time the operator
-/// goes quiet, so nothing in ordinary use comes near it. What it stops is the
-/// first sweep after `[learn]` is turned on, where there is no cursor
-/// and the window would otherwise open at the epoch. Recording is on by
-/// default, so that window holds every search the base has taken since it was
-/// installed, and every interaction with it.
-///
-/// A day is chosen because a pursuit is a sitting, and the sweep after an
-/// idle stretch has already seen everything older than the last one.
+/// Stops the first sweep after `[learn]` is enabled, with no cursor, from reading every search
+/// since install. A day, because a pursuit is a sitting.
 const MAX_LOOKBACK_SECS: i64 = 24 * 60 * 60;
 
-/// One clustered pursuit before a decision: what was asked, and what was done
-/// with the results.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Need {
     pub queries: Vec<String>,
     pub opened_at: i64,
     pub last_at: i64,
-    /// A synthesized artifact led one of the lists above the weak line.
     pub answered: bool,
-    /// A question was answered "not in the knowledge base".
     pub abstained: bool,
-    /// Engagement weight per artifact, in first-engagement order.
     pub engagement: Vec<(String, f64)>,
-    /// Dwell weight per artifact, ≤ 0.5 each. A tiebreak for the order the
-    /// sources go into the prompt; never part of what decides.
+    /// Dwell weight per artifact, at most 0.5 each: a tiebreak for prompt order, never part of the
+    /// decision.
     pub dwell: Vec<(String, f64)>,
     pub pivots: usize,
     pub returns: usize,
-    /// Searches with nothing opened that were followed by another search.
     pub refined: usize,
-    /// The last search opened nothing and nothing followed it.
     pub abandoned: bool,
 }
 
@@ -299,18 +235,13 @@ pub enum Decision {
     Generate,
 }
 
-/// The signals that say the need went unmet, whatever else happened: nothing
-/// the base offered was engaged, the question was rephrased and rephrased,
-/// the last search was walked away from, the model declined to answer.
-///
-/// Everything in `engagement` was reached from a hit at or above the weak
-/// line — the sweep attaches nothing else — so "engaged" and "engaged
-/// something strong" are one condition.
+/// Everything in `engagement` was reached from a hit at or above the weak line, so "engaged" means
+/// "engaged something strong".
 pub fn unsatisfied(n: &Need) -> bool {
     n.engagement.is_empty() || n.refined >= 2 || n.abandoned || n.abstained
 }
 
-/// The analysis pass, in the spec's order. Pure: every input is in `Need`.
+/// The analysis pass, in the spec's order; every input is in `Need`.
 pub fn decide(n: &Need, min_sources: usize, min_engagement: f64) -> Decision {
     if n.answered {
         return Decision::Satisfied("a synthesized artifact led the list".into());
@@ -319,8 +250,7 @@ pub fn decide(n: &Need, min_sources: usize, min_engagement: f64) -> Decision {
     let unsatisfied = unsatisfied(n);
     if n.engagement.len() < min_sources {
         return if unsatisfied {
-            // Above the shipped `min_sources = 2` this is reachable with
-            // artifacts engaged, and "nothing engaged" would then be a lie.
+            // Reachable with artifacts engaged above the shipped `min_sources = 2`.
             Decision::Unsatisfied(if n.engagement.is_empty() {
                 "nothing engaged".into()
             } else {
@@ -342,35 +272,24 @@ pub fn decide(n: &Need, min_sources: usize, min_engagement: f64) -> Decision {
     }
 }
 
-/// One event of either kind, as the sweep clusters it.
 struct Ev {
-    /// Search only: the `search_events` row. Carried because a capture's link
-    /// names that row and nothing else — see `cover_typed_from` below, which
-    /// is the only reader.
+    /// Search only: a capture's link names this row; read by `cover_typed_from`.
     id: Option<String>,
     at: i64,
     scope: Option<String>,
     query: String,
     vec: Vec<f32>,
-    /// Search only.
     answered: bool,
     confirmed: Option<String>,
     shown: Vec<(String, Option<f32>)>,
-    /// Ask only.
     is_ask: bool,
     abstained: bool,
-    /// The excerpts the *answer* referenced — never everything the ask packed
-    /// into its prompt. See `RecordedAsk::cited`.
+    /// What the answer referenced, never everything the ask packed (`RecordedAsk::cited`).
     cited: Vec<String>,
 }
 
-/// Group quiet searches into pursuits and decide each. Returns how many
-/// pursuit rows were written.
-///
-/// Runs only when everything unprocessed has been idle for `idle_secs`: a
-/// pursuit is a thing that ended, and the cheapest correct idle rule is to
-/// wait until the operator stopped. Local throughout — the only model call is
-/// the one `Generate` makes later, and only for a pursuit that earned it.
+/// Runs only once everything unprocessed has been idle for `idle_secs`: a pursuit is something that
+/// ended.
 pub async fn run(core: &Core) -> Result<usize> {
     if !core.associating() {
         return Ok(0);
@@ -429,14 +348,8 @@ pub async fn run(core: &Core) -> Result<usize> {
         .collect();
     evs.sort_by_key(|e| e.at);
 
-    // An interaction belongs to the latest event before it — in the same
-    // scope, within the idle window — that *reached* its artifact: showed it
-    // at or above the weak line, confirmed it, cited it, or showed whatever
-    // it was pivoted from. Never to an answered search: the base answered,
-    // and what was opened afterwards is not a need. And never by the clock
-    // alone: the opens after a search that found nothing are the operator
-    // reading something else, and billing them to that search is what turned
-    // nine minutes of Nmap notes into an artifact about page changes.
+    // An interaction belongs to the latest prior event in scope, within the idle window, that
+    // reached its artifact; never to an answered search, never by the clock alone.
     let weak = core.weak_below();
     let mut reach: Vec<std::collections::HashSet<String>> = evs
         .iter()
@@ -465,26 +378,19 @@ pub async fn run(core: &Core) -> Result<usize> {
             .max_by_key(|(_, e)| e.at)
             .map(|(idx, _)| idx);
         if let Some(idx) = owner {
-            // A pivot lands somewhere the search never showed; opening it
-            // afterwards is still this pursuit.
             reach[idx].insert(i.artifact_id.clone());
             attached[idx].push(k);
         }
     }
 
-    // Grouped by the lead: an event joins the pursuit whose first query it is
-    // nearest, if that is at or above the line and the pursuit is still
-    // within the idle gap; otherwise it opens one. Anchoring on the lead
-    // rather than linking transitively is what keeps "datenfluss" from
-    // pulling "Petrinetze" in over a bridge the two endpoints never cross —
-    // and the idle gap is what makes each group a sitting, something that
-    // ended, rather than a topic.
+    // Anchored on the lead query, not linked transitively, so a bridge cannot pull in an unrelated
+    // topic; the idle gap makes each group a sitting.
     let line = core.link_at();
     let mut clusters: Vec<Vec<usize>> = Vec::new();
     for m in 0..evs.len() {
         let best = clusters
             .iter_mut()
-            .filter(|c| evs[m].at - evs[*c.last().unwrap()].at <= idle)
+            .filter(|c| c.last().is_some_and(|l| evs[m].at - evs[*l].at <= idle))
             .map(|c| (crate::core::gaps::cosine(&evs[c[0]].vec, &evs[m].vec), c))
             .filter(|(sim, _)| *sim >= line)
             .max_by(|a, b| a.0.total_cmp(&b.0));
@@ -497,8 +403,7 @@ pub async fn run(core: &Core) -> Result<usize> {
     let mut written = 0;
     for members in clusters {
         let need = need_of(&evs, &members, &attached, &interactions);
-        // Sources in the order they go to the model: engagement first, dwell
-        // breaking ties. Dwell moves an artifact up the list and nothing else.
+        // Engagement first, dwell breaking ties.
         let mut ranked: Vec<(String, f64)> = need
             .engagement
             .iter()
@@ -515,11 +420,8 @@ pub async fn run(core: &Core) -> Result<usize> {
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
         let sources: Vec<String> = ranked.into_iter().map(|(id, _)| id).collect();
         let decision = decide(&need, core.pursuit.min_sources, core.pursuit.min_engagement);
-        // The leading event's vector, carried onto the row. A pursuit that
-        // closes unsatisfied is a gap, and a gap is a question plus the vector
-        // it was found by; the sweep is holding both right here, and embedding
-        // the words again later would be a call spent on a vector that has
-        // already been computed.
+        // The lead event's vector goes on the row: a gap is a question plus the vector it was found
+        // by.
         let lead = members.first().map(|&m| &evs[m]);
         let pid = core
             .store
@@ -530,13 +432,8 @@ pub async fn run(core: &Core) -> Result<usize> {
                 lead.map(|e| (e.vec.as_slice(), core.embedder.model())),
             )
             .await?;
-        // `insert_pursuit` is keyed on the cluster, so a sitting the previous
-        // sweep already reached comes back with the row it wrote. Only a
-        // pursuit still `open` is undecided — either brand new, or written by
-        // a sweep that failed between the insert and the decision. Anything
-        // closed, generated or dismissed has had its answer and must not be
-        // decided a second time: that is what would arm a second generation
-        // for one need, or re-open a pursuit the operator dismissed.
+        // Keyed on the cluster: only an `open` pursuit is undecided. Deciding a closed one twice
+        // would arm a second generation or reopen a dismissal.
         if core.store.get_pursuit(&pid).await?.state != "open" {
             continue;
         }
@@ -571,29 +468,9 @@ pub async fn run(core: &Core) -> Result<usize> {
     Ok(written)
 }
 
-/// The captures that answered this pursuit before it was ever a pursuit.
-///
-/// `jobs::gaps::cover` runs once per capture, from `settle_corpus`, and it
-/// runs the moment the note is stored. The pursuit those same keystrokes
-/// become does not exist yet: the sweep only groups a sitting once it has
-/// been idle for `idle_secs`, and it is the sweep that closes the cluster
-/// `unsatisfied` and so makes a gap of it. So `TypedFrom::of` resolved no
-/// pursuits at all for the one sequence the link was written for — paste,
-/// search as you type, capture, sweep — and nothing came back for it
-/// afterwards, because nothing else calls `cover`.
-///
-/// This is that second call, made from the only place that knows the pursuit
-/// exists. The decision above is untouched and stands on its own evidence:
-/// nothing in the base engaged, which is true, and the row says so. What the
-/// capture changes is whether the hole is still open, and that is a
-/// `gap_coverage` row — the very row `cover_answering` writes, `CoveredBy`
-/// and all, so a pursuit answered this way and one answered by a capture made
-/// a minute later are one thing in the store and one thing on the page.
-///
-/// Best-effort, and deliberately not `?`: the sweep has already written and
-/// closed the pursuit, and a coverage check that could not run is a line on a
-/// page that does not appear. Taking the whole sweep down for it would leave
-/// the remaining clusters of this pass undecided.
+/// `gaps::cover` runs at capture, before the sweep makes this pursuit a gap, so this is its second
+/// call for captures typed from these searches. Best-effort: the pursuit is already closed, and a
+/// failed check must not leave other clusters undecided.
 async fn cover_typed_from(core: &Core, evs: &[Ev], members: &[usize]) {
     let ids: Vec<String> = members.iter().filter_map(|&m| evs[m].id.clone()).collect();
     let typed = match core.store.captures_typed_from(&ids).await {
@@ -620,7 +497,6 @@ async fn cover_typed_from(core: &Core, evs: &[Ev], members: &[usize]) {
     }
 }
 
-/// Score one cluster.
 fn need_of(
     evs: &[Ev],
     members: &[usize],
@@ -630,7 +506,7 @@ fn need_of(
     use crate::store::links::normalize_query;
     let mut n = Need {
         opened_at: evs[members[0]].at,
-        last_at: evs[*members.last().unwrap()].at,
+        last_at: members.last().map_or(evs[members[0]].at, |l| evs[*l].at),
         ..Default::default()
     };
     let mut seen_q: std::collections::HashSet<String> = Default::default();
@@ -651,11 +527,8 @@ fn need_of(
         n.answered |= e.answered;
         n.abstained |= e.abstained;
         if e.is_ask {
-            // A question that drew on an artifact engaged it as surely as
-            // opening it does. A question the model declined to answer drew on
-            // nothing and arrives here with an empty list — which is what
-            // keeps an abstention from being both the evidence that a need
-            // exists and the engagement that says it was pursued.
+            // An abstention arrives with no citations, so it is not both the evidence of a need and
+            // its engagement.
             for id in &e.cited {
                 bump(id, 1.0);
             }
@@ -667,18 +540,13 @@ fn need_of(
         let mine: Vec<&crate::store::pursuits::Interaction> = attached[m]
             .iter()
             .map(|&k| &interactions[k])
-            // What this base *offered* is not something a person did. Every
-            // kind that is not `dwell` or `pivoted` is weighed at 1.0 below, so
-            // without this every artifact the recommender ever guessed at would
-            // count as engaged — and `engaged`, a few lines down, would call a
-            // search followed by nothing a search that was followed.
+            // What the base offered is not something a person did; every other kind weighs 1.0.
             .filter(|i| i.kind != "recommended_shown")
             .collect();
         if !e.answered {
             for i in &mine {
                 if i.kind == "dwell" {
-                    // ≤ 0.5 per artifact: a tenth per minute, capped. Tiebreak
-                    // only — see `Need::dwell`.
+                    // At most 0.5 per artifact: a tenth per minute, capped.
                     let secs: f64 = i
                         .detail
                         .as_deref()
@@ -709,8 +577,7 @@ fn need_of(
             }
         }
         let followed = pos + 1 < members.len();
-        // Dwell alone is not engagement: a search whose only trace is time
-        // spent is still a search nothing was opened on.
+        // Dwell alone is not engagement.
         let engaged = mine.iter().any(|i| i.kind != "dwell");
         if !engaged && e.confirmed.is_none() && !e.answered {
             if followed {
@@ -728,18 +595,15 @@ fn need_of(
     n
 }
 
-/// The second anchor: are these sources' roots all inside an existing active
-/// generation's roots? Then the need is already written up, whatever the
-/// ranking did with it.
+/// Are these sources' roots all inside an existing active generation's? Then the need is already
+/// written up.
 async fn covered_by_existing(core: &Core, sources: &[String]) -> Result<Option<String>> {
     let roots = core.store.roots_of(sources).await?;
     let mine: std::collections::BTreeSet<String> = roots.values().flatten().cloned().collect();
     if mine.is_empty() {
         return Ok(None);
     }
-    // One lineage read for the whole candidate set rather than one per
-    // candidate inside the loop: the answer is the same, and the walk stays a
-    // single awaited call however many generations are on the list.
+    // One lineage read for the whole set rather than one per candidate.
     let generated = core.store.synthesized_artifacts(200).await?;
     let ids: Vec<String> = generated.iter().map(|g| g.id.clone()).collect();
     let theirs = core.store.roots_of(&ids).await?;
@@ -832,22 +696,15 @@ mod tests {
         let p = core.store.get_pursuit(&pid).await.unwrap();
         assert_eq!(p.state, "generated");
         assert_eq!(p.artifact_id.as_deref(), Some(g.id.as_str()));
-        // Its sources stay active: nothing was superseded.
         for id in &ids {
             assert!(core.store.get_artifact(id).await.unwrap().in_results());
         }
     }
 
-    /// With `[learn]` on and no `[infer.generate]`, `generate` returned a bare
-    /// `Ok(())` and the pursuit stayed `open` with no artifact and no reason —
-    /// a row Ops shows for ever that nobody can act on. `periodic_units` no
-    /// longer arms the stage without a generator, but a unit queued before the
-    /// model was taken out of the config still arrives here.
     #[tokio::test]
     async fn a_pursuit_with_no_generator_closes_unsatisfied_rather_than_sitting_open() {
         let mut core = test_core().await;
-        // `[learn]` on, `[infer.generate]` absent: the shape an operator
-        // reaches by taking the model out of a working config.
+        // `[learn]` on, `[infer.generate]` absent: a working config with the model taken out.
         core.generator = None;
         let ids = two_sources(&core).await;
         let pid = core
@@ -872,10 +729,6 @@ mod tests {
         );
     }
 
-    /// A generation reads originals. A pursuit whose engaged source is itself
-    /// a synthesis hands the model that synthesis's roots, so the lineage of
-    /// what gets written stays one step deep and the prompt never carries a
-    /// paraphrase as an excerpt.
     #[tokio::test]
     async fn a_synthesized_source_contributes_its_roots_not_its_text() {
         let mut core = test_core().await;
@@ -975,8 +828,6 @@ mod tests {
             )
             .await
             .unwrap();
-        // The operator answered their own question: a document captured after
-        // the searching stopped, embedded, and reaching the line.
         let src = core
             .ingest("read the journal at /var/log/journal", "web", None)
             .await
@@ -1016,26 +867,12 @@ mod tests {
         assert_eq!(p.state, "satisfied", "{p:?}");
     }
 
-    /// The order the live base actually does it in.
-    ///
-    /// `jobs::gaps::cover` runs once, from `settle_corpus`, the moment the
-    /// note is stored — and at that moment the pursuit those same keystrokes
-    /// become does not exist. Only the sweep, after `idle_secs` of quiet,
-    /// clusters the searches and closes the cluster `unsatisfied`, which is
-    /// what makes a gap of it. So the capture-side link resolved no pursuits
-    /// at all for the one sequence it was written for, and nothing came back
-    /// for it afterwards.
-    ///
-    /// Out of reach of the measurement on purpose: `weak_below` is 1.0, so a
-    /// distance could not close this gap and the link is the only thing that
-    /// can.
     #[tokio::test]
     async fn a_pursuit_swept_up_after_the_capture_is_still_closed_by_it() {
         let mut core = pursuing_core().await;
         let q = "Netcat can serve a file to one client, then exits";
         let v = core.embedder.embed_query(q).await.unwrap();
         let at = crate::store::now() - 100;
-        // A search that found nothing, quiet long enough for the sweep.
         let eid = core
             .store
             .record_search(
@@ -1055,16 +892,16 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(&eid)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            at,
+            &eid
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
-        // The answer, written into the box the query was typed into — and
-        // driven the whole way through the queue, which is where `cover` runs
-        // and finds no pursuit to close.
+        // Driven through the queue, where `cover` runs and finds no pursuit to close yet.
         let corpus = core
             .ingest_capture(crate::core::ingest::Capture::new(q, "web").with_search(&eid))
             .await
@@ -1077,9 +914,10 @@ mod tests {
         run(&core).await.unwrap();
 
         let states: Vec<(String, String)> =
-            sqlx::query_as("SELECT id, state FROM pursuits ORDER BY id")
+            sqlx::query!(r#"SELECT id AS "id!", state FROM pursuits ORDER BY id"#)
                 .fetch_all(&core.store.pool)
                 .await
+                .map(|v| v.into_iter().map(|r| (r.id, r.state)).collect::<Vec<_>>())
                 .unwrap();
         assert_eq!(
             states.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(),
@@ -1143,44 +981,32 @@ mod tests {
 
     #[test]
     fn the_decision_table_follows_the_spec() {
-        // Answered: nothing else matters.
         let mut n = need(&[("a", 5.0), ("b", 5.0)]);
         n.answered = true;
         assert!(matches!(decide(&n, 2, 3.0), Decision::Satisfied(_)));
-        // One engaged artifact is below `min_sources` like any other shortfall.
-        // It used to be a promotion case of its own; the engagement that made
-        // it one now promotes at the bump, hours before this sweep runs.
         assert_eq!(
             decide(&need(&[("a", 9.0)]), 2, 3.0),
             Decision::Satisfied("nothing to assemble".into())
         );
-        // Three strong opens in a row, then stopped: reading, not assembling.
         assert!(matches!(
             decide(&need(&[("a", 1.0), ("b", 1.0), ("c", 1.0)]), 2, 3.0),
             Decision::Satisfied(_)
         ));
-        // The same three with one return: assembled.
         let mut n = need(&[("a", 3.0), ("b", 1.0), ("c", 1.0)]);
         n.returns = 1;
         assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
-        // Two opens totalling 2.0 and then walked away from: unsatisfied but
-        // not worth a call.
         let mut n = need(&[("a", 1.0), ("b", 1.0)]);
         n.abandoned = true;
         assert!(matches!(decide(&n, 2, 3.0), Decision::Unsatisfied(_)));
-        // Two opens totalling 3.0, walked away from: generate.
         let mut n = need(&[("a", 1.5), ("b", 1.5)]);
         n.abandoned = true;
         assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
-        // An abstention with two cited sources: generate.
         let mut n = need(&[("a", 2.0), ("b", 1.0)]);
         n.abstained = true;
         assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
-        // Refined twice, assembled: generate.
         let mut n = need(&[("a", 2.0), ("b", 1.0)]);
         n.refined = 2;
         assert_eq!(decide(&n, 2, 3.0), Decision::Generate);
-        // Nothing engaged and abandoned: unsatisfied.
         let mut n = need(&[]);
         n.abandoned = true;
         assert!(matches!(decide(&n, 2, 3.0), Decision::Unsatisfied(_)));
@@ -1188,8 +1014,6 @@ mod tests {
 
     #[test]
     fn a_short_pursuit_says_how_much_was_engaged_not_that_nothing_was() {
-        // Only reachable above the shipped `min_sources = 2`, where two
-        // engaged artifacts are still too few to write from.
         let mut n = need(&[("a", 1.0), ("b", 1.0)]);
         n.abandoned = true;
         let Decision::Unsatisfied(why) = decide(&n, 3, 3.0) else {
@@ -1199,7 +1023,6 @@ mod tests {
         assert!(why.contains('2'), "{why}");
     }
 
-    /// A core at earned with pursuits on, recording, and a tiny idle window.
     async fn pursuing_core() -> crate::core::Core {
         let mut core = test_core().await;
         core.learn.enabled = true;
@@ -1226,8 +1049,6 @@ mod tests {
         .await
     }
 
-    /// A recorded search, as a named door with a named scope makes it. The two
-    /// tests below turn on the scope alone.
     async fn event_from(
         core: &crate::core::Core,
         door: crate::store::feedback::Door,
@@ -1266,28 +1087,22 @@ mod tests {
             )
             .await
             .unwrap();
-        // Back-date it: `record_search` stamps now, and the sweep wants quiet.
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            at,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         id
     }
 
-    /// The join the terminal door had never been able to make.
-    ///
-    /// A search typed at a shell records with a scope now, and the `--show`
-    /// that follows it records the open with the same one, so the sweep can see
-    /// that the two are one run. What it does with that run is the ordinary
-    /// decision; what matters here is that it has the run at all.
     #[tokio::test]
     async fn an_open_at_a_shell_attaches_to_the_search_that_led_to_it() {
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let now = crate::store::now();
-        // Exactly the origin `GET /search?door=cli` now builds.
         event_from(
             &core,
             crate::store::feedback::Door::Cli,
@@ -1298,7 +1113,6 @@ mod tests {
             now - 100,
         )
         .await;
-        // Exactly what `GET /artifacts/{id}` records for `engram --show`.
         core.store
             .record_interaction(&ids[0], "opened", None, Some("me"), now - 97)
             .await
@@ -1322,8 +1136,6 @@ mod tests {
         );
     }
 
-    /// The bug, kept as a witness. Unscoped — which is what every CLI search
-    /// recorded before this — the same run reads as a search nobody followed.
     #[tokio::test]
     async fn an_unscoped_search_cannot_be_joined_to_the_opens_after_it() {
         let core = pursuing_core().await;
@@ -1356,11 +1168,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_offer_that_was_only_shown_is_not_engagement() {
-        // `recommended_shown` is the recommender's own guess, not something a
-        // person did. Every kind that is not `dwell` or `pivoted` is weighed at
-        // 1.0, so without an explicit exclusion every artifact the recommender
-        // ever guessed at would count as engaged — and a search followed by
-        // nothing at all would read as a search that was followed.
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let now = crate::store::now();
@@ -1398,8 +1205,6 @@ mod tests {
         let ids = two_sources(&core).await;
         let now = crate::store::now();
         let t0 = now - 100;
-        // Two unrelated needs: one assembled by pivoting between two sources,
-        // one a single search with nothing opened.
         search_event(
             &core,
             "read the journal",
@@ -1451,12 +1256,9 @@ mod tests {
             .find(|p| p.queries.iter().any(|q| q == "something else"))
             .expect("the lone pursuit");
         assert_eq!(lone.state, "unsatisfied", "{lone:?}");
-        // The watermark moved; a second sweep finds nothing new.
         assert_eq!(run(&core).await.unwrap(), 0);
     }
 
-    /// Record a question at `at`, with `cited` naming each excerpt the model
-    /// was shown and whether the answer referenced it.
     async fn ask_event(
         core: &crate::core::Core,
         q: &str,
@@ -1487,9 +1289,7 @@ mod tests {
             })
             .await
             .unwrap();
-        sqlx::query("UPDATE ask_events SET created_at = ? WHERE id = ?")
-            .bind(at)
-            .bind(&id)
+        sqlx::query!("UPDATE ask_events SET created_at = ? WHERE id = ?", at, &id)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1498,12 +1298,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_question_the_model_declined_does_not_pay_for_a_generation() {
-        // An ask packs whatever fits its window, so a question that retrieved
-        // three excerpts and then abstained was *shown* three artifacts. Score
-        // those as engagement and the abstention is both the evidence that a
-        // need exists and the engagement that says it was pursued: the base
-        // spends a call writing an artifact out of the very excerpts it has
-        // just declared insufficient.
+        // An ask is shown every excerpt it packed; scoring them would make its abstention count as
+        // engagement.
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let now = crate::store::now();
@@ -1526,8 +1322,6 @@ mod tests {
             "an unanswered question is a need, not an engagement"
         );
 
-        // The same question, answered out of the same two excerpts: the
-        // engagement is real and the pursuit is worth a call.
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let used: Vec<(&str, bool)> = vec![(ids[0].as_str(), true), (ids[1].as_str(), true)];
@@ -1564,11 +1358,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_that_failed_before_its_cursor_moved_writes_no_second_copy() {
-        // The cursor advances once, after the loop. Anything that fails inside
-        // it — a locked database on the fourth cluster — leaves the pursuits
-        // already written under a cursor that never moved, and the retry reads
-        // the same events and clusters them the same way. The pursuit's
-        // identity is the sitting, so the second pass finds its own rows.
+        // The cursor advances once, after the loop; a retry re-clusters the same events and finds
+        // its own rows.
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let now = crate::store::now();
@@ -1596,7 +1387,6 @@ mod tests {
         let before = core.store.recent_pursuits(50).await.unwrap();
         assert_eq!(before.len(), first);
 
-        // The cursor back where the failed sweep left it.
         core.store.meta_set(PURSUIT_AFTER, "0").await.unwrap();
         run(&core).await.unwrap();
 
@@ -1613,9 +1403,6 @@ mod tests {
         assert_eq!(ids_before, ids_after);
     }
 
-    /// The clock is not attribution. A search that found nothing, followed by
-    /// nine minutes of reading something the search never showed, is a search
-    /// nobody followed — not a pursuit that engaged what was read.
     #[tokio::test]
     async fn an_open_the_search_never_showed_attaches_to_nothing() {
         let core = pursuing_core().await;
@@ -1642,8 +1429,6 @@ mod tests {
         assert!(p.sources.is_empty(), "{p:?}");
     }
 
-    /// A pivot lands where the search never showed, and is still the pursuit:
-    /// it was reached from something the search did show.
     #[tokio::test]
     async fn a_pivot_from_a_shown_hit_is_engagement_and_so_is_opening_where_it_landed() {
         let core = pursuing_core().await;
@@ -1670,9 +1455,6 @@ mod tests {
         assert_eq!(p.sources, vec![ids[1].clone()], "{p:?}");
     }
 
-    /// Grouping anchors on the lead. A joins B and B joins C, but A and C sit
-    /// apart: under single linkage that chained into one pursuit about
-    /// nothing in particular.
     #[tokio::test]
     async fn grouping_does_not_chain_through_a_bridge() {
         let mut core = pursuing_core().await;
@@ -1694,10 +1476,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_sittings_on_one_subject_are_two_pursuits() {
-        // `cluster` groups on the words, and the words do not say when. Without
-        // the split these two come back as one pursuit whose `opened_at` and
-        // `last_at` span the gap between them and whose engagement is summed
-        // across a session boundary.
+        // `cluster` groups on words, which do not say when.
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let now = crate::store::now();
@@ -1723,9 +1502,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_sweep_never_reaches_further_back_than_its_lookback() {
-        // With no cursor the window would open at the epoch, and on a base that
-        // has been recording since it was installed that is every search ever
-        // taken — clustered quadratically, in one allocation.
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let now = crate::store::now();
@@ -1827,12 +1603,6 @@ mod tests {
             .id
             .clone();
         let now = crate::store::now();
-        // Three phrasings of one question with a single open at the end is the
-        // shape of a need that went unmet. Nothing the sweep does can help it:
-        // one engaged artifact is below `min_sources`, and the sweep no longer
-        // has a promotion of its own to try. Inside one sitting — further apart
-        // than `idle_secs` and these would be three pursuits, not one need
-        // asked three ways.
         search_event(&core, "where is it stored", vec![1.0, 0.0], &[&p], now - 40).await;
         search_event(&core, "where is it kept", vec![1.0, 0.0], &[&p], now - 36).await;
         search_event(&core, "storage location", vec![1.0, 0.0], &[&p], now - 32).await;
@@ -1841,9 +1611,8 @@ mod tests {
             .await
             .unwrap();
         run(&core).await.unwrap();
-        // Capture itself armed this small corpus's one synthesis call, so the
-        // window is legitimately pending; what the sweep must not have done
-        // is drive it to completion on its own.
+        // Capture armed this corpus's one synthesis call; the sweep must not have driven it to
+        // completion.
         assert_ne!(
             core.store.segment_state(&out.id, 0).await.unwrap(),
             Some(crate::store::segments::SegmentState::Done),
@@ -1859,8 +1628,6 @@ mod tests {
         let ids = two_sources(&core).await;
         let now = crate::store::now();
         let t0 = now - 100;
-        // Nothing opened; long dwell on both. A search with only dwell is a
-        // search nothing was opened on: unsatisfied, not generated.
         search_event(
             &core,
             "only looked",
@@ -1881,8 +1648,7 @@ mod tests {
         let p = &core.store.recent_pursuits(10).await.unwrap()[0];
         assert_eq!(p.state, "unsatisfied", "{p:?}");
 
-        // Opened both equally, dwelt on the second: the second leads. A fresh
-        // core — the first sweep moved the watermark past these timestamps.
+        // A fresh core: the first sweep moved the watermark past these timestamps.
         let core = pursuing_core().await;
         let ids = two_sources(&core).await;
         let t1 = now - 50;

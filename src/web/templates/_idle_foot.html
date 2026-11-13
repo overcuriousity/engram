@@ -1,58 +1,15 @@
 {{ echo|safe }}
-{# The last line of the idle column, and the only place the base says what it
-   holds. It used to be the rail's own idle state — a block of counts above a
-   list of the last five captures, standing beside a middle column rendering
-   those same five rows in a different shape. One list is now one line.
-
-   Not `.rail-item` cards and not a list: these are not answers to anything.
-   The title opens its source, the stamp opens the day.
-
-   `hx-swap-oob` on both pieces, and inert on first paint: htmx reads
-   out-of-band attributes only on a swapped response, so the same fragment
-   renders in place inside `#idle` when the page is built and swaps itself
-   into that same place when the box is emptied again. One account of the idle
-   state, however it is reached. #}
-{# The rail's label, emptied. While the box is empty the rail is not on screen
-   at all, so "This memory" over a hidden column is a heading for nothing —
-   and left standing it is the heading the *next* act's results arrive under.
-   Cleared here, so whichever fragment fills the rail is the one that names
-   it. #}
-{# Neither swap rides anything but a swap (`oob`). The line's own poll can land
-   while someone types: it would empty the heading over their results and
-   forget the search they are folding into. On first paint they are inert
-   anyway — htmx reads out-of-band attributes only on a swapped response — so
-   one flag says both things. #}
+{# Out-of-band attributes act only on a swap, so on first paint this renders in place inside `#idle`. #}
 {% if oob %}
+{# The rail heading and the folded search id both belong to text no longer in the box. #}
 <div class="rail-act" hx-swap-oob="innerHTML:#rail-head"></div>
-{# The search the box was folding into, forgotten. Nothing was searched for
-   this answer — the box is empty, or holds a paste too long to be a query —
-   so the id `_results.html` handed over last is about text that is no longer
-   there, and a Capture pressed now would send it as this text's first draft.
-   A named search closes its gap without a distance check. #}
 <span hx-swap-oob="innerHTML:#fold-of"></span>
 {% endif %}
-{# What a paste becomes, and the two words the line below counts in. Only while
-   the base is young; see `TEACH_UNTIL_SOURCES`.
-
-   Here rather than in `workspace.html`, where it was rendered once with the
-   page: the fifth capture left it standing until a reload, and a base that
-   reached five sources by another door — MCP, the CLI, a second tab — showed
-   the list and the counts disagreeing. This fragment is swapped out of band
-   after every capture and on the line's own poll, so the list retires itself.
-
-   The element is always here and empties instead of disappearing: an
-   out-of-band swap can only replace an element the response carries, so a
-   fragment that simply left the list out would leave the stale one standing.
-   `.teach:empty` takes the grid's margin with it.
-
-   The two phrasings are glosses here and buttons under the box — see
-   `_box_hint.html` for why they stopped moving between the two. #}
+{# Always present and emptied rather than dropped: an out-of-band swap can only replace what the response carries. #}
 <dl id="teach" class="teach" hx-swap-oob="true">
 {%- if self.teach() %}
   <dt>note</dt><dd>anything you keep</dd>
   {%- if example_remind.is_empty() %}
-  {# The embed-only floor: `workspace::examples` is empty without a
-     synthesizer, and these two are what the judged read finds. #}
   <dt>reminder</dt><dd>not configured &mdash; no synthesizer</dd>
   <dt>event</dt><dd>not configured &mdash; no synthesizer</dd>
   {%- else %}
@@ -64,33 +21,16 @@
   <dt>artifact</dt><dd>a passage search returns</dd>
 {% endif -%}
 </dl>
-{# While a capture is read the line polls itself. `hx-swap="none"`: the answer
-   is this same paragraph, out of band.
-
-   The trigger is filtered, not merely armed. A poll fires as readily inside a
-   hidden parent as a visible one and as readily in a background tab: app.js
-   hides `#idle` on the first keystroke, so the tick went on costing three
-   reads a second for a line nobody could see. `refresh` is what app.js fires
-   when the column comes back, so the line the reader returns to is current
-   rather than however old the last tick left it. #}
+{# While a capture is read the line refreshes on server events; `refresh` is fired by app.js when the column returns. #}
 <p id="idle-foot" class="idle-foot muted" hx-swap-oob="true"
    {%- if reading %} hx-get="/ui/idle-foot" hx-swap="none"
-   hx-trigger="refresh, every 3s [!document.hidden && !this.closest('#idle')?.hidden]"{% endif %}>
-{%- if !held %}
-  {# Nothing. No counts to print and no last capture to name, and the sentence
-     that used to stand here was the third copy of one thought: the placeholder
-     inside the box, the hint under it, and this. The hint keeps it, being the
-     one of the three that is next to the box and read in both states. The
-     branch stays because the paragraph is the out-of-band swap target, and it
-     renders empty — `.idle-foot:empty` takes the margin with it. #}
-{%- else %}
+   hx-trigger="refresh, sse:idle, sse:resync" data-poll-while-visible="#idle"{% endif %}>
+{%- if held %}
   {% if reading %}reading… &middot; {% endif %}<span class="mono">{{ artifacts }}</span> artifact{% if artifacts != 1 %}s{% endif %}
   from <span class="mono">{{ corpora }}</span> source{% if corpora != 1 %}s{% endif %}
   {%- if let Some(r) = recent.first() %} &middot; last kept
   <a href="/ui/corpora/{{ r.id }}">{{ r.label }}</a>
-  {#- `data-day-at` is the capture's instant: app.js rebuilds the whole href
-      from it in the viewer's zone, because the date baked into the path here
-      is UTC and the day page reads its window locally. #}
+  {#- app.js rebuilds the href from `data-day-at` in the viewer's zone; the path here is UTC. #}
   <a href="/ui/day/{{ r.day }}" data-day-link data-day-at="{{ r.at }}">{{ r.when }}</a>
   {%- endif %}
 {%- endif %}

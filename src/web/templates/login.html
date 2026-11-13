@@ -2,37 +2,29 @@
 {% block title %}Sign in — engram{% endblock %}
 {% block nav %}{% endblock %}
 {% block tabbar %}{% endblock %}
-{# The one page with no left anchor. Every other page starts at the shell's
-   left edge on purpose — that is what stops the content column moving as you
-   navigate — but there is nothing to navigate to from here and nothing beside
-   this card to line up with, so an off-centre card just reads as a mistake. #}
 {% block regions %}regions-center{% endblock %}
 {% block content %}
-<div class="card" style="max-width:22rem;margin:6rem auto">
-  {# The lockup below is a mark and a wordmark, not a heading. This is the
-     page's top level, for the outline and for anything reading it aloud. #}
-  <h1 class="sr-only">Sign in to engram</h1>
+<div class="oc-stack login">
+  <h1 class="oc-sr-only">Sign in to engram</h1>
   <div class="brand-lockup">
     {% include "_mark.html" %}
     <span class="brand-name">engram</span>
   </div>
-  <p class="muted brand-tag">A trace of everything worth keeping.</p>
-  {% if oidc %}
-    <p class="muted">Authentication is handled by your identity provider.</p>
-    <a class="btn btn-accent" href="/auth/login?go=1" style="width:100%">Continue</a>
-  {% else %}
-    <p class="muted">Local development mode.</p>
-    <form method="post" action="/auth/login" class="stack">
-      {# The page that asked for the login, carried across it so signing in
-         returns there instead of dropping everyone on Search. Checked by
-         `safe_next` on the way in and again on the way out. #}
-      {% if let Some(n) = next %}<input type="hidden" name="next" value="{{ n }}">{% endif %}
-      <input class="input" name="username" placeholder="Username" autocomplete="username" autofocus>
-      <input class="input" name="password" type="password" placeholder="Password"
-             autocomplete="current-password">
-      <button class="btn btn-accent" type="submit">Sign in</button>
-    </form>
+  {% if let Some(e) = error %}
+  <div class="oc-notice oc-notice--danger" role="alert">{{ crate::web::icons::icon("circle-x", 16) }}<span class="oc-notice__text">{{ e }}</span></div>
   {% endif %}
-  {% if let Some(e) = error %}<p style="color:var(--color-danger)">{{ e }}</p>{% endif %}
+  {% if oidc %}
+  <form class="oc-form" method="get" action="/auth/login">
+    <input type="hidden" name="go" value="1">
+    <div class="oc-form__actions"><button type="submit" class="oc-btn oc-btn--primary">Sign in with your provider</button></div>
+  </form>
+  {% else %}
+  <form class="oc-form" method="post" action="/auth/login">
+    {% if let Some(n) = next %}<input type="hidden" name="next" value="{{ n }}">{% endif %}
+    <div class="oc-field"><label for="username">Username</label><input class="oc-input" id="username" name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required autofocus></div>
+    <div class="oc-field"><label for="password">Password</label><input class="oc-input" id="password" name="password" type="password" autocomplete="current-password" required></div>
+    <div class="oc-form__actions"><button type="submit" class="oc-btn oc-btn--primary">Sign in</button></div>
+  </form>
+  {% endif %}
 </div>
 {% endblock %}

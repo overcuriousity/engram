@@ -35,30 +35,14 @@ use std::str::FromStr;
 #[derive(Clone)]
 pub struct Store {
     pub pool: sqlx::SqlitePool,
-    /// The instance-wide control database: identity, and the job queue.
-    ///
-    /// Held by every tenant `Store` rather than reached through the registry,
-    /// because the enqueue paths are deep inside capture and have no business
-    /// carrying a second handle down with them.
+    /// Held by every tenant `Store` so the enqueue paths deep in capture need no second handle.
     pub control: control::Control,
-    /// Whose database this is.
-    ///
-    /// Bound into every queue query, and the only place a tenant identity
-    /// appears anywhere below the web layer. The knowledge tables never see
-    /// it: they are already alone in a file of their own.
+    /// Bound into every queue query; the knowledge tables never see it.
     pub subject: String,
 }
 
-/// Journal entries are gone, and a corpus filed as one is an ordinary capture
-/// again: `origin` goes back to the channel it came through (`origin_was`,
-/// or `web` where an entry was typed on the day page and has none), and the
-/// keys only the entry filing read are dropped. Nothing else about the corpus
-/// changes — it was searchable as an entry and stays searchable as a note.
-///
-/// Idempotent, so it runs on every connect like the schema does: the first
-/// pass leaves no row it would touch again. `json_valid` guards the rows
-/// whose metadata is not JSON at all, which the rest of the base tolerates and
-/// a failed boot would not.
+/// Retires journal entries back to ordinary captures. Idempotent, so it runs on every connect;
+/// `json_valid` guards rows whose metadata is not JSON.
 const RETIRE_JOURNAL: &str = "
 UPDATE corpora
    SET origin = COALESCE(json_extract(metadata, '$.origin_was'), 'web'),
@@ -75,9 +59,6 @@ UPDATE corpora
 ";
 
 impl Store {
-    /// Open one tenant's file. The path is passed rather than read from
-    /// [`StoreConfig`]: every base belongs to a user, and `store.dir` plus the
-    /// slug is what names it.
     pub async fn connect(path: &str, control: control::Control, subject: &str) -> Result<Store> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{path}"))
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
@@ -89,9 +70,7 @@ impl Store {
             .busy_timeout(std::time::Duration::from_secs(5));
 
         let pool = SqlitePoolOptions::new()
-            // Four rather than eight. A hundred open tenants at eight
-            // connections each is a file-descriptor problem, and no single
-            // tenant needs eight.
+            // Four, not eight: a hundred open tenants at eight each is a file-descriptor problem.
             .max_connections(4)
             .connect_with(opts)
             .await?;
@@ -104,11 +83,6 @@ impl Store {
         Ok(store)
     }
 
-    /// The same database under a different subject.
-    ///
-    /// Used by the registry when it opens a tenant, and by the tests that need
-    /// two of them over one queue. Cheap: a `Store` is two pool handles and a
-    /// string.
     pub fn for_subject(&self, subject: &str) -> Store {
         Store {
             subject: subject.to_string(),
@@ -116,66 +90,35 @@ impl Store {
         }
     }
 
-    /// Bring the database up to the schema this binary expects.
-    ///
-    /// One statement of what the schema *is*, rather than a chain of diffs
-    /// describing how it came to be. Every object is `IF NOT EXISTS`, so this
-    /// creates what is missing on a fresh database and is a no-op on one that
-    /// already has it. Changing a column means changing `schema.sql` and
-    /// recreating the database.
-    ///
-    /// Which is exactly why it checks first. `CREATE TABLE IF NOT EXISTS`
-    /// leaves an existing table as it is, columns and all, so adding a column
-    /// to `schema.sql` without recreating the base changes nothing here and
-    /// fails much later, inside a request, with a bare `ColumnNotFound` that
-    /// names no cause. Nothing is altered to fix that — recreating is still the
-    /// answer — but it is said here, at boot, with the columns named.
-    ///
-    /// The check runs *before* the file rather than after it because the file
-    /// is not inert on an old base. It drops a superseded index by name and
-    /// creates its replacement over a column such a base does not have, and
-    /// `raw_sql` runs statements one after another with no transaction around
-    /// them: applied first, the drop commits, the create fails with the bare
-    /// `no such column` this message exists to replace, and the base is left
-    /// with neither index. Read first, nothing has happened yet.
+    /// Checks columns before applying `schema.sql`: `CREATE TABLE IF NOT EXISTS` keeps old tables,
+    /// and the file's index drop would commit before its create failed, outside a transaction.
     pub async fn migrate(&self) -> Result<()> {
         const SCHEMA: &str = include_str!("schema.sql");
 
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
-        // One exception to "recreate it", and deliberately a list rather than
-        // a rule.
-        //
-        // The doctrine above is about columns that change *meaning* — a type,
-        // a constraint, a default that rewrites what existing rows say. It is
-        // the right doctrine and it is not what `artifacts.updated_at` is: a
-        // column added beside the others, `NOT NULL DEFAULT 0`, that no row
-        // needs to have been written with. Against that, "recreate the base"
-        // means re-ingesting every artifact to gain a stamp, which is a price
-        // nobody would pay and so a column nobody would add.
-        //
-        // Named one at a time on purpose. A general "ALTER in anything
-        // additive" would make this boot path guess, and the guess would be
-        // wrong the first time a column's default is not what its old rows
-        // should say. Everything not on this list still recreates.
-        const ADDITIVE: [(&str, &str, &str); 20] = [
+        // Columns safe to add in place: their default (or NULL) is true of every existing row.
+        // Named one by one; any other missing column still refuses.
+        const ADDITIVE: [(&str, &str, &str); 22] = [
+            (
+                "artifacts",
+                "trashed_at",
+                "ALTER TABLE artifacts ADD COLUMN trashed_at INTEGER",
+            ),
+            (
+                "artifacts",
+                "trashed_from",
+                "ALTER TABLE artifacts ADD COLUMN trashed_from TEXT",
+            ),
             (
                 "artifacts",
                 "updated_at",
                 "ALTER TABLE artifacts ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
             ),
-            // Nullable and with no default, which is the whole reason it
-            // qualifies: NULL on an existing row says "nobody recorded who
-            // decided this", which is exactly true of every row written before
-            // the column existed. A default would have those rows claim an
-            // author they never had.
             (
                 "artifact_pairs",
                 "decided_by",
                 "ALTER TABLE artifact_pairs ADD COLUMN decided_by TEXT",
             ),
-            // Both nullable for the same reason: every verdict before these
-            // columns came from the deck, and no search before them was opened
-            // in a way anything recorded.
             (
                 "search_events",
                 "judged_by",
@@ -186,32 +129,22 @@ impl Store {
                 "opened_at",
                 "ALTER TABLE search_events ADD COLUMN opened_at INTEGER",
             ),
-            // Not nullable and defaulted to 0, unlike the columns around it:
-            // the absence of a request is a true statement about every row
-            // that predates the button, because nobody could press it.
             (
                 "artifact_pairs",
                 "synthesis_asked",
                 "ALTER TABLE artifact_pairs ADD COLUMN synthesis_asked INTEGER NOT NULL DEFAULT 0",
             ),
-            // Nullable, no default, and NULL is the truth about every row that
-            // predates it: no reminder on that note had been completed,
-            // because nothing could record that it had.
             (
                 "corpora",
                 "retired_at",
                 "ALTER TABLE corpora ADD COLUMN retired_at INTEGER",
             ),
-            // NULL on every row that predates it, and truthfully: nothing had
-            // reread a capture on its own before this column existed.
             (
                 "corpora",
                 "auto_reread_at",
                 "ALTER TABLE corpora ADD COLUMN auto_reread_at INTEGER",
             ),
-            // Both nullable, no default. NULL on an old retired row truthfully
-            // says "never stamped", and the reap sweep stamps it fresh before
-            // judging rather than a migration inventing a date.
+            // NULL: the reap sweep stamps it fresh before judging; no migration invents a date.
             (
                 "artifacts",
                 "retired_at",
@@ -222,9 +155,6 @@ impl Store {
                 "reaped_at",
                 "ALTER TABLE artifacts ADD COLUMN reaped_at INTEGER",
             ),
-            // Nullable, no default, and NULL says exactly what is true of every
-            // row written before it: this row has never been moved, so the
-            // instant it was read at is the instant it still holds.
             (
                 "moments",
                 "moved_from",
@@ -235,11 +165,7 @@ impl Store {
                 "moved_at",
                 "ALTER TABLE moments ADD COLUMN moved_at INTEGER",
             ),
-            // Both nullable, no default, and NULL is the truth about every row
-            // written before them. A moment with no `series_id` is counted the
-            // old way -- by the rows on its artifact -- and one with no
-            // `origin_corpus_id` resolves its note through the artifact it
-            // sits on, which is what every such row did when it was written.
+            // A moment with no `series_id` counts by the rows on its artifact.
             (
                 "moments",
                 "series_id",
@@ -250,39 +176,26 @@ impl Store {
                 "origin_corpus_id",
                 "ALTER TABLE moments ADD COLUMN origin_corpus_id TEXT",
             ),
-            // Nullable, no default, and NULL is the truth about every
-            // observation written before it: nothing recorded which search it
-            // came from.
             (
                 "observations",
                 "event_id",
                 "ALTER TABLE observations ADD COLUMN event_id TEXT",
             ),
-            // Defaulted, and 0 is the truth about every old row: nothing
-            // appended was ever captured before the column existed.
             (
                 "search_candidates",
                 "band",
                 "ALTER TABLE search_candidates ADD COLUMN band INTEGER NOT NULL DEFAULT 0",
             ),
-            // Nullable, no default, and NULL is the truth about every row
-            // written before it: nothing was exploring, so no row was lent a
-            // rank it had not earned and there is none to charge back.
             (
                 "search_candidates",
                 "explored_from",
                 "ALTER TABLE search_candidates ADD COLUMN explored_from INTEGER",
             ),
-            // Nullable, no default, and NULL is the truth about every search
-            // recorded before it: nothing wrote down which generation drew the
-            // list, and a give-up with no generation to charge is not charged.
             (
                 "search_events",
                 "generation_id",
                 "ALTER TABLE search_events ADD COLUMN generation_id TEXT",
             ),
-            // Both nullable, no default: NULL is the truth about every row
-            // buried before the vector was kept.
             (
                 "graveyard",
                 "vec",
@@ -293,10 +206,6 @@ impl Store {
                 "embed_model",
                 "ALTER TABLE graveyard ADD COLUMN embed_model TEXT",
             ),
-            // Nullable, no default, and NULL says what is true of every
-            // coverage written before it: the coverage check measured it. A
-            // capture answering the query it was typed from is the kind that
-            // did not exist yet, so no old row can be one.
             (
                 "gap_coverage",
                 "covered_by",
@@ -313,19 +222,8 @@ impl Store {
             )));
         }
 
-        // The mirror of `ADDITIVE`: columns this schema used to have and no
-        // longer does. `eval_runs.recommended` and `applied_at` said whether a
-        // pass's result was waiting for a person to take it, and nothing waits
-        // for that any more — the pass adopts what clears its gate. The
-        // `NOT NULL` one is not inert: it fails every `INSERT` that stopped
-        // naming it, which is the one `record_eval_run` makes, so the first
-        // idle pass on an upgraded base would fail at the journal.
-        //
-        // After the refusal and not before it, for the reason the control
-        // plane gives: a drop is the one step here that cannot be undone, and
-        // a base refused for some other column has to come out exactly as it
-        // went in, so the previous binary can be put back. The index over
-        // the two columns has to go first or SQLite refuses the drop.
+        // Dropped only after the refusal, so a refused base can still run the previous binary.
+        // The index over the two columns must go first or SQLite refuses the drop.
         const REMOVED: [(&str, &str, &str); 2] = [
             (
                 "eval_runs",
@@ -355,24 +253,17 @@ impl Store {
         Ok(())
     }
 
-    /// Fresh in-memory database with the schema applied, for the tests.
-    ///
-    /// Builds its own in-memory control database too, so a test that only
-    /// wants a `Store` does not have to know a control plane exists. This is
-    /// the seam that keeps every existing test compiling.
+    /// Builds its own in-memory control database too.
     pub async fn memory() -> Result<Store> {
         Store::memory_with(control::Control::memory().await?).await
     }
 
-    /// The same, over a control database the caller already holds -- for the
-    /// tests that need two tenants sharing one queue.
     pub async fn memory_with(control: control::Control) -> Result<Store> {
         control.provision(TEST_SUBJECT, None).await?;
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .map_err(|e| crate::error::Error::Store(e.to_string()))?
             .foreign_keys(true);
-        // One connection: every `sqlite::memory:` connection is a separate
-        // database, so a multi-connection pool would see different data per query.
+        // One connection: every `sqlite::memory:` connection is a separate database.
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect_with(opts)
@@ -387,26 +278,29 @@ impl Store {
     }
 }
 
-/// The `(table, columns)` pairs `schema.sql` declares.
-///
-/// Read out of the file rather than listed by hand, so it cannot fall behind
-/// the schema it is checking — a hand-kept list of "columns added recently" is
-/// exactly the thing everyone forgets to append to. The file is ours and one
-/// column per line, which is what makes this much parsing enough: a line inside
-/// a `CREATE TABLE` block starts with the column's name, unless it starts with a
-/// comment or a table constraint.
-/// The columns a schema names that a database does not have, as `table.column`.
-///
-/// A table with no columns at all is no such table — a fresh base, or one this
-/// schema is about to create — and contributes nothing. Written once and
-/// called twice: the tenant schema and the control schema ask the same
-/// question, and had the same twenty lines each to ask it with.
+/// The reference database for `cargo sqlx prepare`: control and tenant schema in one file.
+pub async fn dev_schema(path: &std::path::Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let control = control::Control::connect(&path.to_string_lossy()).await?;
+    let store = Store {
+        pool: control.pool.clone(),
+        control: control.clone(),
+        subject: String::new(),
+    };
+    store.migrate().await?;
+    control.pool.close().await;
+    Ok(())
+}
+
+/// Columns `schema` declares that the database lacks, as `table.column`. Parsed from the file
+/// (one column per line); a table with no columns is absent and contributes nothing.
 pub(crate) async fn missing_columns(pool: &sqlx::SqlitePool, schema: &str) -> Result<Vec<String>> {
     let mut missing = Vec::new();
     for (table, columns) in schema_columns(schema) {
-        // The table-valued form of `PRAGMA table_info`, which takes a bind
-        // parameter where the pragma statement would need the name spliced
-        // into the SQL.
+        // The table-valued form takes a bind parameter; the pragma statement would need splicing.
+        // runtime: reads the live schema of the database at hand.
         let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
             .bind(&table)
             .fetch_all(pool)
@@ -426,16 +320,8 @@ pub(crate) async fn missing_columns(pool: &sqlx::SqlitePool, schema: &str) -> Re
     Ok(missing)
 }
 
-/// Add the columns a caller has decided are safe to add, striking each off
-/// `missing` as it lands.
-///
-/// What stays in `missing` afterwards is what the caller refuses over, which
-/// is why this takes the list by reference rather than returning a verdict:
-/// the two callers word that refusal differently, and the wording is the
-/// useful part of it.
-/// `'static` on the DDL is sqlx's requirement, not a stylistic one: it refuses
-/// a SQL string whose lifetime does not prove it was written here rather than
-/// assembled from input.
+/// Strikes each added column off `missing`; what remains is what the caller refuses over.
+/// `'static` DDL is sqlx's requirement: the SQL must be written here, not assembled.
 pub(crate) async fn apply_additive(
     pool: &sqlx::SqlitePool,
     additive: &[(&'static str, &'static str, &'static str)],
@@ -456,18 +342,14 @@ pub(crate) async fn apply_additive(
     Ok(())
 }
 
-/// Drop the columns a schema no longer has, where the base still has them.
-///
-/// Each entry is a table, the column, and the DDL that takes it away — the
-/// DDL rather than a generated `ALTER`, because a column under an index has
-/// to lose the index first, and only the caller knows which. Skipped where
-/// the column is already gone, so this runs on every connect like everything
-/// else here.
+/// Takes the DDL rather than generating `ALTER`: a column under an index must lose it first.
+/// Skipped where already gone, so it runs on every connect.
 pub(crate) async fn drop_removed(
     pool: &sqlx::SqlitePool,
     removed: &[(&'static str, &'static str, &'static str)],
 ) -> Result<()> {
     for &(table, column, ddl) in removed {
+        // runtime: reads the live schema of the database at hand.
         let have: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info(?)")
             .bind(table)
             .fetch_all(pool)
@@ -503,7 +385,9 @@ fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
             continue;
         };
         if line.starts_with(')') {
-            tables.push(open.take().expect("just borrowed"));
+            if let Some(t) = open.take() {
+                tables.push(t);
+            }
             continue;
         }
         if line.is_empty() || line.starts_with("--") {
@@ -518,36 +402,21 @@ fn schema_columns(sql: &str) -> Vec<(String, Vec<String>)> {
     tables
 }
 
-/// The subject every `Store::memory()` runs as, so that the foreign key on
-/// `jobs.subject` is satisfied without every test knowing tenancy exists.
-///
-/// `user-1` and not something tidier because that is the subject the web
-/// fixtures have always signed in as. The identity at the door and the owner
-/// of the data behind it have to be one person, or every handler resolves a
-/// tenant that holds none of the rows the test just wrote.
+/// `user-1` because the web fixtures sign in as it: the door and the data must be one person.
 pub const TEST_SUBJECT: &str = "user-1";
 
 pub fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 pub fn new_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Where a job has read a table up to, kept in `meta` between passes.
-///
-/// A second is the whole clock here, so a bare timestamp is not a position:
-/// when a page's limit cuts inside a group of rows written in the same
-/// second, `created_at > cursor` never returns the rest of that second and
-/// those rows are lost. The row id breaks the tie, and every reader that
-/// takes one of these orders by `(at, id)` to match.
-///
-/// Written as `at|id`. A bare integer reads as `(at, "")` — an older cursor,
-/// or none at all.
+/// Seconds are the clock, so the row id breaks ties; readers order by `(at, id)`.
+/// Written as `at|id`; a bare integer reads as `(at, "")`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cursor {
     pub at: i64,
@@ -577,15 +446,40 @@ impl Cursor {
 mod tests {
     use super::*;
 
+    async fn table_names(pool: &sqlx::SqlitePool) -> Vec<String> {
+        sqlx::query_scalar!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%'"#
+        )
+            .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn dev_schema_builds_a_database_with_both_schemas() {
+        let control = control::Control::memory().await.unwrap();
+        let store = Store::memory().await.unwrap();
+        let ours = table_names(&store.pool).await;
+        let clash: Vec<_> = table_names(&control.pool)
+            .await
+            .into_iter()
+            .filter(|t| ours.contains(t))
+            .collect();
+        assert!(clash.is_empty(), "defined by both schemas: {clash:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prepare.db");
+        dev_schema(&path).await.unwrap();
+        let both = control::Control::connect(&path.to_string_lossy())
+            .await
+            .unwrap();
+        let names = table_names(&both.pool).await;
+        assert!(names.contains(&"users".to_string()), "{names:?}");
+        assert!(names.contains(&"artifacts".to_string()), "{names:?}");
+    }
+
     #[tokio::test]
     async fn a_base_without_updated_at_gains_the_column_instead_of_being_refused() {
-        // `artifacts.updated_at` is additive: a column beside the others with a
-        // default no existing row needs to have been written with. Refusing the
-        // base for it meant "re-ingest every artifact you own to gain a
-        // stamp", which is a price nobody pays and so a column nobody adds.
-        // Everything not on the ADDITIVE list still recreates, which is the
-        // line `a_base_older_than_the_schema_is_named_before_anything_is_touched`
-        // holds.
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
             .foreign_keys(true);
@@ -599,9 +493,7 @@ mod tests {
             control: control::Control::memory().await.unwrap(),
             subject: TEST_SUBJECT.to_string(),
         };
-        // A base as it was before the column existed: the real schema, with
-        // the column taken back off. Hand-writing a cut-down `artifacts` would
-        // only test a table this application does not have.
+        // The real schema with the column dropped, not a hand-written cut-down table.
         store.migrate().await.unwrap();
         sqlx::raw_sql(
             "INSERT INTO corpora (id, raw_text, origin, content_hash, status, created_at, updated_at)
@@ -615,23 +507,21 @@ mod tests {
         .unwrap();
 
         store.migrate().await.unwrap();
-        // The row that was already there kept its text and gained the default.
         let (text, stamp): (String, i64) =
-            sqlx::query_as("SELECT text, updated_at FROM artifacts WHERE id = 'a'")
+            sqlx::query!("SELECT text, updated_at FROM artifacts WHERE id = 'a'")
                 .fetch_one(&store.pool)
                 .await
+                .map(|r| (r.text, r.updated_at))
                 .unwrap();
         assert_eq!(text, "hours", "the row was rewritten");
         assert_eq!(stamp, 0, "a stamp nobody has set is not a claim about when");
-        // And again, because migrate runs on every connect.
+        // migrate runs on every connect.
         store.migrate().await.unwrap();
     }
 
     #[tokio::test]
     async fn a_journal_from_before_autonomy_loses_the_columns_that_waited_for_a_press() {
-        // `recommended` was `NOT NULL` with no default, so left in place it
-        // failed the first idle pass's journal write on an upgraded base. The
-        // rows stay: what a pass found is still what it found.
+        // `recommended` was `NOT NULL` with no default and failed the idle pass's journal write.
         let store = Store::memory().await.unwrap();
         sqlx::raw_sql(
             "ALTER TABLE eval_runs ADD COLUMN recommended INTEGER NOT NULL DEFAULT 1;
@@ -652,6 +542,7 @@ mod tests {
         .unwrap();
 
         store.migrate().await.unwrap();
+        // runtime: reads the live schema of the database at hand.
         let cols: Vec<String> = sqlx::query("SELECT name FROM pragma_table_info('eval_runs')")
             .fetch_all(&store.pool)
             .await
@@ -663,7 +554,6 @@ mod tests {
         assert!(!cols.iter().any(|c| c == "applied_at"), "{cols:?}");
         let run = store.latest_eval_run().await.unwrap().unwrap();
         assert_eq!(run.id, "r", "the journal row survived the drop");
-        // And the next pass can write its row.
         store
             .record_eval_run(&eval_runs::NewEvalRun {
                 judged_count: 0,
@@ -679,15 +569,12 @@ mod tests {
             })
             .await
             .unwrap();
-        // And again, because migrate runs on every connect.
+        // migrate runs on every connect.
         store.migrate().await.unwrap();
     }
 
     #[tokio::test]
     async fn a_base_judged_only_from_the_deck_gains_the_two_search_columns() {
-        // `judged_by` and `opened_at` are nullable and mean, on an old row,
-        // exactly what NULL says: the deck gave the verdict, and nobody recorded
-        // an open. A base full of deck verdicts must keep them.
         let store = Store::memory().await.unwrap();
         sqlx::raw_sql(
             "INSERT INTO search_events (id, query, door, query_vec, vec_dim, embed_model,
@@ -701,22 +588,17 @@ mod tests {
         .unwrap();
 
         store.migrate().await.unwrap();
-        let (verdict, by, opened): (String, Option<String>, Option<i64>) = sqlx::query_as(
-            "SELECT verdict, judged_by, opened_at FROM search_events WHERE id = 'e'",
-        )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
+        let (verdict, by, opened): (String, Option<String>, Option<i64>) =
+            sqlx::query!(r#"SELECT verdict AS "verdict!", judged_by, opened_at FROM search_events WHERE id = 'e'"#)
+                .fetch_one(&store.pool)
+                .await
+                .map(|r| (r.verdict, r.judged_by, r.opened_at))
+                .unwrap();
         assert_eq!((verdict.as_str(), by, opened), ("gap", None, None));
     }
 
     #[tokio::test]
     async fn a_base_that_never_explored_gains_the_borrowed_rank_column() {
-        // `search_candidates.explored_from` is nullable with no default, and
-        // NULL is the truth about every row written before it: nothing was
-        // exploring, so no row was lent a rank it had not earned. A base with
-        // a search log in it must keep the log rather than be told to recreate
-        // itself.
         let store = Store::memory().await.unwrap();
         sqlx::raw_sql(
             "INSERT INTO search_events (id, query, door, query_vec, vec_dim, embed_model,
@@ -736,12 +618,12 @@ mod tests {
         .unwrap();
 
         store.migrate().await.unwrap();
-        let (shown, explored): (i64, Option<i64>) = sqlx::query_as(
-            "SELECT shown, explored_from FROM search_candidates WHERE event_id = 'e'",
-        )
-        .fetch_one(&store.pool)
-        .await
-        .unwrap();
+        let (shown, explored): (i64, Option<i64>) =
+            sqlx::query!("SELECT shown, explored_from FROM search_candidates WHERE event_id = 'e'")
+                .fetch_one(&store.pool)
+                .await
+                .map(|r| (r.shown, r.explored_from))
+                .unwrap();
         assert_eq!(
             (shown, explored),
             (1, None),
@@ -751,25 +633,33 @@ mod tests {
 
     #[tokio::test]
     async fn applying_the_schema_twice_changes_nothing() {
-        // migrate() runs on every connect, so a second application has to be a
-        // no-op rather than an error. This is what `IF NOT EXISTS` on every
-        // object buys, and it is the whole reason the schema can be a
-        // statement of shape rather than a chain of diffs.
         let store = Store::memory().await.unwrap();
-        let before: Vec<(String, String)> =
-            sqlx::query_as("SELECT type, name FROM sqlite_master ORDER BY type, name")
-                .fetch_all(&store.pool)
-                .await
-                .unwrap();
+        let before: Vec<(String, String)> = sqlx::query!(
+            r#"SELECT type AS "type!", name AS "name!" FROM sqlite_master ORDER BY type, name"#
+        )
+        .fetch_all(&store.pool)
+        .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.r#type, r.name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
 
         store.migrate().await.unwrap();
         store.migrate().await.unwrap();
 
-        let after: Vec<(String, String)> =
-            sqlx::query_as("SELECT type, name FROM sqlite_master ORDER BY type, name")
-                .fetch_all(&store.pool)
-                .await
-                .unwrap();
+        let after: Vec<(String, String)> = sqlx::query!(
+            r#"SELECT type AS "type!", name AS "name!" FROM sqlite_master ORDER BY type, name"#
+        )
+        .fetch_all(&store.pool)
+        .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.r#type, r.name))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
         assert_eq!(before, after);
         assert!(
             before.iter().any(|(_, n)| n == "artifacts"),
@@ -779,11 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_base_older_than_the_schema_is_named_before_anything_is_touched() {
-        // The check runs before the file, not after it. `schema.sql` drops a
-        // superseded index by name and creates its replacement over `class` —
-        // so applying it to a base without that column would commit the drop,
-        // fail the create with a bare `no such column`, and leave the base with
-        // neither index and no idea why it would not boot.
+        // Checked before applying: the drop would commit and the create fail, losing both indexes.
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
             .foreign_keys(true);
@@ -792,7 +678,6 @@ mod tests {
             .connect_with(opts)
             .await
             .unwrap();
-        // A `segments` table as it was before `no_promote` existed.
         sqlx::raw_sql(
             "CREATE TABLE segments (
                id TEXT PRIMARY KEY, corpus_id TEXT NOT NULL, idx INTEGER NOT NULL,
@@ -818,9 +703,10 @@ mod tests {
              a bare column error from the middle of the file: {err}"
         );
         let tables: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table'")
+            sqlx::query!(r#"SELECT name AS "name!" FROM sqlite_master WHERE type='table'"#)
                 .fetch_all(&store.pool)
                 .await
+                .map(|v| v.into_iter().map(|r| (r.name,)).collect::<Vec<_>>())
                 .unwrap();
         assert!(
             tables.len() == 1,
@@ -840,11 +726,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let tables: Vec<(String,)> =
-            sqlx::query_as("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                .fetch_all(&store.pool)
-                .await
-                .unwrap();
+        let tables: Vec<(String,)> = sqlx::query!(
+            r#"SELECT name AS "name!" FROM sqlite_master WHERE type='table' ORDER BY name"#
+        )
+        .fetch_all(&store.pool)
+        .await
+        .map(|v| v.into_iter().map(|r| (r.name,)).collect::<Vec<_>>())
+        .unwrap();
         let names: Vec<&str> = tables.iter().map(|t| t.0.as_str()).collect();
         for expected in [
             "artifact_pairs",
@@ -859,9 +747,7 @@ mod tests {
                 "{expected} is missing: {names:?}"
             );
         }
-        // The control plane is not in here. A tenant database holds knowledge
-        // and nothing about who may read it, which is what makes the isolation
-        // structural rather than a filter somebody has to remember to write.
+        // A tenant database holds nothing about who may read it.
         for control_side in ["users", "sessions", "api_tokens", "jobs"] {
             assert!(
                 !names.contains(&control_side),
@@ -906,10 +792,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_database_missing_a_column_is_refused_with_the_column_named() {
-        // The failure this replaces: `CREATE TABLE IF NOT EXISTS` leaves an
-        // older table exactly as it is, so startup succeeded and every corpus
-        // view, synthesis run and reconcile job then panicked on a column that
-        // was never added.
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
             .unwrap()
             .foreign_keys(true);
@@ -918,6 +800,7 @@ mod tests {
             .connect_with(opts)
             .await
             .unwrap();
+        // runtime: builds an older schema than the reference database holds.
         sqlx::query(
             "CREATE TABLE segments (
                corpus_id TEXT NOT NULL, idx INTEGER NOT NULL,
@@ -940,23 +823,21 @@ mod tests {
         assert!(err.contains("segments.carry_lines"), "{err}");
     }
 
-    /// A corpus filed as a journal entry by a binary that still had them is
-    /// an ordinary capture once this one connects: the channel it came
-    /// through is back, the keys only the filing read are gone, and a second
-    /// connect finds nothing left to change.
     #[tokio::test]
     async fn a_journal_entry_from_before_comes_back_as_the_capture_it_was() {
         let store = Store::memory().await.unwrap();
         let set = |id: String, origin: &'static str, meta: serde_json::Value| {
             let pool = store.pool.clone();
             async move {
-                sqlx::query("UPDATE corpora SET origin = ?, metadata = ? WHERE id = ?")
-                    .bind(origin)
-                    .bind(meta.to_string())
-                    .bind(id)
-                    .execute(&pool)
-                    .await
-                    .unwrap();
+                sqlx::query!(
+                    "UPDATE corpora SET origin = ?, metadata = ? WHERE id = ?",
+                    origin,
+                    meta.to_string(),
+                    id
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
             }
         };
         let filed = store.insert_corpus("Long day.", "web", None).await.unwrap();
@@ -987,11 +868,13 @@ mod tests {
         )
         .await;
         let broken = store.insert_corpus("not json", "web", None).await.unwrap();
-        sqlx::query("UPDATE corpora SET origin = 'journal', metadata = 'nope' WHERE id = ?")
-            .bind(&broken.id)
-            .execute(&store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE corpora SET origin = 'journal', metadata = 'nope' WHERE id = ?",
+            &broken.id
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
 
         store.migrate().await.unwrap();
         store.migrate().await.unwrap();
@@ -1008,11 +891,11 @@ mod tests {
         let c = store.get_corpus(&refused.id).await.unwrap();
         assert_eq!(c.origin, "share");
         assert_eq!(c.metadata, serde_json::json!({}));
-        let origin: String = sqlx::query_scalar("SELECT origin FROM corpora WHERE id = ?")
-            .bind(&broken.id)
-            .fetch_one(&store.pool)
-            .await
-            .unwrap();
+        let origin: String =
+            sqlx::query_scalar!("SELECT origin FROM corpora WHERE id = ?", &broken.id)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
         assert_eq!(
             origin, "web",
             "metadata that is not JSON still loses the filing"

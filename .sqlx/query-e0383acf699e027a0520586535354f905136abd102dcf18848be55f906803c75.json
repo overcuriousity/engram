@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id FROM search_candidates ORDER BY event_id, rank",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e0383acf699e027a0520586535354f905136abd102dcf18848be55f906803c75"
+}

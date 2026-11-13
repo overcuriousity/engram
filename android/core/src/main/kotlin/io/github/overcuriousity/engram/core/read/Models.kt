@@ -715,6 +715,7 @@ object Api {
     fun corpus(id: String) = Request("/api/v1/corpora/$id")
     /** [event] is the search that listed it, so the open is attributed to that search and the bar is drawn. */
     fun artifact(id: String, event: String? = null) = Request("/api/v1/artifacts/$id", mapOf("event" to event))
+    fun artifactRestore(id: String) = "/api/v1/artifacts/$id/restore"
     fun lineage(id: String) = Request("/api/v1/artifacts/$id/lineage")
     fun versions(id: String) = Request("/api/v1/artifacts/$id/versions")
     fun related(id: String) = Request("/api/v1/artifacts/$id/related")

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET created_at = created_at + 100 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a4a15e40b3b9504941f35b2c8ed04ba0ac76ea58b187aab7da7c3b72a8668602"
+}

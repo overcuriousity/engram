@@ -1,24 +1,11 @@
-//! What the memory did while nobody was looking.
-//!
-//! One row per completed run of a periodic unit. There is no "night" to group
-//! them by: units that reschedule themselves on their own periods do not line
-//! up into one cycle, and inventing a cycle identity to group them by would be
-//! inventing it. What Ops shows is the last day, and under it the history —
-//! which is the thing a single overwritten summary could never give, namely
-//! whether a sweep started going wrong yesterday or has been going wrong for a
-//! week.
+//! One row per completed run of a periodic unit. Units keep their own periods: no cycle id.
 
 use super::{Store, now};
 use crate::error::Result;
-use sqlx::Row;
 
-/// How many runs are kept. Trimmed by the repair pass, which is behind no
-/// setting: a trim that rode on the retention unit stopped whenever capture was
-/// switched off, and the sweeps that kept running kept writing rows.
-/// Housekeeping about housekeeping does not get a policy key.
+/// Trimmed by the repair pass, which no setting switches off: the sweeps keep writing regardless.
 pub const MAX_RUNS: i64 = 2000;
 
-/// One recorded run.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SweepRun {
     pub stage: String,
@@ -31,11 +18,7 @@ pub struct SweepRun {
 }
 
 impl Store {
-    /// Record what one run of a periodic unit did.
-    ///
-    /// A failed run is recorded like any other. It is exactly the run an
-    /// operator needs to see, and a history that only kept the successes would
-    /// show a sweep going quiet with nothing anywhere saying why.
+    /// Failed runs are recorded too: they are the ones an operator needs to see.
     pub async fn record_sweep_run(
         &self,
         stage: &str,
@@ -43,78 +26,83 @@ impl Store {
         outcome: &str,
         detail: &str,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO sweep_runs (stage, started_at, ended_at, outcome, detail)
              VALUES (?, ?, ?, ?, ?)",
+            stage,
+            started_at,
+            now(),
+            outcome,
+            detail
         )
-        .bind(stage)
-        .bind(started_at)
-        .bind(now())
-        .bind(outcome)
-        .bind(detail)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Every run since `since`, newest first.
     pub async fn sweep_runs_since(&self, since: i64, limit: i64) -> Result<Vec<SweepRun>> {
-        let rows = sqlx::query(
-            "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
-              WHERE started_at >= ? ORDER BY started_at DESC LIMIT ?",
-        )
-        .bind(since)
-        .bind(limit)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+            crate::store::sweeps::SweepRunRow,
+            r#"SELECT stage AS "stage!", started_at AS "started_at!", ended_at AS "ended_at!", outcome AS "outcome!", detail AS "detail!" FROM sweep_runs
+              WHERE started_at >= ? ORDER BY started_at DESC LIMIT ?"#,
+            since,
+            limit
+        ).fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(read_run).collect())
+        Ok(rows.into_iter().map(read_run).collect())
     }
 
-    /// The history: the most recent runs, newest first, whenever they were.
     pub async fn sweep_history(&self, limit: i64) -> Result<Vec<SweepRun>> {
-        let rows = sqlx::query(
-            "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
-              ORDER BY started_at DESC LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query_as!(
+            crate::store::sweeps::SweepRunRow,
+            r#"SELECT stage AS "stage!", started_at AS "started_at!", ended_at AS "ended_at!", outcome AS "outcome!", detail AS "detail!" FROM sweep_runs
+              ORDER BY started_at DESC LIMIT ?"#,
+            limit
+        ).fetch_all(&self.pool)
         .await?;
-        Ok(rows.iter().map(read_run).collect())
+        Ok(rows.into_iter().map(read_run).collect())
     }
 
-    /// The most recent run of one sweep, if it has ever run.
     pub async fn last_sweep_run(&self, stage: &str) -> Result<Option<SweepRun>> {
-        let row = sqlx::query(
-            "SELECT stage, started_at, ended_at, outcome, detail FROM sweep_runs
-              WHERE stage = ? ORDER BY started_at DESC LIMIT 1",
-        )
-        .bind(stage)
-        .fetch_optional(&self.pool)
+        let row = sqlx::query_as!(
+            crate::store::sweeps::SweepRunRow,
+            r#"SELECT stage AS "stage!", started_at AS "started_at!", ended_at AS "ended_at!", outcome AS "outcome!", detail AS "detail!" FROM sweep_runs
+              WHERE stage = ? ORDER BY started_at DESC LIMIT 1"#,
+            stage
+        ).fetch_optional(&self.pool)
         .await?;
-        Ok(row.as_ref().map(read_run))
+        Ok(row.map(read_run))
     }
 
-    /// Keep the newest `MAX_RUNS` and forget the rest.
     pub async fn trim_sweep_runs(&self) -> Result<u64> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "DELETE FROM sweep_runs WHERE id NOT IN (
                SELECT id FROM sweep_runs ORDER BY started_at DESC, id DESC LIMIT ?
              )",
+            MAX_RUNS
         )
-        .bind(MAX_RUNS)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected())
     }
 }
 
-fn read_run(r: &sqlx::sqlite::SqliteRow) -> SweepRun {
+/// A row as `read_run` reads it, for `query_as!`.
+pub(crate) struct SweepRunRow {
+    pub stage: String,
+    pub started_at: i64,
+    pub ended_at: i64,
+    pub outcome: String,
+    pub detail: String,
+}
+
+fn read_run(r: SweepRunRow) -> SweepRun {
     SweepRun {
-        stage: r.get("stage"),
-        started_at: r.get("started_at"),
-        ended_at: r.get("ended_at"),
-        outcome: r.get("outcome"),
-        detail: r.get("detail"),
+        stage: r.stage,
+        started_at: r.started_at,
+        ended_at: r.ended_at,
+        outcome: r.outcome,
+        detail: r.detail,
     }
 }
 

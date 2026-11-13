@@ -1,113 +1,51 @@
 {% extends "layout.html" %}
 {% block title %}Insights — engram{% endblock %}
+{% block live %} hx-ext="sse" sse-connect="/ui/live"{% endblock %}
 {% block regions %}regions-table{% endblock %}
 {% block content %}
-<h1>Insights</h1>
-{# A base with nothing in it has nothing to measure, and three panels of
-   zeros make a healthy empty base read as a broken full one. Only the
-   measures: what is due, and the sweeps and the capture queue, run whether or
-   not anything has been captured — hiding the page would hide all of that.
-   What is noisy rather than absent lives behind the disclosure at the foot. #}
+<div class="oc-page-head"><h1 class="oc-text-page">Insights</h1></div>
+{# An empty base hides only the measures; due reminders, sweeps and the queue run regardless. #}
 {% if held.corpora == 0 %}
-<div class="empty">
-  <h2>Nothing is held yet</h2>
-  <p class="muted">This page measures what the base holds and says what it did
-    on its own. The measures wait on there being something in it.</p>
-  <p><a class="btn btn-ghost btn-sm" href="/ui">Back to the box</a></p>
-</div>
+<div class="oc-empty"><p>Nothing is held yet.</p><a href="/ui">Capture something</a></div>
 {% else %}
-{# ── What this memory is like ──────────────────────────────────────────────
-   Aggregates over tables that already exist. Nothing here embeds anything or
-   calls a model, which is what makes the page cheap enough to open whenever.
-
-   Figures in mono, because they are measurements and a proportional face
-   makes two of them the same width by accident. #}
-<h2>What this memory is like</h2>
-
+{# Aggregates over existing tables: no embedding, no model call. #}
+<h2 class="oc-text-section">What this memory is like</h2>
 <div class="measures">
-  <div class="measure">
-    <div class="label pane-label">Held</div>
-    <p class="measure-figure mono">{{ held.artifacts }}</p>
-    <p class="measure-sub">artifacts, from {{ held.corpora }} source{% if held.corpora != 1 %}s{% endif %}</p>
-    {# The thesis of the application, as a number: rewriting is earned, so
-       most of what is held should be the operator's own words. #}
-    <p class="measure-sub">{{ held.synthesized }} written by a model · {{ held.segments }} segments — slices the model reads</p>
-  </div>
-
-  <div class="measure">
-    <div class="label pane-label">Use</div>
-    {# Activation above the capture baseline, decayed — what opening,
-       confirming and citing put there, in units of one open. Not "what a
-       search would find": priming moves a hit by at most a rung of
-       `associate.prime_lift`, one place on a base started from the shipped
-       file and none where the lift is zero, and with `retrieved` at zero a raw
-       reading only ever counted the days since capture. The bottom band is the
-       point of the row: how much of this base nobody has ever reached for. #}
-    {% for b in used %}
-    <p class="measure-row"><span>{{ b.label }}</span><span class="mono">{{ b.count }}</span></p>
-    {% endfor %}
-  </div>
-
-  <div class="measure">
-    <div class="label pane-label">Retrieval</div>
-    {# Not a proxy score: recall@10 and MRR read off the positions those
-       searches actually gave. A test query written while looking at an
-       artifact reuses its wording and every system passes it — these come
-       from questions asked in earnest, before anything came back.
-
-       Two rows and a line, in every state. The figure is resolved in Rust —
-       an em dash where there is nothing to say, because a 0.00 here would read
-       as a score rather than as an absence, which is the one thing this
-       measure must never do — and `note` says which absence it is. The three
-       states used to be three branches with the label-and-gloss markup copied
-       into each, so the wording of "right result in the top 10" was a
-       four-place edit.
-
-       The rows rather than a paragraph in their place: this card stands in a
-       row of three, and three lines of prose where the other two have figures
-       read as one broken card rather than as a measure with nothing to say
-       yet. #}
-    <p class="measure-row"><span>recall@10 <span class="gloss">— right result in the top 10</span></span><span class="mono">{{ retrieval.recall_at_10 }}</span></p>
-    <p class="measure-row"><span>MRR <span class="gloss">— how high it ranked</span></span><span class="mono">{{ retrieval.mrr }}</span></p>
-    {# `safe`: the note is built in Rust and its only variable part is a count.
-       See `Retrieval::note`. #}
+  <section>
+    <h3 class="label pane-label">Held</h3>
+    <dl class="oc-facts">
+      <dt>Artifacts</dt><dd><span class="oc-value oc-num">{{ held.artifacts }}</span></dd>
+      <dt>Sources</dt><dd><span class="oc-value oc-num">{{ held.corpora }}</span></dd>
+      <dt>Written by a model</dt><dd><span class="oc-value oc-num">{{ held.synthesized }}</span></dd>
+      <dt>Segments</dt><dd><span class="oc-value oc-num">{{ held.segments }}</span></dd>
+    </dl>
+  </section>
+  <section>
+    {# Decayed activation above the capture baseline, in units of one open; the last band is what nobody reached for. #}
+    <h3 class="label pane-label">Use</h3>
+    <dl class="oc-facts">
+      {% for b in used %}<dt>{{ b.label }}</dt><dd><span class="oc-value oc-num">{{ b.count }}</span></dd>{% endfor %}
+    </dl>
+  </section>
+  <section>
+    {# Read off positions earnest searches gave; an em dash, never 0.00, where there is nothing to say. #}
+    <h3 class="label pane-label">Retrieval</h3>
+    <dl class="oc-facts">
+      <dt>recall@10 <span class="gloss">right result in the top 10</span></dt><dd><span class="oc-value oc-num">{{ retrieval.recall_at_10 }}</span></dd>
+      <dt>MRR <span class="gloss">how high it ranked</span></dt><dd><span class="oc-value oc-num">{{ retrieval.mrr }}</span></dd>
+    </dl>
+    {# Built in Rust; its only variable part is a count. See `Retrieval::note`. #}
     <p class="measure-sub">{{ retrieval.note|safe }}</p>
-  </div>
+  </section>
 </div>
-
-{# What the base did while nobody was there. #}
 {% include "_sleep.html" %}
-{# What the base did to its own ranking, if it was allowed to. #}
 {% include "_evolve.html" %}
 {% endif %}
 
-{# Due reminders, the same band the workspace column shows — same fragment,
-   same route, same actions, so there is exactly one way this list behaves
-   rather than two that can drift apart. A page opened to check on the base
-   is exactly where a reminder set for a date now past deserves to be seen,
-   not only in the column beside the capture box.
-
-   The heading comes back with the band and not from here — `head: "1"` asks
-   for it — because the band swaps itself out on every action and on its own
-   poll. Gated from this side, on a `has_due` read taken once at page render,
-   it outlived its own rows: press done on the only open reminder and the
-   fragment came back empty under a heading still claiming something was due.
-   Nothing is drawn until the band lands, which is the honest state for a
-   region whose contents are not known yet. #}
+{# The band asks for its own heading (`head: "1"`), so the heading cannot outlive its rows. #}
 <div id="due" class="due" hx-post="/ui/due" hx-trigger="load"
-     hx-vals='js:{tz: Intl.DateTimeFormat().resolvedOptions().timeZone || "", head: "1"}' hx-swap="outerHTML"></div>
+     hx-vals='{"head": "1"}' data-send-tz hx-swap="outerHTML"></div>
 
-{# Pursuits had a heading and a section of its own, below seven tables, to say
-   one sentence. No table: a run that ended unsatisfied is a hole the base
-   keeps working on by itself, one that ended satisfied needs nobody, and one
-   that was written up is on the journal below under `generated`.
-
-   There was a list of those holes here, with a box to write an answer beside
-   each and a button to forget it. Neither was the base's to ask for: a hole
-   closes on its own when a capture covers it, and the sweep that names them
-   goes on without anyone pressing anything. #}
-{# Only when there is something to say. "No run of searches has gone quiet
-   yet" is a sentence about a thing that has not happened. #}
 {% if pursuit_enabled && pursuit_recent > 0 %}
 <p class="muted">
   {{ pursuit_recent }} run{% if pursuit_recent != 1 %}s{% endif %} of searches went quiet
@@ -115,125 +53,51 @@
 </p>
 {% endif %}
 
-{# The day view is a whole page — the day's captures, what was
-   due on it, what was opened — and the only route into it from anywhere in the
-   app was the word "today" at the end of one sentence in the workspace's idle
-   foot, which renders only while the box is empty. This list is the same
-   captures without the days around them, so this is the heading that owes it a
-   link. `data-day-link` is app.js rebuilding the date in the viewer's zone;
-   see `_idle_foot.html`, which does the same. #}
-<h2 class="head-aside">Recent
-  <a class="quiet-link" href="/ui/day/today" data-day-link>Browse by day</a>
+<h2 class="oc-text-section head-aside">Recent
+  {# app.js rebuilds the date in the viewer's zone. #}
+  <a href="/ui/day/today" data-day-link>Browse by day</a>
 </h2>
-{# Loaded rather than rendered inline, so the first paint and every refresh
-   afterwards go through exactly the same fragment. #}
 <div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
 
-{# A quiet `Settings` link stood here, from when Settings was reachable from
-   nowhere else. It is in the top row and in the phone's tab bar now, and the
-   row lights the entry you are in — so this was a third route to a page two
-   pieces of chrome already offer. #}
-
-{# One list, where seven tables were.
-
-   They were Merged, Generated, Hidden as stale, Reaped, Worth a second look,
-   Hidden as near-identical and Captures waiting on a decision: seven headings,
-   seven paragraphs explaining a mechanism, and seven column layouts for what
-   is one shape — a thing, why the base touched it, what it put beside it, and
-   the button that takes it back. The paragraphs were a tour of the machine's
-   own categories; the reason belongs on the row, because that is where it
-   differs.
-
-   The reads are untouched, each with its own cap. `web::insights::SetAsideRow`
-   is the fold.
-
-   It was "Set aside for you", and two of its kinds were questions: a capture
-   that resembled another, and an artifact nobody had confirmed in a while.
-   The base answers both itself now, so what is left is a journal — what it
-   did, why, and the button that takes it back. #}
+{# One journal of what the base did on its own, each row with its undo. `web::insights::SetAsideRow` is the fold. #}
 {% if !set_aside.is_empty() %}
-<h2>What the base did</h2>
-<p class="muted">What it merged, wrote, hid and buried, and anything hidden by
-  hand. Nothing is deleted, and every row can be taken back.</p>
-<table class="grid set-aside">
-  <thead><tr><th>What</th><th>Why it is here</th><th>Beside it</th><th></th></tr></thead>
-  <tbody>
+<h2 class="oc-text-section">What the base did</h2>
+<p class="muted">Merged, written, hidden, buried · every row can be undone</p>
+<ul class="oc-list set-aside" role="list">
   {% for r in set_aside %}
-    <tr>
-      <td>
-        {# A label that is the artifact's own opening rather than a name it was
-           given is set as text — see `ui::RowLabel`. The anchor stays: a row
-           whose whole content is the label cannot be emptied. #}
-        <a href="{{ r.href }}"{% if !r.named %} class="name-opening"{% endif %}>{{ r.title }}</a>
-        {% if !r.subtitle.is_empty() %}<div class="muted row-sub">{{ r.subtitle }}</div>{% endif %}
-        {% if let Some(c) = r.caveat %}<div class="muted row-sub">{{ c }}</div>{% endif %}
-      </td>
-      <td>
-        <span class="badge">{{ r.kind }}</span>
-        <div class="muted row-sub">{{ r.why }}</div>
-      </td>
-      <td>
+  <li>
+    <div class="oc-list__main">
+      <a class="oc-list__title{% if !r.named %} name-opening{% endif %}" href="{{ r.href }}">{{ r.title }}</a>
+      <span class="oc-list__meta"><span class="set-aside-kind">{{ r.kind }}</span> · {{ r.why }}{% if !r.subtitle.is_empty() %} · {{ r.subtitle }}{% endif %}{% if let Some(c) = r.caveat %} · {{ c }}{% endif %}</span>
+      {% if !r.beside.is_empty() %}
+      <span class="oc-list__meta">beside
         {% for src in r.beside %}
-        <div>
-          {% if src.id.is_empty() %}
-          <a href="/ui/corpora/{{ src.corpus_id }}">{{ src.title }}</a>
-          {% else %}
-          <a href="/ui/artifacts/{{ src.id }}"{% if !src.named %} class="name-opening"{% endif %}>{{ src.title }}</a>
-          {% endif %}
-          {% if !src.subtitle.is_empty() %}<div class="muted row-sub">{{ src.subtitle }}</div>{% endif %}
-        </div>
+        {% if src.id.is_empty() %}<a href="/ui/corpora/{{ src.corpus_id }}">{{ src.title }}</a>{% else %}<a href="/ui/artifacts/{{ src.id }}"{% if !src.named %} class="name-opening"{% endif %}>{{ src.title }}</a>{% endif %}{% if !src.subtitle.is_empty() %} ({{ src.subtitle }}){% endif %}{% if !loop.last %}, {% endif %}
         {% endfor %}
-      </td>
-      {# Labelled, not icons. Two icons under a column heading that explained
-         them worked while every row in the table meant the same thing; in a
-         list where the row above is a merge and the row below is a burial, a
-         bare arrow means nothing. The long form stays in `title` and
-         `aria-label`. #}
-      <td>
-        <div class="set-aside-actions">
-          {% for a in r.actions %}
-          <form method="post" action="{{ a.action }}">
-            <button class="btn btn-sm" type="submit" title="{{ a.hint }}" aria-label="{{ a.hint }}">{{ a.label }}</button>
-          </form>
-          {% endfor %}
-        </div>
-      </td>
-    </tr>
+      </span>
+      {% endif %}
+    </div>
+    <div class="set-aside-actions oc-row">
+      {% for a in r.actions %}
+      <form method="post" action="{{ a.action }}">
+        <button class="oc-btn" type="submit" data-oc-tip="{{ a.hint }}">{{ a.label }}</button>
+      </form>
+      {% endfor %}
+    </div>
+  </li>
   {% endfor %}
-  </tbody>
-</table>
+</ul>
 {% if set_aside_capped %}
-<p class="muted">Some of these lists are capped — the rest appear as these are cleared.</p>
+<p class="muted">Capped · more appear as these clear</p>
 {% endif %}
 {% endif %}
 
-{# Everything below is about the instance rather than about what is in it, and
-   it is the same readout for every user of it. Stage identifiers, target
-   identifiers and raw error strings are what an operator opens a page for and
-   what everybody else scrolls past, so the page states the memory above and
-   offers the machine here, closed. A disclosure rather than a second page: a
-   route would need a handler, a link and an empty state of its own to draw the
-   same line. #}
-{# Open, and said on the summary, when something in here is going wrong. The
-   sweep failures and the last-error column are the only surfaces that report a
-   background pipeline falling over, and behind a closed disclosure with a
-   neutral summary an instance whose every embed job has failed for a week
-   looks exactly like one with nothing to say. A count on the summary is the
-   smallest thing that survives the fold. #}
+{# The instance's own readout, closed unless something fails: a count on the summary survives the fold. #}
 <details class="machine"{% if last_day_failures > 0 || !retrying.is_empty() %} open{% endif %}>
-  <summary><h2>What the machine is doing</h2>{% if last_day_failures > 0 %}
-    <span class="flag">{{ last_day_failures }} failed</span>{% endif %}{% if !retrying.is_empty() %}
+  <summary><h2 class="oc-text-section">What the machine is doing</h2>{% if last_day_failures > 0 %}
+    {{ crate::web::ui::status("danger", format!("{} failed", self.last_day_failures).as_str()) }}{% endif %}{% if !retrying.is_empty() %}
     <span class="muted">{{ retrying.len() }} retrying</span>{% endif %}</summary>
 
-
-{# The counts as a sentence rather than as `done: 17`-style badges: this is a
-   page you open to reassure yourself, and a row of key-value chips reads as a
-   debug dump of something going wrong.
-
-   Every number says what it counts. "1523 done" sat beside "1236 artifacts"
-   and read as a count of artifacts — of which there cannot be more done than
-   there are — when it was a count of jobs. Same for the links: a bare "45
-   links, 0 named" says nothing about what is linked to what. #}
 <p class="muted">
   {{ artifact_count }} artifacts, {{ vector_count }} embedded.
   {% if job_counts.is_empty() %}No jobs queued.{% else %}
@@ -245,13 +109,9 @@
   {% endif %}
 </p>
 
-{# The last day, not "last night". Units that reschedule themselves on their
-   own periods do not line up into one cycle, and grouping them by an invented
-   cycle identity would be inventing it. The history under the summary is the
-   half a single overwritten line could never give: whether a sweep started
-   going wrong yesterday or has been going wrong for a week. #}
+{# The last day, not a night: units reschedule on their own periods and share no cycle. #}
 {% if !last_day.is_empty() || last_day_failures > 0 || !sweep_history.is_empty() %}
-<h3>The last day</h3>
+<h3 class="oc-text-section">The last day</h3>
 <p class="muted">
   {% if last_day.is_empty() %}The sweeps ran and found nothing to do.{% else %}
   {% for c in last_day %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}.
@@ -261,73 +121,70 @@
   {% endif %}
 </p>
 {% if !sweep_history.is_empty() %}
-<table class="grid">
-  <thead><tr><th>When</th><th>Sweep</th><th>Did</th><th>Took</th></tr></thead>
+<div class="oc-table-wrap">
+<table class="oc-table">
+  <thead><tr><th>When</th><th>Sweep</th><th>Did</th><th class="oc-num">Took</th></tr></thead>
   <tbody>
   {% for r in sweep_history %}
     <tr>
-      <td>{{ r.when }}</td>
+      <td class="oc-mono">{{ r.when }}</td>
       <td title="{{ r.stage_id }}">{{ r.stage }}</td>
-      <td>
+      <td class="oc-wide"{% if !r.error.is_empty() %} title="{{ r.error }}"{% endif %}>
         {% if !r.error.is_empty() %}
-        <span class="flag">failed</span>
-        <div class="muted row-sub">{{ r.error }}</div>
+        {{ crate::web::ui::status("danger", "failed") }} {{ r.error }}
         {% else if r.counts.is_empty() %}
         <span class="muted">nothing to do</span>
         {% else %}
         {% for c in r.counts %}{{ c.n }} {{ c.what }}{% if !loop.last %}, {% endif %}{% endfor %}
         {% endif %}
       </td>
-      <td class="muted">{{ r.took }}</td>
+      <td class="oc-num oc-muted">{{ r.took }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 {% endif %}
 
-{# Shown against clicked, by rung. The one number that can settle whether the
-   weights the recommender rests on are right — they are chosen, not measured,
-   and until this has data, fitting them would be guessing with extra steps.
-   `[sitting] prime` has sat at `false` for months because nobody measured it;
-   this is here so the same thing does not happen twice. #}
+{# Shown against opened, by rung: the only measurement of the recommender's chosen weights. #}
 {% if !offer_rates.is_empty() %}
-<h3>What was offered</h3>
-<p class="muted">The last thirty days. A weekly pattern needs weeks, so a rate
-  measured over a day would be a number nobody could act on.</p>
-<table class="grid">
-  <thead><tr><th>Rung</th><th>Shown</th><th>Opened</th></tr></thead>
+<h3 class="oc-text-section">What was offered</h3>
+<p class="muted">Last 30 days</p>
+<div class="oc-table-wrap">
+<table class="oc-table">
+  <thead><tr><th>Rung</th><th class="oc-num">Shown</th><th class="oc-num">Opened</th></tr></thead>
   <tbody>
   {% for r in offer_rates %}
-    <tr><td>{{ r.rung }}</td><td>{{ r.shown }}</td><td>{{ r.opened }}</td></tr>
+    <tr><td>{{ r.rung }}</td><td class="oc-num">{{ r.shown }}</td><td class="oc-num">{{ r.opened }}</td></tr>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 
 {% if !retrying.is_empty() %}
-<h3>Retrying</h3>
-<p class="muted">Work that hit something and is waiting to try again. Nothing here needs you.</p>
-<table class="grid">
-  <thead><tr><th>Stage</th><th>Target</th><th>Attempts</th><th>Next</th><th>Last error</th></tr></thead>
+<h3 class="oc-text-section">Retrying</h3>
+<p class="muted">Waiting to retry · nothing to do</p>
+<div class="oc-table-wrap">
+<table class="oc-table">
+  <thead><tr><th>Stage</th><th>Target</th><th class="oc-num">Attempts</th><th>Next</th><th>Last error</th></tr></thead>
   <tbody>
   {% for j in retrying %}
     <tr>
-      <td class="mono">{{ j.stage }}</td>
-      <td class="mono">{{ j.target_id }}</td>
-      <td class="mono">{{ j.attempts }}</td>
-      <td class="mono">{{ j.due }}</td>
-      <td class="muted">{{ j.last_error }}</td>
+      <td class="oc-mono">{{ j.stage }}</td>
+      <td class="oc-mono oc-cell-copy"><span><span class="oc-truncate">{{ j.target_id }}</span>{% let copy_label = "target id" %}{% let copy_value = j.target_id.as_str() %}{% include "_copy.html" %}</span></td>
+      <td class="oc-num oc-mono">{{ j.attempts }}</td>
+      <td class="oc-mono">{{ j.due }}</td>
+      <td class="oc-wide oc-muted">{{ crate::web::markdown::inert(j.last_error)|safe }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
+</div>
 {% endif %}
 </details>
 
-
-{# One sentence for everything that is empty. Five headings each answered
-   "None." made a base with nothing wrong with it look like a backlog. #}
 {% if set_aside.is_empty() && retrying.is_empty() %}
 <p class="muted">Nothing done on its own yet, and nothing retrying.</p>
 {% endif %}

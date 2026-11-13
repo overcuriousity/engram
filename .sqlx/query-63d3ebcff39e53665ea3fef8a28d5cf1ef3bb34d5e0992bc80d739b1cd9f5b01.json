@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM pursuits",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "63d3ebcff39e53665ea3fef8a28d5cf1ef3bb34d5e0992bc80d739b1cd9f5b01"
+}

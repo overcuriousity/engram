@@ -1,42 +1,17 @@
-//! Probes: questions the base can ask itself about one artifact.
-//!
-//! Two classes and a rule. A `capture` probe is the text of a later capture
-//! that landed near this artifact at integration — a query written by a
-//! person who was not looking at the answer, which is the standard verdicts
-//! are held to. A `cue` probe is a question a model-written artifact was
-//! written for. The rule: nothing is ever minted from an artifact's own
-//! title, body or tags, because a query written while looking at the answer
-//! passes on every system ever built.
+//! Probes: questions the base asks itself about one artifact, from later captures or a
+//! model-written artifact's cues. Never minted from the artifact's own text.
 
 use super::feedback::{blob_to_vec, vec_to_blob};
 use super::{Cursor, Store, new_id, now};
 use crate::error::{Error, Result};
 use sqlx::Row;
 
-/// Distinct probes an owner's retained results have to come from before they
-/// are an agreement rather than one observation counted twice.
-///
-/// The rehearsal lap wraps, so on an unchanged base the same probe is replayed
-/// on consecutive nights and writes identical rows. Two rows off one probe is
-/// one reading repeated; two probes is two questions somebody asked that both
-/// landed on the artifact, which is what `sleep::interferers` and
-/// `sleep::condense_candidates` claim to have when they act.
+/// The rehearsal lap wraps, so one probe replayed nightly writes identical rows; only
+/// distinct probes count as agreement.
 pub const MIN_AGREEING_PROBES: usize = 2;
 
-/// Results kept per probe, the oldest dropped as newer ones are written.
-///
-/// Rows per probe rather than days is the bound this table needs: storage
-/// becomes a function of how many probes exist instead of how long the base
-/// has been running. A pass writes up to `OBSERVATION_LIMIT` rows, each
-/// carrying a JSON list of ids, and every pass runs window functions
-/// (`fragile_rehearsals`, `latest_results_under`) over all of them.
-///
-/// Ten, from what reads back further than the last row. `fragile_rehearsals`
-/// compares the last two under a generation; `retract::spanning` pairs a
-/// probe's last result before a condensation against its first after, so the
-/// older side has to survive the passes between one lap and the next. Past
-/// that nothing looks, and `MIN_AGREEING_PROBES` counts probes rather than
-/// rows, so keeping more history buys it nothing at all.
+/// Bounds storage by probe count rather than age. `retract::spanning` needs results to
+/// survive between laps; nothing reads further back.
 const KEEP_PER_PROBE: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,11 +59,6 @@ pub struct Rehearsal {
     pub retired_at: Option<i64>,
 }
 
-const COLUMNS: &str =
-    "id, created_at, class, query, query_vec, embed_model, artifact_id, source_id, retired_at";
-/// The same columns off an aliased `rehearsals r`, for the joined reads.
-const QUALIFIED: &str = "r.id, r.created_at, r.class, r.query, r.query_vec, r.embed_model, r.artifact_id, r.source_id, r.retired_at";
-
 #[derive(Debug, Clone)]
 pub struct NewResult {
     pub rehearsal_id: String,
@@ -112,124 +82,143 @@ fn outranked(json: &str) -> Result<Vec<String>> {
         .map_err(|e| Error::Store(format!("rehearsal_results.outranked_by: {e}")))
 }
 
-fn read_result(r: &sqlx::sqlite::SqliteRow) -> Result<RehearsalResult> {
+/// A row as `read_result` reads it, for `query_as!`.
+pub(crate) struct RehearsalResultRow {
+    pub id: String,
+    pub rehearsal_id: String,
+    pub generation_id: String,
+    pub at: i64,
+    pub rank: Option<i64>,
+    pub outranked_by: String,
+}
+
+fn read_result(r: RehearsalResultRow) -> Result<RehearsalResult> {
     Ok(RehearsalResult {
-        id: r.get("id"),
-        rehearsal_id: r.get("rehearsal_id"),
-        generation_id: r.get("generation_id"),
-        at: r.get("at"),
-        rank: r.get("rank"),
-        outranked_by: outranked(&r.get::<String, _>("outranked_by"))?,
+        id: r.id,
+        rehearsal_id: r.rehearsal_id,
+        generation_id: r.generation_id,
+        at: r.at,
+        rank: r.rank,
+        outranked_by: outranked(&r.outranked_by)?,
     })
 }
 
-fn read(r: &sqlx::sqlite::SqliteRow) -> Result<Rehearsal> {
+/// A row as `read` reads it, for `query_as!`.
+pub(crate) struct RehearsalRow {
+    pub id: String,
+    pub created_at: i64,
+    pub class: String,
+    pub query: String,
+    pub query_vec: Vec<u8>,
+    pub embed_model: String,
+    pub artifact_id: String,
+    pub source_id: Option<String>,
+    pub retired_at: Option<i64>,
+}
+
+fn read(r: RehearsalRow) -> Result<Rehearsal> {
     Ok(Rehearsal {
-        id: r.get("id"),
-        created_at: r.get("created_at"),
-        class: Class::parse(&r.get::<String, _>("class"))?,
-        query: r.get("query"),
-        query_vec: blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-        embed_model: r.get("embed_model"),
-        artifact_id: r.get("artifact_id"),
-        source_id: r.get("source_id"),
-        retired_at: r.get("retired_at"),
+        id: r.id,
+        created_at: r.created_at,
+        class: Class::parse(&r.class)?,
+        query: r.query,
+        query_vec: blob_to_vec(&r.query_vec),
+        embed_model: r.embed_model,
+        artifact_id: r.artifact_id,
+        source_id: r.source_id,
+        retired_at: r.retired_at,
     })
 }
 
 impl Store {
-    /// `None` when the same (artifact, class, query) is already *live*: a
-    /// probe is written once, however often the unit that mints it runs.
-    ///
-    /// Live, and not ever: a retired row is history and does not stand in the
-    /// way of the question being asked again under a new embedder. See
-    /// `idx_rehearsals_live`.
+    /// Live, not ever: a retired row does not block the same question under a new embedder.
     pub async fn record_rehearsal(&self, r: &NewRehearsal) -> Result<Option<String>> {
         let id = new_id();
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT OR IGNORE INTO rehearsals
                (id, created_at, class, query, query_vec, vec_dim, embed_model, artifact_id, source_id)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            now(),
+            r.class.as_str(),
+            &r.query,
+            vec_to_blob(&r.query_vec),
+            r.query_vec.len() as i64,
+            &r.embed_model,
+            &r.artifact_id,
+            &r.source_id
         )
-        .bind(&id)
-        .bind(now())
-        .bind(r.class.as_str())
-        .bind(&r.query)
-        .bind(vec_to_blob(&r.query_vec))
-        .bind(r.query_vec.len() as i64)
-        .bind(&r.embed_model)
-        .bind(&r.artifact_id)
-        .bind(&r.source_id)
-        .execute(&self.pool)
+            .execute(&self.pool)
         .await?;
         Ok((res.rows_affected() > 0).then_some(id))
     }
 
     pub async fn rehearsal(&self, id: &str) -> Result<Option<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM rehearsals WHERE id = ?"
-        )))
-        .bind(id)
-        .fetch_optional(&self.pool)
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"SELECT id AS "id!", created_at AS "created_at!", class AS "class!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!", artifact_id AS "artifact_id!", source_id AS "source_id?", retired_at AS "retired_at?" FROM rehearsals WHERE id = ?"#,
+            id
+        ).fetch_optional(&self.pool)
         .await?
-        .as_ref()
+
         .map(read)
         .transpose()
     }
 
-    /// Live probes after `cursor`, in `(created_at, id)` order. The pair and
-    /// not a bare stamp: the clock is seconds, and a limit that cuts inside
-    /// one second would otherwise lose the rest of it.
+    /// `(created_at, id)`: the clock is seconds, and a limit cutting inside one would lose rows.
     pub async fn rehearsals_after(&self, cursor: &Cursor, limit: usize) -> Result<Vec<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM rehearsals
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"SELECT id AS "id!", created_at AS "created_at!", class AS "class!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!", artifact_id AS "artifact_id!", source_id AS "source_id?", retired_at AS "retired_at?" FROM rehearsals
               WHERE retired_at IS NULL
                 AND (created_at > ? OR (created_at = ? AND id > ?))
               ORDER BY created_at ASC, id ASC
-              LIMIT ?"
-        )))
-        .bind(cursor.at)
-        .bind(cursor.at)
-        .bind(&cursor.id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              LIMIT ?"#,
+            cursor.at,
+            cursor.at,
+            &cursor.id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
 
-    /// Live probes for one artifact, oldest first.
     pub async fn rehearsals_of(&self, artifact_id: &str) -> Result<Vec<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT {COLUMNS} FROM rehearsals
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"SELECT id AS "id!", created_at AS "created_at!", class AS "class!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!", artifact_id AS "artifact_id!", source_id AS "source_id?", retired_at AS "retired_at?" FROM rehearsals
               WHERE artifact_id = ? AND retired_at IS NULL
-              ORDER BY created_at ASC, id ASC"
-        )))
-        .bind(artifact_id)
-        .fetch_all(&self.pool)
+              ORDER BY created_at ASC, id ASC"#,
+            artifact_id
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
 
     pub async fn retire_rehearsal(&self, id: &str, at: i64) -> Result<()> {
-        sqlx::query("UPDATE rehearsals SET retired_at = ? WHERE id = ? AND retired_at IS NULL")
-            .bind(at)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query!(
+            "UPDATE rehearsals SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+            at,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    /// Retire every live probe of this artifact. Rows stamped.
     pub async fn retire_rehearsals_of(&self, artifact_id: &str, at: i64) -> Result<u64> {
-        Ok(sqlx::query(
+        Ok(sqlx::query!(
             "UPDATE rehearsals SET retired_at = ? WHERE artifact_id = ? AND retired_at IS NULL",
+            at,
+            artifact_id
         )
-        .bind(at)
-        .bind(artifact_id)
         .execute(&self.pool)
         .await?
         .rows_affected())
@@ -237,7 +226,7 @@ impl Store {
 
     pub async fn live_rehearsal_count(&self) -> Result<i64> {
         Ok(
-            sqlx::query_scalar("SELECT COUNT(*) FROM rehearsals WHERE retired_at IS NULL")
+            sqlx::query_scalar!("SELECT COUNT(*) FROM rehearsals WHERE retired_at IS NULL")
                 .fetch_one(&self.pool)
                 .await?,
         )
@@ -245,103 +234,76 @@ impl Store {
 
     pub async fn record_rehearsal_result(&self, r: &NewResult) -> Result<String> {
         let id = new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO rehearsal_results (id, rehearsal_id, generation_id, at, rank, outranked_by)
              VALUES (?, ?, ?, ?, ?, ?)",
+            &id,
+            &r.rehearsal_id,
+            &r.generation_id,
+            now(),
+            r.rank,
+            serde_json::to_string(&r.outranked_by).unwrap_or_else(|_| "[]".into())
         )
-        .bind(&id)
-        .bind(&r.rehearsal_id)
-        .bind(&r.generation_id)
-        .bind(now())
-        .bind(r.rank)
-        .bind(serde_json::to_string(&r.outranked_by).unwrap_or_else(|_| "[]".into()))
         .execute(&self.pool)
         .await?;
-        // And everything this probe has past `KEEP_PER_PROBE`, here rather
-        // than on a sweep. Retention only runs on `feedback.retain_days`,
-        // which ships at "keep for ever" — so the table grew by up to
-        // `OBSERVATION_LIMIT` JSON-carrying rows a pass with nothing ever
-        // taking any of them out, and every pass ran window functions over
-        // the lot.
-        sqlx::query(
+        // Trimmed here, not by a sweep: retention ships at "keep for ever".
+        sqlx::query!(
             "DELETE FROM rehearsal_results
               WHERE rehearsal_id = ? AND id NOT IN (
                     SELECT id FROM rehearsal_results WHERE rehearsal_id = ?
                      ORDER BY at DESC, id DESC LIMIT ?)",
+            &r.rehearsal_id,
+            &r.rehearsal_id,
+            KEEP_PER_PROBE as i64
         )
-        .bind(&r.rehearsal_id)
-        .bind(&r.rehearsal_id)
-        .bind(KEEP_PER_PROBE as i64)
         .execute(&self.pool)
         .await?;
         Ok(id)
     }
 
-    /// Newest first, at most `limit`.
     pub async fn results_of(
         &self,
         rehearsal_id: &str,
         limit: usize,
     ) -> Result<Vec<RehearsalResult>> {
-        sqlx::query(
-            "SELECT id, rehearsal_id, generation_id, at, rank, outranked_by
+        sqlx::query_as!(
+            crate::store::rehearsals::RehearsalResultRow,
+            r#"SELECT id AS "id!", rehearsal_id AS "rehearsal_id!", generation_id AS "generation_id!", at AS "at!", rank AS "rank?", outranked_by AS "outranked_by!"
                FROM rehearsal_results WHERE rehearsal_id = ?
-              ORDER BY at DESC, id DESC LIMIT ?",
-        )
-        .bind(rehearsal_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY at DESC, id DESC LIMIT ?"#,
+            rehearsal_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read_result)
         .collect()
     }
 
-    /// The same, bounded to one generation.
-    ///
-    /// What every *rule* reading retained results wants, and `results_of` is
-    /// not it. A rehearsal result is a rank measured under one set of ranking
-    /// parameters, so results from two generations are two different
-    /// measurements and comparing them across the boundary compares the knobs
-    /// rather than the base. Nothing expires them either at the default
-    /// `retain_days = 0`, so an unscoped read is the whole history of the
-    /// artifact for ever.
-    ///
-    /// That is not academic. `sleep::condense_candidates` refuses an owner any
-    /// of whose results missed (`rank IS NULL`), and `condense_artifact` sets
-    /// `embed_state = 'pending'` — so the first rehearsal after a condensation
-    /// records exactly such a miss, and unscoped it disabled condense *and*
-    /// interference for that owner permanently, on evidence the base itself
-    /// had manufactured one generation ago.
+    /// Results from two generations measure different knobs. Unscoped, the miss after a
+    /// condensation (`embed_state = 'pending'`) disabled condense for that owner permanently.
     pub async fn results_of_under(
         &self,
         rehearsal_id: &str,
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<RehearsalResult>> {
-        sqlx::query(
-            "SELECT id, rehearsal_id, generation_id, at, rank, outranked_by
+        sqlx::query_as!(
+            crate::store::rehearsals::RehearsalResultRow,
+            r#"SELECT id AS "id!", rehearsal_id AS "rehearsal_id!", generation_id AS "generation_id!", at AS "at!", rank AS "rank?", outranked_by AS "outranked_by!"
                FROM rehearsal_results WHERE rehearsal_id = ? AND generation_id = ?
-              ORDER BY at DESC, id DESC LIMIT ?",
-        )
-        .bind(rehearsal_id)
-        .bind(generation_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY at DESC, id DESC LIMIT ?"#,
+            rehearsal_id,
+            generation_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read_result)
         .collect()
     }
 
-    /// The most recent rank each of these probes was measured at under this
-    /// generation. Absent from the map where the probe has no result yet.
-    ///
-    /// One query for a whole batch, because the caller has the batch in hand
-    /// and the alternative is a point lookup per probe on a pass that already
-    /// runs `OBSERVATION_LIMIT` searches. The value is nested `Option`
-    /// deliberately: absent means never measured, `Some(None)` means measured
-    /// and missed, and those are different facts.
+    /// `Some(None)` means measured and missed; absent means never measured.
     pub async fn latest_ranks_under(
         &self,
         rehearsal_ids: &[String],
@@ -351,6 +313,7 @@ impl Store {
             return Ok(std::collections::HashMap::new());
         }
         let holes = vec!["?"; rehearsal_ids.len()].join(", ");
+        // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT rehearsal_id, rank FROM (
                SELECT rehearsal_id, rank,
@@ -370,16 +333,16 @@ impl Store {
             .collect())
     }
 
-    /// Live probes whose last two results under `generation_id` disagree —
-    /// found then not, or a different rank, NULL counted as its own value.
-    /// What wobbles is what needs rehearsing. Oldest result first.
+    /// NULL counts as its own value. Oldest result first.
     pub async fn fragile_rehearsals(
         &self,
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<Rehearsal>> {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "WITH ranked AS (
+        sqlx::query_as!(
+
+    RehearsalRow,
+    r#"WITH ranked AS (
                SELECT rehearsal_id, rank, at,
                       ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n
                  FROM rehearsal_results WHERE generation_id = ?
@@ -390,100 +353,96 @@ impl Store {
                    ON a.rehearsal_id = b.rehearsal_id AND a.n = 1 AND b.n = 2
                 WHERE a.rank IS NOT b.rank
              )
-             SELECT {QUALIFIED} FROM rehearsals r
+             SELECT r.id AS "id!", r.created_at AS "created_at!", r.class AS "class!", r.query AS "query!", r.query_vec AS "query_vec!", r.embed_model AS "embed_model!", r.artifact_id AS "artifact_id!", r.source_id AS "source_id?", r.retired_at AS "retired_at?" FROM rehearsals r
                JOIN last_two l ON l.rehearsal_id = r.id
               WHERE r.retired_at IS NULL
-              ORDER BY l.at ASC, r.id ASC LIMIT ?"
-        )))
-        .bind(generation_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY l.at ASC, r.id ASC LIMIT ?"#,
+            generation_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(read)
         .collect()
     }
 
-    /// The latest result per live probe under `generation_id`, with the
-    /// probe. Newest results first, at most `limit`.
     pub async fn latest_results_under(
         &self,
         generation_id: &str,
         limit: usize,
     ) -> Result<Vec<(Rehearsal, RehearsalResult)>> {
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "WITH latest AS (
+        let rows = sqlx::query!(
+            r#"WITH latest AS (
                SELECT id, rehearsal_id, at, rank, outranked_by,
                       ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n
                  FROM rehearsal_results WHERE generation_id = ?
              )
-             SELECT {QUALIFIED},
-                    x.id AS x_id, x.at AS x_at, x.rank AS x_rank, x.outranked_by AS x_outranked_by
+             SELECT r.id AS "id!", r.created_at AS "created_at!", r.class AS "class!", r.query AS "query!", r.query_vec AS "query_vec!", r.embed_model AS "embed_model!", r.artifact_id AS "artifact_id!", r.source_id AS "source_id?", r.retired_at AS "retired_at?", x.id AS "x_id!", x.at AS x_at, x.rank AS x_rank, x.outranked_by AS x_outranked_by
                FROM latest x JOIN rehearsals r ON r.id = x.rehearsal_id
               WHERE x.n = 1 AND r.retired_at IS NULL
-              ORDER BY x.at DESC, x.id DESC LIMIT ?"
-        )))
-        .bind(generation_id)
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+              ORDER BY x.at DESC, x.id DESC LIMIT ?"#,
+            generation_id,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?;
-        rows.iter()
+        rows.into_iter()
             .map(|r| {
-                let probe = read(r)?;
+                let probe = read(RehearsalRow {
+                    id: r.id,
+                    created_at: r.created_at,
+                    class: r.class,
+                    query: r.query,
+                    query_vec: r.query_vec,
+                    embed_model: r.embed_model,
+                    artifact_id: r.artifact_id,
+                    source_id: r.source_id,
+                    retired_at: r.retired_at,
+                })?;
                 let result = RehearsalResult {
-                    id: r.get("x_id"),
+                    id: r.x_id,
                     rehearsal_id: probe.id.clone(),
                     generation_id: generation_id.to_string(),
-                    at: r.get("x_at"),
-                    rank: r.get("x_rank"),
-                    outranked_by: outranked(&r.get::<String, _>("x_outranked_by"))?,
+                    at: r.x_at,
+                    rank: r.x_rank,
+                    outranked_by: outranked(&r.x_outranked_by)?,
                 };
                 Ok((probe, result))
             })
             .collect()
     }
 
-    /// Artifacts in results that nothing has ever asked for: no live probe,
-    /// and no positive observation naming them. The count, and the oldest
-    /// `limit` as `(id, title)`.
+    /// No live probe and no positive observation. The count, and the oldest `limit`.
     pub async fn unrehearsed(&self, limit: usize) -> Result<(i64, Vec<(String, Option<String>)>)> {
-        const WHERE: &str = "a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
+        let count: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) FROM artifacts a WHERE a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
                 AND a.embed_state = 'embedded'
                 AND NOT EXISTS (SELECT 1 FROM rehearsals r WHERE r.artifact_id = a.id AND r.retired_at IS NULL)
-                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL)";
-        let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT COUNT(*) FROM artifacts a WHERE {WHERE}"
-        )))
-        .fetch_one(&self.pool)
+                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL)"#
+        ).fetch_one(&self.pool)
         .await?;
-        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "SELECT a.id, a.title FROM artifacts a WHERE {WHERE} ORDER BY a.created_at ASC, a.id ASC LIMIT ?"
-        )))
-        .bind(limit as i64)
-        .fetch_all(&self.pool)
+        let rows = sqlx::query!(
+            r#"SELECT a.id AS "id!", a.title FROM artifacts a WHERE a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
+                AND a.embed_state = 'embedded'
+                AND NOT EXISTS (SELECT 1 FROM rehearsals r WHERE r.artifact_id = a.id AND r.retired_at IS NULL)
+                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL) ORDER BY a.created_at ASC, a.id ASC LIMIT ?"#,
+            limit as i64
+        ).fetch_all(&self.pool)
         .await?;
-        Ok((
-            count,
-            rows.iter().map(|r| (r.get("id"), r.get("title"))).collect(),
-        ))
+        Ok((count, rows.into_iter().map(|r| (r.id, r.title)).collect()))
     }
 
-    /// Results older than `retain_days`. Zero keeps for ever, as it does for
-    /// the observations this shares a clock with.
-    ///
-    /// Not the bound on this table — `KEEP_PER_PROBE` is, and it holds at the
-    /// shipped zero. This is the operator's separate wish that nothing older
-    /// than a window be kept anywhere, and the rehearsal results are part of
-    /// "anywhere".
+    /// Zero keeps for ever. `KEEP_PER_PROBE` is the table's real bound.
     pub async fn expire_rehearsal_results(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);
         }
-        Ok(sqlx::query("DELETE FROM rehearsal_results WHERE at < ?")
-            .bind(now() - retain_days * 86_400)
-            .execute(&self.pool)
-            .await?
-            .rows_affected())
+        Ok(sqlx::query!(
+            "DELETE FROM rehearsal_results WHERE at < ?",
+            now() - retain_days * 86_400
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 }
 
@@ -567,11 +526,6 @@ mod tests {
         assert_eq!(store.live_rehearsal_count().await.unwrap(), 0);
     }
 
-    /// Retirement is history, not a bar. The uniqueness used to be total, so
-    /// a probe retired for its embedder blocked the fresh one minted at the
-    /// new model, and an artifact that had lost its probes never got them
-    /// back — which is the rehearsal anchor switched off for good on any base
-    /// that changed embedder.
     #[tokio::test]
     async fn a_retired_probe_does_not_block_the_same_question_being_asked_again() {
         let store = Store::memory().await.unwrap();
@@ -598,7 +552,6 @@ mod tests {
         assert_eq!(live[0].id, again);
         assert_eq!(live[0].embed_model, "another-embedder");
 
-        // And the bar still stands between two live rows.
         assert!(
             store
                 .record_rehearsal(&probe(&o, "why won't it mount"))

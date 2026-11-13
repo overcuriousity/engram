@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT text, meta_json, reaped_at FROM graveyard WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "text",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "meta_json",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "meta_json"
+          }
+        }
+      },
+      {
+        "name": "reaped_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "graveyard",
+            "name": "reaped_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bc586b7b62c14dc73f317943ce6b5380e7a6d043bdb6a497bc16af568c587ad7"
+}

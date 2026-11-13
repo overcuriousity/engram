@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_links\n                        SET weight = ?, bumped_at = ?, queries = ?, cues = ?\n                      WHERE a_id = ? AND b_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "64d18ed998005cb39c53f4327cc354fdb94eae643ad0493980b1cccb2cb4644d"
+}

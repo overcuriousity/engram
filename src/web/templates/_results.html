@@ -1,214 +1,81 @@
 {{ echo|safe }}
-{# The id this rail was recorded under, handed straight back to the box: the
-   next keystroke sends it, and the fold is onto this event rather than onto
-   whatever this operator's other tab wrote last. Out of band because the form
-   is not inside the target this fragment fills, and empty where nothing was
-   recorded — the box then has nothing to name and starts a new event, which is
-   what it should do. See `Store::record_search`. #}
+{# Hands the recorded search id back to the box, so the next keystroke folds onto this event. #}
 <span hx-swap-oob="innerHTML:#fold-of">{% if let Some(ev) = event_id %}<input type="hidden" name="fold" value="{{ ev }}">{% endif %}</span>
 {% if results.is_empty() && associated.is_empty() %}
-  {# While a capture is read the answer may be in it, so the line says so and
-     no gap is offered. `ResultsTemplate::gap` holds that rule and the one
-     about an empty base; the paragraph is written once either way. #}
-  {# `still-reading` is what app.js looks for before re-running the search when
-     the read lands: this line is the dead end that needs re-running, and a
-     rail showing anything else does not. #}
+  {# app.js re-runs the search when a read lands and finds `still-reading`. #}
   <p class="muted{% if reading %} still-reading{% endif %}">{% if reading %}No matches yet &middot; still reading{% else %}No matches.{% endif %}</p>
   {% if let Some(ev) = self.gap() %}
-  <p><button class="btn btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
+  <p><button class="oc-btn" type="button" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
              hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
   {% endif %}
 {% else %}
 <div data-terms="{{ terms }}">
-  {# Counted off the list rather than passed in beside it, so the number and
-     the rows cannot disagree. Said once above them: a ranked list with no
-     count is a list you cannot tell is complete.
-
-     Out of band, into the rail's heading, because the rail says which act
-     filled it: `3 results` here, `Written from · 5` after an Ask. The heading
-     is outside the swapped target, so the fragment that fills the list is also
-     what names it and the two cannot disagree. #}
   <div class="rail-act" hx-swap-oob="innerHTML:#rail-head">
-    <span class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}{% if self.loose() > 0 && !all_weak %} · {{ self.loose() }} loose{% endif %}{% if reranked %} <span class="refined-tick" title="Order confirmed by the reranker">· refined</span>{% endif %}</span>
+    <span class="result-count">{{ results.len() }} result{% if results.len() != 1 %}s{% endif %}{% if self.loose() > 0 && !all_weak %} · {{ self.loose() }} loose{% endif %}{% if reranked %} <span class="refined-tick">· refined</span>{% endif %}</span>
   </div>
-  {# Said once, above the list, rather than repeated on every card: when the
-     whole answer is loose the useful statement is about the search, not about
-     each result. Retrieval always returns its best candidates however bad they
-     are, so without this a typo comes back looking like an answer. #}
   {% if all_weak %}
-  <div class="flag" role="status">
-    <div aria-hidden="true">⚠</div>
-    <div>
-      <b>Nothing matches closely</b>
-      <div>These are the nearest artifacts, but none of them is a close match
-        for what you typed. Check the spelling, or try describing the thing
-        rather than naming it.</div>
-      {# The deck's "gap" key, moved to where the person is when they know.
-         A verdict on the whole list, so it sits with the line about the whole
-         list rather than under any one row. #}
-      {% if let Some(ev) = self.gap() %}
-      <p><button class="btn btn-sm" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
-                 hx-target="this" hx-swap="outerHTML">Nothing here has it</button></p>
-      {% endif %}
-    </div>
+  <div class="oc-notice oc-notice--warning" role="status">{{ crate::web::icons::icon("triangle-alert", 16) }}<span class="oc-notice__text">Nothing matches closely · check the spelling, or describe it</span>
+    {%- if let Some(ev) = self.gap() %}
+    <button class="oc-btn" type="button" hx-post="/ui/search/{{ ev }}/gap?q={{ q|urlencode }}"
+            hx-target="this" hx-swap="outerHTML">Nothing here has it</button>
+    {%- endif %}
   </div>
   {% endif %}
   {% for r in results %}
-  {# Once, before the first row past it: the ranks continue — those hits did
-     place — but the page stops claiming each of them is an answer. #}
   {% if r.past_cliff && (loop.first || !results[loop.index0 - 1].past_cliff) %}
   <div class="cliff-rule" role="separator">Relevance falls off here</div>
   {% endif %}
-  {# The delete control is a sibling of the link rather than a child: a button
-     inside an anchor is invalid, and the anchor must keep being the
-     `.rail-item` the arrow keys move between.
-
-     `transition:true` on the pane swap only. The artifact cross-fades so the
-     change reads as one pane showing something else rather than as two paints;
-     the rail is left alone because it has a stagger of its own, and running
-     both over the same swap would animate the same movement twice. htmx skips
-     the transition where the browser has no API for it, and the reduced-motion
-     rule empties the animation either way. #}
+  {# A sibling of the link: a button inside an anchor is invalid. #}
   <div class="rail-row">
+    {# The search travels on href and hx-get alike, so every way of opening is attributed to it. #}
     <a class="rail-item{% if r.past_cliff %} rail-past{% endif %}" role="option" aria-selected="false"
-       {# The search that listed this row travels with the link. It is what the
-          bar under the artifact reports against, and naming it here is what
-          keeps an open attributed to the search it came from rather than to
-          whichever recent search happened to hold the same artifact. Absent
-          while searches are not being recorded.
-
-          On the `href` as well as the `hx-get`, and identical to it: a
-          middle-click, a ⌘-click and a load that reached the page without htmx
-          are all the same open, and a link that carried the search down one
-          path and not the other produced a label from one and silence from the
-          other for the same act. #}
        href="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}{% if let Some(ev) = event_id %}&event={{ ev }}{% endif %}"
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}{% if let Some(ev) = event_id %}&event={{ ev }}{% endif %}"
        hx-target="#pane-content" hx-swap="innerHTML transition:true" hx-push-url="true">
-      {# `weak` rather than `r.weak` from here down. The badge and the sentence
-         below are the scannable and the readable form of one fact, and when
-         the whole list is loose the panel above has already said it — so on
-         that page they said it a third and a fourth time, on every row. The
-         count line already made this distinction with `!all_weak`; the row did
-         not. #}
       {% let weak = r.weak && !all_weak %}
       <div class="rail-head{% if r.title.is_empty() %} rail-head-bare{% endif %}">
-        {# `rank` is deliberately empty on a weak hit and on an associated one —
-           see `Hit::rank`: a rank is a claim about standing among answers, and
-           neither of those competed for one. So the slot is empty rather than
-           holding an empty span, which was still a flex child and still took
-           the row's `gap` in front of the title. #}
         {% if weak %}
-        <span class="badge badge-warning">loose</span>
+        <span class="oc-status oc-status--warning">{{ crate::web::icons::icon("triangle-alert", 14) }}<span>loose</span></span>
         {% else if !r.rank.is_empty() %}
         <span class="rail-rank mono">{{ r.rank }}</span>
         {% endif %}
-        {# Why this row is below the line, said on the row. A demoted hit with
-           no reason given is indistinguishable from a ranking that went
-           wrong. #}
-        {% if r.retired %}
-        <span class="badge">done reminder</span>
-        {% endif %}
-        {% if r.primed %}
-        {% if r.in_sitting %}
-        <span class="badge" title="Moved up: you have been in this one already today">primed · seen</span>
-        {% else %}
-        <span class="badge" title="Moved up: opened, confirmed or cited more than the hits it passed">primed</span>
-        {% endif %}
-        {% endif %}
         {% if let Some(d) = r.due_in %}
-        <span class="badge badge-due" title="A reminder you set on this is due">due {{ d }}</span>
+        <span class="oc-status oc-status--due">{{ crate::web::icons::icon("alarm-clock", 14) }}<span>due {{ d }}</span></span>
         {% endif %}
-        {% if r.model_written %}
-        {# Never silently indistinguishable from captured text. The count comes
-           off the vector payload, so a hit that was reached rather than ranked
-           — a neighbour, an association — does not carry one. Zero there means
-           "not read", not "no sources", and the badge said the second. #}
-        {% if r.origin_count > 0 %}
-        <span class="badge" title="A model wrote this, from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}">model-written · {{ r.origin_count }}</span>
-        {% else %}
-        <span class="badge" title="A model wrote this">model-written</span>
-        {% endif %}
-        {% endif %}
-        {# No heading unless the name is this text's own. A passage carries the
-           heading of the section it was cut from and a note carries none at
-           all; `render_hit` empties both, and "Untitled" is a word that says
-           nothing standing where a name would. The snippet carries the row. #}
         {% if !r.title.is_empty() %}
         <span class="rail-title">{{ r.title }}</span>
         {% endif %}
       </div>
-      {# Rank, title, two lines. No tags: the pane beside this lists them in
-         full, so the card was echoing it — and the chips were what made the
-         rail heavy enough to need a scrollbar of its own. The facets above
-         narrow by tag, which is what the chips were being read for. #}
       <div class="rail-snippet">{{ r.snippet }}</div>
-      {# Where in its source this sits, under the snippet and prefixed, not
-         over it as a name. A passage carries the heading of the section it was
-         cut from, and emptying the name slot for that heading took the row's
-         only statement of whereabouts with it — a passage row said nothing at
-         all about where it came from. A qualifier can stand on every passage
-         of a chapter without claiming each of them is called that, which is
-         what the heading in the title slot was doing. See `render_hit`. #}
       {% if !r.section.is_empty() %}
       <p class="rail-where">in {{ r.section }}</p>
       {% endif %}
-      {# The badges above say what a result *is*. This says why it is *here* —
-         one quiet line rather than a row of chips, because "moved up because
-         you opened this more" is a sentence and `primed` is a word you have
-         to already know. The sentence names the events it rests on — opened,
-         confirmed, cited — because those are what raise activation; "you
-         reach this one often" was said of things merely listed often.
-
-         No new data and no new query: every one of these already reached the
-         template, as a badge with the explanation hidden in a title attribute
-         that only appears once you have hovered the thing you were unsure
-         about. The badges stay, as the scannable form. #}
-      {% if r.primed || weak || r.model_written || r.due_in.is_some() || r.why_ranked.is_some() %}
+      {% let a = r.retired.clone() %}
+      {% let b = a || r.primed %}
+      {% let c = b || weak %}
+      {% let d0 = c || r.model_written %}
+      {% let e = d0 || r.due_in.is_some() %}
+      {% if e || r.why_ranked.is_some() %}
       <p class="rail-why">
-        {%- if r.primed %}{% if r.in_sitting %}moved up — you have been in this one already{% else %}moved up — opened, confirmed or cited more than the hits it passed{% endif %}{% endif -%}
-        {%- if weak %}{% if r.primed %} · {% endif %}a loose match{% endif -%}
-        {%- if r.model_written %}{% if r.primed || weak %} · {% endif %}written by a model{% if r.origin_count > 0 %} from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}{% endif %}{% endif -%}
-        {#- The due badge's own sentence. Every other badge on this row has one
-            here; that one's meaning lived in a title attribute, which is to say
-            nowhere on a phone. -#}
-        {%- if let Some(d) = r.due_in %}{% if r.primed || weak || r.model_written %} · {% endif %}a reminder on this is due {{ d }}{% endif -%}
-        {#- The ranking's own answer, on the same line rather than a second one:
-            two lines both saying why this row is here would be exactly the
-            disagreement the explanation object exists to end. -#}
-        {%- if let Some(why) = r.why_ranked %}{% if r.primed || weak || r.model_written || r.due_in.is_some() %} · {% endif %}{{ why }}{% endif -%}
+        {%- if r.retired %}a done reminder{% endif -%}
+        {%- if r.primed %}{% if a %} · {% endif %}{% if r.in_sitting %}moved up — you have been in this one already{% else %}moved up — opened, confirmed or cited more than the hits it passed{% endif %}{% endif -%}
+        {%- if weak %}{% if b %} · {% endif %}a loose match{% endif -%}
+        {%- if r.model_written %}{% if c %} · {% endif %}written by a model{% if r.origin_count > 0 %} from {{ r.origin_count }} source{% if r.origin_count > 1 %}s{% endif %}{% endif %}{% endif -%}
+        {%- if let Some(d) = r.due_in %}{% if d0 %} · {% endif %}a reminder on this is due {{ d }}{% endif -%}
+        {%- if let Some(why) = r.why_ranked %}{% if e %} · {% endif %}{{ why }}{% endif -%}
       </p>
       {% endif %}
-      {# Its own line, under the ones that say why this row is *here*. This says
-         something else — what the document does next — and the two must not run
-         together into one sentence.
-
-         Exclusive by construction, not by an accident of the template: a
-         continuation that placed is named by its rank, and one that did not is
-         announced. `mark_continuations` sets exactly one of the two, so there is
-         no case where the row both points at a visible neighbour and offers to
-         go and get it. #}
       {% if !r.continues_in.is_empty() %}
-      <p class="rail-continues"><span class="arrow" aria-hidden="true">↓</span> continues in {{ r.continues_in }}</p>
+      <p class="rail-continues">continues in {{ r.continues_in }}</p>
       {% else if r.continues %}
-      <p class="rail-continues"><span class="arrow" aria-hidden="true">↳</span> continues in the next passage</p>
+      <p class="rail-continues">continues in the next passage</p>
       {% endif %}
     </a>
     {% include "_disagrees.html" %}
-    {# No delete control here. It was the only irreversible act in the app that
-       could be fired on something nobody had opened — a title, a snippet and a
-       confirm dialog were the whole of what stood behind it — and it was the
-       *only* one-click act a result row offered, so the permanent choice was
-       the easy one and hiding, which can be undone, meant opening the artifact
-       first. A result is an answer to what was typed, not an inventory row.
-       Deleting lives where the artifact is open and readable; a whole bad
-       capture goes from the corpus page in one action. #}
   </div>
   {% endfor %}
   {% if !associated.is_empty() %}
-  {# Below a rule and under its own heading: these were not ranked against the
-     query, they were recalled by something that was. Presenting them in the
-     same list would be a claim about relevance that nothing here supports. #}
+  {# Recalled, not ranked: below a rule so no relevance is claimed. #}
   <div class="assoc-rule" role="separator">Recalled by association</div>
   {% for r in associated %}
   <div class="rail-row">
@@ -216,9 +83,6 @@
        href="/ui/artifacts/{{ r.artifact_id }}"
        hx-get="/ui/artifacts/{{ r.artifact_id }}?terms={{ terms|urlencode }}"
        hx-target="#pane-content" hx-swap="innerHTML transition:true" hx-push-url="true">
-      {# Only where there is a name to show. A passage has none, and the head
-         was rendered regardless — an empty flex box above the snippet, which
-         is a blank line the titled rows beside it do not have. #}
       {% if !r.title.is_empty() %}
       <div class="rail-head">
         <span class="rail-title">{{ r.title }}</span>

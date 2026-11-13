@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stage, target_id, attempts, last_error, run_after FROM jobs\n              WHERE subject = ? AND state = 'pending' AND attempts > 0 AND run_after > ?\n              ORDER BY run_after LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "stage",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "name": "target_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_id"
+          }
+        }
+      },
+      {
+        "name": "attempts",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "last_error",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "last_error"
+          }
+        }
+      },
+      {
+        "name": "run_after",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "run_after"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "cfdfa07de8057893924bd46a4411a2c6c8f590b3d28c4775049cca7a64f032fb"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT theme, density FROM users WHERE subject = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "theme",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "theme"
+          }
+        }
+      },
+      {
+        "name": "density",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "density"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "10f9082bc2805010370cbc66b9ce2c1290ffe82faa34ea7b9986def888866257"
+}

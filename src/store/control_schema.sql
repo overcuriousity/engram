@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS users (
   -- background job holds a cached `Core` that knows no subject and could not
   -- read this column when it matters.
   lang         TEXT NOT NULL DEFAULT '',
+  -- The OIDC issuer this subject belongs to; '' for a local user.
+  issuer       TEXT NOT NULL DEFAULT '',
+  -- 'system' | 'light' | 'dark', and 'default' | 'compact'.
+  theme        TEXT NOT NULL DEFAULT 'system',
+  density      TEXT NOT NULL DEFAULT 'default',
   created_at   INTEGER NOT NULL
 );
 
@@ -49,15 +54,7 @@ CREATE TABLE IF NOT EXISTS instance (
 );
 
 -- ── Auth ─────────────────────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS sessions (
-  id         TEXT PRIMARY KEY,
-  subject    TEXT NOT NULL,
-  email      TEXT,
-  expires_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
-
+-- Browser sessions live in `tower_sessions`, created by its store.
 CREATE TABLE IF NOT EXISTS api_tokens (
   id           TEXT PRIMARY KEY,
   name         TEXT NOT NULL,
@@ -69,7 +66,9 @@ CREATE TABLE IF NOT EXISTS api_tokens (
   -- What asked for the token, as it announced itself. The extension mints
   -- every one of its tokens under the same name, so without this two rows can
   -- be identical in everything a person can read.
-  user_agent   TEXT
+  user_agent   TEXT,
+  -- 1: a whole-token hash, looked up by scanning (removed at upgrade); 2: `engram_<id>.<secret>`.
+  scheme       INTEGER NOT NULL DEFAULT 1
 );
 
 -- A code drawn on a screen for the app to scan, and nothing more: two

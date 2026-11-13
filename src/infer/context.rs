@@ -1,40 +1,23 @@
 use crate::infer::budget::TokenCounter;
 
-/// How many tokens of surrounding material a window may carry on top of its
-/// own text. Absolute rather than a fraction of the window: a large context
-/// should make context free, not proportionally expensive.
+/// Absolute rather than a fraction of the window, so a large context makes context free.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ContextBudget {
-    /// Tokens of the document's verbatim opening.
     pub opening: usize,
-    /// Tokens of each neighbouring window, on both sides.
+    /// On both sides.
     pub overlap: usize,
-    /// Tokens of nearest-neighbor artifacts shown to a judged capture call.
+    /// For a judged capture call.
     pub neighbors: usize,
 }
 
-/// The fence lines and their labels, which are prompt text like any other and
-/// have to be paid for out of the same budget. Sized for all four block kinds,
-/// the NEIGHBORS and JUDGE fences included.
-///
-/// Counted rather than guessed at, because 60 was a guess and it was short.
-/// The opening, preceding and following fences are two lines each, the INPUT
-/// fence carries a sentence about line numbers and the artifact ceiling, and
-/// the JUDGE block spells out the local time, the zone and — where the door
-/// said one — the forced intent before its own fence. See
-/// `prompt::synthesis_prompt`, which is what these numbers describe.
+/// Counted from `prompt::synthesis_prompt`'s fences, all four block kinds; 60 was a guess and too short.
 const FENCE_TOKENS: usize = 160;
 
-/// What one entry of the NEIGHBORS block costs before a word of its text:
-/// `[id: <uuid>] ` and the two newlines around it. A UUID is not one token —
-/// it is a couple of dozen — and with five neighbours that alone was most of
-/// the overrun this budget was under-reserving by. The title is counted for
-/// real beside it; only the fixed part is a constant.
+/// `[id: <uuid>] ` plus newlines; a UUID is a couple of dozen tokens. The title is counted separately.
 pub const NEIGHBOR_HEADER_TOKENS: usize = 28;
 
 impl ContextBudget {
-    /// Everything the context blocks cost, fences included. This is subtracted
-    /// from the window so the assembled prompt still fits the model.
+    /// Subtracted from the window so the assembled prompt still fits the model.
     pub fn total(&self) -> usize {
         if self.opening == 0 && self.overlap == 0 && self.neighbors == 0 {
             return 0;
@@ -43,27 +26,17 @@ impl ContextBudget {
     }
 }
 
-/// The material surrounding one window: what document it belongs to, and what
-/// its neighbours say on either side of it.
-///
-/// Derived, never stored. A retry rebuilds it byte-for-byte from the stored
-/// line numbers, which is what keeps a resumed job idempotent.
+/// Derived, never stored: a retry rebuilds it byte-for-byte from stored lines, keeping resumed jobs idempotent.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WindowContext {
-    /// The document's verbatim first lines. Absent for the window that already
-    /// contains them.
+    /// Absent for the window that already contains them.
     pub opening: Option<String>,
-    /// The tail of the previous window.
     pub before: Option<String>,
-    /// The head of the next window.
     pub after: Option<String>,
 }
 
 impl WindowContext {
-    /// `windows` is every window of the corpus, in order, as the splitter
-    /// produced them — the stored text, not a re-derivation from line numbers.
-    /// A window's line range cannot reproduce its text when the splitter had to
-    /// cut inside a line, and that is precisely the case this has to survive.
+    /// `windows` is the stored splitter output: line ranges cannot reproduce text cut inside a line.
     pub fn build(
         windows: &[&str],
         idx: usize,
@@ -74,8 +47,7 @@ impl WindowContext {
             return WindowContext::default();
         }
 
-        // Window 0 opens with the document, so repeating it there would spend
-        // the budget on text the model is already reading.
+        // Window 0 already opens with the document.
         let opening = (idx > 0 && budget.opening > 0)
             .then(|| windows[0])
             .and_then(|t| head_lines(t, budget.opening, counter));
@@ -98,8 +70,7 @@ impl WindowContext {
         }
     }
 
-    /// Every block that ended up populated. Callers use this to ask whether a
-    /// piece of text came from context rather than from the window itself.
+    /// Lets callers ask whether text came from context rather than the window.
     pub fn blocks(&self) -> impl Iterator<Item = &str> {
         [
             self.opening.as_deref(),
@@ -115,21 +86,17 @@ impl WindowContext {
     }
 }
 
-/// As many leading whole lines as fit. Whole lines because a context block cut
-/// mid-sentence reads as corruption to a small model.
+/// Whole lines: a block cut mid-sentence reads as corruption to a small model.
 fn head_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String> {
     let taken = take_lines(text.lines(), limit, counter);
     if !taken.is_empty() {
         return Some(taken.join("\n"));
     }
-    // Not one whole line fits. That is not a pathological case here — it is the
-    // corpus this whole mechanism exists for, pasted with no line boundaries at
-    // all — and no context is worse than context cut mid-word, so the budget is
-    // spent on characters, counted the way every other budget in the prompt is.
+    // A paste with no line breaks fits no whole line; cut on characters rather than drop the context.
     counter.cut(text, limit, true)
 }
 
-/// As many trailing whole lines as fit, in their original order.
+/// In their original order.
 fn tail_lines(text: &str, limit: usize, counter: &TokenCounter) -> Option<String> {
     let mut taken = take_lines(text.lines().rev(), limit, counter);
     taken.reverse();
@@ -161,8 +128,6 @@ fn take_lines<'a>(
 mod tests {
     use super::*;
 
-    /// Three windows as the splitter would hand them over: the first opens the
-    /// document, the rest are body.
     fn windows() -> Vec<String> {
         let body = |from: usize, to: usize| {
             (from..to)
@@ -222,13 +187,11 @@ mod tests {
                 .starts_with("# Backup Server Admin Guide"),
             "the opening must be the document's first lines verbatim"
         );
-        // The preceding block is the tail of window 0, which ends at line 17.
         assert!(
             c.before.as_deref().unwrap().contains("body line 17"),
             "got {:?}",
             c.before
         );
-        // The following block is the head of window 2, which starts at line 38.
         assert!(
             c.after.as_deref().unwrap().contains("body line 38"),
             "got {:?}",
@@ -248,10 +211,7 @@ mod tests {
 
     #[test]
     fn a_corpus_with_no_line_structure_still_gets_context() {
-        // The case the stored window text exists for. Line numbers cannot
-        // address a unit smaller than a line, so a corpus pasted with no
-        // newlines used to re-derive as the whole document for window 0 and as
-        // nothing at all for every window after it.
+        // Line numbers cannot address less than a line, so a newline-free corpus needs the stored text.
         let w: Vec<String> = (0..4).map(|i| format!("part{i} ").repeat(40)).collect();
         let c = WindowContext::build(&refs(&w), 2, budget(), &TokenCounter::default());
         assert!(
@@ -290,8 +250,6 @@ mod tests {
 
     #[test]
     fn assembly_is_reproducible() {
-        // A retry rebuilds context from the stored windows alone, so the same
-        // rows must always give the same bytes.
         let w = windows();
         let a = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());
         let b = WindowContext::build(&refs(&w), 1, budget(), &TokenCounter::default());

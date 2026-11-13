@@ -212,7 +212,7 @@ fun SearchScreen(
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())) {
         if (keptFrom != null) {
             Text(
-                "Kept from: “$question” — an answer engram wrote. Edit it as you like; saving is yours, and the capture records the question it came from.",
+                "Kept from “$question”",
                 Modifier.padding(16.dp, 8.dp), style = MaterialTheme.typography.bodySmall, color = muted(),
             )
         }
@@ -345,7 +345,7 @@ fun BoxHint(doors: Status?, onExample: (String) -> Unit) {
     val ex = doors?.examples
     Column(Modifier.padding(16.dp, 0.dp)) {
         Text(
-            if (held) "A whole sentence finds more than keywords do." else "Paste anything worth keeping — a note, an article, a chunk of a chat. engram finds it again by meaning, and nobody else can search this base.",
+            if (held) "A whole sentence finds more than keywords do." else "Paste something to keep.",
             style = MaterialTheme.typography.bodySmall, color = muted(),
         )
         if (ex != null && ex.remind.isNotEmpty()) {

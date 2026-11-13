@@ -1,15 +1,9 @@
-//! `--status`: what the base holds, what it is working through, and what it has
-//! been learning.
-//!
-//! One shot, and no ambient version of it. A footer under every search would
-//! make the cheapest door in the application pay a request for something nobody
-//! asked for at that moment.
+//! `--status`: what the base holds, is working through and has been learning. One shot only.
 
 use crate::cli::endpoint::Endpoint;
 use crate::cli::face::{Face, Lamp};
 use crate::error::{Error, Result};
 
-/// Ask the server what it is doing, and say it.
 pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
     let http = crate::cli::endpoint::client()?;
     let res = http
@@ -29,15 +23,14 @@ pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
         )));
     }
     if json {
-        // The server's own body, unchanged, by the rule `-s --json` follows.
+        // The server's own body, unchanged, as `-s --json` prints it.
         println!("{body}");
         return Ok(0);
     }
     let said: serde_json::Value =
         serde_json::from_str(&body).map_err(|err| Error::Internal(format!("status: {err}")))?;
     print!("{}", render(face, e, &said));
-    // What is due, from a second read that an older server answers 404 to —
-    // in which case nothing is said, rather than the status failing.
+    // An older server answers 404 to the due list; then nothing is said.
     if let Ok(res) = http
         .get(e.api("/moments?kind=due"))
         .bearer_auth(&e.token)
@@ -46,16 +39,13 @@ pub async fn run(e: &Endpoint, face: &Face, json: bool) -> Result<i32> {
         && res.status().is_success()
         && let Ok(due) = res.json::<serde_json::Value>().await
     {
-        // `items`: the list envelope. An older server's bare array has no
-        // such key, reads as null, and prints nothing — the same silence the
-        // 404 above gets.
+        // `items`: the list envelope; an older server's bare array reads null and prints nothing.
         print!("{}", render_due(face, &due["items"]));
     }
     Ok(0)
 }
 
-/// The Due block: one line per open reminder, overdue marked, undated last.
-/// Empty when nothing is due, so a quiet base prints nothing extra.
+/// The Due block: one line per open reminder, overdue marked, undated last; empty when none.
 pub(crate) fn render_due(face: &Face, rows: &serde_json::Value) -> String {
     let Some(rows) = rows.as_array().filter(|r| !r.is_empty()) else {
         return String::new();
@@ -75,9 +65,7 @@ pub(crate) fn render_due(face: &Face, rows: &serde_json::Value) -> String {
     out
 }
 
-/// The screen, as a string. Split from `run` for the reason every renderer in
-/// this module is: what is said is worth asserting, and it cannot be asserted
-/// through a function whose only output is stdout.
+/// The screen, as a string, so it can be asserted.
 pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String {
     let mut out = String::new();
     let host = e
@@ -92,9 +80,7 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
     );
     out.push_str(&format!("\n  {host}   {}\n\n", face.ink_dim(&held)));
 
-    // Corpora by status. `needs review` and `failed` are the two a person can
-    // act on, so they are the two that carry a colour — and they say their own
-    // names either way.
+    // `needs review` and `failed` are the two a person can act on, so only they carry a colour.
     if let Some(rows) = s["sources"].as_array() {
         out.push_str(&format!("  sources    {}\n", counts(face, rows)));
     }
@@ -109,8 +95,7 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
         out.push_str(&format!("  jobs       {line}\n"));
     }
 
-    // Absent while `[learn]` is off, which is the honest answer: four zeroes
-    // read like a faculty failing, and one that was never switched on is not.
+    // Absent while `[learn]` is off: four zeroes would read like a failure.
     if let Some(l) = s["learning"].as_object() {
         let n = |k: &str| l.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
         out.push_str(&format!(
@@ -125,9 +110,7 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
         ));
     }
 
-    // What the last reap sweep did, and how many retired rows still hold
-    // their text. Absent from an older server, absent while the sweep is off
-    // — either way the key is missing and the line with it.
+    // Absent from an older server and while the sweep is off.
     if let Some(r) = s["reap"].as_object() {
         let n = |k: &str| r.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
         out.push_str(&format!(
@@ -139,8 +122,7 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
         ));
     }
 
-    // The rows, not only the count: a failed job nobody can name is a failed
-    // job nobody can retry.
+    // The rows, not only the count: a failed job nobody can name nobody can retry.
     if let Some(failed) = s["failed"].as_array().filter(|f| !f.is_empty()) {
         out.push_str(&format!(
             "\n  {}\n",
@@ -161,7 +143,6 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
     out
 }
 
-/// `1 780 ready   3 embedding   2 failed`, with the two anyone can act on lit.
 fn counts(face: &Face, rows: &[serde_json::Value]) -> String {
     rows.iter()
         .filter_map(|r| {
@@ -178,7 +159,6 @@ fn counts(face: &Face, rows: &[serde_json::Value]) -> String {
         .join("   ")
 }
 
-/// A duration a person reads rather than a count of seconds.
 fn ago(secs: i64) -> String {
     match secs {
         s if s < 90 => format!("{s} s"),
@@ -223,7 +203,6 @@ mod tests {
         })
     }
 
-    /// A faculty that was never switched on is not a faculty at zero.
     #[test]
     fn nothing_is_said_about_learning_while_the_layer_is_off() {
         let out = render(&face(), &endpoint(), &body(serde_json::Value::Null));
@@ -232,9 +211,6 @@ mod tests {
         assert!(out.contains("engram.mikoshi.de"), "{out}");
     }
 
-    /// The reap line: what the last sweep did, and how many retired rows
-    /// still wait with their text. Absent from an older server's JSON, so
-    /// absent from the render too.
     #[test]
     fn the_reap_line_says_what_was_done_and_what_waits() {
         let mut b = body(serde_json::Value::Null);
@@ -250,8 +226,6 @@ mod tests {
         assert!(!without.contains("reap"), "{without}");
     }
 
-    /// The half that was invisible from a shell: a pursuit closed unsatisfied
-    /// is a hole somebody went looking through and did not fill.
     #[test]
     fn the_learning_half_is_counted_and_named() {
         let out = render(
@@ -270,9 +244,6 @@ mod tests {
         assert!(out.contains("3 artifacts written from pursuits"), "{out}");
     }
 
-    /// Serialised from the struct the server actually sends, not from a
-    /// hand-written object: the keys drifted once already, and a fixture that
-    /// spells them itself cannot notice.
     fn failed(target_id: &str, last_error: Option<&str>) -> serde_json::Value {
         serde_json::to_value(crate::store::jobs::FailedJob {
             id: 1,
@@ -284,7 +255,6 @@ mod tests {
         .expect("a failed job serialises")
     }
 
-    /// A failed job nobody can name is a failed job nobody can retry.
     #[test]
     fn a_failed_job_is_named_and_not_only_counted() {
         let mut b = body(serde_json::Value::Null);
@@ -295,7 +265,6 @@ mod tests {
         assert!(out.contains("connection refused"), "{out}");
     }
 
-    /// Everything colour says here is said in words as well.
     #[test]
     fn the_screen_survives_having_every_escape_stripped() {
         let bare = Face {

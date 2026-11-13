@@ -1,25 +1,14 @@
-// Client-side because none of it may touch the sanitized HTML on the server.
-// Every function here walks text nodes only: it can wrap what is already
-// rendered, and it can never introduce an element the sanitizer disallowed.
+// Client-side, walking text nodes only, so it can never add an element the server's sanitizer disallowed.
 (function () {
   'use strict';
 
-  // What the code below fires when the box's *surroundings* changed — a file
-  // staged or dropped, an answer that finished, a capture that emptied the box
-  // — and the verb row has to be re-read. It used to fire `input`, which was
-  // true of nothing: nobody typed. `contextOffer` listens for the first
-  // keystroke on `input` and takes the offer away, so dragging a file onto a
-  // fresh page removed a card the operator had not touched, and if the offer
-  // fetch had not landed yet, `/ui/context/seen` never went and a real
-  // impression fell out of both halves of the hit rate.
+  // Fired when the box's surroundings change (a staged file, a finished answer). Not `input`:
+  // `contextOffer` takes `input` as the first keystroke and would drop an untouched offer.
   var VERB_SYNC = 'engram:verbsync';
-  // Fired on the box once the base has stopped being empty and the held
-  // state has been swapped in. See `syncHeld`.
+  // Fired once the held state is swapped in; see `syncHeld`.
   var HELD_SYNC = 'engram:held';
 
-  // Registering the worker is what makes the browser offer to install engram
-  // rather than bookmark it. Guarded on both the API and a secure context,
-  // because plain HTTP on a LAN address has neither and must still work.
+  // The worker is what makes the browser offer to install. Plain HTTP on a LAN has neither API.
   if ('serviceWorker' in navigator && window.isSecureContext) {
     window.addEventListener('load', function () {
       navigator.serviceWorker.register('/sw.js').catch(function (e) {
@@ -28,9 +17,7 @@
     });
   }
 
-  // Chrome fires this once, early, and only hands the prompt to a listener
-  // that was already there — so it is caught here, at script scope, and
-  // `installNudge` decides later whether to use it.
+  // Chrome fires this once, early, only to a listener already present.
   var installPrompt = null;
   window.addEventListener('beforeinstallprompt', function (e) {
     e.preventDefault();
@@ -38,11 +25,7 @@
     installNudge();
   });
 
-  // Offered on a phone browser, once a week, until installed or declined.
-  // Not in an installed window: there is nothing left to offer. Not on a
-  // desktop: the browser's own address-bar affordance is enough there, and a
-  // banner on a wide screen is furniture. A week rather than never, because
-  // "Not now" means not now.
+  // Phone browsers only, weekly until installed or declined: "Not now" means not now.
   var INSTALL_KEY = 'engram.install-nudged';
   var INSTALL_WEEK = 7 * 24 * 60 * 60 * 1000;
   function installNudge() {
@@ -57,8 +40,7 @@
     var last = 0;
     try { last = parseInt(localStorage.getItem(INSTALL_KEY) || '0', 10) || 0; } catch (e) { return; }
     if (Date.now() - last < INSTALL_WEEK) return;
-    // Safari has no prompt and no event; the route is the Share sheet. Any
-    // other browser without a prompt has no route at all, so no banner.
+    // Safari's only route is the Share sheet; other browsers without a prompt get no banner.
     var ios = /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.MSStream;
     if (!installPrompt && !ios) return;
     function stamp() {
@@ -69,10 +51,10 @@
       var button = nudge.querySelector('[data-install]');
       button.hidden = false;
       button.addEventListener('click', function () {
-        var p = installPrompt;
+        var installEvent = installPrompt;
         installPrompt = null;
         stamp();
-        if (p) p.prompt();
+        if (installEvent) installEvent.prompt.call(installEvent);
       });
     } else {
       nudge.querySelector('[data-install-how]').hidden = false;
@@ -127,8 +109,7 @@
     });
   }
 
-  // Clamping is visual only. The text is never truncated, so a fenced command
-  // is never cut in half — expanding reveals what was always there.
+  // Visual only: the text is never truncated, so a fenced command is never cut.
   function clamp(root) {
     root.querySelectorAll('.clampable:not([data-clamped])').forEach(function (el) {
       el.setAttribute('data-clamped', 'yes');
@@ -136,7 +117,7 @@
       el.classList.add('is-clamped');
       var btn = document.createElement('button');
       btn.type = 'button';
-      btn.className = 'btn btn-ghost btn-sm expand';
+      btn.className = 'oc-btn expand';
       btn.textContent = 'Expand';
       btn.addEventListener('click', function () {
         var stillClamped = el.classList.toggle('is-clamped');
@@ -169,14 +150,7 @@
     });
   }
 
-  // A blank source line costs a full numbered row, and in a chapter of
-  // exercises that was a third of the pane. Runs of three or more fold to one
-  // rule carrying their count.
-  //
-  // Rendering only: the server still sends every line, and the numbers either
-  // side of a fold are the source's own. A row inside the extraction range is
-  // never folded, whatever it holds — the pane exists to show that range, and
-  // hiding part of it to save space defeats the only thing the pane is for.
+  // Runs of three or more blank lines fold to a counted rule; rows inside the extraction range never fold.
   function collapseBlanks(root) {
     root.querySelectorAll('.raw table:not([data-folded])').forEach(function (table) {
       table.setAttribute('data-folded', '1');
@@ -206,23 +180,12 @@
     });
   }
 
-  // The artifact and the lines it came from are one thing read twice, so they
-  // move together. Proportional rather than line-mapped: prose and source do
-  // not share a line count, and pretending they do lands on the wrong line
-  // more often than it helps.
-  //
-  // The card, not the column it sits in. Related and Seen together share that
-  // column and are not this artifact, so binding here moved the source panel
-  // whenever the neighbour list was scrolled — the one pane on the screen
-  // whose whole claim is that it shows where *this* artifact came from. The
-  // card is the scroll box for the same reason; see 40-search.css.
-  //
-  // The guard is not decoration. Setting scrollTop fires scroll, which would
-  // set the other back, which would fire again.
+  // Proportional, not line-mapped: prose and source do not share a line count. Bound to the card, not the
+  // column (whose neighbour lists are not this artifact). The guard stops the two scroll events ping-ponging.
   function lockstep(root) {
     var split = root.querySelector('.split');
     if (!split || split.dataset.lockstep) return;
-    var artifact = split.children[0] && split.children[0].querySelector('.card');
+    var artifact = split.children[0] && split.children[0].querySelector('.artifact-main');
     var source = split.querySelector('.raw');
     if (!artifact || !source) return;
     split.dataset.lockstep = '1';
@@ -251,18 +214,8 @@
     splitHandles(root);
   }
 
-  // ── Column boundaries the reader can move ─────────────────────────────────
-  //
-  // Two of them, and they are one mechanism twice: the results rail against
-  // the pane, and the artifact against the source it was cut from. Each is a
-  // grid whose first track is a custom property, so moving the boundary is
-  // writing one number onto the container — nothing the server rendered is
-  // touched, and the stylesheet's own default stands for everyone who never
-  // drags anything.
-  //
-  // Remembered in `localStorage` and not in the base. A reading width is a
-  // habit of one browser on one screen, like the theme beside it; carried
-  // between a desktop and a phone it would be wrong in both places.
+  // Movable boundaries: each grid's first track is a custom property. In `localStorage`, not the base:
+  // a reading width is a habit of one browser on one screen.
   function rem() {
     return parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
   }
@@ -271,16 +224,7 @@
     return Math.min(Math.max(v, lo), Math.max(lo, hi));
   }
 
-  // Everything that differs between a boundary between columns and a boundary
-  // between rows, which is less than it sounds: which coordinate of a drag is
-  // the one that means anything, which two arrow keys are the arrow keys, where
-  // the boundary currently sits, and what the browser is told the thing is.
-  //
-  // `at` reads the boundary back off the page rather than off the property,
-  // so the keyboard works in whichever unit the property happens to be written
-  // in. The vertical one is positioned by that very property inside its own
-  // offset parent, so `offsetLeft` is the answer; the horizontal one is in
-  // flow, and where it landed is what its rect says.
+  // `at` reads the boundary off the page, so the keyboard works whatever unit the property is in.
   var AXES = {
     x: {
       cls: 'col-handle', orient: 'vertical', body: 'col-dragging',
@@ -296,21 +240,13 @@
     },
   };
 
-  // Writing the boundary onto the container. `also` is for a boundary that
-  // takes more than one property to state — an artifact given a height has
-  // also stopped growing into whatever the lists leave — and those ride along
-  // with the one number that is remembered rather than being remembered too:
-  // they are not the reader's answer, they are what the answer implies.
+  // `also` carries properties implied by the remembered value, which are not remembered themselves.
   function pin(el, spec, v) {
     el.style.setProperty(spec.prop, v);
     for (var k in spec.also || {}) el.style.setProperty(k, spec.also[k]);
   }
 
-  // `spec`: `axis` picks a row of the table above, `prop` is the custom
-  // property the grid reads, `key` where the reader's answer is kept,
-  // `value(pos, rect)` turns a position inside the container into what the
-  // property should say, `nudge(rect)` is one press of an arrow key in pixels,
-  // and `place` puts the handle where it belongs when appending is wrong.
+  // `spec`: `axis`, `prop` (the grid's property), `key` (storage), `value(pos, rect)`, `nudge(rect)`, `place`.
   function columnHandle(el, spec) {
     var ax = AXES[spec.axis || 'x'];
     if (!el || el.querySelector(':scope > .' + ax.cls)) return;
@@ -322,9 +258,7 @@
     var h = document.createElement('button');
     h.type = 'button';
     h.className = ax.cls;
-    // A separator rather than a button as far as assistive technology is
-    // concerned, because that is what it is: `aria-orientation` says which way
-    // it divides, and the arrow keys below are what the role promises.
+    // A separator to assistive technology; the arrow keys below are what the role promises.
     h.setAttribute('role', 'separator');
     h.setAttribute('aria-orientation', ax.orient);
     h.setAttribute('aria-label', spec.label);
@@ -343,8 +277,7 @@
 
     h.addEventListener('pointerdown', function (e) {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
-      // Captured, so the drag survives the pointer leaving the handle — which
-      // it does immediately, the handle being as narrow as the gap it covers.
+      // Captured: the narrow handle loses the pointer immediately.
       h.setPointerCapture(e.pointerId);
       h.classList.add('dragging');
       document.body.classList.add(ax.body);
@@ -369,9 +302,6 @@
     h.addEventListener('pointerup', release);
     h.addEventListener('pointercancel', release);
 
-    // The keyboard's half of the same thing, one step of `nudge` from wherever
-    // the boundary actually resolved to — see `at` on the axis for how that is
-    // read back.
     h.addEventListener('keydown', function (e) {
       var step = ax.step(e.key);
       if (!step) return;
@@ -381,8 +311,7 @@
       remember();
     });
 
-    // The way back to the stylesheet's own answer, on the element itself
-    // rather than a control somewhere else: whoever moved it is holding it.
+    // Double-click restores the stylesheet's own answer.
     h.addEventListener('dblclick', function () {
       el.style.removeProperty(spec.prop);
       for (var k in spec.also || {}) el.style.removeProperty(k);
@@ -392,12 +321,7 @@
     });
   }
 
-  // The rail is measured in pixels, because what it holds is a list of fixed
-  // things — titles and snippets — and its right size is a width, not a share
-  // of the window. The floors are what keep a drag from producing a column
-  // that can hold nothing: neither side may be squeezed past the point where
-  // it stops being readable, and the pane's floor wins when the window is too
-  // narrow for both.
+  // In pixels; the floors keep both sides readable, and the pane's wins on a narrow window.
   function railHandle() {
     columnHandle(document.querySelector('.regions-rail-focus-source'), {
       prop: '--rail-w',
@@ -408,18 +332,13 @@
       },
       value: function (x, rect) {
         var u = rem();
-        // 30rem for the pane and 1rem for the gap between them, which is part
-        // of the width the rail's own number does not describe: without it the
-        // pane's floor was a rem short of what it says.
+        // 30rem for the pane plus the 1rem gap.
         return Math.round(clampTo(x, 15 * u, rect.width - 31 * u)) + 'px';
       },
     });
   }
 
-  // The split is measured as a share, because both columns are prose-shaped
-  // and what a reader is choosing is how to divide whatever room the pane has
-  // — which is not the same number of pixels in the pane as on the standalone
-  // page.
+  // A share: the pane is not the same width in the workspace as on the standalone page.
   function splitHandles(root) {
     var splits = root.matches && root.matches('.split') ? [root] : [];
     if (root.querySelectorAll) {
@@ -442,42 +361,27 @@
     });
   }
 
-  // The third boundary, and the only horizontal one: the artifact against the
-  // neighbour lists under it. What it divides is not the page's height — that
-  // column is a scroll box of whatever height the pane leaves — but how that
-  // height is spent, and the two halves want it for opposite reasons. Reading
-  // the passage wants the artifact tall; casting around for what else is near
-  // it wants the lists tall. The stylesheet's own answer gives the artifact
-  // everything the lists do not need, which is right until it isn't.
-  //
-  // Pixels, like the rail and unlike the split: what is being sized is a number
-  // of lines of prose, and lines do not come in percentages of a window.
+  // The artifact against the neighbour lists under it, in pixels: it sizes lines of prose.
   function cardHandle(col) {
     if (!col || !col.matches) return;
-    var card = col.querySelector(':scope > .card');
-    // Nothing under the artifact is nothing to divide it from. Both lists are
-    // conditional in the template — a fresh artifact has no neighbours yet.
+    var card = col.querySelector(':scope > .artifact-main');
+    // A fresh artifact has no neighbours yet.
     if (!card || !col.querySelector(':scope > .related')) return;
     columnHandle(col, {
       axis: 'y',
       prop: '--artifact-h',
-      // The stated height is only half of it. Left growing, the card would
-      // take back at the next layout every pixel the drag just gave the lists.
+      // Otherwise the card grows back over what the drag gave the lists.
       also: { '--artifact-fill': '0' },
       key: 'engram.artifact-h',
       label: 'Artifact height',
-      // In the card's own bottom margin — see the note in 40-workspace.css —
-      // so offering the boundary moves nothing on the page.
+      // In the card's own bottom margin, so offering the boundary moves nothing.
       place: function (el, h) {
         card.parentNode.insertBefore(h, card.nextSibling);
       },
       nudge: function () {
         return rem();
       },
-      // `top` is where the artifact starts inside the column, which is under a
-      // label and is not zero; the drag reports a position in the column, and
-      // the property is a height. 7rem is the floor under the boundary: the
-      // lists' own 5rem plus the label that says what they are.
+      // `top` is under the label, not zero. 7rem: the lists' 5rem floor plus their label.
       value: function (y, rect) {
         var u = rem();
         var top = card.getBoundingClientRect().top - rect.top;
@@ -486,29 +390,17 @@
     });
   }
 
-  // ── Ask, as it happens ────────────────────────────────────────────────────
-  //
-  // Two requests, because `EventSource` is GET-only and a GET that runs a model
-  // call is a free-inference hole: the POST parks the question and hands back an
-  // id, and the stream spends that id once. Everything the page inserts was
-  // rendered and sanitized by the server — this driver moves HTML it was handed
-  // and text it puts in text nodes, and never builds markup out of an answer.
+  // Ask: POST parks the question and the GET stream spends the id once, since a GET running a model call
+  // would be a free-inference hole. The page only moves server-rendered HTML or sets text.
   function askDriver() {
     var form = document.getElementById('box-form');
     if (!form) return;
-    // The press is delegated, rather than bound to the button found here.
-    // There are two states with no Ask verb in the page — an install with no
-    // model, and a base with nothing held — and only the second one ends: the
-    // verb arrives out-of-band on the first capture (see `syncHeld`), long
-    // after this runs, and a driver that had returned at this line left it
-    // dead. Nothing below fires until a press that reaches the button, so
-    // arming the driver where there is no model costs nothing.
+    // Delegated: the Ask verb can arrive out-of-band later, on the first capture (see `syncHeld`).
     var box = form.querySelector('textarea[name="q"]');
     if (!box) return;
     var live = document.getElementById('ask-live');
     var reasoning = document.getElementById('ask-reasoning');
-    // The disclosure around it: what is shown or hidden is the box, while the
-    // text still streams into the div inside it.
+    // The disclosure is shown or hidden; text streams into the div inside.
     var reasoningBox = document.getElementById('ask-reasoning-box');
     var progress = document.getElementById('ask-progress');
     var rail = document.getElementById('results');
@@ -517,20 +409,14 @@
     var spinner = document.getElementById('search-spinner');
     var stopBtn = document.getElementById('ask-stop');
     var source = null;
-    // The wait is fifty seconds on a fan-out and nothing on the page predicted
-    // it. Counted from the submit rather than from the first token, because
-    // the retrieval in front of the model is most of what is being waited on.
+    // From the submit: retrieval before the model is most of the wait.
     var started = 0;
     var ticker = null;
     // Which ask the page belongs to. See the submit handler.
     var generation = 0;
 
-    // The one line that matters most in this file. An `EventSource` that is
-    // left open reconnects by itself when the server closes the stream, and the
-    // reconnect is a fresh GET — which, on a spent id, is a 404, but on any
-    // future shape of this endpoint is a second model call nobody asked for and
-    // a second bill on a paid endpoint. Every exit from a stream comes through
-    // here.
+    // Every exit from a stream comes through here. A left-open `EventSource` reconnects by itself,
+    // and a reconnect could be a second model call and a second bill.
     function stop() {
       if (source) { source.close(); source = null; }
       if (ticker) { clearInterval(ticker); ticker = null; }
@@ -540,48 +426,20 @@
       setBusy(false);
     }
 
-    // One act in flight. From the press of Ask until the answer lands, the box
-    // is read-only, both verbs are disabled and only Stop is live.
-    //
-    // Read-only rather than disabled, which is what it was. `disabled` is the
-    // one state that also makes text unselectable and hands focus back to the
-    // body, so the question being answered could not be copied out of the box
-    // holding it — while the CSS went to the trouble of keeping that text
-    // legible, on the grounds that a box someone is waiting on is still a box
-    // someone is reading. Read-only keeps the caret, the selection and the
-    // focus, and silences search-while-type just as completely: nothing can be
-    // typed or pasted into it, so no `input` is fired and the form's
-    // `hx-trigger` goes quiet on its own — there is no second mechanism and no
-    // flag to keep in sync with this one.
-    //
-    // The one thing `disabled` did that this does not is drop `q` from the
-    // serialization. That was never what kept a stray request honest anyway;
-    // `configRequest` below is, and it cancels every request this form makes
-    // while the ask owns it.
-    //
-    // The re-enable lives in `stop()` and nowhere else, because every exit
-    // already runs through it: the answer completing, the Stop button, and the
-    // transport error that `fail()` funnels into it. That last one is the
-    // reason it cannot live on the `done` handler — a dropped connection would
-    // leave the box read-only forever, with no way back but a reload.
+    // Read-only, not disabled, so the question stays selectable and focused; it fires no `input`.
+    // Re-enabled only in `stop()`, which every exit runs, including a transport error.
     function setBusy(busy) {
       box.readOnly = busy;
       form.setAttribute('aria-busy', busy ? 'true' : 'false');
       var vs = form.querySelectorAll('[data-verb]');
       for (var i = 0; i < vs.length; i++) vs[i].disabled = busy;
-      // The chips fire the form too, and leaving them live was not a smaller
-      // hole than leaving the box live: a disabled control is left out of the
-      // serialization, so a chip clicked mid-answer sent `q` empty and swapped
-      // a "0 results" rail over the citations the answer was being written
-      // from.
+      // A chip clicked mid-answer would swap a "0 results" rail over the citations.
       var chips = form.querySelectorAll('#kind-chips input');
       for (var j = 0; j < chips.length; j++) chips[j].disabled = busy;
-      // A box someone emptied while the answer streamed must not come back
-      // with live verbs over nothing to act on.
+      // A box emptied while streaming must not come back with live verbs.
       if (!busy) box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
     }
 
-    // Count up beside the spinner while the stream is open.
     function startTicking() {
       started = Date.now();
       stopBtn.hidden = false;
@@ -592,15 +450,8 @@
       }, 1000);
     }
 
-    // No search leaves this form while an ask owns the page. A read-only box
-    // fires no `input`, but that silences neither a debounce timer that armed
-    // just before Ask was pressed nor the "← results" anchor firing `submit`,
-    // and either one swapped the idle rail over the citations the answer was
-    // being written from. It matters more since the box stopped being
-    // `disabled`: `q` now serializes while the ask runs, so a request that got
-    // out would search for the question instead of sending it empty — a live
-    // rail either way. `configRequest` is cancelable and is the one gate every
-    // htmx request from this form passes through.
+    // The one gate every htmx request from this form passes; a debounce armed before Ask, or the
+    // "← results" anchor, would otherwise swap a rail over the citations.
     form.addEventListener('htmx:configRequest', function (e) {
       if (form.getAttribute('aria-busy') === 'true') e.preventDefault();
     });
@@ -609,59 +460,38 @@
       if (!source) return;
       var secs = Math.round((Date.now() - started) / 1000);
       stop();
-      // What arrived stays. `live` holds the partial answer and the rail holds
-      // the excerpts it was being written from, and both are worth more than a
-      // cleared page — the reader stopped the wait, not the answer.
+      // What arrived stays: the reader stopped the wait, not the answer.
       status.textContent = 'stopped after ' + secs + ' seconds';
     });
 
     function fail(message) {
       stop();
-      // The rail was emptied when the ask began, and the heading over it is
-      // only rewritten by a citations event that is not coming. Left alone it
-      // kept claiming the last search's count over zero rows.
+      // No citations event is coming to rewrite the heading over the emptied rail.
       var head = document.getElementById('rail-head');
       if (head) head.textContent = '';
       result.textContent = '';
-      var box = document.createElement('div');
-      box.className = 'flag';
-      box.setAttribute('role', 'status');
-      // textContent, not innerHTML: an error string is the one payload here
-      // that never went through the sanitizing renderer.
-      box.textContent = message;
-      result.appendChild(box);
+      // textContent inside: an error string never went through the sanitizer.
+      result.appendChild(notice('danger', message));
       live.hidden = true;
       reasoningBox.hidden = true;
       progress.hidden = true;
     }
 
     function openStream(id, mine) {
-      // The id of a superseded ask is simply never spent: the stream is not
-      // opened at all rather than opened and closed, which is one fewer model
-      // call started and abandoned.
+      // A superseded ask's id is never spent: one fewer model call started.
       if (mine !== generation) return;
       source = new EventSource('/ui/ask/' + encodeURIComponent(id) + '/stream');
 
-      // Every handler is gated the same way. `stop()` closes the stream the
-      // page is currently listening to; an event already queued from an older
-      // one must not write into the answer that replaced it.
+      // An event queued from an older stream must not write into the newer answer.
       function current() { return mine === generation; }
 
       source.addEventListener('citations', function (e) {
         if (!current()) return;
-        // Server-rendered, ids and all: the `cite-n` anchors in here are the
-        // other end of the `[n]` links the answer arrives with.
+        // The `cite-n` anchors in here are the targets of the answer's `[n]` links.
         var payload = JSON.parse(e.data);
         rail.innerHTML = payload.rail;
         enhance(rail);
-        // The rail holds what the current act produced. The results that were
-        // here are gone, because they were produced by a different act and
-        // have nothing to do with the excerpts this answer was written from.
-        //
-        // The query is still in the box unedited, so nothing re-triggers the
-        // search on its own. This anchor is the way back — it re-fires the
-        // form's own request with whatever the box holds now, rather than
-        // storing a result set that would go stale the moment it was kept.
+        // The rail now holds this act's excerpts; the anchor re-runs the box's search rather than keeping stale results.
         var head = document.getElementById('rail-head');
         if (head) {
           var n = rail.querySelectorAll('.rail-item').length;
@@ -669,45 +499,30 @@
           var label = document.createElement('span');
           label.className = 'result-count';
           label.textContent = 'Written from · ' + n;
-          var back = document.createElement('a');
-          back.className = 'quiet-link';
-          back.href = '#';
+          var back = document.createElement('button');
+          back.type = 'button';
+          back.className = 'oc-btn';
           back.setAttribute('data-rerun', '');
-          back.textContent = '← results';
+          back.textContent = 'Back to results';
           head.appendChild(label);
           head.appendChild(back);
         }
       });
-      // The fanned-out retrieval, made visible. Without it the extra searches
-      // are a silent pause in front of the answer, and the queries they ran are
-      // otherwise nowhere on the page. With `plan = false` neither of these ever
-      // fires and the line stays hidden.
+      // Shows the fan-out's queries; with `plan = false` this never fires.
       source.addEventListener('needs', function (e) {
         if (!current()) return;
         progress.hidden = false;
-        // textContent, not innerHTML: these strings are model output that went
-        // through no renderer. Same rule as the error box.
+        // textContent: model output that went through no renderer.
         progress.textContent = 'Looking further: ' +
           JSON.parse(e.data).queries.join(', ');
       });
       source.addEventListener('retrieved', function (e) {
         if (!current()) return;
         var round = JSON.parse(e.data);
-        // Round one happens on every ask, including every ask that will never
-        // fan out, and a line of retrieval statistics in front of every answer
-        // is noise. The fan-out is the part nobody can otherwise see happen.
+        // Round one runs on every ask; only the fan-out is worth a line.
         if (round.round < 2) return;
         progress.hidden = false;
-        // Appended, not assigned: the line already holds what `needs` said the
-        // fan-out went looking for, and after this event nothing else on the
-        // page does. Round one never writes here, so the join is only ever to
-        // those queries.
-        //
-        // What was searched beside what is shown, rather than what was left
-        // out. Every round the fan-out runs widens the net, so the number not
-        // shown grows with the feature working — and "26 left out" reads as
-        // twenty-six failures. The pair says the true thing: a wide search,
-        // narrowed to what the window holds.
+        // Appended to what `needs` wrote. Searched beside shown: "26 left out" would read as failures.
         progress.textContent = (progress.textContent ?
           progress.textContent + ' \u2014 ' : 'Round ' + round.round + ': ') +
           'searched ' + round.retrieved + ', showing ' + round.shown;
@@ -716,16 +531,13 @@
         if (!current()) return;
         reasoningBox.hidden = false;
         reasoning.appendChild(document.createTextNode(JSON.parse(e.data).text));
-        // Only while it is open. A closed box has no scroll position to keep,
-        // and asking for one fights the page for the reader's.
+        // A closed box has no scroll position to keep.
         if (reasoningBox.open) reasoning.scrollTop = reasoning.scrollHeight;
       });
       source.addEventListener('token', function (e) {
         if (!current()) return;
         live.hidden = false;
-        // The box scrolls inside the pinned workspace, so the tail is what
-        // leaves the screen. Followed while the reader is at it, and left
-        // alone once they have scrolled up to reread something.
+        // Followed while the reader is at the tail, left alone once they scroll up.
         var atTail = live.scrollHeight - live.scrollTop - live.clientHeight < 40;
         live.appendChild(document.createTextNode(JSON.parse(e.data).text));
         if (atTail) live.scrollTop = live.scrollHeight;
@@ -735,28 +547,15 @@
         stop();
         result.innerHTML = JSON.parse(e.data).html;
         enhance(result);
-        // The fragment carries `hx-post` controls — the verdict bar, "carried
-        // the answer" — and htmx binds those only to markup it swapped in
-        // itself or was told about. Set through `innerHTML` they are inert
-        // buttons until this call; before it, a click on Right did nothing.
+        // htmx binds `hx-post` only on markup it swapped or was told about.
         if (window.htmx) window.htmx.process(result);
-        // The plain stream and the model's aside have both been superseded by
-        // the rendered answer. Hidden rather than emptied, so the next ask
-        // reuses them.
+        // Hidden rather than emptied, so the next ask reuses them.
         live.hidden = true;
         reasoningBox.hidden = true;
-        // `progress` deliberately stays: what the retrieval went looking for
-        // still describes the rail underneath the answer, and it is the only
-        // place on the page that says a fan-out happened at all.
-        // Said once, when there is something to read. The tokens streamed into
-        // a polite live region as they arrived, which tells a reader that an
-        // answer is coming; nothing until now said it had finished.
+        // `progress` stays: it still describes the rail. Announced once; the live region only said it was coming.
         status.textContent = 'The answer is ready.';
       });
-      // Both failures arrive as `error`: the server's own event, which carries
-      // a message, and the browser's transport error, which carries no data.
-      // The second one is the dangerous one — the browser is already queuing a
-      // reconnect when it fires, so `stop()` has to run on it too.
+      // The browser's transport error is also `error`, and it is already queuing a reconnect, so `stop()` runs.
       source.addEventListener('error', function (e) {
         if (!current()) return;
         fail(e.data ? e.data : 'The connection to the answer stream was lost.');
@@ -765,29 +564,15 @@
 
     form.addEventListener('click', function (e) {
       var askBtn = e.target.closest ? e.target.closest('[data-verb="ask"]') : null;
-      // `disabled` is checked as well as matched: a disabled button fires no
-      // click of its own, but it is inside a form that does.
+      // A disabled button fires no click, but its form does.
       if (!askBtn || askBtn.disabled) return;
       e.preventDefault();
       var q = box.value;
       if (!q.trim()) return;
-      // The three regions move with the act, and an ask is an act. Bound to
-      // the keystroke alone this never ran on the ask door: `/ui/ask?q=…`
-      // renders `idle_state` true — the box arrives filled and nothing is
-      // going to search — so `#rail` and `#pane` carry `hidden`, and the
-      // stylesheet's `.pane[hidden]{display:none}` means the answer streamed
-      // into a collapsed pane. The reader watched a spinner and then nothing.
-      // The door pre-fills the box server-side, so no `input` event was ever
-      // coming to reveal them.
+      // The ask door renders `idle_state` with the box filled and no `input` coming, so reveal the regions here.
       hideIdle();
-      // A second ask supersedes the first at every stage, which `stop()` on its
-      // own does not achieve: it closes a stream that is already open, and two
-      // submits made before the first POST resolves open two streams, the
-      // second overwriting the only reference to the first. That first one is
-      // then unclosable, reconnects on its own, and — worse — its eventual
-      // error wipes the answer the second ask is in the middle of writing.
-      // The generation is what the page belongs to; anything an older ask has
-      // to say is dropped, including the stream it was about to open.
+      // Two submits before the first POST resolves would open two streams, the first unclosable.
+      // Anything from an older generation is dropped, including the stream it was about to open.
       var mine = ++generation;
       stop();
       status.textContent = '';
@@ -797,27 +582,15 @@
       progress.hidden = true;
       rail.textContent = '';
       result.textContent = '';
-      // The pane shows one act at a time: the artifact a result click left
-      // here belongs to the search this ask supersedes.
+      // An artifact left in the pane belongs to the superseded search.
       var pane = document.getElementById('pane-content');
       if (pane) pane.textContent = '';
       live.hidden = true;
       reasoningBox.hidden = true;
       reasoningBox.open = false;
-      // The pane is now the act, and the layout has to be told: `has-selection`
-      // was set by a result swap and nothing else, so an ask claimed no room at
-      // all. Wide, the rail kept the 40rem it holds while nothing is open and
-      // the answer streamed into what was left; narrow, the rail comes first in
-      // the DOM and every excerpt sat above the answer.
-      //
-      // Its own class rather than `has-selection`, which narrow reads as
-      // "hide the rail": the excerpts are what this answer was written from and
-      // the `[n]` links point into them, so hiding them is the one thing that
-      // must not happen here. Narrow puts the rail after the answer instead.
+      // `answering`, not `has-selection`, which narrow reads as "hide the rail": the `[n]` links point into it.
       var regions = document.querySelector('.regions');
-      // `pane-open` goes with the artifact that was just emptied out of the
-      // pane above: the class is a statement about what `#pane-content` holds,
-      // and what holds the pane now is the answer.
+      // `pane-open` describes `#pane-content`, which the answer now replaces.
       if (regions) {
         regions.classList.remove('pane-open');
         regions.classList.add('answering');
@@ -837,23 +610,18 @@
       }).then(function (out) {
         openStream(out.id, mine);
       }).catch(function (err) {
-        // A stale rejection has the same shape as a stale event and is dropped
-        // for the same reason: it would replace a live answer with the failure
-        // of an ask nobody is waiting for any more.
+        // A stale rejection must not replace a live answer.
         if (mine !== generation) return;
         fail(err.message || 'The question could not be sent.');
       });
     });
 
-    // A citation is a link to an excerpt on this page. Delegated, because the
-    // links arrive with the answer long after this runs.
+    // Delegated: the links arrive with the answer.
     document.addEventListener('click', function (e) {
       var link = e.target.closest ? e.target.closest('a.cite') : null;
       if (!link) return;
       var target = document.getElementById(link.getAttribute('href').slice(1));
-      // Left alone when the anchor is missing: the default jump does nothing
-      // visible, which is honest, where scrolling somewhere arbitrary would
-      // look like provenance.
+      // Without its anchor the jump does nothing, where scrolling elsewhere would look like provenance.
       if (!target) return;
       e.preventDefault();
       rail.querySelectorAll('.rail-active').forEach(function (el) {
@@ -864,17 +632,8 @@
     });
   }
 
-  // ── Dwell ─────────────────────────────────────────────────────────────────
-  //
-  // How long an artifact stayed open, reported as the reader leaves it: the
-  // next pane swap, the page going away, the tab going hidden. The weakest
-  // pursuit signal there is, and it is sent as a beacon so leaving costs
-  // nothing. Under three seconds is a glance, not a read, and is not sent.
-  //
-  // A pursuit signal only. This used to carry the search the pane was opened
-  // from, and a long enough read was written as that search having found its
-  // answer — but the beacon flushes as the pane is *left*, so it landed after
-  // the buttons under the result and overwrote them. The bar answers now.
+  // Dwell: how long an artifact stayed open, sent as a beacon on leaving; under three seconds is not sent.
+  // A pursuit signal only: the beacon lands after the verdict buttons and must not overwrite them.
   var dwell = { id: null, since: 0 };
   function flushDwell() {
     if (!dwell.id) return;
@@ -900,49 +659,26 @@
     }
   }
 
-  // ── The end of the empty base ─────────────────────────────────────────────
-  //
-  // The workspace is rendered once. A capture posts to `/ui/capture` and swaps
-  // a receipt, and the rail refresh swaps `#results` — nothing else on the page
-  // moves. So the paste that ends an empty base left the whole page still
-  // arranged for one: no Ask verb, no shortcut row, a box hint introducing the
-  // application and a pane saying what will happen to the first capture, all
-  // of it describing a state the operator had just left, until a reload nobody
-  // had a reason to perform.
-  //
-  // `/ui/held` returns those four regions as out-of-band swaps, written from
-  // the same partials the page itself includes, so there is one author for
-  // what the held state says. The placeholders are not among them and ride the
-  // textarea instead — see the box's `HELD_SYNC` listener.
-  //
-  // Runs at most once: `data-held` is written before the request goes, so the
-  // second capture of a session asks for nothing.
+  // The first capture leaves the page arranged for an empty base. `/ui/held` returns those regions out of
+  // band from the same partials; `data-held` is written first, so it runs at most once.
   function syncHeld() {
     var form = document.getElementById('box-form');
     if (!form || form.getAttribute('data-held') !== '0') return;
     form.setAttribute('data-held', '1');
-    // `swap: "none"` because every region in the answer names its own target.
-    // A `target` is still required, and the form is the one element here that
-    // is certain to exist.
+    // `swap: "none"`: every region names its own target, but a `target` is still required.
     htmx.ajax('GET', '/ui/held', { target: form, swap: 'none' })
-      // A capture that stored and a page that failed to redress itself is
-      // still a capture that stored: the receipt stands, and the state is
-      // re-armed so the next one tries again rather than the page staying
-      // wrong for the session.
+      // The capture stored regardless; re-armed so the next one tries again.
       .catch(function () { form.setAttribute('data-held', '0'); })
       .then(function () {
         if (form.getAttribute('data-held') !== '1') return;
         var box = form.querySelector('textarea[name="q"]');
         if (box) box.dispatchEvent(new Event(HELD_SYNC, { bubbles: true }));
-        // The shortcut row arrived hidden, as it always does. This is what
-        // decides whether there is a keyboard to show it to.
+        // Decides whether there is a keyboard to show the row to.
         keyHint();
       });
   }
 
-  // Shown until it is dismissed, then never again on this browser. Not shown
-  // at all on a touch screen: there are no keys there and the row would be
-  // furniture that costs a line of the results.
+  // Until dismissed; never on a touch screen, which has no keys to teach.
   function keyHint() {
     var hint = document.querySelector('.keyhint');
     if (!hint) return;
@@ -956,8 +692,7 @@
     });
   }
 
-  // Restored before anything is drawn into the rail, so a remembered reading
-  // mode does not flash the wide rail first.
+  // Before anything is drawn, so a remembered reading mode does not flash the wide rail.
   function restoreReading() {
     var regions = document.querySelector('.regions');
     if (!regions || !document.querySelector('.region-rail')) return;
@@ -966,60 +701,25 @@
     } catch (e) {}
   }
 
-  // Follows the system until it is touched; a remembered two-state switch from
-  // then on. The pre-paint script in the head is what applies a stored choice
-  // before anything is drawn — this only has to keep the button honest and
-  // move the status-bar colour with it.
-  function themeToggle() {
-    var btn = document.querySelector('[data-theme-toggle]');
-    if (!btn) return;
-    var label = btn.querySelector('[data-theme-label]');
 
-    function current() {
-      var set = document.documentElement.getAttribute('data-theme');
-      if (set) return set;
-      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-    }
 
-    function paint() {
-      var now = current();
-      // Names the destination, not the state: a button called "Dark" while the
-      // page is dark reads as a label rather than as something to press.
-      label.textContent = now === 'dark' ? 'Light' : 'Dark';
-      // An installed app frames the page in this colour. Left alone, a light
-      // page keeps a dark status bar and looks broken on a phone. The two
-      // media-scoped tags in the head answer the system, not the choice, so
-      // the choice needs one of its own.
-      var meta = document.querySelector('meta[name="theme-color"]:not([media])');
-      if (!meta) {
-        meta = document.createElement('meta');
-        meta.setAttribute('name', 'theme-color');
-        document.head.appendChild(meta);
+  // A theme stored under the old key moves to the kit's, once.
+  function migrateThemeKey() {
+    try {
+      var old = localStorage.getItem('engram.theme');
+      if (old === null) return;
+      if (old === 'light' || old === 'dark') {
+        localStorage.setItem('oc.theme', old);
+        if (document.documentElement.dataset.prefs === 'local') {
+          document.documentElement.setAttribute('data-theme', old);
+        }
       }
-      meta.setAttribute('content', now === 'dark' ? '#0e1015' : '#f8f6f1');
-    }
-
-    btn.addEventListener('click', function () {
-      var next = current() === 'dark' ? 'light' : 'dark';
-      document.documentElement.setAttribute('data-theme', next);
-      try { localStorage.setItem('engram.theme', next); } catch (e) {}
-      paint();
-    });
-    paint();
+      localStorage.removeItem('engram.theme');
+    } catch (e) {}
   }
 
-  // The situation this page view happened in.
-  //
-  // Synchronous, because htmx reads `hx-vals js:` synchronously. The two
-  // asynchronous sources — the Battery API and the device list — are read once
-  // at load and cached here, so the first page view of a session goes without
-  // them and the server zeroes their blocks rather than inventing a value.
-  //
-  // Deliberately not collected: canvas, WebGL, fonts, plugins. Those identify a
-  // device across a population; here the population is one authenticated
-  // person, so they are constant and say nothing about which situation this is
-  // — and a hardened browser randomises them per session, so every day would
-  // look like a new device.
+  // Synchronous, since htmx reads `hx-vals js:` synchronously; async sources are cached at load.
+  // No canvas, WebGL or font probing: constant for one person, and randomised by hardened browsers.
   var slow = {
     battery_level: null, charging: null,
     audio_outputs: null, audio_inputs: null, video_inputs: null,
@@ -1042,33 +742,22 @@
         slow.video_inputs = n.videoinput;
       }).catch(function () {});
     }
-    // Chromium only. The map's own keys are layout-specific; the letters under
-    // the physical Q, Y and A are enough to tell QWERTY from QWERTZ from AZERTY.
+    // Chromium only; the letters under Q, Y and A tell QWERTY, QWERTZ and AZERTY apart.
     if (navigator.keyboard && navigator.keyboard.getLayoutMap) {
       navigator.keyboard.getLayoutMap().then(function (m) {
         slow.keyboard_layout = (m.get('KeyQ') || '') + (m.get('KeyY') || '') + (m.get('KeyA') || '');
       }).catch(function () {});
     }
-    // `screen.isExtended` says whether there is more than one screen without
-    // the window-management prompt `getScreenDetails` would raise. Two or
-    // more, or one.
+    // `isExtended` avoids the prompt `getScreenDetails` would raise.
     slow.screens = screen.isExtended ? 2 : 1;
     primePlace();
   }
 
-  // How long a kept geohash still describes where this browser is. A fix from
-  // last week is not a place, it is a memory of one.
+  // How long a kept geohash still describes where this browser is.
   var PLACE_GOOD_FOR = 86400000;
 
-  // Place is the one field behind a permission, and the switch is the only way
-  // it is ever asked for. Low accuracy, ten minutes of cache, and the position
-  // is reduced to a geohash here — the coordinates never leave.
-  //
-  // The fix arrives in a callback, and the bundle is built on load, in this
-  // same turn: whatever this asks for now can only reach the bundle after it
-  // has gone. So the geohash is kept and read back on the next load, which is
-  // the app's own shape — `AndroidSituationSource.place` reads a last known
-  // position too, and never waits for a fresh one.
+  // Only behind the switch; low accuracy, reduced to a geohash here. The fix lands after this load's
+  // bundle, so it is kept for the next one, as the Android app's last-known position is.
   function primePlace() {
     if (!placeOn()) return;
     try {
@@ -1086,7 +775,7 @@
     try { return localStorage.getItem('engram:place') === 'on'; } catch (e) { return false; }
   }
 
-  // The switch off is a withdrawal, not a pause: what was kept goes with it.
+  // Switching off withdraws what was kept.
   function forgetPlace() {
     slow.place = null;
     try { localStorage.removeItem('engram:place_hash'); } catch (e) {}
@@ -1098,14 +787,12 @@
     try { el.checked = localStorage.getItem('engram:place') === 'on'; } catch (e) {}
     el.addEventListener('change', function () {
       try { localStorage.setItem('engram:place', el.checked ? 'on' : 'off'); } catch (e) {}
-      // Asking now, while the person is looking at the switch they pressed,
-      // is the one moment a permission prompt makes sense.
+      // Asked while the person looks at the switch they pressed.
       if (el.checked) primePlace(); else forgetPlace();
     });
   }
 
-  // Standard geohash, base32 alphabet, `precision` characters. The same
-  // function as `Geohash.encode` in the app.
+  // The same function as `Geohash.encode` in the app.
   function geohash(lat, lon, precision) {
     var chars = '0123456789bcdefghjkmnpqrstuvwxyz';
     var latR = [-90, 90], lonR = [-180, 180];
@@ -1142,10 +829,7 @@
     } catch (e) { return 'external'; }
   }
 
-  // Two counters this browser keeps about itself: how long since it last
-  // built a bundle, and how many it has built since its local midnight. A
-  // visit after a week away and the ninth visit of a morning are different
-  // situations, and nothing else in the bundle says so.
+  // A visit after a week away and the ninth of a morning are different situations.
   function viewCounters() {
     var now = Date.now();
     var out = { since_last_view_s: null, views_today: null };
@@ -1167,8 +851,7 @@
     var d = navigator.userAgentData;
     if (d && d.brands) {
       for (var i = 0; i < d.brands.length; i++) {
-        // Chromium pads the list with a deliberately absurd brand to break
-        // exactly the kind of sniffing this is not doing; skip it.
+        // Chromium's decoy brand.
         if (!/Not.*Brand/i.test(d.brands[i].brand)) return d.brands[i].brand;
       }
     }
@@ -1180,8 +863,7 @@
     var c = navigator.connection || navigator.mozConnection;
     if (!c) return null;
     if (c.type) return c.type;
-    // `effectiveType` describes speed rather than medium, and calling a slow
-    // wifi "cellular" would be inventing a fact. Absent instead.
+    // `effectiveType` is speed, not medium; absent rather than invented.
     return null;
   }
 
@@ -1209,7 +891,7 @@
       b.battery_level = slow.battery_level;
       b.charging = slow.charging;
       b.audio_outputs = slow.audio_outputs;
-      // ── Stored, not encoded. See the Bundle struct in core/context.rs. ──
+      // Stored, not encoded. See the Bundle struct in core/context.rs.
       var conn = navigator.connection || navigator.mozConnection || {};
       b.place = slow.place;
       b.net_effective = conn.effectiveType || null;
@@ -1241,8 +923,7 @@
       b.online = navigator.onLine;
       b.keyboard_layout = slow.keyboard_layout;
       b.hour_cycle = Intl.DateTimeFormat().resolvedOptions().hourCycle || null;
-      // A browser cannot read these. The app fills them; they are listed here
-      // so that the test in context.rs sees the whole vocabulary on this side.
+      // Filled by the app; listed so the test in context.rs sees the whole vocabulary.
       b.audio_route = null;
       b.dnd = null;
       b.ringer = null;
@@ -1252,27 +933,15 @@
       b.docked = null;
       b.headset = null;
     } catch (e) {
-      // A partial bundle is a working one: the blocks it could not fill are
-      // zeroed server-side, and the weekday and the hour still stand.
+      // Unfilled blocks are zeroed server-side.
     }
     return JSON.stringify(b);
   };
 
-  // Removed on the first keystroke, and it does not come back when the box is
-  // cleared. The flag is what covers the race: the fetch fires on `load`, and
-  // its answer can land *after* the first keystroke — without this, an offer
-  // already dismissed would swap itself back in.
+  // Covers the offer fetch landing after the first keystroke.
   var offerDismissed = false;
 
-  // A day link carries the browser's zone, so the day page reads the day
-  // the viewer means and not the server's.
-  //
-  // `data-day-at` is the other half of that, and the half `?tz=` could not
-  // reach: where the server wrote the date into the path itself it wrote it in
-  // UTC, while the day page builds its window in the viewer's zone. East of
-  // Greenwich every capture between local midnight and the offset therefore
-  // linked to the previous day, which answered "Nothing on this day." Given the
-  // instant, the path is rebuilt here from the local date instead.
+  // The server writes the path in UTC; it is rebuilt from `data-day-at` in the viewer's zone.
   function zoneDayLinks(root) {
     var tz = (Intl.DateTimeFormat().resolvedOptions().timeZone || '');
     (root || document).querySelectorAll('a[data-day-link]').forEach(function (a) {
@@ -1285,9 +954,7 @@
     });
   }
 
-  // `YYYY-MM-DD` for an instant, in the browser's own zone. Built from the
-  // parts rather than sliced out of `toISOString`, which is UTC and is the bug
-  // above; `en-CA` is the locale that already spells a date this way.
+  // Not `toISOString`, which is UTC; `en-CA` already spells dates this way.
   function localDay(ms) {
     var d = new Date(ms);
     if (isNaN(d.getTime())) return '';
@@ -1297,48 +964,18 @@
       (p + d.getDate()).slice(-2);
   }
 
-  // The idle column is hidden, not removed. Removing it is how a reminder
-  // armed by a capture stayed invisible until a reload: Capture empties the
-  // box, the idle state is correct again, and there was no `#due` left in the
-  // document for the band to swap into.
-  //
-  // The offer used to be removed here rather than hidden with the rest, on the
-  // argument that it is a measured impression and an offer reappearing in a
-  // new situation would be a second one nobody had. That argument does not
-  // hold: `confirmOffer` runs on `htmx:afterSwap` and nowhere else, so the
-  // impression is written exactly once, when the fragment arrives, and
-  // hiding a card that is already on screen writes nothing at all. What the
-  // removal did instead was destroy the card on the first keystroke — after
-  // which the column came back without it for the rest of the session, and a
-  // capture left a page that was not the page it started as.
-  //
-  // The race it was reaching for is real and is handled where it happens: an
-  // offer whose fetch lands *after* the keystroke was never seen, and
-  // `dropOffer` on the swap is what refuses to count it.
-  //
-  // The three regions move together because they are one statement about what
-  // the page is doing: with an intent expressed there is a rail and a pane and
-  // a chip row to narrow with; with none there is the column.
+  // Hidden, not removed: a reminder armed by a capture needs `#due` to swap into. The offer is hidden
+  // too; `confirmOffer` counts it once on swap, and `dropOffer` handles the late-fetch race.
   function hideIdle() {
     document.documentElement.classList.add('typing');
     var idle = document.getElementById('idle');
-    if (idle) idle.hidden = true;
+    if (idle) idle.setAttribute('data-off', '');
     show('rail', true);
     show('pane', true);
     show('kind-row', true);
   }
 
-  // Is the pane holding an act of its own — an ask in flight, or the answer
-  // one left standing?
-  //
-  // `askDriver` never clears the box, on purpose: the question stays legible
-  // beside the answer it produced. So emptying the box by hand — select all,
-  // Delete — is not a statement that the answer is over, and treating it as
-  // one hid `#pane` and `#rail` mid-stream, taking the answer and the "back to
-  // results" anchor with them. `show` is the only writer of those flags, so
-  // nothing brought them back until another keystroke or a reload.
-  // An ask actually in flight: the submit is out, or tokens are still
-  // arriving. Nothing may take the pane away from this, whatever asked.
+  // `askDriver` never clears the box, so emptying it by hand must not end the answer.
   function paneIsAsking() {
     var form = document.getElementById('box-form');
     if (form && form.classList.contains('asking')) return true;
@@ -1352,34 +989,19 @@
     return !!(result && result.textContent.trim());
   }
 
-  // The box is empty again, so the column is right again. The due band is
-  // re-fetched rather than left as it stands: it may have been hidden through
-  // a capture that armed something, and what it holds is a minute old.
-  //
-  // Except where the pane is mid-answer: see `paneIsBusy`.
-  //
-  // `force` is for the one caller that is a statement rather than a side
-  // effect: a capture that has just landed and emptied the box. Without it
-  // `paneIsBusy` stayed true for the rest of the session once `#ask-result`
-  // held anything, so after any completed Ask a captured reminder left
-  // `#idle` — and the due band inside it — hidden until a full reload. An ask
-  // still in flight is never overruled; only an answer left standing is.
+  // `force`: a capture that just emptied the box overrules an answer left standing, never an ask in flight.
   function showIdle(force) {
-    // Before the class, not after: `html.typing` says an intent is expressed,
-    // and an answer standing in the pane is one whether or not the box that
-    // asked for it still holds the question.
+    // An answer standing in the pane is an expressed intent, whatever the box holds.
     if (paneIsAsking() || (!force && paneIsBusy())) return;
     document.documentElement.classList.remove('typing');
     var idle = document.getElementById('idle');
-    if (idle) idle.hidden = false;
+    if (idle) idle.removeAttribute('data-off');
     show('rail', false);
     show('pane', false);
     show('kind-row', false);
     var due = document.getElementById('due');
     if (due) htmx.trigger(due, 'refresh');
-    // The idle line's poll is filtered on the column being visible, so while
-    // the column was hidden it fired nothing. What the reader comes back to
-    // would otherwise be however old the last tick left it.
+    // The poll only fires while the column is visible, so catch up now.
     var foot = document.getElementById('idle-foot');
     if (foot && foot.getAttribute('hx-get')) htmx.trigger(foot, 'refresh');
   }
@@ -1389,42 +1011,19 @@
     if (el) el.hidden = !on;
   }
 
-  // The fourth region, at load. `workspace.html` renders `hidden` onto `#idle`,
-  // `#rail`, `#pane` and `#kind-row` from `idle_state` — but `html.typing` is
-  // set only by `hideIdle`, and `hideIdle` runs from a keystroke or a submit
-  // that a server-rendered page never fires. A deep-linked `/ui?q=…`, or the
-  // `ask_door` redirect when `[infer.ask]` is off, therefore opened with the
-  // three regions correct and the class missing: on a phone the capture box
-  // sat undocked, the example chips lay over the results, and `#vec-bg` stayed
-  // at 0.72 opacity behind the text until the first keystroke.
-  //
-  // Read off `#idle` rather than the box, so the browser agrees with the
-  // decision the server already made rather than making a second one.
+  // `hideIdle` never runs on a server-rendered `/ui?q=…`, so the class is set here, off `#idle`.
   function syncIdle() {
     var idle = document.getElementById('idle');
-    if (idle) document.documentElement.classList.toggle('typing', idle.hidden);
+    if (idle) document.documentElement.classList.toggle('typing', idle.hasAttribute('data-off'));
   }
 
-  // The offer alone, and for exactly one case: the fetch that lands after the
-  // keystroke that dismissed it. That card was never on screen, so counting it
-  // as shown would put a population that structurally could not click into the
-  // denominator of the hit rate. An offer that *did* arrive in time is not
-  // touched here — it is hidden with the column and comes back with it.
+  // Only the fetch that lands after the dismissing keystroke: that card was never on screen.
   function dropOffer() {
     var area = document.getElementById('context-offer');
     if (area) area.remove();
   }
 
-  // The other half of the impression. The server computes an offer without
-  // knowing whether anyone saw it — this fragment races the first keystroke,
-  // and the answer that loses is dropped above without ever being on screen.
-  // Counting those as shown put a population that structurally cannot click
-  // into the denominator of the hit rate on Ops, which is the number the block
-  // weights are supposed to be fitted against one day. So the browser says so,
-  // and only the browser can.
-  //
-  // Nothing waits on this and nothing is done with the answer: a confirmation
-  // that fails to send costs one row of an instrument, not a page.
+  // Only the browser knows the offer was seen; fire-and-forget.
   function confirmOffer(area) {
     if (!area) return;
     var id = area.getAttribute('data-rec-id');
@@ -1437,17 +1036,9 @@
   }
 
   function contextOffer() {
-    // The box is a textarea, and has been since the three pages became one.
-    // Matched as `input[name=q]` this never bound, so the offer outlived the
-    // first keystroke and kept logging impressions beside live queries.
     var box = document.querySelector('textarea[name="q"]');
     if (!box) return;
-    // Not `{ once: true }`. The column comes back when the box is emptied, so
-    // this is a transition and not a one-way dismissal: the offer is hidden
-    // with the column and returns with it. What `offerDismissed` records is
-    // narrower — that a keystroke has happened — so that an offer whose fetch
-    // lands *after* it can be dropped by `dropOffer` instead of appearing over
-    // a query nobody asked it about.
+    // Not `{ once: true }`: the offer comes back with the column. `offerDismissed` only records a keystroke.
     box.addEventListener('input', function () {
       if (box.value.trim()) {
         offerDismissed = true;
@@ -1458,73 +1049,36 @@
     });
   }
 
-  // Say what went wrong where the answer was going to be.
-  //
-  // The server's own reason, verbatim, the same rule the upload path follows:
-  // a generic "something went wrong" would hide what actually goes wrong here
-  // — an embedder that is down, a vector store that cannot answer, a body over
-  // the limit. `textContent`, because an error string is the one payload on
-  // this page that went through no sanitizing renderer.
-  // A search whose endpoint was merely busy — rate limited, or a model still
-  // loading. The server has already retried it for as long as a keystroke's
-  // answer is worth retrying (see `infer::retry`), so reaching here means the
-  // limiter is still shedding.
-  //
-  // Not `failedSwap`, because a keystroke's answer is disposable and the rail
-  // under it is not: typing one character into a box that is showing eight
-  // results must not replace them with an error box. The results stay, a line
-  // above them says why they did not move, and the next keystroke tries again
-  // — which is exactly what a person typing is about to do anyway.
-  //
-  // Silence would be the other mistake, and the handler below has a comment
-  // about it: a door that fails invisibly reads as a base with nothing in it.
+  // `textContent`: an error string went through no sanitizer.
+  function notice(kind, text) {
+    var t = document.getElementById('oc-notice-' + kind);
+    var box = t.content.firstElementChild.cloneNode(true);
+    box.querySelector('.oc-notice__text').textContent = text;
+    return box;
+  }
+
   function busyNote(target) {
     if (!target || target.id !== 'results') return false;
-    // One note however many keystrokes are refused. The next successful search
-    // swaps the rail's innerHTML and takes it away with everything else, so
-    // nothing has to remove it.
-    if (target.querySelector('.flag-busy')) return true;
-    var box = document.createElement('div');
-    box.className = 'flag flag-busy';
-    box.setAttribute('role', 'status');
-    box.textContent =
-      'The model endpoint is busy. This search has not run — the next thing you type will try again.';
+    // The next successful swap removes it.
+    if (target.querySelector('[data-busy-note]')) return true;
+    var box = notice('warning', 'The model endpoint is busy · the next keystroke tries again');
+    box.setAttribute('data-busy-note', '');
     target.insertBefore(box, target.firstChild);
     return true;
   }
 
   function failedSwap(target, xhr) {
     if (!target || !target.id) return;
-    var reason = 'engram is unreachable.';
+    var reason = 'Server unreachable.';
     if (xhr) reason = reasonOf(xhr) || ('engram answered ' + xhr.status + '.');
-    var box = document.createElement('div');
-    box.className = 'flag';
-    box.setAttribute('role', 'status');
-    // Not named `b`: `the_browser_sends_exactly_the_fields_this_struct_reads`
-    // reads the context bundle's fields off this file by looking for lines
-    // that start with `b.`, and a one-letter element handle here is
-    // indistinguishable from a bundle assignment.
-    var title = document.createElement('b');
-    title.textContent = 'That did not work';
-    var why = document.createElement('div');
-    why.textContent = reason;
-    var wrap = document.createElement('div');
-    wrap.appendChild(title);
-    wrap.appendChild(why);
-    box.appendChild(wrap);
     target.textContent = '';
-    target.appendChild(box);
-    // The heading names the act that filled the rail, and nothing filled it.
+    target.appendChild(notice('danger', 'That did not work · ' + reason));
+    // Nothing filled the rail.
     var head = document.getElementById('rail-head');
     if (head && target.id === 'results') head.textContent = '';
   }
 
-  // What the server said went wrong, out of whichever body it sent. The API
-  // answers `{"error": …}`; a `/ui` route answers with the error page, which
-  // marks its one sentence of what happened with `data-error-detail`
-  // (`error.html`, `not_found.html`). Reading only the first shape turned
-  // every `/ui` failure into a bare status code once those routes started
-  // answering with a page — "chunk text is empty" became "engram answered 400".
+  // The API answers `{"error": …}`; a `/ui` route answers a page marking its sentence `data-error-detail`.
   function reasonOf(xhr) {
     var type = xhr.getResponseHeader('content-type') || '';
     try {
@@ -1539,15 +1093,8 @@
     }
   }
 
-  // The two example phrasings under the box. A chip fills the box and stops
-  // there: the point is to put the phrasing in front of you, let the echo
-  // answer it, and leave the press to you. The synthetic `input` is what the
-  // form's own trigger and the idle column's hide both listen for, so a filled
-  // box behaves exactly as a typed one does.
-  //
-  // Bound on the document because `_box_hint.html` is swapped out of band the
-  // first time a capture ends an empty base, and a listener on the old node
-  // would go with it.
+  // A chip fills the box and stops; the synthetic `input` makes it behave as typed. On the document,
+  // since `_box_hint.html` is swapped out of band.
   function exampleChips() {
     document.addEventListener('click', function (e) {
       var chip = e.target.closest && e.target.closest('.chip-example');
@@ -1561,15 +1108,13 @@
     });
   }
 
-  // The zone the echo reads dates in. Filled once, on load: it cannot be
-  // rendered server-side, and `Intl` is the only thing that knows it.
+  // Only `Intl` knows it.
   function boxZone() {
     var el = document.getElementById('box-tz');
     if (el) el.value = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
   }
 
-  // The way back to results after an Ask. Bound on the document because the
-  // anchor is written into the rail by the stream driver, long after load.
+  // On the document: the stream driver writes the anchor long after load.
   function railBack() {
     document.addEventListener('click', function (e) {
       var back = e.target.closest && e.target.closest('[data-rerun]');
@@ -1580,50 +1125,25 @@
     });
   }
 
-  // ── The box, and what the two verbs may do with it ──────────────────
-  // Typing is the third verb and needs no button: it is the `hx-trigger` on
-  // the form. These two need one, because a model call and a write are both
-  // deliberate acts — what decides which of the three happens is never a
-  // length, a newline, or anything else the page noticed on its own.
+  // Typing is the third verb (the form's `hx-trigger`); a model call or a write is always a press.
   function boxVerbs() {
     var form = document.getElementById('box-form');
     if (!form) return;
     var box = form.querySelector('textarea[name="q"]');
     if (!box) return;
-    // Read at every sync, never captured. A `querySelectorAll` here is a
-    // static list, and the Ask button is not always in it: an empty base
-    // renders no Ask verb at all — `_ask_verb.html` has nothing to offer until
-    // something is held — and the first capture swaps a fresh `disabled`
-    // button into the slot out of band, long after this ran. That button was
-    // in no list, so nothing ever enabled it or lit it, and a new base's Ask
-    // verb stayed dead until a full reload. This driver became the only thing
-    // that decides how the verb looks when the hard-coded accent came off it,
-    // so a list that cannot see it is a verb that cannot work.
+    // Read at every sync: the Ask button can be swapped in out of band after load.
     function verbs() {
       return form.querySelectorAll('[data-verb]');
     }
 
-    // Neither verb has anything to act on while the box is empty — except
-    // Capture, whose act can also be a staged file. A photo over an empty box
-    // left Capture disabled and the file with no way into the base: the state
-    // rendered, the control did not exist. The staged box is read directly
-    // rather than mirrored into a flag, and stage()/unstage() fire `input` on
-    // the box so this runs when staging changes, not only when typing does.
+    // A staged file is something for Capture to act on, even over an empty box.
     function sync() {
-      // An act in flight owns the verbs, and `setBusy` in askDriver is what
-      // says so. Both write `disabled` on the same buttons, so without this
-      // anything that fires `input` mid-answer handed them back — staging a
-      // file does, and a file can be dropped on the page while an answer is
-      // streaming.
+      // `setBusy` owns the verbs during an ask; a mid-answer drop would otherwise re-enable them.
       if (form.getAttribute('aria-busy') === 'true') return;
       var hasText = !!box.value.trim();
       var stagedEl = document.getElementById('staged');
       var hasFile = !!(stagedEl && !stagedEl.hidden);
-      // Which verb the accent goes to. Not which verb runs — that stays a
-      // press — only which one is lit. A trailing question mark or a leading
-      // question word says Ask; a paste (long, multi-line, or a file) says
-      // Capture; a short plain sentence lights neither, because typing
-      // already searches and there is nothing to press for.
+      // Which verb is lit, not which runs.
       var text = box.value.trim();
       var asksLike = /\?\s*$/.test(text) ||
         /^(who|what|when|where|why|how|which|is|are|do|does|did|can|could|should|wer|was|wann|wo|warum|wie|welche|ist|sind|kann|hat|habe)\b/i.test(text);
@@ -1633,32 +1153,15 @@
         var verb = buttons[i].getAttribute('data-verb');
         buttons[i].disabled = verb === 'capture'
           ? !(hasText || hasFile)
-          // A staged file has made the box that file's note. Asking a note is
-          // not a thing to do, and the answer would land beside a file the
-          // question was never about.
+          // Asking a file's note makes no sense.
           : (!hasText || hasFile);
         var lead = verb === 'ask' ? (asksLike && !keepsLike) : keepsLike;
-        buttons[i].classList.toggle('btn-accent', lead && !buttons[i].disabled);
+        buttons[i].classList.toggle('oc-btn--primary', lead && !buttons[i].disabled);
       }
     }
 
-    // One line to start, growing to a ten-line cap and then scrolling inside
-    // itself. Measured off `scrollHeight` rather than counting newlines,
-    // because a pasted paragraph is many lines and carries none.
-    //
-    // This is not the box changing shape on its own in the sense the panel
-    // rules out: it never becomes a different control, and it never decides
-    // what the words in it are for. It only stops hiding them.
-    //
-    // The padding and the border have to be added back, and leaving them out
-    // was worth two pixels of permanent scroll. `.box` is `border-box`, so the
-    // height set here is the outside of the element, while `scrollHeight` is
-    // the inside — content and padding, never the 1px border on each edge. The
-    // box therefore ended two pixels shorter than the text it was measured
-    // from, every time, and with `overflow-y: auto` above it that is a live
-    // scrollbar on a box that has nothing to scroll. The cap is the other half
-    // of the same mistake: ten lines of text plus the padding they sit in, or
-    // the tenth line is the one the padding eats.
+    // Grows to a ten-line cap. `.box` is `border-box` and `scrollHeight` excludes the border, so it is
+    // added back, or the box shows a scrollbar for two pixels.
     var CAP = 10;
     function grow() {
       box.style.height = 'auto';
@@ -1673,28 +1176,12 @@
     box.addEventListener('input', function () { sync(); grow(); });
     box.addEventListener(VERB_SYNC, function () { sync(); grow(); fitPlaceholder(); });
 
-    // The height is a measurement of wrapped text, and text re-wraps whenever
-    // the box changes width. Bound to `input` alone it was only ever correct
-    // for the width the last keystroke was typed at: narrow the window, or turn
-    // a phone, and a paragraph that grew to four lines is still four lines tall
-    // with six lines in it — clipped, scrolling, and no key coming to fix it.
+    // Text re-wraps when the width changes.
     window.addEventListener('resize', grow);
-    // Inter loads with `font-display: swap`, so the first measurement is of the
-    // fallback face and the swap re-wraps everything under a height nothing
-    // will recompute — the box is not typed into before it is read.
+    // `font-display: swap` re-wraps after the first measurement.
     if (document.fonts && document.fonts.ready) document.fonts.ready.then(grow);
 
-    // The two verbs, without a pointer. This is not the box inferring one from
-    // a newline — the rule it is built on and keeps: Enter puts in a line
-    // break here and always will. The chord is a second, deliberate gesture,
-    // the same act as the button and no more ambiguous, and without it the one
-    // hand that reached the box with `/` had no way back out of it.
-    //
-    // Routed through the button rather than the handler behind it, so that
-    // everything the button already knows goes on being true: an empty box or
-    // an ask in flight leaves it disabled, and a disabled verb does nothing
-    // here either. Where the install has no Ask, there is no button and the
-    // unshifted chord is simply not a key.
+    // Enter is a line break; the chord is the button's act, routed through it so a disabled verb stays inert.
     box.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey) return;
       var verb = form.querySelector(
@@ -1704,22 +1191,11 @@
       verb.click();
     });
 
-    // The long placeholder names all three verbs, which is what the box needs
-    // said and what the phone has no room for: one row at that width clips it
-    // around the thirtieth character, and the hint that would have carried the
-    // rest is `display: none` there. Read off the element rather than branched
-    // on in the template, because app.js is one file for every installation —
-    // the same reason `data-eager` exists below. Bound to the query, not read
-    // once, so a rotation is not a sentence that stays cut in half.
+    // The phone's one row clips the long placeholder; bound to the query, so rotation updates it.
     var narrow = window.matchMedia('(max-width: 40rem)');
     var wide = box.placeholder;
     var short = box.getAttribute('data-placeholder-narrow') || wide;
-    // And a third, for when the box is not a query box at all: a staged file
-    // makes it that file's note. Asked here rather than written from
-    // `stage()`, because this function owns the placeholder and re-runs on
-    // every rotation — set from outside, the note's prompt would survive until
-    // the first turn of the phone and then be replaced by a search hint over
-    // an annotation half typed. Short enough for either width.
+    // Owned here, since this re-runs on rotation and would overwrite a hint set from `stage()`.
     var NOTE_HINT = 'What is it, why keep it?';
     function fitPlaceholder() {
       var stagedEl = document.getElementById('staged');
@@ -1728,10 +1204,7 @@
         : (narrow.matches ? short : wide);
     }
     narrow.addEventListener('change', fitPlaceholder);
-    // And the two sentences an empty base's box will use once something is
-    // held, carried on the element by the template. Read across here rather
-    // than swapped in with the rest of the held state: replacing a textarea
-    // takes the caret, the selection and anything typed since with it.
+    // Carried across rather than swapping the textarea, which would lose the caret and text.
     box.addEventListener(HELD_SYNC, function () {
       wide = box.getAttribute('data-placeholder-held') || wide;
       short = box.getAttribute('data-placeholder-held-narrow') || short;
@@ -1743,16 +1216,7 @@
     grow();
   }
 
-  // ── The microphone ──────────────────────────────────────────────────
-  // Hold the button, talk, let go: the recording goes to `/ui/transcribe` and
-  // the words come back into the box. The button is on the page only where a
-  // speech model is configured, so everything here is guarded on finding it.
-  //
-  // What this deliberately does not do is search. The transcript is written
-  // into the value and `VERB_SYNC` is fired — the same event a staged file
-  // fires — so the verbs and the height catch up without the `input` htmx
-  // listens on. Dictation fills the box; pressing something is still what acts
-  // on it, exactly as it is for typing that has not been finished yet.
+  // Hold to record; the words go into the box and `VERB_SYNC` fires. Dictation never searches by itself.
   function micButton() {
     var btn = document.getElementById('mic');
     if (!btn) return;
@@ -1761,9 +1225,7 @@
     if (!box) return;
     var status = document.getElementById('mic-status');
 
-    // Nothing to hold down if the browser has neither half of this. Removed
-    // rather than left dead: the server said a microphone is configured, and
-    // this is the client's own answer that it cannot use one.
+    // Removed rather than left dead when the browser cannot record.
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
         typeof window.MediaRecorder === 'undefined') {
       btn.remove();
@@ -1773,8 +1235,7 @@
 
     var recorder = null;
     var chunks = [];
-    // Set on the way down and read on the way up: a press that has already
-    // been given up on must not start a recorder that arrives after it.
+    // A released press must not start a recorder that arrives late.
     var holding = false;
 
     function say(msg) { if (status) status.textContent = msg || ''; }
@@ -1784,44 +1245,20 @@
       for (var i = 0; i < tracks.length; i++) tracks[i].stop();
     }
 
-    // The transcript goes in at the end, never over what is there: the box may
-    // hold a question half typed, and a microphone is not a reason to lose it.
+    // Appended, never over a half-typed question.
     function fill(text) {
       if (!text) return;
       var had = box.value.replace(/\s+$/, '');
       box.value = had ? had + ' ' + text : text;
       box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
-      // And the synthetic `input`, for the same reason `exampleChips` fires
-      // one: the form's own search trigger and the idle column's hide both
-      // listen for it and for nothing else, and there is no Search button in
-      // the verb row. Without this a dictated query sat in the box unanswered
-      // until one more character was typed by hand.
+      // There is no Search button; the form's trigger listens for `input`.
       box.dispatchEvent(new Event('input', { bubbles: true }));
-      // The caret at the end of what was just said, so the next thing typed
-      // continues it. Focus, because the press was on a button and the box is
-      // where the operator is now working.
       box.focus();
       try { box.setSelectionRange(box.value.length, box.value.length); } catch (e) {}
     }
 
-    // What the transcriber is handed, always: 16 kHz mono 16-bit PCM in a RIFF
-    // wrapper, and never what the recorder produced.
-    //
-    // `MediaRecorder` has no WAV to give — Chrome and Firefox record
-    // `audio/webm;codecs=opus`, Safari `audio/mp4` — and whisper.cpp built
-    // without `WHISPER_FFMPEG` reads WAV and nothing else. It answered HTTP
-    // 200 carrying `{"error": "failed to read audio data as wav"}` to every
-    // recording this page ever sent, which the client then reported as a
-    // missing `text` field. The browser already holds the decoder for its own
-    // output, so the conversion belongs here: one `decodeAudioData`, and no
-    // build flag or server-side dependency anywhere.
-    //
-    // 16 kHz mono because that is what whisper resamples to internally
-    // whatever it is given — anything richer is bytes over the wire the model
-    // throws away, and Opus at 44.1 kHz stereo is several times the size of
-    // the PCM that comes out of it. One channel on the `OfflineAudioContext`
-    // does the downmix and the resample together, in the browser's own
-    // resampler rather than a hand-rolled one.
+    // Always 16 kHz mono 16-bit WAV: `MediaRecorder` gives webm/mp4, and whisper.cpp without
+    // `WHISPER_FFMPEG` reads only WAV. One `OfflineAudioContext` channel downmixes and resamples.
     var STT_RATE = 16000;
 
     function toWav(blob) {
@@ -1832,9 +1269,7 @@
       var close = function () { if (ctx.close) { try { ctx.close(); } catch (e) {} } };
       return blob.arrayBuffer()
         .then(function (buf) {
-          // Safari answers `decodeAudioData` through callbacks and returns
-          // nothing; everything else returns a promise. Both, so neither
-          // browser hangs on the other's contract.
+          // Safari answers through callbacks; others return a promise.
           return new Promise(function (resolve, reject) {
             var p = ctx.decodeAudioData(buf, resolve, reject);
             if (p && p.then) p.then(resolve, reject);
@@ -1851,20 +1286,12 @@
           return off.startRendering();
         })
         .then(function (rendered) { return wavOf(rendered.getChannelData(0)); })
-        // The recording is never thrown away over a conversion. A browser that
-        // refuses 16 kHz on an `OfflineAudioContext`, or a codec its own
-        // decoder will not take, still has audio somebody just spoke — and a
-        // whisper built with ffmpeg takes it as it stands. The upload is the
-        // same one this code has always made.
+        // A failed conversion still sends the original recording; a whisper built with ffmpeg takes it.
         .catch(function () { return blob; })
         .then(function (out) { close(); return out; }, function (e) { close(); throw e; });
     }
 
-    // A RIFF header and the samples, 16-bit signed little-endian. The shape
-    // every minimal WAV reader accepts without an argument — `dr_wav`, which
-    // is whisper's, among them: no extensible subformat, no float samples, no
-    // streaming `0xFFFFFFFF` sizes, every length known before a byte is
-    // written.
+    // The plainest WAV (no extensible subformat, no float, sizes known up front), which `dr_wav` accepts.
     function wavOf(samples) {
       var n = samples.length;
       var buf = new ArrayBuffer(44 + n * 2);
@@ -1886,10 +1313,7 @@
       ascii(36, 'data');
       v.setUint32(40, n * 2, true);
       for (var i = 0; i < n; i++) {
-        // Clamped before it is scaled. Both the decoder and the resampler hand
-        // back values a hair outside [-1, 1], and `setInt16` wraps rather than
-        // saturating — so the loudest moment of a recording came back as a
-        // click at the opposite polarity.
+        // Clamped first: values slightly outside [-1, 1] would wrap in `setInt16` and click.
         var x = Math.max(-1, Math.min(1, samples[i]));
         v.setInt16(44 + i * 2, x < 0 ? x * 0x8000 : x * 0x7fff, true);
       }
@@ -1897,14 +1321,12 @@
     }
 
     function send(blob) {
-      // A press and a release with nothing in between. No call, no message:
-      // nothing happened, and saying so is noise.
+      // Nothing recorded, nothing to say.
       if (!blob || !blob.size) { say(''); return; }
       btn.disabled = true;
       say('Transcribing…');
       var body = new FormData();
-      // The name the handler reads, and a filename because a part without one
-      // is a field rather than a file to the multipart reader on the server.
+      // Without a filename the multipart reader sees a field, not a file.
       body.append('audio', blob, 'recording');
       fetch('/ui/transcribe', { method: 'POST', body: body, credentials: 'same-origin' })
         .then(function (r) {
@@ -1916,8 +1338,7 @@
           say('');
         })
         .catch(function () {
-          // The endpoint is the operator's own, and what is wrong with it is in
-          // the server log. What the page can say is that nothing was typed.
+          // The details are in the server log.
           say('Could not transcribe that.');
         })
         .then(function () { btn.disabled = false; });
@@ -1929,9 +1350,7 @@
       btn.classList.add('listening');
       say('Listening…');
       navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
-        // Let go before the permission dialog was answered, or before the
-        // device opened. The stream is closed again and nothing is recorded —
-        // leaving it open is a microphone light nobody asked for.
+        // Released before the device opened: close it, or the microphone light stays on.
         if (!holding) { stopTracks(stream); return; }
         chunks = [];
         recorder = new MediaRecorder(stream);
@@ -1944,15 +1363,13 @@
           var blob = new Blob(chunks, { type: type });
           recorder = null;
           chunks = [];
-          // Converted before it is sent, not after it fails: see `toWav`.
           toWav(blob).then(send);
         });
         recorder.start();
       }).catch(function () {
         holding = false;
         btn.classList.remove('listening');
-        // The one failure worth a sentence on the page: no amount of pressing
-        // again fixes it, and the browser's own prompt is gone by now.
+        // Pressing again cannot fix this, and the browser's prompt is gone.
         say('No microphone — the browser refused access.');
       });
     }
@@ -1965,23 +1382,17 @@
       if (recorder.state !== 'inactive') recorder.stop();
     }
 
-    // Pointer events cover mouse, pen and touch in one, and `pointerup` is
-    // taken on the window rather than the button: a hold that drifts off the
-    // button — which a thumb does — must still end the recording, and end it
-    // where the finger actually came up.
+    // `pointerup` on the window: a thumb drifting off the button must still end the recording.
     btn.addEventListener('pointerdown', function (e) {
       e.preventDefault();
       start();
     });
     window.addEventListener('pointerup', stop);
     window.addEventListener('pointercancel', stop);
-    // A window that loses focus mid-hold — an alt-tab, a phone call — is a
-    // held button nothing will ever release.
+    // A blur mid-hold would leave a button nothing releases.
     window.addEventListener('blur', stop);
 
-    // The keyboard's half of the same gesture. Space and Enter on a focused
-    // button auto-repeat while held, so `e.repeat` is what keeps the second
-    // and hundredth keydown from starting a second recorder.
+    // Held keys auto-repeat; `e.repeat` stops a second recorder.
     btn.addEventListener('keydown', function (e) {
       if (e.key !== ' ' && e.key !== 'Enter') return;
       e.preventDefault();
@@ -1993,15 +1404,10 @@
       e.preventDefault();
       stop();
     });
-    // A button that fires `click` as well would start a recording nobody is
-    // holding: the key gesture above already ran, and the browser synthesises
-    // this one after it.
+    // The synthesised click would start a recording nobody holds.
     btn.addEventListener('click', function (e) { e.preventDefault(); });
   }
 
-  // ── Capture, as a verb ──────────────────────────────────────────────
-  // Everything the capture page used to do inline, on the one box. The
-  // reasons are the page's own and travel with the code.
   function captureVerb() {
     var form = document.getElementById('box-form');
     if (!form) return;
@@ -2011,32 +1417,17 @@
 
     var drop = document.getElementById('drop');
     var picker = drop && drop.querySelector('input[type=file]');
-    // Same reason as EAGER: read off the picker the server rendered, which
-    // names `image/*` only where `[infer.vision]` is configured.
+    // Like EAGER: the server's picker names `image/*` only where `[infer.vision]` is configured.
     var VISION = !!picker && (picker.getAttribute('accept') || '').indexOf('image/*') >= 0;
 
-    // ── What is waiting to be sent ────────────────────────────────────────
-    // A file arriving is not a capture. It is held here until Capture is
-    // pressed, so the note can be written into the box above it and the wrong
-    // photo can be removed — on a phone the camera hands the picture back the
-    // moment it is taken, and uploading on arrival meant the operator never
-    // got a say.
+    // A file is held until Capture is pressed, so it can be annotated or removed.
     var staged = null, stagedUrl = null;
-    // Set from the press until the upload answers. `staged` is cleared before
-    // the file is sent, and a debounce armed by the last word of the note
-    // fires after that — a search for the annotation, which is the one thing
-    // the guard below exists to prevent. The box is not cleared early instead:
-    // a capture that fails keeps its note for the second press.
+    // Set from the press until the upload answers, so a late debounce cannot search the note.
     var sending = false;
     var stagedBox = document.getElementById('staged');
 
-    // The box is that file's note while one is staged, and typing an
-    // annotation into a live search box is an embedding call, an activation
-    // bump and a Judge-queue row per phrase — for text nobody asked as a
-    // question. Cancelling the form's own requests rather than rewriting its
-    // `hx-trigger`: the trigger is the template's to say, and this holds
-    // whatever it says. Capture does not go through the form, and Ask is
-    // disabled in `boxVerbs` while a file waits.
+    // While a file is staged the box is its note; typing it must not search. The form's requests are
+    // cancelled rather than its `hx-trigger` rewritten.
     form.addEventListener('htmx:beforeRequest', function (e) {
       if (staged || sending) e.preventDefault();
     });
@@ -2046,34 +1437,21 @@
 
     function unstage() {
       staged = null;
-      // The object URL holds the picture in memory until it is let go.
-      if (stagedUrl) { URL.revokeObjectURL(stagedUrl); stagedUrl = null; }
+      stagedUrl = null;
       stagedThumb.removeAttribute('src');
       stagedThumb.hidden = true;
       stagedName.hidden = true;
       stagedClear.hidden = true;
-      // The whole box goes: it is not an invitation any more, it is the thing
-      // waiting to be sent. The picker in the verb row is the invitation, and
-      // it costs a search nothing.
+      // The verb-row picker is the invitation.
       if (stagedBox) stagedBox.hidden = true;
       if (drop) drop.hidden = false;
-      // Or picking the same file twice in a row fires no `change` the second
-      // time, and the drop zone looks broken.
+      // Or picking the same file twice fires no `change`.
       if (picker) picker.value = '';
-      // Capture may have been armed by this file alone. See `sync` in
-      // boxVerbs, which listens for this.
+      // See `sync` in boxVerbs.
       box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
     }
 
-    // `restore` is the failed upload coming back: the same file, already
-    // described, and no reason to take the caret off the note a second time.
-    //
-    // Where a capture answers. A press was once two captures — a staged file
-    // and the text above it, which is now that file's note — and both wrote
-    // this node whole: whichever request landed last wiped the other's line,
-    // an upload's error included. A line each, cleared once per press. One
-    // press writes one line now, and the appending swap below is what keeps
-    // that true rather than what makes it necessary.
+    // `restore`: a failed upload coming back. One press writes one appended line.
     function receipt() {
       var host = document.getElementById('capture-result');
       var slot = document.createElement('p');
@@ -2087,8 +1465,7 @@
 
     function stage(file, restore) {
       if (!file) return;
-      // Said now rather than after the operator has written a note for a file
-      // this server was never going to read.
+      // Said before a note is written for a file the server cannot read.
       if (file.type.indexOf('image/') === 0 && !VISION) {
         clearReceipts();
         receipt().textContent = 'Image capture is not configured on this server.';
@@ -2100,117 +1477,88 @@
       stagedName.textContent = (file.name || 'photo.jpg') +
         ' — ready. Press Capture.';
       if (file.type.indexOf('image/') === 0) {
-        stagedUrl = URL.createObjectURL(file);
-        stagedThumb.src = stagedUrl;
-        stagedThumb.hidden = false;
+        // A data: URL: the CSP's img-src allows data:, not blob:.
+        var reader = new FileReader();
+        var mine = file;
+        reader.onload = function () {
+          if (staged !== mine) return;
+          stagedUrl = reader.result;
+          stagedThumb.src = stagedUrl;
+          stagedThumb.hidden = false;
+        };
+        reader.readAsDataURL(file);
       }
       stagedName.hidden = false;
       stagedClear.hidden = false;
-      // The invitation steps aside for the file that accepted it: one box,
-      // saying one thing at a time.
       if (stagedBox) stagedBox.hidden = false;
       if (drop) drop.hidden = true;
-      // Only where a pointer says there is a hardware keyboard — the rule the
-      // paste box and the search box already follow. On a phone this would
-      // throw the software keyboard over the thumbnail the operator is
-      // checking, which is the picture they just took.
+      // Only with a hardware keyboard; on a phone the keyboard would cover the thumbnail.
       if (!restore && window.matchMedia('(hover: hover)').matches) box.focus();
-      // A file over an empty box is still something Capture can act on. See
-      // `sync` in boxVerbs, which listens for this.
+      // See `sync` in boxVerbs.
       box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
     }
 
     function send(file, note) {
       if (!file) return;
       var isImage = file.type.indexOf('image/') === 0;
-      // By name as well as by type: a drop from some file managers carries no
-      // type at all, and the door judges those by their name too.
+      // Some file managers drop files with no type.
       var isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
       var result = receipt();
       if (isImage && !VISION) {
         result.textContent = 'Image capture is not configured on this server.';
         return;
       }
-      // The upload does not go through htmx, so the spinner beside the button
-      // never lit for it. On a phone a photo is the slowest thing this page
-      // sends and pressing Capture looked like it had done nothing.
+      // Not through htmx, so its spinner never lights.
       result.textContent = 'Sending…';
       var payload = new FormData();
       if (note) payload.append('note', note);
-      // The fallback name matters: a PDF that arrived unnamed and went up as
-      // `paste.txt` would be refused by the very door it belongs to.
+      // A PDF sent as `paste.txt` would be refused by its own door.
       var fallbackName = isImage ? 'photo.jpg' : (isPdf ? 'capture.pdf' : 'paste.txt');
       payload.append(isImage ? 'image' : 'file', file, file.name || fallbackName);
       var url = isImage ? '/api/v1/corpora/image' : '/api/v1/corpora/upload';
-      // The session cookie authenticates this: it is same-origin, so no token
-      // is involved.
+      // Same-origin: the session cookie authenticates it.
       fetch(url, { method: 'POST', body: payload })
-        // Not every failure answers in JSON. A file over the body limit is
-        // rejected before the handler sees it, and that reply is plain text —
-        // parsing it threw, and with nothing catching the throw the drop zone
-        // sat there having visibly done nothing.
+        // A body over the limit is refused before the handler, as plain text.
         .then(function (r) {
           return r.json()
             .catch(function () { return { error: 'engram answered ' + r.status + '.' }; })
             .then(function (j) { return [r.ok, j]; });
         })
-        .catch(function () { return [false, { error: 'engram is unreachable.' }]; })
+        .catch(function () { return [false, { error: 'Server unreachable.' }]; })
         .then(function (pair) {
-          // Lifted before the branches: `refreshRail` below submits the form,
-          // and a guard still standing would cancel the very refresh the
-          // capture was made for. Any debounce armed while the note was being
-          // typed has long since tried to fire and been cancelled — it was
-          // 120ms behind the press, and this is a round trip later.
+          // Lifted first, or the guard cancels `refreshRail`'s own submit.
           sending = false;
-          // The server's reason, verbatim. A generic "upload failed" would
-          // hide what actually goes wrong here: wrong type, wrong encoding,
-          // an image door that is closed.
+          // The server's reason, verbatim.
           result.textContent = pair[0]
             ? (isImage ? 'Captured — the photo is queued to be read.'
                : isPdf ? 'Captured — the PDF is queued to be extracted.'
                : 'Captured.')
             : (pair[1].error || 'Upload failed.');
           if (pair[0]) {
-            // The note went in with the file. The box is a search box again
-            // and holding the words it sent is not that.
             box.value = '';
             box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
             refreshRail();
-            // A photo or a PDF ends an empty base exactly as a paste does, and
-            // this path never goes near `/ui/capture` — without this the first
-            // capture of a phone-only base left the page arranged for nothing.
+            // This path never touches `/ui/capture`, so it must end an empty base itself.
             syncHeld();
           } else {
-            // It never left. Put it back where it was, so the fix is a second
-            // press rather than a second trip to the camera.
+            // Back where it was, so the fix is a second press.
             stage(file, true);
           }
         });
     }
     if (picker) picker.addEventListener('change', function () { stage(picker.files[0]); });
 
-    // The whole page is the drop target, because a browser that is not offered
-    // the file takes it: a photo dropped an inch wide of the box replaced
-    // engram with the picture, and the capture the operator was in the middle
-    // of writing went with it. The box below still says where to aim; missing
-    // it is no longer punished.
-    //
-    // Only for drags carrying files. Dragging selected text into the paste box
-    // is a drop too, and cancelling that one would break a thing that works.
+    // The whole page is the drop target, or the browser opens the file over engram. Files only:
+    // dropping selected text into the box must keep working.
     function carriesFiles(e) {
       var types = e.dataTransfer && e.dataTransfer.types;
       if (!types) return false;
       for (var i = 0; i < types.length; i++) if (types[i] === 'Files') return true;
       return false;
     }
-    // `dragenter` and `dragleave` fire again for every element the pointer
-    // crosses on the way in, so a depth count is what tells the page's edge
-    // from the boundary between two paragraphs inside it.
+    // Enter/leave fire per element crossed; a depth count finds the page's edge.
     var depth = 0;
-    // Both the staged box and the picker light up, because only one of them is
-    // on screen at a time: before anything is staged the box is `display:
-    // none`, so a class on it alone made the first drop — the common one —
-    // a drag with no visible target anywhere on the page.
+    // Before staging the box is `display: none`, so the picker lights too.
     function dim(on) {
       if (stagedBox) stagedBox.classList.toggle('dropping', on);
       if (drop) drop.classList.toggle('dropping', on);
@@ -2225,8 +1573,7 @@
       if (!carriesFiles(e)) return;
       if (--depth <= 0) undim();
     });
-    // Without cancelling `dragover` the drop never happens — the browser reads
-    // the absence as "nothing here takes this" and opens the file itself.
+    // Without cancelling `dragover` the browser opens the file itself.
     document.addEventListener('dragover', function (e) {
       if (carriesFiles(e)) e.preventDefault();
     });
@@ -2240,50 +1587,22 @@
 
     if (stagedClear) stagedClear.addEventListener('click', unstage);
 
-    // The Capture verb. A staged file is what it sends; with nothing staged it
-    // posts what is in the box. Text typed above a staged file is not thrown
-    // away — it goes as the capture it is, in the same press.
-    //
-    // The box's own form is a GET that searches, so the text cannot ride it:
-    // this posts to the same `/ui/capture` the old form did, with the same
-    // fields, and lands in the same fragment.
-    // The rail after a capture. A synthetic `input` keeps the verbs honest
-    // but matches nothing in the form's trigger list, so the rail kept
-    // showing results for text that no longer existed. The form's own submit
-    // is the refresh: with the box just emptied the results endpoint answers
-    // with the idle rail, whose "Last captured" row is the capture landing.
+    // The form's own submit is the refresh: with the box empty the results endpoint answers the idle rail.
     function refreshRail() {
       htmx.trigger(form, 'submit');
-      // The capture emptied the box, so the idle column is correct again — and
-      // this is the moment a reminder captured a second ago wants to appear.
-      // The band's own polling covers the gap between here and the background
-      // job that reads the intent out of the note.
+      // A reminder captured a second ago should appear now; the band's poll covers the background job.
       showIdle(true);
     }
 
-    // Hands back its promise: the press that carries a file too runs the two
-    // one after the other, and this is how the second one knows to start.
+    // Returns its promise so a press with a file can chain the two.
     function postText() {
       var text = box.value.trim();
       if (!text) return Promise.resolve();
       var fromAsk = document.querySelector('input[name="from_ask"]');
-      // The search this text was typed into, which the results fragment fills
-      // out of band on every answer (see `_results.html`). The box searches
-      // while it is typed, so that event is this capture's first draft — and
-      // it found nothing, because nothing was there yet. Sent so the hole it
-      // would otherwise become closes against the text that answers it.
-      // Absent before the first answer comes back, and then this is an
-      // ordinary capture: the coverage check still has its own say.
+      // The search this text was typed into, so its hole closes against the text that answers it.
       var fromSearch = document.querySelector('#fold-of input[name="fold"]');
-      // htmx settles this promise for every answer the server gives, a 500
-      // among them — it rejects only for a request that never completed at
-      // all — so the promise on its own says nothing about whether anything
-      // was stored, and the clear below ran on the failures too. The verdict
-      // is on `htmx:afterRequest`, which fires before the promise settles.
-      //
-      // Matched on the path because the box's own search is firing requests
-      // from the same body at the same time, and either one's status would
-      // otherwise be read as this one's.
+      // htmx settles the promise for any answer, a 500 included; the verdict is on `htmx:afterRequest`,
+      // matched on the path since the box's search runs alongside.
       var stored = false;
       function verdict(e) {
         var path = e.detail && e.detail.pathInfo;
@@ -2293,58 +1612,37 @@
       document.body.addEventListener('htmx:afterRequest', verdict);
       return htmx.ajax('POST', '/ui/capture', {
         target: '#capture-result',
-        // Appended, not replaced: an upload sent by the same press has its own
-        // line in here, and a receipt that overwrites the other one is how the
-        // page came to report only whichever request was slower.
+        // Appended: an upload from the same press has its own line.
         swap: 'beforeend',
-        // The zone travels with the text. Without it the box stored none and
-        // the server read *tomorrow at 9* in its own default, while the echo
-        // directly under the box had already told the operator 09:00 in theirs.
+        // The zone travels with the text, so *tomorrow at 9* matches the echo.
         values: {
           text: text,
           from_ask: fromAsk ? fromAsk.value : '',
           from_search: fromSearch ? fromSearch.value : '',
           tz: (document.getElementById('box-tz') || {}).value || ''
         }
-      // A transport failure rejects, and nothing catching it was an unhandled
-      // rejection on top of a capture that visibly did nothing.
+      // A transport failure rejects.
       }).catch(function () {}).then(function () {
         document.body.removeEventListener('htmx:afterRequest', verdict);
-        // Cleared only on the path that stored something: a failed capture
-        // that emptied the box would lose the text it failed to keep, and the
-        // error fragment beside it is not where the text went.
+        // A failed capture keeps its text.
         if (!stored) return;
-        // The provenance was about the text that just went in, and the box
-        // stays open. Left standing, the next thing pasted into it was stored
-        // as the same model answer — `origin = "ask"`, that question, those
-        // citations — for words the operator typed themselves.
+        // Or the next paste is stored as the same model answer.
         var kept = document.getElementById('kept-from');
         if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
-        // The same for the search this text was typed into: it has had its
-        // answer. Left standing, the next paste too long to be searched went
-        // out naming it, and a named search closes its gap with no distance
-        // check. The idle answer below clears it too; this does not wait on it.
+        // Or the next unsearchable paste names that search and closes its gap unchecked.
         var foldOf = document.getElementById('fold-of');
         if (foldOf) foldOf.textContent = '';
         box.value = '';
         box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
         refreshRail();
-        // The base may have just stopped being empty. Asked after the box is
-        // cleared, so the placeholder this uncovers is the one that lands.
+        // After the box is cleared, so the uncovered placeholder is the one that lands.
         syncHeld();
       });
     }
     verb.addEventListener('click', function (e) {
       e.preventDefault();
       clearReceipts();
-      // A staged file is one capture, annotated — never two. The box is read
-      // here, at press time, which is what makes the order the file and the
-      // words arrived in stop mattering: nothing moved when the file was
-      // staged, and nothing moves now but this read.
-      //
-      // `from_ask` needs no guard: `postText` is its only sender, and a staged
-      // file no longer reaches it. A whole model answer turned into a caption
-      // on somebody's PDF is not what that provenance claims.
+      // A staged file is one annotated capture; the box is read at press time. `from_ask` only rides `postText`.
       if (staged) {
         var file = staged;
         var note = box.value.trim();
@@ -2355,11 +1653,7 @@
       }
       postText();
     });
-    // A pasted screenshot goes the same way as a dropped one — unless the
-    // paste is on its way somewhere that takes text. A clipboard from Sheets,
-    // Excel or Word carries the selection twice, as text and as a picture of
-    // itself, so taking the picture while the caret sat in the note box
-    // staged a screenshot and swallowed the paste the user asked for.
+    // A Sheets/Excel/Word clipboard carries a picture too; take it only when the paste is not headed for text.
     document.addEventListener('paste', function (e) {
       var t = e.target;
       if (t && t.closest && t.closest('textarea, input, [contenteditable]')) return;
@@ -2374,26 +1668,14 @@
     });
     }
 
-  // ── Vector background ───────────────────────────────────────────────────
-  // A slow monochrome rotation of the store's own vectors, projected to 3-D
-  // on the server (random projection, fixed seed). Decorative, and held to a
-  // decoration's budget: one revalidation per load, a few bytes of it
-  // whenever the store has not moved, a 12 fps ceiling, no loop at all under
-  // prefers-reduced-motion, and silence on every failure — a picture of the
-  // database may never take the page down with it.
+  // A slow rotation of a server-side 3-D projection of the store's vectors. Held to a decoration's
+  // budget: one revalidation per load, 12 fps, still under reduced motion, silent on failure.
   function vectorBg() {
     var CACHE_KEY = 'engram.vbg';
 
-    // Login and any other page without chrome get no canvas. The topbar is
-    // exactly the marker: login empties the nav block.
-    //
-    // It is also where the snapshot is dropped. Every other key this file
-    // writes is a local preference; this one is server data — a projection of
-    // one account's store — and `/auth/logout` clears the cookie and nothing
-    // else. Without this, signing out and signing a second account in on the
-    // same browser redrew the first one's cloud straight from `localStorage`,
-    // with no authorization anywhere on the path.
-    if (!document.querySelector('.topbar')) {
+    // No topbar, no canvas. The snapshot is server data and logout clears only the cookie, so it is
+    // dropped here, or the next account would see the last one's cloud.
+    if (!document.querySelector('.oc-topbar')) {
       try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
       return;
     }
@@ -2401,12 +1683,7 @@
     var SPIN = 0.01 * Math.PI; // rad/s — slow enough to feel geological
     var AXIS_MIN = 6, AXIS_MAX = 14; // seconds on one rotation axis
     var BUCKETS = 8;
-    // Nothing nearer to the camera than this is drawn. The projection divides
-    // by `radius - z`, so a point swinging towards the eye has no bound on how
-    // far off-canvas it lands — which is what turned the axes into streaks
-    // running clean off every edge of the window with no endpoint in sight.
-    // Points are pulled from a bounded cloud and never come close; the axes
-    // are drawn out to their own ends, so they do.
+    // The projection divides by `radius - z`, so nothing nearer than this is drawn.
     var NEAR_Z = 0.55;
 
     var canvas = document.createElement('canvas');
@@ -2420,8 +1697,6 @@
     var theta = 0.7, phi = 1.15;
     var spinT = SPIN, spinP = 0, nextAxisAt = 0;
 
-    // The axis changes every few seconds — a fixed one reads as a screensaver
-    // on rails; a wandering one reads as an object.
     function pickAxis(t) {
       var r = Math.random();
       if (r < 0.35) {
@@ -2437,19 +1712,13 @@
       nextAxisAt = t + AXIS_MIN + Math.random() * (AXIS_MAX - AXIS_MIN);
     }
 
-    // The one colour, re-read every draw: a theme flip mid-session is picked
-    // up on the next frame with no listener at all.
+    // Re-read every draw, so a theme flip needs no listener.
     function ink() {
-      var hex = getComputedStyle(document.body).getPropertyValue('--color-fg-muted').trim();
-      var m = /^#([0-9a-f]{6})$/i.exec(hex);
-      if (!m) return { r: 122, g: 122, b: 114 };
-      var n = parseInt(m[1], 16);
-      return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+      return getComputedStyle(document.body).getPropertyValue('--color-fg-muted').trim() || 'gray';
     }
 
     function resize() {
-      // Capped rather than native: at 3x a phone paints nine times the pixels
-      // for a picture whose finest detail is a two-pixel dot.
+      // Capped: at 3x a phone paints nine times the pixels for two-pixel dots.
       var dpr = Math.min(window.devicePixelRatio || 1, 1.5);
       canvas.width = Math.round(window.innerWidth * dpr);
       canvas.height = Math.round(window.innerHeight * dpr);
@@ -2464,20 +1733,11 @@
       var z2 = py * cp + z1 * sp;
       var radius = 2.5;
       var d = radius - z2;
-      // `!(d > 0.01)` rather than `d < 0.01`, so a NaN coordinate fails here
-      // instead of sailing through: every comparison against NaN is false, and
-      // one `null` on the wire or one mangled cache entry used to reach
-      // `buckets[Math.floor(NaN)].push` and throw twelve times a second for
-      // the life of the page.
+      // `!(d > 0.01)` rejects NaN too, which would otherwise throw every frame.
       if (!(d > 0.01)) return null;
       var unit = Math.min(W, H) * 0.52;
       var s = (radius * unit) / d;
-      // Centred horizontally, but only on a window that is not much taller
-      // than it is wide. On a portrait screen the page's content sits in the
-      // top third and a cloud centred on the viewport hangs well below all of
-      // it, reading as an object on the page rather than as the ground behind
-      // one. Pulled up towards the content, and never so far that its own top
-      // leaves the window.
+      // On a portrait screen the cloud is pulled up towards the content.
       var cy = Math.max(unit, Math.min(H * 0.5, H * 0.5 - (H - W) * 0.22));
       var sx = x1 * s + W * 0.5, sy = -y2 * s + cy;
       if (!isFinite(sx) || !isFinite(sy)) return null;
@@ -2487,12 +1747,7 @@
     function drawAxes(c) {
       var L = 1.2, T = 0.05, TICKS = [-1, -0.5, 0.5, 1], STEPS = 24;
 
-      // Walked in steps rather than drawn end to end. A straight line in space
-      // is still straight on the canvas, so the subdivision buys nothing for
-      // shape — it buys the ability to stop the stroke exactly where the axis
-      // crosses the near plane, and to resume it on the far side. Drawn as one
-      // segment, an axis with one end near the eye either vanished whole or
-      // stretched into a streak the length of the window.
+      // In steps, so the stroke can stop at the near plane and resume beyond it.
       function seg(x0, y0, z0, x1, y1, z1) {
         var open = false;
         for (var n = 0; n <= STEPS; n++) {
@@ -2504,9 +1759,8 @@
         }
       }
       ctx.beginPath();
-      // Dimmer than the cloud it frames. These are scaffolding: they say which
-      // way the thing is turning, and nothing else.
-      ctx.strokeStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',0.13)';
+      ctx.strokeStyle = c;
+      ctx.globalAlpha = 0.13;
       ctx.lineWidth = 1;
       seg(-L, 0, 0, L, 0, 0);
       for (var i = 0; i < TICKS.length; i++) seg(TICKS[i], -T, 0, TICKS[i], T, 0);
@@ -2522,8 +1776,7 @@
       ctx.clearRect(0, 0, W, H);
       var c = ink();
       drawAxes(c);
-      // Depth shading batched by bucket: one fill per bucket rather than one
-      // per point, so 2000 dots cost 8 draw calls.
+      // One fill per depth bucket: 2000 dots in 8 draw calls.
       var buckets = [];
       for (var b = 0; b < BUCKETS; b++) buckets.push([]);
       for (var i = 0; i < points.length; i++) {
@@ -2535,10 +1788,10 @@
       }
       for (var k = 0; k < BUCKETS; k++) {
         if (!buckets[k].length) continue;
-        // Dim overall, dimmer far away: the cloud is present, never loud.
         var alpha = 0.07 + ((k + 0.5) / BUCKETS) * 0.38;
         ctx.beginPath();
-        ctx.fillStyle = 'rgba(' + c.r + ',' + c.g + ',' + c.b + ',' + alpha.toFixed(3) + ')';
+        ctx.fillStyle = c;
+        ctx.globalAlpha = alpha;
         for (var j = 0; j < buckets[k].length; j++) {
           var q2 = buckets[k][j];
           ctx.moveTo(q2.sx + q2.r, q2.sy); // moveTo keeps the arcs unconnected
@@ -2569,12 +1822,7 @@
 
     function start(pts) {
       if (!pts || !pts.length) { canvas.parentNode.removeChild(canvas); return; }
-      // Centred on its own centroid. The projection is a random one and its
-      // origin is wherever the embedding space happens to put it, so the
-      // cloud arrived off to one side of the axes and off to one side of the
-      // window — behind nothing, beside the page. The centroid is subtracted
-      // once here, so the object turns about its own middle and the middle is
-      // the middle of the window, where the idle column now is.
+      // Centred on its centroid: a random projection's origin is anywhere.
       var cx = 0, cyy = 0, cz = 0;
       for (var i = 0; i < pts.length; i++) { cx += pts[i][0]; cyy += pts[i][1]; cz += pts[i][2]; }
       cx /= pts.length; cyy /= pts.length; cz /= pts.length;
@@ -2589,27 +1837,19 @@
         if (reduced) draw();
       });
       if (reduced) {
-        // One still frame — which then has to be repainted by hand. `ink()` is
-        // re-read every draw, and with the loop off there is no next draw: the
-        // toggle rewrites `data-theme` in place with no reload, so a
-        // reduced-motion reader who switched to dark kept the light theme's
-        // ink on a dark page until they navigated.
+        // With the loop off, a theme toggle must repaint by hand.
         draw();
         new MutationObserver(draw).observe(document.documentElement, {
           attributes: true, attributeFilter: ['data-theme']
         });
         var dark = window.matchMedia('(prefers-color-scheme: dark)');
-        // The same flip arriving from the system rather than from the toggle.
         if (dark.addEventListener) dark.addEventListener('change', function () { draw(); });
         return;
       }
       requestAnimationFrame(frame);
     }
 
-    // Everything drawn is read back out of storage a page load later, where
-    // anything at all could be standing in for it. One string in the array and
-    // the draw loop throws on every frame, so the shape is checked once here
-    // rather than trusted three hundred times a second.
+    // Storage can hold anything; the shape is checked once rather than every frame.
     function usable(pts) {
       if (!Array.isArray(pts) || !pts.length) return false;
       for (var i = 0; i < pts.length; i++) {
@@ -2628,110 +1868,62 @@
       } catch (e) {}
     }
 
-    // The canvas comes down, the snapshot stays. Used wherever there is
-    // nothing to draw *this* load without that being a verdict on what is in
-    // storage: a store the server could not reach, a backdrop switched off, a
-    // projection that came back empty. Whatever is stored is revalidated on
-    // the next load anyway, so throwing it away here buys nothing and costs a
-    // full refetch.
+    // The canvas comes down but the snapshot stays: this is no verdict on storage.
     function hide() {
       if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
     }
 
-    // The snapshot is never drawn on its own authority, however fresh it looks.
-    // It used to stand for six hours, which meant a base emptied — or reindexed
-    // away, or simply signed out of on a shared browser — went on being drawn
-    // as a cloud of points that no longer existed anywhere. So every load asks,
-    // carrying the tag of what it holds: the answer is either a few bytes
-    // saying the store still matches, or the cloud that replaces it.
+    // Never drawn on its own authority: every load revalidates by tag.
     var cached = null;
     try { cached = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null'); } catch (e) {}
-    // An empty point list is a snapshot like any other — of a store with
-    // nothing drawable in it — and its tag is worth sending. Without that,
-    // "there is nothing to draw" was the one answer the client could never
-    // cache, so an instance with the backdrop off, or a store whose vectors
-    // are all off the modal width, re-ran the whole question on every page
-    // load and never once got to skip it.
+    // An empty snapshot has a tag too, so "nothing to draw" is cacheable.
     var stored = cached && Array.isArray(cached.points)
       && (cached.points.length === 0 || usable(cached.points));
     var have = stored && typeof cached.tag === 'string' ? cached.tag : null;
 
     var url = '/api/v1/vectors/sample';
     if (have) url += '?have=' + encodeURIComponent(have);
-    // `cache: 'no-store'` as well as the response's own header. The header is
-    // what stops a *new* answer being held; this is what stops an answer some
-    // earlier build let the browser keep — a `max-age` snapshot of whoever was
-    // signed in then — being replayed to whoever is signed in now.
+    // `no-store` too, so a snapshot an older build let the browser keep is never replayed.
     fetch(url, { credentials: 'same-origin', cache: 'no-store' })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (data) {
-        // No answer, or an answer with no tag in it: the store could not be
-        // asked, so nothing here is a statement about the cloud in storage.
-        // A tag that fails to match is the statement; its absence is not.
+        // No tag means the store could not be asked; only a mismatched tag is a verdict.
         if (!data || typeof data.tag !== 'string') { hide(); return; }
         if (data.unchanged && have) {
           if (cached.points.length) start(cached.points); else hide();
           return;
         }
         var pts = usable(data.points) ? data.points : [];
-        // Stored before the length is looked at, so that "nothing to draw"
-        // is remembered under its own tag and the next load is the cheap
-        // exchange rather than another full sample.
+        // Stored first, so "nothing to draw" is remembered under its tag.
         keep(pts, data.tag);
         if (!pts.length) { hide(); return; }
         start(pts);
       })
       .catch(function () {
-        // The network, not the store: nothing here says the cloud is wrong, so
-        // the snapshot is left where it is for the next load to revalidate.
+        // A network failure says nothing about the stored cloud.
         hide();
       });
   }
 
-  // ── The refining pass ─────────────────────────────────────────────────────
-  //
-  // Typing gets vector order at embedding speed; the reranker's opinion is
-  // asked for afterwards, once the box has been quiet long enough to mean the
-  // query is settled. The reranked fragment then replaces the list and the
-  // rows glide to their new places, so the reordering reads as a refinement
-  // happening in front of you rather than as the list twitching.
-  //
-  // Armed only by `data-rerank` on the form, which the server renders only
-  // where a reranker actually serves search: without it a second request
-  // could only buy the same order back, and the tick beside the count would
-  // be claiming a confirmation that never took place.
+  // The refining pass: vector order while typing, the reranker's order once the box is quiet, gliding in.
+  // Armed only by `data-rerank`, which the server renders only where a reranker serves search.
 
-  // Was this swap the refining pass? Read off the request rather than kept in
-  // a flag, so the fast handler below and the driver cannot disagree about
-  // which swap they are looking at.
+  // Read off the request rather than a flag, so the handlers cannot disagree.
   function wasRefine(e) {
     var cfg = e.detail && e.detail.requestConfig;
-    // The pre-filter set: `parameters` is only what survived `hx-params`, so
-    // an allowlist edit there would silently turn every refine swap back into
-    // a typing swap — and the typing branch re-arms the timer, which is the
-    // loop that never stops.
+    // Unfiltered: `parameters` is post-`hx-params`, and a miss here re-arms the timer forever.
     var params = cfg && (cfg.unfilteredParameters || cfg.parameters);
     return !!(params && params.rerank === 'true');
   }
 
-  // Was this the idle line's own poll? Same question as `wasRefine` and for the
-  // same reason: nobody asked for this request. It fires every three seconds
-  // while a capture is read, so a 500 wrote "That did not work" into the
-  // paragraph on every tick, and an expired session navigated a reader to the
-  // login page from a timer, mid-sentence.
+  // Nobody asked for this poll, so its errors must not write into the paragraph or navigate away.
   function wasIdlePoll(e) {
     var cfg = e.detail && e.detail.requestConfig;
     return String((cfg && cfg.path) || '').indexOf('/ui/idle-foot') === 0;
   }
 
-  // The read landed. The rail may be standing at "No matches yet · still
-  // reading", which is a dead end: the search that drew it ran against a base
-  // that was still taking the answer in, and nothing re-ran it. The idle line's
-  // last poll — the one that reports the reading over — fires this.
-  //
-  // Only from that state, and only over a box that is not mid-request: a search
-  // somebody is in the middle of typing is already on its way, and re-running
-  // it would be a second one for the same keystroke.
+  // A "still reading" rail was searched against an unfinished base; re-run it once the read lands.
+  // Not over a box mid-request.
   function rerunAfterRead() {
     document.body.addEventListener('engram:read-landed', function () {
       if (!document.querySelector('#results .still-reading')) return;
@@ -2741,10 +1933,7 @@
     });
   }
 
-  // The rail's selected row, recomputed from the URL. Run after any swap that
-  // repaints the list while an artifact is open: the fragment renders every
-  // row `aria-selected="false"`, and the open artifact's highlight must
-  // survive a repaint it had nothing to do with.
+  // The fragment renders every row unselected; the open artifact's highlight must survive.
   function markOpenRow() {
     var open = window.location.pathname;
     document.querySelectorAll('.rail-item').forEach(function (el) {
@@ -2757,31 +1946,20 @@
     if (!form || form.getAttribute('data-rerank') !== 'true') return;
     var box = form.querySelector('textarea[name="q"]');
     if (!box) return;
-    // Long enough past the 120ms debounce to mean "settled", short enough
-    // that the refinement still reads as part of the same answer.
+    // Long enough past the 120ms debounce to mean "settled".
     var QUIET_MS = 500;
     var timer = null;
-    // Where each row stood when the refine was fired, keyed by href — taken
-    // just before the request, spent by the animation, and good for exactly
-    // one swap.
+    // Row positions keyed by href, good for exactly one swap.
     var from = null;
-    // The last refined answer, kept to be replayed: `key` is the query and
-    // chip it answered, `hrefs` the row set it is valid over, `html` and
-    // `head` the fragment and the count line it painted.
+    // `key`: query and chip; `hrefs`: the row set it is valid over; `html`/`head`: what it painted.
     var refined = null;
-    // The key of the refine in flight, promoted into `refined` when its swap
-    // lands.
     var pending = null;
 
     function cancel() {
       if (timer) { clearTimeout(timer); timer = null; }
     }
 
-    // Positions are taken relative to the list itself rather than the
-    // viewport: the rail is its own scroll box on a wide screen and the
-    // window scrolls on a narrow one, and a refine can land seconds after it
-    // fired. Viewport coordinates captured before a scroll would make every
-    // unmoved row lurch by exactly the scroll distance.
+    // Relative to the list: the scroller differs by width, and a refine can land after a scroll.
     function resultsTop() {
       var el = document.getElementById('results');
       return el ? el.getBoundingClientRect().top : 0;
@@ -2790,20 +1968,16 @@
     function fire() {
       timer = null;
       var q = box.value.trim();
-      // The same two guards the endpoint applies: an empty box is the idle
-      // rail, and a pasted chapter is a capture, not a query.
+      // The endpoint's guards: an empty box is the idle rail, a chapter is a capture.
       if (!q || q.length > 2000) return;
       var values = { q: q, rerank: 'true' };
       var chip = form.querySelector('input[name="category"]:checked');
       if (chip && chip.value) values.category = chip.value;
-      // This request is built by hand, so `hx-params` on the form does not
-      // reach it: the flag has to be copied across or the refined answer
-      // silently drops the explanation the fast pass painted.
+      // Built by hand, so `hx-params` does not reach it.
       var why = form.querySelector('input[name="explain"]');
       if (why && why.value) values.explain = why.value;
       var rows = document.querySelectorAll('#results .rail-item');
-      // Nothing to refine: the server skips the rerank call over an empty
-      // answer, so the request would buy a guaranteed-identical fragment.
+      // The server skips the rerank over an empty answer.
       if (!rows.length) return;
       var key = q + '\u0000' + (values.category || '');
       var origin = resultsTop();
@@ -2814,24 +1988,14 @@
         hrefs.push(href);
         from[href] = el.getBoundingClientRect().top - origin;
       });
-      // The same query, settled again over the same rows — a type-and-undo,
-      // a chip toggled back. The reranker already answered this exact
-      // question, so its fragment is replayed rather than bought twice.
-      // Replayed only over an identical row set: a capture landing
-      // mid-sitting changes what there is to rank, and a stored answer must
-      // never hide a row the fast pass just showed. Both sides of the
-      // comparison are fast-pass sets — this one and the one captured when
-      // the stored refine fired — sorted into set order, because what is
-      // being asked is "same rows", not "same order".
+      // Replayed only for the same query over the same fast-pass row set (compared as sets).
       if (refined && refined.key === key && refined.hrefs === hrefs.slice().sort().join('\n')) {
         var target = document.getElementById('results');
         if (target) {
           target.innerHTML = refined.html;
           var head = document.getElementById('rail-head');
           if (head && refined.head) head.innerHTML = refined.head;
-          // By hand, so none of the htmx swap machinery ran: the new rows
-          // need their hx- attributes wired, the same enhancements a real
-          // swap gets, and the selection recomputed.
+          // Swapped by hand, so wire htmx and recompute the selection.
           htmx.process(target);
           enhance(target);
           markOpenRow();
@@ -2840,16 +2004,9 @@
         }
         return;
       }
-      // The row set the refine is answering over is the one on screen *now*:
-      // the reranker reorders (and promotes into) what the fast pass matched,
-      // so its fragment can show rows this list does not. Valid replay is
-      // "same query over the same fast-pass rows", which only this moment
-      // knows — captured here, promoted into `refined` when the swap lands.
+      // Captured now: only this moment knows the fast-pass rows the refine answers over.
       pending = { key: key, hrefs: hrefs.slice().sort().join('\n') };
-      // `source: form` so this request stands in the form's own sync queue:
-      // a keystroke's search replaces an in-flight refine exactly as it
-      // replaces an older keystroke's search, and the list shown is always
-      // the answer to the last thing typed.
+      // `source: form` puts it in the form's sync queue, so a keystroke replaces an in-flight refine.
       htmx.ajax('GET', '/ui/search/results', {
         source: form, target: '#results', swap: 'innerHTML', values: values
       });
@@ -2864,8 +2021,7 @@
       document.querySelectorAll('#results .rail-item').forEach(function (el) {
         var top = was[el.getAttribute('href')];
         if (top === undefined) {
-          // A row the fast pass never showed: promoted from the candidate
-          // pool. Nowhere to glide from, so it arrives instead.
+          // Promoted from the candidate pool: nowhere to glide from.
           el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 300, easing: 'ease-out' });
           return;
         }
@@ -2878,41 +2034,18 @@
       });
     }
 
-    // A keystroke inside the debounce window: the pending refine belongs to a
-    // query that is no longer what the box says. Composition events are
-    // skipped to mirror the form's own trigger filter
-    // (`input[!event.isComposing]`): a browser whose final IME event still
-    // says composing fires no search off it, and a cancel with no request
-    // behind it would leave the pass disarmed on a settled query. The
-    // composition itself disarms once, below, when it starts.
+    // Composition events are skipped to mirror the form's `input[!event.isComposing]` filter.
     box.addEventListener('input', function (e) {
       if (e.isComposing) return;
       cancel();
     });
     box.addEventListener('compositionstart', cancel);
-    // Any request from the form — a keystroke's search, a chip, the refine
-    // itself — retires the pending timer; the fast swap landing below is what
-    // arms a new one. And any mutation from anywhere — an edit saved in the
-    // detail pane, a deprecate, a delete — retires the stored answer: its
-    // fragment carries titles and snippets as they stood when it was bought,
-    // and a pane-only edit changes those without touching the row set the
-    // replay guard checks.
+    // Any form request retires the timer; any mutation retires the stored answer, whose snippets may be stale.
     document.body.addEventListener('htmx:beforeRequest', function (e) {
       if (!e.detail) return;
       if (e.detail.elt === form) {
         cancel();
-        // Which of the two passes is in flight, said rather than left as one
-        // word for both. `searching…` was true of everything and therefore
-        // told you nothing: the fast pass is vector order at embedding speed
-        // and the second one is the reranker's opinion, and how long each is
-        // worth waiting for is not the same answer.
-        //
-        // The limit of the claim, stated because it is easy to mistake for
-        // more: this names the request that is open, not the stage the server
-        // is inside. `Core::search_events` reports that, and the box does not
-        // read it — adopting the channel here means rebuilding what htmx does
-        // around this form by hand, which is not worth two words. See
-        // `docs/superpowers/specs/2026-08-28-cli-face-design.md` §1.
+        // Names the open request, not the server's stage (`Core::search_events`, which the box does not read).
         var spinner = document.getElementById('search-spinner');
         if (spinner) spinner.textContent = wasRefine(e) ? 'reranking…' : 'retrieving…';
       }
@@ -2922,17 +2055,9 @@
     document.body.addEventListener('htmx:afterSwap', function (e) {
       if (e.target.id !== 'results') return;
       if (wasRefine(e)) {
-        // The fragment renders every row unselected, and this swap can land
-        // over a list whose open artifact was clicked during the quiet
-        // window; the highlight must not vanish under a repaint that changed
-        // nothing about what is open.
+        // A row may have been opened during the quiet window.
         markOpenRow();
-        // Kept to be replayed the next time this exact query settles over
-        // this exact row set — see `fire`. The row set stored is the
-        // fast-pass one `fire` captured, not the fragment's: the reranker
-        // may have promoted rows the fast list never showed, and a replay
-        // guard built from those would miss every time the rerank did
-        // anything at all.
+        // Stored with the fast-pass row set from `fire`, since the rerank may promote other rows.
         var target = document.getElementById('results');
         if (pending && target) {
           var head = document.getElementById('rail-head');
@@ -2946,12 +2071,9 @@
         pending = null;
         glide();
       } else {
-        // The same repaint hazard as the refine branch: a typing swap also
-        // renders every row unselected, and the open artifact's highlight
-        // must survive it.
+        // A typing swap also renders every row unselected.
         markOpenRow();
-        // Never re-armed off a refine swap: that loop would turn one settled
-        // query into a rerank call every half second forever.
+        // Never re-armed off a refine swap, or it reranks every half second forever.
         cancel();
         from = null;
         timer = setTimeout(fire, QUIET_MS);
@@ -2959,23 +2081,11 @@
     });
   }
 
-  // ── The countdown on the due band ─────────────────────────────────────────
-  //
-  // The band re-reads at most every five minutes (`due::POLL_CAP`), so a
-  // gradient left to the server would step five times an hour and a countdown
-  // would be wrong by up to five minutes — which is the whole of what a
-  // countdown is for. Both are recomputed here from `data-due-at`, off one
-  // timer, using the same rules as `due::due_words` and `due::heat`; the
-  // server's render is what a reader with no JS sees, and it is correct at the
-  // instant it is sent.
+  // The band re-reads at most every five minutes (`due::POLL_CAP`), so the countdown and heat are recomputed
+  // here with the rules of `due::due_words` and `due::heat`.
   var HEAT_WINDOW = 6 * 3600;
 
-  // Whole seconds. `dueTick` works from `Date.now() / 1000`, which is
-  // fractional, and every branch below the first floors its unit on the way to
-  // a number — this one did not, so the last minute before a reminder counted
-  // down as `in 45.372s` and re-jittered on every tick, and the minute after
-  // read `3.128s overdue`. The server's `due_words` is integer arithmetic, so
-  // the row was correct until the client timer took it over.
+  // Whole seconds, as the server's integer `due_words`.
   function spanWords(secs) {
     var s = Math.max(0, Math.floor(secs));
     if (s < 60) return s + 's';
@@ -2998,50 +2108,18 @@
         '--heat',
         (ahead <= 0 ? 1 : ahead >= HEAT_WINDOW ? 0 : 1 - ahead / HEAT_WINDOW).toFixed(3)
       );
-      // Outside the window the row shows a wall-clock time the server wrote,
-      // and there is nothing to count. Left alone rather than reformatted:
-      // the date words are the server's, in the viewer's zone, and rebuilding
-      // them here would be a second implementation of the same sentence.
+      // Beyond the window the server's wall-clock words stand.
       if (ahead >= HEAT_WINDOW) return;
       var count = row.querySelector('.due-count');
       if (!count) return;
       var text = ahead <= 0 ? spanWords(-ahead) + ' overdue' : 'in ' + spanWords(ahead);
       if (count.textContent !== text) count.textContent = text;
-      // It crossed while the page was open: the row is late now, and the
-      // weight the stylesheet gives a late row has to follow.
       if (ahead <= 0) row.classList.add('due-overdue');
     });
   }
 
-  // The band polls, and a swap replaces every row in it — including the
-  // `later` a person has just opened and the date they are half way through
-  // typing. Opening `later` and watching it shut a second later is not a
-  // disclosure anyone can use, and no poll interval makes that acceptable: at
-  // five minutes it is a rarer version of the same defect.
-  //
-  // Only the band's own requests are held off. A snooze or a `done` is a
-  // button inside the band asking to be swapped, and must always land.
-  //
-  // The undo is the third thing a swap destroys, and the worst of the three.
-  // `just` — "Done · undo" — is rendered for exactly one swap, and it shares
-  // the `#due` element the poll replaces; the poll runs every two seconds
-  // while anything is in flight, and a capture puts something in flight. So
-  // pressing done on a moment, with a capture still settling, offered the undo
-  // and took it back before it could be read — and for a deleted moment it is
-  // the only way back.
-  //
-  // Bounded rather than absolute: an undo nobody takes must not stop the band
-  // for ever. It is held for as long as a person plausibly reaches for it and
-  // then let go, after which one poll clears it and the next press starts the
-  // clock again.
-  //
-  // The clock is stamped where the undo arrives — in the swap handler below,
-  // off the response about to land — and not lazily from in here. Read from
-  // the DOM on the way past, it was only ever written while a band swap was
-  // being considered, so a press whose clearing swap landed while polling was
-  // at five minutes left the stamp behind: the next press, minutes later,
-  // inherited an expired clock and had its undo swapped away by the first poll
-  // after it. For a deleted moment that undo is the only way back.
+  // Polls hold off while `later` is open, a date is being typed, or a fresh undo is showing (for a deleted
+  // moment it is the only way back). Bounded; the clock is stamped in the swap handler, off the response.
   var UNDO_GRACE = 30000;
   var undoSince = 0;
 
@@ -3051,7 +2129,7 @@
     if (band.querySelector('details[open]')) return true;
     if (document.activeElement && band.contains(document.activeElement)) return true;
     if (undoSince && Date.now() - undoSince < UNDO_GRACE) return true;
-    // A date typed but not yet submitted. Nothing else on the band holds text.
+    // A date typed but not yet submitted.
     return Array.prototype.some.call(band.querySelectorAll('input'), function (i) {
       return i.value !== '';
     });
@@ -3063,25 +2141,20 @@
     document.body.addEventListener('htmx:beforeSwap', function (e) {
       if (!e.target || e.target.id !== 'due') return;
       var cfg = e.detail && e.detail.requestConfig;
-      // The poll and the `refresh` event both name the band as their source;
-      // a button names itself.
+      // The poll and `refresh` name the band as source; a button names itself.
       var own = !(cfg && cfg.elt && cfg.elt !== e.target);
       if (own && dueBusy()) {
         e.detail.shouldSwap = false;
         return;
       }
-      // This response is landing, so it is what the band is about to be: an
-      // undo in it is a new undo and starts the clock, and one without clears
-      // it. Read off the response rather than the DOM because the two presses
-      // in a row case has no swap in between to notice the change.
+      // Read off the response: two presses in a row have no swap between them.
       undoSince = (e.detail.serverResponse || '').indexOf('due-done') >= 0 ? Date.now() : 0;
     });
-    // A second is the resolution of the last minute of a countdown, and the
-    // work is a handful of rows: cheaper than the poll it replaces.
+    // Cheaper than the poll it replaces.
     setInterval(dueTick, 1000);
     syncIdle();
     railHandle();
-    themeToggle();
+    migrateThemeKey();
     vectorBg();
     keyHint();
     installNudge();
@@ -3105,134 +2178,65 @@
       if (document.visibilityState === 'hidden') flushDwell();
       else trackDwell();
     });
-    // A session that ended while the page stayed open. htmx swaps nothing on a
-    // 4xx by design, so every click after that point did visibly nothing at
-    // all — the one case the server cannot fix, because a fragment request
-    // must not be answered with a full-page redirect into a login. Handled
-    // here instead, and it names the page so signing in comes back to it.
+    // htmx swaps nothing on a 4xx, and a fragment must not be redirected into a login; so navigate here.
     document.body.addEventListener('htmx:responseError', function (e) {
       if (!e.detail || !e.detail.xhr) return;
-      // Not for the refining pass: nobody asked for that request, and the
-      // vector-order list it would improve is already on screen and being
-      // read. A transient failure half a second after the operator stopped
-      // typing must not replace their results with an error box — and an
-      // expired session must not navigate them to a login mid-read; the next
-      // thing they actually do will land here and redirect with intent.
+      // Unrequested requests must not show an error box or navigate mid-read.
       if (wasRefine(e) || wasIdlePoll(e)) return;
       if (e.detail.xhr.status === 401) {
         var here = window.location.pathname + window.location.search;
         window.location.assign('/auth/login?go=' + encodeURIComponent(here));
         return;
       }
-      // 503 is the one status that means "ask again" rather than "this is
-      // broken" — `Error::InferenceBusy`, and nothing else in the app answers
-      // with it. Handled before `failedSwap` so a rate-limited keystroke keeps
-      // the rail it was typed over.
+      // 503 is `Error::InferenceBusy` alone; a busy keystroke keeps its rail.
       if (e.detail.xhr.status === 503 && busyNote(e.detail.target)) return;
       failedSwap(e.detail.target, e.detail.xhr);
     });
-    // The other half of the same problem. htmx swaps nothing on an error of
-    // any kind, and 401 was the only one this handler knew about — so a search
-    // against a base whose embedder is down did visibly nothing at all: you
-    // typed, and the rail stayed exactly as empty as it was before. A door
-    // that fails silently is worse than one that fails, because the only
-    // reading left is that the base has nothing.
+    // htmx swaps nothing on error, and a silent failure reads as an empty base.
     document.body.addEventListener('htmx:sendError', function (e) {
       if (!e.detail) return;
-      // Same exemption as above: a refine that never reached the server
-      // leaves the list it was refining alone, and so does a poll nobody asked
-      // for.
+      // Same exemption as above.
       if (wasRefine(e) || wasIdlePoll(e)) return;
       failedSwap(e.detail.target, null);
     });
-    // Out-of-band content arrives on its own event, and the day link is only
-    // ever delivered that way: `_idle_foot.html` is swapped `hx-swap-oob`, so
-    // `htmx:afterSwap` never sees it. Unvisited, the anchor keeps the UTC date
-    // the server wrote into the path and carries no `?tz=` — east of Greenwich
-    // every capture after local midnight linked to the previous day.
+    // `_idle_foot.html` arrives out of band only, so `htmx:afterSwap` never sees the day link.
     document.body.addEventListener('htmx:oobAfterSwap', function (e) {
       zoneDayLinks(e.target);
     });
     document.body.addEventListener('htmx:afterSwap', function (e) {
-      // The offer's own fetch can land after the first keystroke has already
-      // dismissed it. Swapping it back in then would be exactly the flicker the
-      // removal exists to prevent.
+      // An offer fetch landing after the first keystroke must not swap back in.
       if (e.target.id === 'context-offer') {
         if (offerDismissed) dropOffer();
         else confirmOffer(e.target);
       }
       zoneDayLinks(e.target);
       enhance(e.target);
-      // A swapped-in band renders at the instant the server answered; by the
-      // time it lands the numbers have moved.
+      // By the time it lands the numbers have moved.
       if (e.target.id === 'due') dueTick();
       trackDwell();
-      // The pane now holds something, so a narrow screen can hide the rail.
       var ws = document.querySelector('.regions');
       if (ws && e.target.id === 'pane-content') {
-        // An artifact is the act now; the answer that had the pane is cleared
-        // just below.
         ws.classList.remove('answering');
-        // Two facts, told apart: `has-selection` is "a narrow screen should
-        // stop showing the list", which a fresh list undoes below, and
-        // `pane-open` is "the pane holds an artifact", which a fresh list does
-        // not change. See 20-layout.css.
+        // `has-selection`: narrow hides the list (a fresh list undoes it); `pane-open`: the pane holds an artifact.
         ws.classList.add('has-selection', 'pane-open');
       }
-      // A fresh list is the answer to a new query or chip, so a narrow screen
-      // shows it again rather than leaving the result you opened on screen
-      // over results that have since changed underneath it.
-      //
-      // `#results` rather than `#rail`: the list is its own element inside the
-      // rail now, so that what a search replaces is the results and not the
-      // sitting beside them.
-      //
-      // Not for the refining pass: it lands over a list the operator may
-      // already be reading, and the whole point of the glide is that the rows
-      // move under a still eye. Resetting the scroll would trade that for a
-      // jump.
+      // A fresh list shows again on narrow screens. Not for the refine: the rows glide under a still eye.
       if (e.target.id === 'results' && !wasRefine(e)) {
-        // `pane-open` is deliberately not dropped here: the pane still holds
-        // what it held, and a new list is no reason to take its width away.
-        // Dropping it was how a capture — which empties the box, and an empty
-        // box comes back as the idle rail through this very swap — crushed the
-        // open artifact into the strip left beside a 40rem rail.
+        // `pane-open` stays: the pane still holds what it held.
         if (ws) ws.classList.remove('has-selection', 'answering');
-        // Back to the top of the answer. Nothing moved the scroll on a swap,
-        // and the two layouts strand it in different places for the same
-        // reason: whatever you had scrolled to in the last list is kept, and
-        // the new list is drawn under it. On a phone the search box is the
-        // fixed bar at the *bottom*, so typing leaves the window scrolled to
-        // the end of the page — and the answer to what you just typed opened
-        // at its last result, with the best hits somewhere above the top of
-        // the screen.
+        // Back to the top: on a phone the box is at the bottom, so a new list would open at its end.
         var railEl = document.getElementById('rail');
         if (railEl) {
-          // Wide: the rail is its own scroll box (see 40-search.css).
+          // Wide: the rail is its own scroll box.
           railEl.scrollTop = 0;
-          // Narrow: `max-height: none`, so the window is the scroller. Only
-          // ever scrolls up, and only as far as the list's own top — a page
-          // that jumped on every keystroke would be worse than the bug.
+          // Narrow: the window scrolls; only ever up, and only to the list's top.
           var top = railEl.getBoundingClientRect().top;
           if (top < 0) window.scrollBy(0, top);
         }
       }
-      // A clicked result was never marked as the open one. `aria-selected` was
-      // set only by the arrow-key handler below, so the styling for an open
-      // card — the accent border, and dropping the snippet the pane beside it
-      // is already showing in full — applied to keyboard navigation and to
-      // nothing else: clicking left the whole list looking unselected while
-      // its own pane was on screen.
-      //
-      // Matched on the href rather than on the click, because the pane is also
-      // swapped by the Related and Seen-together links inside it, and those
-      // move the selection just as truly as a click in the rail does.
+      // Matched on href, since Related and Seen-together links swap the pane too.
       if (e.target.id === 'pane-content') {
-        // An artifact filled the slot, so whatever an ask left around it —
-        // the streamed text, the reasoning, the progress line, the rendered
-        // answer, a capture receipt — is over. The nodes survive the swap by
-        // design (they are the ask's only targets); they must not keep
-        // talking over the artifact.
+        // The ask's nodes survive the swap as its only targets, but must not talk over the artifact.
         ['ask-live', 'ask-reasoning-box', 'ask-progress'].forEach(function (id) {
           var el = document.getElementById(id);
           if (el) el.hidden = true;
@@ -3246,23 +2250,12 @@
     });
   });
 
-  // Focused only where a pointer says there is a hardware keyboard. On a touch
-  // screen the software keyboard covers what the page was opened to show — the
-  // rail, and on the start page the base introducing itself — and in an
-  // installed window there is no URL bar to dismiss it from. This is why the
-  // box carries no `autofocus`.
-  //
-  // `textarea[name="q"]` is the box. It was matched as `input[name="q"]` and
-  // `textarea[name="text"]` until the three pages folded into one, which is
-  // two selectors for elements the workspace no longer has: the box was not
-  // focused on any pointer device, on any route. The input form is still here
-  // for the assign box on Insights.
+  // Focused only with a hardware keyboard: on touch the keyboard covers the page. `input[name="q"]` is
+  // the Insights assign box.
   var field = document.querySelector('textarea[name="q"], input[name="q"]');
   if (field && window.matchMedia('(hover: hover)').matches) field.focus();
 
-  // Whether something is being typed into. Every letter shortcut below is
-  // gated on this: a letter belongs to the field that has focus, and nothing
-  // else.
+  // Every letter shortcut is gated on this.
   function typing() {
     var el = document.activeElement;
     if (!el) return false;
@@ -3270,15 +2263,7 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || el.isContentEditable;
   }
 
-  // The rail is a list: arrows move through it, Enter opens what is focused.
-  // j and k do the same, for hands that never left the home row.
-  //
-  // The arrows are gated on `typing()` too, not only the letters. They were
-  // not while the box was a single-line input, where Down meant nothing to the
-  // caret. The box is a textarea now — chapters get pasted into it, and
-  // /ui/capture?from_ask= opens it holding a whole model answer — so Down is
-  // "next line of what I am editing" long before it is "next result", and
-  // stealing focus out to the rail lost the keystroke as well as the place.
+  // Arrows and j/k move through the rail. Gated on `typing()` too: in the textarea Down is the next line.
   document.addEventListener('keydown', function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     var down = e.key === 'ArrowDown' || e.key === 'j';
@@ -3295,33 +2280,20 @@
     items[next].focus();
     e.preventDefault();
   });
-  // The keys that are the same on every page. `/` reaches the query without a
-  // pointer, Esc steps back one region — which on a narrow window is the only
-  // way back to a list that has been replaced — and `s` and `r` are the two
-  // things the search page can show more or less of.
+  // `/` reaches the query, Esc steps back one region, `s` and `r` show more or less.
   document.addEventListener('keydown', function (e) {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     if (e.key === '/' && !typing()) {
-      // The box is a textarea, and has been since the three pages became one.
-      // `select()` because `/` means "start a new query", not "append to the
-      // last one" — the same as it always did.
-      // `readOnly` while an ask is in flight, and focusing it then would put a
-      // caret in a box that cannot take the query `/` promised to start.
+      // `select()`: `/` starts a new query. Not while read-only during an ask.
       var q = document.querySelector('textarea[name="q"]');
       if (q && !q.readOnly) { e.preventDefault(); q.focus(); q.select(); }
       return;
     }
     if (e.key === 'Escape') {
-      // Out of the field first. Only once nothing is focused does Escape mean
-      // "back", or typing a query you thought better of would throw away the
-      // results behind it.
+      // Out of the field first, so Escape does not throw away the results.
       if (typing()) { document.activeElement.blur(); return; }
-      // `.back` is in the DOM wherever an artifact is, and `display: none`
-      // above 60rem — and on the standalone artifact page at every width.
-      // Testing for existence alone made Escape a browser Back on a wide
-      // window, where the list is already on screen and there is no region to
-      // step out of. `offsetParent` is null exactly when it is not rendered.
+      // `.back` exists but is hidden on wide windows; `offsetParent` is null exactly when it is not rendered.
       var back = document.querySelector('.back');
       if (back && back.offsetParent !== null) { e.preventDefault(); back.click(); }
       return;
@@ -3329,19 +2301,7 @@
     if (typing()) return;
     var regions = document.querySelector('.regions');
     if (!regions) return;
-    // Scoped to what is actually on the page, not merely to the grid: every
-    // page has a `.regions`, so without this one keypress toggled something
-    // the page in front of the reader does not have.
-    //
-    // The source is the second half of the `.split` inside the artifact, so
-    // this hides that half and gives the prose the whole column. Off by
-    // default: showing an artifact beside the lines it came from is the point
-    // of the page, and s is for the times you have already checked.
-    //
-    // Gated on the source itself rather than on the split around it. A merged
-    // artifact has no `.raw` — its second half is the lineage — so the split
-    // was there, the key fired, and `s` hid a merge's provenance under a word
-    // that says source.
+    // Gated on `.raw`: a merge has no source, and its second half is the lineage.
     if (e.key === 's' && document.querySelector('.raw')) {
       e.preventDefault();
       regions.classList.toggle('hide-source');
@@ -3350,10 +2310,109 @@
     if (e.key === 'r' && document.querySelector('.region-rail')) {
       e.preventDefault();
       var on = regions.classList.toggle('reading');
-      // Remembered: this is a way of working rather than a choice made once
-      // per visit.
+      // A way of working, not a per-visit choice.
       try { localStorage.setItem('engram.reading', on ? '1' : '0'); } catch (err) {}
     }
   });
 
+})();
+
+// Behaviour the templates declare in data attributes; the CSP allows no inline code.
+(function () {
+  'use strict';
+  var VARS = ['heat', 'd'];
+
+  function applyVars(root) {
+    if (!root.querySelectorAll) return;
+    VARS.forEach(function (name) {
+      var attr = 'data-var-' + name;
+      var els = root.querySelectorAll('[' + attr + ']');
+      if (root.hasAttribute && root.hasAttribute(attr)) els = [root].concat(Array.prototype.slice.call(els));
+      Array.prototype.forEach.call(els, function (el) {
+        el.style.setProperty('--' + name, el.getAttribute(attr));
+      });
+    });
+  }
+
+  function zone() {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { return ''; }
+  }
+
+  document.addEventListener('click', function (e) {
+    var show = e.target.closest && e.target.closest('[data-show]');
+    if (show) {
+      var target = document.querySelector(show.getAttribute('data-show'));
+      if (target) {
+        target.hidden = false;
+        show.hidden = true;
+        var field = target.querySelector('textarea, input:not([type=hidden])');
+        if (field) field.focus();
+      }
+      return;
+    }
+    var hide = e.target.closest && e.target.closest('[data-hide]');
+    if (hide) {
+      var sel = hide.getAttribute('data-hide');
+      var t = document.querySelector(sel);
+      if (t) t.hidden = true;
+      document.querySelectorAll('[data-show="' + sel + '"]').forEach(function (b) { b.hidden = false; });
+      return;
+    }
+    var back = e.target.closest && e.target.closest('[data-back-to-results]');
+    if (back) {
+      var rail = document.querySelector('.region-rail');
+      if (!rail) return;
+      e.preventDefault();
+      rail.closest('.regions').classList.remove('has-selection');
+      history.back();
+    }
+  });
+
+  document.addEventListener('change', function (e) {
+    var select = e.target.closest && e.target.closest('[data-shows-rule]');
+    var field = select && select.form && select.form.querySelector('[data-rule-field]');
+    if (field) field.hidden = select.value !== 'custom';
+  });
+
+  document.addEventListener('htmx:configRequest', function (e) {
+    var elt = e.detail.elt;
+    if (!elt || !elt.closest) return;
+    if (elt.closest('[data-send-tz]')) e.detail.parameters.tz = zone();
+    if (elt.closest('[data-send-context]') && window.engramContext) {
+      e.detail.parameters.bundle = window.engramContext();
+    }
+  });
+
+  document.addEventListener('htmx:beforeRequest', function (e) {
+    var elt = e.detail.elt;
+    var scope = elt && elt.getAttribute && elt.getAttribute('data-poll-while-visible');
+    if (!scope) return;
+    var region = elt.closest(scope);
+    if (document.hidden || (region && region.hidden)) e.preventDefault();
+  });
+
+  document.addEventListener('htmx:afterSwap', function (e) { applyVars(e.detail.target || document); });
+  document.addEventListener('htmx:oobAfterSwap', function (e) { applyVars(e.detail.target || document); });
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { applyVars(document); });
+  } else {
+    applyVars(document);
+  }
+})();
+
+// The due band counts down to its next row by a timer the server names, not by polling.
+(function () {
+  'use strict';
+  var timer = null;
+  function arm() {
+    clearTimeout(timer);
+    var due = document.getElementById('due');
+    var secs = due && Number(due.getAttribute('data-refresh-in'));
+    if (!secs || !window.htmx) return;
+    timer = setTimeout(function () { window.htmx.trigger(due, 'refresh'); }, secs * 1000);
+  }
+  document.addEventListener('htmx:afterSettle', function (e) {
+    if (e.detail.elt && (e.detail.elt.id === 'due' || e.detail.elt.querySelector && e.detail.elt.querySelector('#due'))) arm();
+  });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', arm); else arm();
 })();

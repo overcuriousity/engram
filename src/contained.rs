@@ -1,10 +1,5 @@
-//! A whole engram behind one call, for an app that carries its own.
-//!
-//! What `main` does for a server, shaped as a function: a config, the control
-//! store, the tenant registry over SQLite vectors and in-process models, the
-//! workers, and the router on a loopback port of the kernel's choosing. The
-//! caller gets the port and a token minted for this launch, and a handle that
-//! stops it all.
+//! A whole engram behind one call (control store, tenants, workers, loopback router),
+//! for an app that carries its own.
 
 use crate::error::{Error, Result};
 use crate::infer::local::LocalModels;
@@ -13,7 +8,7 @@ use std::sync::Arc;
 
 /// The one person a contained engram serves.
 pub const SUBJECT: &str = "phone";
-/// What this launch's token is called, and so what last launch's was.
+/// This launch's token name, and so last launch's.
 const TOKEN_NAME: &str = "contained";
 
 pub struct Started {
@@ -21,8 +16,7 @@ pub struct Started {
     pub token: String,
 }
 
-/// An OpenAI-compatible endpoint of the person's choosing, for the one role a
-/// phone may not be able to carry a model for.
+/// An OpenAI-compatible endpoint for the role a phone may not carry a model for.
 #[derive(Clone, Default)]
 pub struct Endpoint {
     pub base_url: String,
@@ -30,8 +24,6 @@ pub struct Endpoint {
     pub api_key: Option<String>,
 }
 
-/// What a launch is given: the model files on the device, and where to ask
-/// when there is no file for that.
 #[derive(Default)]
 pub struct Setup {
     pub models: LocalModels,
@@ -39,8 +31,7 @@ pub struct Setup {
 }
 
 pub struct Running {
-    /// The queue's gate on generating stages, and whether anything could do
-    /// that work if it were opened.
+    /// The queue's gate on generating stages, and whether anything could do that work.
     generation: Arc<std::sync::atomic::AtomicBool>,
     can_generate: bool,
     shutdown: tokio::sync::watch::Sender<bool>,
@@ -52,8 +43,7 @@ fn internal(e: impl std::fmt::Display) -> Error {
     Error::Internal(e.to_string())
 }
 
-/// A string as a TOML basic string. A data directory is somebody else's
-/// choice of characters, and the config is text.
+/// A string as a TOML basic string: a data directory may hold any characters.
 fn quoted(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
@@ -68,12 +58,8 @@ fn quoted(s: &str) -> String {
     out
 }
 
-/// The hash `[auth.local]` has to carry, made once per base.
-///
-/// Nothing ever logs in with it: the app holds a token, and there is no page
-/// to type a password into. It is random rather than fixed because a fixed one
-/// would be a password anyone could read in this repository, and kept in a
-/// file rather than made per launch because Argon2 is slow on purpose.
+/// The hash `[auth.local]` must carry; random so it is no readable password, kept on disk
+/// because Argon2 is slow on purpose. Nothing logs in with it.
 fn local_hash(data_dir: &Path) -> Result<String> {
     let path = data_dir.join("local.hash");
     if let Ok(hash) = std::fs::read_to_string(&path)
@@ -89,27 +75,8 @@ fn local_hash(data_dir: &Path) -> Result<String> {
     Ok(hash)
 }
 
-/// This build's defaults, rendered for one directory.
-///
-/// The endpoint every role names is port 9 on loopback, where nothing
-/// listens: a role with no model on the device then fails at once and in
-/// words, instead of waiting out a timeout against a server that was never
-/// going to be there. A role that *has* a model never reads its endpoint —
-/// see `Core::with_local_models`.
-///
-/// An endpoint, where the person set one, serves both generating roles: it is
-/// one OpenAI-compatible server, and somebody who pointed ask at it expects
-/// their captures read by it too. The model on the phone is another matter —
-/// it is swapped in for ask alone, in `Core::with_local_models`.
-///
-/// Two tiers, because the two windows mean different things. The
-/// synthesizer's is a planning budget: its instructions alone are some three
-/// thousand tokens, and a window too small to plan in fails the capture
-/// *before* its passages are embedded — which is how this file first came to
-/// have the server's default here. Ask's is memory: it is the KV cache a model
-/// on this device allocates, so it is as small as an answer over retrieved
-/// passages allows. `plan = false` spares a phone the second completion per
-/// question.
+/// This build's defaults for one directory. Endpoints default to loopback port 9, where
+/// nothing listens, so a role with no model on the device fails at once, not on a timeout.
 fn config_for(data_dir: &Path, local_hash: &str, ask: Option<&Endpoint>) -> String {
     let dir = data_dir.join("bases");
     let control = data_dir.join("control.db");
@@ -179,8 +146,7 @@ pub async fn start(data_dir: &Path, models: LocalModels) -> Result<(Started, Run
 pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Running)> {
     std::fs::create_dir_all(data_dir).map_err(internal)?;
     let config_path = data_dir.join("config.toml");
-    // Written on every launch, not only the first: the file is this build's
-    // defaults rendered for this directory, not a place anyone edits.
+    // Rewritten every launch: it is this build's defaults, not a file anyone edits.
     std::fs::write(
         &config_path,
         config_for(data_dir, &local_hash(data_dir)?, setup.ask.as_ref()),
@@ -208,9 +174,7 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
         )
         .with_local_models(setup.models),
     );
-    // Shut from the first moment: nothing here may generate until the app
-    // says the phone can afford it, and never where there is nothing to
-    // generate with. See `Running::allow_generation`.
+    // Shut until the app says the phone can afford generation. See `Running::allow_generation`.
     let generation = tenants.generation();
     generation.store(false, std::sync::atomic::Ordering::Relaxed);
     let can_generate = setup.ask.is_some();
@@ -223,6 +187,13 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
     }
     let (_, token) = crate::auth::tokens::mint(&control, TOKEN_NAME, SUBJECT, None).await?;
 
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(internal)?;
+    let addr = listener.local_addr().map_err(internal)?;
+    let port = addr.port();
+    let deployment = crate::web::security::Deployment::loopback(addr);
+
     let state = crate::web::state::AppState {
         tenants: tenants.clone(),
         config: cfg.clone(),
@@ -231,7 +202,7 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
             local: cfg.auth.local.clone(),
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: false,
+            deployment: deployment.clone(),
         }),
         ask_handoff: Default::default(),
     };
@@ -244,17 +215,17 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
         shutdown_rx.clone(),
     ));
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
-        .await
-        .map_err(internal)?;
-    let port = listener.local_addr().map_err(internal)?.port();
     let mut stop = shutdown_rx;
     let server = tokio::spawn(async move {
-        let served = axum::serve(listener, crate::web::router(state))
-            .with_graceful_shutdown(async move {
-                let _ = stop.wait_for(|s| *s).await;
-            })
-            .await;
+        let served = axum::serve(
+            listener,
+            crate::web::app(state, &deployment)
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = stop.wait_for(|s| *s).await;
+        })
+        .await;
         if let Err(e) = served {
             tracing::error!(error = %e, "the contained listener stopped");
         }
@@ -272,11 +243,8 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
 }
 
 impl Running {
-    /// Open or shut the queue's gate on the stages that call a generation
-    /// model, and say what it now is. It opens only where an endpoint was
-    /// given: the model on the phone answers questions and does not read
-    /// captures, so without an endpoint that work has nobody to do it and
-    /// stays held however the app asks.
+    /// Open or shut the gate on generating stages and return its state; it opens only where
+    /// an endpoint was given, since the phone's model does not read captures.
     pub fn allow_generation(&self, allow: bool) -> bool {
         let open = allow && self.can_generate;
         self.generation
@@ -284,8 +252,7 @@ impl Running {
         open
     }
 
-    /// Stop listening, then let a job in flight finish: a `running` row left
-    /// behind is a job the next launch has to find and repair.
+    /// Stop listening, then let a job in flight finish: a `running` row left behind needs repair.
     pub async fn stop(self) {
         let _ = self.shutdown.send(true);
         let _ = self.server.await;
@@ -378,9 +345,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(made.status(), 201);
-        // The small capture's one synthesis call is armed by the `synthesize`
-        // unit. With no embedder here the embed fails, which is not this
-        // test's business; the generating unit must simply wait.
+        // With no embedder the embed fails; the generating unit must simply wait.
         let mut waiting = 0;
         for _ in 0..50 {
             waiting = status_json(&started).await["waiting_generation"]

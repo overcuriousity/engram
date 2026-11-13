@@ -1,0 +1,109 @@
+
+/* One table for every kind of row: a sentence-wide reason column and stacked buttons. */
+.regions-table table.set-aside td:nth-child(2) { width: 34%; }
+.regions-table table.set-aside td { vertical-align: top; }
+
+.set-aside-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+
+/* On a phone, rows rather than a table; each row's badge is its heading. */
+@media (width <= 40rem) {
+  .regions-table table.set-aside > thead { display: none; }
+  .regions-table table.set-aside > tbody { display: block; width: 100%; }
+  .regions-table table.set-aside tr {
+    display: block; padding: 0.75rem 0;
+    border-bottom: 1px solid var(--color-border-subtle);
+  }
+  .regions-table table.set-aside tr:last-child { border-bottom: none; }
+  /* Beats the control-column `width: 1%; white-space: nowrap` rule in `table.grid`. */
+  .regions-table table.set-aside td,
+  .regions-table table.set-aside td:first-child,
+  .regions-table table.set-aside td:nth-child(2),
+  .regions-table table.set-aside td:last-child {
+    display: block; width: auto; white-space: normal; padding: 0.125rem 0;
+    border: none;
+  }
+  .regions-table table.set-aside td:last-child { padding-top: 0.5rem; }
+  .regions-table table.set-aside td:empty { display: none; }
+}
+
+.head-aside { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+
+/* Rows, not a table: only the name and whether it is done are worth reading. */
+/* A container: the list is an aside and must answer the width it is given. */
+.queue {
+  display: flex; flex-direction: column; margin-top: 0.25rem;
+  container-type: inline-size; container-name: queue;
+}
+/* Wrapping puts the answer line under the name instead of past the right edge. */
+.qrow {
+  display: flex; flex-wrap: wrap; gap: 0.125rem 0.75rem; align-items: baseline;
+  min-width: 0;
+  padding: 0.6rem 0.25rem; border-bottom: 1px solid var(--color-border-subtle);
+}
+.qrow:last-child { border-bottom: none; }
+.qrow:hover { background: var(--color-bg-hover); }
+.qname { flex: 1 1 12rem; min-width: 0; text-decoration: none; display: block; }
+.qtitle {
+  display: block;
+  font-size: var(--text-prose); text-decoration: none; color: var(--color-fg-primary);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Shared labels keep their opening words on a line of their own, out of reach of the truncation. */
+.qtitle-opening {
+  display: block; white-space: normal; overflow: visible;
+  font-size: var(--text-dense); line-height: 1.35; color: var(--color-fg-muted);
+}
+.qrow:hover .qtitle { color: var(--color-accent); }
+.qname.pending .qtitle { color: var(--color-fg-muted); font-style: italic; }
+/* A grid, so the timestamp keeps its own column and stops sliding. */
+.qmeta {
+  margin-left: auto; display: grid; grid-template-columns: auto 9.5rem;
+  gap: 0.75rem; align-items: baseline; flex: none;
+  font-size: var(--text-dense); color: var(--color-fg-muted); font-family: var(--font-mono);
+}
+.qtime { text-align: right; }
+/* A caption, not `.qmeta`: it must not inherit the auto margin and timestamp column. */
+.qanswers {
+  flex: 1 0 100%; margin-top: 0.125rem;
+  font-size: var(--text-dense); color: var(--color-fg-muted);
+}
+.qcov-low {
+  color: var(--color-warning); text-decoration: underline;
+  text-decoration-color: var(--color-border-strong);
+}
+.qcov-low:hover { text-decoration-color: currentColor; }
+.qdot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent);
+  flex: none; align-self: center; animation: qpulse 1.6s ease-in-out infinite;
+}
+@keyframes qpulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.25 } }
+@media (prefers-reduced-motion: reduce) { .qdot { animation: none } }
+
+/* Too narrow for a metadata column beside the name, which is the only thing anyone reads. */
+@container queue (width <= 30rem) {
+  .qname { flex: 1 0 100%; }
+  .qmeta {
+    margin-left: 0; display: flex; flex-wrap: wrap; gap: 0.5rem;
+    flex: 0 1 auto; min-width: 0;
+  }
+  .qtime { text-align: left; }
+}
+
+/* `auto-fit`: two panels beat three squeezed on a narrow window. */
+.measures {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem; margin-bottom: 2rem;
+}
+
+.measure-sub { font-size: var(--text-micro); color: var(--color-fg-muted); margin: 0.125rem 0 0; }
+
+/* The instance's own readout, set apart by a rule. The summary's <h2> is made inline so the marker stays beside it. */
+.machine {
+  margin-top: 2.5rem;
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.75rem;
+}
+.machine > summary { cursor: pointer; color: var(--color-fg-secondary); }
+.machine > summary > h2 { display: inline; }
+.machine > summary::marker { color: var(--color-fg-muted); }
+.machine[open] > summary { margin-bottom: 0.5rem; }

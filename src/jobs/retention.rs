@@ -1,106 +1,62 @@
-//! Expire what is past keeping, then regroup what is left.
-//!
-//! One unit, two passes, in this order: grouping reads the rows expiring
-//! removes, and grouping first would name a cluster around a search deleted a
-//! second later. It was one ticker before it was one unit, and the ordering
-//! inside it is the half that was already written down.
-//!
-//! Runs even with capture disabled, so turning capture off also expires what it
-//! recorded while it was on.
+//! Expire what is past keeping, then regroup what is left: grouping first would name clusters
+//! around rows deleted a second later.
+//! Runs with capture disabled too, so turning capture off still expires what it recorded.
 
 use crate::core::Core;
 use crate::error::Result;
 
-/// What one pass did. The counts the two halves already returned; nothing here
-/// is counted for the account's sake.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Report {
-    /// Searches and questions dropped for being past `retain_days`.
     pub expired: u64,
+    pub trash_purged: u64,
     pub standing: Standing,
     pub named: usize,
     pub removed: usize,
-    /// Situations dropped for being past `store::context::RETAIN_DAYS`.
     pub contexts: u64,
-    /// Interactions dropped for being past the same window.
     pub interactions: u64,
-    /// Searches given up on, written down as weak negatives.
     pub gave_up: usize,
-    /// Generations adopted by the idle pass. Zero or one.
     pub adopted: usize,
-    /// Generations the idle pass took back. Zero or one.
     pub reverted: usize,
-    /// Corpus actions the pass took back on evidence.
     pub undone: usize,
-    /// Artifacts the pass restored for a search given up on.
     pub restored: usize,
-    /// Artifacts the integrate phase filed against the rest of the base, and
-    /// the capture probes it minted doing so.
+    /// Artifacts the integrate phase filed against the rest of the base, and the probes it minted.
     pub integrated: usize,
     pub probes: usize,
-    /// Probes the rehearse phase retired: another embedder, or an owner gone.
-    /// A change to the probe set itself, so this pass acted.
+    /// Probes retired: another embedder, or an owner gone.
     pub retired: usize,
-    /// Of the probes replayed, the ones that landed somewhere new. What this
-    /// pass learned, as opposed to how many measurements it repeated — see
-    /// `sleep::Replayed::moved`, and `Standing::rehearsed` beside it.
+    /// Replayed probes that landed somewhere new: what this pass learned
+    /// (`sleep::Replayed::moved`).
     pub moved: usize,
-    /// Condensations the pass armed.
     pub condensed: usize,
 }
 
-/// What the base holds, as opposed to what this pass did to it.
-///
-/// Nested, and the nesting is the point: `jobs::did_work` reads the flat
-/// numbers of a report and calls any non-zero one work. `clusters` is a
-/// standing count — `gaps::sweep` returns how many gap clusters exist, which is
-/// why the log line beside it prints only when `named` or `removed` says
-/// something happened — so at the top level it made every run over a base with
-/// any gaps at all report work, and the empty-run backoff never engaged for
-/// this sweep. Recorded in `sweep_runs.detail` all the same, for a person
-/// reading the history.
+/// Standing counts, nested so `jobs::did_work` does not read them as work; still recorded in
+/// `sweep_runs.detail`.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Standing {
-    /// Gap clusters the base holds after this pass, named or not.
     pub clusters: usize,
-    /// Probes the rehearse phase replayed.
-    ///
-    /// Standing, though it is this pass that ran them, and the distinction is
-    /// the one this struct exists to draw. The lap wraps at the end of the
-    /// probe set, so on any base that has ever captured anything this is
-    /// non-zero on every pass for ever — and a count that is never zero is a
-    /// backoff that never engages. Repeating a measurement over unchanged
-    /// inputs is not work; `Report::moved` carries the part of it that is.
+    /// Standing although this pass ran them: the lap wraps, so it is never zero, and repeating a
+    /// measurement is not work.
     pub rehearsed: usize,
-    /// Interferers rule 3 observed. A standing fact about the ranking rather
-    /// than anything this pass did: `sleep::interference` files nothing, and
-    /// says so at length. Left flat, it returned the same non-zero number over
-    /// an unchanged base on every run.
+    /// Standing: `sleep::interference` files nothing.
     pub interference: usize,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
     let mut report = Report::default();
-    // The first thing that went wrong, held rather than returned. Neither half
-    // stops the other — they are independent, and a base whose grouping is
-    // failing still wants its log trimmed — but a pass where nothing worked
-    // must not report itself as a pass. `run_accounted` reads the return value
-    // and nothing else, so swallowing these into warnings is what would make
-    // the `failed` flag on `sweep_runs` unreachable for this sweep, and the
-    // history's whole reason for existing is that a sweep going wrong is
-    // visible there rather than only in the log.
-    //
-    // The error is carried as itself, not flattened to a string: `retryable`
-    // classifies the variant, and that decides whether the worker spends
-    // another attempt.
+    // Held, not returned: neither half stops the other, but a pass where something failed must
+    // reach `run_accounted` as failed. Carried as itself, since `retryable` reads the variant.
     let mut failure: Option<crate::error::Error> = None;
 
-    // Before expiry, and that ordering is the point: expiring removes the very
-    // rows a give-up is read from, and a chain trimmed before it is read is a
-    // failure nobody ever hears about. It is a third pass in the same unit for
-    // the reason the other two are one — it reads the same log, on the same
-    // ticker, and a second ticker over one table is two things to reason about
-    // where there was one.
+    match core.purge_trash(crate::core::TRASH_RETENTION_SECS).await {
+        Ok(n) => report.trash_purged = n,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not empty the trash");
+            failure.get_or_insert(e);
+        }
+    }
+
+    // Before expiry, which removes the rows a give-up is read from.
     match crate::jobs::observe::run(core).await {
         Ok(n) => report.gave_up = n,
         Err(e) => {
@@ -109,42 +65,21 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    // After the give-ups are written and before anything is expired: the pass
-    // reads the observations, and the give-ups just recorded are part of what
-    // the generation under watch is judged on. Its own quiet check is inside;
-    // this unit is only the ticker it hangs off, the way the give-up chain is.
+    // After the give-ups are written, which the generation under watch is judged on, and before
+    // expiry.
     match crate::jobs::tune::run_if_quiet(core).await {
         Ok(p) => {
             report.adopted = usize::from(p.adopted.is_some());
             report.reverted = usize::from(p.reverted.is_some());
             report.undone = p.undone;
             report.restored = p.restored;
-            // The sleep phases. Flat where the number is this pass acting,
-            // because `jobs::did_work` reads flat numbers and nothing else:
-            // without them a pass that integrated five hundred artifacts
-            // reported no work at all, and `rearm_periodic_with` doubled the
-            // interval away from `sweep_hours` towards `backoff_max_hours` —
-            // on a base whose integration backlog drains at
-            // `OBSERVATION_LIMIT` a pass, and where nothing in production
-            // calls `arm_now` to put it back.
-            //
-            // And nested where it is not. "This pass acting" is a narrower
-            // test than "this pass ran a query": the rehearse lap wraps, so
-            // replaying probes over an unchanged base is the same measurement
-            // again for ever, and rule 3 counts a standing fact and files
-            // nothing at all. Left flat, those two meant the backoff could
-            // never engage on any base that had ever captured anything —
-            // which is every base it was written for. What the pass *learned*
-            // is `moved`, and that is flat.
+            // Flat where the number is this pass acting, or a pass that integrated five hundred
+            // artifacts backs off; nested where it repeats a measurement or counts a standing fact.
             report.integrated = p.integrated.integrated;
             report.probes = p.integrated.probes;
             report.retired = p.replayed.retired;
             report.moved = p.replayed.moved;
             report.condensed = p.condensed;
-            // The two that say what the base holds rather than what this pass
-            // did to it. Recorded all the same — `sweep_runs.detail` is the
-            // history a person reads — just where `did_work` does not read
-            // them.
             report.standing.rehearsed = p.replayed.rehearsed;
             report.standing.interference = p.interference;
         }
@@ -203,11 +138,8 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    // Its own window, and behind no key. A weekly pattern needs weeks, and
-    // `feedback.retain_days` defaults to keeping for ever but is an operator
-    // switch — an operator who shortens their query log is not asking the base
-    // to forget what Friday afternoon looks like. Runs whenever this unit runs,
-    // which is why `periodic_units` also arms it for `recommend.enabled`.
+    // Its own window, behind no key: shortening the query log is not asking to forget weekly
+    // patterns. Hence `periodic_units` also arms this for `recommend.enabled`.
     match core
         .store
         .expire_context_events(crate::store::context::RETAIN_DAYS)
@@ -225,11 +157,7 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    // Interactions ride the situations' window, not the query log's: the two
-    // are read as a pair by the context sweep, and one kept past the other
-    // profiles nothing. Behind no key for the same reason the line above is —
-    // an operator who turned the offer off still wants the rows it wrote while
-    // it was on to leave.
+    // Interactions ride the situations' window: the context sweep reads them as a pair.
     match core
         .store
         .expire_interactions(crate::store::context::RETAIN_DAYS)
@@ -247,10 +175,7 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
 
-    // The sweep history is trimmed by the repair pass, not here. This unit is
-    // behind `feedback`, and an operator with capture off keeps no retention
-    // unit at all — while the sweeps that do run keep writing a row apiece.
-    // See `background::repair_once`.
+    // The sweep history is trimmed by `background::repair_once`: this unit may not exist.
 
     match failure {
         Some(e) => Err(e),
@@ -262,7 +187,6 @@ pub async fn run(core: &Core) -> Result<Report> {
 mod tests {
     use super::*;
 
-    /// One search, old enough to be past any window.
     async fn seed_old_event(core: &Core) {
         let id = core
             .store
@@ -283,16 +207,18 @@ mod tests {
             )
             .await
             .unwrap();
-        sqlx::query("UPDATE search_events SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 40 * 86_400)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE search_events SET created_at = ? WHERE id = ?",
+            crate::store::now() - 40 * 86_400,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
     }
 
     async fn captured(core: &Core) -> i64 {
-        sqlx::query_scalar("SELECT count(*) FROM search_events")
+        sqlx::query_scalar!("SELECT count(*) FROM search_events")
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
@@ -300,9 +226,6 @@ mod tests {
 
     #[tokio::test]
     async fn retention_runs_with_consolidation_switched_off() {
-        // Retention used to ride on the consolidation sweep, so switching
-        // duplicate hygiene off silently kept the query log forever. It is its
-        // own unit now, and it stays its own unit.
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = false;
         core.learn.enabled = true;
@@ -321,15 +244,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_sweep_where_nothing_worked_does_not_report_a_clean_run() {
-        // `run_accounted` reads the return value and nothing else, so a pass
-        // that warned about every half and then returned `Ok` would be written
-        // into `sweep_runs` as `ok` with no counts — and the `failed` flag, the
-        // stated reason that history exists, could never fire for this sweep.
+        // `run_accounted` reads only the return value, so warnings alone would record the pass as
+        // `ok`.
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         core.feedback.retain_days = 30;
-        // The expiry's table, taken out from under it.
-        sqlx::query("DROP TABLE search_events")
+        sqlx::query!("DROP TABLE search_events")
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -357,8 +277,7 @@ mod tests {
     async fn the_unit_groups_the_gaps() {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
-        // Two of them: one gap is not a group, and the sweep no longer spends a
-        // naming call restating a single question.
+        // One gap is not a group.
         for q in ["mount an E01", "mounting E01 images"] {
             let id = core
                 .store
@@ -390,9 +309,6 @@ mod tests {
 
     #[tokio::test]
     async fn expiring_comes_before_grouping() {
-        // The ordering is the whole reason these two share a unit: grouping
-        // reads the rows expiring removes, and naming a cluster around a search
-        // deleted a second later is a call spent on nothing.
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         core.feedback.retain_days = 30;

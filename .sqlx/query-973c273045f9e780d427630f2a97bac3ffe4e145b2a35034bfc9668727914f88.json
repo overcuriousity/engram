@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT * FROM segments WHERE corpus_id = ? ORDER BY idx",
+  "describe": {
+    "columns": [
+      {
+        "name": "corpus_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "corpus_id"
+          }
+        }
+      },
+      {
+        "name": "idx",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "idx"
+          }
+        }
+      },
+      {
+        "name": "start_line",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "start_line"
+          }
+        }
+      },
+      {
+        "name": "end_line",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "end_line"
+          }
+        }
+      },
+      {
+        "name": "text",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "carry_lines",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "carry_lines"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "keep_artifacts",
+        "ordinal": 7,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "keep_artifacts"
+          }
+        }
+      },
+      {
+        "name": "no_promote",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "no_promote"
+          }
+        }
+      },
+      {
+        "name": "attempts",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "last_error",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "last_error"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "973c273045f9e780d427630f2a97bac3ffe4e145b2a35034bfc9668727914f88"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT origin, metadata FROM corpora WHERE raw_text = 'edited by hand'",
+  "describe": {
+    "columns": [
+      {
+        "name": "origin",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "origin"
+          }
+        }
+      },
+      {
+        "name": "metadata",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "metadata"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7e5ebf9d901f873a1fc4ad819dc04c205f1ed29a4248d4454fd6e483643404c8"
+}

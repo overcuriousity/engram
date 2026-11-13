@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO eval_runs\n               (id, created_at, judged_count, pairs_used, pairs_skipped,\n                base_params, base_recall, base_mrr,\n                best_params, best_recall, best_mrr,\n                diff)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "533702ab892005a6629da99d6ac6280998ec5b6a6df1f8db69354109fe35cf9b"
+}

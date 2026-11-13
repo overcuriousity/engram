@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pair_grants SET expires_at = ? WHERE code_hash = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "00f9e1405e2dd95916f4349c818edf570418a81e101c86a1ed2b9a483e3d11d3"
+}

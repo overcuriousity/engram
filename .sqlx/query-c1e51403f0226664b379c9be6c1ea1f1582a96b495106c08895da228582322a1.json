@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MAX(at) FROM interaction_events WHERE kind <> 'recommended_shown'",
+  "describe": {
+    "columns": [
+      {
+        "name": "MAX(at)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c1e51403f0226664b379c9be6c1ea1f1582a96b495106c08895da228582322a1"
+}

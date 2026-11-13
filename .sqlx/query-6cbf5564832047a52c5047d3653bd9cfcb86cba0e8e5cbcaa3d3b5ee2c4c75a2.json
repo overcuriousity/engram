@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments\n                SET rule = ?1, series_id = CASE WHEN ?1 IS NULL THEN NULL ELSE id END,\n                    moved_at = ?2\n              WHERE id = ?3 AND kind = 'due' AND done_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6cbf5564832047a52c5047d3653bd9cfcb86cba0e8e5cbcaa3d3b5ee2c4c75a2"
+}

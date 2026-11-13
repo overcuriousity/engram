@@ -1,0 +1,42 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (SELECT count(*) FROM corpora) AS \"corpora!: i64\",\n                    (SELECT count(*) FROM artifacts WHERE status = 'active') AS \"artifacts!: i64\",\n                    (SELECT count(*) FROM segments) AS \"segments!: i64\",\n                    (SELECT count(*) FROM artifacts\n                     WHERE status = 'active' AND provenance IN ('merged', 'synthesized'))\n                     AS \"synthesized!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "corpora!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "artifacts!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "segments!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "synthesized!: i64",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "6cfefbe8d13b0b426767ab746d4580149f29f97215593235c04367e959851587"
+}

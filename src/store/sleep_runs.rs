@@ -2,7 +2,6 @@
 
 use super::{Store, now};
 use crate::error::Result;
-use sqlx::Row;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SleepRun {
@@ -33,73 +32,74 @@ pub struct SleepRun {
 
 impl Store {
     pub async fn record_sleep_run(&self, r: &SleepRun) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO sleep_runs
                (id, started, ended, stopped, generation_id, integrated, novel, known, conflicts,
                 rehearsed, found, adopted, reverted, refused, undone, restored, interference,
                 condensed, budget_used, budget, detail)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &r.id,
+            r.started,
+            if r.ended == 0 { now() } else { r.ended },
+            &r.stopped,
+            &r.generation_id,
+            r.integrated,
+            r.novel,
+            r.known,
+            r.conflicts,
+            r.rehearsed,
+            r.found,
+            &r.adopted,
+            &r.reverted,
+            &r.refused,
+            r.undone,
+            r.restored,
+            r.interference,
+            r.condensed,
+            r.budget_used,
+            r.budget,
+            if r.detail.is_empty() {
+                "{}"
+            } else {
+                r.detail.as_str()
+            }
         )
-        .bind(&r.id)
-        .bind(r.started)
-        .bind(if r.ended == 0 { now() } else { r.ended })
-        .bind(&r.stopped)
-        .bind(&r.generation_id)
-        .bind(r.integrated)
-        .bind(r.novel)
-        .bind(r.known)
-        .bind(r.conflicts)
-        .bind(r.rehearsed)
-        .bind(r.found)
-        .bind(&r.adopted)
-        .bind(&r.reverted)
-        .bind(&r.refused)
-        .bind(r.undone)
-        .bind(r.restored)
-        .bind(r.interference)
-        .bind(r.condensed)
-        .bind(r.budget_used)
-        .bind(r.budget)
-        .bind(if r.detail.is_empty() {
-            "{}"
-        } else {
-            r.detail.as_str()
-        })
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Newest first.
     pub async fn sleep_runs(&self, limit: usize) -> Result<Vec<SleepRun>> {
-        let rows = sqlx::query("SELECT * FROM sleep_runs ORDER BY started DESC, id DESC LIMIT ?")
-            .bind(limit as i64)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", started, ended, stopped, generation_id, integrated, novel, known, conflicts, rehearsed, found, adopted, reverted, refused, undone, restored, interference, condensed, budget_used, budget, detail FROM sleep_runs ORDER BY started DESC, id DESC LIMIT ?"#,
+            limit as i64
+        )
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows
-            .iter()
+            .into_iter()
             .map(|r| SleepRun {
-                id: r.get("id"),
-                started: r.get("started"),
-                ended: r.get("ended"),
-                stopped: r.get("stopped"),
-                generation_id: r.get("generation_id"),
-                integrated: r.get("integrated"),
-                novel: r.get("novel"),
-                known: r.get("known"),
-                conflicts: r.get("conflicts"),
-                rehearsed: r.get("rehearsed"),
-                found: r.get("found"),
-                adopted: r.get("adopted"),
-                reverted: r.get("reverted"),
-                refused: r.get("refused"),
-                undone: r.get("undone"),
-                restored: r.get("restored"),
-                interference: r.get("interference"),
-                condensed: r.get("condensed"),
-                budget_used: r.get("budget_used"),
-                budget: r.get("budget"),
-                detail: r.get("detail"),
+                id: r.id,
+                started: r.started,
+                ended: r.ended,
+                stopped: r.stopped,
+                generation_id: r.generation_id,
+                integrated: r.integrated,
+                novel: r.novel,
+                known: r.known,
+                conflicts: r.conflicts,
+                rehearsed: r.rehearsed,
+                found: r.found,
+                adopted: r.adopted,
+                reverted: r.reverted,
+                refused: r.refused,
+                undone: r.undone,
+                restored: r.restored,
+                interference: r.interference,
+                condensed: r.condensed,
+                budget_used: r.budget_used,
+                budget: r.budget,
+                detail: r.detail,
             })
             .collect())
     }

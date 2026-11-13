@@ -3,16 +3,7 @@
 use super::Store;
 use super::artifacts::Chunk;
 use crate::error::{Error, Result};
-use sqlx::Row;
 
-/// Two answers, not three. There used to be a `conflict`: two artifacts at or
-/// above the supersede line whose value-shaped tokens differed, filed as a
-/// contradiction without a model reading either. In a base of lecture slides
-/// the tokens that differed were footer dates, and 130 near-identical pairs
-/// settled into a state no sweep reopened. Whether two artifacts disagree is
-/// a question about what they say, and nothing that splits on whitespace can
-/// be asked it. The rows it wrote still read — as `Known`, which is what they
-/// were: something near, at or above the line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tag {
     Novel,
@@ -29,8 +20,7 @@ impl Tag {
     pub fn parse(s: &str) -> Result<Self> {
         Ok(match s {
             "novel" => Tag::Novel,
-            // A row from before the detector was retired. It was near
-            // something, which is all the tag can honestly say now.
+            // `conflict` rows predate the retired detector; they read as `Known`.
             "known" | "conflict" => Tag::Known,
             other => return Err(Error::Store(format!("integrations: unknown tag {other}"))),
         })
@@ -50,59 +40,55 @@ pub struct Integration {
 impl Store {
     /// `false` when the artifact already has a row. A tag is written once.
     pub async fn record_integration(&self, i: &Integration) -> Result<bool> {
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "INSERT OR IGNORE INTO integrations
                (artifact_id, at, tag, nearest_id, nearest_score, detail)
              VALUES (?, ?, ?, ?, ?, ?)",
+            &i.artifact_id,
+            i.at,
+            i.tag.as_str(),
+            &i.nearest_id,
+            i.nearest_score.map(f64::from),
+            &i.detail
         )
-        .bind(&i.artifact_id)
-        .bind(i.at)
-        .bind(i.tag.as_str())
-        .bind(&i.nearest_id)
-        .bind(i.nearest_score.map(f64::from))
-        .bind(&i.detail)
         .execute(&self.pool)
         .await?;
         Ok(res.rows_affected() > 0)
     }
 
     pub async fn integration_of(&self, artifact_id: &str) -> Result<Option<Integration>> {
-        let row = sqlx::query(
-            "SELECT artifact_id, at, tag, nearest_id, nearest_score, detail
-               FROM integrations WHERE artifact_id = ?",
+        let row = sqlx::query!(
+            r#"SELECT artifact_id AS "artifact_id!", at, tag, nearest_id, nearest_score, detail
+               FROM integrations WHERE artifact_id = ?"#,
+            artifact_id
         )
-        .bind(artifact_id)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|r| {
             Ok(Integration {
-                artifact_id: r.get("artifact_id"),
-                at: r.get("at"),
-                tag: Tag::parse(&r.get::<String, _>("tag"))?,
-                nearest_id: r.get("nearest_id"),
-                nearest_score: r.get::<Option<f64>, _>("nearest_score").map(|s| s as f32),
-                detail: r.get("detail"),
+                artifact_id: r.artifact_id,
+                at: r.at,
+                tag: Tag::parse(&r.tag)?,
+                nearest_id: r.nearest_id,
+                nearest_score: r.nearest_score.map(|s| s as f32),
+                detail: r.detail,
             })
         })
         .transpose()
     }
 
-    /// The work list: embedded, in results, and without a row — oldest first.
-    /// In results, because a hidden artifact has no neighbours worth recording
-    /// and would be re-scanned every pass; when it comes back it is integrated
-    /// then, which is when the question is live. The table is the memory, so
-    /// there is no cursor to lose an artifact embedded late.
+    /// Only artifacts in results: a hidden one would be re-scanned every pass for nothing.
     pub async fn artifacts_to_integrate(&self, limit: usize) -> Result<Vec<Chunk>> {
-        let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT a.id FROM artifacts a
+        let ids: Vec<String> = sqlx::query_scalar!(
+            r#"SELECT a.id AS "id!" FROM artifacts a
                LEFT JOIN integrations i ON i.artifact_id = a.id
               WHERE i.artifact_id IS NULL
                 AND a.embed_state = 'embedded'
                 AND a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL
               ORDER BY a.created_at ASC, a.id ASC
-              LIMIT ?",
+              LIMIT ?"#,
+            limit as i64
         )
-        .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
         let rows = self.artifacts_by_ids(&ids).await?;
@@ -114,15 +100,15 @@ impl Store {
 
     /// (novel, known, conflict) over every row.
     pub async fn integration_counts(&self) -> Result<(i64, i64, i64)> {
-        let r = sqlx::query(
+        let r = sqlx::query!(
             "SELECT COALESCE(SUM(tag = 'novel'), 0) AS novel,
                     COALESCE(SUM(tag = 'known'), 0) AS known,
                     COALESCE(SUM(tag = 'conflict'), 0) AS conflict
-               FROM integrations",
+               FROM integrations"
         )
         .fetch_one(&self.pool)
         .await?;
-        Ok((r.get("novel"), r.get("known"), r.get("conflict")))
+        Ok((r.novel, r.known, r.conflict))
     }
 }
 
@@ -149,7 +135,6 @@ mod tests {
             .into_iter()
             .map(|c| c.id)
             .collect();
-        // Not embedded: nothing to integrate yet.
         assert!(store.artifacts_to_integrate(10).await.unwrap().is_empty());
         for id in &ids {
             assert!(store.mark_embedded(id, "fake", 0).await.unwrap());

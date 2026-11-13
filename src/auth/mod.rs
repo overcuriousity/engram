@@ -12,39 +12,54 @@ use axum::http::request::Parts;
 pub struct Identity {
     pub subject: String,
     pub email: Option<String>,
-    /// The web session this request came in on, where there is one.
-    ///
-    /// `None` for a bearer token, and that absence is load-bearing: it is what
-    /// keeps the live sitting at the web door. An access token is not a
-    /// conversation, and two agent sessions sharing one token would share a
-    /// sitting — worse than having none. Giving those doors a real session
-    /// identity is a change to the doors.
+    /// `None` for bearer tokens on purpose: agent sessions sharing a token must not share a live sitting.
     pub session: Option<String>,
 }
 
-/// Sliding session lifetime, 30 days.
-pub const SESSION_TTL_SECS: i64 = 30 * 24 * 3600;
-pub const SESSION_COOKIE: &str = "engram_session";
+pub const SESSION_IDLE_DAYS: i64 = 30;
+pub const SUBJECT_KEY: &str = "engram.subject";
+pub const EMAIL_KEY: &str = "engram.email";
 
-pub fn set_session_cookie(id: &str, secure: bool) -> String {
-    let mut c = format!(
-        "{SESSION_COOKIE}={id}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECS}"
-    );
-    if secure {
-        c.push_str("; Secure");
+/// `__Host-` needs `Secure`, so plain http gets the bare name.
+pub fn session_cookie_name(dep: &crate::web::security::Deployment) -> &'static str {
+    if dep.secure_cookies() {
+        "__Host-engram-session"
+    } else {
+        "engram-session"
     }
-    c
 }
 
-pub fn clear_session_cookie() -> String {
-    format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+pub fn session_layer(
+    control: &crate::store::control::Control,
+    dep: &crate::web::security::Deployment,
+) -> tower_sessions::SessionManagerLayer<tower_sessions_sqlx_store::SqliteStore> {
+    use tower_sessions::cookie::SameSite;
+    use tower_sessions::cookie::time::Duration;
+    tower_sessions::SessionManagerLayer::new(tower_sessions_sqlx_store::SqliteStore::new(
+        control.pool.clone(),
+    ))
+    .with_name(session_cookie_name(dep))
+    .with_secure(dep.secure_cookies())
+    .with_http_only(true)
+    .with_same_site(SameSite::Lax)
+    .with_path("/")
+    .with_expiry(tower_sessions::Expiry::OnInactivity(Duration::days(
+        SESSION_IDLE_DAYS,
+    )))
 }
 
-pub fn cookie_value(header: &str, name: &str) -> Option<String> {
-    header.split(';').find_map(|part| {
-        let (k, v) = part.trim().split_once('=')?;
-        (k == name).then(|| v.to_string())
-    })
+pub async fn sign_in(session: &tower_sessions::Session, identity: &Identity) -> Result<(), Error> {
+    let fail = |e: tower_sessions::session::Error| Error::Store(format!("session: {e}"));
+    session.cycle_id().await.map_err(fail)?;
+    session
+        .insert(SUBJECT_KEY, &identity.subject)
+        .await
+        .map_err(fail)?;
+    session
+        .insert(EMAIL_KEY, &identity.email)
+        .await
+        .map_err(fail)?;
+    Ok(())
 }
 
 pub fn bearer(header: &str) -> Option<String> {
@@ -54,9 +69,6 @@ pub fn bearer(header: &str) -> Option<String> {
         .then(|| value.trim().to_string())
 }
 
-/// Both authentication paths converge here. Handlers ask for an `Identity` and
-/// get 401 automatically if there isn't one; `core` never sees a cookie or a
-/// token.
 impl FromRequestParts<AppState> for Identity {
     type Rejection = Error;
 
@@ -64,16 +76,8 @@ impl FromRequestParts<AppState> for Identity {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Answered once per request, however many extractors ask.
-        //
-        // Two of them routinely do: `Tenant` resolves an `Identity` to find
-        // whose base to open, and a handler that also wants the session id
-        // names `Identity` beside it. Each ask was a full authentication — a
-        // session read and a sliding `extend_session` write per keystroke on
-        // the incremental search route, and for a bearer caller a second walk
-        // of the token table with an argon2 verify on every row. Neither
-        // repetition can produce a different answer: nothing in a request's
-        // lifetime changes the credential it arrived with.
+        // Memoised per request: `Tenant` and handlers both extract `Identity`, and each
+        // authentication costs a session write or an argon2 walk of the token table.
         if let Some(id) = parts.extensions.get::<Identity>() {
             return Ok(id.clone());
         }
@@ -84,7 +88,6 @@ impl FromRequestParts<AppState> for Identity {
 }
 
 impl Identity {
-    /// The authentication itself, with no memo in front of it.
     async fn authenticate(parts: &mut Parts, state: &AppState) -> Result<Self, Error> {
         if let Some(h) = parts
             .headers
@@ -92,38 +95,44 @@ impl Identity {
             .and_then(|v| v.to_str().ok())
             && let Some(token) = bearer(h)
         {
-            return tokens::verify(state.tenants.control(), &token).await;
+            if token.starts_with(tokens::TOKEN_PREFIX) {
+                return tokens::verify(state.tenants.control(), &token).await;
+            }
+            if parts.uri.path() == "/mcp"
+                && let Some(oidc) = &state.auth.oidc
+                && let Some((iss, sub)) = oidc.verify_jwt(&token).await?
+                && state.tenants.control().issuer_of(&sub).await?.as_deref() == Some(iss.as_str())
+            {
+                return Ok(Identity {
+                    subject: sub,
+                    email: None,
+                    session: None,
+                });
+            }
+            return Err(Error::Unauthorized);
         }
 
-        if let Some(h) = parts
-            .headers
-            .get(axum::http::header::COOKIE)
-            .and_then(|v| v.to_str().ok())
-            && let Some(sid) = cookie_value(h, SESSION_COOKIE)
-            && let Some(session) = state.tenants.control().get_session(&sid).await?
-        {
-            // Sliding expiry: active use keeps the session alive.
-            state
-                .tenants
-                .control()
-                .extend_session(&sid, SESSION_TTL_SECS)
-                .await?;
-            return Ok(Identity {
-                subject: session.subject,
-                email: session.email,
-                session: Some(sid),
-            });
-        }
-
-        Err(Error::Unauthorized)
+        let Some(session) = parts.extensions.get::<tower_sessions::Session>().cloned() else {
+            return Err(Error::Unauthorized);
+        };
+        let fail = |e: tower_sessions::session::Error| Error::Store(format!("session: {e}"));
+        let Some(subject) = session.get::<String>(SUBJECT_KEY).await.map_err(fail)? else {
+            return Err(Error::Unauthorized);
+        };
+        let email = session
+            .get::<Option<String>>(EMAIL_KEY)
+            .await
+            .map_err(fail)?
+            .flatten();
+        Ok(Identity {
+            subject,
+            email,
+            session: session.id().map(|id| id.to_string()),
+        })
     }
 }
 
-/// `Option<Identity>` for the one page that has to render for a browser with
-/// no session rather than be bounced to a login it cannot come back from —
-/// see `src/web/pair.rs`. Only "no credentials" becomes `None`; a store
-/// failure while checking is still an error, because treating one as
-/// signed-out would silently show the signed-out page to someone who is not.
+/// Only "no credentials" becomes `None`; a store failure stays an error so nobody is shown as signed out.
 impl axum::extract::OptionalFromRequestParts<AppState> for Identity {
     type Rejection = Error;
 
@@ -143,108 +152,33 @@ impl axum::extract::OptionalFromRequestParts<AppState> for Identity {
 mod tests {
     use super::*;
 
-    #[test]
-    fn session_cookie_carries_the_required_flags() {
-        let c = set_session_cookie("abc123", true);
-        assert!(c.contains("engram_session=abc123"));
-        assert!(c.contains("HttpOnly"), "{c}"); // no JS access
-        assert!(c.contains("SameSite=Lax"), "{c}"); // CSRF mitigation
-        assert!(c.contains("Secure"), "{c}"); // HTTPS only
-        assert!(c.contains("Path=/"), "{c}");
-        assert!(c.contains("Max-Age="), "{c}");
-    }
-
-    #[test]
-    fn insecure_deployments_omit_secure_but_keep_httponly() {
-        // Over plain HTTP a Secure cookie is never sent back and login breaks.
-        let c = set_session_cookie("abc123", false);
-        assert!(!c.contains("Secure"));
-        assert!(c.contains("HttpOnly"));
-    }
-
-    #[test]
-    fn clearing_expires_the_cookie_immediately() {
-        let c = clear_session_cookie();
-        assert!(c.contains("engram_session="));
-        assert!(c.contains("Max-Age=0"), "{c}");
-    }
-
-    #[test]
-    fn cookie_value_is_read_from_a_multi_cookie_header() {
-        let header = "theme=dark; engram_session=wanted; other=1";
-        assert_eq!(
-            cookie_value(header, SESSION_COOKIE).as_deref(),
-            Some("wanted")
-        );
-        assert_eq!(cookie_value("theme=dark", SESSION_COOKIE), None);
-        assert_eq!(cookie_value("", SESSION_COOKIE), None);
-    }
-
-    #[test]
-    fn a_similarly_named_cookie_is_not_mistaken_for_the_session() {
-        assert_eq!(cookie_value("xengram_session=nope", SESSION_COOKIE), None);
-        assert_eq!(
-            cookie_value("engram_session_old=nope", SESSION_COOKIE),
-            None
-        );
-    }
-
-    /// One authentication per request, however many extractors ask for one.
-    ///
-    /// Asserted by taking the session away between the two asks: a second ask
-    /// that still answers cannot have gone back to the store. What that saves
-    /// on the route this was found on — `Tenant` and `Identity` side by side on
-    /// incremental search — is a session read and a sliding-expiry write per
-    /// keystroke, and for a bearer caller a second argon2 walk of the token
-    /// table.
     #[tokio::test]
     async fn one_request_authenticates_once_however_many_extractors_ask() {
         let core = crate::core::test_support::test_core().await;
         let state =
             crate::web::test_support::state_over(core, crate::config::AuthMode::Local).await;
-        state
-            .tenants
-            .control()
-            .insert_session("sid-1", "dev", Some("dev@example.org"), SESSION_TTL_SECS)
-            .await
-            .unwrap();
-
-        let mut parts = axum::http::Request::builder()
-            .uri("/")
-            .header(axum::http::header::COOKIE, "engram_session=sid-1")
-            .body(())
-            .unwrap()
-            .into_parts()
-            .0;
-
+        let control = state.tenants.control();
+        let (row, token) = tokens::mint(control, "t", "dev", None).await.unwrap();
+        let req = || {
+            axum::http::Request::builder()
+                .uri("/")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0
+        };
+        let mut parts = req();
         let first = Identity::from_request_parts(&mut parts, &state)
             .await
-            .expect("the session is live");
-        assert_eq!(first.session.as_deref(), Some("sid-1"));
-
-        state
-            .tenants
-            .control()
-            .delete_session("sid-1")
-            .await
-            .unwrap();
-
+            .expect("the token is live");
+        tokens::revoke(control, &row.id, "dev").await.unwrap();
         let second = Identity::from_request_parts(&mut parts, &state)
             .await
             .expect("the second extractor re-authenticated instead of reading the memo");
         assert_eq!(first, second);
-
-        // A different request with the same credential is a different memo, so
-        // the session going away is still noticed.
-        let mut fresh = axum::http::Request::builder()
-            .uri("/")
-            .header(axum::http::header::COOKIE, "engram_session=sid-1")
-            .body(())
-            .unwrap()
-            .into_parts()
-            .0;
         assert!(matches!(
-            Identity::from_request_parts(&mut fresh, &state).await,
+            Identity::from_request_parts(&mut req(), &state).await,
             Err(Error::Unauthorized)
         ));
     }

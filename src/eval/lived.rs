@@ -1,25 +1,10 @@
-//! What a generation scored while it was actually serving.
-//!
-//! The other half of the loop, and the half that cannot be counterfactual. A
-//! candidate is adopted on a replay: positive observations re-ranked under
-//! other settings, asking where *this* configuration would have put the thing
-//! that mattered. A negative cannot be replayed that way — a give-up says this
-//! list did not answer, and whether some other list would have is unknowable,
-//! because that list was never shown to anybody.
-//!
-//! So the watch reads what happened instead: under the generation that is
-//! live, how much of what use left behind was positive and how much was not,
-//! compared with the same record for the generation before it. No re-ranking
-//! and no retrieval; one aggregate over the observations each one earned.
+//! What a generation scored while serving: a negative cannot be replayed, so the watch compares
+//! the live generation's observations with its parent's, no re-ranking.
 
 use crate::core::Core;
 use crate::error::Result;
-use sqlx::Row;
 
-/// The lived record of one generation.
-///
-/// `negatives` is a weighted sum rather than a count: a give-up is a quarter
-/// of an unsupported literal, and the strengths already say so.
+/// The lived record of one generation; `negatives` is a weighted sum, not a count.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Lived {
     pub positives: usize,
@@ -28,68 +13,38 @@ pub struct Lived {
 }
 
 impl Lived {
-    /// Net strength per observation, or `None` where nothing was observed.
     fn rate(&self) -> Option<f64> {
         (self.observations > 0)
             .then(|| (self.positives as f64 - self.negatives as f64) / self.observations as f64)
     }
 }
 
-/// Everything observed under `generation_id` that is still usable.
+/// Everything still usable that was observed under `generation_id`.
 pub async fn lived(core: &Core, generation_id: &str) -> Result<Lived> {
-    let r = sqlx::query(
+    let r = sqlx::query!(
         "SELECT COUNT(*) AS n,
                 COALESCE(SUM(CASE WHEN strength > 0 THEN 1 ELSE 0 END), 0) AS positives,
                 CAST(COALESCE(SUM(CASE WHEN strength < 0 THEN -strength ELSE 0 END), 0) AS REAL)
                     AS negatives
            FROM observations
           WHERE generation_id = ? AND excluded_at IS NULL",
+        generation_id
     )
-    .bind(generation_id)
     .fetch_one(&core.store.pool)
     .await?;
     Ok(Lived {
-        positives: r.get::<i64, _>("positives") as usize,
-        negatives: r.get::<f64, _>("negatives") as f32,
-        observations: r.get::<i64, _>("n") as usize,
+        positives: r.positives as usize,
+        negatives: r.negatives as f32,
+        observations: r.n as usize,
     })
 }
 
-/// Observations the newer generation needs before this may take it back. Ten,
-/// the same floor as `rehearsed::MIN_PROBES` and `tune::MIN_BAND` and for the
-/// same reason: the noise term is `2/n` a side, so at ten it is a fifth of the
-/// rate range and the two records have to be genuinely far apart to clear it.
-/// Below that a revert is arithmetic on a handful of events — two give-ups
-/// against a parent with forty positives cleared the gate outright, which is
-/// exactly the disproportion "weak evidence may only revert" was meant to
-/// prevent.
+/// Observations the newer generation needs before a revert: the noise is `2/n` a side,
+/// so ten puts it at a fifth of the range (as `rehearsed::MIN_PROBES`).
 pub const MIN_OBSERVATIONS: usize = 10;
 
-/// The watch gate: whether the adopted generation keeps its place against the
-/// one it replaced.
-///
-/// `recommend` pointed at rates instead of ranks, and deliberately conservative
-/// in one direction: the newer generation is kept unless the older one would
-/// clear the gate against it. A tie keeps the newer one, because reverting is
-/// also a change, and the rule that says a knob moving nothing keeps its value
-/// says a generation that lost nothing keeps its place.
-///
-/// "Clear the gate" means the older rate exceeds the newer by more than a
-/// single observation could account for on either side. One strong
-/// observation flipping sign moves a record's net by two, so over `n`
-/// observations it moves the rate by `2 / n` — and it could have happened in
-/// either record. Thin evidence therefore resolves to the branch that changes
-/// nothing: one observation cannot separate anything from anything.
-///
-/// Not corrected for repeated testing, and that is a known weakness rather
-/// than an oversight. Every idle pass asks this again of a growing record, so
-/// the chance that *some* pass in a watch clears the gate is well above what
-/// one reading suggests. A correction would need to know how many times this
-/// generation has been asked about, which is a number nothing keeps; what
-/// stands in for it is `MIN_OBSERVATIONS` and the fact that a false revert is
-/// cheap — the row remembers the candidate, the base goes back to a
-/// configuration it had already measured, and the next pass walks a different
-/// rung.
+/// Whether the adopted generation keeps its place: unless the older rate beats it by more than
+/// one flipped observation (`2/n` a side). Not corrected for repeated testing; reverts are cheap.
 pub fn holds_up(new: &Lived, old: &Lived) -> bool {
     if new.observations < MIN_OBSERVATIONS {
         return true;
@@ -101,38 +56,15 @@ pub fn holds_up(new: &Lived, old: &Lived) -> bool {
     old_rate - new_rate <= one_observation
 }
 
-/// Whether the lived evidence has separated the two generations, in either
-/// direction — or the newer one has been watched for as long as the record it
-/// is measured against.
-///
-/// What ends a watch. While it runs, nothing new is proposed: one change at a
-/// time is what keeps the journal readable and the revert exact. But a watch
-/// that never ended would be one adoption and then silence for the life of
-/// the base, so it ends when the newer generation would itself clear the gate
-/// against the older, or has earned as many observations as the older had
-/// when the two were compared. Neither is a number anybody chose: a base in
-/// heavy use decides quickly and a quiet one waits.
+/// What ends a watch: the newer generation clears the gate against the older, or has
+/// as many observations as the older had.
 pub fn settled(new: &Lived, old: &Lived) -> bool {
-    // The two empty sides are not the same question, and answering them
-    // together with `false` is what wedged this.
-    //
-    // Nothing left on the *older* side ends the watch. With
-    // `old.observations == 0` this function's own second criterion — "as many
-    // observations as the older had" — is trivially true, but the `rate()`
-    // guard returned before it ever got there; `holds_up` answers `true` in
-    // the same case, so the base neither adopted nor reverted and Insights
-    // read "under watch … Nothing else is proposed" for the life of the base.
-    // The way in is ordinary: `exclude_orphaned_observations` zeroes the
-    // parent generation. There is nothing left to separate the two, so the
-    // watch ends and the newer generation keeps its place — which is what a
-    // tie already decides.
+    // Nothing on the older side ends the watch (`exclude_orphaned_observations` can zero it);
+    // returning `false` here would hold the base under watch forever.
     let Some(old_rate) = old.rate() else {
         return true;
     };
-    // Nothing on the *newer* side decides nothing, and must go on waiting: a
-    // generation adopted a moment ago has no observations yet, and ending its
-    // watch here would settle every adoption before any evidence about it
-    // existed — which is the whole of what a watch is for.
+    // Nothing on the newer side must keep waiting: a fresh adoption has no evidence yet.
     let Some(new_rate) = new.rate() else {
         return false;
     };
@@ -255,9 +187,7 @@ mod tests {
             observations: 1,
         };
         assert!(holds_up(&one, &old), "one observation decides nothing");
-        // And nine do not either. The arithmetic alone would have taken the
-        // generation back on two give-ups against forty positives, which is
-        // the disproportion the floor exists to refuse.
+        // Nine neither: the arithmetic alone would revert on two give-ups against forty positives.
         let nine = Lived {
             positives: 0,
             negatives: 9.0,
@@ -290,11 +220,7 @@ mod tests {
 
     #[test]
     fn a_watch_whose_record_was_orphaned_ends_rather_than_wedging() {
-        // `exclude_orphaned_observations` zeroes the parent generation, and
-        // there is then nothing to measure the newer one against. `settled`
-        // used to answer `false` here while `holds_up` answered `true`, so the
-        // base neither adopted nor reverted and Insights read "under watch …
-        // Nothing else is proposed" for the life of the base.
+        // `exclude_orphaned_observations` zeroes the parent; `false` here wedges the watch.
         let new = Lived {
             positives: 3,
             negatives: 1.0,

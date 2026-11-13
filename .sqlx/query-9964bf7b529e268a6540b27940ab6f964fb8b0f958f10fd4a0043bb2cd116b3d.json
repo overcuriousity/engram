@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET created_at = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "9964bf7b529e268a6540b27940ab6f964fb8b0f958f10fd4a0043bb2cd116b3d"
+}

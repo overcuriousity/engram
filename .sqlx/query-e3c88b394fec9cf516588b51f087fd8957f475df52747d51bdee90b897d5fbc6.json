@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(m.origin_corpus_id, a.corpus_id) FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE m.id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "COALESCE(m.origin_corpus_id, a.corpus_id)",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e3c88b394fec9cf516588b51f087fd8957f475df52747d51bdee90b897d5fbc6"
+}

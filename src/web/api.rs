@@ -12,11 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 
-/// One of `text`, `html` or `url` — never two.
-///
-/// Supplying more than one is a validation error rather than a precedence
-/// rule, because every precedence rule here would silently discard something
-/// the caller meant to capture.
+/// One of `text`, `html` or `url`; more than one is refused, since any precedence would discard input.
 #[derive(serde::Deserialize)]
 pub struct IngestRequest {
     #[serde(default)]
@@ -30,23 +26,12 @@ pub struct IngestRequest {
     pub url: Option<String>,
     #[serde(default)]
     pub title: Option<String>,
-    /// `"selection"` when `html` is a fragment the operator highlighted rather
-    /// than a whole page. It exempts the capture from the extraction floor,
-    /// which is a guess about whole pages: three sentences deliberately picked
-    /// out are not a login wall, and refusing them for being short refuses a
-    /// capture that was asked for in as many words.
+    /// `"selection"` when `html` is a highlighted fragment; it exempts the capture from the extraction floor.
     #[serde(default)]
     pub scope: Option<String>,
 }
 
-/// Whether this request may skip the extraction floor.
-///
-/// Only where there is a fragment to be exempt. A server-side GET has no
-/// selection in it: `scope` there is a claim made by a client that never
-/// looked at the page, and honouring it on the `url` path would let anyone
-/// switch off the one guard that catches a login wall — which is the whole
-/// reason the floor exists. So the exemption is tied to `html` having arrived
-/// alongside it.
+/// Only a fragment that arrived as `html` is exempt: on the `url` path `scope` would switch off the login-wall guard.
 fn floor_exempt(req: &IngestRequest) -> bool {
     req.html.is_some() && req.scope.as_deref() == Some("selection")
 }
@@ -60,13 +45,7 @@ fn default_stage() -> String {
     "segment".into()
 }
 
-/// Every field is optional so a caller can correct a tag without resending —
-/// and without re-embedding — the body text.
-///
-/// `title` and `category` are doubly optional on purpose: an absent key means
-/// "leave it alone" and an explicit `null` means "clear it". Collapsing the two
-/// would make a field that can be set but never unset. Tags need no such
-/// distinction, because an empty list already says it.
+/// `title` and `category`: an absent key leaves the field alone, an explicit `null` clears it.
 #[derive(serde::Deserialize)]
 pub struct PatchArtifactRequest {
     #[serde(default)]
@@ -79,8 +58,7 @@ pub struct PatchArtifactRequest {
     pub tags: Option<Vec<String>>,
 }
 
-/// Tell an absent key from an explicit `null`. Serde reaches this function only
-/// when the key was present, so the outer `Some` records that fact.
+/// Serde calls this only when the key is present, so the outer `Some` records presence.
 fn explicit_null<'de, D, T>(d: D) -> std::result::Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -89,12 +67,7 @@ where
     serde::Deserialize::deserialize(d).map(Some)
 }
 
-/// A query-string flag, in the spellings a query string actually carries.
-///
-/// `serde_urlencoded` takes only `true` and `false`, so `?explain=1` — the
-/// spelling in every hand-written curl and every doc example — would be a 400
-/// rather than a flag. An empty value (`?explain`) is on, because writing the
-/// key at all is the request.
+/// Also accepts `1`, `0` and an empty value (on); `serde_urlencoded` takes only `true` and `false`.
 pub(crate) fn query_flag<'de, D>(d: D) -> std::result::Result<Option<bool>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -103,21 +76,13 @@ where
     Ok(raw.map(|v| matches!(v.trim(), "" | "1" | "true" | "yes" | "on")))
 }
 
-/// A chunk may carry this many tags, each this long.
-///
-/// Tags are a filter dimension and a payload index in Qdrant, not a place to
-/// put prose. Unbounded input here becomes unbounded payload on every point
-/// and an index that grows without limit.
+/// Tags become a Qdrant payload index on every point, so they are bounded.
 const MAX_TAGS: usize = 32;
 const MAX_TAG_LEN: usize = 64;
-/// Long enough for any label worth filtering on.
 const MAX_CATEGORY_LEN: usize = 64;
 const MAX_TITLE_LEN: usize = 512;
 
-/// Trim, drop blanks, deduplicate, and refuse what is out of bounds.
-///
-/// Deduplicating matters beyond tidiness: tags are ANDed in a search filter, so
-/// a repeated tag is a condition Qdrant evaluates twice for the same answer.
+/// Deduplicates because tags are ANDed in the search filter.
 fn clean_tags(tags: &[String]) -> Result<Vec<String>> {
     let mut out: Vec<String> = Vec::with_capacity(tags.len());
     for t in tags {
@@ -143,9 +108,7 @@ fn clean_tags(tags: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Trim a settable-or-clearable string field. An empty value after trimming is
-/// a clear, so `""` and `null` mean the same thing rather than storing a label
-/// that renders as nothing.
+/// An empty value after trimming clears the field, so `""` and `null` agree.
 fn clean_optional(value: Option<String>, max: usize, field: &str) -> Result<Option<String>> {
     let Some(v) = value else {
         return Ok(None);
@@ -170,40 +133,25 @@ pub struct StatusResponse {
     pub oldest_pending_secs: Option<i64>,
     pub chunks: i64,
     pub vectors: u64,
-    /// What the base has been learning, or `None` while `[learn]` is off.
-    ///
-    /// Absent rather than zeroed: four zeroes read like a faculty failing, and
-    /// a faculty that was never switched on is not failing.
+    /// `None` while `[learn]` is off: absent, not zeroed, since zeroes read as a failure.
     pub learning: Option<Learning>,
-    /// What the last reap sweep did, or `None` while the sweep is off —
-    /// absent for the same honesty as `learning`.
+    /// `None` while the sweep is off.
     pub reap: Option<ReapStatus>,
-    /// Whether `POST /transcribe` is open: a speech model is configured. The
-    /// web draws its microphone only where this is true, and a client that
-    /// draws one should read this rather than find out with a 404.
+    /// Whether a speech model is configured, so `POST /transcribe` is open.
     pub transcribe: bool,
-    /// The other doors a client draws or hides on the same rule: `POST /ask`
-    /// (an ask model), the image door (a vision model), the verdict bars and
-    /// gaps (`[learn]`), and the offer card (`[recommend]`).
+    /// The doors a client draws or hides on the same rule: `/ask`, images, verdicts and gaps, offers.
     pub asks: bool,
-    /// A synthesizer (`[infer.synthesize]`): without one every capture stays
-    /// verbatim, nothing is read for a reminder, nothing is promoted, and
-    /// `examples` carries an empty phrasing.
+    /// Without a synthesizer captures stay verbatim and nothing is promoted or read for reminders.
     pub synthesizes: bool,
     pub vision: bool,
     pub learn: bool,
     pub recommend: bool,
-    /// What the base holds, for the idle line: sources and live artifacts.
-    /// Units in the stages that call a generation model, still waiting. On a
-    /// server this is the ordinary backlog. On an engram a phone carries, it
-    /// is what the closed gate is holding back.
+    /// Units waiting on a generation model; on a phone, what the closed gate holds back.
     pub waiting_generation: i64,
     pub held: HeldBrief,
-    /// The last capture, for the idle line. Null on an empty base.
+    /// Null on an empty base.
     pub last_kept: Option<LastKept>,
-    /// The two phrasings the box hint offers, in the language `Accept-Language`
-    /// asked for — the classifier's own prototypes, so nothing here is a
-    /// second copy of what the base recognises.
+    /// In the `Accept-Language` language, from the classifier's own prototypes.
     pub examples: Examples,
     /// Whether the base is young enough that the idle column still teaches
     /// what a paste becomes.
@@ -230,8 +178,6 @@ pub struct Examples {
     pub remind: &'static str,
 }
 
-/// The reap line: the last run's counts, and how many retired rows still
-/// hold their text.
 #[derive(serde::Serialize)]
 pub struct ReapStatus {
     pub judged: i64,
@@ -240,11 +186,7 @@ pub struct ReapStatus {
     pub retired_waiting: i64,
 }
 
-/// The half of `status` that is not about machinery.
-///
-/// The counts the insights page renders, in the shape a shell can read. A
-/// pursuit closed unsatisfied is a hole in the base somebody went looking
-/// through and did not fill.
+/// The counts the insights page renders, in a shape a shell can read.
 #[derive(serde::Serialize)]
 pub struct Learning {
     pub pursuits_open: i64,
@@ -253,19 +195,11 @@ pub struct Learning {
     pub gaps_open: i64,
 }
 
-/// Capture channels. `origin` is derived from which field arrived, not
-/// hardcoded: it is the only record of how a document got here.
+/// `origin` is derived from which field arrived; it is the only record of how a document got here.
 use crate::core::ingest::ORIGIN_WEB;
 const ORIGIN_EXTENSION: &str = "extension";
 
-/// Readability and the markdown conversion, off the async worker.
-///
-/// Both are synchronous walks of a DOM that can be megabytes — `fetch_max_bytes`
-/// and the request body limit are both 8 MB — and run inline they hold a Tokio
-/// worker for long enough to stall whatever else that thread was serving.
-/// `Readability` is `!Send`, which is why this could not be awaited across;
-/// inside a `spawn_blocking` closure it is created and dropped without ever
-/// crossing an await, and only the owned `String` has to move.
+/// Off the async worker: these DOM walks can be megabytes, and `Readability` is `!Send`.
 use crate::core::extract::extract;
 
 async fn ingest(
@@ -289,16 +223,13 @@ async fn ingest(
         ));
     }
 
-    // Checked here and not only in `fetch_html`, which the `html` plus `url`
-    // path never calls: this value is stored and rendered as a link on the
-    // corpus page. See `core::fetch::parse_readable`.
+    // Validated here too: the `html` plus `url` path never calls `fetch_html`, and the value is rendered as a link.
     let parsed_url = req
         .url
         .as_deref()
         .map(crate::core::fetch::parse_readable)
         .transpose()?;
 
-    // A highlighted fragment is exempt from the floor. See `floor_exempt`.
     let floor = if floor_exempt(&req) {
         0
     } else {
@@ -310,15 +241,13 @@ async fn ingest(
         (text, ORIGIN_WEB)
     } else if let Some(html) = req.html {
         let page = extract(html, parsed_url.clone(), floor).await?;
-        // The page's own title, when the extension sent none: the same
-        // fallback the link door makes, for the same reason.
         title = title.or(page.title);
         (page.markdown, ORIGIN_EXTENSION)
     } else {
-        // A link may hold a page, a PDF or an image; the core decides which,
-        // the same way it does for the MCP door. 202 when what it stored is
-        // still to be read, as the upload doors answer.
-        let u = parsed_url.as_ref().expect("one-of check guarantees a url");
+        // 202 when what was stored is still to be read, as the upload doors answer.
+        let u = parsed_url
+            .as_ref()
+            .ok_or_else(|| Error::Validation("url: missing".into()))?;
         let out = tenant.core.ingest_url(u, title, None, lang).await?;
         let code = match (&out.status, out.duplicate) {
             (_, true) => StatusCode::OK,
@@ -350,7 +279,6 @@ async fn ingest(
     Ok((code, Json(out)))
 }
 
-/// What `?title=` and `?note=` carry, for every branch of `/capture`.
 #[derive(serde::Deserialize, Default)]
 pub struct CaptureQuery {
     #[serde(default)]
@@ -363,29 +291,19 @@ pub struct CaptureQuery {
     /// `remind` to skip the classifier and date the note as a reminder.
     #[serde(default)]
     pub intent: Option<String>,
-    /// The question this text is an answer to — the ask event's id — where
-    /// the box was filled from an answer. What gets stored then records the
-    /// question and the artifacts the answer was written from, however much
-    /// was edited before saving.
+    /// The ask event's id when the box was filled from an answer; the capture then records the question and its sources.
     #[serde(default)]
     pub from_ask: Option<String>,
 }
 
-/// What the time features take from a capture request: the zone and a forced
-/// intent. Validated here so a typo is a 400 and not a silently ignored
-/// parameter.
+/// Validated here so a typo is a 400, not a silently ignored parameter.
 pub(crate) struct CaptureTime {
     pub tz: Option<String>,
     pub intent: Option<crate::core::moments::Intent>,
 }
 
 pub(crate) fn capture_time(tz: Option<String>, intent: Option<String>) -> Result<CaptureTime> {
-    // The zone gets the same treatment as the intent, which the doc above
-    // has always claimed it did. An unparseable name fell through `zone` to
-    // UTC, so `?tz=Europe/Berlim` was a 201 and every date in the note was
-    // read, stored and rendered two hours off — the silently ignored parameter
-    // this function exists to rule out. Kept as the zone table spells it, so
-    // what is stored is what the day page and the recurrence read back.
+    // An unknown zone is a 400; falling back to UTC would shift every date in the note.
     let tz = match tz.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         None => None,
         Some(name) => match name.parse::<chrono_tz::Tz>() {
@@ -409,24 +327,8 @@ pub(crate) fn capture_time(tz: Option<String>, intent: Option<String>) -> Result
     Ok(CaptureTime { tz, intent })
 }
 
-/// Refuse `intent` on a capture that is not verbatim text, and let `tz`
-/// through unread.
-///
-/// It used to be validated and then silently dropped: only the text branch
-/// applies it, so `intent=remind` on a URL was accepted and ignored.
-///
-/// `intent` is refused because for a fetched page and an uploaded file it
-/// cannot mean anything, and a caller sends it on purpose: it is a statement
-/// about a sentence somebody typed.
-///
-/// `tz` is not refused. It is ambient — every client that can name its zone
-/// sends it — and whether a body is "only a link" is the server's own guess
-/// (`only_a_url`), which no client should have to repeat to the letter. When
-/// it was refused, every client that did not got the capture itself turned
-/// away: the CLI's links and files, then the phone's files, then the phone's
-/// shared links, each held for review and absent from search. A zone that
-/// does not reach the segmentation path costs nothing; a capture that never
-/// arrives costs the capture.
+/// `intent` cannot apply to a fetched page or a file, so it is refused.
+/// `tz` is ambient and let through: refusing it turned away captures from every client that sends it.
 pub(crate) fn refuse_time_fields(intent: Option<&str>) -> Result<()> {
     if !intent.is_some_and(|v| !v.trim().is_empty()) {
         return Ok(());
@@ -438,9 +340,7 @@ pub(crate) fn refuse_time_fields(intent: Option<&str>) -> Result<()> {
     ))
 }
 
-/// The code a stored capture answers with, in the one place the doors that now
-/// need it can share: `200` for something already held, `202` while what was
-/// stored is still to be read, `201` for a capture that is complete.
+/// `200` already held, `202` still to be read, `201` complete.
 pub(crate) fn code_for(out: &crate::core::ingest::IngestOutcome) -> StatusCode {
     if out.duplicate {
         StatusCode::OK
@@ -455,14 +355,7 @@ pub(crate) fn code_for(out: &crate::core::ingest::IngestOutcome) -> StatusCode {
     }
 }
 
-/// Every part of a capture upload: the text fields by name, and every file
-/// part in the order it arrived.
-///
-/// `read_upload` cannot serve this: it takes exactly one file and refuses a
-/// second, which is right for a door that stores one document and wrong for a
-/// share sheet handing over four photos at once. A part counts as a file when
-/// it carried a filename, which is what a browser and a platform share sheet
-/// both do and what a plain text field never does.
+/// Unlike `read_upload`, accepts many files (a share sheet's photos); a part with a filename is a file.
 pub(crate) async fn read_capture_parts(
     mut multipart: axum::extract::Multipart,
 ) -> Result<(std::collections::HashMap<String, String>, Vec<FilePart>)> {
@@ -501,9 +394,7 @@ pub(crate) async fn read_capture_parts(
     Ok((fields, files))
 }
 
-/// One capture or several, in the shape a client can parse without a flag: an
-/// object for a body that held one thing, an array for a share that held more.
-/// Untagged, so neither is wrapped in a name the other lacks.
+/// Untagged: an object for one capture, an array for several.
 #[derive(serde::Serialize)]
 #[serde(untagged)]
 pub(crate) enum Captured {
@@ -511,7 +402,6 @@ pub(crate) enum Captured {
     Many(Vec<crate::core::ingest::IngestOutcome>),
 }
 
-/// A text body refused by `decode_text`, in the words of the door it came to.
 fn not_text(e: crate::core::ingest::NotText, undecodable: &str) -> Error {
     Error::Validation(match e {
         crate::core::ingest::NotText::Undecodable => undecodable.into(),
@@ -519,13 +409,7 @@ fn not_text(e: crate::core::ingest::NotText, undecodable: &str) -> Error {
     })
 }
 
-/// One door for a client that has not classified what it is holding.
-///
-/// A share sheet hands over a blob and a maybe-URL; a shell hands over a path
-/// or a pipe. Written once here, that dispatch is thirty lines; written once
-/// per client, it is the reason the clients never get written. Every branch
-/// ends in an ingest call the other doors already use, and `POST /corpora`
-/// stays exactly as it was for a caller that does know what it holds.
+/// For a client that has not classified what it holds; every branch ends in an existing ingest call.
 async fn capture(
     tenant: Tenant,
     Query(q): Query<CaptureQuery>,
@@ -555,8 +439,7 @@ async fn capture(
             .map_err(|e| not_text(e, "that body is not valid UTF-8 text"))?;
         let out = match only_a_url(&text) {
             Some(u) => {
-                // The body is one link, so this is a fetch and not a capture
-                // of what was sent. See `refuse_time_fields`.
+                // The body is one link, so this is a fetch; see `refuse_time_fields`.
                 refuse_time_fields(q.intent.as_deref())?;
                 tenant.core.ingest_url(&u, q.title, q.note, lang).await?
             }
@@ -567,8 +450,6 @@ async fn capture(
                     .with_note(q.note)
                     .with_tz(time.tz)
                     .with_intent(time.intent);
-                // Kept from an answer: the question and the artifacts ride
-                // along, as they do from the web's `edit first` door.
                 if let Some(ask) = q.from_ask.as_deref().filter(|a| !a.is_empty())
                     && let Some(ev) = tenant.core.store.ask_event(ask).await?
                 {
@@ -587,8 +468,7 @@ async fn capture(
         let (mut fields, files) = read_capture_parts(m).await?;
         let title = q.title.or_else(|| fields.remove("title"));
         let note = q.note.or_else(|| fields.remove("note"));
-        // Read out before `capture_time` takes them, so the refusal below can
-        // still name what the caller sent in the form as well as in the query.
+        // Read before `capture_time` takes them, so the refusal can name form fields too.
         let raw_tz = fields.remove("tz");
         let raw_intent = fields.remove("intent");
         let time = capture_time(
@@ -597,27 +477,18 @@ async fn capture(
         )?;
         let mut out: Vec<crate::core::ingest::IngestOutcome> = Vec::new();
 
-        // A share sheet sends `url` and `text` for the same share, and the
-        // link is the better capture of the two: the text is usually the
-        // page's title repeated. So a `url` wins and takes the text with it,
-        // and the text is kept only where it stands alone.
+        // A share sheet sends `url` and `text` together; the url wins, since the text usually repeats the title.
         let shared_url = fields.remove("url").or_else(|| {
             fields
                 .get("text")
                 .and_then(|t| only_a_url(t).map(|u| u.to_string()))
         });
-        // Nothing here will be a text capture, so nothing here can carry
-        // `intent` (a `tz` is let through; see
-        // `refuse_time_fields`). Judged after `shared_url` is resolved, because a `url`
-        // takes the text with it and a share that turns out to be a link is a
-        // fetch. Where a text part *is* captured they apply to it, and the
-        // files beside it are read on their own terms as they always were.
+        // No text capture here, so no `intent`; judged after `shared_url`, since a url takes the text with it.
         if shared_url.is_some() || !fields.contains_key("text") {
             refuse_time_fields(q.intent.as_deref().or(raw_intent.as_deref()))?;
         }
         if let Some(raw) = shared_url {
-            // Kept for the one case it matters: a link that cannot be read is
-            // stored as the link and this text. See `Core::ingest_link`.
+            // A link that cannot be read is stored as the link and this text; see `Core::ingest_link`.
             let shared = fields.remove("text");
             let u = url::Url::parse(&raw).map_err(|e| Error::Validation(format!("url: {e}")))?;
             if !matches!(u.scheme(), "http" | "https") {
@@ -669,13 +540,12 @@ async fn capture(
                 "nothing to capture: send `text`, `url`, or at least one file part".into(),
             )),
             1 => {
-                let one = out.pop().expect("length checked");
+                let one = out
+                    .pop()
+                    .ok_or_else(|| Error::Internal("one capture expected".into()))?;
                 Ok((code_for(&one), Json(Captured::One(one))).into_response())
             }
             _ => {
-                // The weakest true statement about the set: something here is
-                // still being read if anything is, and nothing is new only if
-                // every one of them was already held.
                 let code = if out.iter().all(|o| o.duplicate) {
                     StatusCode::OK
                 } else if out.iter().any(|o| {
@@ -705,15 +575,13 @@ async fn capture(
         let bytes = axum::body::Bytes::from_request(req, &())
             .await
             .map_err(|e| Error::Validation(format!("body: {e}")))?;
-        // The route's ceiling is the widest branch's. Each kind re-imposes its
-        // own here, or widening the door for a book would widen it for a photo.
+        // Each kind re-imposes its own ceiling, or widening the route for one would widen it for all.
         if bytes.len() > ceiling {
             return Err(Error::Validation(format!(
                 "that {what} is over the {} MB limit for a {what} capture",
                 ceiling / (1024 * 1024)
             )));
         }
-        // A PDF or a photo, read by the server on its own terms.
         refuse_time_fields(q.intent.as_deref())?;
         let out = tenant
             .core
@@ -730,8 +598,7 @@ async fn capture(
 
 const ORIGIN_UPLOAD: &str = "upload";
 
-/// Whether an upload's filename claims to be a PDF. Consulted on the same
-/// terms as `named_txt`: only when the part carried no `Content-Type`.
+/// Consulted only when the part carried no `Content-Type`.
 fn named_pdf(filename: Option<&str>) -> bool {
     filename.is_some_and(|n| {
         std::path::Path::new(n)
@@ -740,11 +607,7 @@ fn named_pdf(filename: Option<&str>) -> bool {
     })
 }
 
-/// Whether an upload's filename claims to be a text file.
-///
-/// Only consulted when the part carried no `Content-Type`. Case-insensitive,
-/// because a browser on a case-preserving filesystem will happily send
-/// `NOTES.TXT`, and refusing that would be a rule about shouting.
+/// Consulted only when the part carried no `Content-Type`; case-insensitive.
 fn named_txt(filename: Option<&str>) -> bool {
     filename.is_some_and(|n| {
         std::path::Path::new(n)
@@ -753,7 +616,6 @@ fn named_txt(filename: Option<&str>) -> bool {
     })
 }
 
-/// One file part of a multipart upload.
 pub(crate) struct FilePart {
     pub(crate) filename: Option<String>,
     /// The part's `Content-Type`, or "" when it carried none.
@@ -763,16 +625,11 @@ pub(crate) struct FilePart {
 
 struct UploadParts {
     file: Option<FilePart>,
-    /// The text fields asked for, by name; only non-blank values are kept.
+    /// Only non-blank values are kept.
     fields: std::collections::HashMap<&'static str, String>,
 }
 
-/// Drain a multipart body: one file part under `file_field`, any of
-/// `text_fields` as text. Order-independent, because a browser sends `note`
-/// before or after the file depending on the form. A second part under
-/// `file_field` is refused rather than silently winning or losing: two files
-/// in one request is a client bug, and whichever we picked would be wrong for
-/// half of them.
+/// A second file part is refused: whichever one won would be wrong for half the clients.
 async fn read_upload(
     mut multipart: axum::extract::Multipart,
     file_field: &'static str,
@@ -820,10 +677,7 @@ async fn read_upload(
     Ok(out)
 }
 
-/// `.txt` and PDF, and nothing else. Refusing everything else by name is what
-/// keeps this one from quietly ingesting the bytes of a format it cannot read.
-///
-/// A PDF is stored and queued; the reading happens in `Stage::Extract`.
+/// `.txt` and PDF only; anything else is refused by name.
 async fn upload(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
@@ -840,11 +694,7 @@ async fn upload(
         return Err(Error::Validation("no file in the upload".into()));
     };
     let note = parts.fields.get("note").cloned();
-    // A part may legally carry no `Content-Type` at all, and letting that
-    // skip the check turns "`.txt` and nothing else" into "anything whose
-    // bytes happen to be UTF-8" — a `.csv`, a `.json`, a page of HTML.
-    // An absent type is not a pass; it just moves the question to the
-    // name, which is the only other thing the sender told us.
+    // An absent `Content-Type` moves the check to the filename; it is not a pass.
     let kind = if declared.is_empty() {
         if named_txt(filename.as_deref()) {
             Kind::Text
@@ -869,10 +719,7 @@ async fn upload(
 
     match kind {
         Kind::Text => {
-            // The route's ceiling is the PDF one, which is many times the
-            // global limit. Text does not get to ride on that: a paste is
-            // bounded by `MAX_BODY_BYTES` however it arrives, and widening the
-            // door for one format must not widen it for the other.
+            // Text is bounded by `MAX_BODY_BYTES` even though the route allows PDF-sized bodies.
             if bytes.len() > crate::web::MAX_BODY_BYTES {
                 return Err(Error::Validation(
                     "that text file is over the 8 MB limit for a text capture".into(),
@@ -910,8 +757,7 @@ async fn upload(
                     lang,
                 })
                 .await?;
-            // 202, not 201: stored, but the extraction — the part that makes it
-            // a corpus anyone can search — is still queued.
+            // 202: stored, but extraction is still queued.
             let code = if out.duplicate {
                 StatusCode::OK
             } else {
@@ -922,15 +768,12 @@ async fn upload(
     }
 }
 
-/// What the upload door decided a part is. Named rather than a bool: the two
-/// branches store different things and answer with different codes.
 enum Kind {
     Text,
     Pdf,
 }
 
-/// The image door. Parts: `image` (required), `title_hint`, `note`. The
-/// bytes are validated and stored here; the reading happens in a job.
+/// Parts: `image` (required), `title_hint`, `note`; the reading happens in a job.
 async fn upload_image(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
@@ -954,8 +797,7 @@ async fn upload_image(
             lang,
         })
         .await?;
-    // 202, not 201: stored, but the reading — the part that makes it a corpus
-    // anyone can search — is still queued.
+    // 202: stored, but the reading is still queued.
     let code = if out.duplicate {
         StatusCode::OK
     } else {
@@ -964,16 +806,8 @@ async fn upload_image(
     Ok((code, Json(out)))
 }
 
-/// The bytes as uploaded, whatever they are. The image door's `?original=1`
-/// answers the same thing for a photo and stays where it is; this is the name
-/// that does not lie about a PDF.
-/// The tag of a corpus's bytes, or the `304` that ends the request.
-///
-/// From the `content_hash` the row already holds, so a phone revalidating a
-/// five-megabyte photo is answered from one indexed column and the blob is
-/// never read. `variant` separates the preview from the original, which are
-/// different bytes at one id; the preview's also carries this build's version,
-/// because a preview is derived and a later build may derive it differently.
+/// The ETag of a corpus's bytes, or the `304` that ends the request; from `content_hash`, so the blob is not read.
+/// A preview's tag carries the build version, since a later build may derive it differently.
 async fn bytes_tag(
     tenant: &Tenant,
     id: &str,
@@ -1082,20 +916,12 @@ fn default_limit() -> i64 {
     50
 }
 
-/// One row of the corpus list: the row's facts and a label, and not its text.
-///
-/// Lists carry summaries and details carry bodies. `GET /corpora/{id}` is
-/// where `raw_text` is read.
+/// Lists carry summaries; `GET /corpora/{id}` carries `raw_text`.
 #[derive(serde::Serialize)]
 pub struct CorpusRow {
     pub id: String,
     pub origin: String,
-    /// What to call the row, and whether that is a name the base holds for it
-    /// — given at capture, derived from the text, or written by a model; all
-    /// three land in `title_hint` — or the opening of its text standing in for
-    /// one because no name has been stored yet. Seen over real HTTP: a fresh
-    /// text capture is `named` within moments, because the passages job
-    /// derives a title as soon as it has read it.
+    /// A stored name (`title_hint`), or the text's opening while no name is stored.
     pub label: String,
     pub named: bool,
     pub status: crate::store::corpora::CorpusStatus,
@@ -1162,7 +988,14 @@ pub struct CorpusDetail {
 
 async fn get_corpus(tenant: Tenant, Path(cid): Path<String>) -> Result<Json<CorpusDetail>> {
     let source = tenant.core.store.get_corpus(&cid).await?;
-    let chunks = tenant.core.store.artifacts_for_corpus(&cid).await?;
+    let chunks = tenant
+        .core
+        .store
+        .artifacts_for_corpus(&cid)
+        .await?
+        .into_iter()
+        .filter(|c| c.status != crate::store::artifacts::ArtifactStatus::Trashed)
+        .collect::<Vec<_>>();
     Ok(Json(CorpusDetail { source, chunks }))
 }
 
@@ -1182,46 +1015,29 @@ async fn reprocess(
     Ok(StatusCode::ACCEPTED)
 }
 
-/// What consolidation has decided, and the pairs it has not settled yet.
 async fn consolidation(tenant: Tenant) -> Result<Json<serde_json::Value>> {
     use crate::store::pairs::PairState;
     Ok(Json(serde_json::json!({
         "superseded": tenant.core.store.superseded_artifacts(100).await?,
-        // The disagreements the judge found, which stay open: the base keeps
-        // both sides and never picks one. Listed first because it is the one
-        // output here that cost a model call, and a reader looking only at
-        // `pairs` would conclude there was nothing to see. Only pairs whose
-        // sides are both still in results, the rule search and Ask read them
-        // by — a pair naming a hidden artifact disagrees with nothing a
-        // reader can reach.
+        // Only pairs whose sides are both still in results; a hidden side disagrees with nothing a reader can reach.
         "contradictions": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Contradiction, 100)
             .await?,
-        // Judge-proposed supersedes no sweep has carried out yet. Only ever
-        // rows an older base filed: the judge now acts on its own verdict, and
-        // the sweep drains what it finds waiting. Emitted regardless — a
-        // client indexing this key breaks on a response that drops it.
+        // Only older bases file these; emitted regardless, since clients index the key.
         "supersede_proposals": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Superseded, 100)
             .await?,
-        // Discards waiting on the sweep, listed for the same reason. Only ever
-        // rows an older base filed: a vacuous verdict is now carried out where
-        // it is found, so nothing new lands here. Emitted regardless — a client
-        // indexing this key breaks on a response that drops it.
+        // Only older bases file these; emitted regardless, since clients index the key.
         "discard_proposals": tenant
             .core
             .store
             .pairs_awaiting_review(PairState::Vacuous, 100)
             .await?,
-        // Retired, and permanently empty: `would_merge` was a verdict a person
-        // confirmed, every verdict is acted on now, and the migration rewrites
-        // the rows that carried it. Emitted anyway — a client indexing this key
-        // breaks on a response that drops it, and an empty list already says
-        // "nothing here to act on" in the language the rest of this reads.
+        // Retired and always empty; emitted because clients index the key.
         "merge_proposals": serde_json::Value::Array(vec![]),
         "pairs": tenant
             .core
@@ -1234,20 +1050,8 @@ async fn consolidation(tenant: Tenant) -> Result<Json<serde_json::Value>> {
 #[derive(serde::Deserialize)]
 pub struct SearchParams {
     pub q: String,
-    /// How many *ranked* hits to return. The response can be longer than this:
-    /// with `[associate]` on, up to `associate.spread_max` further artifacts
-    /// are appended — ones the query never matched, recalled because they are
-    /// linked to what it did match. Every such row carries `via` (the ranked
-    /// hit it was recalled beside) and a `score` of 0, so a client that wants
-    /// only what it asked for can drop them by that field. They obey `tags` and
-    /// `category` like any other row.
-    ///
-    /// They do *not* obey the two `include_*` flags: an associated row is always
-    /// an active, unsuperseded artifact, whatever those are set to. Nothing here
-    /// was asked for by name — association is a spread out of what the query did
-    /// match — and a retired artifact recalled that way would be competing with
-    /// the very successor that retired it. A deprecation audit gets what it
-    /// needs from the ranked hits, where both flags do apply.
+    /// Ranked hits; `[associate]` may append rows carrying `via` and a `score` of 0.
+    /// Appended rows obey `tags` and `category` but not `include_*`: they are always active artifacts.
     pub limit: Option<usize>,
     pub tags: Option<String>,
     pub category: Option<String>,
@@ -1255,24 +1059,16 @@ pub struct SearchParams {
     pub include_deprecated: bool,
     #[serde(default)]
     pub include_superseded: bool,
-    /// Which client is asking. Only `extension` is honoured; see
-    /// `Door::from_client`.
+    /// Only `extension` is honoured; see `Door::from_client`.
     pub door: Option<String>,
-    /// `false` skips the reranker for this call — the typing opt-out.
-    /// Absent means true: one deliberate question wants the best order.
+    /// `false` skips the reranker (the typing opt-out); absent means true.
     pub rerank: Option<bool>,
-    /// Ask for the ranking explanation. It changes the response shape — the
-    /// bare array becomes `{"results": […], "explanation": {…}}` — so only a
-    /// caller that asked for it sees the envelope. It never changes the order.
+    /// Changes the response to `{"results", "explanation"}`; never changes the order.
     #[serde(default, deserialize_with = "query_flag")]
     pub explain: Option<bool>,
 }
 
-/// What both search doors make of one set of query parameters.
-///
-/// Extracted rather than repeated: `typing`, `mark` and `rerank` are decisions
-/// with reasons, and two doors reaching them separately is exactly the drift a
-/// second route must not introduce.
+/// Shared by both search doors so `typing`, `mark` and `rerank` cannot drift apart.
 fn search_request(
     tenant: &Tenant,
     q: SearchParams,
@@ -1283,23 +1079,13 @@ fn search_request(
         .as_deref()
         .map(Door::from_client)
         .unwrap_or(Door::Api);
-    // The extension's panel is a search-as-you-type box exactly like the web
-    // UI's: it debounces at 200ms, so one query arrives as a run of its own
-    // prefixes. Marking those stamps `last_seen_at` on whatever "loo", "loop",
-    // "loop d" happened to match, and that is the field `resurface` reads —
-    // typing would quietly drain the forgotten-chunk feature and disqualify
-    // those artifacts from the stale list. `src/web/ui.rs` opts out for this
-    // reason; the panel has to as well. What an operator actually read is
-    // stamped when they open the artifact, not while they are still typing.
-    // The app's box is one too: it asks when the typing settles, so a query
-    // arrives as a short run of its own spellings.
+    // The extension and the app search as you type; marking prefixes would stamp `last_seen_at` and drain `resurface`.
     let typing = matches!(door, Door::Extension | Door::App);
     let explain = q.explain.unwrap_or(false);
     let query = SearchQuery {
         q: q.q,
         limit: q.limit.unwrap_or(0),
-        // Repeated `?tags=a&tags=b` is awkward in a browser query string, so
-        // accept a comma-separated list.
+        // Also accepts a comma-separated list; repeated `?tags=` is awkward in a browser.
         tags: q
             .tags
             .map(|s| {
@@ -1310,32 +1096,15 @@ fn search_request(
             })
             .unwrap_or_default(),
         category: q.category.filter(|c| !c.is_empty()),
-        // An API call is one deliberate question; only a typing UI opts out.
         mark: !typing,
         include_deprecated: q.include_deprecated,
         include_superseded: q.include_superseded,
-        // Deliberate calls want the best order by default; a typing door
-        // opts out the way the web UI's keystrokes do, and gets its answer
-        // at vector-order speed. An explicit `rerank` still overrides either
-        // way.
+        // An explicit `rerank` overrides the typing default.
         rerank: q.rerank.unwrap_or(!typing),
         explain,
     };
-    // Typing and scoped were one decision here, and they are two.
-    //
-    // Coalescing folds a keystroke into the query it was an early spelling of,
-    // and it folds only within one scope — so a box that types has to say who
-    // is typing, or two operators' panels fold into each other's queries. But a
-    // shell is not a typing door and still has a subject: `--show` records the
-    // open it leads to with a scope, and `jobs/pursuit.rs` attaches an
-    // interaction to a search only when the scopes match. Unscoped, a
-    // shell-only session opened pursuits that collected no engagement at all
-    // and closed unsatisfied every time — it could widen a hole in the base and
-    // never fill one.
-    //
-    // `Api` and `Mcp` stay unscoped on purpose: a bearer token is not a person,
-    // and two agents sharing one would fold into each other's queries. The same
-    // reason `sitting.rs` keeps no sitting for them.
+    // Scoped by door so two operators' typing does not coalesce and pursuits can match shell opens.
+    // `Api` and `Mcp` stay unscoped: a bearer token is not a person.
     let origin: crate::store::feedback::Origin = match door {
         Door::Extension | Door::Cli | Door::App => door.by(tenant.user.subject.clone()),
         _ => door.into(),
@@ -1343,14 +1112,13 @@ fn search_request(
     (query, origin, explain)
 }
 
-/// The cap `Core::search` would have applied, read the same way, so asking for
-/// an explanation — or for the stages — cannot change what a door returns.
+/// Read as `Core::search` reads it, so asking for an explanation cannot change what a door returns.
 fn search_cap(tenant: &Tenant) -> Option<usize> {
     tenant
         .core
         .ranking
         .read()
-        .expect("ranking lock")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .per_source_cap
 }
 
@@ -1359,15 +1127,10 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
     let (query, origin, explain) = search_request(&tenant, q);
     let (results, outcome) = tenant.core.search_with(&query, cap, origin).await?;
     let mut body = search_body(&results, explain.then_some(&outcome.explanation))?;
-    // The search this list was recorded under, where the door waited for it:
-    // what an open, a verdict and a gap name. The web's rail carries it on
-    // every row; here it is beside the list, once.
     if let Some(ev) = outcome.event {
         body["event"] = serde_json::Value::String(ev);
     }
-    // Where each hit's document goes on, for a rail that says *continues in
-    // #4* or *continues in the next passage*. Best-effort, as the web's is: a
-    // marker is a bonus, and failing to read one must not cost the results.
+    // Best-effort: failing to read a continuation marker must not cost the results.
     let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
     if let Ok(next) = tenant.core.store.continuations_of(&ids).await
         && let Some(items) = body["items"].as_array_mut()
@@ -1381,17 +1144,8 @@ async fn search(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Json<se
     Ok(Json(body))
 }
 
-/// What the search door answers: the list envelope, and the pool beside it
-/// when it was asked for.
-///
-/// `explain` adds a key beside `items` and changes nothing else. It used to
-/// turn a bare array into an object, which is a shape a client can only handle
-/// by remembering what it sent.
-///
-/// The rows go out as `SearchResult` serialises them and are not re-shaped
-/// here. `weak` and `past_cliff` are the two facts a rail's honesty is drawn
-/// from — the loose-match badge and the *relevance falls off here* rule — and
-/// a door that rebuilt its rows field by field is a door that can forget one.
+/// `explain` adds a key beside `items` and changes nothing else.
+/// Rows go out as `SearchResult` serialises them, so `weak` and `past_cliff` cannot be dropped.
 pub(crate) fn search_body(
     results: &[crate::core::search::SearchResult],
     explanation: Option<&crate::core::explain::SearchExplanation>,
@@ -1400,9 +1154,7 @@ pub(crate) fn search_body(
     if let Some(e) = explanation {
         body["explanation"] = serde_json::to_value(e)
             .map_err(|e| Error::Internal(format!("serialising the explanation: {e}")))?;
-        // The ranking's own answer, in the words the web's rail says — the
-        // sentence is the server's, so every door says the same one. Beside
-        // each row, only where it has something to say.
+        // The server's own sentence, so every door says the same one.
         body["reranked"] = serde_json::Value::Bool(e.reranked);
         if let Some(items) = body["items"].as_array_mut() {
             for (item, r) in items.iter_mut().zip(results) {
@@ -1420,9 +1172,7 @@ pub struct StaleParams {
     pub limit: Option<usize>,
 }
 
-/// Active artifacts nobody has confirmed or retrieved in a while — candidates
-/// for an operator to review and deprecate. Read-only: nothing here changes
-/// an artifact, and nothing here feeds search ranking.
+/// Read-only: nothing here changes an artifact or feeds ranking.
 async fn stale(
     tenant: Tenant,
     Query(p): Query<StaleParams>,
@@ -1445,22 +1195,13 @@ async fn ask(
     Ok(Json(tenant.core.ask(&req, origin).await?))
 }
 
-/// Which door asked, in the query string, exactly as search names it.
-///
-/// A query parameter rather than a body field: `AskRequest` is the shape a
-/// dozen internal callers build by hand, and how a question arrived is a fact
-/// about the request rather than part of the question.
+/// In the query rather than the body: `AskRequest` is built by hand by many internal callers.
 #[derive(serde::Deserialize)]
 pub struct AskParams {
     pub door: Option<String>,
 }
 
-/// Which door asked, and on whose behalf.
-///
-/// `default` is the door a caller that names none has always been treated as,
-/// which differs per route and is why it is a parameter. The scope rule is
-/// search's, for search's reasons: a door with a known person says who, and a
-/// bearer token is not a person.
+/// `default` differs per route; a bearer token is not a person, so it gets no scope.
 fn ask_origin(
     q: &AskParams,
     tenant: &Tenant,
@@ -1488,11 +1229,7 @@ async fn resurface(
     )))
 }
 
-/// Enough of a corpus to say where a passage came from, and no more.
-///
-/// Not the `Corpus` row itself: that carries `raw_text`, which for a captured
-/// book is the whole book. Shipping it beside every single-artifact read would
-/// make the cheapest door in the API the most expensive one, to say a name.
+/// Not the `Corpus` row, which carries `raw_text` (for a book, the whole book).
 #[derive(serde::Serialize)]
 pub struct SourceRef {
     pub id: String,
@@ -1501,28 +1238,19 @@ pub struct SourceRef {
     pub source_url: Option<String>,
 }
 
-/// One artifact, and the document it was captured from.
-///
-/// The chunk is flattened rather than nested, so every key this door has ever
-/// answered with is still at the top level and no reader of it had to change.
-/// `source` is `None` in the two cases that are not failures: a merged
-/// artifact belongs to no single corpus, and a corpus deleted since leaves its
-/// artifacts readable.
+/// The chunk is flattened so every key this door has answered with stays top level.
+/// `source` is `None` for a merged artifact and for one whose corpus was deleted.
 #[derive(serde::Serialize)]
 pub struct ArtifactDetail {
     #[serde(flatten)]
     pub artifact: crate::store::artifacts::Chunk,
     pub source: Option<SourceRef>,
-    /// The search this open was attributed to, where `?event=` named one the
-    /// caller's own and the artifact is in results: what the verdict bar
-    /// under the text reports against. Null otherwise, and then there is no
-    /// bar — the only way a verdict can be given at all.
+    /// Set only where `?event=` named the caller's own search and the artifact is in results; without it there is no verdict bar.
     pub search_event: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
 pub struct OpenParams {
-    /// The search that listed this artifact, off `GET /search`'s `event`.
     pub event: Option<String>,
 }
 
@@ -1532,9 +1260,7 @@ async fn get_artifact(
     Query(p): Query<OpenParams>,
 ) -> Result<Json<ArtifactDetail>> {
     let chunk = tenant.core.store.get_artifact(&cid).await?;
-    // Opened from a list that named the search it came from: attributed to
-    // that search and no other, under the same three guards the web pane
-    // applies — see `artifact::artifact_detail`.
+    // Attributed under the same three guards as the web pane; see `artifact::artifact_detail`.
     let mut search_event = None;
     if tenant.core.learn.enabled
         && chunk.in_results()
@@ -1548,11 +1274,9 @@ async fn get_artifact(
     {
         search_event = Some(event.to_string());
     }
-    // A reading is not refused because the document behind it is gone: the
-    // artifact is the thing that was asked for and it is still here.
+    // A deleted document does not make its artifact unreadable.
     let source = match &chunk.corpus_id {
-        // `corpus_origin` and not `get_corpus`: the four columns below are the
-        // whole of what this answers with, and the row carries `raw_text`.
+        // `corpus_origin`, not `get_corpus`: the row carries `raw_text`.
         Some(id) => tenant
             .core
             .store
@@ -1566,11 +1290,7 @@ async fn get_artifact(
             }),
         None => None,
     };
-    // Asking for one artifact by id is the same deliberate act the detail pane
-    // records, and it is the whole of what this door can honestly say: there
-    // is no navigation to have pivoted through, so no `via`, and no session to
-    // belong to, because a bearer token is not a conversation. Written after
-    // the read succeeds — a 404 engaged nothing.
+    // No `via` and no session: a bearer token is not a conversation. Written after the read, so a 404 engages nothing.
     tenant.core.mark_artifact_seen(&cid);
     tenant
         .core
@@ -1582,7 +1302,6 @@ async fn get_artifact(
     }))
 }
 
-/// The card the home screen may show, for the situation in the body.
 #[derive(serde::Serialize)]
 pub struct OfferCard {
     pub artifact_id: String,
@@ -1590,29 +1309,19 @@ pub struct OfferCard {
     pub label: String,
     pub named: bool,
     pub snippet: String,
-    /// The ladder's own word: `pattern`, `similar`, `tentative`, `random`. Not
-    /// a sentence — a client owns its wording — and what `seen` and an open
-    /// send back, so the shown and the open agree about what was offered.
+    /// The ladder's word: `pattern`, `similar`, `tentative`, `random`; `seen` and an open send it back.
     pub rung: &'static str,
     pub slot: Option<i64>,
     /// How many earlier occasions the offer rests on. Zero on `random`.
     pub events: i64,
     /// The signals that decided it, largest first. Empty on `random`.
     pub blocks: Vec<&'static str>,
-    /// The earlier occasion this one is like, and the zone it happened in.
     pub at: Option<i64>,
     pub at_tz: Option<String>,
 }
 
-/// `POST /context` — the situation in, the offer out.
-///
-/// A POST because it carries the bundle and because it writes: the situation
-/// is recorded whether or not anything is offered. So no tag — an offer
-/// belongs to a moment. The body is the bundle itself, the JSON the form
-/// field of `/ui/context` holds, read as text so it is stored as it was sent.
-///
-/// `{"offer": null}` is the ordinary answer, not an error: the faculty off,
-/// nothing learned yet, or nothing a card could say.
+/// A POST because it records the situation whether or not anything is offered; the body is stored as sent.
+/// `{"offer": null}` is the ordinary answer, not an error.
 async fn context(tenant: Tenant, bundle: String) -> Json<serde_json::Value> {
     let offer = crate::web::ui::compute_offer(&tenant, &bundle)
         .await
@@ -1642,27 +1351,14 @@ struct SeenBody {
     slot: Option<i64>,
 }
 
-/// `POST /context/seen` — the client confirming the card reached the screen.
-/// What writes `recommended_shown`, and so what keeps the hit rate on Ops a
-/// hit rate: a client calls it when the card is on screen and not before.
-/// Always `204`; see `ui::record_seen`.
+/// The only writer of `recommended_shown`, so a client calls it once the card is on screen. Always `204`.
 async fn context_seen(tenant: Tenant, Json(b): Json<SeenBody>) -> StatusCode {
     crate::web::ui::record_seen(&tenant, &b.artifact_id, &b.rung, b.slot).await;
     StatusCode::NO_CONTENT
 }
 
-/// How an artifact came to exist: what it was written from, nested by
-/// generation, and what it replaced without being written from it.
-///
-/// A sub-resource rather than a key on `GET /artifacts/{id}`: that door is the
-/// cheap one and says so, a tree is up to two hundred reads, and the two
-/// revalidate on their own. Reading a tree is not opening an artifact, so
-/// nothing is recorded here.
-///
-/// An artifact with no history answers the empty tree, not a 404 — it exists,
-/// and "written from nothing, replaced nothing" is a true thing to say about
-/// it. `truncated` crosses for the reason it is on the page: a tree that
-/// quietly stops reads as a complete history.
+/// A sub-resource: a tree is up to two hundred reads, and reading one records no open.
+/// No history answers the empty tree, not a 404; `truncated` says the tree stops early.
 async fn artifact_lineage(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -1673,7 +1369,6 @@ async fn artifact_lineage(
     ))
 }
 
-/// One earlier wording of an artifact.
 #[derive(serde::Serialize)]
 pub struct VersionRow {
     pub n: i64,
@@ -1683,8 +1378,7 @@ pub struct VersionRow {
     pub created_at: i64,
 }
 
-/// The wordings an artifact has had, oldest first. Read-only: putting one back
-/// is a decision, and lives with the other decisions.
+/// Oldest first. Read-only: restoring one is a decision and lives with the decisions.
 async fn artifact_versions(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -1704,41 +1398,32 @@ async fn artifact_versions(
     )))
 }
 
-/// A neighbour, or something this artifact has been needed alongside, as one
-/// row a client can draw: a label that says whether it is a name, and the
-/// opening of the text under it.
+/// A label that says whether it is a name, and the opening of the text.
 #[derive(serde::Serialize)]
 pub struct RelatedRow {
     pub id: String,
     pub label: String,
     pub named: bool,
     pub snippet: String,
-    /// The judge's line, or the question that bound the pair. Only on a row of
-    /// `seen_together`; a neighbour is near by resemblance and needs no why.
+    /// Only on `seen_together`; a neighbour needs no why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
-    /// The document the other side came from. Only on `seen_together`.
+    /// Only on `seen_together`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub corpus_title: Option<String>,
 }
 
-/// What the artifact pane lists beside an artifact, and where it continues.
 #[derive(serde::Serialize)]
 pub struct RelatedAnswer {
-    /// The nearest artifacts by the vector already stored: what this resembles.
     pub related: Vec<RelatedRow>,
     /// What this has been reached for together with, learned from co-retrieval
     /// rather than resemblance. Empty while `[learn]` is off.
     pub seen_together: Vec<RelatedRow>,
-    /// The next passage of the same document, where this one stops mid-sentence.
+    /// Where this passage stops mid-sentence.
     pub continues_at: Option<String>,
 }
 
-/// `GET /artifacts/{id}/related`: the two lists the web pane pivots through,
-/// and the way onward. Its own route rather than fields on the detail, because
-/// the detail records an open and this is read beside it, not instead of it —
-/// and because a neighbour list is a layer over the artifact: the vector store
-/// being down is not a reason to refuse the text.
+/// Its own route: the detail records an open, and a vector store outage must not refuse the text.
 async fn artifact_related(tenant: Tenant, Path(id): Path<String>) -> Result<Json<RelatedAnswer>> {
     let c = tenant.core.store.get_artifact(&id).await?;
     let d = crate::web::artifact::pivots(&tenant.core, &c).await;
@@ -1773,9 +1458,7 @@ async fn artifact_related(tenant: Tenant, Path(id): Path<String>) -> Result<Json
     }))
 }
 
-/// One line of the source beside an artifact, numbered as the document
-/// numbers it. `in_span` is the line the artifact was drawn from, as opposed
-/// to the context either side.
+/// `in_span` marks the lines the artifact was drawn from, as opposed to context.
 #[derive(serde::Serialize)]
 pub struct SourceLine {
     pub number: i64,
@@ -1783,23 +1466,16 @@ pub struct SourceLine {
     pub in_span: bool,
 }
 
-/// The lines an artifact was drawn from, with a little context either side.
 #[derive(serde::Serialize)]
 pub struct SourceSlice {
-    /// The document, for the link onward. `None` for a merged artifact, which
-    /// belongs to no single document, and for one whose document is gone.
+    /// `None` for a merged artifact and for one whose document is gone.
     pub corpus_id: Option<String>,
-    /// What to call the range: `lines 118–141`, `line 6`, or `extraction
-    /// lines 118–141` where the lines are docling's rather than the source's.
+    /// `lines 118–141`, `line 6`, or `extraction lines 118–141` where the lines are docling's.
     pub label: String,
     pub lines: Vec<SourceLine>,
 }
 
-/// `GET /artifacts/{id}/source`: the source column of the web pane, as data.
-/// The same slice the pane draws — `corpus_view::slice` — so the two cannot
-/// disagree about which lines an artifact claims. Empty, with no `corpus_id`,
-/// for a merge: it has no document to claim lines of, and the lineage route
-/// is what says where it came from.
+/// The same slice as the pane (`corpus_view::slice`), so the two agree; empty for a merge.
 async fn artifact_source(tenant: Tenant, Path(id): Path<String>) -> Result<Json<SourceSlice>> {
     let c = tenant.core.store.get_artifact(&id).await?;
     let src = match &c.corpus_id {
@@ -1831,10 +1507,7 @@ async fn artifact_source(tenant: Tenant, Path(id): Path<String>) -> Result<Json<
     }))
 }
 
-/// `POST /transcribe`: one recording in as the `audio` part of a multipart
-/// body, the words in it back as `text/plain`. Nothing is stored — see
-/// `workspace::hear`, which is the whole of it. `404` where no speech model is
-/// configured; `GET /status` says so in advance as `transcribe`.
+/// Nothing is stored. `404` where no speech model is configured; `GET /status` reports it as `transcribe`.
 async fn transcribe(tenant: Tenant, multipart: axum::extract::Multipart) -> Result<Response> {
     let text = crate::web::workspace::hear(&tenant, multipart).await?;
     Ok((
@@ -1855,8 +1528,7 @@ async fn patch_artifact(
     if req.text.is_none() && req.title.is_none() && req.category.is_none() && req.tags.is_none() {
         return Err(Error::Validation("no fields to update".into()));
     }
-    // Validate everything before writing anything: a request half-applied and
-    // then rejected leaves a chunk in a state the caller never asked for.
+    // Validate everything before writing anything, so a rejected request leaves nothing half-applied.
     let text = match &req.text {
         Some(t) if t.trim().is_empty() => {
             return Err(Error::Validation("chunk text is empty".into()));
@@ -1868,11 +1540,7 @@ async fn patch_artifact(
         .title
         .map(|t| clean_optional(t, MAX_TITLE_LEN, "title"))
         .transpose()?;
-    // Held to the same closed list synthesis is. This is the other door into
-    // the field, and a door that accepts any string is the one the subject
-    // words came through in the first place. Folded rather than rejected, for
-    // the same reason: the edit is about the text, and refusing the whole
-    // request over a label helps nobody.
+    // Folded onto the same closed list synthesis uses, rather than rejected.
     let category = req
         .category
         .map(|c| clean_optional(c, MAX_CATEGORY_LEN, "category"))
@@ -1882,9 +1550,7 @@ async fn patch_artifact(
 
     tenant.core.store.get_artifact(&cid).await?;
 
-    // The embedder is shown the title followed by the body, so either of those
-    // invalidates the stored vector. A category or a tag changes only what the
-    // payload says about the chunk.
+    // The embedder sees title and body, so only those invalidate the stored vector.
     let revectorize = text.is_some() || title.is_some();
 
     if let Some(t) = &text {
@@ -1916,12 +1582,7 @@ async fn patch_artifact(
             .enqueue(Stage::Embed, "artifact", &cid)
             .await?;
     } else if chunk.embed_state == crate::store::artifacts::EmbedState::Embedded {
-        // Nothing the model saw has changed, so rewrite the payload in place
-        // rather than spending an inference call to recompute the same vector.
-        //
-        // Only when there is a point to rewrite: for a chunk still waiting to
-        // be embedded, this would be a request Qdrant accepts and applies to
-        // nothing, and the pending job writes the whole payload anyway.
+        // Only when the chunk has a point: a pending embed job writes the whole payload anyway.
         tenant
             .core
             .vectors
@@ -1946,15 +1607,18 @@ async fn patch_artifact(
     Ok(Json(chunk))
 }
 
+/// Into Trash; `POST …/restore` takes it back for 30 days.
 async fn delete_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
-    // Both stores, in the order that survives an interruption — see
-    // `Core::delete_artifact`, which the UI button posts to as well.
-    tenant.core.delete_artifact(&cid).await?;
+    tenant.core.trash_artifact(&cid).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn restore_artifact(tenant: Tenant, Path(cid): Path<String>) -> Result<StatusCode> {
+    tenant.core.restore_artifact(&cid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<StatusResponse>> {
-    use sqlx::Row;
     let (held_corpora, held_artifacts) = tenant.core.store.held_brief().await?;
     let last_kept = tenant
         .core
@@ -1970,39 +1634,27 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
             at: created_at,
         });
     let (example_remind, example_lang) = crate::web::workspace::examples(&tenant.core, &headers);
-    let corpus_rows = sqlx::query("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
+    let corpus_rows = sqlx::query!("SELECT status, COUNT(*) AS n FROM corpora GROUP BY status")
         .fetch_all(&tenant.core.store.pool)
         .await?;
-    let chunks: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+    let chunks: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
-        .await?
-        .get("n");
+        .await?;
 
-    // Counted rather than paged. Every one of these was the length of a list
-    // the insights page draws — fifty pursuits, two hundred artifacts — which
-    // reads as a total right up to the base that has more than that, and then
-    // reports the page size for ever. `--status` is opened to find out whether
-    // a number is moving.
-    //
-    // The predicates are the same store's, so the sentence in a terminal and
-    // the screen in a browser still cannot come apart about what is being
-    // counted; only the cap is gone.
+    // Counted, not paged: a capped list reports its page size as the total.
+    // The predicates are the store's, so the terminal and the browser count the same rows.
     let learning = match tenant.core.learn.enabled {
         false => None,
         true => Some(Learning {
             pursuits_open: tenant.core.store.count_pursuits("open").await?,
-            // The ones still on the gap list: `unsatisfied` is how a run ended,
-            // and a capture that answers one afterwards leaves the word alone
-            // deliberately.
+            // Still on the gap list: a later answering capture leaves `unsatisfied` alone.
             pursuits_unsatisfied: tenant
                 .core
                 .store
                 .count_open_pursuit_gaps(tenant.core.embedder.model())
                 .await?,
             from_pursuits: tenant.core.store.count_synthesized_artifacts().await?,
-            // `?`, not `unwrap_or_default`: a store that cannot be read has to
-            // say so. Reported as zero, a failure here reads as a healthy base
-            // on the one screen an operator opens because something is wrong.
+            // `?`, not `unwrap_or_default`: a zero here would read as a healthy base.
             gaps_open: tenant
                 .core
                 .store
@@ -2056,31 +1708,17 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
             remind: example_remind,
         },
         teach: held_corpora < crate::web::ui::TEACH_UNTIL_SOURCES,
-        sources: corpus_rows
-            .iter()
-            .map(|r| (r.get("status"), r.get("n")))
-            .collect(),
+        sources: corpus_rows.into_iter().map(|r| (r.status, r.n)).collect(),
         jobs: tenant.core.store.job_counts().await?,
         failed: tenant.core.store.failed_jobs(50).await?,
         oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
         chunks,
-        // Qdrant being briefly unreachable should not fail the status page,
-        // which is exactly where you look when something is wrong.
+        // Qdrant briefly unreachable must not fail the status page.
         vectors: tenant.core.vectors.count().await.unwrap_or(0),
     }))
 }
 
-/// The same ask, streamed, for a client that cannot wait in one request.
-///
-/// The browser extension's panel is the caller this exists for. `/ui/ask` would
-/// not serve it three times over: it parks the question and streams from a
-/// second GET, because a page navigates and an `EventSource` cannot POST; it
-/// records against `Door::Ui`; and its frames carry rendered HTML. The panel
-/// has none of those problems and one the page does not — it reads the stream
-/// by hand with `fetch`, since `EventSource` cannot carry a bearer header — so
-/// one POST that streams its own response is the shape that fits.
-///
-/// One question, one request, and no handoff to expire.
+/// For the extension's panel: it reads the stream with `fetch` (EventSource cannot send a bearer header), so one POST streams its own response.
 async fn ask_stream(
     tenant: Tenant,
     Query(q): Query<AskParams>,
@@ -2093,50 +1731,27 @@ async fn ask_stream(
     use tokio_stream::StreamExt as _;
 
     let core = tenant.core.clone();
-    // The door an ask came through, named by the caller. The panel says
-    // nothing and keeps the door it has always had.
+    // The panel names no door and keeps `Extension`.
     let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Extension);
     let events = async_stream::stream! {
         let s = core.ask_events(&req, origin);
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
-            // Every arm is a frame, and the stream itself never fails. Yielding
-            // an `Err` into `Sse` ends the response body where it stands, with
-            // no frame at all — from the panel that is indistinguishable from
-            // an answer that simply stopped, `thinking` still on screen and
-            // nothing said. A failure that has words is worth the words.
+            // Every arm is a frame: an `Err` into `Sse` ends the body with no frame, which reads as an answer that stopped.
             yield Ok::<_, Error>(match ev {
-                // Terminal by construction: the producer is a `try_stream!` and
-                // ends at its first error, so the panel sees one `error` frame
-                // and nothing after it.
+                // Terminal: the `try_stream!` producer ends at its first error.
                 Ok(e) => api_sse_event(e).unwrap_or_else(|e| error_frame("ask", &e)),
                 Err(e) => error_frame("ask", &e),
             });
         }
     };
-    // Kept alive for the same reason the page's stream is: a slow model thinks
-    // for longer than a proxy's idle timeout, and a connection closed
-    // mid-answer looks exactly like an answer that ended.
+    // Kept alive: a slow model outlasts a proxy's idle timeout.
     Ok(Sse::new(events)
         .keep_alive(KeepAlive::default())
         .into_response())
 }
 
-/// A failure the panel can read, in the shape every other frame has.
-///
-/// JSON like the rest of them, so the panel's reader has one shape to parse
-/// rather than one payload that is a value and one that is a bare sentence.
-///
-/// The words are `client_message`'s, not `Display`'s, for the reason the JSON
-/// error body uses them: a store or LLM-parse failure carries schema and
-/// prompt fragments, and a stream is no less a door than a status code. This
-/// is also where the detail goes to the log, since a frame yielded from inside
-/// the body never reaches `IntoResponse` and would otherwise fail in silence.
-/// One search event as a JSON frame.
-///
-/// Deliberately not an arm of `api_sse_event`: a test over that function
-/// asserts the browser panel handles every frame name it mentions, and a
-/// search's stages are no business of the panel's.
+/// Not an arm of `api_sse_event`: a test asserts the panel handles every frame name there.
 fn search_sse_event(ev: crate::core::search::SearchEvent) -> Result<SseEvent> {
     use crate::core::search::SearchEvent::*;
     let (name, data) = match ev {
@@ -2150,12 +1765,7 @@ fn search_sse_event(ev: crate::core::search::SearchEvent) -> Result<SseEvent> {
     ))
 }
 
-/// The same search, reporting each stage as it starts.
-///
-/// A second route rather than a header on the first: `GET /search` answers a
-/// bare array to the terminal client, the extension, `/mcp` and anything a
-/// person has scripted, and a route that answers two shapes depending on what
-/// was asked for is worse than two routes that each answer one.
+/// A second route: `GET /search` answers a bare array to many clients, and one route should answer one shape.
 async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<Response> {
     use tokio_stream::StreamExt as _;
     let cap = search_cap(&tenant);
@@ -2165,8 +1775,7 @@ async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<
         let s = core.search_events(query, cap, origin);
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
-            // Terminal by construction: the producer ends at its first error,
-            // so a client sees one `error` frame and nothing after it.
+            // Terminal: the producer ends at its first error.
             yield Ok::<_, Error>(match ev {
                 Ok(e) => search_sse_event(e).unwrap_or_else(|e| error_frame("search", &e)),
                 Err(e) => error_frame("search", &e),
@@ -2178,9 +1787,7 @@ async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<
         .into_response())
 }
 
-/// `stream` is the route the failure came out of. Two routes yield these now,
-/// and a search that failed logged as `ask stream failed` sends whoever is
-/// reading the log to the wrong half of the application.
+/// `stream` names the route in the log line.
 fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
     if e.status().is_server_error() {
         tracing::error!(error = %e, stream, "stream failed");
@@ -2192,16 +1799,7 @@ fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
         .data(serde_json::json!({ "error": e.client_message() }).to_string())
 }
 
-/// One ask event as a JSON frame.
-///
-/// The twin of `sse_event` in `ui.rs`, and deliberately not the same function.
-/// That one renders the rail and the answer into HTML, because the page's two
-/// halves of a citation have to be numbered by one server-side pass. The panel
-/// builds every node with `textContent` — artifact text is whatever a captured
-/// page contained — so it is sent values and renders them itself.
-///
-/// The frame names are shared with that mapper, and a test asserts the panel
-/// names every one of them.
+/// Sends values, not HTML: the panel builds nodes with `textContent`. A test asserts the panel names every frame.
 fn api_sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
     use crate::core::ask::stream::AskEvent::*;
     let (name, data) = match ev {
@@ -2225,16 +1823,10 @@ fn api_sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
         Citations(hits) => ("citations", serde_json::json!({ "hits": hits })),
         Reasoning(t) => ("reasoning", serde_json::json!({ "text": t })),
         Token(t) => ("token", serde_json::json!({ "text": t })),
-        // The whole response, which is what the blocking door returns: the
-        // panel replaces its streamed draft with it, so what is finally on
-        // screen is the answer the server stands behind rather than a
-        // concatenation the panel assembled.
+        // The panel replaces its draft with this, so the final screen is the server's answer.
         Done(d) => (
             "done",
-            // Every field is a string, a number or a list of those, so this
-            // cannot fail for any input the type admits. Returned rather than
-            // unwrapped because a panic here would kill the stream mid-answer
-            // with nothing said; the caller turns it into an `error` frame.
+            // Cannot fail for this type; returned rather than unwrapped so a panic cannot kill the stream.
             serde_json::to_value(*d)
                 .map_err(|e| Error::Internal(format!("the answer would not serialise: {e}")))?,
         ),
@@ -2245,11 +1837,7 @@ fn api_sse_event(ev: crate::core::ask::stream::AskEvent) -> Result<SseEvent> {
 pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppState> {
     Router::new()
         .route("/corpora", post(ingest).get(list_corpora))
-        // Its own ceiling, because this door now takes a PDF and a book is
-        // many times the global limit. The text branch re-imposes
-        // `MAX_BODY_BYTES` on itself inside the handler.
-        // One route carrying what three carried, so its ceiling is the widest
-        // of theirs; each branch re-imposes its own inside the handler.
+        // Its ceiling is the widest branch's; each branch re-imposes its own inside the handler.
         .route(
             "/capture",
             post(capture).layer(axum::extract::DefaultBodyLimit::max(
@@ -2285,13 +1873,12 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
                 .patch(patch_artifact)
                 .delete(delete_artifact),
         )
+        .route("/artifacts/{id}/restore", post(restore_artifact))
         .route("/artifacts/{id}/lineage", get(artifact_lineage))
         .route("/artifacts/{id}/versions", get(artifact_versions))
         .route("/artifacts/{id}/related", get(artifact_related))
         .route("/artifacts/{id}/source", get(artifact_source))
-        // The microphone's door, the same one the web's button presses. A
-        // recording is a few hundred kilobytes of PCM; the global limit is
-        // for text.
+        // A recording is a few hundred kilobytes of PCM; the global limit is for text.
         .route(
             "/transcribe",
             post(transcribe).layer(axum::extract::DefaultBodyLimit::max(image_max_bytes)),
@@ -2308,22 +1895,16 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .merge(crate::web::client::routes())
         .merge(crate::web::push::routes())
         .merge(crate::web::app::routes())
-        // Over every route above and every one added later: a read that
-        // answers JSON revalidates, without its handler having to know.
+        // Every JSON read above, and any added later, revalidates by ETag.
         .layer(axum::middleware::from_fn(crate::web::etag::layer))
 }
 
-// ── Moments ──────────────────────────────────────────────────────────────────
-
 #[derive(serde::Deserialize)]
 pub struct MomentsQuery {
-    /// The window's lower bound, and `kind=event`'s alone — see `list_moments`
-    /// for why a `due` query has none. Accepted on a `due` query and not
-    /// consulted there.
+    /// The lower bound of `kind=event` only; accepted but ignored on `due`.
     #[serde(default)]
     pub from: Option<i64>,
-    /// The window's upper bound, on both kinds. Defaults to the base's
-    /// `time.horizon_hours` out.
+    /// Defaults to `time.horizon_hours` out.
     #[serde(default)]
     pub to: Option<i64>,
     /// `due` (the default) or `event`.
@@ -2331,17 +1912,8 @@ pub struct MomentsQuery {
     pub kind: Option<String>,
 }
 
-/// Reminders and dates in a window. `due` answers what the front page shows —
-/// open rows only, undated last; `event` answers what refers to the window.
-///
-/// `from` bounds an `event` query and only that one. A `due` query has no lower
-/// bound by design: an overdue reminder is the one that most deserves to be
-/// listed, so a client asking for next week is still told about the row that
-/// went past three weeks ago. Said here because the parameter is accepted on
-/// both and consulted on one, which is not a thing a caller can see from the
-/// answer — and because giving `due` the bound instead would both hide those
-/// overdue rows and, passed as `open_due`'s first argument, un-hide everything
-/// snoozed between here and the window as though it were currently due.
+/// `due`: open rows only, undated last; `event`: what refers to the window.
+/// `due` has no lower bound, so overdue reminders are always listed.
 async fn list_moments(
     tenant: Tenant,
     Query(q): Query<MomentsQuery>,
@@ -2351,12 +1923,7 @@ async fn list_moments(
     let to =
         q.to.unwrap_or(now + tenant.core.time.horizon_hours as i64 * 3_600);
     let rows = match q.kind.as_deref().unwrap_or("due") {
-        // `now`, and never the caller's `from`. `open_due`'s first argument is
-        // the instant a snooze is measured against, not a window's lower
-        // bound — the query has no lower bound on `at` at all, because an
-        // overdue reminder is the one that most deserves to be listed. Passed
-        // `from`, a window a month out both listed every past-overdue row and
-        // un-hid everything snoozed between here and there as currently due.
+        // `now`, not `from`: `open_due`'s first argument is the snooze instant, and `from` would un-hide snoozed rows.
         "due" => tenant.core.store.open_due(now, to).await?,
         "event" => tenant.core.store.event_moments_between(from, to).await?,
         other => return Err(Error::Validation(format!("kind={other}: `due` or `event`"))),
@@ -2364,13 +1931,7 @@ async fn list_moments(
     Ok(Json(Page::whole(rows)))
 }
 
-/// Strike a reminder. `404` where there was no open row to strike, exactly as
-/// `moment_snooze` answers it.
-///
-/// The `bool` used to be discarded and every call answered `204`. A phone
-/// client posting to an id that a re-read or another device had already
-/// settled was told it had succeeded, struck the row locally, and went on
-/// being pushed at by a reminder its own screen no longer showed.
+/// `404` where there was no open row to strike, as `moment_snooze` answers.
 async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
     if !tenant.core.complete_moment(&id).await? {
         return Err(Error::NotFound);
@@ -2379,10 +1940,7 @@ async fn moment_done(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCod
 }
 
 async fn moment_undone(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
-    // `Core::uncomplete_moment`, exactly as the band does it. Clearing
-    // `done_at` alone left this route unable to undo its own `done`: the
-    // recurrence's successor stayed armed, and the note the completion retired
-    // stayed retired, with no API route that could bring it back.
+    // Through `Core::uncomplete_moment`, so the successor is disarmed and the retired note restored.
     tenant.core.uncomplete_moment(&id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2392,19 +1950,8 @@ pub struct SnoozeBody {
     pub until: i64,
 }
 
-/// Put a reminder aside until an instant that is actually later than now.
-///
-/// Validated like `set_moment`, and then some. A snooze is read as the row's
-/// effective time everywhere the ladder is computed, and `snoozed_until IS
-/// NOT NULL` collapses the lead rungs to the single one at zero — so an
-/// `until` in the past does not merely fail to hide the row, it permanently
-/// removes the 48 h, 12 h, 3 h and 30 min pushes from it. `{"until": 0}` is a
-/// plausible way to spell "clear the snooze"; the route for that is
-/// `moment_unsnooze`, and this one says so rather than quietly obeying.
-///
-/// And a 404 where nothing was put aside: `snooze` answers whether a row
-/// moved, and a stale button on a page open since before a re-read replaced
-/// the row was told "snoozed" either way.
+/// `until` must be later than now: a past snooze collapses the lead ladder and loses the 48 h to 30 min pushes.
+/// 404 where nothing was put aside.
 async fn moment_snooze(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -2424,11 +1971,7 @@ async fn moment_snooze(
                 .into(),
         ));
     }
-    // And a reminder with no date has nothing to be put aside until. It is
-    // the band's question "when?", which `open_due` lists whatever any snooze
-    // says — so the 204 this used to answer drew "Snoozed — undo" over a row
-    // that went on standing directly underneath it. Named here rather than
-    // left to `snooze`'s `false`, which spells "no such row".
+    // An undated reminder has nothing to be put aside until, and `open_due` lists it whatever the snooze says.
     if let Some(m) = tenant.core.store.moment(&id).await?
         && m.at.is_none()
     {
@@ -2465,7 +2008,7 @@ pub struct NewMomentBody {
     pub rule: Option<String>,
 }
 
-/// The explicit door: a moment somebody set, on an artifact they name.
+/// A moment somebody set, on an artifact they name.
 async fn set_moment(
     tenant: Tenant,
     Path(aid): Path<String>,
@@ -2480,10 +2023,7 @@ async fn set_moment(
     if let Some(rule) = b.rule.as_deref() {
         crate::core::moments::validate_rule(rule).map_err(Error::Validation)?;
     }
-    // As strictly as `kind`, `rule` and `tz` below. `at` was taken as given,
-    // and `i64::MIN` is a number a JSON body may carry: the band then computed
-    // `at - now` and took its `abs()` when the row was drawn — a panic under
-    // overflow checks, and "in 106751991167300 days" without them.
+    // `at` must be a representable timestamp: the band computes `abs(at - now)`.
     if chrono::DateTime::from_timestamp(b.at, 0).is_none()
         || !(YEAR_ONE..=END_OF_9999).contains(&b.at)
     {
@@ -2492,10 +2032,7 @@ async fn set_moment(
             b.at
         )));
     }
-    // As strictly as `kind` and `rule` beside it. A name that does not parse
-    // fell through to UTC and stayed on the row, so a typo silently moved every
-    // occurrence of a recurrence by the caller's whole offset — and the row
-    // then said UTC, as though somebody had asked for it.
+    // An unknown zone is refused rather than falling through to UTC.
     let tz = match b.tz.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         None => "UTC".to_string(),
         Some(name) => match name.parse::<chrono_tz::Tz>() {
@@ -2542,8 +2079,7 @@ pub(crate) mod tests {
         app_from_core(crate::core::test_support::test_core().await).await
     }
 
-    /// Wrap a core a test has already adjusted — feedback switched on, say —
-    /// in the real router.
+    /// Wraps a core a test has already adjusted in the real router.
     pub async fn app_from_core(
         core: crate::core::Core,
     ) -> (axum::Router, String, crate::core::Core) {
@@ -2554,11 +2090,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn the_consolidation_report_still_carries_every_key_it_ever_had() {
-        // `would_merge` is a retired verdict and the migration rewrites those
-        // rows to `pending`, so `merge_proposals` is now always empty — which
-        // is a reason to stop filling it, not a reason to stop emitting it. A
-        // client indexing the key breaks on a response that omits it, and an
-        // empty list says "nothing to act on" in the language it already reads.
+        // `merge_proposals` is always empty but still emitted, since clients index the key.
         let (app, token) = app_and_token().await;
 
         let res = app
@@ -2582,10 +2114,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// The report is the API's copy of the review queue, and a client acting on
-    /// it presses the same endpoints an operator does. A pair naming an
-    /// artifact that has left results is refused by all of them, so listing it
-    /// hands the client work that can only fail.
     #[tokio::test]
     async fn the_consolidation_report_leaves_out_a_pair_nobody_can_act_on() {
         let (app, token, core) = app_token_and_core().await;
@@ -2645,9 +2173,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn reading_an_artifact_over_the_api_is_an_open() {
-        // The API door was the one place a read left no trace at all: an agent
-        // could work through `GET /artifacts/{id}` all afternoon and teach the
-        // offer ladder, promotion and pursuits precisely nothing.
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let out = core
@@ -2677,16 +2202,9 @@ pub(crate) mod tests {
         assert_eq!(got.len(), 1, "the API read was not recorded: {got:?}");
         assert_eq!(got[0].artifact_id, a);
         assert_eq!(got[0].kind, "opened");
-        // The API has no navigation to pivot through and no session to belong
-        // to: a bearer token is not a conversation.
         assert_eq!(got[0].via, None);
     }
 
-    /// The terminal's `--show` reads one artifact in full, and the whole point
-    /// of it is that nothing is clipped: a rendering that shows two lines is
-    /// the rendering that made this door necessary. The source travels with it
-    /// because a passage without the document it came from is the citation
-    /// problem `-a` already has.
     #[tokio::test]
     async fn one_artifact_is_readable_in_full_with_the_document_it_came_from() {
         let (app, token, core) = app_token_and_core().await;
@@ -2751,9 +2269,6 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    /// A capture with one due moment on it, `cue`-sourced — which is what
-    /// makes the note a reminder's note, and so what makes completing the last
-    /// open reminder retire the corpus.
     async fn corpus_with_due(core: &crate::core::Core, rule: Option<&str>) -> (String, String) {
         use crate::store::moments::{Kind, NewMoment, Source};
         use chrono::TimeZone;
@@ -2794,10 +2309,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn undo_through_the_api_brings_the_note_back_with_the_row() {
-        // The band's undo and this one have to leave the same state behind.
-        // Clearing `done_at` alone left the note retired — out of
-        // `recent_captures`, demoted below the cliff in every search — with no
-        // API route anywhere that could bring it back.
         let (app, token, core) = app_token_and_core().await;
         let (cid, id) = corpus_with_due(&core, None).await;
 
@@ -2831,11 +2342,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// `moment_done` discarded the `bool` and answered `204` whatever it did,
-    /// so a phone client posting to an id a re-read or another device had
-    /// already settled was told it succeeded, struck the row locally, and went
-    /// on being pushed at by a reminder its own screen no longer showed. The
-    /// sibling `moment_snooze` answers `404` for exactly this case.
     #[tokio::test]
     async fn striking_a_reminder_that_is_not_there_is_a_404_and_not_a_204() {
         let (app, token, core) = app_token_and_core().await;
@@ -2920,7 +2426,6 @@ pub(crate) mod tests {
         b.body(Body::empty()).unwrap()
     }
 
-    /// The whole SSE body of a GET, as text.
     async fn sse_body(app: &axum::Router, uri: &str, token: &str) -> String {
         let res = app.clone().oneshot(get(uri, Some(token))).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK, "{uri}");
@@ -2933,8 +2438,6 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    /// A shell has a subject, and the open it leads to is recorded with one.
-    /// Unscoped, the two could never be joined.
     #[tokio::test]
     async fn a_cli_search_is_recorded_against_whoever_ran_it() {
         let mut core = crate::core::test_support::test_core().await;
@@ -2944,8 +2447,6 @@ pub(crate) mod tests {
             .oneshot(get("/api/v1/search?q=journal&door=cli", Some(&token)))
             .await
             .unwrap();
-        // The recording is off the request path, as everything the learning
-        // layer writes is.
         core.background.wait_idle().await;
         let events = core
             .store
@@ -2959,8 +2460,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The other half of the rule, and the one that must not move: a token is
-    /// not a person, and two agents sharing one must not fold together.
     #[tokio::test]
     async fn a_bearer_token_is_still_not_a_person() {
         let mut core = crate::core::test_support::test_core().await;
@@ -2980,10 +2479,6 @@ pub(crate) mod tests {
         assert_eq!(events[0].scope, None, "Door::Api must stay unscoped");
     }
 
-    /// A question typed at a shell reaches the log; the panel, which names no
-    /// door, keeps the door it has always had and records nothing.
-    /// The block is absent while the layer is off, and the fields every
-    /// existing reader of this endpoint depends on are untouched.
     #[tokio::test]
     async fn status_says_nothing_about_learning_while_the_layer_is_off() {
         let (app, token) = app_and_token().await;
@@ -3035,8 +2530,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
 
-        // Drained, not just received: the answer is produced while the body is
-        // read, and `record_ask` runs at the end of it.
         let res = app
             .clone()
             .oneshot(post_json(
@@ -3056,8 +2549,6 @@ pub(crate) mod tests {
         assert_eq!(asks.len(), 1, "a shell question reached nothing: {asks:?}");
         assert!(asks[0].scope.is_some(), "{asks:?}");
 
-        // The same route, named by nobody: the panel, recording nothing, as
-        // it has since it was written.
         let res = app
             .oneshot(post_json(
                 "/api/v1/ask/stream",
@@ -3097,9 +2588,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// The shape the CLI and the extension read: the list envelope. The
-    /// streaming door beside it is a different conversation and must not be
-    /// what changes this one.
     #[tokio::test]
     async fn the_plain_search_door_answers_the_list_envelope() {
         let (app, token) = app_and_token().await;
@@ -3152,13 +2640,7 @@ pub(crate) mod tests {
             .unwrap();
 
         assert_eq!(res.status(), StatusCode::OK);
-        // Never a `max-age`. One URL answers with a different tenant's contents
-        // depending on who is signed in, and an HTTP cache is keyed on the URL
-        // alone — so a held answer is the previous account's cloud drawn for
-        // the next one, and nothing can reach into a browser cache to drop it.
-        // The tag and the client's `localStorage` hold the snapshot instead,
-        // because that is the layer sign-out can clear — and the tag is checked
-        // on every load rather than trusted for a window.
+        // Never `max-age`: one URL answers per tenant and a browser cache cannot be cleared on sign-out.
         let cache = res.headers()[header::CACHE_CONTROL]
             .to_str()
             .unwrap()
@@ -3196,10 +2678,6 @@ pub(crate) mod tests {
         let body = json_of(res).await;
         assert_eq!(body["points"], serde_json::json!([]));
         assert_eq!(body["count"], 0);
-        // And it says so with a tag of its own, so a browser holding the cloud
-        // this base used to have is told to drop it. Points that outlive the
-        // vectors they were drawn from are a picture of a store that is not
-        // there — which is what a held snapshot made of an emptied base.
         assert!(!body["unchanged"].as_bool().unwrap_or(false));
         assert!(body["tag"].as_str().expect("a tag").ends_with(":0"));
     }
@@ -3222,8 +2700,6 @@ pub(crate) mod tests {
         let tag = body["tag"].as_str().unwrap().to_string();
         assert_eq!(body["points"].as_array().unwrap().len(), 1);
 
-        // The same store, so the client keeps what it has and the scroll is
-        // never run.
         let again = json_of(
             app.clone()
                 .oneshot(get(
@@ -3237,9 +2713,6 @@ pub(crate) mod tests {
         assert_eq!(again["unchanged"], true);
         assert_eq!(again["points"], serde_json::json!([]));
 
-        // One more vector and the tag no longer describes the base: the answer
-        // carries the new cloud rather than telling the client to redraw a
-        // picture that has stopped being true.
         core.vectors
             .upsert(vec![bg_point("b", vec![0.0, 1.0, 0.0])])
             .await
@@ -3268,10 +2741,6 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// A POST with a raw body and a content type of the caller's choosing —
-    /// what every client of `/capture` sends, and what `post_json` cannot
-    /// express because it fixes the type. An empty `content_type` omits the
-    /// header entirely, which is a case the door has to answer for.
     pub(crate) fn raw_post(
         uri: &str,
         token: &str,
@@ -3328,7 +2797,6 @@ pub(crate) mod tests {
         )
     }
 
-    /// Like `post_file`, with text fields sent before the file part.
     fn post_file_with(
         uri: &str,
         token: &str,
@@ -3351,8 +2819,6 @@ pub(crate) mod tests {
         )
     }
 
-    /// Two parts under the same file field, which no browser form sends and
-    /// no handler should guess about.
     fn post_two_files(uri: &str, token: &str, field_name: &str, mime: &str) -> Request<Body> {
         multipart(
             uri,
@@ -3394,8 +2860,6 @@ pub(crate) mod tests {
             ))
             .await
             .unwrap();
-        // 202, not 201: stored, but the reading that makes it searchable is
-        // still queued — the same promise the image door makes.
         assert_eq!(res.status(), StatusCode::ACCEPTED);
         let j = json_of(res).await;
         assert_eq!(j["status"], "extracting");
@@ -3409,8 +2873,6 @@ pub(crate) mod tests {
         assert_eq!(src.metadata["note"], "the quarterly plan");
     }
 
-    /// A part may legally carry no `Content-Type`; the name is then the only
-    /// thing the sender told us, exactly as for `.txt`.
     #[tokio::test]
     async fn a_pdf_named_pdf_but_declaring_nothing_is_still_taken() {
         let (app, token) = app_and_token().await;
@@ -3429,7 +2891,6 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::ACCEPTED, "case must not matter");
     }
 
-    /// The door widened by one format, not to anything binary.
     #[tokio::test]
     async fn a_zip_is_refused_by_type_and_by_name() {
         let (app, token, core) = app_token_and_core().await;
@@ -3452,8 +2913,7 @@ pub(crate) mod tests {
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 
-    /// Over the global 8 MB, under the PDF ceiling: the multipart parser gets
-    /// to see it, so the answer is the handler's and not the framework's 413.
+    /// Over the global 8 MB, under the PDF ceiling: the handler answers, not the framework's 413.
     #[tokio::test]
     async fn the_upload_door_has_its_own_larger_body_limit_for_a_pdf() {
         let (app, token) = app_and_token().await;
@@ -3509,9 +2969,6 @@ pub(crate) mod tests {
         assert_eq!(got.to_vec(), a_pdf(), "byte for byte as uploaded");
     }
 
-    /// The image route answers for images. A PDF is stored without a preview,
-    /// and a caller walking every corpus for a thumbnail must be told there is
-    /// none rather than handed zero bytes under `image/jpeg`.
     #[tokio::test]
     async fn the_image_route_has_nothing_to_show_for_a_pdf() {
         let (app, token, core) = app_token_and_core().await;
@@ -3580,7 +3037,6 @@ pub(crate) mod tests {
         assert_eq!(src.metadata["note"], "front of the router");
         assert_eq!(src.origin, "image");
 
-        // The same bytes again: 200, same id.
         let res = app
             .oneshot(post_file_with(
                 "/api/v1/corpora/image",
@@ -3655,16 +3111,11 @@ pub(crate) mod tests {
             ))
             .await
             .unwrap();
-        // Not a closed door any more: stored, and read when a vision role is
-        // configured.
         assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
     #[tokio::test]
     async fn the_image_door_has_its_own_larger_body_limit() {
-        // Over the global 8 MB, under the image ceiling: the multipart parser
-        // gets to see it, so the answer is the handler's (junk → 400), not the
-        // framework's 413.
         let (app, token) = app_and_token().await;
         let big = vec![0u8; crate::web::MAX_BODY_BYTES + 1024];
         let res = app
@@ -3681,9 +3132,7 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        // And the text door still stops at 8 MB. Multipart streams, so the
-        // limit surfaces as a parse error inside the handler rather than a
-        // 413 from the framework; either way nothing is stored.
+        // Multipart streams, so the 8 MB limit surfaces as a parse error inside the handler.
         let (app, token, core) = app_token_and_core().await;
         let res = app
             .oneshot(post_file(
@@ -3802,10 +3251,7 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         core.background.wait_idle().await;
 
-        // A search from the panel is the least contaminated query there is:
-        // composed while reading, before anything came back. The judging page
-        // can only weigh it that way if the door says which it was.
-        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+        let doors: Vec<String> = sqlx::query_scalar!("SELECT door FROM search_events")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();
@@ -3814,12 +3260,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_search_from_the_panel_does_not_stamp_what_a_prefix_matched() {
-        // The extension's panel is a search-as-you-type box: it debounces at
-        // 200ms, so "loop device" arrives as a run of its own prefixes. If
-        // those mark, every artifact "loo" happened to match gets its
-        // `last_seen_at` stamped — the field `resurface` reads — and typing
-        // quietly drains the forgotten-artifact feature and empties the stale
-        // list. `src/web/ui.rs` opts out for this reason; so must this door.
         let core = crate::core::test_support::test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -3867,11 +3307,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_panel_keystroke_does_not_wait_on_the_reranker() {
-        // The panel is the same search-as-you-type box as the web UI's, and
-        // the comment on `search` says it takes the same opt-outs. The web UI
-        // answers keystrokes in vector order and refines on the pause; a
-        // debounced panel prefix must not pay a synchronous rerank round trip
-        // either.
         let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -3909,8 +3344,6 @@ pub(crate) mod tests {
              on a rerank call"
         );
 
-        // A deliberate API call is one question asked on purpose, and it
-        // still gets the best order by default.
         let res = app
             .oneshot(get("/api/v1/search?q=loop", Some(&token)))
             .await
@@ -3924,8 +3357,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_deliberate_api_search_still_counts_as_seeing() {
-        // The other half of the rule above: an API call is one question asked
-        // on purpose, and it must go on marking what it showed.
         let core = crate::core::test_support::test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let made = core
@@ -3974,9 +3405,6 @@ pub(crate) mod tests {
         core.learn.enabled = true;
         let (app, token, core) = app_from_core(core).await;
 
-        // `ask` and `judge` are never captured, so naming one would be a way
-        // to have a contaminated query recorded as a clean one — or to have a
-        // real one silently dropped.
         let res = app
             .oneshot(get("/api/v1/search?q=loop+device&door=judge", Some(&token)))
             .await
@@ -3984,7 +3412,7 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         core.background.wait_idle().await;
 
-        let doors: Vec<String> = sqlx::query_scalar("SELECT door FROM search_events")
+        let doors: Vec<String> = sqlx::query_scalar!("SELECT door FROM search_events")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();
@@ -4025,8 +3453,6 @@ pub(crate) mod tests {
                 &token,
                 "notes.txt",
                 Some("text/plain"),
-                // No byte-order mark, and invalid UTF-8. `ff fe` used to stand
-                // in here, but that is UTF-16's mark and is read now.
                 &[0xc3, 0x28, 0x41],
             ))
             .await
@@ -4035,8 +3461,6 @@ pub(crate) mod tests {
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
     }
 
-    /// UTF-16LE with no byte-order mark is valid UTF-8 — every other byte a
-    /// NUL — and was stored that way (engram#60). It is refused with the fix.
     #[tokio::test]
     async fn an_upload_of_utf16_without_a_byte_order_mark_is_refused() {
         let (app, token, core) = app_token_and_core().await;
@@ -4067,10 +3491,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_upload_of_the_wrong_type_is_refused_with_the_reason() {
-        // This asserted a PDF until the PDF door opened. A CSV is the case it
-        // was really about: bytes that decode as UTF-8 and are still not a
-        // document anyone asked to capture. The reason has to name what the
-        // door does take, or the sender is left guessing.
         let (app, token) = app_and_token().await;
         let res = app
             .oneshot(post_file(
@@ -4093,9 +3513,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_upload_with_no_declared_type_is_judged_by_its_name() {
-        // A multipart part may legally carry no `Content-Type`, and treating
-        // that as "fine" turned the `.txt` door into "anything that decodes as
-        // UTF-8": a `.csv`, a `.json`, a page of HTML.
         let (app, token, core) = app_token_and_core().await;
         let res = app
             .clone()
@@ -4111,7 +3528,6 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         assert!(core.store.list_corpora(10, 0).await.unwrap().is_empty());
 
-        // Named `.txt` and nothing else to go on: accepted, as before.
         let res = app
             .oneshot(post_file(
                 "/api/v1/corpora/upload",
@@ -4127,11 +3543,6 @@ pub(crate) mod tests {
 
     #[test]
     fn only_a_supplied_fragment_is_exempt_from_the_extraction_floor() {
-        // `scope: "selection"` exempts a highlighted fragment, because three
-        // sentences picked out on purpose are a real capture. There is no
-        // selection in a server-side fetch, though — so on the `url` path the
-        // claim is only a way to switch off the guard that catches a login
-        // wall, and it must not be honoured there.
         let req = |html: Option<&str>, url: Option<&str>, scope: Option<&str>| {
             serde_json::from_value::<super::IngestRequest>(serde_json::json!({
                 "html": html,
@@ -4216,7 +3627,6 @@ pub(crate) mod tests {
             src.source_url.as_deref(),
             Some("https://example.test/notes")
         );
-        // Extraction, not the raw HTML: nothing downstream learns HTML exists.
         assert!(
             src.raw_text.contains("## Mounting"),
             "got: {}",
@@ -4242,8 +3652,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn every_api_route_rejects_an_unauthenticated_request() {
-        // A missing auth check on one route is the failure mode that matters
-        // most here, so assert it route by route rather than spot-checking.
+        // A missing auth check on one route is the failure that matters, so every route is asserted.
         let (app, _) = app_and_token().await;
         for (method, uri) in [
             ("GET", "/api/v1/search?q=x"),
@@ -4334,8 +3743,6 @@ pub(crate) mod tests {
         assert_eq!(second["duplicate"], true);
     }
 
-    /// The paste-a-link door reads what the MCP door reads: a link to a PDF
-    /// is stored for extraction and answered 202, like an uploaded one.
     #[tokio::test]
     async fn a_pasted_link_to_a_pdf_is_stored_for_extraction() {
         use wiremock::matchers::{method, path};
@@ -4362,9 +3769,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_source_url_is_refused_unless_it_is_one_a_page_is_read_over() {
-        // `Url::parse` accepts these, and `html` plus `url` never reaches the
-        // scheme allowlist in `fetch_html`. What is stored here is rendered
-        // as a link on the corpus page, in the operator's own session.
         let (app, token) = app_and_token().await;
         for bad in [
             "javascript:fetch('/api/v1/tokens')",
@@ -4386,11 +3790,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_selection_is_not_held_to_the_whole_page_extraction_floor() {
-        // The floor is a guess about whole pages: too little text out of one
-        // means a login wall or an empty shell. A fragment the operator
-        // highlighted and asked for by name means neither, and refusing it —
-        // with a message about login walls, no less — refuses the capture
-        // that was requested.
         let (app, token) = app_and_token().await;
         let short = "<p>The loop device is what makes this work.</p>";
         let res = app
@@ -4404,7 +3803,6 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::CREATED, "selection refused");
 
-        // The same fragment without the scope is still held to the floor.
         let res = app
             .clone()
             .oneshot(post_json(
@@ -4416,8 +3814,6 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
-        // And a selection that extracted to nothing at all is still an error,
-        // rather than an empty corpus stored in silence.
         let res = app
             .oneshot(post_json(
                 "/api/v1/corpora",
@@ -4467,9 +3863,6 @@ pub(crate) mod tests {
         assert!(json_of(res).await["items"].is_array());
     }
 
-    /// `explain` adds a key and changes nothing else. It used to turn an array
-    /// into an object, which a client could only handle by remembering what
-    /// it had sent.
     #[tokio::test]
     async fn explain_adds_the_pool_beside_the_items_and_changes_nothing_else() {
         let (app, token) = app_and_token().await;
@@ -4591,8 +3984,6 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The streaming twin of `/ask`, as the extension panel performs it: one
-    /// POST carrying the bearer, and the answer arriving in frames.
     #[tokio::test]
     async fn api_ask_streams_the_answer_in_json_frames() {
         let (app, token, core) = app_token_and_core().await;
@@ -4626,9 +4017,6 @@ pub(crate) mod tests {
         let body = crate::web::test_support::body_of(res).await;
         assert!(body.contains("event: token"), "no tokens in {body}");
 
-        // The panel builds every node with `textContent`, so the frames it is
-        // sent are values rather than the UI route's rendered fragments. The
-        // `done` frame therefore carries the whole `AskResponse`.
         let done = body
             .split("event: done")
             .nth(1)
@@ -4658,10 +4046,7 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    /// The panel reads this stream by hand — `EventSource` cannot carry a
-    /// bearer header — so a frame the server sends and the panel's switch does
-    /// not name is a frame that vanishes silently. The same guard `app.js` has
-    /// against `sse_event` in `ui.rs`, pointed at the other mapper.
+    /// A frame name the panel's switch does not handle vanishes silently.
     #[tokio::test]
     async fn every_frame_the_api_streams_is_handled_by_the_panel() {
         let api = include_str!("api.rs");
@@ -4727,8 +4112,6 @@ pub(crate) mod tests {
             .get_corpus(v["id"].as_str().unwrap())
             .await
             .unwrap();
-        // The claim: a body that is one link became a link capture — read by
-        // this server as a stranger — rather than the text of the link itself.
         assert_eq!(stored.origin, crate::core::ingest::ORIGIN_FETCH);
     }
 
@@ -4778,14 +4161,7 @@ pub(crate) mod tests {
         assert_eq!(stored.title_hint.as_deref(), Some("A title"));
     }
 
-    /// Every door that takes text stamps the language it will be read in.
-    ///
-    /// One test over all three because the omission is invisible per door:
-    /// `with_lang` is a builder, so a branch that forgets it compiles, stores
-    /// the text, answers 201, and is only wrong six jobs later when the window
-    /// job reads `of_corpus` and gets English. Each of these three had
-    /// resolved `lang` at the top of its handler and then dropped it on one
-    /// arm while a sibling arm passed it.
+    /// One test over all three doors: `with_lang` is a builder, so a branch that forgets it still compiles.
     #[tokio::test]
     async fn every_door_that_takes_text_stamps_the_language() {
         let (app, token, core) = app_token_and_core().await;
@@ -4796,7 +4172,6 @@ pub(crate) mod tests {
             .unwrap();
         let id_of = |v: serde_json::Value| v["id"].as_str().unwrap().to_string();
 
-        // The JSON door, on its `text` arm — the `url` arm already passed it.
         let ingested = id_of(
             json_of(
                 app.clone()
@@ -4810,7 +4185,6 @@ pub(crate) mod tests {
             )
             .await,
         );
-        // The raw-body door, on the arm that is prose rather than a link.
         let raw = id_of(
             json_of(
                 app.clone()
@@ -4825,8 +4199,6 @@ pub(crate) mod tests {
             )
             .await,
         );
-        // The multipart door, on its `text` field — the `url` field and the
-        // file parts already passed it.
         let shared = id_of(
             json_of(
                 app.clone()
@@ -4936,8 +4308,6 @@ pub(crate) mod tests {
             .await;
 
         let (app, token, core) = app_token_and_core().await;
-        // A share sheet sends both for one share; the link is the better
-        // capture of the two, and the text is the title repeated.
         let res = app
             .oneshot(multipart(
                 "/api/v1/capture",
@@ -5011,9 +4381,6 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn each_branch_is_bounded_by_its_own_ceiling_not_the_widest_one() {
-        // The route's limit is the largest of the per-kind ones, because one
-        // route now carries what three carried. That must not hand the image
-        // branch the PDF's ceiling.
         let core = crate::core::test_support::test_core().await;
         let over = core.capture.image_max_bytes + 1;
         let (app, token, _core) = app_from_core(core).await;
@@ -5039,8 +4406,6 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// `intent` reaches only the text branch, so a capture that is not
-    /// verbatim text has to refuse it rather than take it and drop it.
     #[tokio::test]
     async fn intent_is_refused_where_it_would_be_dropped() {
         let (app, token) = app_and_token().await;
@@ -5053,7 +4418,6 @@ pub(crate) mod tests {
                 .body(Body::from(body.to_string()))
                 .unwrap()
         };
-        // A body that is one link is a fetch, not a capture of what was sent.
         let res = app
             .clone()
             .oneshot(text(
@@ -5067,7 +4431,6 @@ pub(crate) mod tests {
             StatusCode::BAD_REQUEST,
             "intent was accepted and dropped"
         );
-        // A PDF or an image read by the server, same answer.
         let res = app
             .clone()
             .oneshot(raw_post(
@@ -5079,7 +4442,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-        // But a multipart whose text part IS the capture still takes them.
         let res = app
             .oneshot(multipart(
                 "/api/v1/capture",
@@ -5096,17 +4458,9 @@ pub(crate) mod tests {
         assert_eq!(res.status(), StatusCode::CREATED);
     }
 
-    /// A zone is ambient: every client that can name one sends it, and none
-    /// should have to know which bodies the server will read as a fetch. It
-    /// was refused beside a link or a file, and the phone — which sends its
-    /// zone with every text — had each shared link held for review and never
-    /// stored, so never searchable. Beside a capture it cannot apply to, it
-    /// is now let through unread and the capture is stored.
     #[tokio::test]
     async fn a_zone_beside_a_link_or_a_file_never_costs_the_capture() {
         let (app, token) = app_and_token().await;
-        // The link: this fixture has nothing to fetch, so it is the *reason*
-        // that is asserted — the door must not turn it away over the zone.
         let res = app
             .clone()
             .oneshot(
@@ -5131,7 +4485,6 @@ pub(crate) mod tests {
             !said.contains("only applies"),
             "the door refused a link over its zone: {said}"
         );
-        // A photo, stored.
         let res = app
             .clone()
             .oneshot(raw_post(
@@ -5143,7 +4496,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(res.status().is_success(), "{}", res.status());
-        // A multipart carrying only a file, zone in the form, stored.
         let res = app
             .clone()
             .oneshot(multipart(
@@ -5160,7 +4512,6 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(res.status().is_success(), "{}", res.status());
-        // And a shared link in a form, same as the plain body.
         let res = app
             .oneshot(multipart(
                 "/api/v1/capture?tz=Europe/Berlin",
@@ -5195,7 +4546,6 @@ mod patch_tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// One embedded chunk, and the app that can edit it.
     async fn one_artifact() -> (axum::Router, String, crate::core::Core, String) {
         let (app, token, core) = app_token_and_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
@@ -5221,8 +4571,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn editing_only_tags_rewrites_the_payload_without_re_embedding() {
-        // Tags are not shown to the embedding model, so recomputing the vector
-        // would spend an inference call to arrive at the same numbers.
         let (app, token, core, cid) = one_artifact().await;
 
         let res = app
@@ -5245,7 +4593,6 @@ mod patch_tests {
             "the stored vector is still correct and must stay so"
         );
 
-        // And the vector store agrees, so a filtered search finds it.
         let hits = core
             .vectors
             .search(
@@ -5267,8 +4614,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn editing_the_title_does_queue_a_re_embed() {
-        // The embedder is shown the title followed by the body, so a new title
-        // means the stored vector describes text that no longer exists.
         let (app, token, core, cid) = one_artifact().await;
 
         app.oneshot(patch_json(
@@ -5318,8 +4663,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn a_field_can_be_cleared_with_an_explicit_null() {
-        // An absent key means "leave it alone", so without this a category
-        // could be set and then never removed.
         let (app, token, core, cid) = one_artifact().await;
         assert_eq!(
             core.store
@@ -5382,7 +4725,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn an_unbounded_tag_list_is_refused() {
-        // Tags become payload on every point and a keyword index in Qdrant.
         let (app, token, _core, cid) = one_artifact().await;
         let many: Vec<String> = (0..500).map(|i| format!("t{i}")).collect();
         let res = app
@@ -5412,8 +4754,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn a_rejected_field_leaves_the_other_fields_alone() {
-        // Validation happens before any write, so a request that fails is a
-        // request that changed nothing.
         let (app, token, core, cid) = one_artifact().await;
         let res = app
             .oneshot(patch_json(
@@ -5445,9 +4785,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn deleting_an_artifact_frees_whatever_it_was_hiding() {
-        // Deleting a corpus heals for this reason; deleting one artifact left
-        // its loser hidden in favour of an id that no longer exists until the
-        // next sweep — which is never, with `consolidate.enabled = false`.
         let (app, token, core, keeper) = one_artifact().await;
         let src = core
             .store
@@ -5539,8 +4876,6 @@ mod patch_tests {
         assert_eq!(unnamed["label"], "no title, only an opening");
     }
 
-    /// The reason the cursor is a keyset: a capture landing between two page
-    /// reads is the ordinary case on a phone, and it must not repeat a row.
     #[tokio::test]
     async fn a_capture_between_two_pages_neither_repeats_nor_skips_a_row() {
         let (app, token, core) = app_token_and_core().await;
@@ -5600,9 +4935,7 @@ mod patch_tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// The divider and the demoted rows are drawn from two facts on the row,
-    /// and a client can only draw them if both arrive. Named here because the
-    /// failure is silent: a list without them still looks like a list.
+    /// The failure is silent: a list without these fields still looks like a list.
     #[test]
     fn the_envelope_carries_a_rows_weakness_and_the_cliff() {
         let rows = vec![
@@ -5646,8 +4979,6 @@ mod patch_tests {
         assert_eq!(again.status(), StatusCode::NOT_MODIFIED);
         assert!(crate::web::test_support::body_of(again).await.is_empty());
 
-        // The preview and the original are different bytes at one id, so the
-        // file's tag must not pass for the image's.
         let image = app
             .oneshot(bearer_get_if(
                 &format!("/api/v1/corpora/{id}/image?original=1"),
@@ -5668,8 +4999,6 @@ mod patch_tests {
             .unwrap()
     }
 
-    /// The read contract's fourth rule, through the real router: a read is
-    /// tagged, and its own tag sent back is answered with nothing.
     #[tokio::test]
     async fn a_read_answers_an_etag_and_a_304_to_its_own_tag() {
         let (app, token, _core) = app_token_and_core().await;
@@ -5710,7 +5039,6 @@ mod patch_tests {
         assert_ne!(after.headers()["etag"].to_str().unwrap(), tag);
     }
 
-    /// An error is not a version of anything, and a write is not a read.
     #[tokio::test]
     async fn an_error_and_a_post_carry_no_etag() {
         let (app, token, _core) = app_token_and_core().await;
@@ -5829,12 +5157,6 @@ mod patch_tests {
         );
     }
 
-    /// Two things the snooze route took on trust. `{"until": 0}` is a
-    /// plausible way to spell "put it back on the band", and written through
-    /// it did the opposite: `open_due` re-admitted the row, and
-    /// `snoozed_until IS NOT NULL` collapsed the lead ladder to its single
-    /// rung at zero, so the 48 h, 12 h, 3 h and 30 min pushes were gone for
-    /// good. And an id naming nothing answered 204.
     #[tokio::test]
     async fn a_snooze_into_the_past_is_refused_and_an_unknown_row_is_a_404() {
         let (app, token, core) = app_token_and_core().await;
@@ -5899,10 +5221,6 @@ mod patch_tests {
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 
-    /// `open_due`'s first argument is the instant a snooze is measured
-    /// against, not a window's lower bound. Handed the caller's `from`, a
-    /// window a month out listed every overdue row and treated everything
-    /// snoozed between here and there as currently due.
     #[tokio::test]
     async fn a_moments_window_in_the_future_does_not_unhide_a_snoozed_row() {
         let (app, token, core) = app_token_and_core().await;
@@ -6034,10 +5352,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn a_zone_the_table_does_not_know_is_refused_and_not_quietly_read_in_utc() {
-        // The doc on `capture_time` claims a typo is a 400 and not a silently
-        // ignored parameter, and the zone was the one field it was not true of:
-        // `zone` turned an unreadable name into UTC, so `?tz=Europe/Berlim` was
-        // a 201 with every date in the note two hours out.
         let (app, token, core) = app_token_and_core().await;
         let text = |uri: &str, body: &str| {
             Request::builder()
@@ -6064,7 +5378,6 @@ mod patch_tests {
                 .contains("Europe/Berlim")
         );
 
-        // And a name it does know is stored as the table spells it.
         let res = app
             .oneshot(text(
                 "/api/v1/capture?tz=Europe%2FBerlin",
@@ -6082,10 +5395,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn setting_a_moment_refuses_an_instant_no_reader_can_do_arithmetic_in() {
-        // `at` was taken as given. `i64::MIN` is a number a JSON body may
-        // carry, and the band computed `at - now` and took its `abs()` when
-        // the row was drawn: a panic under overflow checks, and nonsense —
-        // "in 106751991167300 days" — without them.
         let (app, token, core) = app_token_and_core().await;
         let out = core
             .ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui"))
@@ -6118,7 +5427,6 @@ mod patch_tests {
             core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
             "and nothing was written"
         );
-        // A date somebody actually means still lands, past ones included.
         let res = app
             .oneshot(post_json(
                 &format!("/api/v1/artifacts/{aid}/moments"),
@@ -6132,9 +5440,6 @@ mod patch_tests {
 
     #[tokio::test]
     async fn setting_a_moment_refuses_a_zone_the_table_does_not_know() {
-        // As `kind` and `rule` beside it already were. A typo here moved every
-        // occurrence of the recurrence by the caller's whole offset, and the
-        // row then said UTC as though somebody had asked for it.
         let (app, token, core) = app_token_and_core().await;
         let out = core
             .ingest_capture(crate::core::ingest::Capture::new("Send the invoice", "ui"))
@@ -6182,9 +5487,7 @@ mod patch_tests {
     }
 }
 
-/// The doors the phone uses that the browser reaches otherwise: the pane's
-/// neighbour lists and source column as data, and the microphone's door under
-/// a bearer token.
+/// The doors the phone uses that the browser reaches otherwise.
 #[cfg(test)]
 mod phone_doors {
     use super::tests::{app_from_core, app_token_and_core};
@@ -6205,8 +5508,6 @@ mod phone_doors {
         }
         b.body(Body::empty()).unwrap()
     }
-
-    // ── The phone's doors: related, source, transcribe ─────────────────────
 
     #[tokio::test]
     async fn related_lists_the_neighbours_and_the_links_the_pane_lists() {
@@ -6309,7 +5610,6 @@ mod phone_doors {
         assert_eq!(v["corpus_id"], doc.id);
         assert_eq!(v["label"], "lines 4–5");
         let lines = v["lines"].as_array().unwrap();
-        // Three lines of context either side, clipped to the document.
         assert_eq!(lines.first().unwrap()["number"], 1);
         assert_eq!(lines.last().unwrap()["number"], 8);
         let claimed: Vec<i64> = lines
@@ -6377,8 +5677,6 @@ mod phone_doors {
         assert_eq!(v["transcribe"], true, "{v}");
     }
 
-    /// The phone's microphone presses the same door the browser's does, with a
-    /// bearer token: the words come back as plain text, nothing is stored.
     #[tokio::test]
     async fn transcribe_hands_back_the_words_over_a_bearer_token() {
         let heard = std::sync::Arc::new(crate::infer::fake::FakeTranscriber::saying(
@@ -6417,8 +5715,6 @@ mod phone_doors {
             "dictation is not a capture"
         );
 
-        // A press and a release with nothing in between: the empty transcript,
-        // and no call spent on it.
         let res = app
             .clone()
             .oneshot(multipart(

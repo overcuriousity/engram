@@ -97,7 +97,7 @@ const HARNESS = `
 `;
 
 const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Ask</title>
-<link rel="stylesheet" href="/assets/app.css"><script src="/assets/htmx.min.js" defer></script><script src="/assets/app.js" defer></script></head><body>
+<link rel="stylesheet" href="/assets/app.css"><script src="/assets/vendor/htmx.min.js" defer></script><script src="/assets/app.js" defer></script></head><body>
 <form id="box-form" hx-get="/ui/search/results" hx-target="#results" hx-params="q,category">
 <textarea class="box" name="q" rows="1" placeholder="Describe the situation…"></textarea>
 <div class="verbs"><button class="btn btn-accent" type="button" data-verb="ask">Ask</button>
@@ -139,9 +139,9 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { 'content-type': 'text/javascript' });
     return res.end(fs.readFileSync(ROOT + '/assets/app.js'));
   }
-  if (req.url === '/assets/htmx.min.js') {
+  if (req.url === '/assets/vendor/htmx.min.js') {
     res.writeHead(200, { 'content-type': 'text/javascript' });
-    return res.end(fs.readFileSync(ROOT + '/assets/htmx.min.js'));
+    return res.end(fs.readFileSync(ROOT + '/assets/vendor/htmx.min.js'));
   }
   if (req.url === '/ui/ask/ev1/verdict' && req.method === 'POST') {
     verdictRequests++;
@@ -218,7 +218,7 @@ server.listen(0, '127.0.0.1', () => {
       '--disable-gpu',
       '--dump-dom',
       '--user-data-dir=' + fs.mkdtempSync(require('os').tmpdir() + '/engram-chrome-'),
-      'http://127.0.0.1:' + port + '/ui'
+      'http:' + '//127.0.0.1:' + port + '/ui'
     ],
     { stdio: 'ignore' }
   );

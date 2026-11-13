@@ -1,6 +1,4 @@
-//! The band under the recommendation: what is due, in the viewer's zone.
-//! Read-only over `moments`, plus the four writes a person makes with a
-//! button. No model call anywhere on this page.
+//! The due band: what is due, in the viewer's zone. Read-only over `moments` plus four button writes.
 
 use crate::core::moments::{DEFAULT_HOUR, zone};
 use crate::store::moments::DueRow;
@@ -36,23 +34,13 @@ struct TzForm {
     until: String,
     #[serde(default)]
     when: String,
-    /// When the band last rendered, as the band itself reported it. A row
-    /// created after this is one the viewer has not seen, and is marked so it
-    /// can announce itself. `0` on the first render of a page, which makes
-    /// every row fresh — and that is right: they have all just appeared.
+    /// When the band last rendered; newer rows are fresh. `0` on a page's first render.
     #[serde(default)]
     since: i64,
-    /// Whether the viewer has opened the fold. Rides on the fragment the same
-    /// way `tz` and `since` do, because the band replaces itself on every
-    /// poll and anything it does not send back it forgets — a `<details>`
-    /// here would snap shut under the reader every five minutes.
+    /// Rides on the fragment like `tz` and `since`: the band replaces itself on every poll.
     #[serde(default)]
     all: String,
-    /// Whether this band draws its own "Due" heading. Insights wants one and
-    /// the workspace column does not, and it rides on the fragment for the
-    /// same reason `all` does: the band swaps itself on every action and on
-    /// its own poll, so a heading rendered once by the page around it outlives
-    /// the rows it was a heading for. See `_due.html`.
+    /// Insights draws one and the workspace does not; on the fragment because the band swaps itself.
     #[serde(default)]
     head: String,
 }
@@ -60,55 +48,36 @@ struct TzForm {
 pub(crate) struct DueView {
     pub id: String,
     pub artifact_id: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`.
+    /// Whether `title` is a given name; see `ui::RowLabel`.
     pub named: bool,
     pub title: String,
     pub when: String,
-    /// The absolute time, always, for the row's tooltip. `when` is the short
-    /// form and drops the date the moment it turns into a countdown; the day
-    /// something is due is not information the band may lose.
+    /// The absolute time for the tooltip; `when` drops the date once it counts down.
     pub full: String,
-    /// The instant, as the client needs it to keep counting between polls.
-    /// `0` on an undated row, which carries no countdown and no heat.
+    /// For the client's countdown between polls; `0` on an undated row.
     pub at: i64,
-    /// How close, as a number between 0 and 1 — see `heat`. Written into the
-    /// row as a custom property and read only by the stylesheet.
+    /// Between 0 and 1 (see `heat`); read only by the stylesheet.
     pub heat: String,
     pub overdue: bool,
     pub undated: bool,
     pub recurring: bool,
     pub source: &'static str,
-    /// Created since the band last rendered. Drives one short animation and
-    /// means nothing afterwards.
+    /// Created since the band last rendered; drives one short animation.
     pub fresh: bool,
 }
 
 pub(crate) struct EventView {
     pub artifact_id: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`.
+    /// Whether `title` is a given name; see `ui::RowLabel`.
     pub named: bool,
     pub title: String,
     pub when: String,
     pub span: String,
 }
 
-/// The row the viewer just acted on: what happened to it, and the route that
-/// takes it back. A snooze that says "Done" and offers `undone` undoes
-/// nothing — `undone` clears a `done_at` that is already NULL and leaves
-/// `snoozed_until` set, so the row stays hidden with no way back.
-///
-/// `undo` is the whole path and not a verb appended to the moment's id: "not a
-/// reminder" deletes the moment, so what takes it back is addressed to the
-/// artifact that is still there.
-///
-/// And it is optional, because on one row there is nothing to address it to.
-/// A merged artifact belongs to no corpus, so nothing can re-read a note to
-/// derive the reminder again — `Core::set_reminder` says as much by answering
-/// `false` to `on` there. The row is still deleted; what is withheld is the
-/// button, because an undo that reported success and restored nothing is
-/// worse than no undo at all.
+/// What happened to the row and the route that takes it back.
+/// `undo` is a whole path: "not a reminder" deletes the moment, so its undo is addressed to the artifact.
+/// `None` where nothing can restore it (a merged artifact).
 pub(crate) struct Just {
     pub verb: &'static str,
     pub undo: Option<String>,
@@ -130,69 +99,33 @@ pub(crate) struct DueTemplate {
     pub events: Vec<EventView>,
     pub tz: String,
     pub just: Option<Just>,
-    /// The stamp this render happened at, sent back with the next request so
-    /// the band can tell a row the viewer has already seen from one that
-    /// arrived while they were looking elsewhere. The band is stateless; this
-    /// is the whole of the state, and it lives on the fragment.
+    /// This render's stamp, sent back so the band can tell seen rows from new; the band is otherwise stateless.
     pub since: i64,
-    /// How many rows are behind the fold, or `0` when the band shows them all.
+    /// `0` when the band shows them all.
     pub hidden: usize,
-    /// Whether the fold is open. Echoed into the fragment's `hx-vals` so the
-    /// next poll comes back the same shape the viewer left it in.
+    /// Echoed into `hx-vals` so the next poll keeps the viewer's shape.
     pub all: bool,
-    /// Whether to draw the "Due" heading above the rows. Echoed the same way,
-    /// and drawn *inside* the swapped element: a heading in the page around
-    /// the band, gated on a `has_due` read taken once at page render, survived
-    /// the swap that emptied the band under it — press done on the last open
-    /// reminder and the heading stood over nothing, which is exactly the state
-    /// the gate was written to prevent.
+    /// Drawn inside the swapped element, so emptying the band removes the heading too.
     pub head: bool,
-    /// Seconds until this fragment should ask again. `Option` for the
-    /// template's sake; `refresh_in` always answers, and the floor is the cap.
-    ///
-    /// The fragment carries its own trigger, so each swap sets its own next
-    /// interval: two seconds while a capture is still being read, the second a
-    /// reminder lands where one is coming, and five minutes when nothing is —
-    /// because "nothing due" is not "nothing coming". See `refresh_in`.
+    /// The fragment sets its own next interval each swap; see `refresh_in`.
     pub refresh_in: Option<i64>,
 }
 
-/// How many rows the band draws before it starts counting instead. Twenty
-/// reminders inside the horizon is a wall of text where the front page wants
-/// a glance, and the rows past the cap are the ones furthest away — the least
-/// urgent thing on a band that exists to show the most urgent. The fold opens
-/// on a click and nothing is lost.
+/// The rows past the cap are the least urgent; the fold opens on a click.
 pub(crate) const BAND_ROWS: usize = 8;
 
-/// The cap, and — since nothing due is not nothing coming — the floor too.
-/// Further out than this and there is nothing to watch for yet: the band
-/// re-reads on the five and whatever is coming is still minutes away.
+/// The cap and the floor: nothing due is not nothing coming.
 const POLL_CAP: i64 = 300;
-/// While a capture is still being read, its reminder does not exist yet. Two
-/// seconds is the gap between "you pressed Capture" and "the band holds it".
+/// Two seconds between "you pressed Capture" and the band holding the reminder.
 const POLL_QUEUE: i64 = 2;
 
-/// `queue_active` — a capture of this tenant's still moving through the
-/// pipeline. Foreground work only: see `foreground_work_in_flight` for why
-/// "any pending job" was true forever and pinned the band at two seconds.
-/// `next_at` — the next second at which the band's contents change, if any.
-///
-/// Never `None`. `next_at` is derived from `next_due_change`, which filters
-/// `m.kind = 'due'`, while the band also renders "Coming up" from
-/// `event_moments_between` — and, in either column, rows this browser did not
-/// create. With no open reminder there was no `next_at`, no `every` on the
-/// fragment's `hx-trigger`, and the band simply stopped: an event at 09:00 went
-/// on being named "Coming up" all afternoon, and a reminder or event captured
-/// from the CLI, the extension or a second window never appeared until
-/// something else on the page forced a swap. The cap is the floor under all of
-/// it — one cheap read every five minutes, which is what the cap was already
-/// worth when the answer was known.
+/// `queue_active`: a capture of this tenant still being read (see `foreground_work_in_flight`).
+/// Never `None`: rows this browser did not create and events need the five-minute floor.
 pub(crate) fn refresh_in(queue_active: bool, next_at: Option<i64>, now: i64) -> Option<i64> {
     if queue_active {
         return Some(POLL_QUEUE);
     }
-    // Already past and still open: the row is on screen and nothing sooner is
-    // coming, so the cap is the whole answer.
+    // Already past and still open: the cap is the whole answer.
     let ahead = match next_at {
         Some(at) => at.saturating_sub(now),
         None => POLL_CAP,
@@ -223,13 +156,10 @@ pub(crate) fn when_words(at: i64, now: i64, tz: Tz) -> String {
     }
 }
 
-/// Where the ramp starts. Further out than six hours and a row is neutral: it
-/// is on the list because it exists, not because anything is about to happen.
+/// Further out than this a row is neutral.
 pub(crate) const HEAT_HOURS: i64 = 6;
 
-/// 0 at the far edge of the window, 1 at the moment it is due and every moment
-/// after. The stylesheet mixes one colour against this and nothing else, so
-/// the whole of "how urgent is this" lives in this one number.
+/// 0 at the window's far edge, 1 from the moment it is due; the only urgency input for the stylesheet.
 pub(crate) fn heat(at: i64, now: i64) -> f32 {
     let ahead = at - now;
     let window = HEAT_HOURS * 3_600;
@@ -242,9 +172,7 @@ pub(crate) fn heat(at: i64, now: i64) -> f32 {
     1.0 - ahead as f32 / window as f32
 }
 
-/// A length of time in the coarsest unit that still says something: *45s*,
-/// *12m*, *3h 05m*, *2d 4h*, *9d*. The minutes are zero-padded so a counter
-/// ticking down does not shift the text either side of it.
+/// *45s*, *12m*, *3h 05m*, *2d 4h*, *9d*; minutes zero-padded so a countdown does not shift.
 pub(crate) fn span_words(secs: i64) -> String {
     let s = secs.max(0);
     if s < 60 {
@@ -265,14 +193,8 @@ pub(crate) fn span_words(secs: i64) -> String {
     format!("{d}d")
 }
 
-/// What a due row says. Inside the heat window it counts down, because that is
-/// the number a person acts on; outside it, a wall-clock time, because *in 4
-/// days 3h* is not something anyone can plan around. Once past, how late —
-/// *overdue since Mon 31 Aug 11:00* was the longest string on the band and the
-/// one carrying the least, since the row is on screen precisely because it is
-/// late and the interesting part is by how much.
-///
-/// The absolute time is never lost: `DueView::full` carries it into the title.
+/// A countdown inside the heat window, a wall-clock time outside it, and how late once past.
+/// `DueView::full` keeps the absolute time.
 pub(crate) fn due_words(at: i64, now: i64, tz: Tz) -> String {
     let ahead = at - now;
     if ahead <= 0 {
@@ -293,18 +215,12 @@ async fn render(
     head: bool,
 ) -> UiResult<Response> {
     let tz = zone(Some(tz_name));
-    // The zone as the zone table spells it, never as the form spelled it. It
-    // is echoed back into the fragment's `hx-vals` JSON, and Askama's escaping
-    // does not survive the round trip through the HTML parser: a quote in the
-    // value would break the JSON and every button on the band would silently
-    // stop sending the zone. An unknown name is UTC here, as everywhere.
+    // As the zone table spells it: echoed into `hx-vals` JSON, where a quote would break every button.
     let tz_name = tz.name();
     let now = tenant.core.clock.now();
     let horizon = now + tenant.core.time.horizon_hours as i64 * 3_600;
     let open = tenant.core.store.open_due(now, horizon).await?;
-    // The cap is applied to the read, not to the drawing: what is folded away
-    // is rows, and the ones kept are the ones the read already put first —
-    // overdue, then nearest, then the undated.
+    // Capped at the read, so the kept rows are those the read put first.
     let hidden = if all {
         0
     } else {
@@ -314,13 +230,7 @@ async fn render(
         .into_iter()
         .take(if all { usize::MAX } else { BAND_ROWS })
         .map(|r: DueRow| {
-            // The instant the row is due at *now*: an elapsed snooze is the
-            // row's time, which is what `open_due` selected and ordered on
-            // (`COALESCE(snoozed_until, at)`), what the ladder is keyed on
-            // (`remind::eff`) and what the artifact page shows. Drawing from
-            // `at` alone, the band said "6h overdue" at full heat about a row
-            // the push for the same second called "now", and wrote that same
-            // stale instant into `data-due-at` for the client to count from.
+            // The effective instant, `COALESCE(snoozed_until, at)`, as `open_due`, the ladder and the pane use.
             let eff = r.moment.snoozed_until.or(r.moment.at);
             DueView {
                 id: r.moment.id.clone(),
@@ -360,14 +270,7 @@ async fn render(
             span: r.moment.span.unwrap_or_default(),
         })
         .collect();
-    // What the band is waiting for: a capture still being read, or the next
-    // change to what is due — whichever is sooner.
-    //
-    // The same narrowed probe the idle line asks, not the broader "is any
-    // foreground row in the queue". What the band is waiting for is a reminder,
-    // and a reminder is written by the window job — a reading stage. A promoted
-    // background sweep or a crashed process's stale claim moves nothing the
-    // band shows, and both used to pin it at two seconds.
+    // The narrowed probe the idle line asks: only a reading stage writes a reminder.
     let queue_active = crate::web::ui::reading_a_capture(&tenant.core.store).await;
     let next_at = tenant
         .core
@@ -395,9 +298,7 @@ async fn fragment(tenant: Tenant, Form(f): Form<TzForm>) -> UiResult<Response> {
 }
 
 async fn done(tenant: Tenant, Path(id): Path<String>, Form(f): Form<TzForm>) -> UiResult<Response> {
-    // Only where something was finished. A press that changed nothing — a
-    // second click, a button on a page open since a re-read replaced the row —
-    // reported "Done" and offered to undo a completion that never happened.
+    // Only where something was finished; a press that changed nothing gets no "Done".
     let just = tenant
         .core
         .complete_moment(&id)
@@ -415,13 +316,7 @@ async fn undone(
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
-/// `hour` = now + 1h; `tomorrow` = 09:00 tomorrow; `monday` = 09:00 next
-/// Monday — in the viewer's zone. Anything else is `None` and hides nothing.
-///
-/// The three words are exhaustive on purpose. `tomorrow` used to be the
-/// fall-through rather than a case, so a typo — or the empty string
-/// `TzForm`'s `#[serde(default)]` supplies when the field is missing at all —
-/// took the row off the band for a day and reported "Snoozed" for it.
+/// `hour`, `tomorrow` 09:00, `monday` 09:00, in the viewer's zone; anything else is `None` and hides nothing.
 fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
     if word == "hour" {
         return Some(now + 3_600);
@@ -440,13 +335,7 @@ fn snooze_until(word: &str, now: i64, tz: Tz) -> Option<i64> {
     local(at, tz)
 }
 
-/// A local wall-clock time as an instant, choosing for the operator on the
-/// two days a year when the zone cannot: the first reading of an ambiguous
-/// fall-back hour, and the first instant the zone has again after a
-/// spring-forward gap — chrono's mapping for the gap is `None`, and
-/// `earliest()` on it is `None` too, not the gap-close its name suggests, so
-/// a date the operator set was a button that silently did nothing. See
-/// `core::moments::resolve_local`, which every date path reads through now.
+/// Resolves ambiguous and skipped local times; see `core::moments::resolve_local`.
 fn local(at: chrono::NaiveDateTime, tz: Tz) -> Option<i64> {
     crate::core::moments::resolve_local(at, tz)
 }
@@ -476,13 +365,7 @@ async fn unsnooze(
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
-/// Move a reminder to a date the operator typed.
-///
-/// One row, updated in place. It used to be a completion plus a fresh row,
-/// which put two rows on a recurrence for one real firing: `occurrences_of_rule`
-/// counts rows, so a `FREQ=DAILY;COUNT=3` whose first occurrence was moved once
-/// stopped after two actual reminders. Moving is not completing — the moved row
-/// keeps its identity, and leaves no `done` behind on the day it has left.
+/// Updated in place, not completed and recreated: `occurrences_of_rule` counts rows.
 async fn set_date(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -499,16 +382,7 @@ async fn set_date(
     render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await
 }
 
-/// "This is not a reminder", and its undo.
-///
-/// The band's other buttons all say something about *when*; this one says the
-/// reading was wrong. It is the only honest answer to a row the stage put
-/// there and the operator never asked for, and before it the only way to
-/// clear one was to mark it done — recording a task somebody finished where
-/// there had never been a task. The undo is addressed to the artifact because
-/// the moment itself is gone by then, and it hands the note back to the stage
-/// rather than re-inserting a row from memory: what comes back is what the
-/// note actually says.
+/// Says the reading was wrong; the undo hands the note back to the stage rather than re-inserting a row.
 async fn not_a_reminder(
     tenant: Tenant,
     Path(id): Path<String>,
@@ -517,18 +391,8 @@ async fn not_a_reminder(
     let Some(m) = tenant.core.store.moment(&id).await? else {
         return render(&tenant, &f.tz, None, f.since, f.all == "1", f.head == "1").await;
     };
-    // The banner is drawn on what happened, not on what was asked for: a
-    // `set` row is the one source this never removes, and announcing "Not a
-    // reminder — undo" over a row still sitting two lines below is the band
-    // telling the reader something they can see is untrue.
-    // The undo only where the artifact can honour it: `is_a_reminder` hands
-    // the note back to the judged read, and not every artifact has a note to
-    // hand back. `Core::can_be_a_reminder` is the same predicate that method
-    // decides on — asked here rather than restated, because the corpus is only
-    // the first of its four conditions and checking that one alone offered the
-    // button on a capture of several windows and on one whose promotion an
-    // operator had undone, where pressing it restored nothing. The deletion
-    // still happens; the button does not appear.
+    // The banner follows what happened: a `set` row is never removed.
+    // The undo only where `Core::can_be_a_reminder` says it can be honoured.
     let takes_it_back = tenant
         .core
         .can_be_a_reminder(&m.artifact_id)
@@ -542,7 +406,6 @@ async fn not_a_reminder(
             verb: "Not a reminder",
             undo: takes_it_back.then(|| format!("/ui/artifacts/{}/is-a-reminder", m.artifact_id)),
         });
-    // The reading that filed this moment is the one being contradicted.
     tenant
         .core
         .store
@@ -561,10 +424,7 @@ async fn is_a_reminder(
     Path(id): Path<String>,
     Form(f): Form<TzForm>,
 ) -> UiResult<Response> {
-    // The band only offers this where `can_be_a_reminder` said it would work,
-    // so a `false` here is the window having changed underneath an open page.
-    // Said out loud rather than dropped: the row simply not reappearing is the
-    // symptom, and this is the only place that knows why.
+    // The window changed under an open page; say so rather than drop it.
     if !tenant.core.set_reminder(&id, true).await? {
         tracing::info!(
             artifact_id = id,
@@ -626,10 +486,6 @@ mod tests {
             .unwrap()
     }
 
-    /// A due row is a link and its time; there is no snippet beside it. So a
-    /// reminder set on a passage was listed under the heading of the section
-    /// the passage was cut from — a name for a chapter standing over a
-    /// reminder about three sentences of it.
     #[tokio::test]
     async fn a_reminder_on_a_passage_is_listed_by_how_its_text_opens() {
         let core = test_core().await;
@@ -696,10 +552,6 @@ mod tests {
         );
     }
 
-    /// The heading rides in the fragment, so the swap that empties the band
-    /// takes it with it. Rendered by the page around it — gated on a `has_due`
-    /// read taken once, which is what Insights used to do — pressing done on
-    /// the only open reminder left "Due" standing over nothing.
     #[tokio::test]
     async fn the_heading_leaves_with_the_last_row_it_was_a_heading_for() {
         let core = test_core().await;
@@ -738,8 +590,6 @@ mod tests {
             "an undo is still something, and a heading over it is honest: {after}"
         );
 
-        // The poll that follows once the undo has been let go. This is the
-        // render the heading used to outlive.
         let empty = body_of(
             app.oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&head=1"))
                 .await
@@ -753,9 +603,6 @@ mod tests {
         );
     }
 
-    /// And the column beside the capture box asks for no heading, so it gets
-    /// none: one fragment, two pages, and only one of them has a section to
-    /// name.
     #[tokio::test]
     async fn the_workspace_column_draws_no_heading() {
         let core = test_core().await;
@@ -1005,13 +852,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_row_the_stage_read_can_be_told_it_is_not_a_reminder_and_taken_back() {
-        // The only honest answer to a row nobody asked for. Before it, the way
-        // to clear one was `done` — a task recorded as finished where there
-        // had never been a task, and a re-embed put it back regardless.
         let core = test_core().await;
         let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
-        // As the reading that filed it would have journaled it.
         core.store
             .record_action(&crate::store::actions::NewAction {
                 job: crate::store::actions::Job::Judgement,
@@ -1059,7 +902,6 @@ mod tests {
             "the row is withdrawn, not completed"
         );
         assert!(core.store.open_due(0, i64::MAX).await.unwrap().is_empty());
-        // The reading that filed it is contradicted, and the journal says so.
         assert!(
             core.store
                 .open_action_on(&id, crate::store::actions::Kind::Moment)
@@ -1101,13 +943,6 @@ mod tests {
         );
     }
 
-    /// `carry_moments` deliberately moves a root's open due row onto the
-    /// merge that folded it in, and a merge belongs to no corpus. Before this,
-    /// `set_reminder` returned at the corpus lookup having done nothing:
-    /// pressing "Not a reminder" gave no banner, no error, deleted nothing and
-    /// recorded no refusal, while the row went on pushing at every rung for
-    /// ever. It deletes now — and offers no undo, because nothing could
-    /// re-read a note that does not exist to derive the row again.
     #[tokio::test]
     async fn a_reminder_carried_onto_a_merge_can_still_be_told_it_is_not_one() {
         let core = test_core().await;
@@ -1162,7 +997,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_reminder_somebody_set_themselves_is_not_offered_an_un_reading() {
-        // Offering it would be offering to undo their own typing.
         let core = test_core().await;
         let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
@@ -1192,8 +1026,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_snooze_says_snoozed_and_its_undo_unsnoozes() {
-        // "Done" with an `undone` button would clear a `done_at` that is
-        // already NULL, leave `snoozed_until` set, and the row would stay gone.
         let core = test_core().await;
         let id = artifact_with_due(&core, Some(crate::store::now() - 60)).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
@@ -1236,8 +1068,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_zone_is_echoed_as_the_zone_table_spells_it() {
-        // It lands inside the fragment's `hx-vals` JSON, where a quote would
-        // break every button on the band.
         let core = test_core().await;
         let (app, cookie) = app_with_cookie(core).await;
         let html = body_of(
@@ -1268,13 +1098,8 @@ mod tests {
         ))
         .await
         .unwrap();
-        // One row, still the one that was moved: moving is not completing, so
-        // it leaves no `done` behind on the day it has left.
         let moved = core.store.moment(&id).await.unwrap().unwrap();
         assert!(moved.done_at.is_none(), "a move does not close anything");
-        // `source` is untouched: it records how the date got here, and
-        // correcting *when* says nothing about *how*. What says a person has
-        // been at this row is `moved_from`, which is also the misreading kept.
         assert_eq!(
             moved.source,
             Source::Cue,
@@ -1354,7 +1179,6 @@ mod tests {
         );
     }
 
-    /// A recurring reminder on the 1st of each month, 09:00 Berlin.
     async fn artifact_with_rule(core: &Core, rule: &str) -> String {
         let out = core
             .ingest_capture(Capture::new("Pay rent", "ui"))
@@ -1391,11 +1215,6 @@ mod tests {
 
     #[tokio::test]
     async fn undoing_a_recurring_done_takes_the_next_occurrence_back_with_it() {
-        // Undo is offered on the band a second after Done, and it has to undo
-        // the whole of it. Clearing `done_at` alone left the successor that
-        // completing armed sitting beside the reopened row: two open rows for
-        // one rule, and — since `occurrences_of_rule` counts rows — one firing
-        // of a bounded recurrence spent on a press that was taken back.
         let core = test_core().await;
         let id = artifact_with_rule(&core, "FREQ=MONTHLY;BYMONTHDAY=1").await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
@@ -1442,9 +1261,6 @@ mod tests {
 
     #[tokio::test]
     async fn undoing_does_not_discard_a_successor_that_has_a_history_of_its_own() {
-        // The successor is deleted because it never happened — unless it has
-        // since been acted on in its own right, in which case an undo two
-        // steps back does not get to throw it away.
         let core = test_core().await;
         let id = artifact_with_rule(&core, "FREQ=MONTHLY;BYMONTHDAY=1").await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
@@ -1480,9 +1296,6 @@ mod tests {
 
     #[tokio::test]
     async fn moving_a_recurring_reminder_does_not_spend_an_occurrence() {
-        // `occurrences_of_rule` counts rows, so the done-plus-insert this
-        // handler used to do put two rows on the artifact for one real firing:
-        // a COUNT=3 whose first occurrence was moved once stopped after two.
         let core = test_core().await;
         let id = artifact_with_rule(&core, "FREQ=DAILY;COUNT=3").await;
         let aid = core.store.moment(&id).await.unwrap().unwrap().artifact_id;
@@ -1513,11 +1326,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_date_in_the_hour_the_clocks_go_back_is_still_set() {
-        // 02:30 on 25 October 2026 happens twice in Berlin, so `single()` is
-        // None and the move was silently dropped: the operator pressed the
-        // button and the band came back unchanged, every time, with nothing
-        // said. Either instant is a defensible reading; the earlier one is
-        // taken, as every other date path in the crate already does.
+        // 02:30 on 25 October 2026 happens twice in Berlin; the earlier instant is taken.
         let core = test_core().await;
         let id = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
@@ -1548,10 +1357,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_date_in_the_hour_the_clocks_skip_is_still_set() {
-        // 02:30 on 28 March 2027 never happens in Berlin: the clocks jump
-        // from 02:00 to 03:00. The move used to be silently dropped — the
-        // operator pressed the button and the band came back unchanged. The
-        // first instant the zone has again is taken instead.
+        // 02:30 on 28 March 2027 never happens in Berlin; the zone's next instant is taken.
         let core = test_core().await;
         let id = artifact_with_due(&core, None).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
@@ -1582,10 +1388,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_snooze_word_nobody_recognises_hides_nothing() {
-        // `tomorrow` was the fall-through rather than a case of its own, so a
-        // typo — or the empty string `#[serde(default)]` supplies when the
-        // field is missing altogether — took the row off the band for a day
-        // and reported "Snoozed" for it.
         let core = test_core().await;
         let id = artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let (app, cookie) = app_with_cookie(core.clone()).await;
@@ -1611,7 +1413,6 @@ mod tests {
         }
     }
 
-    /// How many rows the band drew, counted the way a reader counts them.
     fn rows_in(html: &str) -> usize {
         html.matches("class=\"due-row").count()
     }
@@ -1728,7 +1529,6 @@ mod tests {
         let core = test_core().await;
         artifact_with_due(&core, Some(crate::store::now() + 3_600)).await;
         let (app, cookie) = app_with_cookie(core).await;
-        // First render: nothing has been seen, so the row is new by definition.
         let first = body_of(
             app.clone()
                 .oneshot(form("/ui/due", &cookie, "tz=Europe/Berlin&since=0"))
@@ -1740,7 +1540,6 @@ mod tests {
             first.contains("due-new"),
             "a row nobody has seen announces itself: {first}"
         );
-        // Second render, carrying a stamp from after the moment was written.
         let later = crate::store::now() + 60;
         let again = body_of(
             app.oneshot(form(
@@ -1788,15 +1587,6 @@ mod tests {
         );
     }
 
-    /// An idle band still polls, at the cap and no faster.
-    ///
-    /// It used to ship no `every` at all, which read as a saving and was a
-    /// defect: the interval comes from `next_due_change`, which filters
-    /// `kind = 'due'`, while the same fragment renders "Coming up" from the
-    /// event moments — so a page holding only events stopped asking and went
-    /// on naming a 09:00 event all afternoon. Reminders and events captured
-    /// from the CLI, the extension or a second window were invisible here
-    /// until something else forced a swap.
     #[tokio::test]
     async fn an_idle_band_polls_no_faster_than_the_cap() {
         let core = test_core().await;
@@ -1808,20 +1598,17 @@ mod tests {
         )
         .await;
         assert!(
-            html.contains("every 300s"),
+            html.contains(r#"data-refresh-in="300""#),
             "an idle page asks once every five minutes, and no more often: {html}"
         );
     }
 
     #[tokio::test]
     async fn a_reminder_landing_soon_is_polled_for_at_its_second() {
-        // A fixed clock, or the assertion is off by one whenever the wall
-        // second turns between the row being written and the band reading it.
+        // A fixed clock, or the assertion is off by one when the second turns.
         let mut core = test_core().await;
         let now = crate::store::now();
         core.clock = crate::core::context::Clock::Fixed(now);
-        // Inside the horizon already, so what the band is waiting for is the
-        // turn from coming to overdue.
         artifact_with_due(&core, Some(now + 90)).await;
         let (app, cookie) = app_with_cookie(core).await;
         let html = body_of(
@@ -1831,7 +1618,7 @@ mod tests {
         )
         .await;
         assert!(
-            html.contains("every 90s"),
+            html.contains(r#"data-refresh-in="90""#),
             "polled when it lands, not on a fixed tick: {html}"
         );
     }
@@ -1849,7 +1636,10 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(html.contains("every 300s"), "five-minute cap: {html}");
+        assert!(
+            html.contains(r#"data-refresh-in="300""#),
+            "five-minute cap: {html}"
+        );
     }
 
     #[test]
@@ -1878,8 +1668,6 @@ mod tests {
         assert_eq!(due_words(now + 45, now, tz), "in 45s");
         assert_eq!(due_words(now + 12 * 60, now, tz), "in 12m");
         assert_eq!(due_words(now + 3 * 3_600 + 300, now, tz), "in 3h 05m");
-        // The edge of the heat window: at six hours it is a time of day again,
-        // because *in 6h 00m* is not a thing anyone plans around.
         assert_eq!(due_words(now + HEAT_HOURS * 3_600, now, tz), "today 18:00");
         assert_eq!(due_words(now + 5 * 86_400, now, tz), "Fri 4 Sep 12:00");
         assert_eq!(due_words(now - 90 * 60, now, tz), "1h 30m overdue");
@@ -1920,20 +1708,12 @@ mod tests {
             "the instant: {html}"
         );
         assert!(
-            html.contains("--heat: 0.500"),
+            html.contains(r#"data-var-heat="0.500""#),
             "halfway up the ramp: {html}"
         );
         assert!(html.contains("in 3h 00m"), "and it counts down: {html}");
     }
 
-    /// A snooze re-keys the row, and the band is one of its readers.
-    ///
-    /// `open_due` selects and orders on `COALESCE(snoozed_until, at)`, the
-    /// push ladder is keyed on `snoozed_until.or(at)`, and so is the artifact
-    /// page. The band drew from `at` alone: a reminder due at nine, snoozed to
-    /// three and rendered at five past three came back "6h overdue" at full
-    /// heat, counting up from nine, while the push for the same second said
-    /// "now".
     #[tokio::test]
     async fn an_elapsed_snooze_is_the_rows_time_on_the_band_too() {
         let mut core = test_core().await;

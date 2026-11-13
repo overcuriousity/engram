@@ -7,11 +7,9 @@ use std::collections::HashMap;
 
 pub const DEFAULT_LIMIT: usize = 10;
 pub const MAX_LIMIT: usize = 50;
-/// Over-fetch before reranking and grouping. Both only narrow what they are
-/// given, so the candidate pool has to be wider than the answer.
+/// Reranking and grouping only narrow what they are given.
 pub const CANDIDATE_MULTIPLIER: usize = 3;
-/// Chunks one source may contribute to a result list. A forty-chunk document
-/// otherwise fills the whole answer and hides everything else in the corpus.
+/// A forty-chunk document would otherwise fill the whole answer.
 pub const MAX_PER_CORPUS: usize = 3;
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -23,13 +21,8 @@ pub struct SearchQuery {
     pub tags: Vec<String>,
     #[serde(default)]
     pub category: Option<String>,
-    /// Whether this search counts as having *seen* its results.
-    ///
-    /// Incremental UI requests pass false. Every keystroke used to stamp
-    /// `last_seen_at` on whatever the prefix happened to match, which is the
-    /// same field `resurface` reads — so typing quietly drained the
-    /// forgotten-chunk feature. Opening, expanding and submitting pass true,
-    /// and so do the API and MCP paths, which are deliberate by construction.
+    /// Incremental UI requests pass false: `last_seen_at` feeds `resurface`, and typing must not
+    /// drain it.
     #[serde(default)]
     pub mark: bool,
     /// Include deprecated artifacts, excluded by default.
@@ -38,21 +31,11 @@ pub struct SearchQuery {
     /// Include superseded artifacts, excluded by default.
     #[serde(default)]
     pub include_superseded: bool,
-    /// Whether this request wants the reranker consulted, where the scope
-    /// allows it at all (`Core::rerank_apply`).
-    ///
-    /// True by default: an API or MCP call is one deliberate question and
-    /// wants the best order engram can produce. The UI's typing path passes
-    /// false — a keystroke must come back at embedding speed — and asks again
-    /// with true once the operator stops typing, which is the refining pass
-    /// that reorders the rail.
+    /// Ask for the reranker, where `Core::rerank_apply` allows it; the UI's typing path passes
+    /// false.
     #[serde(default = "default_rerank")]
     pub rerank: bool,
-    /// Render the ranking explanation. Off by default: the object is computed
-    /// on every search either way, and this decides only whether a door says
-    /// any of it out loud. Making the computation conditional would be a
-    /// second path through the ranking stages, and the unexercised one is the
-    /// one that ships.
+    /// Render the ranking explanation, which is computed on every search either way.
     #[serde(default)]
     pub explain: bool,
 }
@@ -61,10 +44,8 @@ fn default_rerank() -> bool {
     true
 }
 
-/// What priming reads at the moment of one search: the activation of the
-/// candidates, the artifacts this sitting has been in, and the due reminders.
-/// Recorded beside the pool so a replay at another lift sees what the
-/// searcher saw, and handed back in by the idle pass on the Judge door.
+/// What priming read at one search, recorded so a replay at another lift sees what the searcher
+/// saw.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Priming {
     pub activation: HashMap<String, f64>,
@@ -72,13 +53,8 @@ pub struct Priming {
     pub due: std::collections::HashSet<String>,
 }
 
-/// The gate's claim for one search, held for as long as the search runs.
-///
-/// Two shapes because the two lanes are two different things: a lease is a
-/// count that others yield to, a permit is a turn that waits for them. Held in
-/// one binding so the choice is made once, at the top, and released at the same
-/// place either way.
-/// Both are held and never read: what a lane does, it does on the way out.
+/// The gate's claim for one search: a lease others yield to, or a permit that waits; held, never
+/// read.
 enum Lane<'a> {
     Interactive(#[allow(dead_code)] crate::infer::gate::InteractiveLease),
     Background(#[allow(dead_code)] crate::infer::gate::BackgroundPermit<'a>),
@@ -89,36 +65,22 @@ enum Lane<'a> {
 pub struct SearchTiming {
     pub embed_ms: u128,
     pub total_ms: u128,
-    /// Whether a rerank call actually ran and came back. The UI's claim
-    /// ("Order confirmed by the reranker") is derived from this and never
-    /// from what the request asked for: a rerank that failed or was skipped
-    /// answered in vector order, and the honest fragment stays silent.
+    /// Whether a rerank actually ran and came back; the UI's "confirmed" claim reads this, not the
+    /// request.
     pub reranked: bool,
 }
 
-/// Everything a search says about itself, beside the results.
-///
-/// Two things that are not one thing: how long it took, and how it decided.
-/// They are returned together because a caller that wants either has already
-/// paid for both.
+/// Everything a search says about itself beside the results: its timing and its explanation.
 #[derive(Debug, Clone)]
 pub struct SearchOutcome {
     pub timing: SearchTiming,
     pub explanation: crate::core::explain::SearchExplanation,
-    /// The capture this search wrote, where the door waited for it. Only the
-    /// UI door does — it is the one whose answer a person then clicks, and the
-    /// id is what lets the open and the "nothing here has it" name the search
-    /// they came from instead of guessing at it. `None` everywhere else, and
-    /// wherever the capture is off or failed.
+    /// The capture this search wrote, where the door waited for it (UI only); `None` elsewhere.
     pub event: Option<String>,
 }
 
-/// A stage of the search pipeline, in the order it runs.
-///
-/// Named by the server rather than assumed by a client: whether the reranker
-/// runs at all is decided here, out of configuration and out of which door
-/// asked, and a client that drew a lamp for it regardless would be drawing work
-/// that is not going to happen.
+/// A stage of the search pipeline, in order; named by the server, which decides whether reranking
+/// runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchStage {
@@ -127,14 +89,10 @@ pub enum SearchStage {
     Rerank,
 }
 
-/// What one search emits while it happens.
-///
-/// The producer is `search_inner`, which is also what the blocking door runs:
-/// one pipeline reporting on itself, rather than a second description of a
-/// search that could drift from the search.
+/// What one search emits while it happens; produced by `search_inner`, as the blocking door is.
 #[derive(Debug, Clone)]
 pub enum SearchEvent {
-    /// The stages this search will pass through. Always first, always once.
+    /// Always first, always once.
     Stages(Vec<SearchStage>),
     /// This stage has started.
     Stage(SearchStage),
@@ -142,9 +100,7 @@ pub enum SearchEvent {
     Results(Vec<SearchResult>),
 }
 
-/// Deserialised as well as serialised, because the terminal client reads the
-/// very JSON this door writes. One type for both ends means a field added here
-/// cannot silently stop reaching the shell.
+/// Deserialised too: the terminal client reads this very JSON.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SearchResult {
     pub artifact_id: String,
@@ -154,111 +110,70 @@ pub struct SearchResult {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub score: f32,
-    /// Absent means active — see `VectorPayload::status`. Only worth reading
-    /// when the query opted into deprecated/superseded results; an ordinary
-    /// search never returns anything else.
+    /// Absent means active; see `VectorPayload::status`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ArtifactStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_verified_at: Option<i64>,
-    /// This artifact is only loosely related to the query.
-    ///
-    /// Retrieval always returns its best candidates, however bad they are, and
-    /// `score` cannot expose that: hybrid retrieval fuses ranks, so the top hit
-    /// for a typed-in typo carries the same score as the top hit for an exact
-    /// question. Presenting both the same way is how a search for nonsense came
-    /// back with four confident-looking answers. This is read from the cosine
-    /// similarity, which does mean the same thing from one query to the next.
-    ///
-    /// False when nothing can be said — a hit the lexical half found contains
-    /// the query's terms verbatim, and a store that reports no similarity gets
-    /// the benefit of the doubt. Weakness has to be demonstrated, never assumed.
+    /// Only loosely related, read from the cosine similarity, which means the same across queries.
+    /// False when nothing can be said: a lexical hit or a store with no similarity. Weakness is
+    /// demonstrated.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub weak: bool,
-    /// A model wrote this text (merged, or synthesized from a pursuit). Never
-    /// silently indistinguishable from captured text.
+    /// A model wrote this text; never silently indistinguishable from captured text.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub model_written: bool,
-    /// Written from a pursuit. What the stopping rule reads.
+    /// Written from a pursuit; the stopping rule reads it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub synthesized: bool,
     /// How many corpora it draws from — the badge's source count.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub origin_count: usize,
-    /// This hit moved up because it is more accessible than the ones it passed
-    /// — opened, confirmed or cited more, and more recently. Never for being
-    /// listed: activation above the capture baseline is what priming reads,
-    /// and only use raises it (`engagement`). Bounded by `associate.prime_lift`,
-    /// never past rank 1, and said out loud wherever it happened: nothing about
-    /// the order is silent.
+    /// Moved up for engagement, bounded by `associate.prime_lift`, never past rank 1, and always
+    /// said.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub primed: bool,
-    /// This sitting has already been in this artifact. Said beside `primed`,
-    /// because "you were just reading this" and "this is used often" are
-    /// two different reasons to be higher up the list and the page should not
-    /// pass one off as the other.
+    /// Said beside `primed`: "you were just reading this" is a different reason from "used often".
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_sitting: bool,
-    /// An open reminder on this artifact falls due inside `time.horizon_hours`.
-    /// A fact about the row whatever `time.lift` says; the lift is what may
-    /// move it, and then `primed` says so.
+    /// An open reminder falls due inside `time.horizon_hours`; a fact whether or not `time.lift`
+    /// moves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<i64>,
-    /// `due_at` in words — "in 2 h", "in 3 days", "1 h ago" — so every door
-    /// prints the same thing without each owning a clock.
+    /// In words ("in 2 h"), so every door prints the same without owning a clock.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_in: Option<String>,
-    /// This hit sits past the cliff: the one step in this list's scores that
-    /// accounts for more of the fall than the rest of the list together. See
-    /// `cliff`. It still competed and still placed — nothing is reordered or
-    /// dropped — but the page stops claiming it is an answer.
+    /// Past the cliff (see `cliff`); not reordered or dropped, but no longer claimed as an answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub past_cliff: bool,
-    /// The note this passage came from is a reminder that is done. It keeps
-    /// its place in the list and is moved to the tail rather than dropped:
-    /// search for its own words and it is still there. What it stops doing is
-    /// competing with the things that were written to be kept.
+    /// A done reminder's note: moved to the tail, never dropped.
     #[serde(default)]
     pub retired: bool,
-    /// Cosine similarity between the query and this hit, when the store could
-    /// say. Comparable across queries where `score` is not, which is why the
-    /// cliff is read from it whenever no reranker has calibrated the scores.
-    /// `None` for a hit only the lexical half found.
+    /// Comparable across queries where `score` is not; `None` for a lexical-only hit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub similarity: Option<f32>,
-    /// `title` is not a name of *this* text. Two ways that happens: the hit is
-    /// a passage carrying the heading of the section it was cut from — see
-    /// `Provenance::names_its_own_text` — or it had no title and `fill_titles`
-    /// put the note's name there so a rail of `(untitled)` rows is readable.
-    /// A door that shows names decides for itself what to do with a borrowed
-    /// one; the web rail shows none, and the machine-facing doors keep it.
+    /// `title` is not this text's own name: a passage's section heading, or the note's via
+    /// `fill_titles`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub borrowed_name: bool,
-    /// The ranked hit that recalled this one. `None` for a ranked hit — which
-    /// is every hit inside `limit`.
+    /// The ranked hit that recalled this one; `None` for a ranked hit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub via: Option<String>,
     /// What the judge said the relation is, where a link has been judged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// Why this hit is where it is. `None` for a `SearchResult` that never
-    /// came out of a ranking — a stale candidate, a neighbour, a resurfaced
-    /// row. A `Default` there would claim a retrieved rank of zero.
+    /// `None` outside a ranking; a `Default` would claim a retrieved rank of zero.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<crate::core::explain::HitExplanation>,
-    /// Which other notes the dedupe judge found saying something different
-    /// from this one. The base picks no side: both stay in results and each
-    /// says so about the other. Read once on the way out, by `finish_hits`;
-    /// the ranking never sees it, so it cannot move a hit.
+    /// Notes the dedupe judge found disagreeing; read by `finish_hits`, so the ranking never sees
+    /// it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disagrees_with: Vec<crate::store::pairs::Disagreement>,
 }
 
-/// Test-only, for the reason `NewArtifact`'s is: in production every field
-/// here is a decision, and a field added later must break every call site
-/// until somebody answers for it. A fixture has no such duty.
+/// Test-only: in production every field is a decision, and a new one must break every call site.
 #[cfg(test)]
 impl Default for SearchResult {
     fn default() -> Self {
@@ -293,9 +208,8 @@ impl Default for SearchResult {
     }
 }
 
-/// The words of a query the keyword fallback asks for: split on whitespace,
-/// trimmed of punctuation at either end, at least two characters, each once,
-/// at most eight. Every one of them has to appear in a hit.
+/// Whitespace-split, trimmed of punctuation, at least two characters, deduped, at most eight; all
+/// must match.
 fn keyword_terms(q: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for w in q.split_whitespace() {
@@ -325,10 +239,7 @@ impl From<SearchHit> for SearchResult {
         SearchResult {
             model_written: provenance.is_some_and(|p| p.is_model_written()),
             synthesized: provenance == Some(crate::store::artifacts::Provenance::Synthesized),
-            // A passage carries the heading of the section it was cut from and
-            // a note carries none; neither is a name for this text. Said here
-            // rather than at each door, so `fill_titles` below is the only
-            // other thing that can set it and every door reads one flag.
+            // Set here, so `fill_titles` is the only other writer and every door reads one flag.
             borrowed_name: provenance.is_some_and(|p| !p.names_its_own_text()),
             origin_count: h.payload.origin_corpora.len(),
             artifact_id: h.payload.artifact_id,
@@ -357,8 +268,7 @@ impl From<SearchHit> for SearchResult {
     }
 }
 
-/// Visible to the rest of `core` so `ask` can decay link weights to the same
-/// clock the results rail does, rather than keeping a second reading of it.
+/// Visible to `core` so `ask` decays link weights to the same clock as the results rail.
 pub(super) fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -366,15 +276,6 @@ pub(super) fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Promote at most `max` hits per source to the front of the list, then refill
-/// from what that displaced until `target` is reached.
-///
-/// The cap is a diversity rule, not a ceiling. Capping alone would mean a base
-/// holding two sources could never answer with more than `2 * max` results
-/// however many good matches it contains — which is the common case for a young
-/// knowledge base, and the case where throwing matches away hurts most. So the
-/// displaced hits go back on the end in rank order: one long document no longer
-/// leads the list, but it still fills it when nothing else can.
 /// Each hit's current position, for `note_reorder` to compare against.
 fn positions(results: &[SearchResult]) -> HashMap<String, usize> {
     results
@@ -384,10 +285,7 @@ fn positions(results: &[SearchResult]) -> HashMap<String, usize> {
         .collect()
 }
 
-/// Record what a reordering stage did, on the hits it actually moved.
-///
-/// A stage that left a hit alone writes nothing: "considered and kept" and
-/// "did not run" must not render the same, and only the second is silence.
+/// A stage that left a hit alone writes nothing: "kept" and "did not run" must differ.
 fn note_reorder(
     results: &mut [SearchResult],
     before: &HashMap<String, usize>,
@@ -412,26 +310,18 @@ fn note_reorder(
     }
 }
 
-/// What the cap did, for the explanation. Kept beside the returned list rather
-/// than derived from it, because "was displaced and came back" is not
-/// recoverable from the order alone.
+/// Kept beside the list: "displaced and came back" is not recoverable from the order.
 #[derive(Debug, Default)]
 struct CapReport {
     corpora_in_pool: usize,
     /// How many hits were over their cap in one of their corpora.
     displaced: usize,
-    /// Of those, the artifact ids the refill put back in the pool.
-    ///
-    /// Not the answer to "did the cap redistribute anything". The refill
-    /// target is the candidate pool rather than `limit`, so with a pool no
-    /// wider than the fetch there is always room for every displaced hit and
-    /// this set is always all of them. What the cap actually removes is
-    /// decided by the truncate at the end of the search, and only there:
-    /// `search_inner` counts how many of these are still in the answer once it
-    /// has cut to `limit`.
+    /// Always every displaced hit, since the refill targets the pool; `search_inner` counts after
+    /// the truncate.
     refilled: std::collections::HashSet<String>,
 }
 
+/// At most `max` hits per source lead, then the displaced refill in rank order up to `target`.
 fn cap_per_corpus(
     hits: Vec<crate::vector::SearchHit>,
     max: usize,
@@ -442,10 +332,7 @@ fn cap_per_corpus(
     let mut kept = Vec::with_capacity(hits.len());
     let mut displaced = Vec::new();
     for h in hits {
-        // A merge counts against every corpus it drew from; a passage or a
-        // captured artifact against its one. The payload carries the
-        // projection; a point written before it existed falls back to
-        // `corpus_id`.
+        // A merge counts against every corpus it drew from; old points fall back to `corpus_id`.
         let keys: Vec<String> = if h.payload.origin_corpora.is_empty() {
             vec![h.payload.corpus_id.clone()]
         } else {
@@ -456,10 +343,7 @@ fn cap_per_corpus(
             .iter()
             .any(|k| seen.get(k).copied().unwrap_or(0) >= max);
         if !over {
-            // Only a hit that took a place counts against one. A displaced hit
-            // is over its cap in *one* of its corpora, and charging it to the
-            // others as well let a five-corpus merge that never made the list
-            // evict unrelated hits from the four that had room for it.
+            // Only a hit that took a place counts against its corpora.
             for k in &keys {
                 *seen.entry(k.clone()).or_insert(0) += 1;
             }
@@ -483,8 +367,7 @@ fn cap_per_corpus(
     (kept, report)
 }
 
-/// Each hit's stored retrieval count, keyed by artifact id. Absent means the
-/// payload carried no `hit_count`, which reads as zero.
+/// Absent `hit_count` reads as zero.
 fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
     hits.iter()
         .map(|h| {
@@ -496,42 +379,14 @@ fn counts_of(hits: &[crate::vector::SearchHit]) -> HashMap<String, i64> {
         .collect()
 }
 
-/// The largest gap must exceed this many times the mean of the other gaps to
-/// count as a cliff. A constant rather than configuration: a default that
-/// changes what the page claims moves after the harness has run, and until
-/// then a number with its reasoning beside it is more honest than a knob.
+/// The largest gap must exceed this many times the mean of the other gaps.
 pub const CLIFF_FACTOR: f32 = 3.0;
 
-/// And it must be at least this share of the top score.
-///
-/// Without a floor, a plateau made any difference at all a cliff: when every
-/// other gap is exactly zero — which is what a saturated reranker produces once
-/// several hits round to the same f32 — their mean is zero, and every positive
-/// number exceeds three times zero. The page then drew its line through a pair
-/// of hits that were numerically tied. A share of the top score rather than a
-/// fixed gap keeps the rule scale-free, which is the same reason `CLIFF_FACTOR`
-/// measures a step against the list's other steps instead of against a number.
+/// Without a floor, a plateau of tied scores (mean gap zero) makes any difference a cliff.
 pub const CLIFF_MIN_SHARE: f32 = 0.01;
 
-/// Where the relevance falls off in a ranked list, as the number of hits above
-/// the fall — or `None` when no single step stands out.
-///
-/// Hybrid scores are fused ranks and mean nothing across queries; reranker
-/// scores and the recency stage live on other scales again. A step compared
-/// against its own list's other steps is scale-free: the cliff is the one gap
-/// that is larger than `CLIFF_FACTOR` times the mean of all the others, and at
-/// least `CLIFF_MIN_SHARE` of the top score. Below three hits there is one gap
-/// and nothing to compare it to.
-///
-/// **`scores` must be sorted descending**, and every caller sorts before
-/// calling. An out-of-order score is not a small negative gap to be shrugged
-/// off: clamping one to zero manufactured a large *positive* gap at the
-/// position before it, and a leading `0.80, 0.40, 0.78` then cut after the
-/// first hit and threw the 0.78 away. `mark_past_cliff` states how the answer
-/// is carried back to a list that is deliberately not in score order.
-///
-/// This is also where `ask` will stop packing excerpts, which is why it is a
-/// function over scores rather than a step inside `search_with`.
+/// Hits above the relevance fall, or `None`: the one gap over `CLIFF_FACTOR` × the mean of the
+/// others. `scores` must be sorted descending, or a clamped negative gap manufactures a cliff.
 pub fn cliff(scores: &[f32]) -> Option<usize> {
     if scores.len() < 3 {
         return None;
@@ -552,7 +407,7 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
     if largest <= 0.0 {
         return None;
     }
-    // A tie is not a fall, whatever the comparison below makes of it.
+    // A tie is not a fall.
     if largest <= CLIFF_MIN_SHARE * scores[0].abs() {
         return None;
     }
@@ -560,27 +415,8 @@ pub fn cliff(scores: &[f32]) -> Option<usize> {
     (largest > CLIFF_FACTOR * others).then_some(at + 1)
 }
 
-/// The scores a list's cliff is read from, or `None` when it has none to read.
-///
-/// Never the fused rank. An RRF score is `Σ 1/(k+rank)` per branch — a
-/// harmonic curve whose first gap is structurally its largest — so a cliff
-/// taken on it measured how many hits both branches agreed on, and landed
-/// after hit #1 on almost every query. A reranker calibrates its scores, so
-/// once one has run they are the right input; without one, the cosine
-/// similarity is — it means the same thing from one query to the next, which
-/// is the property the largest-gap rule needs.
-///
-/// One entry per hit, `None` where the hit carries no similarity: one only the
-/// lexical half found, or a store that reports none. Such a hit cannot be
-/// placed on the scale, so it is left out of the gaps — but it is *not* an end
-/// to the reading. Read as a leading run this truncated at the first one, and
-/// an exact term match is both the commonest hit with no similarity and the
-/// likeliest to land at rank 1: a `None` at position 0 gave an empty run and
-/// no cliff at all, silently switching the feature off for every
-/// keyword-shaped query. Skipped instead, so the hits that do sit on the
-/// cosine scale are all read wherever they sit in the list. A store that
-/// reports no similarity anywhere still gives no cliff, which is right: there
-/// is nothing to measure.
+/// Reranker scores, or else cosine similarity; never the fused rank, whose first gap is always
+/// largest. A hit without a similarity is skipped, not an end to the reading.
 fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<Option<f32>> {
     if reranked {
         return results.iter().map(|r| Some(r.score)).collect();
@@ -588,27 +424,9 @@ fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<Option<f32>> {
     results.iter().map(|r| r.similarity).collect()
 }
 
-/// Flag every hit from the cliff on. The list is left in its order and at its
-/// length; nothing about the cliff is silent and nothing about it is a change.
-///
-/// The gaps are measured over the scores **sorted**, and the answer is carried
-/// back to the list as a score: the lowest score still above the fall, and
-/// everything after the last hit that reaches it is past the cliff. The list
-/// itself is not sorted by score, and cannot be — a fused list puts a hit both
-/// branches found above one only the dense branch ranked higher, which is the
-/// point of fusing, and priming moves more. Read position by position, an
-/// out-of-order hit did not merely vanish from the reading: the old clamp of a
-/// negative gap to zero manufactured a large positive gap at the position
-/// *before* it and drew the fall there. A leading `0.80, 0.40, 0.78` cut after
-/// the first hit and threw away the 0.78 — in `ask`, out of the answer
-/// entirely, which is the failure this reading was changed to stop.
-///
-/// Carried back as "after the last hit that reaches the cut" rather than as a
-/// per-hit test, so what is marked stays a tail. Every reader downstream is
-/// built on that: `ask` truncates at the first marked hit, and the face draws
-/// one divider where the fall happens. The cost is that a weak hit sitting
-/// high in the list is left above the line — `weak` is the mark for that one,
-/// and cutting the good hits below it was the bug.
+/// Flag every hit from the cliff on, without reordering: gaps are measured over sorted scores and
+/// the cut is carried back as a score, so what is marked stays a tail (`ask` truncates at the first
+/// mark).
 fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     let scored = cliff_scores(results, reranked);
     let mut sorted: Vec<f32> = scored.iter().flatten().copied().collect();
@@ -616,10 +434,7 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     let Some(above) = cliff(&sorted) else {
         return;
     };
-    // The lowest score the cliff leaves standing, and the last place in the
-    // list that reaches it. A hit with no score at all reaches nothing, so it
-    // is kept where it sits above that place and marked with the tail below
-    // it — the cut is a line across the list, not a judgement of that hit.
+    // A hit with no score is kept where it sits above the cut.
     let cut = sorted[above - 1];
     let from = scored
         .iter()
@@ -633,26 +448,9 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     }
 }
 
-/// Retired notes to the tail, then the cliff, then the tail marked with it.
-///
-/// One function because the order is the whole of it. Marks, never reorders
-/// beyond the demotion, never drops.
-///
-/// `mark_past_cliff` guarantees that what it marks is a *suffix* of the list,
-/// and `ask` truncates at the first marked hit — so marking a row in the
-/// middle would silently cut the answer short. `sort_by_key` is stable, so
-/// every other row keeps the order the ranking produced.
-///
-/// The cliff is read over the live prefix and not the whole list. A retired
-/// row keeps its score, and a retired row with a *high* one — demoted here,
-/// not dropped — lands at the tail and makes the last position satisfy
-/// `score >= cut`: `mark_past_cliff` then finds its `from` at the end of the
-/// list and marks nothing at all. Scores `[0.90(retired), 0.88, 0.87, 0.30,
-/// 0.29]` gave a cut of 0.87 and left the 0.30 and 0.29 above the line — in
-/// `ask`, back in the answer — so one retired row switched the cliff off for
-/// everything. The retired tail is marked below whatever the cliff says, so
-/// reading the cliff over the rows the cliff is about costs nothing and is the
-/// only reading that means anything.
+/// Retired notes to the tail, then the cliff read over the live prefix, then the tail marked with
+/// it. The marks must stay a suffix; a high-scoring retired row read with the rest would switch the
+/// cliff off.
 fn sink_retired_and_mark_the_cliff(results: &mut [SearchResult], reranked: bool) {
     results.sort_by_key(|r| r.retired);
     let live = results
@@ -668,16 +466,8 @@ fn sink_retired_and_mark_the_cliff(results: &mut [SearchResult], reranked: bool)
     }
 }
 
-/// Activation above the capture baseline, per artifact: what use has added,
-/// and nothing else. The arithmetic is `links::engagement_at`, which promotion
-/// and the insights page read the same quantity through.
-///
-/// A never-opened artifact carries the baseline, decaying. Read raw, a fresh
-/// one at `1.0` out-activates an old one at `0.25` by more than any margin,
-/// and priming then said "you reach this one often" of something nobody had
-/// reached. With `retrieved` at zero only opened, confirmed and cited raise
-/// activation, so above the baseline it is engagement by construction — and a
-/// hit that has none cannot be primed.
+/// Activation above the capture baseline (`links::engagement_at`), so a never-opened artifact has
+/// none.
 fn engagement(
     rows: HashMap<String, (f64, i64, i64)>,
     at: i64,
@@ -693,28 +483,9 @@ fn engagement(
         .collect()
 }
 
-/// Move hits up on activation, within hard bounds.
-///
-/// Rank-based rather than score-based: hybrid scores are fused ranks and mean
-/// nothing across queries, while "moved up two places" means the same thing
-/// every time. The activation is normalised within this one list, so `margin` is
-/// a fraction of the most accessible hit here rather than an absolute weight —
-/// which is what makes one default work for a list of ones and a list of
-/// hundreds.
-///
-/// Index 0 is untouchable and index 1 cannot move, because moving it would
-/// displace rank 1. An exact match is never buried.
-///
-/// Every row's destination is decided against the ORIGINAL ordering in one
-/// pass, then the list is reordered once. An earlier attempt did this by
-/// repeatedly swapping adjacent rows in place, insertion-sort style — but
-/// once a row swaps, the array no longer records which row already spent its
-/// budget: a later position, reached by a *different* row after an earlier
-/// row moved through it, got a fresh budget for free. On a five-element list
-/// with only the last row activated and `lift = 2`, that let it climb three
-/// places instead of two, and on a longer list the overrun only grows. Here
-/// every comparison reads from an activation snapshot untouched by any move,
-/// so no row can ever borrow a gap another row's move opened.
+/// Rank-based, normalised within this list. Rows 0 and 1 never move, so rank 1 is never displaced.
+/// Every destination is decided against the original order in one pass, so no row borrows another's
+/// budget.
 fn prime(
     mut results: Vec<SearchResult>,
     activation: &HashMap<String, f64>,
@@ -724,21 +495,13 @@ fn prime(
     sitting_prime: bool,
     due: &std::collections::HashSet<String>,
 ) -> Vec<SearchResult> {
-    // The knob gates the *use* of the sitting, never its collection: the
-    // `Priming` this search records names what the session touched either way,
-    // which is the whole of what lets the idle pass replay the search with the
-    // sitting on and find out whether it should be. Held to the badge as well
-    // as the lift, so serving is unchanged until the loop adopts it.
+    // Gates the use of the sitting, not its recording, so the idle pass can replay with it on.
     let empty = std::collections::HashSet::new();
     let sitting = match sitting_prime {
         true => sitting,
         false => &empty,
     };
-    // Marked before anything can return. `in_sitting` is a fact about the row —
-    // this sitting has been in it — and not a consequence of the reordering. A
-    // list of two is a list nothing can move in, not a list where the badge
-    // stops being true, and a badge that disappears on short result lists reads
-    // as the page forgetting rather than as a rule.
+    // Marked before anything can return: `in_sitting` is a fact about the row, not the reordering.
     for r in &mut results {
         r.in_sitting = sitting.contains(&r.artifact_id);
     }
@@ -750,13 +513,7 @@ fn prime(
         return results;
     }
     let n = results.len();
-    // Normalised once, against the original list, and never touched again.
-    //
-    // The sitting enters here, as a value in the same scale, rather than as a
-    // second pass: one budget, one walk, one `lift`. A hit cannot be lifted
-    // `prime_lift` places for being accessible and then `prime_lift` again for
-    // having been read ten minutes ago — which is what two passes would do, and
-    // the second lift would be the one nobody bounded.
+    // The sitting is a value on the same scale, so there is one budget and one bounded lift.
     let acts: Vec<f64> = results
         .iter()
         .map(|r| {
@@ -764,10 +521,6 @@ fn prime(
                 true => activation.get(&r.artifact_id).copied().unwrap_or(0.0) / max,
                 false => 0.0,
             };
-            // The top of the same normalised scale: what this sitting has
-            // been in is as accessible as anything in the base gets, and a
-            // reminder the operator set for this week is a fact about what
-            // they want now — the one budget, the one walk, for both.
             match sitting.contains(&r.artifact_id) || due.contains(&r.artifact_id) {
                 true => act.max(1.0),
                 false => act,
@@ -775,11 +528,7 @@ fn prime(
         })
         .collect();
 
-    // For each row, how many of its original predecessors — walked nearest
-    // first — it beats by strictly more than `margin`, stopping at the first
-    // it does not beat, capped at `lift`, and floored so the target index
-    // can never fall below 1: rank 1 is never displaced. Rows 0 and 1 never
-    // move, so the walk only starts at index 2.
+    // Walked nearest first, stopping at the first predecessor not beaten by more than `margin`.
     let mut climb = vec![0usize; n];
     for (i, slot) in climb.iter_mut().enumerate().skip(2) {
         let mut c = 0usize;
@@ -793,9 +542,8 @@ fn prime(
         *slot = c;
     }
 
-    // One stable sort by destination decides the final order. The secondary
-    // key is load-bearing: without it, a climbing row sorts behind the row
-    // it was meant to pass, because its original index is larger.
+    // The secondary key is load-bearing: a climbing row would otherwise sort behind the row it
+    // passes.
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&i| {
         let target = i - climb[i];
@@ -807,16 +555,11 @@ fn prime(
     order
         .into_iter()
         .enumerate()
-        .map(|(pos, i)| {
-            let mut r = slots[i]
-                .take()
-                .expect("each original index used exactly once");
-            // Only a climb is priming: this is exactly the row that ended up
-            // at a lower index than it started at. A hit that was merely
-            // displaced by another row's climb did not move up, and
-            // labelling it would say something untrue about it.
+        .filter_map(|(pos, i)| {
+            let mut r = slots[i].take()?;
+            // Only a climb is priming; a row merely displaced did not move up.
             r.primed = pos < i;
-            r
+            Some(r)
         })
         .collect()
 }
@@ -827,21 +570,9 @@ pub const FORGOTTEN_AFTER_DAYS: i64 = 30;
 const SECONDS_PER_DAY: i64 = 86_400;
 
 impl Core {
-    /// Record that these results were shown, without making the caller wait.
-    ///
-    /// One request for the whole list, off the request path: a search must not
-    /// get slower, or fail, because a bookkeeping write did. Tracked rather
-    /// than merely spawned, so shutdown drains it instead of dropping it — a
-    /// lost stamp makes a chunk look forgotten when it is not.
-    /// `hit_counts` carries what the payloads the caller just read said, keyed
-    /// by artifact id. `touch` needs the current count to increment it, and
-    /// passing along the copy already in hand is what keeps a marked search
-    /// from costing an extra read of every hit it just fetched.
-    ///
-    /// `counts_as_hit` is false for a list nobody asked for — `resurface` draws
-    /// its chunks at random, and counting that as a retrieval would let the
-    /// forgotten-chunks feature quietly disqualify the same artifacts from the
-    /// stale-review list. See `vector::Touch`.
+    /// Off the request path but tracked, so shutdown drains it. `hit_counts` saves rereading each
+    /// hit. `counts_as_hit` is false for an unrequested list such as `resurface`; see
+    /// `vector::Touch`.
     fn mark_seen(
         &self,
         results: &[SearchResult],
@@ -872,15 +603,8 @@ impl Core {
             }
         });
 
-        // Only a retrieval raises accessibility. A list nobody asked for —
-        // `resurface`, an association — is shown, not reached, and the row in
-        // §5.4 that reads zero is the one-way guard this implements.
-        //
-        // Also gated on `associating()`: activation only exists to feed
-        // priming, and an install that never opted into `feedback` must see
-        // no artifact's activation move, or the ranked order could start
-        // changing under a feature it never turned on.
-        // Never `maybe_promote` here: exposure is not engagement.
+        // Only a retrieval raises accessibility, and only with the associative layer live. Never
+        // promotes.
         if counts_as_hit && self.associating() {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let core = self.clone();
@@ -894,17 +618,7 @@ impl Core {
         }
     }
 
-    /// Give a passage with no heading of its own the title of its corpus.
-    ///
-    /// The stored `artifacts.title` is only ever a real heading — nothing is
-    /// inferred to fill that gap, and that stays true. But most pasted notes
-    /// have no heading, and a rail, an answer's citations and a judge card of
-    /// `(untitled)` rows is unreadable when the note's own title is one join
-    /// away. Done here, once, on the way out of the ranking: the CLI, MCP, the
-    /// web rail and the extension all inherit it. Said on the result
-    /// (`borrowed_name`) so a door can decide whether to show a name that is
-    /// the note's rather than this passage's.
-    ///
+    /// Give a heading-less passage its corpus's title on the way out, flagged with `borrowed_name`.
     /// Best-effort: a failed read costs the titles, never the results.
     pub(crate) async fn fill_titles(&self, results: &mut [SearchResult]) {
         let mut wanted: Vec<String> = results
@@ -932,10 +646,7 @@ impl Core {
         }
     }
 
-    /// Everything a hit carries that the ranking did not put there: a name
-    /// borrowed from its note, and what it is known to disagree with. Once,
-    /// on the way out, so every door inherits both. Best-effort like
-    /// `fill_titles`: a failed read costs the lines, never the results.
+    /// A borrowed name and known disagreements, added once on the way out. Best-effort.
     pub(crate) async fn finish_hits(&self, results: &mut [SearchResult]) {
         self.fill_titles(results).await;
         let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
@@ -953,15 +664,8 @@ impl Core {
         }
     }
 
-    /// Opening a chunk is the deliberate act that counts as remembering it,
-    /// which is why the detail pane records it and an incremental search does
-    /// not.
-    ///
-    /// It stamps `last_seen_at` only. An open is not a retrieval: the stale
-    /// review list surfaces artifacts with at most `stale_max_hits` hits since
-    /// they were last verified — zero by default — so counting the click that
-    /// opens a candidate would remove it from the list that offered it, and
-    /// only a `verify` could ever put it back.
+    /// Stamps `last_seen_at` only: counting the open as a hit would drop it from the stale list
+    /// that offered it.
     pub fn mark_artifact_seen(&self, artifact_id: &str) {
         let targets = vec![crate::vector::Touch::shown(artifact_id)];
         let vectors = self.vectors.clone();
@@ -972,11 +676,7 @@ impl Core {
             }
         });
 
-        // An open is a deliberate act and counts for less than a retrieval:
-        // clicking a candidate says you looked, not that it answered. Gated
-        // on `associating()` for the same reason as `mark_seen`: activation
-        // exists only to feed priming, so it must not move at all while the
-        // layer is off.
+        // An open counts for less than a retrieval, and only with the associative layer live.
         if self.associating() {
             let ids = vec![artifact_id.to_string()];
             let core = self.clone();
@@ -987,8 +687,7 @@ impl Core {
                     tracing::warn!(error = %e, "could not raise activation for opening");
                     return;
                 }
-                // An open is an engagement: the one kind of bump that can
-                // promote. See `jobs::promote::maybe_promote`.
+                // An open is an engagement: the one kind of bump that can promote.
                 if let Err(e) = crate::jobs::promote::maybe_promote(&core, &ids, at).await {
                     tracing::warn!(error = %e, "could not check the promotion threshold");
                 }
@@ -996,15 +695,7 @@ impl Core {
         }
     }
 
-    /// An answer cited this artifact, so the model drew on it. `ask_citations`
-    /// has said which those were since it was written; nothing read it as use.
-    ///
-    /// Deliberately not `mark_artifact_seen`: that stamps `last_seen_at`, and
-    /// the stale review list exists to put artifacts nobody has verified in
-    /// front of a person. A model citing one is not a person having looked at
-    /// it, so stamping would quietly remove it from the list that was trying
-    /// to get it looked at. What a citation is, is an engagement — the one kind
-    /// of bump that can promote.
+    /// Not `mark_artifact_seen`: a model citing it is not a person having looked at it.
     pub fn mark_artifacts_cited(&self, ids: Vec<String>) {
         if ids.is_empty() || !self.associating() {
             return;
@@ -1023,13 +714,7 @@ impl Core {
         });
     }
 
-    /// What happened after the list rendered: this artifact was opened, or
-    /// reached from `via` — a neighbour, an association, a continuation. The
-    /// pursuit sweep attaches it to a search by time and scope; nothing here
-    /// names one, and the context sweep reads the same rows to learn which
-    /// situations an artifact is opened in. Off the request path, and a no-op
-    /// only while `[learn]` is off — this is the log, and every faculty
-    /// downstream reads it rather than writing its own.
+    /// The interaction log every downstream faculty reads; a no-op while `[learn]` is off.
     pub fn record_interaction(&self, artifact_id: &str, via: Option<&str>, scope: Option<&str>) {
         if !self.learn.enabled {
             return;
@@ -1052,8 +737,8 @@ impl Core {
         });
     }
 
-    /// How long an artifact stayed open. Capped — a tab left open overnight is
-    /// not a day of reading — and a no-op while `[learn]` is off.
+    /// Capped, since a tab left open overnight is not a day of reading; a no-op while `[learn]` is
+    /// off.
     pub fn record_dwell(&self, artifact_id: &str, secs: i64, scope: Option<&str>) {
         if !self.learn.enabled || secs <= 0 {
             return;
@@ -1069,12 +754,8 @@ impl Core {
         });
     }
 
-    /// Each artifact's engagement — activation decayed to now, less the capture
-    /// baseline decayed to now.
-    ///
-    /// The one SQLite read the query path takes. It can only add: a failure is
-    /// one warning and an empty map, and everything downstream then behaves
-    /// exactly as it did before any of this existed.
+    /// Activation less the capture baseline, decayed to now. A failure is a warning and an empty
+    /// map.
     async fn engagement_now(&self, ids: &[String]) -> HashMap<String, f64> {
         let at = now_secs();
         match self.store.activation_of(ids).await {
@@ -1086,37 +767,9 @@ impl Core {
         }
     }
 
-    /// Artifacts linked to the top of the answer, appended beside it.
-    ///
-    /// One hop only. Spreading further is what a graph view would be for, and
-    /// there is none. Everything here is additive: it never removes or reorders
-    /// a ranked hit, and a store that will not answer produces an empty list and
-    /// one warning.
-    ///
-    /// `filter` is the caller's own narrowing, and it applies here too. A
-    /// search for `category=runbook` is a statement about what the searcher
-    /// will accept, not a hint to the ranker, and an association that walks
-    /// past it hands back exactly the rows they asked not to see. `links_from`
-    /// already excludes anything not active and not live, so what is left to
-    /// re-check here is what the caller typed.
-    /// Lift the top candidate that just missed the window into the last
-    /// visible row, on `feedback.explore` of the searches that are recorded.
-    ///
-    /// Returns the artifact that was lifted and the 0-based rank it held
-    /// before, or `None` when this search did not explore. The caller carries
-    /// that rank onto the candidate row, and `open_event` charges an open to
-    /// it rather than to the row the exploration lent — which is the whole
-    /// point. Without it the loop records only what it already believed.
-    ///
-    /// Only where the evidence is worth gathering: a door that records opens,
-    /// capture switched on, a window of at least two rows, and something
-    /// actually below the cut. A one-row answer has no "last row" to spend.
-    ///
-    /// Which searches explore is decided by hashing the event this one folds
-    /// into, falling back to the query text. Not a coin flip per keystroke: a
-    /// typing burst folds into one event and one piece of evidence, and a list
-    /// whose bottom row appeared and vanished as somebody typed would be a
-    /// worse thing to read than anything this buys.
+    /// Lift the top candidate below the window into the last visible row, on `feedback.explore` of
+    /// recorded searches. Returns it and its prior rank, so an open is charged to that rank. Chosen
+    /// by hashing the event, not per keystroke.
     fn explore_swap(
         &self,
         results: &mut [SearchResult],
@@ -1130,19 +783,13 @@ impl Core {
             || self.feedback.explore <= 0.0
             || limit < 2
             || results.len() <= limit
-            // The lifted row has to be inside the pool that gets recorded, or
-            // it is a row on screen with no candidate row behind it — and an
-            // open on it is refused for not being in the pool, which throws
-            // away the one observation the exploration was spent to buy.
+            // The lifted row must be inside the recorded pool, or an open on it is refused.
             || limit >= self.feedback.candidates
         {
             return None;
         }
-        // The event where the door names one, so a whole typing burst answers
-        // the same way. Where it does not — the API and MCP, which name
-        // nothing — the query and the hour: a fixed seed per query would
-        // explore on the same questions for ever and never on the others,
-        // which is a sample of the base rather than of the searching.
+        // API and MCP name no event: the query and the hour, so a fixed seed does not explore the
+        // same questions forever.
         let hourly;
         let seed: &str = match origin.fold_onto.as_deref() {
             Some(ev) => ev,
@@ -1151,10 +798,7 @@ impl Core {
                 &hourly
             }
         };
-        // FNV-1a. A hash rather than a random number because there is no
-        // randomness in this process to draw on and one coin flip does not
-        // earn a dependency — and because a decision that is a function of the
-        // event is one a later reader of the journal can reproduce.
+        // FNV-1a: reproducible from the journal, and no randomness dependency.
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for b in seed.as_bytes() {
             h ^= *b as u64;
@@ -1164,9 +808,7 @@ impl Core {
         if h % 1000 >= share {
             return None;
         }
-        // The top of what the window cut off, into the bottom of the window.
-        // The displaced row keeps its place in the pool and simply stops being
-        // shown, so nothing about it is misrecorded.
+        // The displaced row keeps its place in the pool and is merely not shown.
         let natural = limit;
         let lifted = results[natural].artifact_id.clone();
         results.swap(limit - 1, natural);
@@ -1210,24 +852,9 @@ impl Core {
                 self.associate.half_life_days,
                 now_secs(),
                 self.associate.show_min,
-                // Not `spread_max`: `links_from` returns one row per (anchor,
-                // link) with no dedup across anchors, and it truncates before
-                // the filtering below runs. The rows most likely to be
-                // discarded here are anchor-to-anchor links — both ends
-                // already in `results` — and those are exactly the links
-                // co-retrieval makes most likely to exist. A limit of just
-                // `spread_max` lets such rows consume the whole budget and
-                // leave nothing for genuinely new artifacts. This bound
-                // leaves room for every anchor-to-anchor pair among the
-                // ranked anchors to be discarded and still fill the budget;
-                // the real cap is the `out.len() >= spread_max` check below.
-                //
-                // Saturating, and `try_from` rather than `as`: both operands
-                // are operator-typed. `Config::normalize` clamps them to
-                // something a person could mean, so this cannot overflow in
-                // practice — but `as` on a `usize` that did would wrap to a
-                // negative `i64` and switch association silently off, which is
-                // the one failure nobody would report as a bug.
+                // Not `spread_max`: `links_from` truncates before anchor-to-anchor rows are
+                // filtered out. Saturating `try_from`: an `as` wrap would go negative and silently
+                // switch association off.
                 i64::try_from(
                     spread_max.saturating_mul(self.associate.spread_from.saturating_add(1)),
                 )
@@ -1252,13 +879,11 @@ impl Core {
             if !have.insert(l.other.clone()) {
                 continue;
             }
-            // Read from SQLite rather than the vector store: the row is already
-            // one connection away, and the payload adds nothing this needs.
+            // From SQLite: the row is one connection away.
             let Ok(c) = self.store.get_artifact(&l.other).await else {
                 continue;
             };
-            // The same predicate the vector store applies, on the same two
-            // fields: every listed tag present, and the category exact.
+            // The vector store's predicate on the same two fields.
             if !filter.tags.iter().all(|t| c.tags.contains(t))
                 || filter
                     .category
@@ -1274,8 +899,7 @@ impl Core {
                 text: c.text,
                 category: c.category,
                 tags: c.tags,
-                // Not a rank and not a similarity: this hit did not compete for
-                // a place in the list, it was recalled beside it.
+                // Not a rank or similarity: it was recalled beside the list.
                 score: 0.0,
                 status: Some(c.status),
                 superseded_by: c.superseded_by,
@@ -1288,23 +912,15 @@ impl Core {
                 past_cliff: false,
                 retired: false,
                 similarity: None,
-                // Read from the row, the way the ranked path reads it from the
-                // payload. A recalled passage carries the heading of the
-                // section it was cut from just as a ranked one does, and
-                // hard-coding `false` here put that heading back on the one
-                // rail that sits directly under the rows it was taken off.
+                // From the row, as the ranked path reads it from the payload.
                 borrowed_name: !c.provenance.names_its_own_text(),
-                // Set here, where `via` is known. Never ranked, so every other
-                // stage stays absent rather than defaulting to values that
-                // would read as facts about a competition that never happened.
+                // Never ranked, so every other stage stays absent.
                 disagrees_with: Vec::new(),
                 explanation: Some(crate::core::explain::HitExplanation::recalled(&l.via)),
                 via: Some(l.via),
                 reason: l.reason,
-                // Also the row's own answer, and for a harder reason than the
-                // heading: `model_written` is what stops a paraphrase being
-                // handed back as its own root, and a merged artifact reached
-                // by association is as model-written as one that was ranked.
+                // From the row: `model_written` stops a paraphrase being handed back as its own
+                // root.
                 model_written: c.provenance.is_model_written(),
                 synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
                 origin_count: 0,
@@ -1313,11 +929,8 @@ impl Core {
         out
     }
 
-    /// Artifacts found by the words of `q` in SQLite, as results. See
-    /// `Store::keyword_matches`; `unembedded_only` narrows it to what has no
-    /// vector yet. The filters a search was asked for hold here too. A read
-    /// that fails is logged and answers nothing: this is the fallback, and it
-    /// must not be the reason a search fails.
+    /// See `Store::keyword_matches`; `unembedded_only` narrows to what has no vector. A failed read
+    /// answers nothing.
     async fn keyword_hits(
         &self,
         q: &str,
@@ -1359,8 +972,7 @@ impl Core {
                 status: Some(c.status),
                 superseded_by: c.superseded_by,
                 last_verified_at: c.last_verified_at,
-                // It holds every word of the query; weakness has to be
-                // demonstrated, and nothing here can.
+                // It holds every word of the query; nothing here can demonstrate weakness.
                 weak: false,
                 primed: false,
                 in_sitting: false,
@@ -1384,11 +996,7 @@ impl Core {
             .collect()
     }
 
-    /// A random handful of chunks that have not surfaced in a month.
-    ///
-    /// Random rather than ranked, because there is no query: the question is
-    /// what has been forgotten, and ranking would keep returning the same
-    /// answer to it.
+    /// Random rather than ranked: there is no query, and ranking would return the same answer.
     pub async fn resurface(&self, limit: usize) -> Result<Vec<SearchResult>> {
         let cutoff = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY;
         let hits = self
@@ -1398,21 +1006,15 @@ impl Core {
         let hit_counts = counts_of(&hits);
         let results: Vec<SearchResult> = hits
             .into_iter()
-            // Not an answer to a query, so there is no query to be far from:
-            // these lists are drawn, not matched, and nothing here is weak.
+            // Drawn, not matched: nothing here is weak.
             .map(SearchResult::from)
             .collect();
-        // Surfacing counts as seeing, or the same chunks come back tomorrow —
-        // but not as a retrieval: nobody asked for these.
+        // Counts as seeing, so they do not return tomorrow, but not as a retrieval.
         self.mark_seen(&results, &hit_counts, false);
         Ok(results)
     }
 
-    /// Active artifacts confirmed stale a while ago and rarely or never
-    /// retrieved since — candidates for an operator to review and deprecate,
-    /// never anything applied automatically. A one-way signal: it can only
-    /// surface a candidate, never rank anything higher, so it cannot create a
-    /// popularity feedback loop the way scoring on `hit_count` directly would.
+    /// Candidates for an operator to review; a one-way signal, so it creates no popularity loop.
     pub async fn stale_candidates(&self, limit: usize) -> Result<Vec<SearchResult>> {
         let cutoff = now_secs() - self.consolidate.stale_after_days as i64 * SECONDS_PER_DAY;
         let hits = self
@@ -1425,58 +1027,35 @@ impl Core {
             .await?;
         Ok(hits
             .into_iter()
-            // Not an answer to a query, so there is no query to be far from:
-            // these lists are drawn, not matched, and nothing here is weak.
+            // Drawn, not matched: nothing here is weak.
             .map(SearchResult::from)
             .collect())
     }
 
-    /// The hot path. One embedding call, one vector search, and optionally one
-    /// rerank call. No completion, ever.
-    ///
-    /// Results are capped per source so one long document cannot fill the list.
+    /// The hot path: one embedding, one vector search, optionally one rerank. No completion, ever.
     pub async fn search(
         &self,
         query: &SearchQuery,
         origin: impl Into<Origin>,
     ) -> Result<Vec<SearchResult>> {
-        let cap = self.ranking.read().expect("ranking lock").per_source_cap;
+        let cap = self
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap;
         Ok(self.search_with(query, cap, origin.into()).await?.0)
     }
 
-    /// The embedding of `q`, if a search just made it. `search_with` caches the
-    /// query vector under the whitespace-normalised query; a caller that ran a
-    /// search a moment ago and wants to store the vector it used reads it here
-    /// rather than paying for the embedding twice. `None` only if the cache
-    /// evicted it in between, which a caller must tolerate.
+    /// The vector a search just embedded `q` with; `None` if evicted meanwhile.
     pub fn cached_query_vector(&self, q: &str) -> Option<Vec<f32>> {
         let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
         self.query_cache.lock().ok().and_then(|c| c.get(&key))
     }
 
-    /// The other direction: hand the cache a vector a query was searched with
-    /// before, so the next search of `q` embeds nothing. What lets a replay of
-    /// stored observations spend no inference — the vector is stored beside
-    /// each one for exactly this.
+    /// Seed the cache so a replay of stored observations spends no inference.
     pub fn remember_query_vector(&self, q: &str, vector: Vec<f32>) {
-        // An empty vector is not a vector this query was searched with; it is
-        // the absence of one, spelled `unwrap_or_default()` somewhere upstream.
-        // `ask` stores `cached_query_vector(&req.q).unwrap_or_default()` on its
-        // row, so a question whose embedding had already fallen out of this
-        // cache is recorded with `vec![]` — and the observation written beside
-        // it carries the same. The sweep then replays that observation and
-        // hands the empty vector straight back here.
-        //
-        // This cache is not the sweep's own: `search_inner` reads it verbatim,
-        // for every door. So one such replay left a zero-dimension vector under
-        // a query that people actually type, and the next real search of that
-        // wording ran against it — `cosine` refuses a width it does not share
-        // and answers 0.0, so the search returned its candidates in no
-        // meaningful order at all, silently, until the entry was evicted.
-        //
-        // Refused here rather than at each of the three call sites, because
-        // this is the one place all of them pass through and a fourth is one
-        // patch away.
+        // An empty vector is an absence spelled `unwrap_or_default()`; cached, it would break every
+        // later search of that wording, since `cosine` answers 0.0 across widths.
         if vector.is_empty() {
             return;
         }
@@ -1488,11 +1067,8 @@ impl Core {
         }
     }
 
-    /// `search`, with the per-source cap chosen by the caller and what the
-    /// search cost. `cap` of `None` lets a single source supply every result:
-    /// `ask` wants that, since a question is often answered by one document.
-    /// The timing is reported as a `server-timing` header, so a sluggish box
-    /// points at the embedder or the vector store without anyone opening a log.
+    /// `cap` of `None` lets one source supply every result, which `ask` wants. Timing goes to
+    /// `server-timing`.
     pub async fn search_with(
         &self,
         query: &SearchQuery,
@@ -1501,23 +1077,16 @@ impl Core {
     ) -> Result<(Vec<SearchResult>, SearchOutcome)> {
         let params = crate::core::ranking::RankingParams {
             per_source_cap: cap,
-            ..*self.ranking.read().expect("ranking lock")
+            ..*self
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         self.search_inner(query, params, origin.into(), true, None)
             .await
     }
 
-    /// `search_with`, with every runtime-tunable knob chosen by the caller.
-    ///
-    /// What the tuning sweep ranks its candidates through, so measurement and
-    /// the live path are one pipeline rather than two that can drift: a sweep
-    /// scoring a subtly different search would recommend settings for a program
-    /// nobody runs.
-    ///
-    /// The one thing it does differently is the lane. Nobody is waiting on a
-    /// replay of questions that were already answered, and a sweep is thousands
-    /// of searches: on the interactive lane it holds every background worker off
-    /// for the length of the run.
+    /// The sweep's door, so measurement and serving are one pipeline; it takes the background lane.
     pub async fn search_with_ranking(
         &self,
         query: &SearchQuery,
@@ -1528,15 +1097,7 @@ impl Core {
             .await
     }
 
-    /// `search_with`, reporting each stage as it starts.
-    ///
-    /// Why this lives in `Core` and not in the door that draws it: the terminal
-    /// client and the web box both show these, and two implementations of "what
-    /// a search is doing" would disagree inside a month. The producer is the
-    /// pipeline itself, so a stage cannot be reported for work that was not run
-    /// and cannot be missed for work that was.
-    ///
-    /// The blocking `GET /search` is untouched and still answers a bare array.
+    /// `search_with`, reporting each stage as it starts; the pipeline is the producer.
     pub fn search_events(
         &self,
         query: SearchQuery,
@@ -1546,16 +1107,17 @@ impl Core {
         let core = self.clone();
         let params = crate::core::ranking::RankingParams {
             per_source_cap: cap,
-            ..*self.ranking.read().expect("ranking lock")
+            ..*self
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         async_stream::try_stream! {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let task = tokio::spawn(async move {
                 core.search_inner(&query, params, origin, true, Some(tx)).await
             });
-            // The sender lives inside the search and is dropped when it
-            // returns, so this ends exactly once every stage it reported has
-            // been handed on — and never before the results it preceded.
+            // The sender drops when the search returns, so this ends after every reported stage.
             while let Some(ev) = rx.recv().await {
                 yield ev;
             }
@@ -1566,8 +1128,7 @@ impl Core {
         }
     }
 
-    /// `waited_on` is whether a person is on the other end of this search. It
-    /// chooses the lane and nothing else: the pipeline is the same either way.
+    /// `waited_on` chooses the lane and nothing else.
     async fn search_inner(
         &self,
         query: &SearchQuery,
@@ -1579,17 +1140,13 @@ impl Core {
         let door = origin.door;
         let cap = params.per_source_cap;
         let recency_weight = params.recency_weight;
-        // A client that hung up must not fail a search that is already running:
-        // the send is the report, not the work.
+        // A client that hung up must not fail a running search.
         let say = |ev: SearchEvent| {
             if let Some(tx) = &stages {
                 let _ = tx.send(ev);
             }
         };
-        // Filled in as the stages run. Always computed: a conditional path
-        // through the ranking would be a second pipeline, and the unexercised
-        // one is the one that ships. `query.explain` decides only what is
-        // rendered.
+        // Always computed; `query.explain` decides only what is rendered.
         let mut explanation = crate::core::explain::SearchExplanation {
             capped: cap,
             ..Default::default()
@@ -1598,12 +1155,8 @@ impl Core {
         if q.is_empty() {
             return Err(Error::Validation("query is empty".into()));
         }
-        // The embedder's own ceiling, not the model's nominal context: this is
-        // the same physical batch size `jobs::embed` splits documents under,
-        // and a query is one input the splitter never gets a chance to touch.
-        // Caught here, a paste that is too long to search is a 400 the box can
-        // show beside itself; caught only downstream, it is a 502 from an
-        // endpoint that already rejected it.
+        // The embedder's own batch ceiling: too long a query is a 400 here rather than a 502
+        // downstream.
         let rendered = self.embedder.templates().render_query(q);
         let safe_limit = (self.embedder.max_input_tokens() as f32 * 0.8) as usize;
         let tokens = self.counter.count(&rendered);
@@ -1617,22 +1170,12 @@ impl Core {
             n => n.min(MAX_LIMIT),
         };
 
-        // Whether the reranker runs on *this* search: one is configured, the
-        // scope covers this door, and the query did not opt out. The scope
-        // collapses every door but `Ask` into "search" — the judging view, the
-        // API, MCP and the extension all show the operator a ranked list, and
-        // `apply = ["ask"]` means none of them wait on a rerank call.
-        //
-        // Decided here rather than beside the call it guards, because the stage
-        // list below is a promise about work that is going to happen and it has
-        // to be made before any of it starts.
+        // Decided before the stage list, which promises the work that will happen.
         let reranking = query.rerank
             && params.rerank
             && match door {
                 Door::Ask => self.reranks_ask(),
-                // The same predicate that arms the UI's refining pass: written
-                // once, so the form can never advertise a refine this search
-                // would not run.
+                // The same predicate that arms the UI's refining pass.
                 _ => self.reranks_search(),
             };
         let mut will = vec![SearchStage::Embed, SearchStage::Retrieve];
@@ -1641,19 +1184,8 @@ impl Core {
         }
         say(SearchEvent::Stages(will));
 
-        // Embedding the query is a model call, and so is the reranker, so a
-        // search is a person waiting on the endpoint exactly as `ask` is — and
-        // it is the more common way in, through the UI and through MCP. Without
-        // the lane a worker is free to start a window the instant the query
-        // lands, and the query then waits out twenty to seventy seconds of it.
-        // `ask` takes one too and holds it across this; the lane is a count, so
-        // nesting is what it is built for.
-        //
-        // Unless nobody is waiting: a sweep is twenty-one searches per judged
-        // pair and hundreds of pairs, so on this lane it is not a query in
-        // front of a worker but a wall in front of every worker, for as long as
-        // the run lasts. It takes the background turn instead — behind whoever
-        // is actually waiting, and never alongside a generation.
+        // Embedding and reranking are model calls, so a person waiting takes the interactive lane;
+        // a sweep takes the background turn, or it would wall off every worker.
         let _lane = match waited_on {
             true => Lane::Interactive(self.gate.interactive()),
             false => Lane::Background(self.gate.background_light().await),
@@ -1661,26 +1193,14 @@ impl Core {
 
         say(SearchEvent::Stage(SearchStage::Embed));
         let started = std::time::Instant::now();
-        // Prefixes repeat constantly inside one search and whole queries repeat
-        // across sessions, so this is the difference between one embedding call
-        // per search and one per keystroke.
+        // Whitespace-normalised: prefixes repeat within a search and queries across sessions.
         let key = q.split_whitespace().collect::<Vec<_>>().join(" ");
         let cached = self.query_cache.lock().ok().and_then(|c| c.get(&key));
         let vector = match cached {
             Some(v) => v,
             None => {
-                // Retried only where somebody is waiting, and for the reason
-                // the box is built the way it is: a search is one embedding
-                // call per debounced keystroke, so a burst of typing is a
-                // burst of calls, and the first thing a shared endpoint does
-                // about a burst is shed some of it. One 429 in the middle of a
-                // word used to be a failed search.
-                //
-                // A sweep takes the other road. It runs twenty-one searches
-                // per judged pair over hundreds of pairs, nobody is watching,
-                // and the job layer already owns backoff for it — spending a
-                // budget per search there would turn a rate-limited minute
-                // into a run that never finishes.
+                // Retried only where someone waits: typing bursts get shed with 429s. The job layer
+                // backs off for sweeps.
                 let embedded = match waited_on {
                     true => {
                         crate::infer::retry::transiently(
@@ -1693,13 +1213,8 @@ impl Core {
                 };
                 let v = match embedded {
                     Ok(v) => v,
-                    // The embedder is down, or refused the query. A person
-                    // waiting gets what the words alone can find rather than
-                    // an error — the index is unreachable, the text is not.
-                    // Not a sweep: nobody is watching one, and a tuning pass
-                    // scored on keyword hits would learn from a ranking that
-                    // is not the ranking. Nothing found is the error again,
-                    // so an outage is still said.
+                    // Embedder down: a person waiting gets keyword hits; a sweep does not, or it
+                    // learns a different ranking.
                     Err(e)
                         if waited_on
                             && door != Door::Judge
@@ -1713,8 +1228,8 @@ impl Core {
                             return Err(e);
                         }
                         self.finish_hits(&mut results).await;
-                        // Every stage promised above is entered, so a client
-                        // following them is not left waiting on one.
+                        // Every promised stage is entered, so a client following them is not left
+                        // waiting.
                         say(SearchEvent::Stage(SearchStage::Retrieve));
                         if reranking && self.reranker.is_some() {
                             say(SearchEvent::Stage(SearchStage::Rerank));
@@ -1748,40 +1263,27 @@ impl Core {
         let filter = SearchFilter {
             tags: query.tags.clone(),
             category: query.category.clone(),
-            // Deprecated/superseded artifacts stay out of ordinary search by
-            // default; they remain readable by id either way, which is what
-            // the review queue and the undo need. A caller opts in explicitly.
+            // Retired artifacts stay out unless opted in; they stay readable by id.
             include_superseded: query.include_superseded,
             include_deprecated: query.include_deprecated,
-            // Ordinary search asks the whole base. Narrowing to one document is
-            // the coverage check's question, not a searcher's.
+            // Narrowing to one document is the coverage check's question, not a searcher's.
             corpus_id: None,
         };
-        // Over-fetch whenever something downstream narrows the list: both the
-        // per-source cap and the reranker can only discard what they are given.
+        // The cap and the reranker can only discard what they are given.
         let candidates = if cap.is_some() || reranking {
             limit * params.candidate_multiplier
         } else {
             limit
         };
-        // Capture needs a pool wider than the answer — that is the whole point
-        // of storing one, since a hit the ranking buried is unconfirmable
-        // otherwise. The fetch is the ceiling on that pool, and the width above
-        // is derived from `limit` alone: a `feedback.candidates` larger than it
-        // was silently cut back, either by a small `limit` (three results
-        // over-fetched to nine, against a configured pool of twenty) or by
-        // raising `candidates` past the multiplier. Neither said so anywhere.
-        // Widening the fetch is also the cost of the setting: `Config::normalize`
-        // caps `candidates` at `MAX_LIMIT * CANDIDATE_MULTIPLIER` so this can
-        // never exceed what the widest ordinary search already fetches.
+        // Capture needs a pool wider than the answer; `Config::normalize` caps `candidates` at the
+        // widest fetch.
         let candidates = if self.learn.enabled && door.fetches_the_capture_pool() {
             candidates.max(self.feedback.candidates)
         } else {
             candidates
         };
         explanation.candidates_fetched = candidates;
-        // The lexical half of the query. Computed locally and for free, so it
-        // costs nothing when the store ignores it.
+        // Computed locally and for free.
         let sparse = crate::vector::sparse::encode_query(query.q.trim());
         say(SearchEvent::Stage(SearchStage::Retrieve));
         let hits = self
@@ -1798,25 +1300,14 @@ impl Core {
             )
             .await?;
 
-        // Where retrieval put each hit, read before anything below reorders
-        // them. The cap moves its displaced hits to the tail, so enumerating
-        // the capped list — which is what this used to do — reports where the
-        // cap put a hit under a field whose whole claim is that it says where
-        // retrieval did.
+        // Read before anything reorders: the cap moves displaced hits to the tail.
         let retrieved_rank: HashMap<String, usize> = hits
             .iter()
             .enumerate()
             .map(|(rank, h)| (h.payload.artifact_id.clone(), rank))
             .collect();
 
-        // Cap before reranking, in vector order, so what leads per source is
-        // that source's best. The refill target is the candidate pool rather
-        // than the answer: refilling only to `limit` would hand the reranker
-        // exactly `limit` hits whenever a few sources dominate, which is the
-        // case over-fetching exists for. The final truncate still cuts to size.
-        // The pool's shape is recorded either way: how many corpora were on
-        // offer is what says whether one source dominating is the rule failing
-        // or no rule at all, and that question does not need a cap to be set.
+        // Cap before reranking, refilling to the pool so the reranker still gets more than `limit`.
         let (hits, cap_report) = match cap {
             Some(max) => cap_per_corpus(hits, max, candidates),
             None => {
@@ -1841,15 +1332,7 @@ impl Core {
         };
         explanation.corpora_in_pool = cap_report.corpora_in_pool;
         explanation.displaced = cap_report.displaced;
-        // `explanation.refilled` is *not* set from the report: every displaced
-        // hit is refilled into the pool by construction. It is counted after
-        // the truncate, over the hits the caller will actually see.
-        // Taken before the payloads are consumed: `mark_seen` needs each hit's
-        // stored `hit_count` to increment it without reading it back.
         let hit_counts = counts_of(&hits);
-        // Taken for the same reason: the similarity is dropped when a payload
-        // becomes a `SearchResult`, and capture wants the value rather than the
-        // `weak` verdict computed from it.
         let sims: HashMap<String, Option<f32>> = if self.learn.enabled && door.captured() {
             hits.iter()
                 .map(|h| (h.payload.artifact_id.clone(), h.similarity))
@@ -1858,30 +1341,21 @@ impl Core {
             HashMap::new()
         };
 
-        // Read once, and from the same configuration the vector store was
-        // built from: a second reading of these could drift from the formula
-        // that actually scored this search. The recency terms come off the
-        // parameters rather than the lock, because `search_with_ranking`
-        // overrides them and a replay must be explained with the settings it
-        // ran under.
+        // From the store's own configuration; recency comes off `params`, which
+        // `search_with_ranking` overrides.
         let half_life_secs = params.recency_half_life_days as u64 * 86_400;
         let pinned_boost = self.pinned_boost;
-        // Asked of the store, not of the configuration: the default
-        // `search_weighted` drops the weight and delegates to a plain
-        // `search`, so against `MemoryVectors` — and any future backend that
-        // does not override it — these two terms are configured and never
-        // applied. Reporting them then contradicts the ranking they explain.
+        // Asked of the store: the default `search_weighted` ignores the weights, so the terms would
+        // not apply.
         let scored = self.vectors.applies_scoring_formula();
         let scored_at = now_secs();
         let mut results: Vec<SearchResult> = hits
             .into_iter()
             .map(|h| {
-                // Demonstrated, never assumed: a hit with no similarity to
-                // read is one the lexical half matched verbatim.
+                // A hit with no similarity was matched verbatim by the lexical half.
                 let weak = h.similarity.is_some_and(|s| s < self.weak_below());
-                // Kept and refilled are different claims: a refilled hit is
-                // over its cap and present only because nothing else was on
-                // offer, which is the case the cap fails silently in.
+                // A refilled hit is over its cap and present only because nothing else was on
+                // offer.
                 let cap = match (
                     cap.is_some(),
                     cap_report.refilled.contains(&h.payload.artifact_id),
@@ -1915,15 +1389,7 @@ impl Core {
             })
             .collect();
 
-        // What the index does not hold yet, found by its words: a capture
-        // seconds old whose passages are still waiting for a vector, a chunk
-        // the embedder refused. Search reads only the vector store, so those
-        // were invisible until their embed landed. A hit here contains every
-        // term of the query verbatim, which is stronger evidence than a fused
-        // rank, so a few go at the head — few, so a long embed backlog cannot
-        // push the index's answers out — and the reranker, where one runs,
-        // orders them with everything else. Not on the judging door, whose
-        // pool has to be the ranking's.
+        // Unembedded text found by its words goes at the head, a few only; not on the judging door.
         if door != Door::Judge {
             let have: std::collections::HashSet<String> =
                 results.iter().map(|r| r.artifact_id.clone()).collect();
@@ -1951,11 +1417,8 @@ impl Core {
         self.finish_hits(&mut results).await;
 
         let mut reranked = false;
-        // Said on the same condition the stage list was built from, and before
-        // the emptiness check below: a stage named in `stages` and never
-        // started is a client waiting on a step that is not coming. A search
-        // that retrieved nothing still enters the stage, finds nothing to order
-        // and leaves it.
+        // On the stage list's condition and before the emptiness check, so a named stage is always
+        // entered.
         if reranking && self.reranker.is_some() {
             say(SearchEvent::Stage(SearchStage::Rerank));
         }
@@ -1965,12 +1428,7 @@ impl Core {
         {
             let before = positions(&results);
             let docs: Vec<String> = results.iter().map(|r| r.text.clone()).collect();
-            // Reranked wider than the answer when the search is being recorded:
-            // the reranker scores every document either way, so asking it to
-            // return more costs nothing, while asking for `limit` would hand
-            // capture a pool exactly as wide as what the searcher saw. A hit
-            // the reranker buried would then be unconfirmable, and the whole
-            // point of storing a pool is that it can be.
+            // Reranked wider when recorded, at no extra cost, so a buried hit stays confirmable.
             let top_n = if self.learn.enabled && door.captured() {
                 limit.max(self.feedback.candidates)
             } else {
@@ -1989,28 +1447,14 @@ impl Core {
                         .collect();
                     note_reorder(&mut results, &before, |e| &mut e.rerank);
                 }
-                // A rerank failure degrades ordering, not availability; vector
-                // order is still a usable answer.
+                // A rerank failure degrades ordering, not availability.
                 Err(e) => tracing::warn!(error = %e, "rerank failed; returning vector order"),
             }
         }
 
-        // Before capture and before the truncate, so the pool that is recorded
-        // is the order the searcher was actually shown — a judged rank has to
-        // be a rank that happened. Bounded by `prime_lift` and never past rank
-        // 1, so this can reorder near-ties and nothing else.
-        //
-        // Held off the same two doors as association below, for the same
-        // reason in a different shape. `Ask` does not show this list to
-        // anybody: it turns the head of it into excerpts and, when they do not
-        // all fit the context window, keeps a prefix and drops the tail on the
-        // stated grounds that the tail matched the question least
-        // (`src/core/ask.rs`). Reordering by accessibility makes that untrue,
-        // and the excerpt lost is then the one that answered best — a silent
-        // change to the answer, on a path where nobody can see what was cut.
-        // `Judge` needs the pool it labels to be the pool the ranking produced.
-        // What is due on these rows, said on every door. Read regardless of
-        // `time.lift`: the badge is a fact, the lift is a choice.
+        // Primed before capture and truncate, so the recorded pool is what the searcher saw; not on
+        // `Ask` (its excerpt cut assumes rank order) or `Judge`. Due rows are read regardless of
+        // `time.lift`.
         let due_map = {
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
             let now = now_secs();
@@ -2023,15 +1467,10 @@ impl Core {
             r.due_at = due_map.get(&r.artifact_id).copied();
             r.due_in = r.due_at.map(crate::fmt::ago_or_ahead);
         }
-        // Retirement, read for the whole page in one query beside the due map.
         {
             let cids: Vec<String> = results.iter().map(|r| r.corpus_id.clone()).collect();
-            // Degraded, but never silently: an empty set here is
-            // indistinguishable from "nothing is retired", so a transient
-            // `SQLITE_BUSY` leaves the marks off the rail and
-            // `sink_retired_and_mark_the_cliff` demoting nothing. The page is
-            // still worth showing without them — the same trade the `due_for`
-            // read above makes — and the log is what says which it was.
+            // Logged rather than silent: an empty set is indistinguishable from "nothing is
+            // retired".
             let retired = match self.store.retired_among(&cids).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -2047,20 +1486,14 @@ impl Core {
             true => due_map.keys().cloned().collect(),
             false => Default::default(),
         };
-        // Kept for the capture below: what a replay needs to see this list
-        // the way the searcher did. Only a real search records it.
+        // What a replay needs to see this list as the searcher did.
         let mut primed_with: Option<Priming> = None;
         let primes = self.associating() && !matches!(door, Door::Ask | Door::Judge);
         if primes || origin.replay.is_some() {
             let before = positions(&results);
             let ids: Vec<String> = results.iter().map(|r| r.artifact_id.clone()).collect();
-            // Collected whatever the knob says, and used only where it says
-            // so — see `prime`. Recording this is what makes the knob
-            // measurable at all: gated on itself, it produced no evidence
-            // about itself, so the idle pass could never move it. Held off the
-            // doors priming is already held off, for the same reasons, and
-            // empty on every door with no session for the reason in
-            // `Origin::session`.
+            // Collected whatever the knob says, so the idle pass has evidence to move it; used only
+            // where it says.
             let sitting: std::collections::HashSet<String> = origin
                 .session
                 .as_deref()
@@ -2072,9 +1505,7 @@ impl Core {
                         .collect()
                 })
                 .unwrap_or_default();
-            // A replay is primed with what the recorded search read, not with
-            // the base as it stands now: the activation has decayed since and
-            // the sitting is long over.
+            // A replay is primed with what the recorded search read, not the base as it is now.
             let priming = match origin.replay.clone() {
                 Some(p) => p,
                 None => Priming {
@@ -2093,45 +1524,24 @@ impl Core {
                 &priming.due,
             );
             note_reorder(&mut results, &before, |e| &mut e.prime);
-            // Only a real search records what it read; a replay is not an
-            // event.
+            // Only a real search records what it read.
             if primes {
                 primed_with = Some(priming);
             }
         }
 
-        // Before the capture below, not after the truncate: the recorded
-        // `rank` is the enumerate index of this very list, and sinking the
-        // retired hits afterwards meant the judge and the tuning pipeline were
-        // trained on an ordering no searcher ever saw. Scoped to the window
-        // the caller will actually be handed, so what the truncate keeps and
-        // what a person reads are unchanged — a retired hit outside `limit`
-        // was already going to be dropped, and the sink has nothing to say
-        // about it.
+        // Sunk before the capture: the recorded `rank` must be an order a searcher saw.
 
-        // The one row of this search the ranking did not choose.
-        //
-        // Before the window is fixed, so the lifted candidate goes through the
-        // same sinking and cliff-marking as everything else a person is shown,
-        // and before the capture below, so `shown` records what was actually
-        // on screen. Its own rank is carried separately: see `explored_from`.
+        // Before the window is fixed and the capture, so the lifted row is sunk, marked and
+        // recorded as shown.
         let explored = self.explore_swap(&mut results, q, limit, door, &origin);
 
         let visible = limit.min(results.len());
         sink_retired_and_mark_the_cliff(&mut results[..visible], reranked);
 
-        // Recorded here, where the list is still wider than the answer and the
-        // ordering is final. Off the request path via `Background`, like
-        // `mark_seen` below it: a search must not get slower, or fail, because
-        // bookkeeping did.
-        //
-        // Except at the UI door, which waits for its own capture — see
-        // `captured_event` below.
-        // The band, read before the capture so it is in the pool: an open on
-        // an appended hit has to find its row, or it is not an observation.
-        // Appended after the truncate, below, so it stays outside `limit` and
-        // outside the retrieval count. The anchors are the shown window, which
-        // is what the append used to hand `associated` after the truncate.
+        // Recorded while the list is wider than the answer, off the request path except at the UI
+        // door. The band is read first so it is in the pool; it is appended after the truncate,
+        // outside `limit`.
         let recalled = if self.associating() && !matches!(door, Door::Ask | Door::Judge) {
             self.associated(&results[..visible], &filter, params.spread_max)
                 .await
@@ -2173,9 +1583,8 @@ impl Core {
                 query: query.q.trim().to_string(),
                 door,
                 scope: origin.scope.clone(),
-                // The event the page sending this is holding, where the door
-                // named one — what keeps a second tab's keystroke from folding
-                // into the first tab's search. See `record_search`.
+                // Keeps a second tab's keystroke from folding into the first tab's search. See
+                // `record_search`.
                 fold_onto: origin.fold_onto.clone(),
                 context: primed_with.clone(),
                 filters: serde_json::json!({
@@ -2189,27 +1598,13 @@ impl Core {
                 query_vec: vector.clone(),
                 embed_model: self.embedder.model().to_string(),
                 candidates,
-                // The stopping rule for pursuits: a synthesized artifact at
-                // final rank 1, at or above `weak_below`, means the base
-                // answered. A fused rank says where a hit placed and not how
-                // good it was, which is why `weak` is read beside it.
+                // The pursuit stopping rule: a synthesized artifact at rank 1, not weak.
                 answered: results.first().is_some_and(|r| r.synthesized && !r.weak),
             };
             let window = self.feedback.coalesce_secs;
             match door {
-                // The one door whose answer a person then clicks on. It waits,
-                // because the page it fills has to name the search on every row
-                // — that is what lets an open, a verdict and a gap report
-                // against the search they actually came from. Guessing at it
-                // afterwards, from recency and pool membership, was wrong in
-                // both directions: a fast click found no capture yet, and a
-                // slow one could be answered by an unrelated search that merely
-                // held the same artifact.
-                //
-                // The rule above still holds. This is one small transaction
-                // behind an embedding call and a vector search the person is
-                // already waiting on, and its failure is logged and dropped:
-                // the results go out either way, without the bar.
+                // The UI waits for its capture so every row names its search; a failure is logged,
+                // the results go out.
                 Door::Ui | Door::App => match self.store.record_search(event, window).await {
                     Ok(id) => captured_event = Some(id),
                     Err(e) => tracing::warn!(error = %e, "could not record the search"),
@@ -2226,12 +1621,7 @@ impl Core {
         }
 
         results.truncate(limit);
-        // Here, and not beside the cap: refilling puts every displaced hit
-        // back into the *pool*, so counting them there always answered
-        // "all of them" and the meta line always read as the failure case.
-        // The truncate is where the cap either removes something or does not,
-        // and a displaced hit that survives it is one the cap meant to drop
-        // and did not — a list one source filled.
+        // Counted after the truncate, where the cap either removes something or does not.
         explanation.refilled = results
             .iter()
             .filter(|r| {
@@ -2244,28 +1634,13 @@ impl Core {
             // A query answered these, so they count as retrievals.
             self.mark_seen(&results, &hit_counts, true);
         }
-        // After the truncate, so an association can only ever add: it is
-        // outside `limit` and outside the retrieval count. See `Touch::shown`.
-        // It is inside the recorded pool, flagged as the band, so an open on
-        // it counts; that is what the spread rule reads.
-        //
-        // Gated on the door where `recalled` is read, not on `captured()` —
-        // that predicate means "recorded for relevance feedback", an unrelated
-        // idea that happens to select the same four doors today. `Ask` is
-        // excluded because it synthesises an answer from `results` as
-        // excerpts; text that never matched the question must not become
-        // source material. `Judge` is excluded because its query is composed
-        // in full knowledge of the answer and needs a clean pool to label, not
-        // a widened one.
+        // After the truncate, so an association only adds. Not on `Ask` (it would become source
+        // material) or `Judge`.
         if !recalled.is_empty() {
             self.mark_seen(&recalled, &HashMap::new(), false);
             let from = results.len();
             results.extend(recalled);
-            // The earlier pass ran before these existed. Without this an
-            // associated passage with no heading of its own renders untitled
-            // beside ranked siblings from the same note that show its name —
-            // `retrieve_round` already re-runs it after `reach_sideways` for
-            // the same reason.
+            // The earlier pass ran before these existed.
             self.finish_hits(&mut results[from..]).await;
         }
         tracing::info!(
@@ -2299,14 +1674,7 @@ mod tests {
     use crate::core::test_support::{test_core, test_core_counting_reranked_docs};
     use crate::store::artifacts::NewArtifact;
     use crate::store::feedback::Door;
-    use sqlx::Row;
 
-    /// An empty vector is the *absence* of one, spelled `unwrap_or_default()`
-    /// upstream — and this cache is not the sweep's own. `search_inner` reads
-    /// it verbatim for every door, so one replay of an observation recorded
-    /// without a vector left a zero-dimension entry under a query people
-    /// actually type, and the next real search of that wording ranked on
-    /// nothing at all: `cosine` refuses a width it does not share.
     #[tokio::test]
     async fn an_empty_query_vector_is_never_remembered() {
         let core = test_core().await;
@@ -2334,7 +1702,6 @@ mod tests {
         seed_from(core, "raw", texts).await
     }
 
-    /// `raw` has to differ per source: sources are deduplicated by a hash of it.
     async fn seed_from(
         core: &crate::core::Core,
         raw: &str,
@@ -2360,7 +1727,6 @@ mod tests {
         src.id
     }
 
-    /// Every event one search emitted, in order.
     async fn events_of(core: &crate::core::Core, text: &str, origin: Origin) -> Vec<SearchEvent> {
         use tokio_stream::StreamExt as _;
         let s = core.search_events(q(text), None, origin);
@@ -2372,9 +1738,6 @@ mod tests {
         seen
     }
 
-    /// A lamp drawn for work that is not going to happen is the one thing a
-    /// progress display must not do, so the client is told the stages up front
-    /// rather than left to assume the pipeline's shape.
     #[tokio::test]
     async fn a_search_names_the_stages_it_will_run_before_it_runs_them() {
         let core = test_core().await;
@@ -2415,8 +1778,6 @@ mod tests {
         );
     }
 
-    /// The other half of the same rule: a stage promised and never started is
-    /// as much an invention as one drawn that never ran.
     #[tokio::test]
     async fn every_named_stage_is_also_announced_as_it_starts() {
         let (core, _calls) = test_core_counting_reranked_docs().await;
@@ -2434,10 +1795,6 @@ mod tests {
         assert_eq!(named, started, "{seen:?}");
     }
 
-    /// The case the rule was broken on: a rerank was promised whenever one was
-    /// configured, but the call itself was also guarded on there being
-    /// something to order, so a search that retrieved nothing named a stage it
-    /// never entered.
     #[tokio::test]
     async fn a_search_that_retrieves_nothing_still_runs_every_stage_it_named() {
         let (core, _calls) = test_core_counting_reranked_docs().await;
@@ -2463,8 +1820,6 @@ mod tests {
     #[tokio::test]
     async fn a_retired_note_sinks_below_the_cliff_and_says_why() {
         let core = test_core().await;
-        // Three ordinary notes, so `cliff` has the three scores it needs, and
-        // the reminder in a corpus of its own so it can be retired alone.
         seed(
             &core,
             &[
@@ -2503,11 +1858,6 @@ mod tests {
         assert!(after.iter().position(|r| r.corpus_id == cid).unwrap() >= pos);
     }
 
-    /// The recorded `rank` is the enumerate index of the list the searcher saw,
-    /// so the retired sink has to happen before the capture. It used to run
-    /// after, and the judge and the tuning pipeline were then trained on an
-    /// ordering nobody was ever shown: a retired hit recorded at rank 1 and
-    /// read at the tail.
     #[tokio::test]
     async fn the_recorded_ranks_are_the_order_the_searcher_was_handed() {
         let mut core = test_core().await;
@@ -2529,18 +1879,18 @@ mod tests {
         .await;
         core.store.retire_corpus(&cid, now_secs()).await.unwrap();
 
-        // `Door::Ui` captures inline, so the row is there when the search
-        // returns rather than whenever a background task lands.
+        // `Door::Ui` captures inline, so the row is there when the search returns.
         let got = core.search(&q("invoice"), Door::Ui).await.unwrap();
         assert!(
             got.iter().any(|r| r.retired),
             "the fixture must actually put a retired hit in the list"
         );
-        let recorded: Vec<String> =
-            sqlx::query_scalar("SELECT artifact_id FROM search_candidates ORDER BY event_id, rank")
-                .fetch_all(&core.store.pool)
-                .await
-                .unwrap();
+        let recorded: Vec<String> = sqlx::query_scalar!(
+            "SELECT artifact_id FROM search_candidates ORDER BY event_id, rank"
+        )
+        .fetch_all(&core.store.pool)
+        .await
+        .unwrap();
         let shown: Vec<String> = got.iter().map(|r| r.artifact_id.clone()).collect();
         assert_eq!(
             recorded[..shown.len()],
@@ -2581,8 +1931,8 @@ mod tests {
             .insert_moment(&crate::store::moments::NewMoment {
                 artifact_id: aid.clone(),
                 kind: crate::store::moments::Kind::Due,
-                // Half an hour of slack: the badge rounds down, and a slow runner
-                // can let a second pass before the search reads the clock.
+                // Half an hour of slack: the badge rounds down, and a slow runner may pass a
+                // second.
                 at: Some(now + 2 * 3_600 + 1_800),
                 tz: "UTC".into(),
                 rule: None,
@@ -2602,7 +1952,6 @@ mod tests {
         );
     }
 
-    /// The stream is the same search, so it has to answer with the same hits.
     #[tokio::test]
     async fn the_streamed_search_returns_what_the_blocking_one_returns() {
         let core = test_core().await;
@@ -2629,7 +1978,6 @@ mod tests {
         );
     }
 
-    /// Rewrite every vector payload from the current chunk rows.
     async fn reembed_all(core: &crate::core::Core) {
         for src in core.store.list_corpora(100, 0).await.unwrap() {
             for c in core.store.artifacts_for_corpus(&src.id).await.unwrap() {
@@ -2638,8 +1986,6 @@ mod tests {
         }
     }
 
-    /// An embedder that stops inside the call, so a test can look at what the
-    /// rest of the system is doing while a search waits on the endpoint.
     struct BlockingEmbedder {
         inner: crate::infer::fake::FakeEmbedder,
         started: std::sync::Arc<tokio::sync::Notify>,
@@ -2667,16 +2013,9 @@ mod tests {
         }
     }
 
-    // Real time rather than `start_paused`: the SQLite pool's own timeouts are
-    // tokio timers too, and a paused clock auto-advances them the moment every
-    // task is idle, so the pool times out before the test starts.
+    // Real time, not `start_paused`: a paused clock auto-advances the SQLite pool's timeouts.
     #[tokio::test]
     async fn a_search_holds_the_interactive_lane_while_it_runs() {
-        // `ask` took the lane and a plain search did not, which left the more
-        // common way in — the UI and MCP — free to be overtaken: a worker could
-        // start a window the instant the query landed, and the person waiting on
-        // their search then waited out twenty to seventy seconds of it. The
-        // query embed is a model call, and so is the reranker.
         let mut core = test_core().await;
         let started = std::sync::Arc::new(tokio::sync::Notify::new());
         let release = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -2708,16 +2047,6 @@ mod tests {
         worker.await.unwrap();
     }
 
-    /// Typing is one embedding call per debounced keystroke, so a burst is a
-    /// burst of calls and a shared endpoint sheds part of it. One 429 in the
-    /// middle of a word used to be a failed search and a wiped rail.
-    ///
-    /// Real time rather than `start_paused`, for the reason the lane test
-    /// above gives: the pool's own timeouts are timers too. One refusal, so
-    /// the test pays at most one jittered gap.
-    /// Search reads the vector store, and a capture's passages have no vector
-    /// until their embed lands — seconds normally, for ever if the embedder
-    /// refuses them. Found by their words meanwhile.
     #[tokio::test]
     async fn text_with_no_vector_yet_is_found_by_its_words() {
         let core = test_core().await;
@@ -2754,7 +2083,6 @@ mod tests {
             hit.explanation.as_ref().is_some_and(|e| e.keyword),
             "and it says how it was found"
         );
-        // Every word has to be there: a partial match is not a keyword hit.
         let (got, _) = core
             .search_with(&q("Signal-Gruppe Montag"), None, Door::Ui)
             .await
@@ -2762,8 +2090,6 @@ mod tests {
         assert!(!got.iter().any(|r| r.text.contains("Signal-Gruppe")));
     }
 
-    /// With the embedder down a search used to fail outright. A person gets
-    /// what the words find, and the answer says it is keywords only.
     #[tokio::test]
     async fn with_the_embedder_down_a_person_still_gets_what_the_words_find() {
         let mut core = test_core().await;
@@ -2783,10 +2109,11 @@ mod tests {
         assert!(got.iter().any(|r| r.text.contains("losetup")));
         assert!(out.explanation.keyword_only);
 
-        // Nothing found is the outage again, said as one.
         assert!(core.search(&q("zzzqqq"), Door::Ui).await.is_err());
-        // And a sweep is not handed keyword hits to learn from.
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(
             core.search_with_ranking(&q("losetup"), params, Door::Judge)
                 .await
@@ -2808,10 +2135,6 @@ mod tests {
         assert_eq!(embedder.calls(), 2, "the keystroke was not asked again");
     }
 
-    /// And the other road. A sweep is twenty-one searches per judged pair over
-    /// hundreds of pairs with nobody watching; the job layer owns its backoff,
-    /// and a budget spent per search would turn a rate-limited minute into a
-    /// run that never ends.
     #[tokio::test]
     async fn a_sweep_does_not_wait_out_a_limiter() {
         let mut core = test_core().await;
@@ -2820,7 +2143,10 @@ mod tests {
         );
         core.embedder = embedder.clone();
 
-        let params = *core.ranking.read().expect("ranking lock");
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let e = core
             .search_with_ranking(&q("mounting an image"), params, Door::Judge)
             .await
@@ -2835,8 +2161,8 @@ mod tests {
             limit: 10,
             tags: vec![],
             category: None,
-            // The default for these tests is the deliberate search the API and
-            // MCP make; the incremental case is exercised explicitly below.
+            // The deliberate search the API and MCP make; the incremental case is tested
+            // explicitly.
             mark: true,
             rerank: true,
             explain: false,
@@ -2851,7 +2177,10 @@ mod tests {
         seed(&core, &[("mounting an image", "procedure", &[])]).await;
         let mut query = q("mount");
         query.limit = 4;
-        let base = *core.ranking.read().unwrap();
+        let base = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for multiplier in [1usize, 2, 5] {
             let params = crate::core::ranking::RankingParams {
                 candidate_multiplier: multiplier,
@@ -2870,18 +2199,6 @@ mod tests {
         }
     }
 
-    /// The replay fetches exactly what the live path fetches.
-    ///
-    /// The idle pass ranks its candidate generations on the Judge door so that
-    /// measurement and serving are one pipeline. `feedback.candidates` is a
-    /// floor under the over-fetch that only the captured doors applied, so the
-    /// replay was a second pipeline in the one place it must not be — and the
-    /// gap fell exactly on an axis the pass sweeps.
-    ///
-    /// At `LIMIT = 10` and the shipped floor of 20, a `candidate_multiplier`
-    /// of 1 and of 2 are the same setting in production: both fetch 20. The
-    /// replay fetched 10 against 20 and could adopt on the difference — a
-    /// change to a number that would not change a single search anyone made.
     #[tokio::test]
     async fn the_replay_door_fetches_the_pool_the_captured_doors_do() {
         let mut core = test_core().await;
@@ -2889,7 +2206,10 @@ mod tests {
         seed(&core, &[("mounting an image", "procedure", &[])]).await;
         let mut query = q("mount");
         query.limit = 4;
-        let base = *core.ranking.read().unwrap();
+        let base = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let mut fetched = vec![];
         for multiplier in [1usize, 2] {
@@ -2950,7 +2270,6 @@ mod tests {
         core.search(&q("dd write iso"), Door::Ui).await.unwrap();
         let after_first = embedder.calls();
         core.search(&q("dd write iso"), Door::Ui).await.unwrap();
-        // Whitespace differences are not a different question.
         core.search(&q("  dd write iso  "), Door::Ui).await.unwrap();
 
         assert_eq!(
@@ -2971,7 +2290,6 @@ mod tests {
         assert!(!core.search(&query, Door::Ui).await.unwrap().is_empty());
         core.background.wait_idle().await;
 
-        // Nothing was stamped, so the chunk is still eligible to resurface.
         let stamped = core
             .vectors
             .resurface(10, i64::MAX, i64::MAX)
@@ -3005,11 +2323,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_deliberate_search_leaves_what_it_returned_no_more_accessible() {
-        // Being listed is exposure, not use. At `retrieved = 1.0` this was the
-        // strongest signal there was — it happened to every hit of every
-        // search — and it primed, and promoted, artifacts nobody had opened.
-        // The path still runs (`[learn]` on, a marked search); the shipped
-        // weight is what makes it raise nothing.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -3037,9 +2350,6 @@ mod tests {
 
     #[tokio::test]
     async fn typing_does_not_make_what_it_happened_to_match_more_accessible() {
-        // The same rule as `last_seen_at`: an incremental request is not a
-        // retrieval, and letting every keystroke raise activation would make
-        // accessibility a function of how slowly someone types.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -3069,16 +2379,16 @@ mod tests {
 
     #[tokio::test]
     async fn being_drawn_at_random_raises_nothing() {
-        // `resurface` shows what has been forgotten. Counting that as a reason
-        // to be more accessible is the loop this whole design is built to close.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ?",
+            now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         reembed_all(&core).await;
         let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
         let before = core
@@ -3123,13 +2433,8 @@ mod tests {
             .await
             .unwrap()[&id]
             .0;
-        // Loose on purpose: `before` is the raw stored activation, but the bump
-        // re-reads it through decay, so the error grows with wall-clock time
-        // between the artifact's creation and the bump (5.7e-7 after one
-        // second, 1.15e-6 after two) and a loaded machine can straddle 1e-6.
-        // 1e-3 still separates `opened` (1.0) from nothing by three orders of
-        // magnitude, so it cannot mask a real regression — don't tighten it
-        // back without addressing the decay re-read instead.
+        // Loose on purpose: the bump re-reads activation through decay, so the error grows with
+        // wall-clock time.
         assert!((after - before - core.activation.opened).abs() < 1e-3);
         assert_eq!(core.activation.opened, 1.0);
         assert!(core.activation.retrieved < core.activation.opened);
@@ -3147,8 +2452,7 @@ mod tests {
         )
         .await;
 
-        // FakeEmbedder hashes text, so query the exact embedded string to get
-        // a deterministic top hit.
+        // FakeEmbedder hashes text, so query the exact embedded string for a deterministic top hit.
         let hits = core
             .search(&q("t0\nmounting an E01 image"), Door::Ui)
             .await
@@ -3253,26 +2557,27 @@ mod tests {
             &[("alpha", "c", &[]), ("beta", "c", &[]), ("gamma", "c", &[])],
         )
         .await;
-        core.ranking.write().unwrap().rerank = false;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rerank = false;
         core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
         assert_eq!(
             reranker.calls(),
             0,
             "rerank off in the generation must mean no call"
         );
-        core.ranking.write().unwrap().rerank = true;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .rerank = true;
         core.search(&q("t0\nalpha"), Door::Ui).await.unwrap();
         assert_eq!(reranker.calls(), 1);
     }
 
     #[tokio::test]
     async fn rerank_over_fetches_candidates_before_narrowing() {
-        // Reranking can only reorder what it is given. If the candidate pool
-        // were not wider than the limit, a better match ranked 11th by vector
-        // similarity could never be promoted into a top-10 answer.
         let core = test_core_counting_reranked_docs().await.0;
-        // Spread across sources so the per-source cap is not what narrows the
-        // list; this test is about the candidate pool, not about grouping.
         for batch in 0..10 {
             let texts: Vec<String> = (0..3).map(|i| format!("doc {batch}-{i}")).collect();
             let refs: Vec<(&str, &str, &[&str])> =
@@ -3288,12 +2593,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_per_source_cap_does_not_starve_the_reranker() {
-        // The cap runs first, and it used to refill only up to the limit: on a
-        // corpus of a few long documents that handed the reranker exactly the
-        // answer it was meant to choose from, so over-fetching bought nothing.
         let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
-        // Two long documents: the cap keeps three from each, so the refill is
-        // what has to reach the candidate pool rather than only the answer.
         for name in ["one", "two"] {
             let texts: Vec<String> = (0..20).map(|i| format!("{name} chunk {i}")).collect();
             let refs: Vec<(&str, &str, &[&str])> =
@@ -3319,9 +2619,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_scope_of_ask_keeps_the_reranker_out_of_search() {
-        // `apply = ["ask"]` is the opt-out for search latency: a configured
-        // reranker must then never be consulted on the search path, whatever
-        // the query asks for.
         let (mut core, reranker) =
             crate::core::test_support::test_core_counting_reranked_docs().await;
         core.rerank_apply = vec![crate::config::RerankApply::Ask];
@@ -3342,8 +2639,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_incremental_query_skips_the_reranker() {
-        // The typing fast path: a query that says `rerank: false` gets vector
-        // order immediately, and the refining pass asks again with `true`.
         let (core, reranker) = crate::core::test_support::test_core_counting_reranked_docs().await;
         seed_from(
             &core,
@@ -3371,8 +2666,6 @@ mod tests {
 
     #[tokio::test]
     async fn one_source_cannot_lead_the_whole_result_list() {
-        // A forty-chunk document otherwise crowds out every other source and
-        // the top of the list becomes forty near-identical paragraphs.
         let core = test_core().await;
         let hog: Vec<String> = (0..12).map(|i| format!("alpha {i}")).collect();
         let refs: Vec<(&str, &str, &[&str])> =
@@ -3396,8 +2689,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_single_source_base_still_fills_the_limit() {
-        // The cap orders the list, it does not shorten it. A base holding one
-        // document must not answer every query with three results.
         let core = test_core().await;
         let texts: Vec<String> = (0..8).map(|i| format!("alpha {i}")).collect();
         let refs: Vec<(&str, &str, &[&str])> =
@@ -3410,7 +2701,6 @@ mod tests {
             8,
             "the per-source cap swallowed matches nothing else could replace"
         );
-        // And still no duplicates: refilling must not re-add a kept hit.
         let ids: std::collections::HashSet<&str> =
             hits.iter().map(|h| h.artifact_id.as_str()).collect();
         assert_eq!(ids.len(), hits.len(), "a hit appeared twice");
@@ -3418,9 +2708,6 @@ mod tests {
 
     #[tokio::test]
     async fn ask_reads_in_rank_order_rather_than_diversity_order() {
-        // An answer is often found in one document. `ask` takes the ranked
-        // list as it is, rather than the reordering that makes a browsable
-        // list varied.
         let core = test_core().await;
         let hog: Vec<String> = (0..6).map(|i| format!("alpha {i}")).collect();
         let refs: Vec<(&str, &str, &[&str])> =
@@ -3445,7 +2732,6 @@ mod tests {
         );
     }
 
-    /// A ranked hit from one corpus, for the cap's own tests.
     fn hit(chunk: &str, src: &str, score: f32) -> crate::vector::SearchHit {
         crate::vector::SearchHit {
             payload: crate::vector::VectorPayload {
@@ -3458,15 +2744,12 @@ mod tests {
         }
     }
 
-    /// The ids of a capped list, in order.
     fn ids(hits: Vec<crate::vector::SearchHit>) -> Vec<String> {
         hits.iter().map(|h| h.payload.artifact_id.clone()).collect()
     }
 
     #[test]
     fn the_cap_leads_with_the_highest_ranked_chunk_of_each_source() {
-        // Applied to a ranked list, what leads per source must be its best,
-        // not whichever chunk happened to be enumerated first.
         let ranked = || {
             vec![
                 hit("a1", "a", 0.9),
@@ -3475,19 +2758,15 @@ mod tests {
                 hit("a3", "a", 0.6),
             ]
         };
-        // Room for three: the cap holds and `a3` stays out.
         assert_eq!(
             ids(cap_per_corpus(ranked(), 2, 3).0),
             vec!["a1", "a2", "b1"]
         );
-        // Room for four and nothing else to offer: `a3` comes back, last.
         assert_eq!(
             ids(cap_per_corpus(ranked(), 2, 4).0),
             vec!["a1", "a2", "b1", "a3"],
             "a displaced hit must refill an otherwise short list"
         );
-        // A merge of `a` and `b` counts against both: with `a` already full it
-        // is displaced even though `b` has room.
         let mut m = hit("m", "", 0.85);
         m.payload.origin_corpora = vec!["a".into(), "b".into()];
         let with_merge = vec![
@@ -3500,10 +2779,6 @@ mod tests {
             ids(cap_per_corpus(with_merge, 2, 3).0),
             vec!["a1", "a2", "b1"]
         );
-        // And a merge that was displaced took no place in the corpora it never
-        // made the list for. Charging it to all of them let one merge spanning
-        // `a` and `b` — dropped because `a` was full — evict `b2` from a corpus
-        // with room to spare.
         let mut m = hit("m", "", 0.85);
         m.payload.origin_corpora = vec!["a".into(), "b".into()];
         let with_merge = vec![
@@ -3522,7 +2797,6 @@ mod tests {
 
     #[tokio::test]
     async fn asking_for_an_explanation_does_not_change_the_order() {
-        // The whole of what this branch promises not to break.
         let core = test_core().await;
         seed(
             &core,
@@ -3558,8 +2832,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rerank_that_moved_a_hit_says_where_it_moved_it_from() {
-        // `FakeReranker` reverses the order it is given, so in a list of three
-        // every hit moves and the assertion cannot pass by accident.
+        // `FakeReranker` reverses its input, so every hit in a list of three moves.
         let core = test_core_counting_reranked_docs().await.0;
         seed(
             &core,
@@ -3620,10 +2893,6 @@ mod tests {
 
     #[test]
     fn a_pool_one_corpus_filled_reports_a_cap_that_redistributed_nothing() {
-        // The failure the whole explanation exists to make visible: with only
-        // one corpus in the pool there is nothing to promote, so everything
-        // the cap displaces comes straight back and the list is dominated
-        // despite `per_source_cap` being set.
         let only_a = vec![
             hit("a1", "a", 0.9),
             hit("a2", "a", 0.8),
@@ -3645,11 +2914,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_list_one_corpus_filled_says_the_cap_removed_nothing() {
-        // The failure the whole object exists to surface, read where it is
-        // actually decided: one corpus supplies everything, so a cap of one
-        // displaces the rest, the refill hands them all back to the pool, and
-        // the truncate cuts to an answer they are still in. The cap removed
-        // nothing.
         let core = test_core().await;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("mounting an image", "note", &[][..]))
@@ -3678,11 +2942,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_cap_the_answer_never_needed_to_break_reports_no_refill() {
-        // Two corpora, an answer narrower than what fits inside the cap: hits
-        // are displaced in the pool and every one of them is cut by the
-        // truncate, so nothing over its cap reaches the caller. Counting the
-        // refill against the pool instead of the answer called this the same
-        // failure as the test above, on a search where the rule held.
         let core = test_core().await;
         let texts: Vec<(&str, &str, &[&str])> = (0..4)
             .map(|_| ("mounting an image", "note", &[][..]))
@@ -3712,13 +2971,6 @@ mod tests {
 
     #[test]
     fn the_cap_moves_its_displaced_hits_to_the_tail_rather_than_dropping_them() {
-        // The shape the real call site has: `search_inner` passes the pool it
-        // fetched as the target, so `kept` can never be short of it and the
-        // refill always takes every displaced hit back. The cap's effect on
-        // the pool is therefore an order and nothing else — which is why
-        // "how many were refilled" is a question only the truncated answer can
-        // be asked, and `a_list_one_corpus_filled_says_the_cap_removed_nothing`
-        // below is the test that asks it.
         let mixed = vec![
             hit("a1", "a", 0.9),
             hit("a2", "a", 0.8),
@@ -3753,12 +3005,14 @@ mod tests {
 
         // `created_at` is set by the store, so age the one that should surface.
         let cutoff = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ? WHERE text = ?")
-            .bind(cutoff)
-            .bind("long forgotten")
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ? WHERE text = ?",
+            cutoff,
+            "long forgotten"
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         // The vector payload carries its own copy, so re-embed to pick it up.
         reembed_all(&core).await;
 
@@ -3774,21 +3028,17 @@ mod tests {
 
     #[tokio::test]
     async fn a_resurfaced_chunk_does_not_come_straight_back() {
-        // Showing something counts as seeing it, or the same handful returns
-        // every day and the feature is noise.
         let core = test_core().await;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
         let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(old)
+        sqlx::query!("UPDATE artifacts SET created_at = ?", old)
             .execute(&core.store.pool)
             .await
             .unwrap();
         reembed_all(&core).await;
 
         assert_eq!(core.resurface(10).await.unwrap().len(), 1);
-        // mark_seen runs off the request path; wait for it rather than sleeping
-        // and hoping, or this test fails on a loaded machine and nowhere else.
+        // `mark_seen` runs off the request path; wait rather than sleep.
         core.background.wait_idle().await;
         assert!(
             core.resurface(10).await.unwrap().is_empty(),
@@ -3798,8 +3048,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_empty_result_list_is_not_marked_seen() {
-        // Nothing was shown, so nothing should be recorded — and the empty
-        // case must not produce a pointless write.
         let core = test_core().await;
         assert!(
             core.search(&q("nothing here"), Door::Ui)
@@ -3822,10 +3070,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_query_too_long_to_embed_is_rejected_before_it_reaches_the_endpoint() {
-        // Pasting more than the embedder can take used to reach `embed_query`
-        // unchecked and come back as whatever the endpoint said — a 502 the
-        // box could not explain. Caught here, it is a plain validation error
-        // instead, and the fake embedder never sees the call.
         let core = test_core().await;
         let pasted = "lorem ".repeat(6000);
         let err = core.search(&q(&pasted), Door::Ui).await.unwrap_err();
@@ -3837,8 +3081,6 @@ mod tests {
 
     #[tokio::test]
     async fn include_deprecated_surfaces_a_deprecated_artifact() {
-        // The opt-in exists to let an operator look at what was retired, so it
-        // must reach a deprecation without also reaching a supersession.
         let core = test_core().await;
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
@@ -3862,9 +3104,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_newly_embedded_artifact_is_not_already_stale() {
-        // The scoring formula reads a missing `last_verified_at` as epoch, so
-        // an unstamped point ranks as maximally stale and lands on the
-        // deprecation-review list the moment it is ingested.
         let core = test_core().await;
         seed(&core, &[("alpha text", "note", &[])]).await;
         reembed_all(&core).await;
@@ -3886,16 +3125,10 @@ mod tests {
 
     #[tokio::test]
     async fn resurfacing_does_not_count_as_a_retrieval() {
-        // The forgotten list draws at random from exactly the population the
-        // stale review list targets — old and unseen — so counting what it drew
-        // as a hit quietly emptied the review list over time. It still stamps
-        // `last_seen_at`, which is what keeps the same handful from returning
-        // every day.
         let core = test_core().await;
         seed_from(&core, "old", &[("long forgotten", "c", &[])]).await;
         let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(old)
+        sqlx::query!("UPDATE artifacts SET created_at = ?", old)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -3919,12 +3152,118 @@ mod tests {
         );
     }
 
+    async fn two_live_artifacts() -> (crate::core::Core, String, String) {
+        let core = test_core().await;
+        seed_from(
+            &core,
+            "raw",
+            &[
+                ("mounting a loop image", "c", &[]),
+                ("mounting an iso image", "c", &[]),
+            ],
+        )
+        .await;
+        reembed_all(&core).await;
+        let ids = core.store.list_all_artifact_ids().await.unwrap();
+        (core, ids[0].clone(), ids[1].clone())
+    }
+
+    #[tokio::test]
+    async fn a_trashed_artifact_is_not_found_by_search() {
+        let (core, gone, kept) = two_live_artifacts().await;
+        core.trash_artifact(&gone).await.unwrap();
+        let hits = core
+            .search(&q("mounting an image"), Door::Judge)
+            .await
+            .unwrap();
+        let ids: Vec<_> = hits.iter().map(|h| h.artifact_id.as_str()).collect();
+        assert!(!ids.contains(&gone.as_str()), "{ids:?}");
+        assert!(ids.contains(&kept.as_str()), "{ids:?}");
+        let mut wide = q("mounting an image");
+        wide.include_deprecated = true;
+        wide.include_superseded = true;
+        let hits = core.search(&wide, Door::Judge).await.unwrap();
+        assert!(hits.iter().all(|h| h.artifact_id != gone));
+    }
+
+    #[tokio::test]
+    async fn a_trashed_artifact_is_absent_from_due_and_day() {
+        let (core, gone, _) = two_live_artifacts().await;
+        let at = crate::store::now() + 3600;
+        core.edit_reminder(&gone, at, "UTC", None).await.unwrap();
+        let horizon = crate::store::now() + 86_400;
+        assert_eq!(core.store.open_due(0, horizon).await.unwrap().len(), 1);
+        assert_eq!(
+            core.store.moments_between(0, horizon).await.unwrap().len(),
+            1
+        );
+        core.trash_artifact(&gone).await.unwrap();
+        assert!(core.store.open_due(0, horizon).await.unwrap().is_empty());
+        assert!(
+            core.store
+                .moments_between(0, horizon)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        core.restore_artifact(&gone).await.unwrap();
+        assert_eq!(core.store.open_due(0, horizon).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_restored_artifact_has_its_status_and_vectors_back() {
+        let (core, id, _) = two_live_artifacts().await;
+        core.deprecate(&id).await.unwrap();
+        core.trash_artifact(&id).await.unwrap();
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().status,
+            ArtifactStatus::Trashed
+        );
+        core.restore_artifact(&id).await.unwrap();
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().status,
+            ArtifactStatus::Deprecated
+        );
+        let payload = core
+            .vectors
+            .lifecycle_of(std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(payload[&id].status, ArtifactStatus::Deprecated);
+        assert!(matches!(
+            core.restore_artifact(&id).await,
+            Err(Error::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn trash_older_than_30_days_is_purged_and_younger_is_kept() {
+        let (core, old, young) = two_live_artifacts().await;
+        core.trash_artifact(&old).await.unwrap();
+        core.trash_artifact(&young).await.unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET trashed_at = trashed_at - ? WHERE id = ?",
+            crate::core::TRASH_RETENTION_SECS + 1,
+            &old
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            core.purge_trash(crate::core::TRASH_RETENTION_SECS)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(core.store.get_artifact(&old).await.is_err());
+        assert_eq!(
+            core.store.get_artifact(&young).await.unwrap().status,
+            ArtifactStatus::Trashed
+        );
+    }
+
     #[tokio::test]
     async fn a_deprecated_artifact_is_not_offered_as_forgotten() {
-        // Old and unseen is exactly what a retired artifact looks like, so the
-        // forgotten list used to hand back the very things an operator had just
-        // taken out of search — and `resurface` marks what it shows as seen, so
-        // it also rewrote their bookkeeping on the way.
         let core = test_core().await;
         seed_from(
             &core,
@@ -3933,8 +3272,7 @@ mod tests {
         )
         .await;
         let old = now_secs() - FORGOTTEN_AFTER_DAYS * SECONDS_PER_DAY - 1;
-        sqlx::query("UPDATE artifacts SET created_at = ?")
-            .bind(old)
+        sqlx::query!("UPDATE artifacts SET created_at = ?", old)
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -3968,10 +3306,6 @@ mod tests {
 
     #[test]
     fn the_sitting_moves_nothing_and_badges_nothing_while_the_knob_is_off() {
-        // The whole promise of collecting the sitting unconditionally: what
-        // serving does must not change until the loop adopts the knob. Held to
-        // the badge as well as the order, because the badge is what a person
-        // would notice appearing.
         let sitting = std::collections::HashSet::from(["d".to_string()]);
         let out = prime(
             ranked(&["a", "b", "c", "d"]),
@@ -4007,9 +3341,6 @@ mod tests {
 
     #[test]
     fn a_hit_climbs_at_most_two_places_and_never_past_the_first() {
-        // Rank-based rather than score-based on purpose: hybrid scores are
-        // fused ranks and mean nothing across queries, while "moved up two
-        // places" means the same thing every time — and can be tested here.
         let act = HashMap::from([("d".to_string(), 4.0)]);
         let out = prime(
             ranked(&["a", "b", "c", "d"]),
@@ -4096,9 +3427,6 @@ mod tests {
 
     #[test]
     fn a_list_too_short_to_reorder_still_says_what_the_sitting_read() {
-        // `in_sitting` is a fact about the row, not a consequence of a move. A
-        // list of two is a list nothing can be lifted in — but a badge that
-        // vanishes on short lists reads as the page forgetting, not as a rule.
         let sitting = std::collections::HashSet::from(["b".to_string()]);
         let out = prime(
             ranked(&["a", "b"]),
@@ -4117,9 +3445,6 @@ mod tests {
 
     #[test]
     fn the_sitting_and_activation_share_one_budget() {
-        // Two passes would give a hit `prime_lift` places for being accessible
-        // and `prime_lift` again for having been read ten minutes ago — and the
-        // second lift would be the one nobody bounded. One walk, one `lift`.
         let act = HashMap::from([("e".to_string(), 9.0)]);
         let sitting = std::collections::HashSet::from(["e".to_string()]);
         let out = prime(
@@ -4140,7 +3465,6 @@ mod tests {
 
     #[test]
     fn the_sitting_cannot_displace_the_first_hit_either() {
-        // Rank 0 never moves, whatever the reason for moving would have been.
         let sitting = std::collections::HashSet::from(["b".to_string(), "c".to_string()]);
         let out = prime(
             ranked(&["a", "b", "c"]),
@@ -4171,8 +3495,6 @@ mod tests {
 
     #[test]
     fn activation_that_is_merely_higher_does_not_move_anything() {
-        // The margin is what keeps this from reshuffling every list: two hits
-        // that are both somewhat active stay in the order the ranking gave.
         let act = HashMap::from([("c".to_string(), 4.0), ("d".to_string(), 3.6)]);
         let out = prime(
             ranked(&["a", "b", "c", "d"]),
@@ -4192,13 +3514,8 @@ mod tests {
 
     #[test]
     fn a_never_opened_artifact_has_no_engagement_however_fresh_it_is() {
-        // Fresh at the baseline, old and decayed, and opened once: only the
-        // last has anything priming may read. The report's `primed` badge on
-        // a note that had only ever been listed came from reading the first
-        // two raw.
-        //
-        // `(value, activated_at, created_at)`, at day 0 and day 28 — two
-        // half-lives — with a 14-day half-life.
+        // `(value, activated_at, created_at)` at day 0 and day 28, two half-lives at a 14-day
+        // half-life.
         const DAY: i64 = 86_400;
         let now = 28 * DAY;
         let acts = HashMap::from([
@@ -4234,32 +3551,22 @@ mod tests {
 
     #[test]
     fn engagement_is_the_same_size_however_old_the_artifact_is() {
-        // The baseline decays with everything else, so subtracting a whole
-        // `1.0` from a half-decayed sum answered in units of nothing: an
-        // artifact captured six weeks ago and opened three times right after
-        // came to `4.0`, read `0.5` today, and came out with no engagement at
-        // all — while a single open on that same artifact came out an eighth
-        // the size of the same open on a fresh one. One open is one open.
         const DAY: i64 = 86_400;
         let now = 42 * DAY;
         let e = engagement(
             HashMap::from([
                 // Captured today, opened three times today: 1.0 + 3 × 1.0.
                 ("fresh".to_string(), (4.0, now, now)),
-                // Captured 42 days ago — three half-lives — and opened three
-                // times the same day. Stored `4.0`, stamped then.
+                // Captured 42 days ago (three half-lives) and opened three times that day.
                 ("old".to_string(), (4.0, 0, 0)),
-                // Captured 42 days ago, opened once *today*: the decayed
-                // remainder of the baseline, plus a whole open.
+                // Captured 42 days ago, opened once today: the decayed baseline plus a whole open.
                 ("old_open_today".to_string(), (0.125 + 1.0, now, 0)),
             ]),
             now,
             14.0,
         );
         assert!((e["fresh"] - 3.0).abs() < 1e-9);
-        // Three opens, three half-lives on: an eighth of three, not zero.
         assert!((e["old"] - 0.375).abs() < 1e-9, "got {}", e["old"]);
-        // And a fresh open reads as a whole open whatever it landed on.
         assert!(
             (e["old_open_today"] - 1.0).abs() < 1e-9,
             "got {}",
@@ -4269,10 +3576,6 @@ mod tests {
 
     #[test]
     fn a_hit_climbs_exactly_the_lift_and_no_further_however_long_the_list_is() {
-        // An insertion-sort-style implementation can let a row that already
-        // spent its climb budget be mistaken for a fresh row once something
-        // else moves through the position it landed on. Five elements is
-        // enough to expose that: `e` should climb exactly two, not three.
         let act = HashMap::from([("e".to_string(), 1.0)]);
         let out = prime(
             ranked(&["a", "b", "c", "d", "e"]),
@@ -4291,8 +3594,6 @@ mod tests {
 
     #[test]
     fn the_lift_bound_holds_on_a_longer_list_too() {
-        // Same shape, stretched to seven: the last row must still land
-        // exactly `lift` positions up, at index 4 rather than index 1.
         let act = HashMap::from([("g".to_string(), 1.0)]);
         let out = prime(
             ranked(&["a", "b", "c", "d", "e", "f", "g"]),
@@ -4318,23 +3619,26 @@ mod tests {
         seed(&core, &texts).await;
         reembed_all(&core).await;
 
-        // The lift is the live generation's, read off `Core::ranking`.
         let plain = core
             .search(&q("alpha text about it"), Door::Ui)
             .await
             .unwrap();
         assert!(plain.len() >= 4, "this test needs a list to reorder");
         assert!(plain.iter().all(|r| !r.primed));
-        core.ranking.write().unwrap().prime_lift = 2;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prime_lift = 2;
 
-        // The one at the bottom is the one people actually keep confirming.
         let bottom = plain.last().unwrap().artifact_id.clone();
-        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
-            .bind(now_secs())
-            .bind(&bottom)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?",
+            now_secs(),
+            &bottom
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         let primed = core
             .search(&q("alpha text about it"), Door::Ui)
@@ -4351,10 +3655,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_marked_search_does_not_touch_activation_while_learning_is_off() {
-        // Nothing is recorded while `[learn]` is off, and links are learned
-        // from recorded searches — so the whole associative layer, including
-        // activation, which exists only to feed priming, must stay dark.
-        // `test_core()` ships with the switch off; nothing here turns it on.
         let core = test_core().await;
         assert!(!core.learn.enabled);
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -4386,11 +3686,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_records_the_sitting_even_though_the_knob_is_off() {
-        // The defect this change exists to fix: the sitting used to be
-        // collected only when the knob was already on, so no evidence about it
-        // ever accumulated, so the idle pass could never measure it, so it
-        // stayed off forever. The knob gates the *use* of the sitting, never
-        // its collection.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed(&core, &[("alpha text about it", "note", &[])]).await;
@@ -4398,7 +3693,11 @@ mod tests {
         let a = id_of(&core, "alpha text about it").await;
 
         assert!(
-            !core.ranking.read().unwrap().sitting_prime,
+            !core
+                .ranking
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sitting_prime,
             "the fixture must run with the knob off, or this proves nothing"
         );
         core.sittings
@@ -4430,9 +3729,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_door_with_no_session_records_an_empty_sitting() {
-        // An access token is not a conversation. `Origin::session` is `None`
-        // everywhere but the web door, and collecting the sitting
-        // unconditionally must not change that.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed(&core, &[("alpha text about it", "note", &[])]).await;
@@ -4441,8 +3737,6 @@ mod tests {
         core.sittings
             .touched("sess", &a, now_secs(), core.pursuit.idle_secs as i64);
 
-        // The same live sitting exists; this search simply does not belong to
-        // it, because the door cannot name one.
         let (_, outcome) = core
             .search_with(&q("alpha text about it"), None, Door::Ui)
             .await
@@ -4460,14 +3754,12 @@ mod tests {
 
     #[tokio::test]
     async fn priming_never_reaches_the_order_while_learning_is_off() {
-        // The spec promise (§11): "existing installs see nothing change until
-        // they opt in." With `[learn]` off, a large activation must not move
-        // the ranked order — the order must be byte-identical to
-        // `prime_lift = 0`, not merely bounded.
         let core = test_core().await;
         assert!(!core.learn.enabled);
-        // Priming on, so that `[learn]` off is the only thing holding it.
-        core.ranking.write().unwrap().prime_lift = 2;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -4480,15 +3772,15 @@ mod tests {
             .unwrap();
         assert!(plain.len() >= 4, "this test needs a list to reorder");
 
-        // The one at the bottom is given a huge activation directly — exactly
-        // what moved the order in the "feature on" test above.
         let bottom = plain.last().unwrap().artifact_id.clone();
-        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
-            .bind(now_secs())
-            .bind(&bottom)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?",
+            now_secs(),
+            &bottom
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
         let with_huge_activation = core
             .search(&q("alpha text about it"), Door::Ui)
@@ -4508,15 +3800,12 @@ mod tests {
 
     #[tokio::test]
     async fn priming_never_reaches_the_list_ask_and_judge_are_given() {
-        // `ask` does not show this list to anyone: it turns the head of it into
-        // excerpts and, when they do not all fit the context window, keeps a
-        // prefix and drops the tail — on the stated grounds that the tail
-        // matched the question least. Reorder by accessibility and the excerpt
-        // dropped is the one that answered best, invisibly. `judge` needs the
-        // pool it labels to be the pool the ranking produced.
         let mut core = test_core().await;
         core.learn.enabled = true;
-        core.ranking.write().unwrap().prime_lift = 2;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prime_lift = 2;
         let texts: Vec<(&str, &str, &[&str])> = (0..6)
             .map(|_| ("alpha text about it", "note", &[][..]))
             .collect();
@@ -4529,14 +3818,15 @@ mod tests {
             .unwrap();
         assert!(plain.len() >= 4, "this test needs a list to reorder");
         let bottom = plain.last().unwrap().artifact_id.clone();
-        sqlx::query("UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?")
-            .bind(now_secs())
-            .bind(&bottom)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?",
+            now_secs(),
+            &bottom
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
 
-        // The same activation that does move the order on the UI door.
         let moved = core
             .search(&q("alpha text about it"), Door::Ui)
             .await
@@ -4558,10 +3848,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_association_obeys_the_filters_the_searcher_typed() {
-        // A category is a statement about what the searcher will accept, not a
-        // hint to the ranker. An artifact recalled beside a hit still has to
-        // satisfy it, or the search hands back exactly the rows they narrowed
-        // away.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.associate.show_min = 1.0;
@@ -4588,7 +3874,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Unfiltered, the linked artifact is recalled beside the ranked hit.
         let wide = core
             .search(&q("alpha text about it"), Door::Ui)
             .await
@@ -4617,7 +3902,7 @@ mod tests {
 
     async fn captured_events(core: &crate::core::Core) -> i64 {
         core.background.wait_idle().await;
-        sqlx::query_scalar("SELECT count(*) FROM search_events")
+        sqlx::query_scalar!("SELECT count(*) FROM search_events")
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
@@ -4625,8 +3910,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_captured_search_stores_the_pool_it_could_have_shown() {
-        // The stored pool is wider than the answer: the judging card offers all
-        // of it, so an artifact the ranking buried can still be confirmed.
         let mut core = test_core().await;
         core.learn.enabled = true;
         let texts: Vec<(&str, &str, &[&str])> = (0..12)
@@ -4640,7 +3923,7 @@ mod tests {
         core.search(&query, Door::Ui).await.unwrap();
         core.background.wait_idle().await;
 
-        let rows = sqlx::query("SELECT rank, shown FROM search_candidates ORDER BY rank")
+        let rows = sqlx::query!("SELECT rank, shown FROM search_candidates ORDER BY rank")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();
@@ -4649,7 +3932,7 @@ mod tests {
             "the pool must be wider than the three results shown, got {}",
             rows.len()
         );
-        let shown: i64 = rows.iter().map(|r| r.get::<i64, _>("shown")).sum();
+        let shown: i64 = rows.into_iter().map(|r| r.shown).sum();
         assert_eq!(
             shown, 3,
             "exactly the answer the searcher saw is flagged shown"
@@ -4658,11 +3941,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_stored_pool_is_as_wide_as_it_was_configured_to_be() {
-        // The fetch width came from `limit` alone, so a pool configured wider
-        // than the over-fetch was quietly truncated to it and nothing warned.
-        // At a limit of two the pool was six, not the twelve asked for — and
-        // the six missing candidates are exactly the buried ones the judging
-        // card exists to surface.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.feedback.candidates = 12;
@@ -4677,7 +3955,7 @@ mod tests {
         core.search(&query, Door::Ui).await.unwrap();
         core.background.wait_idle().await;
 
-        let pool: i64 = sqlx::query_scalar("SELECT count(*) FROM search_candidates")
+        let pool: i64 = sqlx::query_scalar!("SELECT count(*) FROM search_candidates")
             .fetch_one(&core.store.pool)
             .await
             .unwrap();
@@ -4689,19 +3967,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_live_cap_is_read_per_search_rather_than_compiled_in() {
-        // What makes applying a tuning recommendation mean anything: the cap
-        // was a constant, so a recommendation to change it could only ever
-        // have been advice. Every ordinary search reads it here now.
-        //
-        // The cap is visible in the order rather than the length: it displaces
-        // a document's later chunks behind other sources instead of dropping
-        // them. Two sources, one matching the query verbatim, is the smallest
-        // arrangement where that is observable.
         let core = test_core().await;
-        // Untitled and identical within a source, so the three chunks of one
-        // document embed identically and tie: which source leads is then hash
-        // noise, and what the assertions read is only whether a source may
-        // hold two places at once.
+        // Identical untitled chunks tie, so the assertions read only whether a source holds two
+        // places.
         for (raw, text) in [
             ("raw one", "the image will not mount"),
             ("raw two", "unrelated words"),
@@ -4722,14 +3990,20 @@ mod tests {
         let mut query = q("the image will not mount");
         query.limit = 6;
 
-        core.ranking.write().unwrap().per_source_cap = None;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap = None;
         let uncapped = core.search(&query, Door::Judge).await.unwrap();
         assert_eq!(
             uncapped[0].text, uncapped[1].text,
             "uncapped, one document supplies the head of the list"
         );
 
-        core.ranking.write().unwrap().per_source_cap = Some(1);
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .per_source_cap = Some(1);
         let capped = core.search(&query, Door::Judge).await.unwrap();
         assert_ne!(
             capped[0].text, capped[1].text,
@@ -4737,10 +4011,6 @@ mod tests {
         );
     }
 
-    /// A passage *with* a heading is the harder half. `fill_titles` never
-    /// touches it — it has a title — so nothing said the title was borrowed,
-    /// and the rail printed the section's name over the slice as if the slice
-    /// owned it.
     #[tokio::test]
     async fn a_passage_carrying_its_sections_heading_says_the_name_is_borrowed() {
         let core = test_core().await;
@@ -4779,10 +4049,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_passage_with_no_heading_is_shown_under_its_notes_title() {
-        // Most pasted notes have no markdown heading, so their passages are
-        // stored untitled — rightly: a passage claims no heading it lacks. But
-        // the note's own title is one join away, and it is what a person
-        // would call the passage. Filled once here, so every door inherits it.
         let core = test_core().await;
         let named = core
             .store
@@ -4814,16 +4080,12 @@ mod tests {
             of(&named).borrowed_name,
             "the title must say it is not this passage's own"
         );
-        // Nothing is invented where the note has no title either.
         assert_eq!(of(&unnamed).title, None);
         assert!(!of(&unnamed).borrowed_name);
     }
 
     #[tokio::test]
     async fn a_reranked_search_stores_a_pool_wider_than_its_answer() {
-        // The reranker returns at most `top_n`, so asking it for `limit` would
-        // hand capture a pool exactly as wide as the answer — and a hit the
-        // reranker buried would become unconfirmable.
         let (mut core, _r) = crate::core::test_support::test_core_counting_reranked_docs().await;
         core.learn.enabled = true;
         let texts: Vec<(&str, &str, &[&str])> = (0..12)
@@ -4838,7 +4100,7 @@ mod tests {
         assert_eq!(answer.len(), 3, "the searcher still sees only the answer");
         core.background.wait_idle().await;
 
-        let rows = sqlx::query("SELECT rank, shown FROM search_candidates ORDER BY rank")
+        let rows = sqlx::query!("SELECT rank, shown FROM search_candidates ORDER BY rank")
             .fetch_all(&core.store.pool)
             .await
             .unwrap();
@@ -4847,7 +4109,7 @@ mod tests {
             "the reranked pool collapsed to the answer, got {}",
             rows.len()
         );
-        let shown: i64 = rows.iter().map(|r| r.get::<i64, _>("shown")).sum();
+        let shown: i64 = rows.into_iter().map(|r| r.shown).sum();
         assert_eq!(
             shown, 3,
             "only the answer the searcher saw is flagged shown"
@@ -4856,11 +4118,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_captured_filters_record_every_narrowing_the_search_used() {
-        // `filters` exists so a replay can reproduce the same narrowing. A
-        // search that opted into deprecated artifacts drew its pool from a
-        // wider base than the default, and a replay reading only tags and
-        // category would score the judged pair against a base the search
-        // never saw.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed(&core, &[("alpha text", "note", &[])]).await;
@@ -4871,7 +4128,7 @@ mod tests {
         core.search(&query, Door::Ui).await.unwrap();
         core.background.wait_idle().await;
 
-        let filters: String = sqlx::query_scalar("SELECT filters FROM search_events")
+        let filters: String = sqlx::query_scalar!("SELECT filters FROM search_events")
             .fetch_one(&core.store.pool)
             .await
             .unwrap();
@@ -4899,8 +4156,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_that_found_nothing_is_still_captured() {
-        // Deliberately unlike `mark_seen`, which skips an empty list because
-        // there is nothing to stamp. Here the empty list is the finding.
         let mut core = test_core().await;
         core.learn.enabled = true;
         core.search(&q("nothing is indexed yet"), Door::Ui)
@@ -4911,8 +4166,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_doors_that_know_the_answer_are_never_captured() {
-        // Judging composes its queries while reading the artifact, and `ask`
-        // has no single right answer to judge. Both would only add noise.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed(&core, &[("alpha text", "note", &[])]).await;
@@ -4923,10 +4176,6 @@ mod tests {
         assert_eq!(captured_events(&core).await, 0);
     }
 
-    /// The id of the artifact whose text is exactly this. Ordering from
-    /// `list_all_artifact_ids` is not promised, and a test that assumed one
-    /// would pass or fail on which row SQLite happened to return first.
-    /// A base of `n` artifacts, learning on, everything embedded.
     async fn explorable(explore: f32, n: usize) -> crate::core::Core {
         let mut core = test_core().await;
         core.learn.enabled = true;
@@ -4940,21 +4189,21 @@ mod tests {
         core
     }
 
-    /// Every candidate the last search recorded, in pool order: the artifact,
-    /// whether it was shown, and the rank it would have held.
     async fn pool_with_exploration(core: &crate::core::Core) -> Vec<(String, i64, Option<i64>)> {
-        sqlx::query_as(
+        sqlx::query!(
             "SELECT artifact_id, shown, explored_from
-               FROM search_candidates WHERE band = 0 ORDER BY rank",
+               FROM search_candidates WHERE band = 0 ORDER BY rank"
         )
         .fetch_all(&core.store.pool)
         .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.artifact_id, r.shown, r.explored_from))
+                .collect::<Vec<_>>()
+        })
         .unwrap()
     }
 
-    /// The hole the whole feature exists to close: without exploration nothing
-    /// below the window is ever shown, so nothing below the window can ever be
-    /// opened, so the tuner can only ever learn about rows it already chose.
     #[tokio::test]
     async fn an_exploring_search_shows_one_row_the_ranking_hid() {
         let core = explorable(1.0, 8).await;
@@ -4978,7 +4227,6 @@ mod tests {
             out.iter().any(|r| &r.artifact_id == id),
             "the lifted artifact is in the answer the searcher was handed"
         );
-        // And the row it displaced is still in the pool, simply not shown.
         assert_eq!(
             pool.iter().filter(|(_, shown, _)| *shown == 1).count(),
             3,
@@ -5001,7 +4249,6 @@ mod tests {
             "explore = 0 explores"
         );
 
-        // Nothing below the cut: there is no hidden candidate to lend a row to.
         let core = explorable(1.0, 2).await;
         let mut query = q("mount the loop device image");
         query.limit = 10;
@@ -5017,8 +4264,7 @@ mod tests {
     }
 
     async fn id_of(core: &crate::core::Core, text: &str) -> String {
-        sqlx::query_scalar("SELECT id FROM artifacts WHERE text = ?")
-            .bind(text)
+        sqlx::query_scalar!(r#"SELECT id AS "id!" FROM artifacts WHERE text = ?"#, text)
             .fetch_one(&core.store.pool)
             .await
             .unwrap()
@@ -5051,8 +4297,10 @@ mod tests {
         assert_eq!(out[1].artifact_id, b);
         assert_eq!(out[1].via.as_deref(), Some(a.as_str()));
 
-        // The width is the live generation's, not the file's.
-        core.ranking.write().unwrap().spread_max = 0;
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .spread_max = 0;
         let out = core.search(&query, Door::Ui).await.unwrap();
         assert_eq!(out.len(), 1, "spread zero appends nothing: {out:?}");
     }
@@ -5070,7 +4318,10 @@ mod tests {
             .bump_link(&a, &b, 5.0, Some("both of these"), 30.0, now_secs())
             .await
             .unwrap();
-        let params = *core.ranking.read().unwrap();
+        let params = *core
+            .ranking
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = core
             .store
             .record_generation(&crate::store::generations::NewGeneration {
@@ -5091,20 +4342,14 @@ mod tests {
         assert_eq!(out.len(), 2);
         let event = outcome.event.expect("the UI door waits for its capture");
         let rows =
-            sqlx::query("SELECT artifact_id, band, shown FROM search_candidates ORDER BY rank")
-                .bind(&event)
+            sqlx::query!("SELECT artifact_id, band, shown FROM search_candidates ORDER BY rank")
                 .fetch_all(&core.store.pool)
                 .await
                 .unwrap();
-        let band: Vec<&sqlx::sqlite::SqliteRow> = rows
-            .iter()
-            .filter(|r| r.get::<i64, _>("band") == 1)
-            .collect();
+        let band: Vec<_> = rows.iter().filter(|r| r.band == 1).collect();
         assert_eq!(band.len(), 1, "the appended hit is in the pool, flagged");
-        assert_eq!(band[0].get::<String, _>("artifact_id"), b);
-        assert_eq!(band[0].get::<i64, _>("shown"), 1);
-        // It is also in the ranked pool, unshown, past the limit of one: the
-        // open below has to land on the row the person saw.
+        assert_eq!(band[0].artifact_id, b);
+        assert_eq!(band[0].shown, 1);
 
         assert!(core.store.open_event(&event, &b).await.unwrap());
         let obs = core
@@ -5114,14 +4359,8 @@ mod tests {
             .unwrap();
         assert_eq!(obs.len(), 1);
         assert_eq!(obs[0].artifact_id.as_deref(), Some(b.as_str()));
-        // The place on screen, not the place in the pool. `limit` is one here
-        // and the pool holds three rows, so the band hit is the second thing
-        // the person read — while `search_candidates.rank` calls it the third.
-        // The distance is `feedback.candidates - limit` and it is ten by
-        // default: `eval::sweep` and `jobs::retract` both read `rank - 1` as
-        // the place that was served, so recording the pool position handed
-        // every band open a baseline ten places too deep and made replays look
-        // better than they were.
+        // The place on screen, not in the pool: `eval::sweep` and `jobs::retract` read `rank - 1`
+        // as served.
         assert_eq!(
             obs[0].rank,
             Some(2),
@@ -5131,15 +4370,6 @@ mod tests {
 
     #[tokio::test]
     async fn ask_and_judge_never_receive_an_association_but_ui_does() {
-        // `ask` feeds `results` to the model as excerpts to synthesise an
-        // answer from; text that never matched the question must not become
-        // source material. `judge` composes its query in full knowledge of
-        // the answer and needs a clean pool to label. Both are excluded by
-        // door, not by `captured()` — that predicate means something
-        // unrelated (recorded for relevance feedback) that happens to select
-        // the same four doors today. One door alone would not prove the
-        // gate is door-shaped rather than coincidental, so this checks both
-        // an excluded door and an included one against the same link.
         let mut core = test_core().await;
         core.learn.enabled = true;
         seed_from(&core, "one", &[("alpha text", "note", &[])]).await;
@@ -5198,20 +4428,17 @@ mod tests {
         assert_eq!(seen.len(), out.len(), "an artifact was returned twice");
     }
 
-    /// The captured pool, as `(role, shown)` ordered by rank — `role` is `"a"`
-    /// or `"b"` depending on which of the two seeded ids the row names, so two
-    /// separately-seeded cores (whose artifact ids are fresh UUIDs and so never
-    /// equal) can still be compared for shape.
     async fn captured_pool(core: &crate::core::Core, a: &str, b: &str) -> Vec<(&'static str, i64)> {
-        // The ranked pool. The band is recorded beside it, flagged, so the
-        // spread rule can read it — and every reader that learns from the
-        // pool leaves the flagged rows out, which is what keeps this loop
-        // closed; step 4 of the test below checks that.
-        let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT artifact_id, shown FROM search_candidates WHERE band = 0 ORDER BY rank",
+        let rows: Vec<(String, i64)> = sqlx::query!(
+            "SELECT artifact_id, shown FROM search_candidates WHERE band = 0 ORDER BY rank"
         )
         .fetch_all(&core.store.pool)
         .await
+        .map(|v| {
+            v.into_iter()
+                .map(|r| (r.artifact_id, r.shown))
+                .collect::<Vec<_>>()
+        })
         .unwrap();
         rows.into_iter()
             .map(|(id, shown)| {
@@ -5229,28 +4456,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_recalled_artifact_does_not_feed_the_learning_that_produced_it() {
-        // The failure mode of any Hebbian system: a link recalls an artifact, is
-        // strengthened by having done so, and recalls it harder next time. Both
-        // loops have to be closed by construction: the recalled hit must not be
-        // a candidate anything learns from, and must not count as a retrieval.
-        // It *is* written to the pool, flagged as the band, so an open on it
-        // is an observation the spread rule can read; the flag is what every
-        // learning reader excludes on.
-        //
-        // This cannot be checked by asking "is `b` absent from
-        // `search_candidates`" directly: on a base this small, `b` is a
-        // legitimate low-ranked candidate of the plain hybrid search with or
-        // without any link — `feedback.candidates` over-fetches wider than the
-        // two-artifact corpus, so the ordinary capture path records it anyway,
-        // unshown. That is correct and expected, and unrelated to association.
-        // What has to be proven instead is a control comparison: the captured
-        // pool is identical whether or not the link exists, which is what shows
-        // the link changed nothing about what was recorded — plus a check that
-        // the treatment side effect (the link) actually took hold, or the
-        // comparison would pass vacuously on a run where nothing associated at
-        // all. A later reader tempted to simplify this back to a direct
-        // absence check would reintroduce a test that fails on an artifact of
-        // the fixture rather than a bug.
+        // `b` is a legitimate low-ranked candidate on so small a base, so this compares a linked
+        // and an unlinked pool rather than checking `b`'s absence.
         async fn seeded() -> (crate::core::Core, String, String) {
             let mut core = test_core().await;
             core.learn.enabled = true;
@@ -5265,13 +4472,11 @@ mod tests {
         let mut query = q("t0\nalpha text");
         query.limit = 1;
 
-        // Unlinked control.
         let (unlinked, a_u, b_u) = seeded().await;
         let unlinked_out = unlinked.search(&query, Door::Ui).await.unwrap();
         unlinked.background.wait_idle().await;
         let unlinked_pool = captured_pool(&unlinked, &a_u, &b_u).await;
 
-        // Linked treatment.
         let (linked, a, b) = seeded().await;
         linked
             .store
@@ -5301,8 +4506,7 @@ mod tests {
         assert_eq!(linked_out[1].artifact_id, b);
         assert_eq!(linked_out[1].via.as_deref(), Some(a.as_str()));
 
-        // 1. The captured pool — id and shown, in rank order — is identical
-        // either way: the link changed nothing about what the search recorded.
+        // 1. The captured pool, id and shown in rank order, is identical either way.
         assert_eq!(
             unlinked_pool, linked_pool,
             "the link changed what the search recorded as a candidate"
@@ -5314,11 +4518,10 @@ mod tests {
             "being recalled raised activation"
         );
 
-        // 4. The band is in the pool, flagged, and read by nothing that
-        // learns: the associate job's co-appearance read sees the ranked
-        // list alone.
+        // 4. The band is in the pool, flagged, and the associate job's co-appearance read ignores
+        // it.
         let band: Vec<String> =
-            sqlx::query_scalar("SELECT artifact_id FROM search_candidates WHERE band = 1")
+            sqlx::query_scalar!("SELECT artifact_id FROM search_candidates WHERE band = 1")
                 .fetch_all(&linked.store.pool)
                 .await
                 .unwrap();
@@ -5327,7 +4530,7 @@ mod tests {
             vec![b.clone()],
             "the recalled hit is recorded as the band"
         );
-        let event: String = sqlx::query_scalar("SELECT id FROM search_events")
+        let event: String = sqlx::query_scalar!(r#"SELECT id AS "id!" FROM search_events"#)
             .fetch_one(&linked.store.pool)
             .await
             .unwrap();
@@ -5366,8 +4569,6 @@ mod tests {
         assert_eq!(core.search(&query, Door::Ui).await.unwrap().len(), 1);
     }
 
-    /// A contradiction is shown, not settled: both notes stay where the
-    /// ranking put them, and each names the other.
     #[tokio::test]
     async fn a_hit_says_which_note_disagrees_with_it_and_keeps_its_rank() {
         use crate::store::pairs::{DecidedBy, PairState};
@@ -5414,16 +4615,6 @@ mod tests {
         }
     }
 
-    /// A passage recalled by association shows no name, exactly as a ranked
-    /// one does.
-    ///
-    /// The rail puts the two lists one under the other, so a heading that the
-    /// ranked rows no longer carry reappearing three rows down does not read
-    /// as a different rule — it reads as the same rule applied wrongly. Both
-    /// answers come off the row's own provenance, which is why this also pins
-    /// `model_written`: a merge reached by association is as model-written as
-    /// one that was ranked, and `false` there is how a paraphrase is handed
-    /// back as its own root.
     #[tokio::test]
     async fn a_recalled_hit_is_named_and_attributed_by_its_own_provenance() {
         let mut core = test_core().await;
@@ -5449,13 +4640,15 @@ mod tests {
                 .expect("the associated hit")
         }
 
-        // A slice of a section, carrying that section's heading — `t1` here,
-        // which names the seeded corpus and not this passage.
-        sqlx::query("UPDATE artifacts SET provenance = 'passage' WHERE id = ?")
-            .bind(&b)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        // A passage carrying its section's heading, `t1`, which names the corpus and not the
+        // passage.
+        sqlx::query!(
+            "UPDATE artifacts SET provenance = 'passage' WHERE id = ?",
+            &b
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let hit = recalled(&core).await;
         assert!(
             hit.borrowed_name,
@@ -5464,13 +4657,13 @@ mod tests {
         );
         assert!(!hit.model_written, "a passage is source text");
 
-        // The other side of the same read: a merge names its own text, and is
-        // never its own root.
-        sqlx::query("UPDATE artifacts SET provenance = 'merged' WHERE id = ?")
-            .bind(&b)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET provenance = 'merged' WHERE id = ?",
+            &b
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let hit = recalled(&core).await;
         assert!(!hit.borrowed_name, "a merge was named by what wrote it");
         assert!(
@@ -5501,17 +4694,8 @@ mod tests {
 
     #[tokio::test]
     async fn links_between_ranked_hits_do_not_starve_the_association_budget() {
-        // `links_from` returns one row per (anchor, link) with no dedup
-        // across anchors, and truncates at its own limit before `associated`
-        // filters out rows whose other end is already ranked. A link between
-        // two of the top `spread_from` hits is therefore fetched twice — once
-        // per anchor — and those are exactly the rows co-retrieval makes most
-        // likely to exist. If the store limit were just `spread_max`, three
-        // such rows could fill the entire budget and then all be discarded,
-        // leaving nothing for an artifact that is linked to the ranked hits
-        // but did not itself rank. This calls `associated` directly, on
-        // hand-built anchors, so the outcome does not depend on the fake
-        // embedder's incidental ranking of a fifth candidate.
+        // Calls `associated` directly so the outcome does not depend on the fake embedder's
+        // ranking.
         let core = test_core().await;
         seed_from(
             &core,
@@ -5530,11 +4714,6 @@ mod tests {
         let c = id_of(&core, "alpha three").await;
         let d = id_of(&core, "alpha four").await;
 
-        // Every pair among the three ranked hits (a, b, c) is linked more
-        // strongly than the single link from a ranked hit to the one
-        // artifact that never ranks (d) — so a limit that keeps the
-        // strongest rows first keeps the redundant, discardable ones and
-        // drops the useful one, which is exactly the bug.
         let now = now_secs();
         core.store
             .bump_link(&a, &b, 10.0, Some("q"), 30.0, now)
@@ -5574,10 +4753,6 @@ mod tests {
         );
     }
 
-    // ── The cliff ────────────────────────────────────────────────────────────
-
-    /// Hybrid RRF as Qdrant fuses it: two hits both branches agreed on, then
-    /// hits only the dense branch found. The step between them is the cliff.
     #[test]
     fn a_hybrid_list_falls_off_where_only_one_branch_still_matches() {
         let both = |r: f32| 1.0 / (60.0 + r) + 1.0 / (60.0 + r);
@@ -5586,8 +4761,6 @@ mod tests {
         assert_eq!(cliff(&scores), Some(2));
     }
 
-    /// Dense-only RRF falls evenly, `1/(60+r)`: no step stands out, so the
-    /// list makes no claim about where its answers stop.
     #[test]
     fn an_evenly_falling_list_has_no_cliff() {
         let scores: Vec<f32> = (1..=10).map(|r| 1.0 / (60.0 + r as f32)).collect();
@@ -5599,14 +4772,11 @@ mod tests {
         assert_eq!(cliff(&[0.95, 0.90, 0.30, 0.28, 0.10]), Some(2));
     }
 
-    /// Two comparable drops: the list is ambiguous and says nothing, rather
-    /// than picking one of them and calling the rest noise.
     #[test]
     fn an_ambiguous_list_says_nothing() {
         assert_eq!(cliff(&[0.9, 0.5, 0.1, 0.05]), None);
     }
 
-    /// One gap has nothing to be compared against.
     #[test]
     fn fewer_than_three_hits_have_no_cliff() {
         assert_eq!(cliff(&[]), None);
@@ -5614,36 +4784,21 @@ mod tests {
         assert_eq!(cliff(&[1.0, 0.1]), None);
     }
 
-    /// A plateau and then a drop is the clearest cliff there is; the mean of
-    /// the other gaps being zero must not turn it into a division that says no.
     #[test]
     fn a_plateau_followed_by_a_drop_is_a_cliff() {
         assert_eq!(cliff(&[1.0, 1.0, 1.0, 0.2, 0.2]), Some(3));
-        // And an entirely flat list has no fall at all.
         assert_eq!(cliff(&[0.5, 0.5, 0.5, 0.5]), None);
     }
 
-    /// The same plateau, with a drop too small to mean anything: three hits a
-    /// reranker scored alike and a fourth a rounding error below them. The mean
-    /// of the other gaps is zero here too, so without a floor every positive
-    /// number cleared three times zero and the page drew its line between two
-    /// hits that were tied.
     #[test]
     fn a_tie_at_the_foot_of_a_plateau_is_not_a_cliff() {
         assert_eq!(cliff(&[1.0, 1.0, 1.0, 0.9999]), None);
-        // The floor is a share of the top score rather than a fixed gap, so the
-        // same shape in fused-rank space — where the scores, and every real gap
-        // between them, are two orders of magnitude smaller — is read the same
-        // way, and a genuine fall there is still a cliff.
+        // The floor is a share of the top score, so the same shape in fused-rank space reads the
+        // same.
         assert_eq!(cliff(&[0.016, 0.016, 0.016, 0.0159]), None);
         assert_eq!(cliff(&[0.016, 0.016, 0.016, 0.004]), Some(3));
     }
 
-    /// Priming may lift a near-tie past its neighbour. Read position by
-    /// position that was a negative gap, and clamping it to zero manufactured
-    /// a fall at the position before it; `mark_past_cliff` sorts instead, and
-    /// the four near-tied hits are then one plateau with one fall after it —
-    /// which is what the list is.
     #[test]
     fn a_primed_inversion_is_not_a_cliff() {
         assert_eq!(cliff(&[0.90, 0.89, 0.88, 0.87, 0.30]), Some(4));
@@ -5664,13 +4819,11 @@ mod tests {
             dummy("c", 0.30),
             dummy("d", 0.28),
         ];
-        // Reranked, so the scores are calibrated and the cliff is read from them.
         mark_past_cliff(&mut results, true);
         assert_eq!(
             results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, true, true]
         );
-        // The list is neither reordered nor shortened.
         assert_eq!(
             results
                 .iter()
@@ -5684,14 +4837,6 @@ mod tests {
         assert!(flat.iter().all(|r| !r.past_cliff));
     }
 
-    /// One retired row used to switch the cliff off for the whole list.
-    ///
-    /// A retired hit is demoted to the tail, not dropped, and it keeps its
-    /// score. With a high one it made the *last* position satisfy `score >=
-    /// cut`, so the mark started at the end of the list and the genuinely weak
-    /// rows above it lost the mark — in `ask`, they were no longer truncated
-    /// out of the answer. The cliff is read over the live prefix now, and the
-    /// retired tail is marked whatever the cliff said.
     #[test]
     fn a_retired_hit_at_the_tail_does_not_take_the_cliff_with_it() {
         let dummy = |id: &str, score: f32, retired: bool| SearchResult {
@@ -5701,7 +4846,6 @@ mod tests {
             retired,
             ..Default::default()
         };
-        // The retired row scores highest of all, and is first in the ranking.
         let mut results = vec![
             dummy("retired", 0.90, true),
             dummy("a", 0.88, false),
@@ -5723,17 +4867,10 @@ mod tests {
             vec![false, false, true, true, true],
             "the fall between 0.87 and 0.30 is still where the cliff is"
         );
-        // And what is marked is still a suffix, which is what `ask` truncates on.
         let first = results.iter().position(|r| r.past_cliff).unwrap();
         assert!(results[first..].iter().all(|r| r.past_cliff));
     }
 
-    /// The default configuration has no reranker, and the scores are then
-    /// RRF fusions: a harmonic curve whose first gap is always its largest.
-    /// The list reproduced here is the `loop device` query from the report —
-    /// three relevant notes, and a cliff drawn after the first of them on the
-    /// fused scores. Read on the cosine similarity instead, the divider lands
-    /// where the relevance actually falls, and not at all when it does not.
     #[test]
     fn without_a_reranker_the_cliff_is_read_from_similarity_and_never_from_the_fused_rank() {
         let dummy = |id: &str, score: f32, similarity: Option<f32>| SearchResult {
@@ -5747,7 +4884,6 @@ mod tests {
         // Sanity: on the fused scores alone the rule draws its line after #1.
         assert_eq!(cliff(&fused), Some(1));
 
-        // Similarities that fall evenly: no cliff, whatever the fusion says.
         let sims = [0.82, 0.80, 0.78, 0.76, 0.74];
         let mut even: Vec<SearchResult> = fused
             .iter()
@@ -5761,7 +4897,6 @@ mod tests {
             "a cliff was drawn on a list whose similarity falls evenly"
         );
 
-        // Similarities that fall after the third hit: the cliff is there.
         let sims = [0.82, 0.80, 0.78, 0.31, 0.29];
         let mut three: Vec<SearchResult> = fused
             .iter()
@@ -5775,9 +4910,6 @@ mod tests {
             vec![false, false, false, true, true]
         );
 
-        // A hit the lexical half alone found has no similarity: it is left out
-        // of the gaps, and sitting in the tail it is past the cliff with the
-        // rest of it — it placed there.
         let mut tail = three.clone();
         tail[4].similarity = None;
         tail.iter_mut().for_each(|r| r.past_cliff = false);
@@ -5786,11 +4918,6 @@ mod tests {
             tail.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true]
         );
-        // Placed second, it is skipped rather than treated as the end of the
-        // reading. Read as a leading run it left one measurable hit and nothing
-        // to compare, so a list with an obvious fall after the third had no
-        // cliff at all — and an exact term match, which is the commonest hit
-        // with no similarity, is exactly what lands high in a fused list.
         let mut mixed = three.clone();
         mixed[1].similarity = None;
         mixed.iter_mut().for_each(|r| r.past_cliff = false);
@@ -5800,8 +4927,6 @@ mod tests {
             vec![false, false, false, true, true],
             "a hit with no similarity ended the reading instead of being skipped"
         );
-        // And at rank 1, which is where it killed the feature outright: every
-        // keyword-shaped query went to `ask` with its whole list.
         let mut leading = three.clone();
         leading[0].similarity = None;
         leading.iter_mut().for_each(|r| r.past_cliff = false);
@@ -5811,8 +4936,6 @@ mod tests {
             vec![false, false, false, true, true],
             "a lexical-only hit at rank 1 switched the cliff off"
         );
-        // A store that reports no similarity anywhere still has nothing to
-        // measure, and says so rather than guessing.
         let mut none = three.clone();
         none.iter_mut().for_each(|r| {
             r.similarity = None;
@@ -5821,12 +4944,6 @@ mod tests {
         mark_past_cliff(&mut none, false);
         assert!(none.iter().all(|r| !r.past_cliff));
 
-        // A fused list is not sorted by similarity — a hit both branches found
-        // is lifted above one the dense branch alone ranked higher, which is
-        // the point of fusing. Read position by position, the clamp turned that
-        // inversion into a large gap at the position *before* it and cut there,
-        // throwing away the 0.78 hit below. Sorted, the three leading hits are
-        // an even fall and there is no cliff at all.
         let mut inverted: Vec<SearchResult> = [0.80, 0.40, 0.78]
             .iter()
             .enumerate()
@@ -5838,11 +4955,8 @@ mod tests {
             "an out-of-order hit manufactured a cliff above itself"
         );
 
-        // And a real fall is still found with an inversion sitting above it.
-        // Sorted that is `0.90 0.85 0.20 0.10`, the fall is after the second,
-        // and the last hit in the *list* reaching 0.85 is the third — so the
-        // tail is the one hit below it. The 0.20 at rank two is left above the
-        // line, which is what `weak` is for.
+        // Sorted `0.90 0.85 0.20 0.10`: the fall is after the second, so only the last hit is past
+        // it.
         let mut still: Vec<SearchResult> = [0.90, 0.20, 0.85, 0.10]
             .iter()
             .enumerate()
@@ -5859,8 +4973,7 @@ mod tests {
     async fn a_synthesized_artifact_leading_the_list_marks_the_search_answered() {
         let mut core = test_core().await;
         core.learn.enabled = true;
-        // Two deliberate searches, not one being reworded: with the window on
-        // the second would fold into the first and there would be one event.
+        // With the coalescing window on, the second search would fold into the first.
         core.feedback.coalesce_secs = 0;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let captured = core
@@ -5895,8 +5008,7 @@ mod tests {
             .unwrap();
         crate::jobs::embed::run(&core, &made_gen.id).await.unwrap();
 
-        // The fake embedder is symmetric: the query that is the generated
-        // artifact's rendered text lands it first.
+        // The fake embedder is symmetric: querying the artifact's rendered text lands it first.
         core.search(&q("g\ngenerated text"), Door::Ui)
             .await
             .unwrap();
@@ -5911,7 +5023,6 @@ mod tests {
             .collect();
         assert!(by_q["g\ngenerated text"], "{events:?}");
         assert!(!by_q["c\ncaptured text"], "{events:?}");
-        // And the rail knows what a model wrote.
         let hits = core
             .search(&q("g\ngenerated text"), Door::Ui)
             .await
@@ -5922,12 +5033,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_interaction_is_recorded_whenever_the_layer_is_learning() {
-        // It used to take pursuits as well, which made the log a pursuit's
-        // private record rather than the layer's. It is not: the context sweep
-        // reads the same `opened` and `pivoted` rows to learn which situations
-        // an artifact is opened in, and gating the only writer behind a second
-        // faculty left that sweep profiling nothing at all. One switch, and
-        // everything downstream reads what it writes.
         let mut core = test_core().await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
         let a = core

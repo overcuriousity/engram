@@ -6,9 +6,7 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-/// The budget every fake synthesizer reports. Context is zero on purpose: a
-/// fake reproduces today's windowing exactly, so a test that did not ask for
-/// context cannot be moved by it.
+/// Context is zero so a test that did not ask for context cannot be moved by it.
 pub const FAKE_BUDGET: SynthesisBudget = SynthesisBudget {
     context_tokens: 4096,
     max_output_tokens: 1024,
@@ -20,30 +18,16 @@ pub const FAKE_BUDGET: SynthesisBudget = SynthesisBudget {
     },
 };
 
-/// Hashes text into a fixed-dimension unit vector. Identical text gives an
-/// identical vector and different text gives a different one, which is all the
-/// retrieval tests need from an embedding model.
-///
-/// Renders with the *legacy* templates by default — `{text}` for a query,
-/// `{title}\n{text}` for a document — so a test that queries with
-/// `"title\ntext"` lands on the document it seeded, exactly as before
-/// templates existed. `with_templates` gives a fake the asymmetric recipe for
-/// the tests that are about the recipe.
+/// Identical text, identical unit vector. Legacy templates by default, so `"title\ntext"` finds its seeded document.
 pub struct FakeEmbedder {
     dim: usize,
     templates: crate::config::EmbedTemplates,
-    /// How many times the endpoint was called. Batching is invisible in the
-    /// output — only the call count shows whether it happened.
+    /// Batching is invisible in the output; only the call count shows it.
     calls: std::sync::atomic::AtomicUsize,
-    /// Every string handed to `embed_raw`, in order: what a real endpoint
-    /// would have been sent.
     sent: std::sync::Mutex<Vec<String>>,
-    /// When set, every call is refused with this reason — the endpoint's "no",
-    /// which a worker must not retry.
+    /// The endpoint's "no", which a worker must not retry.
     reject_with: Option<String>,
-    /// Calls still to be answered with "too many requests" before this
-    /// embedder starts working. The endpoint's "not now", which is the one
-    /// answer a caller can fix by asking again.
+    /// Calls answered "too many requests" first: the one answer asking again can fix.
     busy_for: std::sync::atomic::AtomicUsize,
 }
 
@@ -69,9 +53,6 @@ impl FakeEmbedder {
         e
     }
 
-    /// An endpoint behind a limiter: the first `n` calls are shed, the rest
-    /// answered. What a burst of keystrokes meets on a shared server, and what
-    /// a cold model answers while it loads.
     pub fn busy_for_the_first(self, n: usize) -> Self {
         self.busy_for.store(n, std::sync::atomic::Ordering::Relaxed);
         self
@@ -81,7 +62,6 @@ impl FakeEmbedder {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// What was sent, rendered, in order.
     pub fn sent(&self) -> Vec<String> {
         self.sent.lock().map(|s| s.clone()).unwrap_or_default()
     }
@@ -101,9 +81,7 @@ impl Embedder for FakeEmbedder {
                 detail: m.clone(),
             });
         }
-        // Counted as a call before it is refused, because it was one: the
-        // limiter is in front of the endpoint and the request reached it.
-        // `try_update` is the new name, but it is newer than the MSRV.
+        // Counted before refusing: the request reached the limiter. `try_update` is newer than the MSRV.
         #[allow(deprecated)]
         let refused = self
             .busy_for
@@ -152,10 +130,9 @@ impl Embedder for FakeEmbedder {
 #[derive(Default)]
 pub struct FakeSynthesizer {
     fail_with: Option<String>,
-    /// Answer, but with something the parser cannot read. Distinct from
-    /// `fail_with`, which models an endpoint that never answered at all.
+    /// Distinct from `fail_with`, which never answers at all.
     unparsable_on_marker: Option<String>,
-    /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
+    /// The endpoint's "no" rather than its "not now".
     reject: bool,
 }
 
@@ -168,18 +145,14 @@ impl FakeSynthesizer {
         }
     }
 
-    /// The same refusal, arriving the way a 400 does: the request itself is
-    /// wrong, and asking again sends the same request.
+    /// The 400 shape: asking again sends the same request.
     pub fn rejecting(msg: &str) -> Self {
         let mut s = Self::failing(msg);
         s.reject = true;
         s
     }
 
-    /// The model replies to every window and its reply for the marked one
-    /// cannot be parsed however often it is asked. This is what a duplicate
-    /// JSON key looks like from the caller's side, and it is a property of the
-    /// window's text rather than of the endpoint.
+    /// A property of the window's text, as a duplicate JSON key is, not of the endpoint.
     pub fn unparsable_on(marker: &str) -> Self {
         Self {
             fail_with: None,
@@ -227,9 +200,7 @@ impl Synthesizer for FakeSynthesizer {
             })
             .collect())
     }
-    /// A judged reply the way a model that obeys the hint would answer: the
-    /// door's forced intent, else "none", with no date and no links. A test
-    /// wanting a richer judgement brings its own synthesizer.
+    /// The door's forced intent, else "none", with no date and no links.
     async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
         let judgement = input.judge.map(|j| crate::infer::Judgement {
             intent: Some(j.forced_intent.clone().unwrap_or_else(|| "none".into())),
@@ -248,9 +219,7 @@ impl Synthesizer for FakeSynthesizer {
         FAKE_BUDGET
     }
 
-    /// Deterministic and obviously synthetic, so a test can assert on it. A
-    /// configured failure applies here too: naming is a model call like any
-    /// other, and the caller has to survive it failing.
+    /// A configured failure applies here too: naming is a model call the caller must survive.
     async fn title(
         &self,
         text: &str,
@@ -271,18 +240,14 @@ impl Synthesizer for FakeSynthesizer {
     }
 }
 
-/// Drops a token from the first window it sees and reproduces it faithfully
-/// afterwards. Models the case the retry exists for: a one-off paraphrase that
-/// a second attempt gets right.
+/// A one-off paraphrase that the retry gets right.
 pub struct ParaphrasingSynthesizer {
     drop_token: String,
     calls: std::sync::atomic::AtomicUsize,
-    /// Keep paraphrasing forever rather than recovering on the retry.
     persistent: bool,
 }
 
 impl ParaphrasingSynthesizer {
-    /// `persistent`: keep paraphrasing forever rather than recovering on the retry.
     pub fn new(drop_token: &str, persistent: bool) -> Self {
         Self {
             drop_token: drop_token.to_string(),
@@ -323,14 +288,7 @@ impl Synthesizer for ParaphrasingSynthesizer {
     }
 }
 
-/// Paraphrases on the first judged call and answers with a judgement; keeps
-/// the literals on the retry and answers with none.
-///
-/// The exact shape the window's retry has to merge. `parse_judged_response`
-/// gives `judgement: None` for a reply it had to salvage or that arrived
-/// truncated, and the retry is asked for over paraphrased *artifacts* — never
-/// over the judgement — so a reply that fixes the literals and loses the JUDGE
-/// block is an ordinary outcome, not a retraction.
+/// The retry fixes the literals and drops the JUDGE block, which the merge must treat as ordinary, not a retraction.
 pub struct JudgingParaphraser {
     drop_token: String,
     judgement: Judgement,
@@ -348,13 +306,7 @@ impl JudgingParaphraser {
         }
     }
 
-    /// The retry answers `Some(Judgement::default())` instead of `None` — a
-    /// reply that parsed and simply said nothing about the note as a moment.
-    ///
-    /// The commoner of the two shapes, and the one the merge could not see:
-    /// `parse_judged_response` answers `Some(..)` for every reply that parses
-    /// and `moment`, `events` and `links` are all `#[serde(default)]`, so a
-    /// retry that omits the JUDGE block lands here and not on `None`.
+    /// `Some(Judgement::default())` is what a retry omitting the JUDGE block parses to, since its fields default.
     pub fn answering_an_empty_judgement_on_retry(mut self) -> Self {
         self.empty_on_retry = true;
         self
@@ -404,8 +356,7 @@ impl Synthesizer for JudgingParaphraser {
     }
 }
 
-/// Emits one artifact per line it is given, context blocks included. Stands in
-/// for a small model that ignores the instruction not to extract from context.
+/// A small model that ignores the instruction not to extract from context.
 pub struct GreedySynthesizer {
     pub budget: SynthesisBudget,
 }
@@ -436,8 +387,7 @@ impl Synthesizer for GreedySynthesizer {
     }
 }
 
-/// Records the input of the last call, so a test can assert what the window
-/// was actually given rather than what it was supposed to be given.
+/// So a test asserts what the window was given, not what it was supposed to be given.
 pub struct RecordingSynthesizer {
     pub seen: std::sync::Mutex<Vec<(String, crate::infer::context::WindowContext)>>,
     pub budget: SynthesisBudget,
@@ -457,7 +407,7 @@ impl Synthesizer for RecordingSynthesizer {
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         self.seen
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((input.core.to_string(), input.context.clone()));
         Ok(vec![ProposedArtifact {
             text: input.core.lines().next().unwrap_or("empty").to_string(),
@@ -474,10 +424,7 @@ impl Synthesizer for RecordingSynthesizer {
     }
 }
 
-/// Claims every chunk came from lines far outside its window — the span check
-/// exists because the model's line numbers are taken on trust. With
-/// `echo_text` the body is the window itself and can be recovered; without it
-/// the text appears nowhere in the window and the reader has to be told.
+/// The span check exists because model line numbers are taken on trust. `echo_text` makes the body recoverable.
 pub struct MisreportingSynthesizer {
     pub echo_text: bool,
 }
@@ -508,17 +455,11 @@ impl Synthesizer for MisreportingSynthesizer {
     }
 }
 
-/// Reverses the candidate order. Deliberately not identity: a test asserting
-/// rerank ran can only tell the difference if the order actually changes.
-/// Refuses any single input over `limit` tokens the way llama.cpp does, with
-/// its physical-batch message. The configured ceiling cannot see this limit.
+/// Refuses any input over `limit` tokens with llama.cpp's physical-batch message, which the ceiling cannot see.
 pub struct StrictEmbedder {
     inner: FakeEmbedder,
     limit: usize,
-    /// Whether the refusal arrives the way an HTTP endpoint's does — a 413 the
-    /// client classified as a rejection — rather than as a bare server's
-    /// message inside an otherwise ordinary failure. Both mean "too large",
-    /// and a worker that only understands one of them stops splitting.
+    /// A 413 classified as a rejection; a worker that understands only one form stops splitting.
     over_http: bool,
 }
 
@@ -530,7 +471,6 @@ impl StrictEmbedder {
             over_http: false,
         }
     }
-    /// The same ceiling, refused as a real endpoint refuses it.
     pub fn over_http(dim: usize, limit: usize) -> Self {
         let mut e = Self::new(dim, limit);
         e.over_http = true;
@@ -545,8 +485,7 @@ impl StrictEmbedder {
 impl Embedder for StrictEmbedder {
     async fn embed_raw(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         for t in texts {
-            // The same crude estimate the budget code uses, so the test does
-            // not depend on a tokenizer.
+            // The budget code's crude estimate, so the test needs no tokenizer.
             let tokens = t.len() / 4;
             if tokens > self.limit {
                 let detail = if self.over_http {
@@ -594,12 +533,8 @@ impl Embedder for StrictEmbedder {
 
 #[derive(Default)]
 pub struct FakeReranker {
-    /// How many documents the last call was handed. A reranker can only promote
-    /// what it is given, so a test about over-fetching has to look at this
-    /// rather than at the answer.
+    /// A reranker can only promote what it is given, so over-fetching tests look here.
     saw: std::sync::atomic::AtomicUsize,
-    /// How many times it was called at all, for tests about whether a
-    /// search or a replay reached the reranker.
     calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -631,9 +566,7 @@ impl Reranker for FakeReranker {
     }
 }
 
-/// A reranker whose endpoint is down: every call errors. What the caller does
-/// next — vector order, and no claim of refinement — is the behavior under
-/// test.
+/// Vector order and no claim of refinement is the behavior under test.
 #[derive(Default)]
 pub struct FailingReranker;
 
@@ -652,9 +585,7 @@ impl Reranker for FailingReranker {
     }
 }
 
-/// Answers with `reply`, or — with `None` — with the user prompt it was
-/// handed. What `ask` puts in front of the model is the whole of what the
-/// model can use, and echoing it makes the prompt the thing under test.
+/// `None` echoes the user prompt, making the prompt the thing under test.
 pub struct FakeCompleter {
     pub reply: Option<String>,
 }
@@ -680,24 +611,15 @@ impl Completer for FakeCompleter {
     }
 }
 
-/// A completer that answers from a script and counts how often it was asked.
-///
-/// The consolidation tests are largely about *not* calling the model, so what
-/// they assert on is the call count as much as the reply.
+/// Consolidation tests assert on not calling the model, so the call count matters as much as the reply.
 pub struct ScriptedCompleter {
     replies: std::sync::Mutex<std::collections::VecDeque<String>>,
     calls: std::sync::atomic::AtomicUsize,
-    /// Every user prompt it was handed, in order. What a caller that *packs* a
-    /// prompt has to be able to assert on: whether a call went out at all says
-    /// nothing about what was in it, and the trimming the dedupe unit does is
-    /// visible nowhere else.
+    /// The dedupe unit's trimming is visible nowhere else.
     prompts: std::sync::Mutex<Vec<String>>,
-    /// Overridable so a test can make the window the binding constraint without
-    /// writing a megabyte of artifact text to get there.
+    /// So a test can make the window binding without a megabyte of text.
     context_tokens: std::sync::atomic::AtomicUsize,
-    /// The endpoint's "no" rather than its "not now": every call is refused
-    /// with `InferenceRejected`, which is what a 400 on the request itself
-    /// looks like from the caller's side and is never worth repeating.
+    /// `InferenceRejected`, never worth repeating.
     rejects: Option<String>,
 }
 
@@ -712,9 +634,7 @@ impl ScriptedCompleter {
         }
     }
 
-    /// Refuses every call the way an endpoint refuses a request it will never
-    /// accept. Distinct from an exhausted script, which is the endpoint that
-    /// did not answer.
+    /// Distinct from an exhausted script, which did not answer.
     pub fn rejecting(msg: &str) -> Self {
         let mut s = Self::new(Vec::new());
         s.rejects = Some(msg.to_string());
@@ -724,7 +644,10 @@ impl ScriptedCompleter {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn prompts(&self) -> Vec<String> {
-        self.prompts.lock().unwrap().clone()
+        self.prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub fn set_context_tokens(&self, n: usize) {
         self.context_tokens
@@ -736,7 +659,10 @@ impl ScriptedCompleter {
 impl Completer for ScriptedCompleter {
     async fn complete(&self, _system: &str, user: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.prompts.lock().unwrap().push(user.to_string());
+        self.prompts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(user.to_string());
         if let Some(detail) = &self.rejects {
             return Err(crate::error::Error::InferenceRejected {
                 role: "ask",
@@ -745,7 +671,7 @@ impl Completer for ScriptedCompleter {
         }
         self.replies
             .lock()
-            .unwrap()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .pop_front()
             .ok_or_else(|| crate::error::Error::Inference {
                 role: "ask",
@@ -761,12 +687,10 @@ impl Completer for ScriptedCompleter {
     }
 }
 
-/// Answers every image with one scripted reply, or one scripted failure, and
-/// remembers what context it was shown.
 pub struct FakeDescriber {
     pub reply: String,
     pub fail_with: Option<String>,
-    /// Whether `fail_with` is the endpoint's "no" rather than its "not now".
+    /// The endpoint's "no" rather than its "not now".
     pub reject: bool,
     calls: std::sync::atomic::AtomicUsize,
     last_context: std::sync::Mutex<String>,
@@ -793,8 +717,7 @@ impl FakeDescriber {
         d.fail_with = Some(msg.into());
         d
     }
-    /// The endpoint's "no", not its "not now": what a non-multimodal model
-    /// answers with, and what a worker must not retry.
+    /// What a non-multimodal model answers, and a worker must not retry.
     pub fn rejecting(msg: &str) -> Self {
         let mut d = Self::failing(msg);
         d.reject = true;
@@ -804,7 +727,10 @@ impl FakeDescriber {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn last_context(&self) -> String {
-        self.last_context.lock().unwrap().clone()
+        self.last_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -812,7 +738,10 @@ impl FakeDescriber {
 impl Describer for FakeDescriber {
     async fn describe(&self, _image_jpeg: &[u8], context: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.last_context.lock().unwrap() = context.to_string();
+        *self
+            .last_context
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context.to_string();
         match &self.fail_with {
             Some(m) if self.reject => Err(Error::InferenceRejected {
                 role: "vision",
@@ -827,8 +756,6 @@ impl Describer for FakeDescriber {
     }
 }
 
-/// A microphone that always hears the same sentence, and can be asked what it
-/// was handed.
 pub struct FakeTranscriber {
     pub reply: String,
     pub fail_with: Option<String>,
@@ -862,7 +789,10 @@ impl FakeTranscriber {
         self.calls.load(std::sync::atomic::Ordering::SeqCst)
     }
     pub fn last_mime(&self) -> String {
-        self.last_mime.lock().unwrap().clone()
+        self.last_mime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
     pub fn last_len(&self) -> usize {
         self.last_len.load(std::sync::atomic::Ordering::SeqCst)
@@ -873,7 +803,10 @@ impl FakeTranscriber {
 impl Transcriber for FakeTranscriber {
     async fn transcribe(&self, audio: &[u8], mime: &str) -> Result<String> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        *self.last_mime.lock().unwrap() = mime.to_string();
+        *self
+            .last_mime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = mime.to_string();
         self.last_len
             .store(audio.len(), std::sync::atomic::Ordering::SeqCst);
         match &self.fail_with {
@@ -890,9 +823,6 @@ impl Transcriber for FakeTranscriber {
 mod tests {
     use super::*;
 
-    /// The default implementation is the compatibility guarantee: an implementor
-    /// that knows nothing about streaming still streams, as one delta. Without
-    /// it every fake in the test suite would need a hand-written override.
     #[tokio::test]
     async fn a_completer_without_an_override_streams_its_whole_answer_as_one_delta() {
         let c = FakeCompleter {
@@ -910,9 +840,6 @@ mod tests {
         assert_eq!(done.text, "the answer");
     }
 
-    /// The returned completion, not the accumulated deltas, is what a caller
-    /// stores: a receiver that went away mid-answer must neither fail the call
-    /// nor shorten what it returns.
     #[tokio::test]
     async fn a_dropped_receiver_neither_fails_the_call_nor_truncates_its_answer() {
         let c = FakeCompleter {
@@ -929,9 +856,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_fake_renders_like_the_real_one_and_keeps_what_it_sent() {
-        // With the asymmetric templates the same words embed to different
-        // vectors as a query and as a document — the property the real
-        // embedder has, exercised here so a test can rely on it.
         let e = FakeEmbedder::with_templates(8, EmbedTemplates::default());
         let d = e
             .embed_documents(&[EmbedDoc {
@@ -953,8 +877,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_default_fake_is_symmetric_so_a_query_can_name_a_document() {
-        // What every retrieval test in the crate depends on: querying with
-        // "title\ntext" lands on the document seeded with that title and text.
         let e = FakeEmbedder::new(8);
         let d = e
             .embed_documents(&[EmbedDoc {

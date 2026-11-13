@@ -1,13 +1,4 @@
-{# How this artifact came to exist.
-
-   A flat list of the captured artifacts under a merge says what it is made of
-   and cannot say how it got there: a merge written from two earlier merges and
-   one fresh capture read as three equal siblings. The indentation is the
-   generation, and `artifact_sources.via_id` — the column the schema marks
-   "rendering only" — is what records it.
-
-   What it does not show is how the wording developed: nothing keeps artifact
-   revisions, so this is assembly, not authorship. #}
+{# Indentation is the generation (`artifact_sources.via_id`); this is assembly, not authorship. #}
 {% if d.merged %}
 <div class="label pane-label">
   {% if d.lineage.roots.is_empty() %}
@@ -19,8 +10,6 @@
 {% endif %}
 
 {% if d.synthesized && !d.cues.is_empty() %}
-{# Not "a model guessed you would want this" but "this was written because
-   these things were asked and the base had no answer". #}
 <div class="label pane-label">Written because these were asked</div>
 <ul class="cues">
   {% for q in d.cues %}<li>{{ q }}</li>{% endfor %}
@@ -29,30 +18,24 @@
 
 {% if d.merged && d.lineage.roots.is_empty() %}
 <p class="muted">
-  Every artifact this was written from has since been deleted. Its content is
-  still in the text above; what is gone is the record of where that content
-  came from.
+  Its sources were deleted; their content is kept above.
 </p>
 {% else if d.merged && d.orphaned_source %}
 <p class="muted">
-  One of the artifacts this was written from has since been deleted. Its
-  content is still in the text above; only the link to it is gone.
+  One source was deleted; its content is kept above.
 </p>
 {% endif %}
 
 {% if !d.lineage.roots.is_empty() %}
 <ul class="lineage">
   {% for f in d.lineage.flat_roots() %}
-  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" style="--d:{{ f.depth }}">
+  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" data-var-d="{{ f.depth }}">
     {% if f.depth > 0 %}<span class="lin-tick" aria-hidden="true">{% if f.last %}└{% else %}├{% endif %}─</span>{% endif %}
     <div class="lin-body">
       <div class="lin-head">
         {% if f.n.missing %}
         <span class="lin-title{% if !f.n.named %} name-opening{% endif %} muted">{{ f.n.title }}</span>
         {% else %}
-        {# Swaps the pane for that artifact's, the same way Related does: the
-           partial is also the whole standalone page, where naming `#pane`
-           would leave the link dead. #}
         <a class="lin-title{% if !f.n.named %} name-opening{% endif %}" href="/ui/artifacts/{{ f.n.id }}"
            hx-get="/ui/artifacts/{{ f.n.id }}"
            hx-target="closest [data-terms]" hx-swap="outerHTML"
@@ -74,14 +57,11 @@
 {% endif %}
 
 {% if !d.lineage.also_replaced.is_empty() %}
-{# Apart from the tree on purpose. The dedupe sweep can supersede a near
-   duplicate without merging anything, and "this replaced it" is a weaker claim
-   than "this was written from it" — under one heading the page would say the
-   winner's text carries the loser's, which in this case nothing checked. #}
+{# Apart from the tree: superseding claims less than being written from. #}
 <div class="label pane-label">Replaced without being merged</div>
 <ul class="lineage">
   {% for f in d.lineage.flat_replaced() %}
-  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" style="--d:{{ f.depth }}">
+  <li class="lin{% if f.n.missing %} lin-gone{% endif %}" data-var-d="{{ f.depth }}">
     <div class="lin-body">
       <div class="lin-head">
         {% if f.n.missing %}
@@ -108,7 +88,6 @@
 
 {% if d.lineage.truncated %}
 <p class="muted">
-  This history is deeper or wider than the page will draw; what is shown is the
-  most recent part of it.
+  Showing the most recent part of this history.
 </p>
 {% endif %}

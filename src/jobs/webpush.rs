@@ -1,15 +1,5 @@
-//! Web Push as the current UnifiedPush specification has it: RFC 8291
-//! `aes128gcm` encryption of a payload only the phone can read, RFC 8292
-//! VAPID so the push service knows which deployment is speaking, and the
-//! versioned JSON the phone decodes into a notification.
-//!
-//! What this module does *not* do is send. It builds the request; the
-//! remind unit executes it on the client whose redirect policy
-//! `remind::http_client` argues for.
-//!
-//! The encryption is written out here rather than taken from a crate; see
-//! `Cargo.toml` for why. It is RFC 8291 §3.4 to the letter, for the one
-//! record this ever sends, and the §5 example is its test.
+//! Web Push per UnifiedPush: RFC 8291 `aes128gcm`, RFC 8292 VAPID, and the payload a phone decodes.
+//! Builds requests only; the remind unit sends them. RFC 8291 §3.4 for one record, tested on §5.
 
 use crate::error::{Error, Result};
 use axum::http;
@@ -18,18 +8,15 @@ use p256::elliptic_curve::Generate;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-/// The receiver's half of a registration, as the distributor handed it to
-/// the app and the app handed it to `PUT /api/v1/push/unifiedpush`: the
-/// P-256 public key and the 16-byte auth secret, both base64url.
+/// As handed to `PUT /api/v1/push/unifiedpush`: the P-256 public key and the 16-byte auth secret,
+/// base64url.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebPushKeys {
     pub p256dh: String,
     pub auth: String,
 }
 
-/// The receiver's keys decoded, or why they cannot be. Called at
-/// registration so a bad key is refused at the door, and again at push,
-/// where a stored key can no longer be bad.
+/// Called at registration so a bad key is refused at the door.
 pub fn parse_keys(p256dh: &str, auth: &str) -> Result<(p256::PublicKey, [u8; 16])> {
     let point = B64
         .decode(p256dh)
@@ -45,12 +32,10 @@ pub fn parse_keys(p256dh: &str, auth: &str) -> Result<(p256::PublicKey, [u8; 16]
     Ok((public, secret))
 }
 
-/// The instance's signing identity, RFC 8292.
 #[derive(Clone)]
 pub struct Vapid {
     signing: p256::ecdsa::SigningKey,
-    /// The public key as the push service is shown it: base64url of the
-    /// uncompressed point, the `k=` half of the header.
+    /// Base64url of the uncompressed point: the `k=` half of the header.
     pub public: String,
 }
 
@@ -67,16 +52,8 @@ impl Vapid {
         })
     }
 
-    /// The `Authorization` header for one push: a JWT over the endpoint's
-    /// origin, expiring at `exp`, signed ES256. `sub` is the contact RFC 8292
-    /// says a sender SHOULD name; a deployment with no address for its user
-    /// leaves it out rather than inventing one.
-    ///
-    /// The framing is two base64url JSON blobs and a signature, which is the
-    /// whole of what a JWT library would add here — see `Cargo.toml` on why
-    /// none was taken. The signature is `r || s`, 64 bytes, as JWS wants it,
-    /// which is what `Signature::to_bytes` yields; the DER form is the one
-    /// that would be wrong.
+    /// ES256 JWT over the endpoint's origin; `sub` is left out rather than invented. The signature
+    /// is raw `r || s` (`Signature::to_bytes`), as JWS wants, not DER.
     pub fn authorization(&self, endpoint: &url::Url, sub: Option<&str>, exp: i64) -> String {
         use p256::ecdsa::signature::Signer;
         let mut claims = serde_json::json!({
@@ -100,29 +77,19 @@ impl Vapid {
     }
 }
 
-/// The largest message a push service is required to carry (RFC 8030 §7.2),
-/// and so the one record this sends.
+/// The largest message a push service must carry (RFC 8030 §7.2), and so the one record this sends.
 pub const MAX_RECORD: usize = 4096;
-/// What fits in that record once the header (16 salt, 4 rs, 1 idlen, 65
-/// key) and the delimiter and tag (1 + 16) have taken theirs.
+/// After the header (16 salt, 4 rs, 1 idlen, 65 key) and the delimiter and tag (1 + 16).
 pub const MAX_PLAINTEXT: usize = MAX_RECORD - (16 + 4 + 1 + 65) - (1 + 16);
 
-/// How long the push service holds a message for a phone that is off.
 /// A day: a reminder a day late is still a row on the band.
 const TTL: std::time::Duration = std::time::Duration::from_secs(24 * 3_600);
 
-/// How long the VAPID token is good for, which is not the same question as
-/// how long the message is held, though one constant used to answer both.
-///
-/// RFC 8292 §2 caps `exp` at 24 hours from the request, and the services that
-/// matter reject *at* the boundary. Reusing `TTL` put every token exactly on
-/// it, so a server clock a few seconds ahead of the push service turned every
-/// push into a 401. Half the cap leaves no cliff to fall off.
+/// RFC 8292 §2 caps `exp` at 24 hours and services reject at the boundary, so half the cap absorbs
+/// clock skew.
 const VAPID_EXP: std::time::Duration = std::time::Duration::from_secs(12 * 3_600);
 
-/// The push, built and not sent. Refuses a body that would need a second
-/// record rather than splitting it: a phone reads one record, and a truncated
-/// JSON payload is a notification that fails to parse.
+/// Refuses a body needing a second record: a phone reads one, and truncated JSON fails to parse.
 pub fn request(
     endpoint: &str,
     keys: &WebPushKeys,
@@ -143,7 +110,8 @@ pub fn request(
     let (public, auth) = parse_keys(&keys.p256dh, &keys.auth)?;
     let exp = crate::store::now() + VAPID_EXP.as_secs() as i64;
     let salt = <[u8; 16]>::generate();
-    let payload = encrypt(body, &public, &auth, &p256::SecretKey::generate(), salt);
+    let payload = encrypt(body, &public, &auth, &p256::SecretKey::generate(), salt)
+        .ok_or_else(|| crate::error::Error::Internal("push encryption failed".into()))?;
     http::Request::post(uri)
         .header("ttl", TTL.as_secs())
         .header(http::header::CONTENT_ENCODING, "aes128gcm")
@@ -157,81 +125,71 @@ pub fn request(
         .map_err(|e| Error::Internal(format!("web push request: {e}")))
 }
 
-/// RFC 8291 §3.4: the `aes128gcm` body (RFC 8188) of one push, encrypted to
-/// the receiver's key under a sender key made for this message alone.
-///
-/// The ephemeral key and the salt are arguments so the RFC's own example can
-/// be run through it; `request` makes both fresh. The body is one record, so
-/// the record size is the record's own length and the sequence number that
-/// RFC 8188 XORs into the nonce is zero, which leaves the nonce as derived.
+/// RFC 8291 §3.4 under a per-message sender key. One record, so the RFC 8188 sequence number is
+/// zero and the nonce is as derived.
 fn encrypt(
     body: &[u8],
     ua_public: &p256::PublicKey,
     auth: &[u8; 16],
     as_secret: &p256::SecretKey,
     salt: [u8; 16],
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     use aes_gcm::aead::{Aead, KeyInit};
     let as_public = as_secret.public_key();
     let shared = p256::ecdh::diffie_hellman(as_secret.to_nonzero_scalar(), ua_public.as_affine());
-    let ikm = webpush_ikm(auth, &shared, ua_public, &as_public);
-    let (cek, nonce) = record_keys(&ikm, &salt);
+    let ikm = webpush_ikm(auth, &shared, ua_public, &as_public)?;
+    let (cek, nonce) = record_keys(&ikm, &salt)?;
     let mut record = body.to_vec();
     // The last-record delimiter, and no padding after it.
     record.push(2);
     let sealed = aes_gcm::Aes128Gcm::new(&cek.into())
         .encrypt(&nonce.into(), record.as_slice())
-        .expect("AES-GCM seals any record under 64 GiB");
+        .ok()?;
     let keyid = point(&as_public);
-    let rs = u32::try_from(sealed.len()).expect("one record is under MAX_RECORD");
+    let rs = u32::try_from(sealed.len()).ok()?;
     let mut out = Vec::with_capacity(16 + 4 + 1 + keyid.len() + sealed.len());
     out.extend_from_slice(&salt);
     out.extend_from_slice(&rs.to_be_bytes());
     out.push(keyid.len() as u8);
     out.extend_from_slice(&keyid);
     out.extend_from_slice(&sealed);
-    out
+    Some(out)
 }
 
-/// The uncompressed SEC1 point, 65 bytes, which is the form both RFC 8291's
-/// key info and the `keyid` field name.
+/// The uncompressed SEC1 point, 65 bytes, as RFC 8291's key info and `keyid` name it.
 fn point(key: &p256::PublicKey) -> Vec<u8> {
     use p256::elliptic_curve::sec1::ToSec1Point;
     key.to_sec1_point(false).as_bytes().to_vec()
 }
 
-/// RFC 8291 §3.3–3.4: the input keying material, from the ECDH secret and
-/// the receiver's auth secret, bound to both public keys.
+/// RFC 8291 §3.3–3.4: the IKM from the ECDH secret and auth secret, bound to both public keys.
 fn webpush_ikm(
     auth: &[u8; 16],
     shared: &p256::ecdh::SharedSecret,
     ua_public: &p256::PublicKey,
     as_public: &p256::PublicKey,
-) -> [u8; 32] {
+) -> Option<[u8; 32]> {
     let mut info = b"WebPush: info\0".to_vec();
     info.extend_from_slice(&point(ua_public));
     info.extend_from_slice(&point(as_public));
     let mut ikm = [0u8; 32];
     hkdf::Hkdf::<sha2::Sha256>::new(Some(auth), shared.raw_secret_bytes().as_slice())
         .expand(&info, &mut ikm)
-        .expect("32 bytes is within what HKDF-SHA256 expands to");
-    ikm
+        .ok()?;
+    Some(ikm)
 }
 
 /// RFC 8188 §2.2–2.3: the content-encryption key and the nonce of record 0.
-fn record_keys(ikm: &[u8; 32], salt: &[u8; 16]) -> ([u8; 16], [u8; 12]) {
+fn record_keys(ikm: &[u8; 32], salt: &[u8; 16]) -> Option<([u8; 16], [u8; 12])> {
     let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), ikm);
     let mut cek = [0u8; 16];
-    hk.expand(b"Content-Encoding: aes128gcm\0", &mut cek)
-        .expect("16 bytes is within what HKDF-SHA256 expands to");
+    hk.expand(b"Content-Encoding: aes128gcm\0", &mut cek).ok()?;
     let mut nonce = [0u8; 12];
-    hk.expand(b"Content-Encoding: nonce\0", &mut nonce)
-        .expect("12 bytes is within what HKDF-SHA256 expands to");
-    (cek, nonce)
+    hk.expand(b"Content-Encoding: nonce\0", &mut nonce).ok()?;
+    Some((cek, nonce))
 }
 
-/// The receiver's side of `encrypt`, for the tests that play the phone: one
-/// record, its tag checked, its delimiter stripped. `None` is any failure.
+/// The phone's side of `encrypt`, for tests. `None` is any failure.
 #[cfg(test)]
 pub(crate) fn decrypt(
     body: &[u8],
@@ -243,8 +201,8 @@ pub(crate) fn decrypt(
     let idlen = *body.get(20)? as usize;
     let as_public = p256::PublicKey::from_sec1_bytes(body.get(21..21 + idlen)?).ok()?;
     let shared = p256::ecdh::diffie_hellman(ua_secret.to_nonzero_scalar(), as_public.as_affine());
-    let ikm = webpush_ikm(auth, &shared, &ua_secret.public_key(), &as_public);
-    let (cek, nonce) = record_keys(&ikm, &salt);
+    let ikm = webpush_ikm(auth, &shared, &ua_secret.public_key(), &as_public)?;
+    let (cek, nonce) = record_keys(&ikm, &salt)?;
     let mut plain = aes_gcm::Aes128Gcm::new(&cek.into())
         .decrypt(&nonce.into(), &body[21 + idlen..])
         .ok()?;
@@ -255,8 +213,7 @@ pub(crate) fn decrypt(
     })
 }
 
-/// One reminder as the payload names it: enough for the phone to draw a row
-/// and call `done` or `snooze` on it, and nothing a notification does not show.
+/// Enough to draw a row and call `done` or `snooze`, nothing a notification does not show.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PayloadMoment {
     pub id: String,
@@ -264,13 +221,11 @@ pub struct PayloadMoment {
     pub at: i64,
 }
 
-/// What the phone decodes. `v` is the version the phone checks first; a
-/// version it does not know still rings, as a plain "something is due".
+/// `v` is checked first; an unknown version still rings as a plain "something is due".
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Kind {
-    /// The ladder's message: what this wake owes. `more` is what the body
-    /// would have counted past `BODY_LINES`; the band has them all.
+    /// `more` counts past `BODY_LINES`; the band has them all.
     Due {
         at: i64,
         moments: Vec<PayloadMoment>,
@@ -302,7 +257,7 @@ impl Payload {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("strings and integers always serialise")
+        serde_json::to_vec(self).unwrap_or_default()
     }
 }
 
@@ -314,11 +269,6 @@ mod tests {
         B64.decode(s).unwrap()
     }
 
-    /// RFC 8291 §5, the published example: the receiver's key and auth
-    /// secret, and the ciphertext the sender produced from a known ephemeral
-    /// key and salt. Decrypting is the whole of RFC 8291 run backwards — the
-    /// same ECDH, the same HKDF info strings, the same record layer — and an
-    /// AEAD tag that verifies is not a coincidence.
     #[test]
     fn the_rfc_8291_example_decrypts_to_its_plaintext() {
         let secret =
@@ -328,7 +278,6 @@ mod tests {
         let ciphertext = b64(
             "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
         );
-        // The vector's own ephemeral public key sits in the header as keyid.
         assert_eq!(
             &ciphertext[21..86],
             &b64(
@@ -339,10 +288,6 @@ mod tests {
         assert_eq!(plain, b"When I grow up, I want to be a watermelon");
     }
 
-    /// The same example forwards: the RFC's sender key and salt, encrypted
-    /// to the RFC's receiver, give the RFC's ciphertext byte for byte. The
-    /// one field that differs is the record size, which the example sets to
-    /// 4096 and `encrypt` sets to the one record it writes.
     #[test]
     fn the_rfc_8291_example_encrypts_to_its_ciphertext() {
         let ua_public = p256::PublicKey::from_sec1_bytes(&b64(
@@ -355,7 +300,7 @@ mod tests {
         let auth: [u8; 16] = b64("BTBZMqHH6r4Tts7J_aSIgg").try_into().unwrap();
         let salt: [u8; 16] = b64("DGv6ra1nlYgDCS1FRnbzlw").try_into().unwrap();
         let plain = b"When I grow up, I want to be a watermelon";
-        let ours = encrypt(plain, &ua_public, &auth, &as_secret, salt);
+        let ours = encrypt(plain, &ua_public, &auth, &as_secret, salt).unwrap();
         let mut theirs = b64(
             "DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN",
         );
@@ -444,10 +389,6 @@ mod tests {
         );
     }
 
-    /// RFC 8292 §2 caps `exp` at 24 hours from the request, and FCM and
-    /// Mozilla reject at the boundary. `exp` was `now + TTL`, which is exactly
-    /// 24 hours: a server clock seconds ahead of the push service turned every
-    /// push into a 401.
     #[tokio::test]
     async fn the_vapid_token_expires_well_inside_the_cap_that_rfc_8292_sets() {
         let (_, _, keys) = a_receiver();

@@ -1,13 +1,5 @@
-//! Backup as one unit: the control database, every tenant database and every
-//! tenant's vectors, in one directory with a checksummed manifest.
-//!
-//! Design: `docs/superpowers/specs/2026-10-17-backup-restore-design.md`. This
-//! module takes, checks and restores an archive, and verifies that the stores
-//! agree.
-//!
-//! The archive is as sensitive as the instance — `control.db` carries sessions,
-//! token hashes and the VAPID private key — so every directory here is created
-//! `0700` and every file `0600` before its first byte is written.
+//! Backup, check and restore of control, tenant databases and vectors (docs/superpowers/specs/2026-10-17-backup-restore-design.md).
+//! `control.db` holds sessions and the VAPID key, so every directory is `0700` and every file `0600` before its first byte.
 
 pub mod generations;
 pub mod lock;
@@ -22,10 +14,7 @@ use std::fs::{DirBuilder, File, OpenOptions};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-/// A new file only its owner can read, refused if anything is already there.
-///
-/// `create_new` rather than truncate: an archive is never written over, and a
-/// name that already exists means two writers or a stale archive.
+/// `create_new`: an existing name means two writers or a stale archive.
 pub fn create_private(path: &Path) -> Result<File> {
     OpenOptions::new()
         .write(true)
@@ -35,8 +24,7 @@ pub fn create_private(path: &Path) -> Result<File> {
         .map_err(|e| Error::Store(format!("could not create {}: {e}", path.display())))
 }
 
-/// A directory only its owner can enter. An existing one is accepted only if it
-/// is empty, and is narrowed to `0700` before anything goes into it.
+/// An existing directory is accepted only if empty, and is narrowed to `0700` first.
 pub fn create_private_dir(path: &Path) -> Result<()> {
     if path.exists() {
         let mut entries = std::fs::read_dir(path).map_err(|e| {

@@ -9,17 +9,15 @@ use axum::routing::get;
 #[folder = "assets/"]
 pub struct Assets;
 
-/// What `/assets/app.js?v=` carries, so a year-long cache stays safe.
-///
-/// Computed in `build.rs` from the bytes of the files themselves; see
-/// `stamp_assets` there for why the URL has to move at all. Read by
-/// `layout.html`, which is the one place the pages name these three files.
-///
-/// One stamp over all of them rather than one each: a change to any moves every
-/// URL, which costs a needless re-fetch of two small files and buys never
-/// serving a new script beside an old library.
-pub fn stamp() -> &'static str {
-    env!("ASSET_STAMP")
+/// `/assets/<path>?v=<hash>`, so an immutable cache never serves stale bytes.
+pub fn url(path: &str) -> String {
+    match Assets::get(path) {
+        Some(f) => format!(
+            "/assets/{path}?v={}",
+            hex::encode(&f.metadata.sha256_hash()[..6])
+        ),
+        None => format!("/assets/{path}"),
+    }
 }
 
 fn content_type(path: &str) -> String {
@@ -32,18 +30,11 @@ fn content_type(path: &str) -> String {
     }
 }
 
-/// Embedded, but not public.
-///
-/// `build.rs` writes the browser packages under `assets/extension/`, which is
-/// the directory `rust-embed` takes wholesale. They are served by
-/// `web::extension` instead, behind the same authentication as everything else
-/// and with `no-store` — and neither of those means anything while the same
-/// bytes are reachable here anonymously with a year-long `max-age`.
+/// `build.rs` writes the browser packages here; `web::extension` serves them behind auth with `no-store`.
 const PRIVATE: [&str; 1] = ["extension/"];
 
 async fn serve(Path(path): Path<String>) -> Response {
-    // rust-embed matches on exact stored paths, so a traversal attempt simply
-    // finds nothing. Reject it explicitly anyway rather than relying on that.
+    // rust-embed would find nothing for a traversal anyway; refused explicitly.
     if path.contains("..") {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -63,28 +54,16 @@ async fn serve(Path(path): Path<String>) -> Response {
     }
 }
 
-/// How long a browser may keep an asset.
-///
-/// A year for everything the page references by name, because those are
-/// rebuilt with the binary. The manifest is the exception, for the same reason
-/// the service worker is: it is read once at install time and then held by the
-/// installed app, so a year-long copy of a stale `start_url` or a stale icon
-/// set outlives several deployments.
+/// A year for assets referenced by name; the manifest is held by the installed app, so it gets an hour.
 fn cache_control(path: &str) -> &'static str {
     if path.ends_with(".webmanifest") {
         "public, max-age=3600"
     } else {
-        "public, max-age=31536000"
+        "public, max-age=31536000, immutable"
     }
 }
 
-/// The service worker, from the root rather than from `/assets`.
-///
-/// Two reasons it cannot be an ordinary asset. A worker may only control paths
-/// under the directory it was served from, so one under `/assets` could not see
-/// a navigation to `/ui/search`. And it must not carry the year-long `max-age`
-/// the other assets do: an update has to be able to reach a phone that already
-/// installed the app.
+/// From the root: a worker under `/assets` could not control `/ui`, and it must not carry the year-long `max-age`.
 async fn service_worker() -> Response {
     match Assets::get("sw.js") {
         Some(file) => (
@@ -102,10 +81,23 @@ async fn service_worker() -> Response {
     }
 }
 
+#[derive(askama::Template)]
+#[template(path = "offline.html")]
+struct OfflineTemplate;
+
+async fn offline() -> Response {
+    use askama::Template;
+    match OfflineTemplate.render() {
+        Ok(html) => axum::response::Html(html).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
 fn routes<S: Clone + Send + Sync + 'static>() -> Router<S> {
     Router::new()
         .route("/assets/{*path}", get(serve))
         .route("/sw.js", get(service_worker))
+        .route("/offline", get(offline))
 }
 
 pub fn assets_router() -> Router<AppState> {
@@ -146,12 +138,10 @@ mod tests {
 
     #[tokio::test]
     async fn assets_are_public_and_cacheable() {
-        // Static assets carry no data, so they need no auth, and a long
-        // max-age keeps the UI snappy.
         let res = app()
             .oneshot(
                 Request::builder()
-                    .uri("/assets/htmx.min.js")
+                    .uri("/assets/vendor/htmx.min.js")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -168,10 +158,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_extension_packages_are_not_reachable_through_assets() {
-        // `build.rs` writes them under `assets/`, so they are embedded here
-        // whether or not they belong here. `web::extension` serves them behind
-        // authentication and with `no-store`; both are undone if the same
-        // bytes answer anonymously from this route with a year-long max-age.
         for path in [
             "/assets/extension/chrome.zip",
             "/assets/extension/firefox.xpi",
@@ -185,13 +171,6 @@ mod tests {
         }
     }
 
-    /// The tokenizer is not an asset and is not served.
-    ///
-    /// It lived in `assets/` and `rust_embed` takes that folder whole, so
-    /// 11 MB of vocabulary was embedded in the binary twice — once by
-    /// `budget.rs`'s `include_bytes!` and once by the asset table — and the
-    /// second copy answered anonymously at `/assets/tokenizer.json` under a
-    /// year-long `max-age`. It is in `vendor/` now, which nothing embeds.
     #[tokio::test]
     async fn the_tokenizer_is_not_reachable_through_assets() {
         let res = app()
@@ -212,8 +191,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_manifest_is_served_as_a_manifest() {
-        // A manifest sent as text/plain is ignored, and the install prompt
-        // never appears.
+        // A manifest sent as text/plain is ignored and the install prompt never appears.
         let res = app()
             .oneshot(
                 Request::builder()
@@ -225,17 +203,11 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(res.headers()["content-type"], "application/manifest+json");
-        // Not the year the other assets get: an installed app re-reads this,
-        // and a stale copy would outlive several deployments.
         assert_eq!(res.headers()["cache-control"], "public, max-age=3600");
     }
 
     #[test]
     fn the_manifest_declares_no_share_target() {
-        // The Web Share Target door was retired (engram#97): a platform share
-        // never carried the session cookie, so the system share sheet offered
-        // a door that always dropped what it was handed. The Android app is
-        // the phone's share sheet entry now.
         let m = Assets::get("manifest.webmanifest").expect("manifest");
         let v: serde_json::Value = serde_json::from_slice(&m.data).expect("valid json");
         assert!(v.get("share_target").is_none(), "share_target is back");
@@ -244,9 +216,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_service_worker_is_served_from_the_root_and_is_not_cached() {
-        // Under /assets it could not control /ui, and with the year-long
-        // max-age the other assets carry, an update could never reach a phone
-        // that already installed the app.
         let res = app()
             .oneshot(
                 Request::builder()
@@ -264,6 +233,29 @@ mod tests {
                 .starts_with("text/javascript")
         );
         assert_eq!(res.headers()["cache-control"], "no-cache");
+    }
+
+    #[tokio::test]
+    async fn every_asset_url_is_content_hashed_and_immutable() {
+        let u = url("js/theme.js");
+        let (path, v) = u.split_once("?v=").unwrap();
+        assert_eq!(path, "/assets/js/theme.js");
+        assert_eq!(v.len(), 12);
+        for uri in [u.clone(), format!("{path}?v=000000000000")] {
+            let res = app()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            assert!(
+                res.headers()["cache-control"]
+                    .to_str()
+                    .unwrap()
+                    .contains("immutable")
+            );
+        }
+        let hash = |p: &str| url(p).split_once("?v=").unwrap().1.to_string();
+        assert_ne!(hash("js/theme.js"), hash("js/prefs.js"));
     }
 
     #[tokio::test]

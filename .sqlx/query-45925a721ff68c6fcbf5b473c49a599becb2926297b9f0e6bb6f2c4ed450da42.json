@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT stage AS \"stage!\", started_at AS \"started_at!\", ended_at AS \"ended_at!\", outcome AS \"outcome!\", detail AS \"detail!\" FROM sweep_runs\n              WHERE stage = ? ORDER BY started_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "stage!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sweep_runs",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "name": "started_at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sweep_runs",
+            "name": "started_at"
+          }
+        }
+      },
+      {
+        "name": "ended_at!",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "sweep_runs",
+            "name": "ended_at"
+          }
+        }
+      },
+      {
+        "name": "outcome!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sweep_runs",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "name": "detail!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sweep_runs",
+            "name": "detail"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "45925a721ff68c6fcbf5b473c49a599becb2926297b9f0e6bb6f2c4ed450da42"
+}

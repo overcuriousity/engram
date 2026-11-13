@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(created_at) AS oldest FROM jobs WHERE subject = ? AND state = 'pending'",
+  "describe": {
+    "columns": [
+      {
+        "name": "oldest",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "0bfc60f2416f9e7ec8708798ce052c8aa69d77c0dcf31beb96fb3ac11eb505ea"
+}

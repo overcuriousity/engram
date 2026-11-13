@@ -1,13 +1,7 @@
 #!/bin/sh
-# Fetch the newest released engram binary for this machine and put it on PATH.
-#
-# POSIX sh, and nothing beyond curl, tar and a sha256 tool: the whole point of
-# a one-line installer is that it runs on the box you are already logged into,
-# which may be an Alpine container with no bash and no jq.
-#
-# Environment:
-#   ENGRAM_INSTALL_DIR   where to put the binary (default: see `pick_dir`)
-#   ENGRAM_VERSION       a specific tag, e.g. v2026.827.0 (default: the newest)
+# Fetch the newest released engram binary for this machine and put it on PATH; POSIX sh, curl, tar, sha256.
+# Offline: install.sh --archive engram-<version>-<target>-offline.tar.gz [--system] [--prefix DIR]
+# Environment: ENGRAM_INSTALL_DIR (default: see `pick_dir`), ENGRAM_VERSION (a tag; default: newest).
 set -eu
 
 REPO=overcuriousity/engram
@@ -19,9 +13,7 @@ need() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is needed and was not found"
 }
 
-# The two targets the release workflow builds, and no guessing beyond them: a
-# binary for the wrong architecture fails at exec with a message that says
-# nothing useful, so an unknown machine is told so here instead.
+# Only the two released targets: a wrong-architecture binary fails at exec with no useful message.
 pick_target() {
   case "$(uname -s)" in
     Linux) ;;
@@ -34,13 +26,8 @@ pick_target() {
   esac
 }
 
-# Releases are cut as pre-releases while the version is under 1.0, and
-# `/releases/latest` skips those — it would answer 404 here forever. The list
-# endpoint comes back newest first; drafts are not visible to an anonymous
-# caller, so the first entry is the newest published release.
-#
-# Read with sed rather than jq, which is not on a fresh server. Splitting on
-# `,` and `{` first means this does not depend on the API pretty-printing.
+# `/releases/latest` skips pre-releases; the list is newest first. sed, not jq: a fresh server has none.
+# shellcheck disable=SC2020 # both separators become newlines on purpose
 newest_tag() {
   curl -fsSL -H 'Accept: application/vnd.github+json' \
     "https://api.github.com/repos/$REPO/releases?per_page=10" |
@@ -49,9 +36,7 @@ newest_tag() {
     head -n 1
 }
 
-# Somewhere on PATH that this user can actually write to, without reaching for
-# sudo: a piped script silently escalating is a surprise, and one that prompts
-# for a password mid-pipe cannot read the answer anyway.
+# Never sudo: a piped script cannot read a password prompt.
 pick_dir() {
   if [ -n "${ENGRAM_INSTALL_DIR:-}" ]; then
     echo "$ENGRAM_INSTALL_DIR"
@@ -73,6 +58,57 @@ verify() {
   fi
 }
 
+# An offline bundle: no network, checksums verified, ~/.local by default, never sudo.
+install_archive() {
+  archive=$1 system=$2 prefix=$3
+  [ -f "$archive" ] || die "archive not found: $archive"
+  if [ "$system" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
+    die "run as root for --system; this script never calls sudo"
+  fi
+  work=$(mktemp -d)
+  trap 'rm -rf "$work"' EXIT INT TERM
+  tar -C "$work" -xzf "$archive"
+  set -- "$work"/*/
+  [ $# -eq 1 ] && [ -d "$1" ] || die "the archive should contain exactly one directory"
+  cd "${1%/}"
+  if ! sha256sum -c --quiet SHA256SUMS > "$work/check.log" 2>&1; then
+    bad=$(grep -v ': OK$' "$work/check.log" | head -n 1 | cut -d: -f1)
+    die "checksum mismatch: ${bad:-SHA256SUMS}; the bundle is damaged or was altered"
+  fi
+  mkdir -p "$prefix/bin"
+  install -m 0755 engram "$prefix/bin/engram"
+  say "installed $prefix/bin/engram"
+  if [ "$system" -eq 1 ]; then
+    install -m 0644 engram.service /etc/systemd/system/engram.service
+    mkdir -p /etc/engram
+    if [ ! -f /etc/engram/config.toml ]; then
+      install -m 0644 config.example.toml /etc/engram/config.toml
+      say "wrote /etc/engram/config.toml; set server.public_url before starting"
+    fi
+    say "start it with: systemctl daemon-reload && systemctl enable --now engram"
+  fi
+  doc="$prefix/share/engram"
+  mkdir -p "$doc"
+  for f in nginx.conf AIRGAP.md THIRD-PARTY-LICENSES CHANGELOG.md config.example.toml; do
+    [ -f "$f" ] && install -m 0644 "$f" "$doc/$f"
+  done
+  say "reverse proxy template: $doc/nginx.conf"
+}
+
+archive="" system=0 prefix="${HOME:-}/.local"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --archive) [ $# -ge 2 ] || die "--archive needs a file"; archive=$2; shift 2 ;;
+    --system) system=1; prefix=/usr/local; shift ;;
+    --prefix) [ $# -ge 2 ] || die "--prefix needs a directory"; prefix=$2; shift 2 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+if [ -n "$archive" ]; then
+  install_archive "$archive" "$system" "$prefix"
+  exit 0
+fi
+
 need curl
 need tar
 
@@ -80,12 +116,11 @@ target=$(pick_target)
 tag=${ENGRAM_VERSION:-$(newest_tag)}
 [ -n "$tag" ] || die "could not find a release; check https://github.com/$REPO/releases"
 version=${tag#v}
-archive="engram-${version}-${target}.tar.gz"
+archive="engram-${version}-${target}-offline.tar.gz"
 base="https://github.com/$REPO/releases/download/$tag"
 
 tmp=$(mktemp -d)
-# Including on the failure paths above: a half-downloaded archive left in /tmp
-# is the one piece of litter an installer has no excuse for.
+# Including on failure: no half-downloaded archive left in /tmp.
 trap 'rm -rf "$tmp"' EXIT INT TERM
 
 say "engram $tag ($target)"
@@ -94,8 +129,7 @@ curl -fsSL -o "$tmp/$archive" "$base/$archive" ||
 curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS" ||
   die "$tag publishes no SHA256SUMS, so this download cannot be checked"
 
-# Checked before anything is unpacked, and the archive is refused rather than
-# reported: an installer that carries on after a bad checksum has none.
+# Refused before anything is unpacked.
 ( cd "$tmp" && verify "$archive" ) ||
   die "$archive does not match the published checksum; nothing was installed"
 
@@ -105,8 +139,7 @@ binary="$tmp/engram-${version}-${target}/engram"
 
 dir=$(pick_dir)
 mkdir -p "$dir" || die "cannot create $dir; set ENGRAM_INSTALL_DIR to somewhere writable"
-# Written under a temporary name and moved into place, so an install that is
-# interrupted never leaves a truncated binary where a working one was.
+# Moved into place, so an interrupted install never leaves a truncated binary.
 cp "$binary" "$dir/.engram.new" || die "cannot write to $dir; set ENGRAM_INSTALL_DIR to somewhere writable"
 chmod 755 "$dir/.engram.new"
 mv "$dir/.engram.new" "$dir/engram"
@@ -115,8 +148,7 @@ say "installed $dir/engram"
 
 case ":${PATH}:" in
   *":$dir:"*) ;;
-  # Said rather than fixed: editing somebody's shell profile from inside a
-  # piped script is not this program's business.
+  # Said, not fixed: a piped script does not edit shell profiles.
   *) say "note: $dir is not on your PATH" ;;
 esac
 
@@ -127,6 +159,6 @@ Next:
   engram --print-config                    # what engram resolved, secrets redacted
   engram                                   # needs Qdrant answering on its REST port
 
-config.example.toml, cli.example.toml and engram.service ship in the same
-archive, at https://github.com/$REPO/releases/tag/$tag
+config.example.toml, cli.example.toml and deploy/engram.service ship in the
+same archive, at https://github.com/$REPO/releases/tag/$tag
 EOF

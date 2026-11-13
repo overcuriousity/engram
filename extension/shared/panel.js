@@ -8,22 +8,14 @@ function say(message, kind) {
   el.classList.toggle('good', kind === 'good');
 }
 
-/// What the model is doing while it does it, replaced continually and gone the
-/// moment the answer is complete. Separate from `say`, which reports what
-/// happened and stays until something else happens.
+/// Replaced continually and gone once the answer is complete, unlike `say`.
 function thinking(message) {
   const el = $('thinking');
   el.hidden = !message;
   el.textContent = message || '';
 }
 
-/// The typed address reduced to a bare origin.
-///
-/// It becomes a host permission match pattern, which admits a scheme, a host
-/// and a port and nothing else — a path or a trailing slash makes the request
-/// throw rather than fail. A bare host is read as `https`, because the one
-/// deployment that is legitimately plain `http` is a local one that will have
-/// been typed with its port anyway.
+/// A host-permission match pattern admits only scheme, host and port; a bare host is read as `https`.
 function cleanOrigin(raw) {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -35,19 +27,10 @@ function cleanOrigin(raw) {
   }
 }
 
-/// Where the deployment is reached, as the last `reflectPairing` read it.
-///
-/// Cached so that rendering a row is synchronous. Two overlapping renders that
-/// each awaited storage in the middle could interleave — the citations of an
-/// ask arriving into a list its `done` frame had already replaced — and the
-/// cure for that race is not to have it.
+/// Cached so that rendering a row is synchronous and two renders cannot interleave.
 let deployment = null;
 
-/// Show the pairing face or the paired face, and answer which one it is.
-///
-/// Called after anything that can change the stored token — including a failed
-/// call, because a 401 clears it. Without that the form would stay hidden and
-/// there would be no way back to paired.
+/// Called after a failed call too, since a 401 clears the token.
 async function reflectPairing() {
   const cfg = await engramApi.config();
   deployment = cfg ? cfg.origin : null;
@@ -57,17 +40,14 @@ async function reflectPairing() {
   return cfg;
 }
 
-/// The guard every action starts with. Unpaired is not an error to report and
-/// move on from: it is a state with one way out, so it shows the way out.
 async function requirePaired() {
   if (await reflectPairing()) return true;
-  say('Not paired yet — enter the address engram is reached at.', 'error');
+  say('Not paired. Enter the engram address.', 'error');
   $('origin').focus();
   return false;
 }
 
-/// Report a failure and re-read the pairing state, because the failure may
-/// have been the one that cleared the token.
+/// The failure may have cleared the token.
 async function fail(e) {
   thinking('');
   say(e.message, 'error');
@@ -77,15 +57,11 @@ async function fail(e) {
 $('pair').addEventListener('click', async () => {
   const origin = cleanOrigin($('origin').value);
   if (!origin) {
-    say('That is not an address — try https://engram.example.', 'error');
+    say('Not an address; enter the engram host name.', 'error');
     return;
   }
 
-  // The first thing awaited in this handler, and deliberately so.
-  // `permissions.request` is only granted while the browser still counts this
-  // click as a user gesture, and awaiting anything at all before it spends
-  // that gesture: the browser answers "this function must be called during a
-  // user gesture" and pairing cannot complete.
+  // First, before any `await`: `permissions.request` needs the click's user gesture.
   let granted;
   try {
     granted = await engramShim.permissions.request({ origins: [origin + '/*'] });
@@ -109,43 +85,25 @@ $('pair').addEventListener('click', async () => {
   await refreshRecent();
 });
 
-// Forgetting hands back the host permission along with the token. Leaving the
-// permission granted for a deployment this extension can no longer reach is
-// access held for no reason. The token itself lives on server-side until it is
-// revoked under Housekeeping, and the panel says so rather than implying it
-// has done more than it has.
+// Forgetting hands back the host permission too; the token lives on server-side until revoked.
 $('forget').addEventListener('click', async () => {
   const cfg = await engramApi.config();
   await engramApi.forget();
   if (cfg) {
     await engramShim.permissions.remove({ origins: [cfg.origin + '/*'] }).catch(() => {});
   }
-  // And the permission to read pages, for the same reason: with no deployment
-  // to send a capture to, being able to read every page is access held for
-  // nothing. It is asked for again the next time Capture needs it.
+  // Asked for again the next time Capture needs it.
   await engramShim.permissions.remove({ origins: ALL_HOSTS }).catch(() => {});
   hasAllHosts = false;
   clearResults();
   $('recent-list').textContent = '';
-  say('Forgotten. The token is still listed under Housekeeping until revoked.');
+  say('Forgotten; revoke the token in Settings.');
   await reflectPairing();
 });
 
-/// Reading a page needs either `activeTab` or a host permission for it.
-///
-/// `activeTab` is granted for the tab the invoking gesture happened in and for
-/// no other. A context menu entry therefore always has it, and the panel only
-/// has it for the tab it was opened from — but a side panel stays open across
-/// tab switches, so by the time Capture is pressed the operator is very often
-/// somewhere else, and the injection fails with a browser error the panel had
-/// no business showing raw.
-///
-/// The way out is a real host permission, which the manifest declares as
-/// optional and which is asked for once. Both are tracked here so the click
-/// handler can decide whether to ask *before* it awaits anything: like
-/// pairing, `permissions.request` is only granted while the click still counts
-/// as a user gesture, and awaiting first spends it.
-const ALL_HOSTS = ['https://*/*', 'http://*/*'];
+/// `activeTab` covers only the tab the panel was opened from, and a side panel survives tab switches.
+/// Tracked so the click handler can ask for host permission before awaiting anything.
+const ALL_HOSTS = ['https', 'http'].map((scheme) => scheme + '://*/*');
 let hasAllHosts = false;
 let openedForTabId = null;
 let tabChanged = false;
@@ -160,17 +118,12 @@ engramShim.tabs
   .then(([tab]) => { openedForTabId = tab ? tab.id : null; })
   .catch(() => {});
 
-// Only the id is read, which every browser gives without a permission — the
-// url would need one. Switching back to the tab the panel was opened from
-// restores the grant, so this is assigned rather than latched.
+// Only the id, which needs no permission; returning to the original tab restores the grant.
 engramShim.tabs.onActivated.addListener((info) => {
   tabChanged = info.tabId !== openedForTabId;
 });
 
-/// Ask the active tab for its HTML, or for the selection's.
-///
-/// Two injections rather than one: the scope is set on the page first, so the
-/// second stays an ordinary file rather than a string this script assembles.
+/// Two injections: the scope is set first, so the second stays an ordinary file.
 async function grab(scope) {
   const [tab] = await engramShim.tabs.query({ active: true, currentWindow: true });
   if (!tab) throw new Error('No page to capture.');
@@ -187,21 +140,17 @@ async function grab(scope) {
     });
     return injected && injected.result;
   } catch (e) {
-    // No grant for this tab, or a page no extension may read at all — a
-    // browser settings page, an add-on listing, a PDF viewer. "Cannot access
-    // contents of the page" is true and useless; this says what to do.
+    // No grant, or a page no extension may read; the browser's own message says nothing useful.
     throw new Error(
-      'engram cannot read this tab. Right-click the page and choose ' +
-      '“Capture this page”, or allow engram to read pages when it asks.');
+      'Cannot read this tab; right-click it and choose “Capture this page”.');
   }
 }
 
-/// What `ingest` decided, in the vocabulary the web UI already uses. Not a
-/// second set of words for the same three cases.
+/// The web UI's vocabulary for the same three cases.
 function verdict(out) {
   if (out.duplicate) say('Already captured.');
-  else if (out.link_unread) say('Saved the link — the page could not be read (' + out.link_unread + '), so it is tried again later.');
-  else if (out.near_duplicate) say('Captured. It looks like something you already have — compare on Insights.');
+  else if (out.link_unread) say('Link saved; reading again later (' + out.link_unread + ').');
+  else if (out.near_duplicate) say('Captured; similar to a stored source.');
   else say('Captured.', 'good');
 }
 
@@ -217,10 +166,7 @@ async function capture(scope) {
     const out = await engramApi.call('/api/v1/corpora', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      // `scope` travels with the capture because the server cannot tell a
-      // highlighted fragment from a page that rendered to almost nothing, and
-      // it applies an extraction floor to the second. Three sentences picked
-      // out on purpose are not a login wall.
+      // The server applies an extraction floor to pages but not to a highlighted fragment.
       body: JSON.stringify({ html: page.html, url: page.url, title: page.title, scope }),
     });
     verdict(out);
@@ -231,43 +177,24 @@ async function capture(scope) {
 }
 
 $('capture-page').addEventListener('click', async () => {
-  // First, and before anything is awaited. The panel is open on a tab it was
-  // not opened from and holds no host permission, so the injection is about to
-  // fail — asking now, while the click is still a user gesture, is the only
-  // moment the browser will honour the request. A refusal is not fatal: the
-  // capture goes ahead and `grab` reports what it could not read.
+  // Asked while the click is still a user gesture; a refusal is not fatal.
   if (tabChanged && !hasAllHosts) {
     try {
       hasAllHosts = await engramShim.permissions.request({ origins: ALL_HOSTS });
     } catch (e) {
-      // Some browsers throw rather than answering false. Same outcome.
+      // Some browsers throw rather than answering false.
     }
   }
   await capture('page');
 });
 
-/// The box, and the three things that can be done with what is in it.
-///
-/// Typing searches. The two buttons ask and capture. Which of the three
-/// happens is decided by a button or by the act of typing, and never by the
-/// panel noticing how long the text is or that it has a newline in it: a box
-/// that changed its mind about what it was would be a box you could not paste
-/// into without reading the screen first.
+/// Typing searches; the buttons ask and capture. Never decided by the text's length or shape.
 const box = $('box');
 
-/// Above this the box is no longer plausibly a query, and the live search
-/// stops firing. Nothing else changes: the buttons still act on the text, the
-/// box is still the same box, and a line says why the results stopped moving.
-/// The alternative was embedding a pasted chapter on the deployment on every
-/// pause in typing.
-///
-/// Deliberately generous — several paragraphs rather than one. The cost this
-/// guards against is a pasted document embedded every 200ms, and stopping a
-/// search that somebody meant is the worse failure of the two.
+/// Past this the live search stops, so a pasted chapter is not embedded on every pause. Generous on purpose.
 const MAX_QUERY = 2000;
 
-/// Grow to fit the text, to a point. Past that the box scrolls rather than
-/// pushing the results off the panel.
+/// Past the cap the box scrolls rather than pushing the results off the panel.
 function fit() {
   box.style.height = 'auto';
   const max = Math.round(window.innerHeight * 0.4);
@@ -276,7 +203,6 @@ function fit() {
   box.style.overflowY = wanted > max ? 'auto' : 'hidden';
 }
 
-/// The two verbs act on text; with none there is nothing to act on.
 function reflectVerbs() {
   const empty = !box.value.trim();
   $('ask').disabled = empty;
@@ -290,12 +216,7 @@ function hint(message) {
 }
 
 let searchTimer;
-// The settled pass, the same contract as the web UI's workspace: the
-// keystroke's search answers in vector order, and once the operator stops
-// typing the same question is asked once more with `rerank=true`. On a
-// deployment whose scope covers search that buys the reranked order; on one
-// without, the server answers in the same vector order and the identical
-// list is left untouched below.
+// The settled pass, as in the web UI: the same query once more with `rerank=true`.
 let refineTimer;
 
 box.addEventListener('input', () => {
@@ -303,18 +224,11 @@ box.addEventListener('input', () => {
   reflectVerbs();
   clearTimeout(searchTimer);
   clearTimeout(refineTimer);
-  // Debounced, because this is search-as-you-type and every keystroke would
-  // otherwise be an embedding call on the deployment.
+  // Every keystroke would otherwise be an embedding call.
   searchTimer = setTimeout(runSearch, 200);
 });
 
-/// Render hits as rows linking back to the deployment.
-///
-/// Built with `createElement` and `textContent` rather than assembled as an
-/// HTML string: artifact text is whatever a captured page contained, and
-/// putting that through `innerHTML` would run it. It is also why the ask
-/// stream sends this panel values where the web UI's stream sends rendered
-/// fragments.
+/// `createElement`/`textContent`, never `innerHTML`: artifact text is whatever a captured page contained.
 function renderHits(hits, into) {
   for (const h of hits) {
     const el = document.createElement('div');
@@ -325,8 +239,7 @@ function renderHits(hits, into) {
     link.href = deployment + '/ui/artifacts/' + h.artifact_id;
     link.target = '_blank';
     link.rel = 'noreferrer noopener';
-    // The server names a passage by its note when it has no heading of its
-    // own; what reaches here untitled has neither, and its opening is its name.
+    // An untitled hit has no heading and no note title; its opening is its name.
     link.textContent = h.title || label({ raw_text: h.text }) || h.artifact_id;
     title.appendChild(link);
 
@@ -338,44 +251,22 @@ function renderHits(hits, into) {
   }
 }
 
-/// Which action owns the results.
-///
-/// Search and ask both write there and both are slow enough to overlap: the
-/// keystroke that finishes a question arms a search that fires 200ms after the
-/// click on ask, and two searches can be in flight at once over a deployment
-/// that answers the first one second. Each action takes a turn before it goes
-/// to the wire, and anything arriving for a turn that is no longer the current
-/// one is dropped rather than rendered under whatever replaced it.
+/// Search and ask overlap; a response for a turn that is no longer current is dropped.
 let turn = 0;
 
-/// The ask currently on the wire, so that abandoning one closes its request.
-///
-/// Dropping its frames is not enough. The request behind an abandoned ask goes
-/// on retrieving and prompting, and every one of those calls holds the
-/// deployment's interactive lane — so the next ask waits behind an answer
-/// nobody will read. Aborting stops the rounds that have not started yet. The
-/// model call already in flight finishes regardless: the lane is held across a
-/// dropped reader on purpose, so the worker cannot slip a window in against
-/// hardware that is still busy.
+/// Aborting frees the deployment's interactive lane for the next ask.
 let askAbort = null;
 
 function abandonAsk() {
   if (askAbort) {
     askAbort.abort();
     askAbort = null;
-    // The progress line goes with it. `clearResults` empties it too, but a
-    // search defers that until its hits arrive, and an abandoned ask's "Also
-    // looking for: …" left standing under a failure describes work that was
-    // cancelled.
+    // A search defers `clearResults`, so an abandoned ask's progress line would otherwise stand.
     thinking('');
   }
 }
 
-/// Empty the results pane. Turn-taking is the caller's: back and capture empty
-/// it without putting anything on the wire, and a search empties it only once
-/// its own hits have arrived, so that the pane holds the last answer until
-/// there is something to put in its place rather than blinking on every pause
-/// in typing.
+/// A search empties the pane only once its hits arrive, so it does not blink on every pause.
 function clearResults() {
   $('results').textContent = '';
   $('back').hidden = true;
@@ -392,22 +283,16 @@ async function runSearch() {
     return;
   }
   if (q.length > MAX_QUERY) {
-    // No turn taken and nothing cleared: what is on screen stays, and the hint
-    // is there to say why it stopped moving.
-    hint('Longer than a query, so searching stopped. Ask and Capture still act on it.');
+    // No turn taken: what is on screen stays, and the hint says why.
+    hint('Too long to search; Ask or Capture it.');
     return;
   }
   hint('');
   if (!(await requirePaired())) return;
-  // From here this search owns the results, and an ask still streaming into
-  // them does not.
   const mine = ++turn;
   abandonAsk();
   try {
-    // `door=extension` is how the judging page tells a query typed while
-    // reading from one typed in the web UI. Only this value is honoured
-    // server-side; a client cannot claim to be `ask` or `judge`.
-    // `.items`: every list the API answers is `{ items, next }`.
+    // Only `door=extension` is honoured server-side; a client cannot claim `ask` or `judge`.
     const hits = (await engramApi.call(
       '/api/v1/search?door=extension&q=' + encodeURIComponent(q))).items;
     if (mine !== turn) return;
@@ -418,9 +303,7 @@ async function runSearch() {
       return;
     }
     renderHits(hits, $('results'));
-    // Long enough past the 200ms debounce to mean "settled", short enough
-    // that the refinement still reads as part of the same answer — the same
-    // quiet window the web UI waits.
+    // The same settle window the web UI waits.
     clearTimeout(refineTimer);
     refineTimer = setTimeout(() => refineSearch(q, mine, hits), 500);
   } catch (e) {
@@ -429,10 +312,7 @@ async function runSearch() {
   }
 }
 
-/// The settled query, asked once more with the reranker on. Unattended, so it
-/// is held to less than a search: a failure keeps the vector-order list
-/// already on screen and says nothing, and an answer that arrives after
-/// anything else took the pane — a keystroke, an ask, back — is dropped.
+/// Unattended: a failure keeps the list silently, and a late answer is dropped.
 async function refineSearch(q, owner, fast) {
   if (owner !== turn) return;
   let hits;
@@ -443,18 +323,13 @@ async function refineSearch(q, owner, fast) {
     return;
   }
   if (owner !== turn) return;
-  // The same rows in the same order — a deployment that does not rerank
-  // search, or one whose reranker agreed with the vector order. Nothing to
-  // repaint, and no reason to rebuild nodes under a reading operator.
+  // Same order: nothing to repaint under a reading operator.
   if (
     hits.length === fast.length &&
     hits.every((h, i) => h.artifact_id === fast[i].artifact_id)
   ) return;
   clearResults();
-  // The same branch `runSearch` has, for the same reason. A rerank that comes
-  // back empty over a list the operator is reading would otherwise clear the
-  // node and render nothing into it, leaving a blank pane that says neither
-  // "nothing" nor anything else.
+  // As in `runSearch`: an empty rerank must not blank the pane.
   if (!hits.length) {
     $('results').textContent = 'Nothing.';
     return;
@@ -462,14 +337,7 @@ async function refineSearch(q, owner, fast) {
   renderHits(hits, $('results'));
 }
 
-// An ask runs for as long as the model takes — `infer.ask.timeout_secs`
-// defaults to 900 — and the panel stays usable throughout: the operator can
-// press back, type something else, and start another.
-//
-// Back empties the pane itself rather than leaving it to the search it starts.
-// That search returns without touching anything when the box holds more than
-// `MAX_QUERY`, and back that visibly does nothing is worse than back that
-// shows an empty pane.
+// Back empties the pane itself: the search it starts does nothing past `MAX_QUERY`.
 $('back').addEventListener('click', () => {
   turn++;
   abandonAsk();
@@ -482,15 +350,7 @@ $('ask').addEventListener('click', async () => {
   const q = box.value.trim();
   if (!q) return;
 
-  // The keystroke that finished the question armed a search 200ms ago. Left
-  // armed, it fires once this answer's nodes are on screen and empties the
-  // pane out from under a stream that goes on writing into nodes no longer in
-  // the document — an answer that streams into nowhere. Disarmed before the
-  // await below rather than after it, or the 200ms can elapse while pairing is
-  // read from storage and the search that fires takes the higher turn, whose
-  // `abandonAsk` aborts the ask this click just asked for. The refine armed
-  // by that search's own hits is disarmed with it — its turn-guard would
-  // drop the answer anyway, but there is no reason to put it on the wire.
+  // Disarmed before the await, or the armed search takes the higher turn and aborts this ask.
   clearTimeout(searchTimer);
   clearTimeout(refineTimer);
 
@@ -510,22 +370,17 @@ $('ask').addEventListener('click', async () => {
   const sources = document.createElement('div');
   $('results').append(answer, sources);
 
-  // Whether the stream said how it ended. A body that simply stops — a proxy
-  // cutting a long answer, an intermediary closing at an idle deadline —
-  // resolves the read without throwing, and without this the panel would sit on
-  // "Retrieving…" over half an answer for as long as it is left open.
+  // A body that simply stops (a proxy cut) resolves without throwing.
   let ended = false;
 
   try {
     await engramApi.stream('/api/v1/ask/stream', { q }, ask.signal, (name, data) => {
       if (mine !== turn) return;
       switch (name) {
-        // How wide the net was and how much of it the model will see. Said out
-        // loud because a missing citation is otherwise silent.
+        // Said aloud, because a missing citation is otherwise silent.
         case 'retrieved':
           thinking(data.shown + ' of ' + data.retrieved + ' excerpts kept…');
           break;
-        // Round two: the subjects the model said were still missing.
         case 'needs':
           thinking('Also looking for: ' + data.queries.join(', '));
           break;
@@ -540,9 +395,7 @@ $('ask').addEventListener('click', async () => {
           if (!$('thinking').hidden) thinking('');
           answer.textContent += data.text;
           break;
-        // The whole answer, replacing the draft that streamed in. What is
-        // finally on screen is what the server stands behind rather than a
-        // concatenation this panel assembled.
+        // What the server stands behind, not the streamed draft.
         case 'done':
           ended = true;
           thinking('');
@@ -560,26 +413,22 @@ $('ask').addEventListener('click', async () => {
     });
     if (mine === turn && !ended) {
       thinking('');
-      say('The connection closed before the answer finished.', 'error');
+      say('Connection closed before the answer finished.', 'error');
     }
   } catch (e) {
-    // An abandoned ask throws where it was aborted, and that is this panel's
-    // own doing rather than news.
+    // An abort is this panel's own doing, not news.
     if (mine === turn) await fail(e);
   } finally {
     if (askAbort === ask) askAbort = null;
   }
 });
 
-/// What the answer does not say about itself, said beside it.
 function closing(d) {
   const notes = [];
   if (d.abstained) notes.push('The base had nothing for this.');
   if (d.dropped) notes.push(d.dropped + ' more were retrieved but did not fit.');
   if (d.truncated) notes.push('The answer stopped at its output ceiling.');
-  // Literals the answer carries that no excerpt it was shown does. The one
-  // place a model writes something read as fact, so what it wrote alone is
-  // named rather than left to be spotted.
+  // Literals no excerpt carries are named, not left to be spotted.
   if (d.unsupported && d.unsupported.length) {
     notes.push('In no excerpt: ' + d.unsupported.join(', ') + '.');
   }
@@ -597,8 +446,7 @@ $('capture-text').addEventListener('click', async () => {
       body: JSON.stringify({ text }),
     });
     verdict(out);
-    // Cleared, because the text is now somewhere it will be found again and a
-    // box still holding it invites capturing it twice.
+    // Cleared, so the text is not captured twice.
     box.value = '';
     fit();
     reflectVerbs();
@@ -612,11 +460,7 @@ $('capture-text').addEventListener('click', async () => {
   }
 });
 
-/// What this deployment has lately taken in.
-///
-/// The point is not browsing; it is that "Captured." stops being a claim the
-/// panel makes about itself. A capture that never made it past the queue shows
-/// its state here rather than looking exactly like one that did.
+/// A capture stuck in the queue shows its state here.
 const RECENT = 6;
 let recentOpen = false;
 
@@ -627,18 +471,12 @@ $('recent-toggle').addEventListener('click', async () => {
   if (recentOpen) await refreshRecent();
 });
 
-/// A paste has no title, so it is named by its own first line — the same thing
-/// a person would call it. Empty when there is no line either, so the caller
-/// picks what stands in.
+/// Empty when there is no line, so the caller picks the stand-in.
 function label(c) {
   if (c.title_hint) return c.title_hint;
   const first = (c.raw_text || '').split('\n').find((l) => l.trim());
   if (!first) return '';
-  // The same front trim the server's `stand_in_title` does: a list dash, a
-  // heading's hashes, a quote mark are structure rather than subject, and a
-  // name that opens with them names the markup. Without this the panel showed
-  // `- schneller Schreibzugriff` and `## 3.4.2 FESTE MFT RECORDS` where the
-  // CLI, MCP and web doors all showed the words alone.
+  // The same front trim as the server's `stand_in_title`: list dashes, hashes and quote marks are markup.
   const clipped = first.trim().replace(/^[-–—*#>·•|\s]+/, '').trim() || first.trim();
   return clipped.length > 60 ? clipped.slice(0, 60) + '…' : clipped;
 }
@@ -648,8 +486,7 @@ async function refreshRecent() {
   if (!(await engramApi.config())) return;
   const list = $('recent-list');
   try {
-    // Every list the API answers is `{ items, next }`. One page is all this
-    // shows, so `next` is not followed.
+    // One page only; `next` is not followed.
     const rows = (await engramApi.call('/api/v1/corpora?limit=' + RECENT)).items;
     list.textContent = '';
     if (!rows.length) {
@@ -664,10 +501,7 @@ async function refreshRecent() {
       link.href = deployment + '/ui/corpora/' + c.id;
       link.target = '_blank';
       link.rel = 'noreferrer noopener';
-      // The server's label: a list row no longer carries `raw_text` to build
-      // one from, and the server's is the one every other door shows. Same
-      // floor the hit rows carry — an empty anchor is an invisible,
-      // unclickable row.
+      // The server's label, as every other door shows; the id keeps the anchor clickable.
       link.textContent = c.label || c.id;
 
       const state = document.createElement('span');
@@ -678,15 +512,11 @@ async function refreshRecent() {
       list.appendChild(row);
     }
   } catch (e) {
-    // Not `fail`: the recent list is context, and a deployment that cannot
-    // answer this has already said so on whatever action asked for it. A
-    // second red line under it would be the same news twice.
+    // Not `fail`: the action that failed has already said so.
     list.textContent = '';
   }
 }
 
-// Work handed over from the background script — a context-menu entry or an
-// omnibox query.
 function doWork(msg) {
   if (!msg) return;
   if (msg.type === 'capture') capture(msg.scope);
@@ -700,17 +530,12 @@ function doWork(msg) {
 
 engramShim.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   doWork(msg);
-  // Answered, and that is the whole point of answering. A listener that
-  // returns without calling this closes the port, which the sender sees as a
-  // delivery failure — so the background script would keep work it had
-  // already handed over and replay it later against a different tab.
+  // Without a response the sender sees a delivery failure and would replay the work later.
   sendResponse(true);
   return false;
 });
 
-// A panel that was closed when the menu entry fired missed the message: it
-// had no listener yet. The background script parks anything undelivered, and
-// this is the panel collecting it.
+// Collects work parked while the panel had no listener.
 engramShim.runtime.sendMessage({ type: 'pending' }).then(doWork).catch(() => {});
 
 fit();

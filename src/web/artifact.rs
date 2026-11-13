@@ -1,14 +1,5 @@
-//! One artifact, read in full: the detail pane and everything done to it
-//! from there.
-//!
-//! The third screen out of `web::ui`. What an artifact says, where it came
-//! from, what it was written from and what keeps being retrieved beside it —
-//! and the writes a reader makes while looking at it: an edit, a deletion, a
-//! dismissed neighbour, a dwell, a corpus marked reviewed.
-//!
-//! `link_citations` is here rather than with the markdown renderer because
-//! what it links are *this pane's* excerpt numbers; the search rail imports
-//! it for the same reason it imports the rest of the pane's vocabulary.
+//! One artifact read in full: the detail pane and the writes made from it.
+//! `link_citations` lives here because it links this pane's excerpt numbers.
 
 use crate::error::{Error, Result};
 use crate::fmt::{ago, ago_or_ahead};
@@ -26,20 +17,14 @@ use axum::extract::{Form, Path, Query};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 
-/// Neighbours shown beside an artifact. A short list, because this is a way
-/// out of the pane rather than a second result rail.
+/// Short: a way out of the pane, not a second result rail.
 const RELATED_LIMIT: usize = 5;
 
-/// A chunk beside the source lines it claims.
 pub struct ArtifactDetail {
     pub id: String,
-    /// The name a writer gave this text, or empty where nobody did — a
-    /// passage and a note have none. The pane writes no heading element for an
-    /// empty one; see `title_of`.
+    /// Empty where nobody named it; the pane then writes no heading (see `title_of`).
     pub title: String,
-    /// What a list of names calls this artifact: `title` where there is one,
-    /// and otherwise the opening of the text. Only the browser tab and the
-    /// history entry use it — they are a list of names and cannot show a card.
+    /// `title`, else the text's opening; only the browser tab and history use it.
     pub tab: String,
     /// Sanitized by `markdown::render`. Rendered with `|safe`.
     pub html: String,
@@ -47,108 +32,58 @@ pub struct ArtifactDetail {
     pub tags: Vec<String>,
     pub flags: Vec<String>,
     pub flag_detail: Option<String>,
-    /// The artifact this one was hidden in favour of. Opening a hidden artifact
-    /// by link has to say why it is not in results, or it reads as a bug.
+    /// Opening a hidden artifact by link has to say why it is not in results.
     pub superseded_by: Option<String>,
     pub status: crate::store::artifacts::ArtifactStatus,
     pub last_verified_at: Option<i64>,
     /// Conditions the source stated under which this artifact does not apply.
     pub caveats: Vec<String>,
-    /// `None` for a merged artifact, which belongs to no corpus. The pane shows
-    /// what it was made of instead of corpus lines — see `build_artifact_detail`.
+    /// `None` for a merged artifact, which belongs to no corpus.
     pub corpus_id: Option<String>,
-    /// The artifact's own text, for the edit box. `html` is what is read;
-    /// this is what is edited, and rendering one back into the other is not
-    /// something markdown round-trips.
+    /// The source text for the edit box; markdown does not round-trip from `html`.
     pub text: String,
-    /// How this artifact came to exist: what it was written from, generation
-    /// by generation, and what it replaced. Empty for a captured artifact that
-    /// has replaced nothing — which is most of them, and which is why the
-    /// template asks `is_empty` rather than `merged` before rendering it.
+    /// Empty for a captured artifact that replaced nothing, so the template asks `is_empty`.
     pub lineage: crate::web::lineage_view::Lineage,
-    /// Which of the two panes to render. A merged artifact belongs to no corpus
-    /// and has no span, so the source pane has no document to link and no lines
-    /// to list; it shows what the artifact was written from instead.
-    ///
-    /// The template used to branch on `sources` being empty, which is the same
-    /// question only while a merge still has its sources. One that had lost them
-    /// all fell through to the captured branch and rendered a "Source · …
-    /// highlighted" label over an empty link and an empty line table — on
-    /// exactly the artifact whose orphan notice matters most.
+    /// Which pane to render: a merge has no corpus or span. Not inferred from `sources`, which a merge can lose.
     pub merged: bool,
-    /// Written from a pursuit: shows the questions it was written for.
     pub synthesized: bool,
-    /// Those questions.
     pub cues: Vec<String>,
-    /// True when one of those sources has since been deleted. The text still
-    /// carries what it said, so this is a missing link rather than missing
-    /// knowledge — and saying so beats listing one source fewer in silence.
+    /// One of the sources has since been deleted; the text still carries what it said.
     pub orphaned_source: bool,
-    /// True when this artifact's source was never captured here — the artifact
-    /// was restored from the vector store and its corpus row is a placeholder.
-    /// The pane shows the source beside the artifact, so it has to say when what
-    /// it is showing is the artifact's own text reflected back rather than the
-    /// document it was drawn from.
+    /// The source was never captured here: the artifact was restored from the vector store.
     pub corpus_restored: bool,
-    /// The search this was opened from, when it was opened from the rail and
-    /// searches are being recorded. What the bar under the artifact and the
-    /// dwell timer both report against. See `Store::open_event`.
+    /// The search this was opened from, when recorded; see `Store::open_event`.
     pub search_event: Option<String>,
-    /// Link to the source, scrolled to and highlighting the exact lines this
-    /// artifact was drawn from. Falls back to the plain source page for an
-    /// artifact with no recorded span — a restored one, for instance.
+    /// Scrolled to and highlighting the drawn lines; the plain source page where no span is recorded.
     pub source_at_lines: String,
-    /// The next passage of the same document, when this one stops in the
-    /// middle of a sentence. A segmentation boundary landing mid-clause is not
-    /// a thing the pane can prevent, but leaving the reader at "…Einsatz von"
-    /// with the rest of the sentence visible in the column beside it and no
-    /// way onward is.
+    /// The next passage, when this one stops mid-sentence.
     pub continues_at: Option<String>,
     pub segment_idx: Option<i64>,
     pub slice_label: String,
     pub slice_lines: Vec<crate::web::corpus_view::CorpusLine>,
-    /// Query terms to highlight, space separated. Empty when the pane was
-    /// opened outside a search.
+    /// Space separated; empty outside a search.
     pub terms: String,
-    /// The nearest artifacts to this one. Free in the sense that matters: the
-    /// vector is already stored, so this costs no embedding call and no
-    /// completion. Empty while the artifact is still waiting to be embedded.
+    /// From the stored vector, so no inference call; empty until embedded.
     pub related: Vec<RelatedArtifact>,
-    /// What this artifact has been needed alongside, learned from co-retrieval
-    /// rather than resemblance. Beside `related`, not instead of it: one list
-    /// is what this resembles, the other is what it has been reached for
-    /// together with, and they answer different questions.
+    /// From co-retrieval rather than resemblance; shown beside `related`, not instead of it.
     pub seen_together: Vec<SeenTogether>,
-    /// What the base found when this arrived, as a sentence. `None` before
-    /// the artifact has been integrated.
+    /// `None` before the artifact has been integrated.
     pub tag: Option<String>,
-    /// The probes for this artifact, one line each: class, the question
-    /// shortened, and where it last found this.
+    /// One line each: class, the shortened question, and where it last found this.
     pub probes: Vec<String>,
-    /// Earlier versions a condensation retired: `(n, when, action id)`,
-    /// oldest first. The action id is the undo button's target where the
-    /// condensation is still open.
+    /// `(n, when, action id)`, oldest first; the action id is the undo target while the condensation is open.
     pub versions: Vec<(i64, String, String)>,
-    /// The open condensation's action id, if the live text is a condensed
-    /// one: the button that puts the last version back.
+    /// The open condensation's action id, for the button that puts the last version back.
     pub condensed: Option<String>,
-    /// "in 2 h", "3 d ago", … when this artifact carries an open reminder —
-    /// regardless of `time.horizon_hours`, unlike the same badge on a result
-    /// row: opening the artifact itself is the one place a reminder set for
-    /// next week still deserves to be seen immediately, not only once it
-    /// enters the band a list shows.
+    /// Shown regardless of `time.horizon_hours`, unlike the result-row badge.
     pub due_in: Option<String>,
-    /// The open reminder on this artifact, as the editor under the text
-    /// shows it — or a blank one, which the same editor offers to make.
+    /// The open reminder, or a blank one the editor offers to make.
     pub reminder: ReminderView,
 }
 
-/// The open reminder, in the shape the editor's fields take: the instant as
-/// `datetime-local` wants it, read in the row's own zone and posted back in
-/// it, so a save that changes nothing moves nothing.
+/// Read and posted back in the row's own zone, so a save that changes nothing moves nothing.
 pub struct ReminderView {
-    /// Whether there is a reminder here at all. A blank view is an ordinary
-    /// entry, and saving it makes one.
+    /// A blank view is an ordinary entry; saving it makes one.
     pub exists: bool,
     pub when: String,
     pub tz: String,
@@ -157,10 +92,7 @@ pub struct ReminderView {
     pub rule: String,
 }
 
-/// The repetitions the editor names, and the rule each one stores. Weekly,
-/// monthly and yearly carry no `BYDAY`/`BYMONTHDAY`: `next_after` takes the
-/// day from the occurrence itself, so moving the date moves the repetition
-/// with it. Anything else is `custom`, the RRULE as typed.
+/// Weekly, monthly and yearly carry no `BYDAY`/`BYMONTHDAY`: `next_after` takes the day from the occurrence.
 pub(crate) const REPEATS: &[(&str, Option<&str>)] = &[
     ("once", None),
     ("daily", Some("FREQ=DAILY")),
@@ -189,26 +121,20 @@ fn reminder_view(m: &crate::store::moments::Moment) -> ReminderView {
     }
 }
 
-/// A neighbour, as one line in the pane.
 pub struct RelatedArtifact {
     pub id: String,
     pub title: String,
     pub snippet: String,
 }
 
-/// A link, as one line in the pane. Beside the nearest neighbours, not instead
-/// of them: one list is what this artifact resembles, the other is what it has
-/// been needed alongside, and they answer different questions.
 pub struct SeenTogether {
     pub id: String,
     pub title: String,
     pub snippet: String,
-    /// The judge's line, or the question that bound the pair. `None` only for a
-    /// link with neither, which is a link nothing can explain yet.
+    /// `None` only for a link nothing can explain yet.
     pub why: Option<String>,
     pub corpus_title: String,
-    /// Rendered emphasised: two documents needing each other is the finding.
-    /// Two passages of one document needing each other is not.
+    /// Two documents needing each other is the finding; two passages of one document is not.
     pub cross_corpus: bool,
 }
 
@@ -231,13 +157,7 @@ struct ArtifactDetailPage {
 }
 
 impl ArtifactDetailPage {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
-    ///
-    /// One result, opened out of the rail — still the search half of the app.
+    /// One result opened out of the rail is still the search section.
     fn section(&self) -> &'static str {
         "search"
     }
@@ -246,14 +166,10 @@ impl ArtifactDetailPage {
 #[derive(serde::Deserialize)]
 struct ArtifactEditForm {
     text: String,
-    /// Which shape to answer with. Two screens edit an artifact and they are
-    /// not the same size: the corpus page swaps one card in a list, the detail
-    /// pane swaps the whole pane. Answering both with a card replaced the pane
-    /// — source, lineage and neighbours included — with a list row.
+    /// The corpus page swaps one card, the detail pane the whole pane.
     #[serde(default)]
     view: String,
-    /// The search terms the pane was opened with, so the highlight survives a
-    /// save. Empty everywhere else.
+    /// So the highlight survives a save.
     #[serde(default)]
     terms: String,
 }
@@ -266,21 +182,13 @@ pub(crate) struct ArtifactViewParams {
     /// a continuation — when the link came from another artifact's page.
     #[serde(default)]
     pub(crate) via: Option<String>,
-    /// The cluster slot this was offered under, when the offer rested on a
-    /// learned cluster. Absent on the floor of the ladder, which has none —
-    /// so this says which cluster, never whether the link came from an offer.
+    /// Absent on the ladder's floor, so this says which cluster, not whether it was an offer.
     #[serde(default)]
     pub(crate) rec: Option<i64>,
-    /// The rung it was offered on, and the thing that marks the link as an
-    /// offer's at all. Carried on the link because the offer was computed on a
-    /// previous request and nothing server-side still holds it — without it,
-    /// every click lands in one bucket on Ops.
+    /// Marks the link as an offer's; nothing server-side still holds the offer.
     #[serde(default)]
     pub(crate) rung: Option<String>,
-    /// The search this row was listed by, carried on the link the rail drew.
-    /// Present only on a rail row, so it says both which search this open
-    /// answers and that it came from a list of answers at all.
-    /// See `SearchOutcome::event`.
+    /// Present only on a rail row; see `SearchOutcome::event`.
     #[serde(default)]
     pub(crate) event: Option<String>,
 }
@@ -292,21 +200,13 @@ struct DwellForm {
 }
 
 impl ArtifactDetail {
-    /// `Chunk::in_results`, read off what the pane already holds rather than
-    /// fetched again — and through that method's own predicate rather than a
-    /// second copy of it, so a third lifecycle state still changes one place.
+    /// Through `Chunk::in_results`'s own predicate, so a new lifecycle state changes one place.
     fn in_results(&self) -> bool {
         crate::store::artifacts::in_results(self.status, self.superseded_by.as_deref())
     }
 }
 
-/// Everything the pane needs, in one place, so the handler is only routing.
-/// What the Related list calls a neighbour: the same rule as `title_of`, read
-/// off a vector payload instead of a row.
-///
-/// The snippet fallback that used to stand here is gone: the row prints one
-/// under the name anyway, so an untitled neighbour was listed under the first
-/// forty characters of the text and then showed the first ninety beneath it.
+/// The same rule as `title_of`, read off a vector payload.
 fn neighbour_title(p: &crate::vector::VectorPayload) -> String {
     let names_itself = p
         .provenance
@@ -319,10 +219,7 @@ fn neighbour_title(p: &crate::vector::VectorPayload) -> String {
     }
 }
 
-/// What the pane lists beside an artifact, and where it continues: the two
-/// lists a reader pivots through, and the way onward. One function for the
-/// pane and for `GET /api/v1/artifacts/{id}/related`, so a phone and a
-/// browser are shown the same neighbours for the same reasons.
+/// Shared by the pane and `GET /api/v1/artifacts/{id}/related`, so phone and browser agree.
 pub(crate) struct Pivots {
     pub related: Vec<RelatedArtifact>,
     pub seen_together: Vec<SeenTogether>,
@@ -331,9 +228,7 @@ pub(crate) struct Pivots {
 
 pub(crate) async fn pivots(core: &crate::core::Core, c: &crate::store::artifacts::Chunk) -> Pivots {
     let artifact_id = c.id.as_str();
-    // A missing neighbour list is not a missing pane. The vector store may be
-    // down, or this artifact may simply not be embedded yet, and neither is a
-    // reason to refuse to show the artifact beside its source.
+    // A missing neighbour list is not a missing pane.
     let related = core
         .vectors
         .neighbours(artifact_id, RELATED_LIMIT)
@@ -349,11 +244,7 @@ pub(crate) async fn pivots(core: &crate::core::Core, c: &crate::store::artifacts
             id: h.payload.artifact_id,
         })
         .collect();
-    // Unreadable links are not a missing pane, for the same reason a missing
-    // neighbour list is not: this layer can only ever add. And gated on
-    // And gated on `associating()`: a base that learned links and then had
-    // `[learn]` switched off must stop rendering them, the same as every other
-    // associative surface.
+    // Unreadable links are not a missing pane; gated on `associating()` so switching `[learn]` off hides them.
     let anchor = vec![c.id.clone()];
     let seen_together_links = if core.associating() {
         match core
@@ -393,15 +284,12 @@ pub(crate) async fn pivots(core: &crate::core::Core, c: &crate::store::artifacts
                 .ok()
                 .and_then(|s| s.title_hint)
                 .unwrap_or_else(|| "untitled".into()),
-            // A merged artifact belongs to no document, which is worth saying
-            // rather than leaving blank.
             None => "merged".to_string(),
         };
         seen_together.push(SeenTogether {
             title: title_of(&other),
             snippet: markdown::snippet(&other.text, 90),
-            // The judge's line where there is one; otherwise the question that
-            // bound them, which is the link's own explanation and free.
+            // The judge's line, else the question that bound them.
             why: l
                 .reason
                 .clone()
@@ -411,8 +299,7 @@ pub(crate) async fn pivots(core: &crate::core::Core, c: &crate::store::artifacts
             id: other.id,
         });
     }
-    // Only asked when the passage actually stops mid-sentence: the query is a
-    // second lookup per pane, and most passages end where a sentence does.
+    // Only when the passage stops mid-sentence: it is a second lookup per pane.
     let continues_at = match (&c.corpus_id, ends_mid_sentence(&c.text)) {
         (Some(cid), true) => core
             .store
@@ -431,10 +318,7 @@ pub(crate) async fn pivots(core: &crate::core::Core, c: &crate::store::artifacts
     }
 }
 
-/// The lines of the pane that are about the artifact rather than of it: what
-/// the base found when it arrived, what has asked for it, the wordings it has
-/// had, and whether a reminder on it is due. One function for the pane and
-/// for `GET /api/v1/artifacts/{id}/about`.
+/// Shared by the pane and `GET /api/v1/artifacts/{id}/about`.
 pub(crate) struct About {
     pub tag: Option<String>,
     pub probes: Vec<String>,
@@ -456,11 +340,7 @@ pub(crate) async fn about(
             tracing::warn!(artifact_id, error = %e, "no due state for this pane");
             None
         })
-        // The *effective* instant, as `due_for` reads it for the result-row
-        // badge and `open_due` for the band. A row snoozed from Tuesday to
-        // next Thursday is off the band and its row badge says "in 7 days";
-        // read raw, `at` had the pane say "due 2 days ago" about the same
-        // reminder, on the same screen.
+        // The effective instant, as `due_for` and `open_due` read it, so a snoozed row agrees across the screen.
         .and_then(|m| m.snoozed_until.or(m.at))
         .map(ago_or_ahead);
     let tag = match core.store.integration_of(&c.id).await? {
@@ -531,35 +411,23 @@ pub(crate) async fn build_artifact_detail(
 ) -> Result<ArtifactDetail> {
     let c = core.store.get_artifact(artifact_id).await?;
     let html = artifact_html(&c);
-    // A merged artifact belongs to no corpus, so there are no lines to show
-    // beside it and no span to highlight. Task 15 fills that half of the pane
-    // with the artifacts it was written from; until then it renders without a
-    // source block rather than claiming a document it did not come from.
+    // A merged artifact has no corpus, so no lines and no span.
     let src = match &c.corpus_id {
         Some(id) => Some(core.store.get_corpus(id).await?),
         None => None,
     };
-    // The lines the passage was drawn from, with a little context either
-    // side: the source column is the claim about where the text on screen came
-    // from, and what is on screen is this one artifact.
     let slice = match &src {
         Some(s) => crate::web::corpus_view::slice(s, c.corpus_span.as_ref(), 3),
         None => crate::web::corpus_view::CorpusSlice::default(),
     };
-    // A missing lineage is not a missing pane, for the same reason a missing
-    // neighbour list is not: it is a layer over the artifact, and the artifact
-    // beside its source is what the page is for.
+    // A missing lineage is not a missing pane.
     let lineage = crate::web::lineage_view::build(&core.store, artifact_id)
         .await
         .unwrap_or_else(|e| {
             tracing::warn!(artifact_id, error = %e, "no lineage for this pane");
             Default::default()
         });
-    // Built before the struct consumes `c`. The fragment is what makes the
-    // browser scroll to the span; the query parameters are what make the page
-    // highlight it.
-    // Empty for a merged artifact: there is no document to link to, and the
-    // template hides the whole source block rather than offering a dead link.
+    // The fragment scrolls to the span; the query parameters highlight it. Empty for a merge.
     let source_at_lines = match (&c.corpus_id, c.corpus_span.as_ref()) {
         (Some(cid), Some(sp)) => format!(
             "/ui/corpora/{cid}?from={}&to={}#L{}",
@@ -574,13 +442,10 @@ pub(crate) async fn build_artifact_detail(
         seen_together,
         continues_at,
     } = pivots(core, &c).await;
-    // The same rule as `artifact_title`, and for the same reason: an ordinal in
-    // the ingest is not a name. Taken before the struct, which moves `c`.
+    // Taken before the struct, which moves `c`.
     let title = artifact_title(&c);
     let tab = crate::web::ui::row_label(&c).text;
-    // A missing due moment is not a missing pane: most artifacts carry none.
-    // Undated reminders are left out, the same as `due_for` leaves them out of
-    // the list badge — there is no "in 2 h" to say about one.
+    // A missing due moment is not a missing pane; undated reminders are left out, as `due_for` does.
     let About {
         tag,
         probes,
@@ -632,7 +497,6 @@ pub(crate) async fn build_artifact_detail(
         synthesized: c.provenance == crate::store::artifacts::Provenance::Synthesized,
         cues: c.cues,
         corpus_id: c.corpus_id,
-        // A merged artifact has no corpus and so cannot have a restored one.
         corpus_restored: src.as_ref().is_some_and(|s| s.restored_at.is_some()),
         segment_idx: c.segment_idx,
         slice_label: slice.label,
@@ -642,8 +506,7 @@ pub(crate) async fn build_artifact_detail(
     })
 }
 
-/// One route, two shapes. An htmx swap wants the pane's body; a pasted link
-/// wants a page with navigation around it.
+/// An htmx swap wants the pane's body; a pasted link wants the full page.
 async fn artifact_detail(
     tenant: Tenant,
     identity: crate::auth::Identity,
@@ -652,18 +515,8 @@ async fn artifact_detail(
     Query(p): Query<ArtifactViewParams>,
 ) -> UiResult<Response> {
     let mut d = build_artifact_detail(&tenant.core, &cid, &p.terms).await?;
-    // Opened from the rail, which named the search that listed it. Stamped
-    // here rather than looked up: the id is on the link, so this open is
-    // attributed to the search it came from and to no other.
-    //
-    // Not for an artifact search will no longer return. A hit recorded
-    // against a hidden artifact would raise the recall and MRR on Insights
-    // over a result no search can give again, and the sweep replays it as a
-    // pair nothing can satisfy. The verdict write refuses one for that
-    // reason; so does this. Without `search_event` the bar
-    // is not drawn, which is the only way a verdict can be given at all.
-    // And only the searcher's own event: the id arrives on a link, so it is
-    // whatever the caller sent. See `Store::event_is_mine`.
+    // Only for an artifact still in results and the searcher's own event (`Store::event_is_mine`).
+    // A hit on a hidden artifact would inflate recall and MRR over a result no search can give again.
     if tenant.core.learn.enabled
         && d.in_results()
         && let Some(event) = p.event.as_deref()
@@ -678,18 +531,8 @@ async fn artifact_detail(
     }
     // Opening a chunk is the deliberate act that counts as remembering it.
     tenant.core.mark_artifact_seen(&cid);
-    // And the act the pursuit sweep reads: opened, or pivoted through — unless
-    // this came from the area under the search box, in which case it is written
-    // under its own kind and *not* as an ordinary open. A `recommended_open`
-    // counted as an open is the first lucky guess growing into a habit the
-    // system taught itself. Keyed on the rung and not on the slot: the floor of
-    // the ladder carries no slot, and it is the rung with no evidence behind it
-    // at all — the last one that should be teaching the profile.
-    //
-    // The marker is checked against the ladder rather than taken as written:
-    // it arrives in a query string, and an unrecognised word would be recorded
-    // as the rung it claims and counted on Ops as a row of its own. A link
-    // carrying one is not an open under a rung, so it is an ordinary open.
+    // An offer's open is recorded as `recommended_open`, not an ordinary open, so lucky guesses do not train the profile.
+    // The rung is checked against the ladder: it arrives in a query string.
     match p
         .rung
         .as_deref()
@@ -706,9 +549,7 @@ async fn artifact_detail(
             .core
             .record_interaction(&cid, p.via.as_deref(), Some(&tenant.user.subject)),
     }
-    // The live half of the same act. Written here rather than inside
-    // `record_interaction` because this is where the session is known — and
-    // that is the whole of what keeps the sitting at the web door.
+    // Here, not in `record_interaction`, because this is where the session is known.
     if let Some(sess) = &identity.session {
         tenant.core.sittings.touched(
             sess,
@@ -743,10 +584,7 @@ async fn put_artifact(
         .enqueue(crate::store::jobs::Stage::Embed, "artifact", &cid)
         .await?;
     if f.view == "detail" {
-        // Back to one appended passage. The run's length lives in the link the
-        // reader last clicked, and a save posts a form rather than that link —
-        // carrying it would mean threading a count through every control on
-        // the pane to preserve something one click restores.
+        // Back to one appended passage: the run's length lives in the link, not in the form.
         let d = build_artifact_detail(&tenant.core, &cid, &f.terms).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
@@ -772,9 +610,7 @@ struct ReminderForm {
     terms: String,
 }
 
-/// Make, or restate, the reminder on this artifact — any artifact, so an
-/// ordinary entry becomes a reminder here. Answers the pane, as an edit of
-/// the text does.
+/// Any artifact, so an ordinary entry becomes a reminder here; answers the pane.
 async fn save_reminder(
     tenant: Tenant,
     Path(aid): Path<String>,
@@ -798,7 +634,6 @@ async fn save_reminder(
     Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response())
 }
 
-/// The reminder taken off; the artifact stays an ordinary entry.
 async fn remove_reminder(
     tenant: Tenant,
     Path(aid): Path<String>,
@@ -809,51 +644,33 @@ async fn remove_reminder(
     Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response())
 }
 
-/// Remove an artifact from both stores, from the page that shows it.
-///
-/// The deliberate counterpart to what `Core::heal_store_drift` stopped doing on
-/// its own. A background pass cannot tell an artifact deleted on purpose from
-/// one whose row a crash lost, so it now restores both and this button is the
-/// only thing that removes anything — a person who can see the artifact deciding
-/// it should go.
-///
-/// Two callers, two right answers. Pressed in a list — a search result, a card
-/// on the source page — the answer is nothing at all: htmx swaps the row that
-/// was pressed out of the list, and the page the operator was reading stays
-/// where it was. Pressed in the pane, where the whole view *is* the artifact,
-/// there is nothing left to stay on, so it lands on the source.
-///
-/// An empty 200 rather than a 204: htmx treats no-content as "swap nothing",
-/// which would leave the deleted artifact on screen until a reload.
+/// The only thing that removes an artifact; `heal_store_drift` restores what it cannot tell apart.
+/// In a list the answer is empty and htmx drops the row; in the pane it lands on the source.
+/// An empty 200, not 204: htmx swaps nothing on no-content.
 async fn delete_artifact_ui(
     tenant: Tenant,
     headers: axum::http::HeaderMap,
     Path(aid): Path<String>,
 ) -> UiResult<Response> {
-    let corpus_id = tenant.core.store.get_artifact(&aid).await?.corpus_id;
-    tenant.core.delete_artifact(&aid).await?;
+    let a = tenant.core.store.get_artifact(&aid).await?;
+    let corpus_id = a.corpus_id.clone();
+    tenant.core.trash_artifact(&aid).await?;
     if headers.contains_key("hx-request") {
-        return Ok(axum::response::Html(String::new()).into_response());
+        let name = crate::web::notice::name_of(a.title.as_deref(), &a.text);
+        return Ok(axum::response::Html(crate::web::notice::undo(
+            &format!("Deleted '{name}'"),
+            &format!("/ui/artifacts/{aid}/restore"),
+        ))
+        .into_response());
     }
-    // A merged artifact has no document to return to, so the artifact list is
-    // where deleting one leaves you.
+    // A merged artifact has no document to return to.
     Ok(match corpus_id {
         Some(cid) => Redirect::to(&format!("/ui/corpora/{cid}")).into_response(),
         None => Redirect::to("/ui/insights").into_response(),
     })
 }
 
-/// The page saying how long an artifact was open, sent as the reader leaves
-/// it. `sendBeacon` lands here; nothing is rendered back.
-///
-/// A pursuit signal and nothing more. It used to also label the search: a read
-/// past twenty seconds was written as a hit, on the theory that recall could
-/// come from ordinary use with nothing clicked. It cannot. What the timer
-/// measures is a pane that stayed open, which is a tab abandoned as often as it
-/// is an answer — and because the beacon flushes as the pane is *left*, it
-/// arrived after the buttons it was overwriting and put a hit back on searches
-/// a person had just marked "not sure" or undone. The bar under the result is
-/// the whole of the answer now.
+/// `sendBeacon` lands here. A pursuit signal only: an open pane is not an answer, so it never labels the search.
 async fn artifact_dwell(
     tenant: Tenant,
     Path(aid): Path<String>,
@@ -865,11 +682,7 @@ async fn artifact_dwell(
     Ok(axum::http::StatusCode::NO_CONTENT.into_response())
 }
 
-/// The operator saying this pair does not belong together.
-///
-/// Final for that pair: never shown, never judged, never pruned. The weight is
-/// left exactly as it is, so the decision stays auditable against the evidence
-/// that produced it — undoing one is out of scope, and Ops is where it would go.
+/// Final for that pair; the weight is left as is so the decision stays auditable.
 async fn dismiss_link(
     tenant: Tenant,
     Path((artifact_id, other_id)): Path<(String, String)>,
@@ -879,12 +692,10 @@ async fn dismiss_link(
         .store
         .dismiss_link(&artifact_id, &other_id)
         .await?;
-    // The row swaps itself out and leaves the pane alone, so the artifact you
-    // were reading is still on screen afterwards.
+    // The row swaps itself out and leaves the pane alone.
     Ok(axum::response::Html(String::new()).into_response())
 }
 
-/// The bracket scan, over one run of prose between tags.
 fn link_text(text: &str, n: usize) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -892,8 +703,7 @@ fn link_text(text: &str, n: usize) -> String {
         out.push_str(&rest[..open]);
         let after = &rest[open + 1..];
         let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
-        // The parsed number, never the digits as written: `[01]` cites excerpt
-        // one, and an anchor of `#cite-01` points at nothing the rail emits.
+        // The parsed number: `[01]` cites excerpt one, and `#cite-01` matches nothing.
         let cited = digits.parse::<usize>().ok().filter(|i| (1..=n).contains(i));
         match (after[digits.len()..].strip_prefix(']'), cited) {
             (Some(tail), Some(i)) => {
@@ -912,26 +722,8 @@ fn link_text(text: &str, n: usize) -> String {
     out
 }
 
-/// Turns each `[n]` the answer cites into a link to that excerpt's rail item.
-///
-/// Bounded by `n`, the number of excerpts actually shown: a model writes `[7]`
-/// over four excerpts often enough, and a link to a rail item that does not
-/// exist scrolls nowhere while reading as a citation that is there. An
-/// out-of-range bracket is left as the plain text it is.
-///
-/// Tag interiors are skipped because an attribute value is not prose, and code
-/// spans are skipped because `argv[1]` is not a citation.
-///
-/// That second exclusion is the opposite of what `mark_unsupported` does over
-/// the same markup, and deliberately so. Marking *subtracts* trust, and inside
-/// code is where a fabricated command hides, so marking there is the feature.
-/// Linking *adds* it: `<a href="#cite-1">[1]</a>` asserts that excerpt 1
-/// supports this token, and a reader cannot tell an authored citation from a
-/// coincidence. `arr[0]`, `argv[1]`, `results[2]` are exactly the shapes that
-/// collide, because excerpt counts are single-digit and so are array indices —
-/// on a base whose answers are full of code. Fabricated provenance is the one
-/// failure this codebase exists to prevent, and a wrong link is worse than no
-/// link.
+/// Bounded by `n`, the excerpts shown; an out-of-range bracket stays plain text.
+/// Tag interiors and code spans are skipped: `argv[1]` is not a citation, and a wrong link is fabricated provenance.
 pub(crate) fn link_citations(html: &str, n: usize) -> String {
     if n == 0 {
         return html.to_string();
@@ -967,10 +759,51 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    /// A passage carries the document heading it happened to sit under —
-    /// `split_passages` copies it down, so one heading ends up over twenty
-    /// passages. That is a name for the section, never for this text, and the
-    /// two surfaces that print a name above the text must not print it.
+    #[tokio::test]
+    async fn deleting_answers_with_an_undo_notice_and_no_dialog() {
+        let (app, cookie, core) = app_session_and_core().await;
+        let out = core
+            .ingest("mount the loop image", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::segment_all(&core, &out.id).await;
+        let first = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .remove(0);
+        let (id, before) = (first.id, first.status);
+        let mut req = form(&format!("/ui/artifacts/{id}/delete"), &cookie, "");
+        req.headers_mut()
+            .insert("hx-request", "true".parse().unwrap());
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_of(res).await;
+        assert!(body.contains("Deleted &#39;"), "{body}");
+        assert!(
+            body.contains(&format!("hx-post=\"/ui/artifacts/{id}/restore\"")),
+            "{body}"
+        );
+        assert!(!body.contains("confirm("));
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().status,
+            crate::store::artifacts::ArtifactStatus::Trashed
+        );
+        let trash = get_body(&app, &cookie, "/ui/trash").await;
+        assert!(
+            trash.contains(&format!("/ui/artifacts/{id}/restore")),
+            "{trash}"
+        );
+        let res = app
+            .clone()
+            .oneshot(form(&format!("/ui/artifacts/{id}/restore"), &cookie, ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(core.store.get_artifact(&id).await.unwrap().status, before);
+    }
+
     #[tokio::test]
     async fn a_passage_shows_no_heading_even_when_the_document_gave_it_one() {
         let core = crate::core::test_support::test_core().await;
@@ -1004,11 +837,6 @@ mod tests {
         assert_eq!(d.title, "", "the detail pane named a passage");
     }
 
-    /// `d.title` is empty for a passage, but the pane still wrote the element
-    /// that holds it: an empty `card-title` before the Edit button, taking the
-    /// head row's gap and the heading's line-height over a card whose text
-    /// starts at the top. And the browser tab needs a word, so the page title
-    /// falls to the opening of the text.
     #[tokio::test]
     async fn the_pane_writes_no_heading_element_over_a_passage() {
         let core = crate::core::test_support::test_core().await;
@@ -1045,9 +873,6 @@ mod tests {
         );
     }
 
-    /// The full page still needs a word: a browser tab and a history entry
-    /// are a list of names, and `{{ d.title }} — engram` over a passage left
-    /// every one of them reading " — engram".
     #[tokio::test]
     async fn the_page_title_of_a_passage_is_how_its_text_opens() {
         let core = crate::core::test_support::test_core().await;
@@ -1084,11 +909,6 @@ mod tests {
         assert!(!tab.contains("Kapitel 3"), "the tab read {tab:?}");
     }
 
-    /// The Related list is built off vector payloads rather than rows, so it
-    /// has its own reading of the same question — and it answered it
-    /// differently: `payload.title` straight through, which put the section
-    /// heading over a neighbouring passage while the rail beside it showed
-    /// none.
     #[test]
     fn a_neighbouring_passage_is_listed_without_a_name() {
         let payload = |provenance: &str, title: Option<&str>| crate::vector::VectorPayload {
@@ -1108,9 +928,6 @@ mod tests {
         );
     }
 
-    /// Related and Seen together are rows with a snippet under the name. With
-    /// no name the element was still written, so each row opened with an empty
-    /// line where the other rows carry a heading.
     #[tokio::test]
     async fn a_related_row_with_no_name_writes_no_heading_element() {
         let core = crate::core::test_support::test_core().await;
@@ -1179,10 +996,6 @@ mod tests {
             .unwrap();
         core.store.snooze(&id, now + 7 * 86_400).await.unwrap();
 
-        // The band hides it and the result-row badge reads the effective
-        // instant. The pane read raw `at` and said "due 2 days ago" about the
-        // same row, on the same screen — the defect `Store::due_for`'s comment
-        // says was already fixed once.
         let d = build_artifact_detail(&core, &aid, "").await.unwrap();
         let due = d.due_in.expect("the pane says a reminder is here");
         assert!(!due.contains("ago"), "the pane read past the snooze: {due}");
@@ -1190,9 +1003,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_captured_artifact_lists_no_sources() {
-        // The template branches on provenance, and a captured artifact filling
-        // this list would put a provenance list it does not have where its
-        // corpus lines belong.
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(&core, &[("a text", [1.0, 0.0])]).await;
 
@@ -1205,11 +1015,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_merge_that_lost_every_source_still_renders_as_a_merge() {
-        // An empty source list is not the same question as "was this captured".
-        // The template branched on the list, so a merge whose sources had all
-        // been deleted fell through to the captured branch and rendered a
-        // "Source · … highlighted" label over an empty link and an empty line
-        // table — on exactly the artifact whose orphan notice matters most.
         let core = crate::core::test_support::test_core().await;
         let ids = crate::jobs::consolidate::tests::seed(
             &core,
@@ -1276,8 +1081,6 @@ mod tests {
             d.slice_lines.iter().any(|l| l.in_span),
             "at least one line must be marked as the span"
         );
-        // Either form: this artifact's span may be one line or several, and
-        // the label says which rather than always saying "lines".
         assert!(
             d.slice_label.starts_with("line ") || d.slice_label.starts_with("lines "),
             "{}",
@@ -1287,11 +1090,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_passage_cut_mid_sentence_points_at_the_one_that_carries_the_rest() {
-        // The pane ended "…der bereits vorgestellte Einsatz von" and offered
-        // nothing onward, while the source column beside it showed the rest of
-        // the sentence. A verbatim-path property: the chunker is what cuts a
-        // sentence, so shrink the chunk budget until it does and read the
-        // passages as capture wrote them.
         let mut core = crate::core::test_support::test_core().await;
         core.chunk_tokens = 12;
         let out = core
@@ -1304,8 +1102,6 @@ mod tests {
             .await
             .unwrap();
         crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
-        // The live rows: superseded passages stand behind the artifacts that
-        // cover them and are not what the pane walks between.
         let all: Vec<_> = core
             .store
             .artifacts_for_corpus(&out.id)
@@ -1326,12 +1122,6 @@ mod tests {
             first.text
         );
 
-        // And the way onward is a swap, not a navigation. Left as a bare
-        // `href` this was the one link in the pane that left it: following it
-        // loaded the standalone artifact page, and the results the passage was
-        // found in — the box, the rail, the run — went with it. The Related
-        // list two blocks down has always swapped in place; this is the same
-        // act and takes the same route.
         let html = askama::Template::render(&ArtifactDetailFragment { d }).unwrap();
         let onward = html
             .split(r#"<p class="continues">"#)
@@ -1361,14 +1151,6 @@ mod tests {
 
     #[tokio::test]
     async fn the_floor_of_the_ladder_is_clicked_like_an_offer_and_not_like_a_result() {
-        // The random card has no cluster and so no slot. Hanging the whole
-        // offer marker off the slot left it linking like an ordinary result:
-        // its opens counted as `opened`, so Ops read `random: shown N, opened
-        // 0` for ever — and random is the baseline the block weights would have
-        // to be fitted against. Worse, the open fed back into the profile at
-        // full weight, which is the self-reinforcement `self_weight = 0.0`
-        // exists to close, entered through the one rung with no evidence behind
-        // it at all.
         let (app, cookie, store, aid) = app_recommending().await;
         let body = crate::web::test_support::body_of(
             app.clone()
@@ -1382,8 +1164,6 @@ mod tests {
             "the card links like an ordinary result: {body}"
         );
 
-        // The browser confirming the card reached the screen. The fragment
-        // above computed it; only this says anybody saw it.
         app.clone()
             .oneshot(form(
                 "/ui/context/seen",
@@ -1394,9 +1174,6 @@ mod tests {
             .unwrap();
         get_body(&app, &cookie, &format!("/ui/artifacts/{aid}?rung=random")).await;
         drain().await;
-        // A shown and an open, and both of them on the random rung: that pair
-        // is the hit rate, and before this the second half could never be
-        // written.
         let rows = store.interactions_between(0, i64::MAX).await.unwrap();
         let kinds: Vec<&str> = rows.iter().map(|r| r.kind.as_str()).collect();
         assert_eq!(kinds, vec!["recommended_shown", "recommended_open"]);
@@ -1409,12 +1186,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_rung_the_ladder_does_not_have_is_an_ordinary_open() {
-        // The marker rides in the query string, so its value is whatever the
-        // viewer sends. Taken as written it went into the recorded row and from
-        // there into `offer_rates`' `GROUP BY rung`, which is to say anyone
-        // could add rows to the Ops breakdown by editing a URL — beside the
-        // four rungs that exist, in the one table the block weights would be
-        // fitted against.
+        // The rung arrives in a query string; taken as written, anyone could add rows to the Ops breakdown.
         let (app, cookie, store, aid) = app_recommending().await;
         get_body(
             &app,
@@ -1444,14 +1216,10 @@ mod tests {
 
     #[tokio::test]
     async fn taking_an_offer_is_not_an_ordinary_open() {
-        // Without this the profile reinforces itself. The row is written, and
-        // it is written under its own kind so the sweep can weigh it at
-        // `self_weight` — which is zero.
         let mut core = crate::core::test_support::test_core().await;
         core.recommend.enabled = true;
         core.learn.enabled = true;
-        // Both on, so an ordinary open *would* be recorded — otherwise this
-        // test would pass on a base that records nothing at all.
+        // Both on, so an ordinary open would be recorded; otherwise this passes on a base that records nothing.
         core.learn.enabled = true;
         let store = core.store.clone();
         let background = core.background.clone();
@@ -1489,17 +1257,12 @@ mod tests {
             rows[0].detail
         );
 
-        // And the ordinary path still records an ordinary open, so the branch
-        // above is a branch rather than a hole.
         get_body(&app, &cookie, &format!("/ui/artifacts/{aid}")).await;
         background.wait_idle().await;
         let rows = store.interactions_between(0, i64::MAX).await.unwrap();
         assert!(rows.iter().any(|r| r.kind == "opened"));
     }
 
-    /// One merge written from an earlier merge and one fresh capture. A flat
-    /// list of roots reads as three equal siblings; the generation between them
-    /// is the whole reason the tree exists.
     #[tokio::test]
     async fn the_pane_draws_the_generations_a_merge_came_through() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1530,9 +1293,6 @@ mod tests {
         .await
         .unwrap();
 
-        // What `merge::finish` does once the merge is indexed: the sources it
-        // was written from are hidden behind it. Set here because this test is
-        // about how the pane draws that, not about the write path.
         for hidden in [&ids[2], &m1.id] {
             core.store
                 .set_superseded_by(hidden, Some(&m2.id))
@@ -1551,19 +1311,16 @@ mod tests {
             assert!(page.contains(t), "{t} is missing from the lineage: {page}");
         }
         assert!(
-            page.contains("--d:1"),
+            page.contains(r#"data-var-d="1""#),
             "the earlier merge's own sources are drawn under it: {page}"
         );
         assert!(
             page.contains("Written from 3 artifacts"),
             "the count is of captures, not of the route they took: {page}"
         );
-        // The roots this merge superseded say so where they sit.
         assert!(page.contains("replaced by this"), "{page}");
     }
 
-    /// A captured artifact was written from a document, not from artifacts. Its
-    /// column is the document, and a tree there would be an empty claim.
     #[tokio::test]
     async fn the_pane_of_a_capture_still_shows_its_lines() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1582,13 +1339,8 @@ mod tests {
         assert!(!page.contains(r#"class="lineage""#), "{page}");
     }
 
-    /// The reported gap: a reminder was captured and nothing on the artifact
-    /// itself ever said so. Unlike the same badge in the result list, this
-    /// one is not bounded to `time.horizon_hours` — the pane is where an
-    /// operator checks one specific note, and a reminder set for next week
-    /// is exactly the kind `due_for`'s horizon leaves out of that list.
     #[tokio::test]
-    async fn the_pane_badges_an_open_reminder_however_far_out_it_is() {
+    async fn the_pane_marks_an_open_reminder_however_far_out_it_is() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("water the plants", "web", None).await.unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
@@ -1599,12 +1351,7 @@ mod tests {
             .insert_moment(&crate::store::moments::NewMoment {
                 artifact_id: c.clone(),
                 kind: crate::store::moments::Kind::Due,
-                // An hour of slack on top of the thirty days. `ago_or_ahead`
-                // divides by 86_400 and floors, so an exact multiple reads as
-                // "29 days" the moment one second passes between this row
-                // being written and the page rendering it — which is a second
-                // the full suite spends often enough to fail here and nowhere
-                // when the test runs alone.
+                // An hour of slack: `ago_or_ahead` floors, so an exact multiple flips to "29 days" one second later.
                 at: Some(crate::store::now() + 30 * 86_400 + 3_600),
                 tz: "UTC".into(),
                 rule: None,
@@ -1616,7 +1363,7 @@ mod tests {
             .unwrap();
 
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
-        assert!(page.contains("badge-due"), "{page}");
+        assert!(page.contains("oc-status--due"), "{page}");
         assert!(
             page.contains("30 days"),
             "far outside the 48h horizon, still shown: {page}"
@@ -1624,7 +1371,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_pane_of_an_artifact_with_no_reminder_carries_no_due_badge() {
+    async fn the_pane_of_an_artifact_with_no_reminder_carries_no_due_mark() {
         let (app, cookie, core) = app_session_and_core().await;
         let out = core.ingest("just a note", "web", None).await.unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
@@ -1633,11 +1380,9 @@ mod tests {
             .clone();
 
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{c}")).await;
-        assert!(!page.contains("badge-due"), "{page}");
+        assert!(!page.contains("oc-status--due"), "{page}");
     }
 
-    /// The corpus page could edit an artifact and the pane could not, on the
-    /// screen whose whole subject is one artifact.
     #[tokio::test]
     async fn the_pane_edits_the_artifact_and_comes_back_a_pane() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1673,7 +1418,6 @@ mod tests {
         );
     }
 
-    /// And the corpus page, which swaps one card in a list, still gets a card.
     #[tokio::test]
     async fn the_corpus_card_edit_still_answers_with_a_card() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -1781,8 +1525,6 @@ mod tests {
 
     #[tokio::test]
     async fn dismissing_a_link_takes_it_out_for_good_without_losing_the_evidence() {
-        // The weight stays, so the decision is auditable; the state is final,
-        // so it is never shown, judged or pruned again.
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["alpha text", "something else entirely"]).await;
         core.store
@@ -1821,12 +1563,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_pane_still_renders_when_the_links_cannot_be_read() {
-        // The associative layer can only add. It is not a reason to refuse to
-        // show an artifact beside its source.
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text"]).await;
-        sqlx::query("DROP TABLE artifact_links")
+        sqlx::query!("DROP TABLE artifact_links")
             .execute(&core.store.pool)
             .await
             .unwrap();
@@ -1836,9 +1576,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_cross_corpus_pair_is_marked_and_a_same_corpus_pair_is_not() {
-        // "Two documents needing each other is the finding; two passages of one
-        // document needing each other is not" is the whole point of the flag —
-        // pin it on the data the pane renders, not on a CSS class name.
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let ids = artifacts(&core, &["alpha text", "same corpus neighbour"]).await;
@@ -1896,9 +1633,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_related_link_works_on_the_standalone_artifact_page() {
-        // The detail partial is both the search pane's content and the whole of
-        // `/ui/artifacts/{id}`. A neighbour link that named `#pane` would be
-        // dead on the standalone page, which is the one a shared link opens.
         let (app, cookie) = app_with_embedded_corpus().await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
         let id = rail
@@ -1926,10 +1660,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_lifecycle_button_comes_back_to_the_page_that_offered_it() {
-        // These actions are rendered both on Insights and on an artifact's own
-        // page. Always redirecting to Insights threw a reader who pressed
-        // "Hide from results" while reading an artifact onto a list they were
-        // not working through.
         let (app, cookie) = app_with_embedded_corpus().await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
         let id = rail
@@ -1954,7 +1684,6 @@ mod tests {
             format!("/ui/artifacts/{id}").as_str()
         );
 
-        // Insights sends no `to` and keeps the default.
         let res = app
             .clone()
             .oneshot(form(
@@ -1969,10 +1698,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_lifecycle_button_pressed_in_the_pane_swaps_the_artifact_not_the_page() {
-        // The same fragment is the standalone page and the pane beside the
-        // search results, and the hidden `to` can only name one of them. It
-        // named the page, so pressing "Hide from results" on a result
-        // navigated the whole window there and took the results with it.
         let (app, cookie) = app_with_embedded_corpus().await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
         let id = rail
@@ -2002,15 +1727,12 @@ mod tests {
             body.contains(&format!(r#"data-artifact="{id}""#)),
             "the answer is the artifact, re-rendered: {body}"
         );
-        // A fragment, not a whole page: the pane is inside one already.
         assert!(!body.contains("<nav"), "{body}");
     }
 
     #[tokio::test]
     async fn a_return_path_pointing_off_this_ui_is_ignored() {
-        // The field is user input, and a redirect that follows anything handed
-        // to it is an open redirect: worth nothing here, a phishing hop
-        // everywhere else.
+        // A redirect that follows user input is an open redirect.
         let (app, cookie) = app_with_embedded_corpus().await;
         let rail = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
         let id = rail
@@ -2021,8 +1743,6 @@ mod tests {
             .expect("no result to open")
             .to_string();
 
-        // Hidden and put back for each, so every press is one the artifact's
-        // state admits and only the return path is under test.
         for hostile in ["https://evil.example/x", "//evil.example/x", "/ui//evil"] {
             for action in ["deprecate", "reactivate"] {
                 let res = app
@@ -2045,8 +1765,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_artifact_that_is_not_embedded_yet_still_opens() {
-        // Synthesis without the embed job: the pane has to show the artifact
-        // beside its source and simply offer no neighbours.
         let core = crate::core::test_support::test_core().await;
         let out = core.ingest("alpha\n\nbravo", "web", None).await.unwrap();
         crate::jobs::synthesize::segment_all(&core, &out.id).await;
@@ -2093,8 +1811,6 @@ mod tests {
             card.html
         );
 
-        // And a model-written artifact is still markdown: it was written as
-        // markdown, and reading it as plain text would show the syntax.
         let a = core
             .store
             .insert_artifacts(&src.id, &[na("## Heading\n\n- one")])
@@ -2103,17 +1819,12 @@ mod tests {
         let written = artifact_view(&core.store.get_artifact(&a[0].id).await.unwrap());
         assert!(written.html.contains("<h2>"), "{}", written.html);
 
-        // The detail pane renders the same artifact and has to say the same
-        // thing about it: it is the half of the search page that shows a
-        // passage in full.
         let d = super::build_artifact_detail(&core, &p[0].id, "")
             .await
             .unwrap();
         assert!(d.html.contains("<pre"), "{}", d.html);
     }
 
-    /// The editor under the text, end to end: an entry made a weekly
-    /// reminder, shown as one, made custom, and taken off again.
     #[tokio::test]
     async fn the_pane_edits_the_reminder_and_turns_it_back_into_an_entry() {
         let (app, cookie, core) = app_session_and_core().await;
@@ -2135,7 +1846,7 @@ mod tests {
             .unwrap()
             .id;
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{aid}")).await;
-        assert!(page.contains("+ reminder"), "{page}");
+        assert!(page.contains("Add a reminder"), "{page}");
 
         let uri = format!("/ui/artifacts/{aid}/reminder");
         let html = body_of(
@@ -2190,7 +1901,7 @@ mod tests {
                 .unwrap(),
         )
         .await;
-        assert!(html.contains("+ reminder"), "{html}");
+        assert!(html.contains("Add a reminder"), "{html}");
         assert!(
             core.store
                 .open_due_for_artifact(&aid)
@@ -2255,7 +1966,6 @@ mod tests {
             "no tag facet row: {search}"
         );
 
-        // Still true, still stored, still the channel pinning rides on.
         assert_eq!(
             core.store.get_artifact(&c.id).await.unwrap().tags,
             vec!["forensik".to_string()]
@@ -2264,8 +1974,6 @@ mod tests {
 
     #[tokio::test]
     async fn with_priming_off_the_sitting_moves_no_result() {
-        // The default. Carrying ships on because it changes no order; this is
-        // the part that does, and it waits for the harness.
         let mut c = crate::core::test_support::test_core().await;
         c.learn.enabled = true;
         assert!(
@@ -2300,7 +2008,6 @@ mod tests {
             .unwrap();
 
         let before = get_body(&app, &cookie, "/ui/search/results?q=alpha").await;
-        // Read the last one this list returns, then search again.
         for id in &ids {
             get_body(&app, &cookie, &format!("/ui/artifacts/{id}")).await;
         }
@@ -2320,10 +2027,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_sitting_writes_no_activation() {
-        // The guard most likely to be lost to a refactor: the sitting is a
-        // *read* of what is happening. Writing activation from it would be a
-        // loop that reinforces itself, which is the failure mode this whole
-        // area is built to close.
+        // The sitting is a read; writing activation from it would be a self-reinforcing loop.
         let mut c = crate::core::test_support::test_core().await;
         c.learn.enabled = true;
         let core = c.clone();
@@ -2343,8 +2047,6 @@ mod tests {
             .unwrap()[0]
             .id
             .clone();
-        // Whatever opening it records, record it now, before the sitting is
-        // asked for anything.
         get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
         core.background.wait_idle().await;
         let before = core
@@ -2353,7 +2055,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Reading the sitting, repeatedly, from both pages.
         for _ in 0..3 {
             get_body(&app, &cookie, "/ui/search").await;
         }
@@ -2368,11 +2069,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_page_declares_what_it_holds_rather_than_how_wide_it_is() {
-        // The three shell widths are gone. What is left is a statement about
-        // content: a rail beside an artifact beside its source, prose at a
-        // reading measure, or a table that is as wide as its columns need.
-        // Every one of them starts at the shell's left edge, which is what
-        // stops the content column moving as you navigate.
         let (app, cookie, core) = app_session_and_core().await;
         hold_something(&core).await;
 
@@ -2388,30 +2084,18 @@ mod tests {
             "housekeeping is a table and has no reading measure: {ops}"
         );
 
-        // Capture is a door into the workspace now, not a page of its own, so
-        // it declares what the workspace declares.
         let capture = get_body(&app, &cookie, "/ui/capture").await;
         assert!(
             capture.contains("regions-rail-focus-source"),
             "the capture door is the workspace: {capture}"
         );
 
-        // Ask is a door into the workspace now, not a page of its own. The
-        // excerpts land in the same rail the results were in, because the rail
-        // holds what the current act produced and an ask is a different act
-        // from the search before it.
         let ask = get_body(&app, &cookie, "/ui/ask").await;
         assert!(
             ask.contains("regions-rail-focus-source"),
             "the ask door is the workspace: {ask}"
         );
 
-        // No measure on the one page whose whole subject is an artifact and
-        // the lines it came from — it is the same split the search pane holds,
-        // so it gets the same room rather than a reading column with the rest
-        // of the window empty beside it. Fetched as a real artifact page: the
-        // assertion is about what `/ui/artifacts/<id>` declares, and pointing
-        // it at any other route would pass without testing that.
         let out = core
             .ingest("alpha line\n\nbravo line", "web", None)
             .await
@@ -2426,7 +2110,6 @@ mod tests {
             "the artifact page is a split, not prose: {artifact}"
         );
 
-        // No page says how wide it is any more.
         for (uri, body) in [
             ("/ui/search", &search),
             ("/ui/insights", &ops),
@@ -2437,16 +2120,6 @@ mod tests {
         }
     }
 
-    /// A citation link and the rail item it lands on are the two halves of one
-    /// claim, and they are numbered by two separate passes over two separate
-    /// templates: `link_citations` writes the hrefs into the answer, and
-    /// `_ask_rail.html` writes the ids into the excerpts. Nothing but this
-    /// assertion makes them agree, and a `[1]` that scrolls nowhere reads to a
-    /// reader as provenance the base cannot actually show.
-    ///
-    /// The reply cites `[01]` as well as `[1]`, because the linker anchors on
-    /// the parsed number rather than the digits it found: an id of `cite-01`
-    /// would satisfy a lazier reading of this and still be a dead link.
     #[tokio::test]
     async fn every_citation_link_in_the_answer_points_at_an_excerpt_the_rail_carries() {
         let mut core = crate::core::test_support::test_core().await;
@@ -2458,8 +2131,6 @@ mod tests {
         crate::jobs::embed::run_corpus(&core, &out.id)
             .await
             .unwrap();
-        // Swapped in after indexing, so the citations in the answer are this
-        // reply's and not something retrieval happened to produce.
         core.completer = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
             reply: Some("alpha [1], bravo [2], and alpha again [01].".into()),
         }));
@@ -2470,9 +2141,7 @@ mod tests {
         let answer = done_html(&body);
 
         let cited = pulled(&answer, r##"href="#cite-"##, '"');
-        // Without this the test passes on an answer that cites nothing, which
-        // is the state the page was in before this task and the state a broken
-        // linker would put it back into.
+        // Without this the test passes on an answer that cites nothing.
         assert!(
             !cited.is_empty(),
             "the answer carries no citation links at all, so nothing was checked: {answer}"
@@ -2484,12 +2153,7 @@ mod tests {
             );
         }
 
-        // Coverage on its own is not enough, and a mutation proved it: numbering
-        // the rail from zero leaves every id the answer links to still present
-        // on the page — one excerpt further down. The links would all resolve
-        // and every one of them would cite the wrong artifact, which is the
-        // fabricated provenance this whole scheme exists to avoid. So the
-        // numbering itself is pinned: 1..n, in the order the rail lists them.
+        // Numbering from zero still resolves every link, one excerpt off, so the numbering 1..n is pinned.
         let ids = pulled(&rail, r#"id="cite-"#, '"');
         assert!(
             ids.len() > 1,
@@ -2498,23 +2162,14 @@ mod tests {
         let counted: Vec<String> = (1..=ids.len()).map(|i| i.to_string()).collect();
         assert_eq!(ids, counted, "the rail must number 1..n in order: {rail}");
 
-        // And the n-th rail item has to be the n-th excerpt. The answer fragment
-        // lists the same citations in the same order under "Artifacts used"
-        // (after its own card, which is why the first title is dropped), so the
-        // two renderings of one list are checked against each other rather than
-        // each being trusted separately.
         let rail_titles = pulled(&rail, r#"<span class="rail-title">"#, '<');
-        let mut card_titles = pulled(&answer, r#"<span class="card-title">"#, '<');
-        card_titles.remove(0);
+        let card_titles = pulled(&answer, r#"<span class="cited-title">"#, '<');
         assert_eq!(
             rail_titles, card_titles,
             "the rail and the answer disagree about which excerpt is which"
         );
     }
 
-    /// The model cites more excerpts than it was shown often enough that a link
-    /// to a rail item which does not exist is a real outcome; it reads as a
-    /// citation and scrolls nowhere.
     #[test]
     fn only_a_bracket_naming_an_excerpt_that_exists_becomes_a_link() {
         let out = super::link_citations("<p>see [1] and [2] but not [9] or [x]</p>", 2);
@@ -2531,10 +2186,6 @@ mod tests {
         assert!(out.contains("[x]"), "{out}");
     }
 
-    /// A citation link asserts that an excerpt supports the token it wraps.
-    /// `argv[1]` is an array index on a base whose answers are full of code,
-    /// and the citable range is exactly the range of common indices — so a link
-    /// there is provenance the answer never claimed.
     #[test]
     fn an_array_index_inside_a_code_span_is_not_turned_into_a_citation() {
         let out = super::link_citations("<p>see [1]</p><pre><code>argv[1]</code></pre>", 2);
@@ -2549,8 +2200,6 @@ mod tests {
         assert_eq!(out.matches("cite-1").count(), 1, "{out}");
     }
 
-    /// `[01]` cites excerpt one; an anchor of `#cite-01` points at nothing the
-    /// rail emits.
     #[test]
     fn a_zero_padded_citation_links_to_the_anchor_the_rail_will_carry() {
         let out = super::link_citations("<p>see [01]</p>", 2);
@@ -2558,8 +2207,6 @@ mod tests {
         assert!(!out.contains("cite-01"), "{out}");
     }
 
-    /// It runs over sanitized HTML, where a bracket inside a tag is an
-    /// attribute rather than prose.
     #[test]
     fn citation_linking_leaves_the_inside_of_a_tag_alone() {
         let out = super::link_citations(r#"<a href="/x?q=[1]">[1]</a>"#, 1);
@@ -2618,7 +2265,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_badged_in_the_rail() {
+    async fn a_generated_artifact_shows_its_cues_is_listed_on_ops_and_named_in_the_rail() {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
         let handle = core.clone();
@@ -2670,7 +2317,6 @@ mod tests {
         assert!(detail.contains("why was this asked"), "{detail}");
 
         let ops = get_body(&app, &cookie, "/ui/insights").await;
-        // One queue now, and the row says what put it there. See `QueueRow`.
         assert!(ops.contains(">generated<"), "{ops}");
         assert!(
             ops.contains(&format!("/ui/ops/artifacts/{}/deprecate", g.id)),
@@ -2684,7 +2330,7 @@ mod tests {
             "/ui/search/results?q=Generated%20title%0Agenerated%20from%20S",
         )
         .await;
-        assert!(rail.contains("model-written"), "{rail}");
+        assert!(rail.contains("written by a model"), "{rail}");
     }
 
     #[tokio::test]
@@ -2727,16 +2373,12 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].kind, "dwell");
         assert_eq!(got[0].detail.as_deref(), Some("42"));
-        // The detail root names the artifact, which is what the page's timer reads.
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
         assert!(page.contains(&format!("data-artifact=\"{a}\"")), "{page}");
     }
 
     #[tokio::test]
     async fn a_result_opened_from_the_rail_asks_whether_it_was_the_one() {
-        // The judge deck asks hours later, out of context, and the honest
-        // answer then is "I don't know, I was looking". Under the result just
-        // opened the answer is cheap, so that is where it is asked.
         let (app, cookie, handle, a, event) = searched_app().await;
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event={event}")).await;
         assert!(
@@ -2747,11 +2389,6 @@ mod tests {
             page.contains(&format!("/ui/search/{event}/verdict")),
             "the bar does not name the search: {page}"
         );
-        // The rail's own links carry the search that listed them — on the
-        // `href` as well as on the `hx-get`. A middle-click, a ⌘-click and a
-        // load that reached the page without htmx are all the same open, and
-        // the plain `href` used to drop the event: the same act produced a
-        // label down one path and silence down the other.
         let rail = include_str!("templates/_results.html");
         let carries = |attr: &str| {
             rail.contains(&format!(
@@ -2761,15 +2398,11 @@ mod tests {
         assert!(carries("href"), "{rail}");
         assert!(carries("hx-get"), "{rail}");
 
-        // Reached any other way — a corpus page, a pasted link — there is no
-        // search to be the answer to.
         let plain = get_body(&app, &cookie, &format!("/ui/artifacts/{a}")).await;
         assert!(
             !plain.contains("Was this what you were looking for?"),
             "{plain}"
         );
-        // And a bar was not the whole of the open: the rewording after it starts
-        // its own event because this one is now the list that was read.
         handle
             .store
             .record_search(
@@ -2815,8 +2448,6 @@ mod tests {
             .unwrap()[0]
             .id
             .clone();
-        // With learning off nothing is captured, so the rail draws no event on
-        // its links and there is nothing for the bar to be a verdict on.
         let page = get_body(&app, &cookie, &format!("/ui/artifacts/{a}?event=whatever")).await;
         assert!(
             !page.contains("Was this what you were looking for?"),
@@ -2828,13 +2459,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_long_read_is_a_pursuit_signal_and_never_a_verdict() {
-        // A read past some threshold used to be written as the search having
-        // found its answer. What that measured was a pane left open, which is
-        // an abandoned tab as often as it is an answer — and because the beacon
-        // flushes as the pane is *left*, it landed after the buttons under the
-        // result and put a hit back onto searches a person had just marked
-        // "not sure" or undone. The timer still feeds the pursuit sweep; it no
-        // longer labels anything.
         let (app, cookie, handle, a, _event) = searched_app().await;
         let res = app
             .clone()
@@ -2891,11 +2515,9 @@ mod tests {
         let s = handle.store.feedback_stats(0.0).await.unwrap();
         assert_eq!((s.hits, s.pending), (1, 0), "{s:?}");
 
-        // Undo: a question again.
         app.clone().oneshot(verdict("none")).await.unwrap();
         assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().pending, 1);
 
-        // No: still a question, for the deck — and one no read may answer.
         app.clone().oneshot(verdict("no")).await.unwrap();
         assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().pending, 1);
         app.clone()
@@ -2908,10 +2530,6 @@ mod tests {
             .unwrap();
         assert_eq!(handle.store.feedback_stats(0.0).await.unwrap().hits, 0);
 
-        // Not sure: no verdict at all — not a discard, which says the search
-        // was never real and would drop it from the pairs and out of the
-        // purge's exemption on the strength of somebody not remembering. It
-        // leaves the waiting figure all the same: nothing asks it again.
         let res = app.clone().oneshot(verdict("skip")).await.unwrap();
         let bar = body_of(res).await;
         assert!(bar.contains("left unanswered"), "{bar}");
@@ -2925,12 +2543,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_search_somebody_else_made_cannot_be_opened_or_judged() {
-        // Every route that labels a search takes the event id from the page,
-        // because the page is what knows which search a row came from. An id
-        // is not a capability: guessing at one used to be enough to stamp an
-        // open onto another person's search, answer it, or call it a gap —
-        // and, by stamping `opened_at`, quietly stop their next keystroke
-        // folding as well.
+        // An event id is not a capability: guessing one must not let a caller label another person's search.
         let (app, cookie, handle, a, _) = searched_app().await;
         let theirs = handle
             .store
@@ -2964,8 +2577,7 @@ mod tests {
             "{page}"
         );
         let opened: Option<i64> =
-            sqlx::query_scalar("SELECT opened_at FROM search_events WHERE id = ?")
-                .bind(&theirs)
+            sqlx::query_scalar!("SELECT opened_at FROM search_events WHERE id = ?", &theirs)
                 .fetch_one(&handle.store.pool)
                 .await
                 .unwrap();
@@ -3003,10 +2615,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_deprecated_result_is_never_asked_about() {
-        // A hit recorded against an artifact search will not return raises
-        // the recall on Insights over a result no search can give again. The
-        // verdict write refuses one, and the bar under a result must not be
-        // a way around it.
         let (app, cookie, handle, a, event) = searched_app().await;
         handle
             .store
@@ -3018,8 +2626,6 @@ mod tests {
             !page.contains("Was this what you were looking for?"),
             "{page}"
         );
-        // And the write refuses it too, not only the render: a replayed form
-        // naming the pair is not the way around the guard.
         let res = app
             .clone()
             .oneshot(form(

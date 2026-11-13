@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ask_subjects\n               (id, event_id, subject, query_vec, vec_dim, embed_model, created_at)\n             VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "16e06d0a0a937b6633baf9eceae6fd904b8249a26ffd198d4f6f5e1cb859efc6"
+}

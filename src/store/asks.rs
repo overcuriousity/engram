@@ -1,55 +1,36 @@
-//! What a question looked like, so it can be judged later.
-//!
-//! The search side keeps the query and the verdict apart in time; a question
-//! is judged where it is answered, because judging an answer means reading it
-//! in context. What still has to be recorded in the moment is the answer and
-//! the excerpts the model saw — the verdict is about *those*, and neither can
-//! be reconstructed afterwards.
+//! Recorded questions: the answer and the excerpts the model saw, which cannot be rebuilt later.
 
 use super::{Store, new_id, now};
 use crate::error::{Error, Result};
-use sqlx::Row;
 
 #[derive(Debug, Clone)]
 pub struct NewAskCitation {
     pub artifact_id: String,
     pub score: f32,
-    /// The answer referenced this `[n]`. What the model was *shown* is not
-    /// what it used, and only what it used is engagement — see
-    /// `RecordedAsk::cited`.
+    /// The answer referenced this `[n]`; only use counts as engagement, not being shown.
     pub used: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct NewAsk {
     pub question: String,
-    /// The authenticated subject. Recorded, never used for coalescing: a
-    /// question is one deliberate act, not a typing burst.
+    /// Recorded, never used for coalescing: a question is one deliberate act.
     pub scope: Option<String>,
-    /// JSON, as `search_events.filters` is.
     pub filters: String,
-    /// The vector ask retrieved with. May be empty when the query cache had
-    /// already evicted it; such an event is never clustered as a gap.
+    /// Empty when the query cache had evicted it; such an event is never clustered as a gap.
     pub query_vec: Vec<f32>,
     pub embed_model: String,
     pub answer: String,
     pub abstained: bool,
     pub dropped: usize,
     pub truncated: bool,
-    /// How many literals the answer carried that no excerpt it was shown
-    /// held — the count behind the badge, not the strings.
-    ///
-    /// A count because one observation is written per answer rather than per
-    /// literal: three unsupported literals are one retrieval that fell short,
-    /// not three.
+    /// One count per answer, not per literal: several unsupported literals are one retrieval miss.
     pub unsupported: usize,
     /// In the order the model saw them; `n` is assigned 1-based from it.
     pub citations: Vec<NewAskCitation>,
 }
 
-/// Test-only, for the reason `NewArtifact`'s is: in production every field
-/// here is a decision, and a field added later must break every call site
-/// until somebody answers for it. A fixture has no such duty.
+/// Test-only: in production every field is a decision, so a new field must break every call site.
 #[cfg(test)]
 impl Default for NewAsk {
     fn default() -> Self {
@@ -69,7 +50,6 @@ impl Default for NewAsk {
     }
 }
 
-/// One recorded question as the pursuit sweep reads it.
 #[derive(Debug, Clone)]
 pub struct RecordedAsk {
     pub id: String,
@@ -77,17 +57,12 @@ pub struct RecordedAsk {
     pub query_vec: Vec<f32>,
     pub created_at: i64,
     pub abstained: bool,
-    /// The excerpts the answer actually referenced, in the order they were
-    /// shown. Not everything the model saw: an ask packs whatever fits, so
-    /// "was in the prompt" says nothing about whether it helped, and an
-    /// abstention leaves this empty however much it was given.
     pub cited: Vec<String>,
     pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskVerdict {
-    /// The answer is correct as stated.
     Right,
     /// The base holds the answer and this is not it.
     Wrong,
@@ -155,54 +130,44 @@ fn one_row(res: sqlx::sqlite::SqliteQueryResult) -> Result<()> {
 
 impl Store {
     pub async fn record_ask(&self, ask: NewAsk) -> Result<String> {
-        // Read before the transaction opens: this is a different table with a
-        // different lifetime, and holding the write lock across it would put a
-        // question's own record behind a row that never changes.
+        // Read before the transaction opens, so the write lock is not held across another table.
         let generation = self.live_generation().await?;
         let mut tx = self.pool.begin().await?;
         let id = new_id();
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO ask_events
                (id, question, scope, filters, query_vec, vec_dim, embed_model, answer,
                 abstained, dropped, truncated, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            &id,
+            &ask.question,
+            &ask.scope,
+            &ask.filters,
+            vec_to_blob(&ask.query_vec),
+            ask.query_vec.len() as i64,
+            &ask.embed_model,
+            &ask.answer,
+            ask.abstained as i64,
+            ask.dropped as i64,
+            ask.truncated as i64,
+            now()
         )
-        .bind(&id)
-        .bind(&ask.question)
-        .bind(&ask.scope)
-        .bind(&ask.filters)
-        .bind(vec_to_blob(&ask.query_vec))
-        .bind(ask.query_vec.len() as i64)
-        .bind(&ask.embed_model)
-        .bind(&ask.answer)
-        .bind(ask.abstained as i64)
-        .bind(ask.dropped as i64)
-        .bind(ask.truncated as i64)
-        .bind(now())
         .execute(&mut *tx)
         .await?;
         for (i, c) in ask.citations.iter().enumerate() {
-            sqlx::query(
+            sqlx::query!(
                 "INSERT INTO ask_citations (event_id, n, artifact_id, score, used)
                  VALUES (?, ?, ?, ?, ?)",
+                &id,
+                i as i64 + 1,
+                &c.artifact_id,
+                c.score,
+                c.used as i64
             )
-            .bind(&id)
-            .bind(i as i64 + 1)
-            .bind(&c.artifact_id)
-            .bind(c.score)
-            .bind(c.used as i64)
             .execute(&mut *tx)
             .await?;
 
-            // The densest positive signal there is, and until now it was
-            // computed, stored and read by nothing that tunes anything. An
-            // excerpt the answer actually drew on says the retrieval that put
-            // it there was right to.
-            //
-            // `abstained` is checked as well as `used`, though an abstention
-            // references nothing and so has no used citation: the guard is
-            // explicit because the rule is about the answer, not about the
-            // scan that happens to implement it.
+            // `abstained` is checked explicitly: the rule is about the answer, not the scan.
             if let Some(g) = &generation
                 && c.used
                 && !ask.abstained
@@ -224,10 +189,7 @@ impl Store {
             }
         }
 
-        // An answer that asserts a command or a path none of its excerpts held
-        // is retrieval having failed to supply what the answer needed. It
-        // names no artifact, because the claim is about the set: nothing in the
-        // list was wrong to be there, the list was missing something.
+        // Names no artifact: the claim is that the set was missing something.
         if let Some(g) = &generation
             && ask.unsupported > 0
         {
@@ -251,111 +213,105 @@ impl Store {
     }
 
     pub async fn ask_event(&self, id: &str) -> Result<Option<AskEvent>> {
-        let Some(row) = sqlx::query(
-            "SELECT id, question, answer, abstained, verdict, judged_at FROM ask_events WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
+        let Some(row) = sqlx::query!(
+            r#"SELECT id AS "id!", question, answer, abstained, verdict, judged_at FROM ask_events WHERE id = ?"#,
+            id
+        ).fetch_optional(&self.pool)
         .await?
         else {
             return Ok(None);
         };
-        let citations = sqlx::query(
+        let citations = sqlx::query!(
             "SELECT n, artifact_id, score, carried FROM ask_citations WHERE event_id = ? ORDER BY n",
-        )
-        .bind(id)
-        .fetch_all(&self.pool)
+            id
+        ).fetch_all(&self.pool)
         .await?
-        .iter()
+        .into_iter()
         .map(|r| AskCitation {
-            n: r.get("n"),
-            artifact_id: r.get("artifact_id"),
-            score: r.get::<f64, _>("score") as f32,
-            carried: r.get::<i64, _>("carried") != 0,
+            n: r.n,
+            artifact_id: r.artifact_id,
+            score: r.score as f32,
+            carried: r.carried != 0,
         })
         .collect();
         Ok(Some(AskEvent {
-            id: row.get("id"),
-            question: row.get("question"),
-            answer: row.get("answer"),
-            abstained: row.get::<i64, _>("abstained") != 0,
-            verdict: row
-                .get::<Option<String>, _>("verdict")
-                .as_deref()
-                .and_then(AskVerdict::parse),
-            judged_at: row.get("judged_at"),
+            id: row.id,
+            question: row.question,
+            answer: row.answer,
+            abstained: row.abstained != 0,
+            verdict: row.verdict.as_deref().and_then(AskVerdict::parse),
+            judged_at: row.judged_at,
             citations,
         }))
     }
 
-    /// The artifacts an answer actually referenced, in citation order. What
-    /// the model was shown but did not use is not here: only use is
-    /// engagement.
     pub async fn used_citations(&self, event_id: &str) -> Result<Vec<String>> {
-        Ok(sqlx::query_scalar(
+        Ok(sqlx::query_scalar!(
             "SELECT artifact_id FROM ask_citations WHERE event_id = ? AND used = 1 ORDER BY n",
+            event_id
         )
-        .bind(event_id)
         .fetch_all(&self.pool)
         .await?)
     }
 
     pub async fn judge_ask(&self, id: &str, verdict: AskVerdict) -> Result<()> {
         one_row(
-            sqlx::query("UPDATE ask_events SET judged_at = ?, verdict = ? WHERE id = ?")
-                .bind(now())
-                .bind(verdict.as_str())
-                .bind(id)
-                .execute(&self.pool)
-                .await?,
+            sqlx::query!(
+                "UPDATE ask_events SET judged_at = ?, verdict = ? WHERE id = ?",
+                now(),
+                verdict.as_str(),
+                id
+            )
+            .execute(&self.pool)
+            .await?,
         )
     }
 
-    /// Take a verdict back, carriers included. A carrier left behind would
-    /// count towards citation recall for a judgement nobody stands behind.
+    /// A carrier left behind would count towards citation recall for a withdrawn verdict.
     pub async fn unjudge_ask(&self, id: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        let res =
-            sqlx::query("UPDATE ask_events SET judged_at = NULL, verdict = NULL WHERE id = ?")
-                .bind(id)
-                .execute(&mut *tx)
-                .await?;
+        let res = sqlx::query!(
+            "UPDATE ask_events SET judged_at = NULL, verdict = NULL WHERE id = ?",
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
         one_row(res)?;
-        sqlx::query("UPDATE ask_citations SET carried = 0 WHERE event_id = ?")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query!(
+            "UPDATE ask_citations SET carried = 0 WHERE event_id = ?",
+            id
+        )
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
         Ok(())
     }
 
-    /// Flip whether citation `n` carried the answer; returns the new state.
-    /// Saying an excerpt carried the answer is saying the answer was right, so
-    /// an unjudged event becomes `right`. A verdict already given is left as it
-    /// is: the toggle refines a verdict, it does not overrule one.
+    /// Marking a carrier makes an unjudged event `right`; an existing verdict is left alone.
     pub async fn toggle_carried(&self, id: &str, n: i64) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let res = sqlx::query(
+        let res = sqlx::query!(
             "UPDATE ask_citations SET carried = 1 - carried WHERE event_id = ? AND n = ?",
+            id,
+            n
         )
-        .bind(id)
-        .bind(n)
         .execute(&mut *tx)
         .await?;
         one_row(res)?;
-        let carried: i64 =
-            sqlx::query_scalar("SELECT carried FROM ask_citations WHERE event_id = ? AND n = ?")
-                .bind(id)
-                .bind(n)
-                .fetch_one(&mut *tx)
-                .await?;
+        let carried: i64 = sqlx::query_scalar!(
+            "SELECT carried FROM ask_citations WHERE event_id = ? AND n = ?",
+            id,
+            n
+        )
+        .fetch_one(&mut *tx)
+        .await?;
         if carried != 0 {
-            sqlx::query(
+            sqlx::query!(
                 "UPDATE ask_events SET judged_at = ?, verdict = 'right'
                  WHERE id = ? AND verdict IS NULL",
+                now(),
+                id
             )
-            .bind(now())
-            .bind(id)
             .execute(&mut *tx)
             .await?;
         }
@@ -365,7 +321,7 @@ impl Store {
 
     pub async fn ask_stats(&self) -> Result<AskStats> {
         let mut s = AskStats {
-            asked: sqlx::query_scalar("SELECT count(*) FROM ask_events")
+            asked: sqlx::query_scalar!("SELECT count(*) FROM ask_events")
                 .fetch_one(&self.pool)
                 .await?,
             ..Default::default()
@@ -375,66 +331,64 @@ impl Store {
             (&mut s.wrong, "wrong"),
             (&mut s.nothing_here, "nothing_here"),
         ] {
-            *field = sqlx::query_scalar("SELECT count(*) FROM ask_events WHERE verdict = ?")
-                .bind(verdict)
-                .fetch_one(&self.pool)
-                .await?;
+            *field =
+                sqlx::query_scalar!("SELECT count(*) FROM ask_events WHERE verdict = ?", verdict)
+                    .fetch_one(&self.pool)
+                    .await?;
         }
         s.judged = s.right + s.wrong + s.nothing_here;
         Ok(s)
     }
 
-    /// Unjudged questions older than the window. Judged ones are exempt for
-    /// the reason judged searches are: they are the operator's own work.
+    /// Judged questions are exempt: they are the operator's own work.
     pub async fn expire_asks(&self, retain_days: i64) -> Result<u64> {
         if retain_days <= 0 {
             return Ok(0);
         }
-        Ok(
-            sqlx::query("DELETE FROM ask_events WHERE created_at < ? AND verdict IS NULL")
-                .bind(now() - retain_days * 86_400)
-                .execute(&self.pool)
-                .await?
-                .rows_affected(),
+        Ok(sqlx::query!(
+            "DELETE FROM ask_events WHERE created_at < ? AND verdict IS NULL",
+            now() - retain_days * 86_400
         )
+        .execute(&self.pool)
+        .await?
+        .rows_affected())
     }
 
-    /// Recorded questions with `from < created_at <= to`, oldest first, with
-    /// the excerpts their answers referenced — the sources a question engaged.
+    /// `from < created_at <= to`, oldest first.
     pub async fn asks_between(&self, from: i64, to: i64) -> Result<Vec<RecordedAsk>> {
-        let rows = sqlx::query(
-            "SELECT id, question, query_vec, created_at, abstained, scope FROM ask_events
-              WHERE created_at > ? AND created_at <= ? ORDER BY created_at, id",
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", question, query_vec, created_at, abstained, scope FROM ask_events
+              WHERE created_at > ? AND created_at <= ? ORDER BY created_at, id"#,
+            from,
+            to
         )
-        .bind(from)
-        .bind(to)
         .fetch_all(&self.pool)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
-        for r in &rows {
-            let id: String = r.get("id");
-            let cited: Vec<String> = sqlx::query_scalar(
+        for r in rows {
+            let id: String = r.id;
+            let cited: Vec<String> = sqlx::query_scalar!(
                 "SELECT artifact_id FROM ask_citations
                   WHERE event_id = ? AND used = 1 ORDER BY n",
+                &id
             )
-            .bind(&id)
             .fetch_all(&self.pool)
             .await?;
             out.push(RecordedAsk {
                 id,
-                question: r.get("question"),
-                query_vec: crate::store::feedback::blob_to_vec(&r.get::<Vec<u8>, _>("query_vec")),
-                created_at: r.get("created_at"),
-                abstained: r.get::<i64, _>("abstained") != 0,
+                question: r.question,
+                query_vec: crate::store::feedback::blob_to_vec(&r.query_vec),
+                created_at: r.created_at,
+                abstained: r.abstained != 0,
                 cited,
-                scope: r.get("scope"),
+                scope: r.scope,
             });
         }
         Ok(out)
     }
 
     pub async fn purge_asks(&self) -> Result<u64> {
-        Ok(sqlx::query("DELETE FROM ask_events")
+        Ok(sqlx::query!("DELETE FROM ask_events")
             .execute(&self.pool)
             .await?
             .rows_affected())
@@ -464,8 +418,6 @@ mod tests {
         }
     }
 
-    /// A store with one generation live, so an observation has something to be
-    /// evidence about.
     async fn base() -> (Store, String) {
         use crate::store::generations::{GenerationParams, NewGeneration};
         let store = Store::memory().await.unwrap();
@@ -505,8 +457,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_abstention_leaves_no_observation_however_much_it_was_shown() {
-        // Being packed into the prompt is not engagement. An abstention
-        // references nothing however many excerpts it was given.
         let (store, generation) = base().await;
         let mut a = ask("something the base has never held", 3);
         a.abstained = true;
@@ -566,12 +516,11 @@ mod tests {
 
     #[tokio::test]
     async fn an_ask_recorded_before_any_generation_exists_writes_no_observation() {
-        // Ordering safety: the boot path that names a generation runs in the
-        // background, and nothing may fail because it has not run yet.
+        // The boot path that names a generation runs in the background; nothing may depend on it.
         let store = Store::memory().await.unwrap();
         store.record_ask(ask("early", 2)).await.unwrap();
 
-        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM observations")
+        let n: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM observations")
             .fetch_one(&store.pool)
             .await
             .unwrap();
@@ -653,7 +602,6 @@ mod tests {
             vec![2]
         );
 
-        // Toggling again turns it off and leaves the verdict alone.
         assert!(!store.toggle_carried(&id, 2).await.unwrap());
         let ev = store.ask_event(&id).await.unwrap().unwrap();
         assert_eq!(ev.verdict, Some(AskVerdict::Right));
@@ -697,14 +645,15 @@ mod tests {
             .judge_ask(&old_judged, AskVerdict::Right)
             .await
             .unwrap();
-        // Age two of them past a 30-day window.
         for id in [&old_unjudged, &old_judged] {
-            sqlx::query("UPDATE ask_events SET created_at = ? WHERE id = ?")
-                .bind(now() - 31 * 86_400)
-                .bind(id)
-                .execute(&store.pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE ask_events SET created_at = ? WHERE id = ?",
+                now() - 31 * 86_400,
+                id
+            )
+            .execute(&store.pool)
+            .await
+            .unwrap();
         }
         assert_eq!(store.expire_asks(30).await.unwrap(), 1);
         assert!(store.ask_event(&old_unjudged).await.unwrap().is_none());
@@ -712,13 +661,13 @@ mod tests {
         assert!(store.ask_event(&fresh).await.unwrap().is_some());
         // Zero means keep forever.
         assert_eq!(store.expire_asks(0).await.unwrap(), 0);
-        // Citations go with the event.
-        let orphans: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM ask_citations WHERE event_id = ?")
-                .bind(&old_unjudged)
-                .fetch_one(&store.pool)
-                .await
-                .unwrap();
+        let orphans: i64 = sqlx::query_scalar!(
+            "SELECT count(*) FROM ask_citations WHERE event_id = ?",
+            &old_unjudged
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
         assert_eq!(orphans, 0);
     }
 

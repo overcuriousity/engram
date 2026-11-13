@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET state = 'done' WHERE subject = ? AND stage = ? AND target_id = ? AND state = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2588c12d8b84ed3f03af95b6196fd5f3cabdc9dec50d8070d5ebb81b3c6aaaeb"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT notify FROM users WHERE subject = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "notify",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "notify"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "192ad5a844fb224148c4c82580657acc3be15e9db890f21205c11dccc21931d6"
+}

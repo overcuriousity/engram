@@ -1,23 +1,15 @@
-//! `Stage::Fetch`: a link that could not be read when it was captured, tried
-//! again.
-//!
-//! The capture is already stored and searchable as the link and whatever came
-//! with it (`Core::ingest_link`). What arrives here replaces that text; what
-//! does not is tried again at the backoff, and after `ATTEMPTS` the link is
-//! left as it is, with the reason on it.
+//! `Stage::Fetch`: a link unreadable at capture, tried again. The capture is already searchable as
+//! the link (`Core::ingest_link`).
 
 use crate::core::Core;
 use crate::error::Result;
 
-/// How many times a held link is tried before it is left alone. The backoff
-/// doubles to its six-hour ceiling around the fifteenth, so this is a day or
-/// two of trying: long enough for a site that was down, short enough that a
-/// login wall is not asked every six hours for ever.
+/// The backoff hits its six-hour ceiling around the fifteenth try: a day or two, enough for a site
+/// that was down.
 pub const ATTEMPTS: i64 = 20;
 
 pub async fn run(core: &Core, corpus_id: &str) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
-    // Read already, or asked again by nobody: nothing owed.
     if src.metadata["fetch"]["pending"].as_bool() != Some(true) {
         return Ok(());
     }

@@ -1,11 +1,5 @@
-//! The grant a QR carries, and the exchange that turns it into a token.
-//!
-//! The extension is handed a long-lived token because its browser carries
-//! it straight into the extension that asked. A code drawn on a screen has
-//! no such carrier — anyone in the room can photograph it — so the screen
-//! shows a grant instead: two minutes of life, spent by one claim, and the
-//! real token is minted only in the POST that spends it, over TLS, to the
-//! device that made the request. The credential is never rendered.
+//! A QR grant and its exchange for a token: two minutes, one claim, token minted only in the claiming POST.
+//! The code on screen can be photographed, so it is never the credential itself.
 
 use crate::error::{Error, Result};
 use crate::store::control::Control;
@@ -13,24 +7,17 @@ use argon2::password_hash::rand_core::{OsRng, RngCore};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-/// How long a code on the screen stays claimable. Two minutes is long
-/// enough to find the phone and short enough that a photograph of the screen
-/// is worthless by the time anyone acts on it.
+/// Long enough to find the phone; a photograph of the screen is stale before anyone can use it.
 pub const TTL: i64 = 120;
 
-/// SHA-256, hex. Not argon2id — see the `pair_grants` comment in
-/// `control_schema.sql`.
+/// SHA-256, not argon2id — see `pair_grants` in `control_schema.sql`.
 pub fn hash_code(code: &str) -> String {
     hex::encode(Sha256::digest(code.as_bytes()))
 }
 
-/// Mint a grant for `subject` and return the code, which is shown once.
 pub async fn mint(control: &Control, subject: &str) -> Result<String> {
-    // The button is the only thing that grows this table, so its press is
-    // where the dead rows go.
+    // Only the button grows this table, so its press purges dead rows.
     control.purge_expired_grants().await?;
-    // OsRng from the rand_core argon2 re-exports, as `tokens::mint` does,
-    // so there is one random source in the tree and not two.
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let code = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
@@ -42,9 +29,7 @@ pub async fn mint(control: &Control, subject: &str) -> Result<String> {
     Ok(code)
 }
 
-/// Spend `code` and mint the token it was standing in for, named for the
-/// device that claimed it. `Error::Unauthorized` for a code that is unknown,
-/// expired or already spent — one answer, so the route enumerates nothing.
+/// `Error::Unauthorized` for unknown, expired or spent codes alike, so the route enumerates nothing.
 pub async fn claim(
     control: &Control,
     code: &str,
@@ -54,9 +39,7 @@ pub async fn claim(
     let Some(subject) = control.claim_grant(&hash_code(code)).await? else {
         return Err(Error::Unauthorized);
     };
-    // If this mint fails the grant is spent and the person presses the button
-    // again. That is the right direction to fail in: a grant that could be
-    // retried after a failure is a grant that can be claimed twice.
+    // A failed mint leaves the grant spent: a retryable grant could be claimed twice.
     let (_, token) = crate::auth::tokens::mint(control, device, &subject, user_agent).await?;
     tracing::info!(subject = %subject, device, "app paired");
     Ok(token)
@@ -85,7 +68,7 @@ mod tests {
     async fn the_store_holds_the_hash_and_not_the_code() {
         let c = Control::memory().await.unwrap();
         let code = mint(&c, "alice").await.unwrap();
-        let stored: String = sqlx::query_scalar("SELECT code_hash FROM pair_grants")
+        let stored: String = sqlx::query_scalar!("SELECT code_hash FROM pair_grants")
             .fetch_one(&c.pool)
             .await
             .unwrap();
@@ -126,7 +109,6 @@ mod tests {
             claim(&c, "not-a-code", "phone", None).await,
             Err(Error::Unauthorized)
         ));
-        // The failed claims minted nothing.
         assert_eq!(c.list_tokens("alice").await.unwrap().len(), 1);
     }
 
@@ -137,7 +119,7 @@ mod tests {
             .await
             .unwrap();
         mint(&c, "alice").await.unwrap();
-        let n: i64 = sqlx::query_scalar("SELECT count(*) FROM pair_grants")
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM pair_grants")
             .fetch_one(&c.pool)
             .await
             .unwrap();

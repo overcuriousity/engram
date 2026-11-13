@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT n, artifact_id, score, carried FROM ask_citations WHERE event_id = ? ORDER BY n",
+  "describe": {
+    "columns": [
+      {
+        "name": "n",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ask_citations",
+            "name": "n"
+          }
+        }
+      },
+      {
+        "name": "artifact_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "ask_citations",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "score",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "ask_citations",
+            "name": "score"
+          }
+        }
+      },
+      {
+        "name": "carried",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ask_citations",
+            "name": "carried"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0e2b6ae3d4791f699ffc914b53763eb3b81a5b3f3c5be03723db93fec9505694"
+}

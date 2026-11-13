@@ -1,10 +1,4 @@
-//! Handing the browser extension a token, without ever writing one down.
-//!
-//! Bearer tokens and the UI that mints them already exist. What the extension
-//! needs on top of that is a way to receive one that does not involve the
-//! operator selecting a credential from a page and pasting it somewhere: the
-//! browser's own auth-flow window opens this page, and the redirect carries
-//! the token back into the extension that started the flow.
+//! Handing the browser extension a token through its auth-flow window, without the operator copying it.
 
 use crate::error::Error;
 use crate::tenants::Tenant;
@@ -14,24 +8,15 @@ use crate::web::ui_error::UiResult;
 use askama::Template;
 use axum::Form;
 use axum::Router;
-use axum::extract::Query;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 
-/// Hosts a browser reserves for extension redirect sinks.
-///
-/// `browser.identity.launchWebAuthFlow` hands the response back to the
-/// extension that started the flow instead of loading these; nothing is served
-/// from them. That is what makes a redirect to one safe and a redirect
-/// anywhere else an open redirect carrying a credential.
+/// `launchWebAuthFlow` hands these redirects to the extension and loads nothing; any other target is an open redirect with a credential.
 const EXTENSION_REDIRECT_HOSTS: [&str; 2] = ["chromiumapp.org", "extensions.allizom.org"];
 
-/// Whether a redirect target is one of those sinks.
-///
-/// Matched on the parsed host, never on the raw string:
-/// `https://evil.test/#.chromiumapp.org` ends with the right characters and is
-/// not the right host.
+/// Matched on the parsed host: `https://evil.test/#.chromiumapp.org` ends right and is the wrong host.
 pub fn is_extension_redirect(raw: &str) -> bool {
     let Ok(u) = url::Url::parse(raw) else {
         return false;
@@ -47,45 +32,10 @@ pub fn is_extension_redirect(raw: &str) -> bool {
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
-/// The origin this deployment is being reached at.
-///
-/// Learned from the request rather than configured, because the signed
-/// extension is one artifact serving every deployment: an XPI is signed over
-/// its contents, so a manifest rewritten per host would invalidate the
-/// signature that makes one-click install work. The download and pairing pages
-/// carry the origin instead, and the extension asks for host permission for
-/// that one origin.
-pub fn request_origin(headers: &HeaderMap) -> Option<String> {
-    let host = headers.get(header::HOST)?.to_str().ok()?;
-    if host.is_empty() {
-        return None;
+impl PairTemplate {
+    fn redirect_uri_attr(&self) -> String {
+        crate::web::markdown::inert(&self.redirect_uri)
     }
-    // `https` when the proxy did not say, because the proxy not saying is the
-    // common case — nginx forwards no `X-Forwarded-Proto` unless told to — and
-    // guessing wrong in that direction is the expensive one. This origin is
-    // shown to the operator as the address to pair with, and a deployment
-    // named `http://` there is a bearer token sent in cleartext. Loopback is
-    // the exception, and the one deployment genuinely reached without TLS.
-    let scheme = match headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(s) => s,
-        None if is_loopback(host) => "http",
-        None => "https",
-    };
-    Some(format!("{scheme}://{host}"))
-}
-
-/// Whether a `Host` names this machine, port and all.
-fn is_loopback(host: &str) -> bool {
-    // An IPv6 literal is bracketed and full of colons of its own, so the port
-    // separator is the one after the bracket rather than the first one.
-    let name = match host.strip_prefix('[') {
-        Some(rest) => rest.split(']').next().unwrap_or(rest),
-        None => host.split(':').next().unwrap_or(host),
-    };
-    name == "localhost" || name == "::1" || name.starts_with("127.")
 }
 
 #[derive(Template)]
@@ -94,17 +44,11 @@ struct PairTemplate {
     origin: String,
     redirect_uri: String,
     state: String,
-    /// Whether this window has a session. `false` renders the way back in
-    /// rather than the Pair button; see `pair_page`.
+    /// `false` renders the way back in rather than the Pair button.
     signed_in: bool,
 }
 
 impl PairTemplate {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
     fn section(&self) -> &'static str {
         ""
     }
@@ -118,24 +62,11 @@ pub struct PairParams {
     pub state: String,
 }
 
-/// The page the extension opens through `launchWebAuthFlow`.
-///
-/// A button rather than an automatic mint. The operator sees which origin they
-/// are pairing with and presses something; a flow that minted on page load
-/// would hand a token to anything that could get this URL opened.
-///
-/// `Option<Identity>` rather than `Identity`, because this page is opened
-/// inside `launchWebAuthFlow`'s own window and a 401 there is a dead end:
-/// `redirect_unauthenticated_browsers` rewrites it into `/auth/login?go=1`,
-/// which carries no return path, so signing in lands on `/ui/search` and the
-/// flow never reaches its redirect sink — `pair()` rejects with nothing the
-/// operator can act on. First run is exactly when there is no session, so that
-/// is the case that has to work. Rendered signed-out, the page says what is
-/// missing and offers the way back; minting still requires an `Identity`, on
-/// the POST.
+/// A button, not a mint on load, so opening this URL hands nobody a token.
+/// `Option<Identity>`: a 401 inside `launchWebAuthFlow`'s window is a dead end, so signed-out renders the way back in.
 async fn pair_page(
     tenant: Option<Tenant>,
-    headers: HeaderMap,
+    State(st): State<AppState>,
     Query(p): Query<PairParams>,
 ) -> UiResult<Response> {
     if !is_extension_redirect(&p.redirect_uri) {
@@ -145,7 +76,7 @@ async fn pair_page(
         .into());
     }
     Ok(HtmlTemplate(PairTemplate {
-        origin: request_origin(&headers).unwrap_or_default(),
+        origin: st.auth.deployment.base(),
         redirect_uri: p.redirect_uri,
         state: p.state,
         signed_in: tenant.is_some(),
@@ -155,6 +86,7 @@ async fn pair_page(
 
 async fn pair_submit(
     tenant: Tenant,
+    State(st): State<AppState>,
     headers: HeaderMap,
     Form(p): Form<PairParams>,
 ) -> UiResult<Response> {
@@ -164,10 +96,8 @@ async fn pair_submit(
         )
         .into());
     }
-    let origin = request_origin(&headers).unwrap_or_default();
-    // The browser that asked, recorded with the token: every extension token
-    // carries the same name, so this is the only thing telling one row from
-    // another on the settings page.
+    let origin = st.auth.deployment.base();
+    // Every extension token has the same name; the user agent tells the rows apart.
     let (_, plaintext) = crate::auth::tokens::mint(
         &tenant.core.store.control,
         "browser extension",
@@ -176,10 +106,7 @@ async fn pair_submit(
     )
     .await?;
 
-    // The fragment, not the query: a fragment is never sent to a server and
-    // does not land in a proxy log or in browsing history the way a query
-    // string does. `launchWebAuthFlow` hands the whole URL to the extension,
-    // fragment included.
+    // The fragment, not the query: it never reaches a server log or history; `launchWebAuthFlow` passes it through.
     let location = format!(
         "{}#token={}&state={}&origin={}",
         p.redirect_uri,
@@ -191,8 +118,7 @@ async fn pair_submit(
     Ok((StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response())
 }
 
-/// Percent-encode everything outside the unreserved set. Small and local
-/// rather than a dependency: three values, all of them ASCII.
+/// Local rather than a dependency: three ASCII values.
 pub(crate) fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -214,14 +140,11 @@ pub fn pair_router() -> Router<AppState> {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use axum::http::{HeaderValue, Request};
+    use axum::http::Request;
     use tower::ServiceExt;
 
     #[test]
     fn only_a_browser_extension_redirect_sink_is_accepted() {
-        // These two hosts do not serve anything: the browser intercepts them
-        // and routes the response back into the extension that started the
-        // flow. Anything else is somewhere a token could actually be read.
         assert!(is_extension_redirect("https://abcdefg.chromiumapp.org/"));
         assert!(is_extension_redirect(
             "https://abcdefg.extensions.allizom.org/"
@@ -236,55 +159,6 @@ mod tests {
         ] {
             assert!(!is_extension_redirect(bad), "accepted {bad}");
         }
-    }
-
-    #[test]
-    fn the_pairing_page_carries_its_own_origin() {
-        // The extension must learn which origin to request host permission
-        // for without the operator typing it. The deployment knows it; the
-        // static, signed manifest cannot.
-        let mut h = HeaderMap::new();
-        h.insert("host", HeaderValue::from_static("engram.example"));
-        h.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        assert_eq!(
-            request_origin(&h).as_deref(),
-            Some("https://engram.example")
-        );
-
-        // No `X-Forwarded-Proto`, which is what nginx sends unless it has been
-        // told otherwise. Guessing `http` there names the deployment by a
-        // scheme it does not answer on, and this origin is the address the
-        // operator is shown to pair with — a bearer token in cleartext.
-        let mut unforwarded = HeaderMap::new();
-        unforwarded.insert("host", HeaderValue::from_static("engram.example"));
-        assert_eq!(
-            request_origin(&unforwarded).as_deref(),
-            Some("https://engram.example")
-        );
-
-        // Loopback is the exception: the one deployment genuinely reached
-        // without TLS, and telling an operator to pair with `https://localhost`
-        // would send them somewhere nothing is listening.
-        for host in ["localhost:8080", "127.0.0.1:8080", "[::1]:8080"] {
-            let mut plain = HeaderMap::new();
-            plain.insert("host", HeaderValue::from_str(host).unwrap());
-            assert_eq!(
-                request_origin(&plain).as_deref(),
-                Some(format!("http://{host}").as_str()),
-                "{host}"
-            );
-        }
-
-        // An explicit header still wins in both directions.
-        let mut forwarded_plain = HeaderMap::new();
-        forwarded_plain.insert("host", HeaderValue::from_static("engram.example"));
-        forwarded_plain.insert("x-forwarded-proto", HeaderValue::from_static("http"));
-        assert_eq!(
-            request_origin(&forwarded_plain).as_deref(),
-            Some("http://engram.example")
-        );
-
-        assert_eq!(request_origin(&HeaderMap::new()), None);
     }
 
     #[tokio::test]
@@ -311,15 +185,14 @@ mod tests {
         assert_eq!(res.status(), StatusCode::SEE_OTHER);
         let location = res.headers()["location"].to_str().unwrap().to_string();
         assert!(location.starts_with(redirect), "got {location}");
-        // In the fragment, not the query: a query string reaches server logs
-        // and the browser's history in a way a fragment does not.
+        // A query string reaches server logs and history in a way a fragment does not.
         let fragment = location.split_once('#').unwrap().1;
         let token = fragment
             .split('&')
             .find_map(|kv| kv.strip_prefix("token="))
             .unwrap();
         assert!(fragment.contains("state=nonce123"));
-        assert!(fragment.contains("origin=https%3A%2F%2Fengram.example"));
+        assert!(fragment.contains("origin=http%3A%2F%2F127.0.0.1%3A8080"));
 
         let id = crate::auth::tokens::verify(&core.store.control, &percent_decode(token))
             .await
@@ -329,11 +202,6 @@ mod tests {
 
     #[tokio::test]
     async fn pairing_without_a_session_offers_the_way_back_instead_of_a_dead_end() {
-        // This page opens inside `launchWebAuthFlow`'s own window. A 401 there
-        // is rewritten into `/auth/login?go=1`, which carries no return path —
-        // so signing in lands on the search page, the flow never reaches its
-        // redirect sink, and `pair()` rejects with nothing to act on. First run
-        // is exactly the case with no session, so it has to render.
         let (app, _token, _core) = crate::web::api::tests::app_token_and_core().await;
         let res = app
             .clone()
@@ -351,14 +219,10 @@ mod tests {
             .await
             .unwrap();
         let html = String::from_utf8_lossy(&body);
-        assert!(html.contains("not signed in"), "got {html}");
-        // The state carries through, so continuing after sign-in resumes this
-        // flow rather than starting a new one.
+        assert!(html.contains("Not signed in"), "got {html}");
         assert!(html.contains("value=\"n1\""), "got {html}");
-        // And no button that would ask for a token there is nobody to mint for.
         assert!(!html.contains(">Pair<"), "got {html}");
 
-        // Minting still needs an identity: the POST is unchanged.
         let res = app
             .oneshot(
                 Request::builder()
@@ -397,7 +261,6 @@ mod tests {
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
-    /// The inverse of `urlencode`, for the one value a test has to read back.
     fn percent_decode(s: &str) -> String {
         let b = s.as_bytes();
         let mut out = String::with_capacity(s.len());

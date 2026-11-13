@@ -157,7 +157,7 @@ internal fun DueLine(engram: Engram, row: DueRow, settled: Settled, onArtifact: 
 
     Column(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f).clickable { onArtifact(m.artifactId) }.padding(vertical = 4.dp)) {
+            Column(Modifier.weight(1f).clickable { onArtifact(m.artifactId) }.touchTarget().padding(vertical = 4.dp)) {
                 Label(row.title, row.named, maxLines = 1)
                 val words = buildList {
                     row.at?.let { add(dueWords(it, now)); add(fullWhen(it, zone)) }

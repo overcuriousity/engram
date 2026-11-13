@@ -1,0 +1,35 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT json_extract(detail, '$.rung') AS \"rung?: String\",\n                    SUM(kind = 'recommended_shown') AS shown,\n                    SUM(kind = 'recommended_open')  AS opened\n               FROM interaction_events\n              WHERE at >= ? AND kind IN ('recommended_shown', 'recommended_open')\n              GROUP BY 1\n              ORDER BY shown DESC, 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "rung?: String",
+        "ordinal": 0,
+        "type_info": "Null",
+        "origin": "Expression"
+      },
+      {
+        "name": "shown",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "opened",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null,
+      false,
+      false
+    ]
+  },
+  "hash": "a143aeb52a993cda3e1ba4c85678dac87d72f5c72fb90aa3631f1c24a3601e66"
+}

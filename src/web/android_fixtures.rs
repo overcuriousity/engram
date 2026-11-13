@@ -1,22 +1,5 @@
-//! The Android app's test fixtures are this server's real answers.
-//!
-//! `android/core/src/test/resources/api/*.json` is what the Kotlin models are
-//! tested against. If those files were written by hand they would be a second
-//! account of the API's shapes, and the first time a field was renamed here the
-//! phone's tests would go on passing against a server that no longer exists.
-//!
-//! So the files are produced *by* this test, from the real routes over a small
-//! base, and checked by it on every run: the committed file and a fresh answer
-//! must have the same shape — the same keys, holding the same kinds of value.
-//! Ids and clocks differ from run to run and are not compared.
-//!
-//! To refresh them after a deliberate change to a shape:
-//!
-//! ```text
-//! ENGRAM_WRITE_ANDROID_FIXTURES=1 cargo test --lib android_fixtures
-//! ```
-//!
-//! and then run the Android tests, which are the ones the change may break.
+//! The Android app's test fixtures, written and shape-checked from the real routes.
+//! Refresh with `ENGRAM_WRITE_ANDROID_FIXTURES=1 cargo test --lib android_fixtures`, then run the Android tests.
 
 use crate::store::artifacts::{CorpusSpan, NewArtifact, NewMerged, SpanSource};
 use crate::store::moments::{Kind, NewMoment, Source};
@@ -27,7 +10,6 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 use tower::ServiceExt;
 
-/// Every key path in a document with the kind of value at it.
 fn shape(v: &Value, at: &str, out: &mut BTreeSet<String>) {
     match v {
         Value::Object(m) => {
@@ -39,9 +21,7 @@ fn shape(v: &Value, at: &str, out: &mut BTreeSet<String>) {
             if a.is_empty() {
                 out.insert(format!("{at}[] (empty)"));
             }
-            // Every element, into one set: rows of a list differ in which
-            // optional keys they carry — a loose hit has `weak`, a sure one
-            // does not — and the fixture is there to hold both kinds.
+            // Every element into one set: rows differ in which optional keys they carry.
             for v in a {
                 shape(v, &format!("{at}[]"), out);
             }
@@ -91,12 +71,10 @@ fn check(name: &str, fresh: &Value) {
 #[tokio::test]
 async fn the_android_fixtures_are_shapes_this_server_sends() {
     let mut core = crate::core::test_support::test_core().await;
-    // The retrieval figures are only recorded where searches are.
+    // Retrieval figures are recorded only where searches are.
     core.learn.enabled = true;
     let s = core.store.clone();
 
-    // A titled document with two artifacts cut from known lines, and an
-    // untitled one.
     let doc = s
         .insert_corpus(
             "Filters narrow a search.\nPayload indexes make them fast.\nThird line.",
@@ -127,8 +105,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         .await
         .unwrap();
     let ids: Vec<String> = arts.iter().map(|a| a.id.clone()).collect();
-    // Embedded, so the related route has a neighbour to list; and linked, so
-    // it has something seen together to list beside it.
     crate::jobs::embed::run_corpus(&core, &doc.id)
         .await
         .unwrap();
@@ -142,7 +118,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
     )
     .await
     .unwrap();
-    // A merge of the two, and an earlier wording of it.
     let merged = s
         .insert_merged_artifact(
             &NewMerged {
@@ -164,7 +139,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
     )
     .await
     .unwrap();
-    // A reminder and a date, both today, and a sitting that opened the merge.
     let now = crate::store::now();
     for (kind, source, span) in [
         (Kind::Due, Source::Set, None),
@@ -192,8 +166,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
     .await
     .unwrap();
 
-    // An artifact the base hid, in its own corpus so nothing here is
-    // entangled with the merge above: the journal's plainest row.
     let old_doc = s
         .insert_corpus("an older way", "web", Some("Older"))
         .await
@@ -259,8 +231,6 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         &get(format!("/api/v1/artifacts/{}/source", ids[0])).await,
     );
     check("status.json", &get("/api/v1/status".into()).await);
-    // The merged artifact, because it carries the open reminder `about`
-    // reads back for the editor.
     check(
         "about.json",
         &get(format!("/api/v1/artifacts/{}/about", merged.id)).await,
@@ -300,15 +270,10 @@ async fn the_android_fixtures_are_shapes_this_server_sends() {
         &get("/api/v1/insights/set-aside".into()).await,
     );
 
-    // Three shapes no small base produces on demand — a loose hit past the
-    // cliff, an offer, a finished answer — serialised by the code the routes
-    // use, from values built here.
     let hits = vec![
         crate::cli::search::fixture::hit("sure", 0.9, false, false),
         crate::cli::search::fixture::hit("loose", 0.2, true, true),
     ];
-    // As the app's door answers it: the event the list was recorded under
-    // beside the rows, which is what an open, a verdict and a gap name.
     let mut search = crate::web::api::search_body(&hits, None).unwrap();
     search["event"] = serde_json::Value::String("ev-search".into());
     search["items"][0]["continues_to"] = serde_json::Value::String("art-loose".into());

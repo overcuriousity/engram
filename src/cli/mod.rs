@@ -1,8 +1,5 @@
-//! The terminal door: capture, search and ask from a shell.
-//!
-//! Over HTTP, never into the store — one set of ranking parameters, tenancy
-//! checks and feedback recording stands behind every door, and a search typed
-//! at a shell is a real recorded search the judge page can grade later.
+//! The terminal door: capture, search and ask over HTTP, never into the store, so a shell search
+//! is a real recorded search behind the same ranking and tenancy checks.
 
 pub mod args;
 pub mod ask;
@@ -16,11 +13,7 @@ pub mod status;
 #[cfg(test)]
 pub(crate) mod test_support;
 
-/// Percent-encode a query value.
-///
-/// Only what would end the value or the query; nothing here is a
-/// general-purpose encoder, and it is one function rather than one per verb so
-/// two doors cannot disagree about what needs escaping.
+/// Percent-encode a query value: only what would end the value or the query.
 pub(crate) fn encode(raw: &str) -> String {
     raw.bytes()
         .map(|b| match b {
@@ -32,11 +25,7 @@ pub(crate) fn encode(raw: &str) -> String {
         .collect()
 }
 
-/// An error as a sentence for the terminal.
-///
-/// `Validation` is how the client carries a sentence it wrote for a person —
-/// "no token…", "could not reach…" — and its `validation: ` prefix is the
-/// error's kind, which means something to a log and nothing to the reader.
+/// An error as a sentence for the terminal, without `Validation`'s kind prefix.
 fn say(e: &crate::error::Error) -> String {
     match e {
         crate::error::Error::Validation(msg) => msg.clone(),
@@ -44,11 +33,7 @@ fn say(e: &crate::error::Error) -> String {
     }
 }
 
-/// Run a verb and answer with the process's exit code: `0` results, `1` none,
-/// `2` a failure.
-///
-/// A shell branches on these — `engram -s "x" || …` — so they are part of the
-/// interface rather than a detail, and every verb answers in the same three.
+/// Run a verb and return the exit code: `0` results, `1` none, `2` a failure. Shells branch on it.
 pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
     let endpoint = match endpoint::resolve(
         &|k| std::env::var(k).ok(),
@@ -60,10 +45,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             return 2;
         }
     };
-    // One face for the whole invocation. It used to be decided inside the
-    // `--watch` branch alone; now the upload track, the readout and the lamps
-    // all read the same decision, and a second `decide` could only disagree
-    // with the first.
+    // One face for the whole invocation, so the upload track, readout and lamps agree.
     let face = face::Face::decide(
         cli,
         std::io::IsTerminal::is_terminal(&std::io::stdout()),
@@ -97,8 +79,6 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             };
             match captured {
                 Ok(ids) => {
-                    // One id per line, which is what a shell wants to pipe into
-                    // whatever it does next.
                     for id in &ids {
                         println!("{id}");
                     }

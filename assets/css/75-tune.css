@@ -1,0 +1,13 @@
+/* Accent-bordered: the recommendation is the only actionable thing here. */
+.judge-tune { margin-bottom: 0.9rem; }
+
+.judge-tune-history { margin-top: 0.375rem; }
+.judge-tune summary { cursor: pointer; }
+.judge-tune ul { margin: 0.5rem 0 0; padding-left: 1.25rem; font-size: var(--text-dense); }
+/* A query is whatever someone typed, so it wraps. */
+.judge-tune li { overflow-wrap: anywhere; }
+.judge-tune-history { font-size: var(--text-dense); }
+
+.exif-all { margin-top: 0.75rem; font-size: var(--text-dense); }
+.exif-all summary { cursor: pointer; }
+.exif-all table { margin-top: 0.5rem; }

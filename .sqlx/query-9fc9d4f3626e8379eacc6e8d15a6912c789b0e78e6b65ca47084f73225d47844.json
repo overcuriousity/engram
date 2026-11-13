@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET text = '', reaped_at = ?, lifecycle_dirty = 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "9fc9d4f3626e8379eacc6e8d15a6912c789b0e78e6b65ca47084f73225d47844"
+}

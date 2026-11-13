@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM artifacts WHERE corpus_id = ? AND provenance != 'note'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "729b9044276127908f84cc0290a95580dda22dfa2e69c8423ec4726a6084a242"
+}

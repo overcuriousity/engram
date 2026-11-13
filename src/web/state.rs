@@ -4,10 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// How long a parked question stays askable.
-///
-/// Long enough for a page load and an `EventSource` handshake, short enough
-/// that a tab closed between the two leaves nothing behind worth finding.
+/// Long enough for a page load and an `EventSource` handshake.
 pub const ASK_HANDOFF_TTL: Duration = Duration::from_secs(60);
 
 pub struct AuthContext {
@@ -15,35 +12,20 @@ pub struct AuthContext {
     pub local: Option<LocalConfig>,
     pub oidc: Option<OidcClient>,
     pub pending: PendingStore,
-    /// Whether to set the `Secure` flag on session cookies.
-    pub secure_cookies: bool,
+    pub deployment: crate::web::security::Deployment,
 }
 
 #[derive(Clone)]
 pub struct AppState {
-    /// Subject in, `Core` out. Deliberately the only way a handler reaches
-    /// data: there is no instance-wide core to fall back on, so a handler that
-    /// forgets to say whose data it wants does not compile.
+    /// The only way a handler reaches data: there is no instance-wide core to fall back on.
     pub tenants: Arc<crate::tenants::Tenants>,
     pub auth: Arc<AuthContext>,
-    /// The instance-wide settings every tenant shares.
     pub config: Arc<crate::config::Config>,
-    /// Questions parked between the POST that creates them and the GET that
-    /// streams them.
-    ///
-    /// `EventSource` is GET-only, and a GET that runs a model call and writes
-    /// an `ask_events` row is a mutating GET — the kind browser history and
-    /// prefetchers replay. An opaque one-shot id costs no schema and cannot be
-    /// replayed. Entries are removed on consumption and swept on insert.
-    ///
-    /// Each entry remembers who parked it. The id is unguessable, but a URL is
-    /// the kind of thing that ends up in a log or another tab, and a question
-    /// belongs to the person who asked it: it is answered — and recorded — for
-    /// that subject alone.
+    /// `EventSource` is GET-only, and a mutating GET is replayable; a one-shot id is not.
+    /// Each entry is answered for the subject who parked it alone.
     pub ask_handoff: Arc<Mutex<HashMap<String, ParkedAsk>>>,
 }
 
-/// One question waiting for its stream: what was asked, by whom, and when.
 pub struct ParkedAsk {
     pub req: crate::core::ask::AskRequest,
     pub subject: String,
@@ -51,9 +33,7 @@ pub struct ParkedAsk {
 }
 
 impl AppState {
-    /// Swept on every park rather than on a timer, because the map only grows
-    /// when someone parks: a page that was never streamed leaves one entry,
-    /// and the next ask is what collects it.
+    /// Swept on every park: the map only grows when someone parks.
     pub fn ask_handoff_park(&self, req: crate::core::ask::AskRequest, subject: &str) -> String {
         let id = crate::store::new_id();
         if let Ok(mut m) = self.ask_handoff.lock() {
@@ -71,12 +51,8 @@ impl AppState {
         id
     }
 
-    /// One shot: the entry is removed whether or not the stream succeeds, so a
-    /// reload of the streaming URL cannot spend a second model call.
-    ///
-    /// Only for the subject that parked it. Anyone else gets the same answer an
-    /// unknown id gets, and the entry stays where it is: the asker's own stream
-    /// may still be on its way, and a stranger's guess must not spend it.
+    /// One shot, so a reload cannot spend a second model call.
+    /// Another subject gets the unknown-id answer and the entry stays.
     pub fn ask_handoff_take(
         &self,
         id: &str,
@@ -91,30 +67,19 @@ impl AppState {
     }
 }
 
-/// Whether the ask door is open: `[infer.ask]` is configured. The nav reads
-/// it through every page's template.
+/// Whether `[infer.ask]` is configured; the nav reads it on every page.
 pub fn ask_enabled(t: &crate::tenants::Tenant) -> bool {
     t.core.asks()
 }
 
-/// Which of the ten a capture made through this request is read in.
-///
-/// The account's setting decides, and where it is unset — which is the default,
-/// and what every account that has never opened Settings has — the browser
-/// does, through `Accept-Language`. A door with neither answers English, like
-/// everything else that does not know.
-///
-/// Resolved here, at the door, and stamped onto the corpus: a background job
-/// holds a `Core` cached per tenant in a fixed-size LRU and knows no subject,
-/// so it could not read the account column when it matters. See
-/// `core::ingest::Capture::with_lang`.
+/// The account setting, else `Accept-Language`, else English.
+/// Resolved at the door and stamped on the corpus: background jobs know no subject.
 pub async fn capture_lang(
     tenant: &crate::tenants::Tenant,
     headers: &axum::http::HeaderMap,
 ) -> crate::infer::lang::Lang {
     use crate::infer::lang::Lang;
-    // A control database that cannot be read is not a reason to refuse a
-    // capture: the text matters more than the language it is read in.
+    // An unreadable control database must not refuse a capture.
     if let Ok(Some(set)) = tenant.core.store.control.lang(&tenant.user.subject).await {
         return set;
     }

@@ -1,12 +1,5 @@
-//! A `VectorStore` in a SQLite file, for an engram with no Qdrant beside it.
-//!
-//! Exact search: every query scans every vector, through sqlite-vec's
-//! `vec_distance_cosine`. That is the right trade for a personal base — tens
-//! of thousands of passages scan in milliseconds, and there is no index to
-//! fall out of step with the rows. What Qdrant does on its side of the wire —
-//! IDF over the sparse half, reciprocal rank fusion, the recency formula — is
-//! done here in Rust, to the same arithmetic, so a base ranks the same in
-//! either store.
+//! A `VectorStore` in SQLite for an engram without Qdrant: exact scan via sqlite-vec, with Qdrant's IDF,
+//! rank fusion and recency formula redone in Rust so a base ranks the same in either store.
 
 use super::sparse::SparseVector;
 use super::{
@@ -22,9 +15,7 @@ use std::collections::HashMap;
 
 use super::qdrant::PINNED_TAG;
 
-/// The terms of the scoring stage that are fixed when the store is opened.
-/// `recency` is the default a plain `search` uses; `search_weighted` names its
-/// own.
+/// `recency` is what a plain `search` uses; `search_weighted` names its own.
 #[derive(Debug, Clone, Copy)]
 pub struct Scoring {
     pub recency: Recency,
@@ -32,7 +23,6 @@ pub struct Scoring {
 }
 
 impl Scoring {
-    /// No recency, no boost: the fused rank is the score.
     pub fn off() -> Scoring {
         Scoring {
             recency: Recency {
@@ -84,9 +74,9 @@ CREATE TABLE IF NOT EXISTS vec_ctx (
 ) WITHOUT ROWID;
 ";
 
-/// sqlite-vec, made part of every connection this process opens from here on.
-/// An auto-extension rather than `load_extension`: nothing is read from
-/// storage, which is what lets a hardened Android forbid that outright.
+/// An auto-extension, not `load_extension`: nothing is read from storage, so a hardened Android may forbid that.
+// FFI: sqlite-vec registers through sqlite3_auto_extension.
+#[allow(unsafe_code)]
 fn register() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| unsafe {
@@ -120,6 +110,7 @@ fn status_word(s: ArtifactStatus) -> &'static str {
         ArtifactStatus::Active => "active",
         ArtifactStatus::Deprecated => "deprecated",
         ArtifactStatus::Superseded => "superseded",
+        ArtifactStatus::Trashed => "trashed",
     }
 }
 
@@ -128,24 +119,18 @@ fn decode(payload: &str) -> Result<VectorPayload> {
 }
 
 fn encode(p: &VectorPayload) -> String {
-    // The stamps are `skip_serializing_if` for Qdrant's merge semantics; here
-    // the JSON is the whole truth, so an absent key simply reads back as None.
-    serde_json::to_string(p).expect("a payload is plain data")
+    // The JSON is the whole truth here; an absent key reads back as None.
+    serde_json::to_string(p).unwrap_or_default()
 }
 
-/// A distance as sqlite-vec gives it, as the similarity `cosine()` would.
-/// A zero vector has no direction: sqlite-vec answers NULL or NaN for it, and
-/// `cosine()` in `mod.rs` answers 0.0. Agree with `cosine()`.
+/// sqlite-vec answers NULL or NaN for a zero vector; agree with `cosine()`, which says 0.0.
 fn similarity_of(dist: Option<f64>) -> f32 {
     dist.map(|d| 1.0 - d as f32)
         .filter(|s| s.is_finite())
         .unwrap_or(0.0)
 }
 
-/// Reciprocal rank fusion as Qdrant computes it: `1 / (rank + 2)` per half,
-/// ranks from zero, summed. A hit only the lexical half returned keeps no
-/// similarity — an exact term match is not a weak result, and `None` is how
-/// `SearchHit` says "no opinion".
+/// As Qdrant computes it: `1 / (rank + 2)` per half, summed. A lexical-only hit keeps no similarity.
 fn fuse(dense: Vec<SearchHit>, lexical: Vec<SearchHit>) -> Vec<SearchHit> {
     let mut by_id: HashMap<String, SearchHit> = HashMap::new();
     for (rank, mut h) in dense.into_iter().enumerate() {
@@ -199,8 +184,7 @@ impl SqliteVectors {
         Ok(SqliteVectors { pool, scoring })
     }
 
-    /// Read a stored payload with the columns that are the authority for the
-    /// stamps laid over it.
+    /// The columns are the authority for the stamps laid over the payload.
     fn hydrate(row: &sqlx::sqlite::SqliteRow) -> Result<VectorPayload> {
         let mut p = decode(row.get::<&str, _>("payload"))?;
         p.last_seen_at = row.get("last_seen_at");
@@ -217,6 +201,7 @@ impl SqliteVectors {
         let status = status_word(p.status.unwrap_or(ArtifactStatus::Active));
         match embedding {
             Some(v) => {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "INSERT INTO vec_points (artifact_id, corpus_id, category, status, created_at,
                         last_seen_at, hit_count, last_verified_at, payload, embedding)
@@ -242,6 +227,7 @@ impl SqliteVectors {
                 .await?;
             }
             None => {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "UPDATE vec_points SET corpus_id=?, category=?, status=?, created_at=?,
                         last_seen_at=?, hit_count=?, last_verified_at=?, payload=?
@@ -260,11 +246,13 @@ impl SqliteVectors {
                 .await?;
             }
         }
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query("DELETE FROM vec_tags WHERE artifact_id=?")
             .bind(&p.artifact_id)
             .execute(&mut *tx)
             .await?;
         for tag in &p.tags {
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("INSERT OR IGNORE INTO vec_tags (artifact_id, tag) VALUES (?,?)")
                 .bind(&p.artifact_id)
                 .bind(tag)
@@ -275,6 +263,7 @@ impl SqliteVectors {
     }
 
     async fn stored(tx: &mut sqlx::SqliteConnection, id: &str) -> Result<Option<VectorPayload>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let row = sqlx::query(
             "SELECT payload, last_seen_at, hit_count, last_verified_at
              FROM vec_points WHERE artifact_id=?",
@@ -285,11 +274,9 @@ impl SqliteVectors {
         row.as_ref().map(Self::hydrate).transpose()
     }
 
-    /// The WHERE clause a filter amounts to over `vec_points p`, and its binds
-    /// in order. Built as text because the tag count varies; every value is
-    /// bound, never spliced.
+    /// Text because the tag count varies; every value is bound, never spliced.
     fn where_clause(filter: &SearchFilter) -> (String, Vec<String>) {
-        let mut sql = String::from("1=1");
+        let mut sql = String::from("p.status <> 'trashed'");
         let mut binds = Vec::new();
         if !filter.include_superseded {
             sql.push_str(" AND p.status <> 'superseded'");
@@ -315,12 +302,7 @@ impl SqliteVectors {
         (sql, binds)
     }
 
-    /// The nearest `limit` points by cosine. `except` leaves one artifact out,
-    /// which is how `neighbours` keeps a point from being its own neighbour.
-    ///
-    /// `length(p.embedding) = ?` is the width guard `cosine()` documents: a
-    /// vector of another width is not in the same space, and sqlite-vec would
-    /// fail the whole query over it rather than skip the row.
+    /// `length(p.embedding) = ?` guards width: sqlite-vec fails the whole query on a mismatched row.
     async fn dense(
         &self,
         vector: &[f32],
@@ -336,6 +318,7 @@ impl SqliteVectors {
              WHERE length(p.embedding) = ? AND p.artifact_id IS NOT ? AND {clause}
              ORDER BY dist IS NULL, dist, p.artifact_id LIMIT ?"
         );
+        // runtime: contained-only vector tables, absent from the reference database.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
             .bind(blob(vector))
             .bind((vector.len() * 4) as i64)
@@ -356,10 +339,7 @@ impl SqliteVectors {
             .collect()
     }
 
-    /// The lexical half: BM25 with the IDF Qdrant's `idf` modifier applies,
-    /// `ln((N - n + 0.5) / (n + 0.5) + 1)`. The document side already carries
-    /// saturated term frequencies (`sparse::encode_document`), so a score is a
-    /// dot product with the IDF folded into the query weight.
+    /// IDF as Qdrant's `idf` modifier: `ln((N - n + 0.5) / (n + 0.5) + 1)`, folded into the query weight.
     async fn lexical(
         &self,
         sparse: &SparseVector,
@@ -370,6 +350,7 @@ impl SqliteVectors {
         let (clause, binds) = Self::where_clause(filter);
         let mut scores: HashMap<String, f32> = HashMap::new();
         for (term, qv) in sparse.indices.iter().zip(&sparse.values) {
+            // runtime: contained-only vector tables, absent from the reference database.
             let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vec_sparse WHERE term=?")
                 .bind(*term as i64)
                 .fetch_one(&self.pool)
@@ -383,6 +364,7 @@ impl SqliteVectors {
                  JOIN vec_points p ON p.artifact_id = s.artifact_id
                  WHERE s.term = ? AND {clause}"
             );
+            // runtime: contained-only vector tables, absent from the reference database.
             let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone())).bind(*term as i64);
             for b in &binds {
                 q = q.bind(b);
@@ -409,9 +391,7 @@ impl SqliteVectors {
             .collect())
     }
 
-    /// `score + weight · 0.5^(age / half_life) + pinned_boost`, the formula of
-    /// `qdrant.rs::scoring_formula`. A point never verified decays from now,
-    /// which is that formula's default and makes the term neutral.
+    /// `qdrant.rs::scoring_formula`'s arithmetic; never-verified points decay from now (neutral).
     fn apply_formula(&self, hits: &mut [SearchHit], recency: Recency) {
         let now = crate::store::now();
         let half_life = (recency.half_life_days.max(1) as f32) * 86_400.0;
@@ -442,6 +422,7 @@ impl SqliteVectors {
 #[async_trait]
 impl VectorStore for SqliteVectors {
     async fn ensure_collection(&self, dim: usize) -> Result<()> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let have: Option<String> = sqlx::query_scalar("SELECT value FROM vec_meta WHERE key='dim'")
             .fetch_optional(&self.pool)
             .await?;
@@ -451,6 +432,7 @@ impl VectorStore for SqliteVectors {
                 "this base was embedded at {d} dimensions and the embedder now gives {dim}"
             ))),
             None => {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query("INSERT OR REPLACE INTO vec_meta (key, value) VALUES ('dim', ?)")
                     .bind(dim.to_string())
                     .execute(&self.pool)
@@ -463,9 +445,7 @@ impl VectorStore for SqliteVectors {
     async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for mut p in points {
-            // The same rule as the other stores: a re-embed rebuilds the
-            // payload knowing none of the stamps, and an unset one means
-            // "whatever is stored", never "clear it".
+            // An unset stamp means "whatever is stored", never "clear it".
             if let Some(old) = Self::stored(&mut tx, &p.payload.artifact_id).await? {
                 p.payload.last_seen_at = p.payload.last_seen_at.or(old.last_seen_at);
                 p.payload.hit_count = p.payload.hit_count.or(old.hit_count);
@@ -474,11 +454,13 @@ impl VectorStore for SqliteVectors {
                 p.payload.superseded_by = p.payload.superseded_by.or(old.superseded_by);
             }
             Self::write_point(&mut tx, &p.payload, Some(&p.vector)).await?;
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("DELETE FROM vec_sparse WHERE artifact_id=?")
                 .bind(&p.payload.artifact_id)
                 .execute(&mut *tx)
                 .await?;
             for (term, value) in p.sparse.indices.iter().zip(&p.sparse.values) {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "INSERT OR REPLACE INTO vec_sparse (term, artifact_id, value) VALUES (?,?,?)",
                 )
@@ -504,8 +486,7 @@ impl VectorStore for SqliteVectors {
         p.status = p.status.or(old.status);
         p.last_verified_at = p.last_verified_at.or(old.last_verified_at);
         p.superseded_by = p.superseded_by.or(old.superseded_by);
-        // Only the embed job knows these two; an edit that leaves them empty
-        // means "unchanged", as it does in the other stores.
+        // Only the embed job knows these two; empty means unchanged.
         if p.origin_corpora.is_empty() {
             p.origin_corpora = old.origin_corpora;
         }
@@ -538,6 +519,7 @@ impl VectorStore for SqliteVectors {
         at: i64,
         reset_hits: bool,
     ) -> Result<()> {
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query(
             "UPDATE vec_points SET last_verified_at=?,
                 hit_count=CASE WHEN ? THEN 0 ELSE hit_count END
@@ -557,6 +539,7 @@ impl VectorStore for SqliteVectors {
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT payload, last_seen_at, hit_count, last_verified_at FROM vec_points
              WHERE status='active' AND last_verified_at IS NOT NULL AND last_verified_at < ?
@@ -592,8 +575,7 @@ impl VectorStore for SqliteVectors {
     ) -> Result<Vec<SearchHit>> {
         let dense = self.dense(vector, limit, filter, None).await?;
         let mut hits = if sparse.is_empty() {
-            // No indexable term: the dense order stands and its cosine is the
-            // score, as in `qdrant.rs`'s unfused branch.
+            // No indexable term: dense order, cosine as score, as in `qdrant.rs`.
             dense
         } else {
             let lexical = self.lexical(sparse, limit, filter).await?;
@@ -617,8 +599,7 @@ impl VectorStore for SqliteVectors {
         let mut tx = self.pool.begin().await?;
         for t in targets {
             if t.counts_as_hit {
-                // The caller's count when it has one, as the other stores
-                // honour it; the stored one otherwise.
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query(
                     "UPDATE vec_points SET last_seen_at=?,
                         hit_count=COALESCE(?, hit_count, 0) + 1
@@ -630,6 +611,7 @@ impl VectorStore for SqliteVectors {
                 .execute(&mut *tx)
                 .await?;
             } else {
+                // runtime: contained-only vector tables, absent from the reference database.
                 sqlx::query("UPDATE vec_points SET last_seen_at=? WHERE artifact_id=?")
                     .bind(seen_at)
                     .bind(&t.artifact_id)
@@ -677,6 +659,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         Ok(sqlx::query_scalar("SELECT artifact_id FROM vec_points")
             .fetch_all(&self.pool)
             .await?)
@@ -699,6 +682,7 @@ impl VectorStore for SqliteVectors {
         older_than: i64,
         unseen_since: i64,
     ) -> Result<Vec<SearchHit>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT payload, last_seen_at, hit_count, last_verified_at FROM vec_points
              WHERE status='active' AND created_at < ?
@@ -714,6 +698,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn facets(&self, limit: usize) -> Result<Facets> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT category, COUNT(*) AS n FROM vec_points WHERE category IS NOT NULL
              GROUP BY category ORDER BY n DESC, category LIMIT ?",
@@ -742,20 +727,22 @@ impl VectorStore for SqliteVectors {
 
     async fn set_context_vectors(&self, artifact_id: &str, vectors: Vec<Vec<f32>>) -> Result<()> {
         let mut tx = self.pool.begin().await?;
+        // runtime: contained-only vector tables, absent from the reference database.
         let there: Option<i64> = sqlx::query_scalar("SELECT 1 FROM vec_points WHERE artifact_id=?")
             .bind(artifact_id)
             .fetch_optional(&mut *tx)
             .await?;
-        // No point, nothing to attach a set to: its embedding may never have
-        // run. Not an error, by the trait's word.
+        // No point is not an error, by the trait's word.
         if there.is_none() {
             return Ok(());
         }
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query("DELETE FROM vec_ctx WHERE artifact_id=?")
             .bind(artifact_id)
             .execute(&mut *tx)
             .await?;
         for (n, v) in vectors.iter().enumerate() {
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("INSERT INTO vec_ctx (artifact_id, n, embedding) VALUES (?,?,?)")
                 .bind(artifact_id)
                 .bind(n as i64)
@@ -774,8 +761,7 @@ impl VectorStore for SqliteVectors {
         filter: &SearchFilter,
     ) -> Result<Vec<SearchHit>> {
         let (clause, binds) = Self::where_clause(filter);
-        // `max_sim`: an artifact matches on its nearest situation, so the
-        // smallest distance in its set is the one that speaks for it.
+        // `max_sim`: the smallest distance in an artifact's set speaks for it.
         let sql = format!(
             "SELECT p.payload, p.last_seen_at, p.hit_count, p.last_verified_at,
                     MIN(vec_distance_cosine(c.embedding, ?)) AS dist
@@ -783,6 +769,7 @@ impl VectorStore for SqliteVectors {
              WHERE length(c.embedding) = ? AND {clause}
              GROUP BY p.artifact_id ORDER BY dist, p.artifact_id LIMIT ?"
         );
+        // runtime: contained-only vector tables, absent from the reference database.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(sql.clone()))
             .bind(blob(vector))
             .bind((vector.len() * 4) as i64);
@@ -805,6 +792,7 @@ impl VectorStore for SqliteVectors {
         let mut tx = self.pool.begin().await?;
         for id in artifact_ids {
             // The tags, postings and context set go with it: ON DELETE CASCADE.
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query("DELETE FROM vec_points WHERE artifact_id=?")
                 .bind(id)
                 .execute(&mut *tx)
@@ -815,6 +803,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
+        // runtime: contained-only vector tables, absent from the reference database.
         sqlx::query("DELETE FROM vec_points WHERE corpus_id=?")
             .bind(corpus_id)
             .execute(&self.pool)
@@ -823,6 +812,7 @@ impl VectorStore for SqliteVectors {
     }
 
     async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT artifact_id, embedding FROM vec_points ORDER BY artifact_id LIMIT ?",
         )
@@ -837,6 +827,7 @@ impl VectorStore for SqliteVectors {
 
     async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
         let b: Option<Vec<u8>> =
+            // runtime: contained-only vector tables, absent from the reference database.
             sqlx::query_scalar("SELECT embedding FROM vec_points WHERE artifact_id=?")
                 .bind(artifact_id)
                 .fetch_optional(&self.pool)
@@ -844,13 +835,13 @@ impl VectorStore for SqliteVectors {
         Ok(b.map(|b| unblob(&b)))
     }
 
-    /// The vectors are rows in the tenant database, which the backup copies
-    /// whole; there is nothing separate to write.
+    /// The vectors are rows in the tenant database, which the backup copies whole.
     async fn export_snapshot(&self, _into: &std::path::Path) -> Result<super::VectorExport> {
         Ok(super::VectorExport::Embedded)
     }
 
     async fn count(&self) -> Result<u64> {
+        // runtime: contained-only vector tables, absent from the reference database.
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vec_points")
             .fetch_one(&self.pool)
             .await?;
@@ -933,8 +924,7 @@ mod tests {
             .search(&q, &encode_query("dry-run"), 3, &wide())
             .await
             .unwrap();
-        // Last of three in the dense half (1/4), first in the lexical (1/2):
-        // 0.75, against 0.5 for the dense winner the lexical half never saw.
+        // Last of three dense (1/4) plus first lexical (1/2) is 0.75, against 0.5 for the dense winner.
         assert_eq!(hybrid[0].payload.artifact_id, "term");
         assert!((hybrid[0].score - 0.75).abs() < 1e-5, "{}", hybrid[0].score);
         assert!(hybrid[0].similarity.is_some());
@@ -972,8 +962,7 @@ mod tests {
             .collect();
         pts.push(worded("rare", [0.0, 0.0, 1.0], "common quetzal"));
         s.upsert(pts).await.unwrap();
-        // The lexical half on its own: fused, seven passages that tie in the
-        // dense half would be ordered by their ids and say nothing about IDF.
+        // Fused, seven dense ties would order by id and say nothing about IDF.
         let hits = s
             .lexical(&encode_query("common quetzal"), 7, &wide())
             .await
@@ -1019,13 +1008,10 @@ mod tests {
             .collect();
         assert_eq!(order, ["pinned", "new", "old"]);
         assert!(s.applies_scoring_formula());
-        // The similarity is the cosine, untouched by either term.
         assert!(
             hits.iter()
                 .all(|h| (h.similarity.unwrap() - 1.0).abs() < 1e-5)
         );
-        // And a caller may turn the weight off for one call; what is left is
-        // the pinned boost, then the id.
         let flat = s
             .search_weighted(
                 &[1.0, 0.0, 0.0],

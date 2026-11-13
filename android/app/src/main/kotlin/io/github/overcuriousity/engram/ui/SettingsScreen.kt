@@ -99,8 +99,7 @@ fun SettingsScreen(engram: Engram, onScreen: (Screen) -> Unit = {}, onQueue: () 
             var choosing by remember { mutableStateOf(false) }
             var chosen by remember(lang.read.value?.chosen) { mutableStateOf(lang.read.value?.chosen ?: "") }
             val rows = lang.read.value?.langs.orEmpty()
-            Line("Which language your captures are read and written in — artifact text, titles, tags. It applies to what you capture from now on.", muted = true)
-            Row(Modifier.fillMaxWidth().clickable { choosing = true }.padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Row(Modifier.fillMaxWidth().clickable { choosing = true }.touchTarget().padding(vertical = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
                 Line(rows.firstOrNull { it.value == chosen }?.label ?: "Automatic — follow this phone")
                 Line("change", muted = true)
             }
@@ -116,7 +115,7 @@ fun SettingsScreen(engram: Engram, onScreen: (Screen) -> Unit = {}, onQueue: () 
                                     val r = engram.reader.call("PUT", Api.LANG, Api.json("lang" to v), Decode.nothing)
                                     if (r.value != null) chosen = v
                                 }
-                            }, verticalAlignment = Alignment.CenterVertically) {
+                            }.touchTarget(), verticalAlignment = Alignment.CenterVertically) {
                                 RadioButton(selected = v == chosen, onClick = null)
                                 Text(l, style = MaterialTheme.typography.bodyMedium)
                             }
@@ -143,7 +142,6 @@ fun SettingsScreen(engram: Engram, onScreen: (Screen) -> Unit = {}, onQueue: () 
             // registration, endpoint and keys, along with any Gotify channel.
             val known = n != null
             Waiting(notify)
-            Line("A due reminder is pushed here. Leave a field empty to switch that channel off.", muted = true)
             OutlinedTextField(value = url, onValueChange = { url = it }, enabled = known, label = { Text("Gotify message URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value = token, onValueChange = { token = it }, enabled = known, label = { Text(if (n?.gotifyTokenSet == true) "Gotify app token · kept unless you type a new one" else "Gotify app token") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(value = endpoint, onValueChange = { endpoint = it }, enabled = known, label = { Text("UnifiedPush endpoint") }, singleLine = true, modifier = Modifier.fillMaxWidth())
@@ -201,25 +199,21 @@ fun SettingsScreen(engram: Engram, onScreen: (Screen) -> Unit = {}, onQueue: () 
                     Line("Searches — ${fs.captured} captured, ${fs.pending} waiting" + (f.asks?.let { "; questions — ${it.asked} asked, ${it.judged} judged" } ?: "") + ".", muted = true)
                     purged?.let { Line(it, muted = true) }
                     OutlinedButton(onClick = { purging = true }, colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) {
-                        Text("Delete all captured searches, questions and pursuits")
+                        Text("Delete recorded searches")
                     }
                 }
             }
-            if (purging) AlertDialog(
-                onDismissRequest = { purging = false },
-                title = { Text("Delete every recorded search and question?") },
-                text = { Text("And every verdict given on one. The judged ones cannot be recovered — they are what the retrieval figure is measured from.") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        purging = false
-                        scope.launch {
-                            val r = engram.reader.call("DELETE", Api.FEEDBACK, null, Decode.nothing)
-                            purged = if (r.value != null) "Deleted." else r.error ?: "Server unreachable"
-                            feedback.retry()
-                        }
-                    }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }
+            if (purging) TypedConfirm(
+                "recorded searches", "Delete all recorded searches, questions and verdicts",
+                onConfirm = {
+                    purging = false
+                    scope.launch {
+                        val r = engram.reader.call("DELETE", Api.FEEDBACK, null, Decode.nothing)
+                        purged = if (r.value != null) "Deleted." else r.error ?: "Server unreachable"
+                        feedback.retry()
+                    }
                 },
-                dismissButton = { TextButton(onClick = { purging = false }) { Text("Keep") } },
+                onDismiss = { purging = false },
             )
         }
         // The web's toggle. Kept on the phone: nothing about it is the base's.
@@ -270,7 +264,7 @@ fun SettingsScreen(engram: Engram, onScreen: (Screen) -> Unit = {}, onQueue: () 
 @Composable
 private fun GoLine(label: String, count: Int?, onClick: () -> Unit) {
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 6.dp),
+        Modifier.fillMaxWidth().clickable(onClick = onClick).touchTarget().padding(vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {

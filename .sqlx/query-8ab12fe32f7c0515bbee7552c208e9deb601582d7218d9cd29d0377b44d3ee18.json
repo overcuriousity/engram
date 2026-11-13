@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", query, query_vec, created_at, answered, verdict, expect_id, scope\n               FROM search_events\n              WHERE created_at > ? AND created_at <= ? AND door <> 'judge'\n              ORDER BY created_at, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "query",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "answered",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "answered"
+          }
+        }
+      },
+      {
+        "name": "verdict",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "verdict"
+          }
+        }
+      },
+      {
+        "name": "expect_id",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "expect_id"
+          }
+        }
+      },
+      {
+        "name": "scope",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "scope"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "8ab12fe32f7c0515bbee7552c208e9deb601582d7218d9cd29d0377b44d3ee18"
+}

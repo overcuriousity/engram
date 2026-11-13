@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs\n                SET state = 'pending', detail = NULL, obsolete_id = NULL, merged_into = NULL,\n                    decided_by = NULL, judge_attempts = 0, judge_unreadable = 0\n              WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e233caae898d13aca05b0bd3b8914db413ff2d04ec599e1a90c6f88f89bdfcde"
+}

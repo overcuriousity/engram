@@ -6,14 +6,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use tower::ServiceExt as _;
 
-/// The real router over `core`, in local auth mode with no password
-/// configured (`local`); pass `Some(cfg)` to test the login form itself.
-///
-/// A one-tenant registry around `core`, and the real router over it. Every
-/// test written against the single-user app goes through here, which is the
-/// point: if tenancy needed edits scattered across the web tests, the
-/// extractor boundary would be in the wrong place, and this is where that
-/// would show.
+/// The real router over a one-tenant registry; pass `Some(cfg)` to test the login form.
 pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> axum::Router {
     let user = registered_user(&core).await;
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
@@ -26,14 +19,15 @@ pub async fn router(core: Core, local: Option<crate::config::LocalConfig>) -> ax
             local,
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: false,
+            deployment: crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))),
         }),
         ask_handoff: Default::default(),
     })
 }
 
-/// The registered user: the `User` the registry hands to a handler, with its
-/// row provisioned in the control database.
 async fn registered_user(core: &Core) -> crate::store::control::User {
     let subject = crate::store::TEST_SUBJECT;
     core.store.control.provision(subject, None).await.ok();
@@ -45,8 +39,7 @@ async fn registered_user(core: &Core) -> crate::store::control::User {
     }
 }
 
-/// An `AppState` over one already-open tenant, for the tests that need to hold
-/// the state rather than only the router.
+/// For tests that need to hold the state rather than only the router.
 pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web::state::AppState {
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
     let user = registered_user(&core).await;
@@ -58,7 +51,7 @@ pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web
             local: None,
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: mode == crate::config::AuthMode::Oidc,
+            deployment: crate::web::test_support::deployment_for(mode),
         }),
         ask_handoff: Default::default(),
     }
@@ -66,12 +59,7 @@ pub async fn state_over(core: Core, mode: crate::config::AuthMode) -> crate::web
 
 /// A router over `core` plus a browser session cookie for `user-1`.
 pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
-    let cid = crate::store::new_id();
-    core.store
-        .control
-        .insert_session(&cid, "user-1", None, 3600)
-        .await
-        .unwrap();
+    let control = core.store.control.clone();
     let cfg = std::sync::Arc::new(crate::config::Config::test_default());
     let user = registered_user(&core).await;
     let state = crate::web::state::AppState {
@@ -82,14 +70,38 @@ pub async fn app_with_cookie(core: Core) -> (axum::Router, String) {
             local: None,
             oidc: None,
             pending: crate::auth::oidc::PendingStore::new(),
-            secure_cookies: false,
+            deployment: crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                8080,
+            ))),
         }),
         ask_handoff: Default::default(),
     };
-    (
-        crate::web::router(state.clone()),
-        format!("engram_session={cid}"),
-    )
+    let cookie = session_cookie(&control, &state.auth.deployment, "user-1").await;
+    (crate::web::router(state.clone()), cookie)
+}
+
+pub async fn session_cookie(
+    control: &crate::store::control::Control,
+    dep: &crate::web::security::Deployment,
+    subject: &str,
+) -> String {
+    use tower_sessions::SessionStore;
+    use tower_sessions::cookie::time::{Duration, OffsetDateTime};
+    use tower_sessions::session::{Id, Record};
+    let store = tower_sessions_sqlx_store::SqliteStore::new(control.pool.clone());
+    let mut record = Record {
+        id: Id::default(),
+        data: [(
+            crate::auth::SUBJECT_KEY.to_string(),
+            serde_json::json!(subject),
+        )]
+        .into_iter()
+        .collect(),
+        expiry_date: OffsetDateTime::now_utc() + Duration::days(1),
+    };
+    store.create(&mut record).await.unwrap();
+    format!("{}={}", crate::auth::session_cookie_name(dep), record.id)
 }
 
 /// A router over `core` plus a bearer token for `user-1`.
@@ -114,8 +126,7 @@ pub async fn json_of(res: Response) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
 }
 
-/// One file part in a multipart body. `mime` of `None` omits the part's
-/// `Content-Type` header entirely, which is legal and which a client may do.
+/// `mime` of `None` omits the part's `Content-Type`, which is legal.
 pub struct FilePart<'a> {
     pub field: &'a str,
     pub filename: &'a str,
@@ -123,8 +134,7 @@ pub struct FilePart<'a> {
     pub body: &'a [u8],
 }
 
-/// A minimal multipart POST — text fields first, then the file parts — with a
-/// bearer token. Hand-rolled rather than pulling a builder in for a few tests.
+/// Text fields first, then file parts, with a bearer token.
 pub fn multipart(
     uri: &str,
     token: &str,
@@ -164,7 +174,6 @@ pub fn multipart(
         .unwrap()
 }
 
-/// A small PNG for the image door.
 pub fn a_png() -> Vec<u8> {
     use image::{ImageBuffer, Rgb};
     let img = ImageBuffer::from_fn(24, 12, |x, _| Rgb([x as u8 * 10, 0, 0]));
@@ -175,26 +184,10 @@ pub fn a_png() -> Vec<u8> {
     out.into_inner()
 }
 
-// ── Nothing runs off the side of the window ─────────────────────────────
-//
-// One property, over every page there is, and it cannot be asserted about
-// markup: a row of controls that does not fit renders perfectly, validates
-// perfectly, and makes the document wider than the window. The page then
-// slides sideways under the thumb — a scrollbar nobody asked for in a
-// browser, and in an installed window a control that cannot be reached at
-// all, because there is no wider window to open. So the measurement has to
-// happen where the layout does, which is a browser.
-//
-// `#[ignore]`, for the reason `tests/browser_ask.rs` is: this needs node
-// and a headless Chrome, and `cargo test` may assume neither. The tests that
-// use these live where the thing they measure does — `web::tests` for every
-// page at once, `web::ui::tests` for one rail row.
+// Pages must not overflow the window, which only a browser can measure.
+// `#[ignore]`: needs node and a headless Chrome.
 
-/// The headless Chrome to drive, or `None` when the machine has none.
-///
-/// A second copy of `tests/browser_ask.rs`'s locator, and deliberately: the
-/// integration crate there sees only this crate's public API, and this test
-/// needs `test_support`, which is `cfg(test)`. Neither can call the other's.
+/// A copy of `tests/browser_ask.rs`'s locator: neither crate can call the other's.
 pub(crate) fn chrome() -> Option<std::path::PathBuf> {
     if let Ok(p) = std::env::var("ENGRAM_CHROME") {
         return Some(std::path::PathBuf::from(p));
@@ -212,19 +205,12 @@ pub(crate) fn chrome() -> Option<std::path::PathBuf> {
                 .then(|| (playwright_build(&e.file_name()), bin))
         })
         .collect();
-    // Newest install wins, so an old download is not preferred forever. By the
-    // build number and not by the name: sorting the paths themselves is
-    // lexicographic, which puts `chromium_headless_shell-999` after `-1148`
-    // and pins the oldest install forever — exactly what this line is here to
-    // prevent.
+    // Sorted by Playwright build number, not by path, so the newest install wins.
     found.sort();
     found.pop().map(|(_, p)| p)
 }
 
-/// The build number Playwright ends a download directory with —
-/// `chromium_headless_shell-1148` is build 1148 — or zero where the name ends
-/// in anything else, which sorts such a directory below every numbered one
-/// rather than letting it win on a comparison nobody can predict.
+/// Zero where the name has no build number, so it sorts below every numbered one.
 fn playwright_build(dir: &std::ffi::OsStr) -> u64 {
     dir.to_string_lossy()
         .rsplit('-')
@@ -233,13 +219,7 @@ fn playwright_build(dir: &std::ffi::OsStr) -> u64 {
         .unwrap_or(0)
 }
 
-/// Every full page a signed-in person can open, with something in the base
-/// for each of them to have to render. `/ui/ops` is not one of them any
-/// more — it redirects to Insights, which is already here.
-///
-/// A PDF, because the corpus page's control row is at its longest there —
-/// re-segment, the original, re-extract and delete — and that row is what
-/// sent this whole page sideways.
+/// A PDF is included: the corpus page's control row is longest there.
 pub(crate) async fn every_page() -> Vec<(String, String)> {
     use crate::store::corpora::{CorpusStatus, Reading};
 
@@ -298,7 +278,6 @@ pub(crate) async fn every_page() -> Vec<(String, String)> {
     out
 }
 
-/// One run of the harness over `pages`, at `width`, as JSON.
 pub(crate) fn measure(pages: &[(String, String)], width: &str) -> serde_json::Value {
     let chrome = chrome().expect(
         "no headless Chrome found. Set ENGRAM_CHROME to one, or install Playwright's \
@@ -321,11 +300,7 @@ pub(crate) fn measure(pages: &[(String, String)], width: &str) -> serde_json::Va
         .arg(width)
         .output()
         .expect("node is needed to run this test");
-    // The harness's own exit first, and its stderr with it. A node that threw
-    // before it could print left this asserting on an empty stdout, so the
-    // failure read as "the harness printed nothing" — or, worse, as a JSON
-    // error about whatever unrelated line was last — and said nothing about
-    // the stack that actually explains it.
+    // The harness's exit and stderr first, so a node crash is reported as itself.
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
@@ -347,7 +322,6 @@ pub(crate) fn measure(pages: &[(String, String)], width: &str) -> serde_json::Va
     run
 }
 
-/// The two claims every page has to satisfy, whatever is on it.
 pub(crate) fn nothing_is_broken(run: &serde_json::Value, width: &str) {
     for p in run["pages"].as_array().unwrap() {
         assert!(p["error"].is_null(), "{p}");
@@ -360,6 +334,54 @@ pub(crate) fn nothing_is_broken(run: &serde_json::Value, width: &str) {
             p["name"],
             p["over"],
         );
+        let w: i64 = width.parse().unwrap();
+        let shown = p["tabShown"].as_bool().unwrap_or(false);
+        let items = p["tabItems"].as_array().cloned().unwrap_or_default();
+        let signed_in = !items.is_empty();
+        if signed_in && w < 768 {
+            assert!(shown, "at {width}px the {} page has no tab bar", p["name"]);
+            assert!((3..=5).contains(&items.len()), "{}: {items:?}", p["name"]);
+            for i in &items {
+                assert!(
+                    !i["label"].as_str().unwrap_or("").is_empty(),
+                    "an unlabelled tab: {i}"
+                );
+                assert!(
+                    i["height"].as_f64().unwrap_or(0.0) >= 44.0,
+                    "a tab under 44px: {i}"
+                );
+            }
+        }
+        let fab = p["fabHeight"].as_f64().unwrap_or(0.0);
+        let in_search = ["search", "artifact"].contains(&p["name"].as_str().unwrap_or(""));
+        if signed_in && w < 768 && !in_search {
+            assert!(
+                fab >= 44.0,
+                "at {width}px the {} page has no capture button: {p}",
+                p["name"]
+            );
+        }
+        if w >= 768 || in_search {
+            assert!(
+                fab == 0.0,
+                "at {width}px the {} page shows the capture button",
+                p["name"]
+            );
+        }
+        if signed_in && w >= 768 {
+            assert!(
+                !shown,
+                "at {width}px the {} page still shows the tab bar",
+                p["name"]
+            );
+        }
+        if let Some(focus) = p["focusRem"].as_f64() {
+            assert!(
+                focus <= 46.05,
+                "at {width}px the {} column is {focus}rem wide",
+                p["name"]
+            );
+        }
         let squeezed = p["squeezed"].as_array().expect("a squeeze list");
         assert!(
             squeezed.is_empty(),
@@ -369,13 +391,6 @@ pub(crate) fn nothing_is_broken(run: &serde_json::Value, width: &str) {
         );
     }
 }
-
-// ── A signed-in app, and the shapes a page test asks for ────────────────────
-//
-// These grew inside `web::ui`'s test module and were reachable only from it,
-// which is part of why that module became the place every page's tests
-// lived. Here they belong to every `web/` module, and a page split out of
-// `ui.rs` keeps its tests instead of leaving them behind.
 
 pub(crate) async fn app_with_session() -> (axum::Router, String) {
     let (app, cookie, _core) = app_session_and_core().await;
@@ -415,8 +430,6 @@ pub(crate) fn form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// A recording session, one artifact, and one captured search of this
-/// user's whose pool holds it.
 pub(crate) async fn searched_app() -> (axum::Router, String, crate::core::Core, String, String) {
     let mut core = crate::core::test_support::test_core().await;
     core.learn.enabled = true;
@@ -469,7 +482,6 @@ pub(crate) async fn searched_app() -> (axum::Router, String, crate::core::Core, 
     (app, cookie, handle, a, event)
 }
 
-/// A captured photograph whose vision read has not landed.
 pub(crate) async fn an_unread_image(core: &crate::core::Core) -> String {
     core.ingest_image(crate::core::ingest::ImageCapture {
         bytes: a_png(),
@@ -483,13 +495,7 @@ pub(crate) async fn an_unread_image(core: &crate::core::Core) -> String {
     .id
 }
 
-/// One source, so the base is not empty.
-///
-/// The ask door only opens over a held base — with nothing stored it
-/// redirects to the plain page, because the workspace renders no Ask verb
-/// there and the door would be a question in a box with no way to send it.
-/// Every test below that wants the ask *page* wants a base with something
-/// in it first.
+/// The ask door opens only over a held base.
 pub(crate) async fn hold_something(core: &crate::core::Core) {
     core.ingest_capture(crate::core::ingest::Capture::new(
         "LevelDB tombstones survive compaction longer than the manual admits.",
@@ -499,17 +505,13 @@ pub(crate) async fn hold_something(core: &crate::core::Core) {
     .unwrap();
 }
 
-/// A session over a base holding one source. See `hold_something`.
 pub(crate) async fn app_holding_something() -> (axum::Router, String) {
     let (app, cookie, core) = app_session_and_core().await;
     hold_something(&core).await;
     (app, cookie)
 }
 
-/// A session whose core records searches, which is what the association
-/// features are gated on. `app_session_and_core` cannot be reused: the
-/// router owns its own clone of the core, so flipping a flag afterwards
-/// changes the handle and not the app.
+/// A separate builder: the router owns its own clone of the core, so a later flag flip would not reach it.
 pub(crate) async fn app_session_and_core_with_feedback() -> (axum::Router, String, crate::core::Core)
 {
     let mut core = crate::core::test_support::test_core().await;
@@ -519,7 +521,6 @@ pub(crate) async fn app_session_and_core_with_feedback() -> (axum::Router, Strin
     (app, cookie, handle)
 }
 
-/// The same, for the one route that takes a `PUT`: editing an artifact.
 pub(crate) fn put_form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
     Request::builder()
         .uri(uri)
@@ -530,8 +531,6 @@ pub(crate) fn put_form(uri: &str, cookie: &str, body: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// The first half of the two-request ask: park the question, take the id.
-/// `q` is form-encoded, as it is in the body it goes into.
 pub(crate) async fn post_ask(app: &axum::Router, cookie: &str, q: &str) -> String {
     let res = app
         .clone()
@@ -545,7 +544,6 @@ pub(crate) async fn post_ask(app: &axum::Router, cookie: &str, q: &str) -> Strin
         .to_string()
 }
 
-/// The second half: spend the id and stream.
 pub(crate) async fn get_stream(app: &axum::Router, cookie: &str, id: &str) -> Response {
     app.clone()
         .oneshot(
@@ -559,7 +557,6 @@ pub(crate) async fn get_stream(app: &axum::Router, cookie: &str, id: &str) -> Re
         .unwrap()
 }
 
-/// One whole ask over the wire, as the page performs it.
 pub(crate) async fn ask_over_sse(app: &axum::Router, cookie: &str, q: &str) -> String {
     let id = post_ask(app, cookie, q).await;
     let res = get_stream(app, cookie, &id).await;
@@ -567,9 +564,7 @@ pub(crate) async fn ask_over_sse(app: &axum::Router, cookie: &str, q: &str) -> S
     body_of(res).await
 }
 
-/// The HTML the page swaps in, pulled out of the `done` frame the way the
-/// browser reads it: the payload is JSON, so the fragment survives the
-/// blank lines its markdown carries.
+/// The payload is JSON, so the fragment survives its blank lines.
 pub(crate) fn done_html(body: &str) -> String {
     let data = body
         .lines()
@@ -580,9 +575,6 @@ pub(crate) fn done_html(body: &str) -> String {
     data["html"].as_str().unwrap().to_string()
 }
 
-/// A session plus a corpus that has been through synthesis and embedding,
-/// which is the only state in which there is anything to facet or to find a
-/// neighbour among.
 pub(crate) async fn app_with_embedded_corpus() -> (axum::Router, String) {
     let core = crate::core::test_support::test_core().await;
     let out = core
@@ -597,23 +589,17 @@ pub(crate) async fn app_with_embedded_corpus() -> (axum::Router, String) {
     app_with_cookie(core).await
 }
 
-/// Markup with every run of whitespace collapsed, so an assertion about an
-/// attribute pair does not also assert where the template wrapped a line.
 pub(crate) fn flat(html: &str) -> String {
     html.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The box form's `hx-trigger`, on its own. `html.contains("load")` is
-/// not the same question: the context offer carries `hx-trigger="load"`
-/// too, and so does the word inside half the prose on the page.
+/// Not `html.contains("load")`: the context offer and page prose carry it too.
 pub(crate) fn trigger_of(html: &str) -> String {
     let form = html.split(r#"id="box-form""#).nth(1).expect("the box form");
     let trigger = form.split(r#"hx-trigger=""#).nth(1).expect("its trigger");
     trigger.split('"').next().unwrap().to_string()
 }
 
-/// A session with the recommender on, plus one artifact old enough and
-/// unseen enough that `resurface` returns it.
 pub(crate) async fn app_recommending() -> (axum::Router, String, crate::store::Store, String) {
     let mut core = crate::core::test_support::test_core().await;
     core.recommend.enabled = true;
@@ -649,19 +635,15 @@ pub(crate) async fn app_recommending() -> (axum::Router, String, crate::store::S
         .unwrap();
     let background = core.background.clone();
     let (app, cookie) = crate::web::test_support::app_with_cookie(core).await;
-    // Held so a test can drain the recording writes rather than sleep.
     BACKGROUND.with(|b| *b.borrow_mut() = Some(background));
     (app, cookie, store, a.id)
 }
 
-// Where `app_recommending` parks the background handle for `drain` to find.
 thread_local! {
     static BACKGROUND: std::cell::RefCell<Option<std::sync::Arc<crate::core::background::Background>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-/// The recording writes run off the request path. Drain them rather than
-/// sleeping and hoping.
 pub(crate) async fn drain() {
     let b = BACKGROUND.with(|b| b.borrow().clone());
     if let Some(b) = b {
@@ -669,13 +651,10 @@ pub(crate) async fn drain() {
     }
 }
 
-/// Percent-encoding for the handful of characters these test bodies carry.
 pub(crate) fn urlencoding_of(s: &str) -> String {
     s.replace(':', "%3A").replace('/', "%2F")
 }
 
-/// One corpus with `n` artifacts, titled so the ops page can be searched
-/// for them.
 pub(crate) async fn artifacts(core: &crate::core::Core, titles: &[&str]) -> Vec<String> {
     let src = core.store.insert_corpus("x", "web", None).await.unwrap();
     let new: Vec<crate::store::artifacts::NewArtifact> = titles
@@ -697,9 +676,6 @@ pub(crate) async fn artifacts(core: &crate::core::Core, titles: &[&str]) -> Vec<
         .collect()
 }
 
-/// The excerpt list, out of the `citations` frame, the way the page reads
-/// it. Keyed apart from the answer's `html` so `done_html` above cannot pick
-/// this frame up by mistake.
 pub(crate) fn rail_html(body: &str) -> String {
     let data = body
         .lines()
@@ -710,7 +686,6 @@ pub(crate) fn rail_html(body: &str) -> String {
     data["rail"].as_str().unwrap().to_string()
 }
 
-/// Every run that follows `open`, up to the next `end`, in document order.
 pub(crate) fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
     html.match_indices(open)
         .map(|(at, m)| {
@@ -722,7 +697,6 @@ pub(crate) fn pulled(html: &str, open: &str, end: char) -> Vec<String> {
         .collect()
 }
 
-/// One live artifact on a fresh session.
 pub(crate) async fn session_with_an_artifact() -> (axum::Router, String, crate::core::Core, String)
 {
     let (app, cookie, core) = app_session_and_core().await;
@@ -761,10 +735,7 @@ pub(crate) fn row_on(
     }
 }
 
-/// A `Chunk` with every field named, so a test can say the one thing it
-/// cares about and nothing else. `Chunk` has no `Default` on purpose —
-/// most of its fields are decisions — so the fixture carries them here
-/// rather than putting a misleading default on the type.
+/// `Chunk` has no `Default` on purpose, so the fixture names every field.
 pub(crate) fn chunk_fixture(title: Option<&str>, text: &str) -> crate::store::artifacts::Chunk {
     crate::store::artifacts::Chunk {
         id: "a".into(),
@@ -792,4 +763,16 @@ pub(crate) fn chunk_fixture(title: Option<&str>, text: &str) -> crate::store::ar
         retired_at: None,
         reaped_at: None,
     }
+}
+
+/// Loopback for local mode, an https public URL for OIDC.
+pub fn deployment_for(mode: crate::config::AuthMode) -> crate::web::security::Deployment {
+    let mut d = crate::web::security::Deployment::loopback(std::net::SocketAddr::from((
+        [127, 0, 0, 1],
+        8080,
+    )));
+    if mode == crate::config::AuthMode::Oidc {
+        d.public_url = url::Url::parse("https://engram.test").ok();
+    }
+    d
 }

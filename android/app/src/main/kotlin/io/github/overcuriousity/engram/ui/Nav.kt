@@ -19,7 +19,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -106,7 +105,7 @@ private object Routes {
     val optional = listOf("prefill", "from_ask", "question", "event", "from", "to").map { navArgument(it) { type = NavType.StringType; defaultValue = "" } }
 }
 
-/** The mark from logo.svg beside the name in Inter: wordmark.svg, without the SVG's text element. */
+/** wordmark.svg: the mark beside the name. */
 @Composable
 fun Wordmark() {
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -115,7 +114,7 @@ fun Wordmark() {
             colorFilter = ColorFilter.tint(MaterialTheme.colorScheme.onBackground),
         )
         Spacer(Modifier.width(6.dp))
-        Text("engram", fontFamily = Inter, fontWeight = FontWeight.Medium, fontSize = 22.sp, letterSpacing = (-0.3).sp)
+        Text("engram", fontFamily = Atkinson, fontWeight = FontWeight.Medium, fontSize = 22.sp, letterSpacing = (-0.3).sp)
     }
 }
 
@@ -294,15 +293,8 @@ fun EngramApp(
 
 @Composable
 fun RefusedBanner(onRescan: () -> Unit) {
-    Surface(color = MaterialTheme.colorScheme.error.copy(alpha = 0.1f), modifier = Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.padding(12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text("Unpaired on the server · queue holds", style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onRescan) { Text("Scan a new code") }
-        }
+    Notice("Unpaired on the server · queue holds", tone = Tone.Error) {
+        TextButton(onClick = onRescan) { Text("Scan a new code") }
     }
 }
 

@@ -1,9 +1,5 @@
-//! What every `VectorStore` must do, whichever one it is.
-//!
-//! The stores differ in how they rank — `MemoryVectors` is dense only, Qdrant
-//! and SQLite fuse a lexical half in — so nothing here depends on the order of
-//! results where fusion could change it: each ranking case uses a query with
-//! no indexable term, which every store answers by cosine alone.
+//! What every `VectorStore` must do. Ranking cases use queries with no indexable term,
+//! which every store answers by cosine alone, since fusion differs.
 
 use super::sparse::SparseVector;
 use super::{LifecycleRow, SearchFilter, Touch, VectorPayload, VectorPoint, VectorStore};
@@ -33,7 +29,6 @@ pub fn point(
     }
 }
 
-/// A filter that hides nothing.
 pub fn wide() -> SearchFilter {
     SearchFilter {
         include_superseded: true,
@@ -191,6 +186,36 @@ pub async fn hidden_statuses_stay_out_unless_asked_for(s: &dyn VectorStore) {
     assert_eq!(got.len(), 1);
     assert_eq!(got["old"].status, ArtifactStatus::Superseded);
     assert_eq!(got["old"].superseded_by.as_deref(), Some("live"));
+}
+
+pub async fn a_trashed_artifact_is_excluded_until_restored(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(vec![
+        point("kept", "c", [1.0, 0.0, 0.0], &[], Some("note")),
+        point("binned", "c", [1.0, 0.05, 0.0], &[], Some("note")),
+    ])
+    .await
+    .unwrap();
+    s.set_lifecycle("binned", ArtifactStatus::Trashed, None)
+        .await
+        .unwrap();
+    let q = [1.0, 0.0, 0.0];
+    for f in [SearchFilter::default(), wide()] {
+        assert_eq!(ids(&s.search(&q, &none(), 10, &f).await.unwrap()), ["kept"]);
+    }
+    assert!(ids(&s.neighbours("kept", 5).await.unwrap()).is_empty());
+    assert!(!ids(&s.resurface(10, i64::MAX, i64::MAX).await.unwrap()).contains(&"binned"));
+    s.set_lifecycle("binned", ArtifactStatus::Active, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        ids(&s
+            .search(&q, &none(), 10, &SearchFilter::default())
+            .await
+            .unwrap()),
+        ["kept", "binned"]
+    );
+    assert_eq!(ids(&s.neighbours("kept", 5).await.unwrap()), ["binned"]);
 }
 
 pub async fn a_re_embed_keeps_the_stamps(s: &dyn VectorStore) {
@@ -449,14 +474,13 @@ pub async fn a_sample_is_capped_and_repeatable(s: &dyn VectorStore) {
     assert!(one.iter().all(|(_, v)| v.len() == DIM));
 }
 
-/// One `#[tokio::test]` per behaviour above, for the store `$make` builds.
-/// `$make` is an async expression; whatever it yields must deref to a store
-/// and is kept alive for the length of the test, so it may own a `TempDir`.
+/// `$make` is async and may own a `TempDir`; it lives for the length of the test.
 macro_rules! suite {
     ($make:expr) => {
         $crate::vector::conformance::suite!(@each $make;
             search_ranks_by_cosine, limit_is_respected, zero_vectors_do_not_produce_nan,
             equal_scores_order_by_id, filters_narrow, hidden_statuses_stay_out_unless_asked_for,
+            a_trashed_artifact_is_excluded_until_restored,
             a_re_embed_keeps_the_stamps, set_payload_merges_and_leaves_the_vector,
             touch_counts_only_retrievals, stale_candidates_need_a_stamp,
             resurface_offers_the_old_and_unseen, apply_lifecycle_writes_a_batch,

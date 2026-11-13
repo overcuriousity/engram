@@ -1,12 +1,5 @@
-//! Condense: one artifact, one shorter version of itself, losing no literal.
-//!
-//! Armed by `sleep::condense_candidates` under the daily pace; one
-//! generation. The reply is checked twice — `merge::losses` for the machine
-//! literals, `verify::missing_numbers` for the numbers `merge::losses`
-//! deliberately does not look at — and a draft that would lose either is
-//! refused without writing. Condensation may cost prose. Never a number —
-//! and that is the one line on which this differs from biological gist, on
-//! purpose.
+//! Condense: one artifact, one shorter version of itself. A draft losing a literal
+//! (`merge::losses`) or a number (`verify::missing_numbers`) is refused unwritten.
 
 use crate::core::Core;
 use crate::error::{Error, Result};
@@ -20,24 +13,13 @@ pub async fn arm(core: &Core, artifact_id: &str) -> Result<()> {
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let c = core.store.get_artifact(artifact_id).await?;
-    // A passage is corpus text and is not condensed; one that earns it is
-    // promoted, which exists.
+    // A passage is corpus text and is promoted, not condensed.
     if c.provenance == crate::store::artifacts::Provenance::Passage || !c.in_results() {
         return Ok(());
     }
-    // Already condensed, and the arming path's own check is not enough to say
-    // so. `sleep::condense_candidates` asks this before arming, which stops a
-    // second *arming*; it does nothing about the same arming running twice.
-    // The write below commits and the `enqueue` after it lives in another
-    // database, so a retryable failure there leaves this unit queued with the
-    // condensation already applied — and the retry rewrote the artifact a
-    // second time off one arming.
-    //
-    // Two versions off one nomination is not merely redundant. `undo_action_on`
-    // stamps *every* open row for a subject and kind, so taking the newer
-    // condensation back marks the older one undone as well, and the original
-    // text — the one the first rewrite retired — is hidden from `jobs::retract`
-    // for good: it reads open rows, and there are none left.
+    // Re-checked at the unit: the write and the `enqueue` are in different databases, so a retry
+    // can find the condensation already applied. A second version would make one undo close both
+    // rows.
     if let Some(open) = core
         .store
         .open_action_on(&c.id, crate::store::actions::Kind::Condense)
@@ -50,17 +32,8 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         );
         return Ok(());
     }
-    // And the other half of the arming path's test, which this had only one of.
-    //
-    // An open row says the condensation stands. A row that was *taken back*
-    // says a person or `jobs::retract` decided against it — and that leaves no
-    // open row at all, so the check above waves the unit through. In exactly
-    // the window this function's guards exist for — the rewrite committed, the
-    // `enqueue` in the other database failed, the unit still queued — an undo
-    // landing before the retry was reversed by it, unasked and unreported.
-    //
-    // `sleep::condense_candidates` asks both before it arms anything, for the
-    // same reason: a condensation somebody took back is not a nomination.
+    // A taken-back condensation leaves no open row, so check that too, or a retry reverses the
+    // undo.
     if core
         .store
         .action_was_undone(&c.id, crate::store::actions::Kind::Condense)
@@ -72,17 +45,8 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         );
         return Ok(());
     }
-    // Both gates are read again at the unit, not only where it was armed:
-    // permission and budget can each have gone while this waited in the queue.
-    //
-    // `acts_on_corpus()` as well as `may_act()`, for the reason
-    // `background.rs` gives about Reap: `may_act` answers `true`
-    // unconditionally below "full", so on its own it was no gate at all here.
-    // A `Condense` row is *persisted* — armed under "full", it outlives a drop
-    // to "ranking" and a restart, and the generator rewrote the artifact
-    // anyway. `jobs::retract`, the path that takes a condensation back, is
-    // itself behind `acts_on_corpus()` and so was switched off at that same
-    // level: the rewrite happened and nothing could undo it.
+    // Both gates re-read at the unit. `acts_on_corpus()` too: `may_act` is always true below
+    // "full", and `jobs::retract` is off there, so nothing could undo it.
     if !core.evolve.autonomous.acts_on_corpus() {
         tracing::info!(
             artifact_id,
@@ -136,18 +100,9 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         caveats: g.caveats.clone(),
     };
     let lost = crate::jobs::merge::losses(std::slice::from_ref(&c), &draft);
-    // And the numbers, which `merge::losses` does not check and must not: a
-    // merge brings two artifacts' numbers together across a rewrite, routinely
-    // between languages, and refusing one for renumbering a list is what that
-    // half was dropped for. A condensation is the same artifact in the same
-    // language with less prose around the same facts, so "requires 1.22.0 or
-    // later" coming back as "requires a recent version" is a silent change of
-    // meaning — and a bare version in prose is neither fenced, backticked nor
-    // path-shaped, so nothing in `losses` looks at it at all.
-    //
-    // Against the caveats as well as the text, for the reason `losses` reads
-    // both: a number demoted to a caveat is stored, rendered and recoverable,
-    // and this checks for loss, not for prominence.
+    // Numbers too, which `merge::losses` must not check: in the same language, "1.22.0 or later"
+    // becoming "a recent version" is a silent change. Caveats count: this checks for loss, not
+    // prominence.
     let mut kept = g.text.clone();
     for cav in &g.caveats {
         kept.push(' ');
@@ -168,10 +123,8 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         "before_chars": c.text.len(),
         "after_chars": g.text.len(),
     });
-    // `c.embed_rev` is the revision the text above was read at, and the model
-    // call between the two is unbounded in time. An edit that landed in that
-    // window has to win: it is a person's, it is newer, and the `losses()`
-    // check just above was computed against the copy it replaced.
+    // An edit that landed during the model call wins: it is newer, and `losses()` was computed
+    // against the old copy.
     let Some((action_id, n)) = core
         .store
         .condense_artifact(
@@ -184,11 +137,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         )
         .await?
     else {
-        // Dropped rather than retried. The rewrite that came back describes
-        // text the base no longer holds, so there is nothing here worth
-        // keeping — and if the artifact still earns a condensation,
-        // `sleep::condense_candidates` nominates it again on a later pass with
-        // the current text in front of it.
+        // Dropped, not retried: the rewrite describes text the base no longer holds.
         tracing::info!(
             artifact_id,
             rev = c.embed_rev,
@@ -277,12 +226,6 @@ mod tests {
         );
     }
 
-    /// A version in prose is not fenced, backticked or path-shaped, so
-    /// `merge::losses` — written for a merge, where the numbers of two
-    /// artifacts are being brought together across languages — sees nothing
-    /// wrong with a rewrite that drops it. This is the same artifact in the
-    /// same language, and "requires 1.22.0 or later" coming back as "requires
-    /// a recent version" is a silent change of meaning.
     #[tokio::test]
     async fn a_rewrite_that_drops_a_number_out_of_prose_is_refused_without_writing() {
         let (core, writer) = core_with(vec![reply(
@@ -345,17 +288,6 @@ mod tests {
         );
     }
 
-    /// One arming, one condensation. The enqueue after the commit lives in
-    /// another database, so a retryable failure there leaves this unit queued
-    /// with the rewrite already applied — and the retry used to write a second
-    /// version off the same nomination. The arming path's own check
-    /// (`sleep::condense_candidates`) stops a second *arming* and does nothing
-    /// about this.
-    ///
-    /// Two versions off one nomination is not merely redundant:
-    /// `undo_action_on` stamps every open row for a subject and kind, so
-    /// taking the newer one back marks the older undone too, and the original
-    /// text is hidden from `jobs::retract` for good.
     #[tokio::test]
     async fn an_artifact_that_is_already_condensed_is_not_condensed_again() {
         let (core, writer) = core_with(vec![
@@ -367,7 +299,6 @@ mod tests {
         run(&core, &id).await.unwrap();
         assert_eq!(core.store.versions_of(&id).await.unwrap().len(), 1);
 
-        // The retry the failed enqueue would have caused.
         run(&core, &id).await.unwrap();
 
         assert_eq!(writer.calls(), 1, "the second run spends no model call");
@@ -378,17 +309,6 @@ mod tests {
         );
     }
 
-    /// The same retry, against a condensation somebody has since taken back.
-    ///
-    /// The guard above reads open rows, and an undo leaves none — so in the
-    /// exact window these guards exist for (the rewrite committed, the
-    /// `enqueue` in the other database failed, the unit still queued) a retry
-    /// landing after the undo re-condensed the artifact and reversed it. The
-    /// operator pressed the button, watched the original come back, and it
-    /// went away again on the next tick with nothing to say why.
-    ///
-    /// `sleep::condense_candidates` has asked both questions since it was
-    /// written; this asked one of them.
     #[tokio::test]
     async fn a_condensation_that_was_taken_back_is_not_written_again_by_a_retry() {
         let (core, writer) = core_with(vec![
@@ -409,7 +329,6 @@ mod tests {
             .await
             .unwrap();
 
-        // The retry the failed enqueue would have caused, arriving after.
         run(&core, &id).await.unwrap();
 
         assert_eq!(
@@ -424,12 +343,6 @@ mod tests {
         );
     }
 
-    /// A condensation is a read-modify-write with a model call in the middle,
-    /// and that call takes as long as the endpoint feels like taking. An edit
-    /// through the API in that window has to win: it is a person's, it is
-    /// newer, and the `losses()` guard that is the whole safety argument of
-    /// this path was computed against the copy it replaced — so a value the
-    /// user had just added was covered by nothing at all.
     #[tokio::test]
     async fn an_edit_made_while_the_rewrite_was_being_written_is_not_reverted() {
         let (core, _) = core_with(vec![reply(
@@ -437,10 +350,8 @@ mod tests {
         )])
         .await;
         let id = synthesized(&core).await;
-        // The revision the unit would have read the text at, before the model
-        // was asked. The scripted writer answers instantly, so the window is
-        // opened by hand — but the revision is the whole of what the check
-        // reads, and bumping it is exactly what an edit does.
+        // The scripted writer answers instantly, so the window is opened by bumping the revision,
+        // as an edit does.
         let read_at = core.store.get_artifact(&id).await.unwrap().embed_rev;
         let edited = "Loop mounts need `mount -o loop /dev/loop0` and `losetup -f`.";
         core.store.update_artifact_text(&id, edited).await.unwrap();
@@ -489,11 +400,6 @@ mod tests {
         assert!(core.store.versions_of(&id).await.unwrap().is_empty());
     }
 
-    /// A `Condense` row outlives the permission it was armed under: it is
-    /// persisted, so a core built below "full" that finds it still on the
-    /// queue must not rewrite the artifact — `jobs::retract`, the only way
-    /// back, is switched off at that same level. The base itself always runs
-    /// as "full"; this guards the gate, not a setting an operator can reach.
     #[tokio::test]
     async fn a_row_armed_under_full_writes_nothing_once_the_permission_is_gone() {
         for level in [

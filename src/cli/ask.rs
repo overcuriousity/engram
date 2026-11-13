@@ -4,18 +4,8 @@ use crate::cli::endpoint::Endpoint;
 use crate::cli::endpoint::client;
 use crate::error::{Error, Result};
 
-/// Take every complete SSE frame out of `buf`, leaving a partial one behind.
-///
-/// A chunk from the network splits wherever it likes — mid-event, mid-JSON — so
-/// the reader has to be able to say "not yet" and keep what it has. Split out of
-/// the request loop because that is the only way to test it against a split that
-/// actually happened rather than one that was imagined.
-/// One line on stderr, redrawn in place and taken back before anything else is
-/// written.
-///
-/// Its own small type because the rule is not about what it says: whatever is
-/// drawn here must be gone before the answer starts, or it survives into the
-/// scrollback the answer is read from tomorrow.
+/// One line on stderr, redrawn in place; gone before the answer starts so it never reaches
+/// the scrollback.
 #[derive(Default)]
 struct Note {
     drawn: bool,
@@ -40,25 +30,14 @@ impl Note {
     }
 }
 
-/// Taken back on every way out, not only the two that were written down.
-///
-/// `clear` was called from the `token` and `error` arms, which leaves the line
-/// on screen for the two exits nobody typed: a transport that dies after a
-/// `retrieved` frame, where the error is printed straight onto it, and a stream
-/// that ends with citations and no token at all. `Stages` and `Fill` have both
-/// had this since they were written; the rule is the type's, not the caller's.
+/// Taken back on every way out, including a dying transport and a stream with no token.
 impl Drop for Note {
     fn drop(&mut self) {
         self.clear();
     }
 }
 
-/// One lamp line, held inside the terminal's width.
-///
-/// Clipped here rather than in `Note::show`, because by then the text is
-/// wrapped in escapes and a count of its characters is not a count of its
-/// columns. Four columns go to what is drawn around it: the two of indent
-/// `show` prints and the two of the lamp and its space.
+/// One lamp line within the terminal width; clipped before escapes make counting columns wrong.
 fn within(face: &crate::cli::face::Face, lamp: crate::cli::face::Lamp, said: &str) -> String {
     face.lamp_line(
         lamp,
@@ -66,8 +45,7 @@ fn within(face: &crate::cli::face::Face, lamp: crate::cli::face::Lamp, said: &st
     )
 }
 
-/// What a `retrieved` frame says, in words. `None` where the face is off, so a
-/// redirected answer receives none of it.
+/// What a `retrieved` frame says; `None` where the face is off.
 fn retrieved_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option<String> {
     if !face.on {
         return None;
@@ -80,8 +58,7 @@ fn retrieved_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Op
     ))
 }
 
-/// What a `needs` frame says: the subjects the model named as still missing,
-/// which is the second round beginning.
+/// What a `needs` frame says: the subjects the model named as still missing.
 fn needs_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option<String> {
     if !face.on {
         return None;
@@ -94,10 +71,7 @@ fn needs_line(face: &crate::cli::face::Face, data: &serde_json::Value) -> Option
     if said.is_empty() {
         return None;
     }
-    // The subjects are the model's own words and have no bound; two or three
-    // named ones routinely pass eighty columns, and `show` erases one physical
-    // row, so a wrapped line leaves its head on the screen for the answer to
-    // be written under.
+    // Unbounded model words: `show` erases one physical row, so a wrapped line would stay.
     Some(within(
         face,
         crate::cli::face::Lamp::Running,
@@ -116,15 +90,12 @@ pub fn frames(buf: &mut String) -> Vec<(String, serde_json::Value)> {
             if let Some(rest) = line.strip_prefix("event: ") {
                 name = rest.trim().to_string();
             } else if let Some(rest) = line.strip_prefix("data: ") {
-                // A single frame may carry several `data:` lines, which the
-                // spec says to join. Ours never does today; reading it
-                // correctly costs one `push_str`.
+                // The SSE spec joins several `data:` lines in one frame.
                 data.push_str(rest);
             }
         }
         if name.is_empty() {
-            // A keep-alive comment, which arrives whenever a slow model thinks
-            // for longer than a proxy's idle timeout.
+            // A keep-alive comment, sent while a slow model outlasts a proxy's idle timeout.
             continue;
         }
         let value = serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
@@ -133,34 +104,14 @@ pub fn frames(buf: &mut String) -> Vec<(String, serde_json::Value)> {
     out
 }
 
-/// One question, asked and printed as it is answered.
-///
-/// Takes the `CliArgs` for `--plain` and `--fancy` only: `--tag`, `--category`
-/// and `--json` are refused alongside `-a` by clap rather than accepted and
-/// dropped. This used to take nothing at all, on the grounds that the face had
-/// nothing to draw for a stream of prose — which stopped being true when the
-/// stream got a readout and the sources got a shape.
-/// Take every complete character out of `pending`, leaving a partial one behind.
-///
-/// `frames` is this one boundary up: a chunk from the network is cut at
-/// neither. Decoding each chunk on its own was the bug this replaces — a
-/// boundary falls wherever HTTP framing puts it, including inside a multi-byte
-/// sequence, and `from_utf8_lossy` turns the leading half into one replacement
-/// character and the trailing half into more. An answer drawn from this base
-/// is full of em dashes and umlauts, so that is not a corner case; it is most
-/// sentences, some of the time.
-///
-/// Split out for the same reason `frames` was: a split that actually happened
-/// is the only kind worth testing against.
+/// Take every complete character out of `pending`, leaving a partial one: a network chunk may
+/// cut a multi-byte sequence, which per-chunk `from_utf8_lossy` mangles.
 pub fn decode(pending: &mut Vec<u8>) -> Result<String> {
     let whole = match std::str::from_utf8(pending) {
         Ok(_) => pending.len(),
-        // A sequence cut by a chunk boundary: `error_len` is `None`, and
-        // everything before it is a complete character. Keep the tail.
+        // A sequence cut by a chunk boundary: everything before it is complete. Keep the tail.
         Err(e) if e.error_len().is_none() => e.valid_up_to(),
-        // Not a boundary — bytes that are not UTF-8 at all. Said rather than
-        // papered over: this stream is our own SSE carrying JSON, so this is a
-        // broken transport and not a character to approximate.
+        // Not UTF-8 at all: our own SSE carries JSON, so this is a broken transport.
         Err(e) => {
             return Err(Error::Internal(format!(
                 "the answer stream is not UTF-8 at byte {}",
@@ -169,21 +120,11 @@ pub fn decode(pending: &mut Vec<u8>) -> Result<String> {
         }
     };
     let head: Vec<u8> = pending.drain(..whole).collect();
-    Ok(String::from_utf8(head).expect("checked just above"))
+    Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
-/// The sources under an answer, numbered the way the answer cited them and
-/// drawn as a tree rooted at the answer.
-///
-/// The numbering is the server's: `ask` hands the model this list in this
-/// order and the model writes `[9]` for the ninth of it. Printing the list
-/// without the numbers left the reader holding a citation they could not
-/// follow, which is most of what a citation is for.
-///
-/// The tree is drawn where the terminal can draw it and said in ASCII where it
-/// cannot, and neither form carries a claim the other does not: the numbers,
-/// the titles and the ids are the content, and the branches are how it is
-/// shaped.
+/// The sources under an answer, numbered as the answer cited them, drawn as a tree (ASCII where
+/// the terminal cannot draw one).
 pub fn render_citations(hits: &[serde_json::Value], unicode: bool) -> String {
     let (tee, last) = if unicode {
         ("├─", "└─")
@@ -191,13 +132,10 @@ pub fn render_citations(hits: &[serde_json::Value], unicode: bool) -> String {
         ("|-", "`-")
     };
     let mut out = String::from("\nfrom:\n");
-    // Right-aligned to the widest number, so the titles line up whether the
-    // answer cited three sources or twenty-two.
     let room = hits.len().to_string().len();
     for (i, c) in hits.iter().enumerate() {
         let branch = if i + 1 == hits.len() { last } else { tee };
-        // Named by the note when the passage has no heading — the server did
-        // that — and by its own opening when there is no note either.
+        // Named by its note when it has no heading, by its own opening when it has no note.
         let title = match c["title"].as_str() {
             Some(t) => t.to_string(),
             None => crate::web::markdown::stand_in_title(c["text"].as_str().unwrap_or(""), 60),
@@ -211,15 +149,8 @@ pub fn render_citations(hits: &[serde_json::Value], unicode: bool) -> String {
     out
 }
 
-/// The ids of those sources, in the order they were numbered, so `--show 9`
-/// after an answer reaches what `[9]` meant.
-///
-/// A citation carrying no `artifact_id` keeps its place as an empty string
-/// rather than being dropped: `render_citations` numbers every hit it is given,
-/// so skipping one here would shift every rank below it and `--show 9` would
-/// open the tenth source. `last::resolve` is what turns the empty place back
-/// into a sentence — before that it was sent to the server as an id, which
-/// asked for `/api/v1/artifacts/` and answered with a bare 404.
+/// The ids of those sources in citation order, so `--show 9` reaches `[9]`. An uncited source
+/// keeps its place as an empty string, or every later rank would shift.
 pub fn citation_ids(hits: &[serde_json::Value]) -> Vec<String> {
     hits.iter()
         .map(|c| c["artifact_id"].as_str().unwrap_or_default().to_string())
@@ -236,8 +167,7 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
     );
     let http = client()?;
     let res = http
-        // `door=cli`, exactly as `-s` names its door: a question typed at a
-        // shell is recorded, and the log should hold what it was.
+        // `door=cli`, as `-s` names its door.
         .post(format!("{}?door=cli", e.api("/ask/stream")))
         .bearer_auth(&e.token)
         .json(&serde_json::json!({ "q": question }))
@@ -252,18 +182,12 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
     }
 
     let mut body = res.bytes_stream();
-    // Two buffers, because a chunk from the network is cut at neither
-    // boundary that matters here. `pending` holds bytes that are not yet a
-    // whole character; `buf` holds characters that are not yet a whole frame.
+    // `pending`: bytes not yet a whole character; `buf`: characters not yet a whole frame.
     let mut pending: Vec<u8> = Vec::new();
     let mut buf = String::new();
     let mut citations = Vec::new();
     let mut said_anything = false;
-    // What the ask says about itself while nothing has been written yet. It
-    // has emitted `retrieved`, `needs` and `citations` since it was written and
-    // this client dropped all three on the floor, drawing a strand on a timer
-    // over the gap instead. The readout takes over at the first token, driven
-    // by the answer's own arrival rate.
+    // Retrieval and second-round notes until the first token; the readout takes over from there.
     let mut note = Note::default();
     let mut readout = face.readout();
     let began = std::time::Instant::now();
@@ -273,38 +197,25 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
         buf.push_str(&decode(&mut pending)?);
         for (name, data) in frames(&mut buf) {
             match name.as_str() {
-                // A retrieval, said. The pool and what came out of it is the
-                // one number a reader can act on: a wide search that showed a
-                // handful is the fan-out working.
                 "retrieved" => note.show(retrieved_line(&face, &data)),
-                // Round two happening, in the model's own words for what the
-                // first round missed.
                 "needs" => note.show(needs_line(&face, &data)),
                 "token" => {
                     if let Some(t) = data["text"].as_str() {
                         use std::io::Write;
-                        // The line ends the moment there is something to show,
-                        // before a byte of the answer is printed.
                         note.clear();
                         print!("{}", readout.push(t, began.elapsed().as_millis() as u64));
-                        // Flushed per token: an answer that appears a
-                        // paragraph at a time is an answer that looks stalled.
+                        // Flushed per token, or the answer looks stalled.
                         std::io::stdout().flush().ok();
                         said_anything = true;
                     }
                 }
                 "citations" => citations = data["hits"].as_array().cloned().unwrap_or_default(),
-                // Said, not swallowed: an answer that stopped and an answer
-                // that failed look identical on a terminal otherwise.
+                // Said: a stopped answer and a failed one look alike on a terminal.
                 "error" => {
                     use std::io::Write;
                     note.clear();
                     print!("{}", readout.finish());
-                    // Flushed before a word goes to stderr. The erase is a
-                    // bare escape with no newline, so stdout's line buffer
-                    // holds it: without this the failure prints over a readout
-                    // still on screen, and the erase lands at process exit,
-                    // eating part of whatever line the cursor is on by then.
+                    // The erase has no newline and waits in stdout's buffer: flush before stderr.
                     std::io::stdout().flush().ok();
                     eprintln!(
                         "\n{}",
@@ -316,21 +227,13 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
             }
         }
     }
-    // Taken back before anything else is printed, so no part of it survives
-    // into the scrollback the answer is read from tomorrow.
-    //
-    // Here rather than left to the drop: `note` outlives this block, and a
-    // stream that carried citations and no token at all reaches here with the
-    // line still on screen — `finish` is empty, the `println!` steps past it,
-    // the citations print underneath, and the drop's erase then takes an
-    // unrelated blank row while the note itself stays.
+    // Here, not in the drop: after citations with no token the drop's erase hits the wrong row.
     note.clear();
     print!("{}", readout.finish());
     println!();
     if !citations.is_empty() {
         print!("{}", render_citations(&citations, face.unicode && face.on));
-        // The numbered list is one `--show` can name a rank out of, exactly as
-        // a search's is: a citation nobody can open is half a citation.
+        // The numbered citations are a list `--show` can name a rank from, as a search's is.
         if crate::cli::last::worth_remembering(
             std::io::IsTerminal::is_terminal(&std::io::stdout()),
             false,
@@ -338,16 +241,13 @@ pub async fn run(e: &Endpoint, question: &str, cli: &crate::cli::args::CliArgs) 
             crate::cli::last::save(question, citation_ids(&citations));
         }
     }
-    // `1` when the base had nothing to say, matching `-s`: a shell branches on
-    // it the same way.
+    // `1` when the base had nothing to say, matching `-s`.
     Ok(if said_anything { 0 } else { 1 })
 }
 
 #[cfg(test)]
 mod tests {
 
-    /// The frames were being sent and dropped on the floor while a strand
-    /// animated over the gap. What they say is worth more than what it said.
     #[test]
     fn a_retrieved_frame_becomes_a_line_a_person_can_read() {
         let face = crate::cli::face::Face::decide(
@@ -388,12 +288,9 @@ mod tests {
         )
         .expect("a line");
         assert!(line.contains("journal rotation policy"), "{line}");
-        // A round that named nothing is not a round that happened.
         assert!(needs_line(&face, &serde_json::json!({"queries": []})).is_none());
     }
 
-    /// `show` erases one physical row, so a line that wraps leaves its head on
-    /// the screen and the answer is written under a note that was taken back.
     #[test]
     fn a_note_longer_than_the_terminal_is_clipped_rather_than_wrapped() {
         for width in [24usize, 40, 80] {
@@ -420,7 +317,6 @@ mod tests {
         }
     }
 
-    /// A redirected answer receives none of it.
     #[test]
     fn a_face_that_is_off_says_nothing_between_the_frames() {
         let face = crate::cli::face::Face::decide(&Default::default(), false, false, None);
@@ -433,9 +329,6 @@ mod tests {
         serde_json::json!({ "title": title, "artifact_id": id, "text": format!("the opening of {id}") })
     }
 
-    /// The answer cites `[9]`, and until now the list under it was 22 unnumbered
-    /// lines: there was no way to tell which one `[9]` meant. The number the
-    /// model used is the position in this list, and the list has to say so.
     #[test]
     fn every_source_carries_the_number_the_answer_cited_it_by() {
         let out = render_citations(
@@ -458,9 +351,6 @@ mod tests {
         assert!(!out.contains("untitled"), "{out}");
     }
 
-    /// A reading follows a citation: the numbers under an answer are a list
-    /// `--show` can name a rank out of, the same way the ones under a search
-    /// are.
     #[test]
     fn the_sources_are_a_list_show_can_read_a_rank_out_of() {
         let ids = citation_ids(&[cite(None, "id-a"), cite(None, "id-b")]);
@@ -496,9 +386,7 @@ mod tests {
 
     #[test]
     fn a_character_split_across_two_chunks_survives() {
-        // "held — for review", cut inside the em dash. Three bytes, arriving
-        // one and then two, which is exactly what a `from_utf8_lossy` per
-        // chunk turned into `held \u{fffd}\u{fffd} for review`.
+        // Cut inside the em dash: one byte, then two.
         let text = "held — for review";
         let dash = text.find('—').expect("the dash is in there");
         let raw = text.as_bytes();
@@ -516,8 +404,7 @@ mod tests {
 
     #[test]
     fn a_byte_that_is_not_utf8_at_all_is_said_rather_than_approximated() {
-        // `0xff` begins no sequence, so this is a broken transport rather
-        // than a character still on its way.
+        // `0xff` begins no sequence.
         let mut pending = b"ok \xff".to_vec();
         assert!(decode(&mut pending).is_err());
     }
@@ -526,8 +413,7 @@ mod tests {
     async fn an_answer_streams_and_the_stream_terminates() {
         let (url, token, _core) = crate::cli::test_support::serve_test_app().await;
         let e = Endpoint { url, token };
-        // The test core's synthesizer is a fake, so this asserts the transport
-        // and the frame reader rather than the words that come back.
+        // The test core's synthesizer is a fake, so this asserts the transport and frame reader.
         let code = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             run(&e, "what is stored here", &Default::default()),

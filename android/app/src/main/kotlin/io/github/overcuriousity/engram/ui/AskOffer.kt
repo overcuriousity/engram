@@ -22,7 +22,7 @@ fun AskOfferPane(models: @Composable () -> Unit, onEndpoint: () -> Unit, onOff: 
     Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Ask · no model yet", style = MaterialTheme.typography.titleMedium)
         models()
-        Column(Modifier.fillMaxWidth().clickable(onClick = onEndpoint).padding(vertical = 6.dp)) {
+        Column(Modifier.fillMaxWidth().clickable(onClick = onEndpoint).touchTarget().padding(vertical = 6.dp)) {
             Text("Use an endpoint", style = MaterialTheme.typography.bodyMedium)
             Text("any OpenAI-compatible server", style = MaterialTheme.typography.bodySmall, color = muted())
         }

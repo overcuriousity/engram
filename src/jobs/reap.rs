@@ -1,43 +1,23 @@
-//! Revisit the retired, and act without asking.
-//!
-//! Retirement hides an artifact and then keeps everything about it forever.
-//! This sweep is the second look nobody was going to take by hand: free rules
-//! nominate the long-retired, one model call per nominee asks whether it still
-//! states anything the live base does not, and the verdict is acted on — the
-//! worthless are buried (text and vector into `graveyard`, point deleted,
-//! stub kept), the valuable rewritten as live synthesized artifacts. No
-//! operator queue. A wrong verdict answers to three things: the journal row
-//! every burial writes (`corpus_actions`), the Reaped listing on Insights with
-//! its Restore button, and `jobs::retract`'s second rule, which exhumes a
-//! buried artifact on its own when a search given up on would have been
-//! answered by it. A burial taken back is not bought again.
+//! Revisit the long-retired and act without asking: bury the worthless, rewrite the valuable live.
+//! A wrong burial answers to its journal row, the Reaped listing's Restore, and `retract`'s
+//! exhumation.
 
 use crate::core::Core;
 use crate::error::Result;
 
-/// What one pass did. Flat numbers on purpose: `jobs::did_work` reads any
-/// non-zero flat count as work, which is what drives the empty-run backoff,
-/// and every count here really is this pass acting.
+/// Flat numbers: `jobs::did_work` reads any non-zero flat count as work, and each count here is
+/// this pass acting.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Report {
-    /// Nominees put in front of the judge, verdicts and failures alike.
     pub judged: u64,
-    /// Buried: text in the graveyard, vector point deleted, stub kept.
     pub reaped: u64,
-    /// Rewritten as a live synthesized artifact.
     pub rescued: u64,
-    /// Retired rows given a fresh `retired_at` because they predate the
-    /// column — the migration-free backfill, counted as the work it is.
+    /// Retired rows given a `retired_at` because they predate the column.
     pub stamped: u64,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
-    // Re-read at the top of the pass, not only where the unit is armed.
-    // `periodic_units` (src/jobs/background.rs) gates *arming*, and nothing
-    // disarms a row that is already pending — so switching `[reap] enabled`
-    // off while a unit waited still bought one more full sweep, up to
-    // `max_judged_per_run` burials. `consolidate::run` has always re-checked
-    // its own gate; the one stage that destroys text must not be the exception.
+    // Re-checked here: `periodic_units` gates arming, and nothing disarms a row already pending.
     if !core.reap.enabled {
         return Ok(Report::default());
     }
@@ -45,40 +25,27 @@ pub async fn run(core: &Core) -> Result<Report> {
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
     for c in &cands {
-        // Reap's own day, before the judge call: a burial is the one action
-        // here that destroys text, and the cap is on taking it. Its own,
-        // because a shared count meant a day of condensations could quietly
-        // remove the ceiling's meaning here — and, the other way round, a day
-        // of burials could stop the idle pass shortening anything.
+        // Reap's own daily cap, before the judge call: burial is the action here that destroys
+        // text.
         if !core.may_act(crate::store::actions::Job::Reap).await? {
             tracing::info!("budget spent; the rest of the nominees wait for the window to move");
             break;
         }
-        // A burial taken back — by a person, or by the base for a search
-        // given up on — is not bought again. Read before the judge call,
-        // which is the expensive step.
+        // A burial taken back is not bought again; checked before the expensive judge call.
         if core
             .store
             .action_was_undone(&c.id, crate::store::actions::Kind::Reap)
             .await?
         {
             tracing::debug!(artifact_id = %c.id, "a burial taken back before; left alone");
-            // Stood down, not merely skipped. This is a permanent answer about
-            // this row — a burial taken back is never bought again — and
-            // `reap_candidates` orders by `retired_at ASC`, so leaving the
-            // stamp alone makes it the oldest retirement in the base for ever:
-            // one nominee slot on every sweep, and the candidates behind it
-            // never reached. Exactly the starvation `step_aside` exists for,
-            // arriving through the one branch that never spends a model call.
+            // Stood down, not skipped: `reap_candidates` orders by `retired_at ASC`, so an
+            // unstamped row would hold a nominee slot forever.
             step_aside(core, &c.id).await;
             continue;
         }
         let verdict = judge_one(core, c).await;
-        // Counted only where a judgement actually came back. `jobs::did_work`
-        // calls any non-zero number in the report work, so counting the
-        // attempt made a sweep that judged nothing — no `[infer.reap]` model,
-        // an endpoint that is down — look busy, and the empty-run backoff that
-        // exists to stop it hammering a dead endpoint never engaged.
+        // Counted only when a judgement came back, or a sweep with a dead endpoint looks busy and
+        // never backs off.
         if verdict.is_ok() {
             report.judged += 1;
         }
@@ -96,22 +63,14 @@ pub async fn run(core: &Core) -> Result<Report> {
                 }
             }
             Ok(crate::infer::prompt::Reap::Valuable { reason }) => {
-                // Bounded per run so one bad judging batch cannot flood the
-                // live base with model-written text. What is over the cap is
-                // logged and stays a candidate.
+                // Bounded per run so one bad judging batch cannot flood the live base with
+                // model-written text.
                 if report.rescued >= core.reap.max_rescues_per_run {
                     tracing::info!(artifact_id = %c.id, reason, "valuable, but over this run's rescue cap; it waits");
                     continue;
                 }
-                // The writer this rewrite needs, asked for before the row is
-                // touched. `rescue_one` refuses with a `Validation` when there
-                // is none, and every `rescue_one` failure used to stand the
-                // candidate down — so a base with a `[infer.reap]` judge and no
-                // generator paid `max_judged_per_run` model calls a sweep to
-                // push every valuable thing it owns ninety days out of reach,
-                // one restamp at a time, while `report.judged` stayed non-zero
-                // and the empty-run backoff never engaged. A role that has not
-                // arrived is a wait, exactly as it is for `Describe`.
+                // Checked before the row is touched: a missing generator is a wait, not this
+                // candidate's failure.
                 if core.generator.is_none() {
                     tracing::info!(artifact_id = %c.id, reason, "valuable, but no generator model to rewrite it with; it waits");
                     continue;
@@ -123,15 +82,8 @@ pub async fn run(core: &Core) -> Result<Report> {
                     }
                     Err(e) => {
                         tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; it waits");
-                        // Restamped only where the failure is about this row —
-                        // no source text left to rewrite from, a reply that
-                        // would not parse, an endpoint that refused this text.
-                        // An endpoint that merely did not answer says nothing
-                        // about the candidate, and the sweep's own cadence is
-                        // its retry; standing the row down for it would push
-                        // the whole backlog forward on every outage. A busy
-                        // endpoint says even less than a silent one: it is up,
-                        // and it has not so much as looked at this text.
+                        // Restamped only for a failure about this row; an unanswered or busy
+                        // endpoint says nothing about it, and the sweep's cadence is the retry.
                         if !matches!(
                             e,
                             crate::error::Error::Inference { .. }
@@ -142,25 +94,8 @@ pub async fn run(core: &Core) -> Result<Report> {
                     }
                 }
             }
-            // A reply that failed or cannot be read acts on nothing; the row
-            // is simply a candidate again next interval. The sweep's cadence
-            // is the retry — no bookkeeping.
-            //
-            // Unless the endpoint answered and said no, which is not a wait.
-            // `reap_candidates` orders `retired_at ASC` and the sweep judges
-            // `max_judged_per_run` rows a run, so a row the model will never
-            // accept — text it rejects outright with a 400 — is the oldest
-            // retirement in the base for ever: a slot and a model call every
-            // sweep, and the candidates behind it never reached. That is the
-            // starvation `step_aside` exists for, arriving through the one
-            // branch that did not use it.
-            //
-            // `InferenceRejected` and not every non-retryable error, because
-            // the other one reachable here is "no reap model configured" — a
-            // role that has not arrived, the same wait `Describe`'s exhausted
-            // arm guards for. Standing every candidate in the base down on
-            // that would push every `retired_at` forward on every sweep and
-            // leave nothing reapable once a model finally was configured.
+            // A failed or unreadable reply acts on nothing. A rejection (`InferenceRejected`) is
+            // about this row and stands it down; "no reap model" is a wait and must not.
             Err(e @ crate::error::Error::InferenceRejected { .. }) => {
                 tracing::warn!(artifact_id = %c.id, error = %e, "the judge will not rule on this candidate; standing it down");
                 step_aside(core, &c.id).await;
@@ -173,49 +108,16 @@ pub async fn run(core: &Core) -> Result<Report> {
     Ok(report)
 }
 
-/// Move a candidate the sweep could not act on to the back of the queue.
-///
-/// `reap_candidates` orders by `retired_at ASC` and the sweep judges
-/// `max_judged_per_run` rows a run, so a candidate whose action fails the same
-/// way every time — `excerpts.is_empty()` for a merged artifact whose roots
-/// were themselves buried is the reachable one — is the oldest retirement in
-/// the base for ever. It took a slot and a model call on every sweep, kept
-/// `report.judged` non-zero so the empty-run backoff never engaged, and the
-/// candidates behind it were never reached.
-///
-/// A fresh `retired_at` is the whole of the bookkeeping: nothing is lost, the
-/// row stays retired, and it comes back for another attempt an age later —
-/// which for a failure that was merely transient is a delay, and for one that
-/// is not is the difference between a stuck sweep and a working one.
-///
-/// The action failures restamp, and so does a judge call the endpoint refused:
-/// a 400 on this row's text is a verdict about this row and repeating it every
-/// sweep buys nothing. A judge call that merely *failed* — a timeout, an
-/// endpoint down, no model configured at all — says nothing about the row, and
-/// the sweep's own cadence is its retry.
+/// Moves a candidate the sweep could not act on to the back of the queue with a fresh `retired_at`,
+/// so one that fails the same way every time cannot starve the rest.
 async fn step_aside(core: &Core, id: &str) {
     if let Err(e) = core.store.restamp_retired(id).await {
         tracing::warn!(artifact_id = %id, error = %e, "could not restamp a candidate the sweep could not act on");
     }
 }
 
-/// The nearest artifacts a searcher can actually reach, `(title, text)`. Live
-/// means what `in_results` means; the payload's own status can lag the row,
-/// so the row answers. A candidate with no point gets none, which only ever
-/// defends it.
-///
-/// The errors are raised and not swallowed, and that is the whole safety
-/// argument of the prompt: the judge is asked whether the live base already
-/// states this, and the live texts are what it is asked *against*. A vector
-/// search that timed out came back as an empty list — indistinguishable from
-/// "nothing near it" — and the model then ruled on a retired artifact with no
-/// evidence in front of it, at which point `worthless` wipes the text with only
-/// the graveyard for a way back. Under load, or while an index is building,
-/// that could be a whole run. An error here stops the judging of this row; the
-/// sweep says so and comes back for it.
-///
-/// An empty list from a search that *worked* is still fine, and still only ever
-/// defends the row: the prompt is told there are no neighbours, which is true.
+/// The nearest live artifacts, `(title, text)`. Errors propagate: a failed search read as "nothing
+/// near" would let the judge bury text with no evidence in front of it.
 async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String, String)>> {
     let mut out: Vec<(String, String)> = Vec::new();
     for h in core.vectors.neighbours(id, 6).await? {
@@ -240,30 +142,14 @@ async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String, String)>>
     Ok(out)
 }
 
-/// Act on `valuable`: rewrite what remains into a live synthesized artifact
-/// and point the candidate at it.
-///
-/// What the rewrite is written *from* is the one rule that matters here. A
-/// source-text candidate (captured, passage, note) is its own material. A
-/// model-written one (merged, synthesized) is a paraphrase already, and a
-/// rewrite of it would be a paraphrase of a paraphrase posing as an original —
-/// so its material is the text of its roots through `artifact_sources`, and a
-/// candidate whose roots have lost their text (reaped themselves, or gone) is
-/// skipped rather than rewritten from the copy.
-///
-/// `insert_synthesized_artifact` is handed the candidate as the source list
-/// and resolves roots itself, so the lineage the new artifact records is
-/// root-true at any depth regardless of which branch fed the prompt.
+/// Source text rewrites from itself; a model-written candidate rewrites from its roots' text, never
+/// from a paraphrase, and is skipped if they are gone.
 async fn rescue_one(
     core: &Core,
     c: &crate::store::artifacts::Chunk,
     reason: &str,
 ) -> Result<String> {
-    // `core.generator`, not `core.judge`: `RESCUE_SYSTEM` asks for
-    // `{"artifact":{…}}` and `parse_generation` reads exactly that, which is
-    // `for_generating`'s response format. Under the judge's the endpoint
-    // constrained every rewrite into a dedupe verdict, so no rescue could
-    // parse however good the reply was.
+    // `core.generator`, not `core.judge`: `RESCUE_SYSTEM` needs `for_generating`'s response format.
     let writer = core
         .generator
         .as_ref()
@@ -333,19 +219,8 @@ async fn rescue_one(
     core.store
         .enqueue(crate::store::jobs::Stage::Embed, "artifact", &made.id)
         .await?;
-    // A deprecated candidate now has the winner a supersession names, so it
-    // gets one — through the store directly, not `core.supersede()`, whose
-    // both-active guard rightly refuses a retired loser. An already-superseded
-    // candidate keeps its pointer: its old winner retired it, and the rewrite
-    // will simply outrank it as a live neighbour on the second visit.
-    //
-    // Guarded the way `bury` is, and for the same minutes: `c` is a snapshot
-    // `nominees` took before two model calls, and the row it describes may
-    // have been reactivated since. Without the re-check this verdict about a
-    // retired artifact silently re-retired a live one and pointed it at text a
-    // model wrote. Overtaken, the rewrite simply stands on its own — it is a
-    // live artifact with the candidate in its lineage either way, and the
-    // second visit is where the two are compared.
+    // Through the store, not `core.supersede()`, whose both-active guard refuses a retired loser.
+    // Re-checked like `bury`: the row may have been reactivated during the model calls.
     if c.superseded_by.is_none() {
         let _guard = core.lifecycle_lock.lock().await;
         match core
@@ -377,26 +252,13 @@ async fn rescue_one(
             Err(e) => return Err(e),
         }
     }
-    // And the clock starts over, on both branches. `set_superseded_by` keeps
-    // the first retirement's stamp on purpose, and an already-superseded
-    // candidate never reaches it at all — so without this the row the sweep
-    // just acted on is still the oldest retirement in the base and comes back
-    // as the first nominee on the very next interval, for another judge call
-    // and, on a second `valuable` verdict, a second rewrite of the same
-    // content. The second visit is meant to be an age later, when the rewrite
-    // is what the candidate is judged against.
+    // Restamped on both branches, so the second visit is an age later, against the rewrite.
     core.store.restamp_retired(&c.id).await?;
     Ok(made.id)
 }
 
-/// Act on `worthless`: copy to the graveyard and wipe the row, then delete
-/// the vector point.
-///
-/// Row before point, marker before delete — the same protocol every lifecycle
-/// write uses. A delete that fails leaves a marked row against a standing
-/// point, which is exactly the drift the repair pass reads
-/// `lifecycle_dirty` to find; nothing else in the system would notice. Under
-/// `lifecycle_lock` so no restore lands between the copy and the wipe.
+/// Row before point, marker before delete: a failed delete leaves `lifecycle_dirty` for the repair
+/// pass. Under `lifecycle_lock` so no restore lands between copy and wipe.
 async fn reap_one(
     core: &Core,
     c: &crate::store::artifacts::Chunk,
@@ -415,9 +277,7 @@ async fn reap_one(
         "retired_at": c.retired_at,
     })
     .to_string();
-    // The vector goes into the grave beside the text, read before the point
-    // is deleted. A store that cannot answer buries without it, and says so:
-    // the burial is the point, the vector is what lets a give-up find it.
+    // Read before the point is deleted. A store that cannot answer buries without it, and says so.
     let dense = match core.vectors.dense_of(&c.id).await {
         Ok(v) => v,
         Err(e) => {
@@ -439,10 +299,7 @@ async fn reap_one(
         pair_score: None,
     };
     let _guard = core.lifecycle_lock.lock().await;
-    // `bury` sets `lifecycle_dirty` inside its own transaction, so from the
-    // instant the text is wiped the drift repair can finish the delete below
-    // if this process never gets to it. The journal row rides the same
-    // transaction.
+    // `bury` sets `lifecycle_dirty` and writes the journal row in its own transaction.
     core.store
         .bury(
             &c.id,
@@ -462,41 +319,18 @@ async fn reap_one(
     Ok(())
 }
 
-/// How many rows are read for every one the sweep means to judge.
-///
-/// The one rule left outside SQL — has this candidate been *seen* since it was
-/// retired — lives on the vector point, so it can only be applied after the
-/// page has been fetched, which means it eats into the page. Fetching exactly
-/// `max_judged_per_run` rows and filtering afterwards judged fewer than it was
-/// asked to, and on a run where the whole page was filtered it judged nothing
-/// at all — every time, since the ordering is stable and the same rows come
-/// back on the next run.
-///
-/// A retrieval on a long-retired artifact is rare by construction, so a
-/// factor and not a paging loop: reading four rows to keep one is a cheap
-/// query against a query that has to hold a cursor.
+/// Rows read per row to judge: the seen-since-retired filter runs on vector payloads after the page
+/// is fetched.
 const OVERFETCH: i64 = 4;
 
-/// The free pass: who goes in front of the judge, and at what cost — two SQL
-/// statements and one payload read, no model call.
-///
-/// Everything SQLite can state lives in `reap_candidates`: age, status, no
-/// open reminder, and not a source of a *fresh* active merge — that last one
-/// because the merge's undo needs its sources' text, while an old merge has
-/// forfeited that window (nobody unmerges after `min_age_days`), which is the
-/// one price the design accepts.
-///
-/// The one rule left here is the one SQLite does not hold: the usage stamps
-/// live only on the vector point, and a candidate seen since it was retired is
-/// still earning its keep. See `OVERFETCH` for what that costs.
-/// How long out of `active` a row must have been before the sweep may look at
-/// it. One function because two reads share it: `nominees` asks the question
-/// and `reap_one` asks it again, at the instant it wipes, against the same
-/// number — a re-check under a different floor is not the same re-check.
+/// How long out of `active` before the sweep may look; `nominees` and `reap_one` must re-check
+/// against the same number.
 fn min_age_secs(core: &Core) -> i64 {
     (core.reap.min_age_days as i64).saturating_mul(86_400)
 }
 
+/// Who goes before the judge: `reap_candidates` holds every SQL rule; the seen-since-retired rule
+/// reads the vector point.
 async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u64)> {
     let stamped = core.store.stamp_unaged_retired().await?;
     if stamped > 0 {
@@ -519,35 +353,19 @@ async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u
             payloads.get(&c.id).and_then(|p| p.last_seen_at),
         )
     });
-    // The cap is the sweep's, not the query's: what is over it is still oldest
-    // -first and comes back on the next run.
+    // The cap is the sweep's: what is over it comes back oldest-first on the next run.
     cands.truncate(want.max(0) as usize);
     Ok((cands, stamped))
 }
 
-/// Does this candidate still go in front of the judge? Only if nothing has
-/// reached it since it was retired: a retrieval after that is the row earning
-/// its keep, and the sweep leaves it alone.
-///
-/// Both stamps may be missing, and each absence has its own answer. No
-/// `last_seen_at` means the point was never reached — nothing defends the row,
-/// and it goes. No `retired_at` is the one the SQL rules out, so it is the one
-/// the fail-safe is for: an unknown retirement is treated as the beginning of
-/// time, which every real `last_seen_at` clears, so the row is held back. It
-/// used to be `i64::MAX`, which no stamp can clear — the exact inverse, and a
-/// missing stamp fed the row to a destructive sweep rather than defending it.
+/// Only if nothing has reached it since retirement. A missing `retired_at` is treated as the
+/// beginning of time, so any `last_seen_at` holds the row back.
 fn goes_before_the_judge(retired_at: Option<i64>, last_seen_at: Option<i64>) -> bool {
     last_seen_at.is_none_or(|t| t < retired_at.unwrap_or(0))
 }
 
-/// One nominee, one call. The judge is `core.reaper` — the judges' endpoint
-/// under reap's own response format, because a reap verdict is not a dedupe
-/// verdict and the grammar is carried by the completer — and it compares the
-/// candidate against what a searcher can actually reach: the successor row when one was named, and the
-/// nearest *live* neighbours by the candidate's stored vector. A candidate
-/// with no point simply gets no neighbours; the judge then sees only the
-/// successor, or nothing live at all, and the prompt's own bias ("when
-/// unsure, valuable") is what keeps that from destroying anything.
+/// `core.reaper` compares the candidate with its successor and its nearest live neighbours; the
+/// prompt's "when unsure, valuable" protects a candidate with none.
 async fn judge_one(
     core: &Core,
     c: &crate::store::artifacts::Chunk,
@@ -581,7 +399,6 @@ async fn judge_one(
     crate::infer::prompt::parse_reap(&reply?)
 }
 
-/// The journal row a burial writes, for tests elsewhere that bury by hand.
 #[cfg(test)]
 pub(crate) mod test_support {
     pub(crate) fn row(id: &str) -> crate::store::actions::NewAction {
@@ -604,25 +421,17 @@ mod tests {
 
     #[test]
     fn a_missing_retirement_stamp_defends_the_row() {
-        // Nothing has reached it: it goes, stamp or no stamp.
         assert!(goes_before_the_judge(Some(100), None));
         assert!(goes_before_the_judge(None, None));
-        // Reached since it was retired: kept back, which is the whole rule.
         assert!(!goes_before_the_judge(Some(100), Some(100)));
         assert!(!goes_before_the_judge(Some(100), Some(200)));
-        // Reached, but before it was retired: that read is spent.
         assert!(goes_before_the_judge(Some(100), Some(99)));
-        // The fail-safe. With no retirement stamp any retrieval at all holds
-        // the row back, rather than none of them being able to.
         assert!(!goes_before_the_judge(None, Some(1)));
         assert!(!goes_before_the_judge(None, Some(i64::MAX)));
     }
 
     use crate::store::artifacts::{ArtifactStatus, NewArtifact, NewMerged};
 
-    /// One corpus holding one artifact per text. The corpus text is the texts
-    /// themselves: `insert_corpus` deduplicates on content, so two seeds with a
-    /// fixed string would be one note and not two.
     async fn seed(core: &Core, texts: &[&str]) -> Vec<String> {
         let src = core
             .store
@@ -649,12 +458,14 @@ mod tests {
     }
 
     async fn backdate_retired_at(core: &Core, id: &str, secs_ago: i64) {
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - secs_ago)
-            .bind(id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - secs_ago,
+            id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
     }
 
     async fn deprecate_long_ago(core: &Core, id: &str) {
@@ -665,23 +476,15 @@ mod tests {
         backdate_retired_at(core, id, 100 * 86_400).await;
     }
 
-    /// A burial taken back is a permanent answer about that row, and
-    /// `reap_candidates` orders by `retired_at ASC`. Skipped without a fresh
-    /// stamp it is the oldest retirement in the base for ever: one nominee
-    /// slot on every sweep, and the candidates behind it never reached — the
-    /// starvation `step_aside`'s own doc comment describes, arriving through
-    /// the one branch that never spends a model call.
     #[tokio::test]
     async fn a_burial_taken_back_stands_down_instead_of_holding_its_slot() {
         use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
         let mut core = test_core().await;
         core.reap.enabled = true;
-        // No judge: every nominee that reaches the call fails there, which is
-        // fine — the branch under test is above it.
+        // No judge: every nominee fails at the call, below the branch under test.
         let ids = seed(&core, &["taken back before", "behind it"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
         deprecate_long_ago(&core, &ids[1]).await;
-        // A burial on the first, already taken back.
         core.store
             .record_action(&NewAction {
                 job: Job::Reap,
@@ -707,9 +510,6 @@ mod tests {
             after > before,
             "the row kept its place at the head of the queue: {before:?} -> {after:?}"
         );
-        // And only that row. A candidate whose judge call merely failed —
-        // there is no reap model here — says nothing about itself, and the
-        // sweep's own cadence is its retry.
         assert_eq!(
             core.store.get_artifact(&ids[1]).await.unwrap().retired_at,
             Some(crate::store::now() - 100 * 86_400),
@@ -725,7 +525,6 @@ mod tests {
             &["active", "young", "seen", "unreachable-reminder", "clean"],
         )
         .await;
-        // ids[0] stays active.
         core.store
             .set_artifact_status(&ids[1], ArtifactStatus::Deprecated)
             .await
@@ -736,15 +535,11 @@ mod tests {
             .touch(&[crate::vector::Touch::shown(&ids[2])], crate::store::now())
             .await
             .unwrap(); // seen after retirement
-        // Retired, with a reminder of its own. Nobody can reach that reminder —
-        // a retired artifact is on no band — so it holds nothing back, which is
-        // the whole of the difference from the note below.
+        // A retired artifact is on no band, so its own reminder holds nothing back.
         deprecate_long_ago(&core, &ids[3]).await;
         open_reminder(&core, "m1", &ids[3]).await;
         deprecate_long_ago(&core, &ids[4]).await;
 
-        // A second note, still live and still reminding. Its retired artifact
-        // keeps its text: somebody means to act on this note.
         let pair = seed(&core, &["live", "retired-beside-a-live-reminder"]).await;
         open_reminder(&core, "m2", &pair[0]).await;
         deprecate_long_ago(&core, &pair[1]).await;
@@ -760,16 +555,15 @@ mod tests {
         );
     }
 
-    /// A due moment nobody has completed, on this artifact.
     async fn open_reminder(core: &Core, moment_id: &str, artifact_id: &str) {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO moments (id, artifact_id, kind, at, tz, source, created_at)
              VALUES (?, ?, 'due', ?, 'UTC', 'set', ?)",
+            moment_id,
+            artifact_id,
+            crate::store::now() + 3_600,
+            crate::store::now()
         )
-        .bind(moment_id)
-        .bind(artifact_id)
-        .bind(crate::store::now() + 3_600)
-        .bind(crate::store::now())
         .execute(&core.store.pool)
         .await
         .unwrap();
@@ -801,12 +595,14 @@ mod tests {
         let (cands, _) = nominees(&core).await.unwrap();
         assert!(cands.is_empty(), "a fresh merge's sources are protected");
 
-        sqlx::query("UPDATE artifacts SET created_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 100 * 86_400)
-            .bind(&merge.id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ? WHERE id = ?",
+            crate::store::now() - 100 * 86_400,
+            &merge.id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let (cands, _) = nominees(&core).await.unwrap();
         assert_eq!(cands.len(), 2, "an old merge has forfeited its undo window");
     }
@@ -838,10 +634,6 @@ mod tests {
         );
     }
 
-    /// Switching the sweep off has to stop the sweep, not merely stop arming
-    /// it. `periodic_units` gates arming and nothing disarms an already-pending
-    /// row, so a unit that was waiting when the setting changed still ran once
-    /// — one more full destructive pass, up to `max_judged_per_run` burials.
     #[tokio::test]
     async fn a_disabled_sweep_does_not_run_a_unit_that_was_already_pending() {
         let mut core = test_core().await;
@@ -947,7 +739,6 @@ mod tests {
             .expect("a grave");
         assert!(text.contains("stale duplicate fact"));
         assert!(meta.contains("covered"));
-        // The journal row rode the burial, and the grave kept the vector.
         let rows = core
             .store
             .open_actions(&[crate::store::actions::Kind::Reap], 10)
@@ -956,11 +747,13 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].subject_id, ids[0]);
         assert_eq!(rows[0].detail.as_deref(), Some("covered"));
-        let kept: i64 = sqlx::query_scalar("SELECT vec IS NOT NULL FROM graveyard WHERE id = ?")
-            .bind(&ids[0])
-            .fetch_one(&core.store.pool)
-            .await
-            .unwrap();
+        let kept: i64 = sqlx::query_scalar!(
+            "SELECT vec IS NOT NULL FROM graveyard WHERE id = ?",
+            &ids[0]
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap();
         assert_eq!(kept, 1, "the vector was not kept in the grave");
         assert!(
             core.vectors
@@ -980,12 +773,6 @@ mod tests {
         );
     }
 
-    /// `reactivate` has always routed a reaped artifact through `exhume`;
-    /// `unsupersede` did not, and it is what the Ops restore button and
-    /// `undo_promotion` call. The ordinary path published an *active, empty*
-    /// artifact — text wiped, point deleted — that `reap_candidates` could
-    /// never take back, and whose absent point `repair_lifecycle_drift` went on
-    /// deleting once a pass.
     #[tokio::test]
     async fn restoring_a_buried_superseded_artifact_brings_its_text_back() {
         let mut core = test_core().await;
@@ -996,7 +783,6 @@ mod tests {
         ));
         let ids = seed(&core, &["the loser's own words", "the keeper"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
-        // Hidden in favour of the keeper, then reaped in that state.
         core.supersede(&ids[0], &ids[1]).await.unwrap();
         backdate_retired_at(&core, &ids[0], 400 * 86_400).await;
         let report = run(&core).await.unwrap();
@@ -1027,7 +813,6 @@ mod tests {
     #[tokio::test]
     async fn a_failed_reply_leaves_the_candidate_untouched() {
         let mut core = test_core().await;
-        // An empty script: the call itself errors, which must act on nothing.
         core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![]),
         ));
@@ -1035,10 +820,8 @@ mod tests {
         deprecate_long_ago(&core, &ids[0]).await;
 
         let report = run(&core).await.unwrap();
-        // Nothing judged, and that is the point of the number: `jobs::did_work`
-        // reads any non-zero count in the report as work done, so a sweep whose
-        // every call failed — no model configured, an endpoint down — must come
-        // back empty or the backoff that stops it hammering never engages.
+        // `did_work` reads any non-zero count as work; failed calls must leave the backoff free to
+        // engage.
         assert_eq!((report.judged, report.reaped), (0, 0));
         assert_eq!(
             core.store.get_artifact(&ids[0]).await.unwrap().text,
@@ -1047,12 +830,6 @@ mod tests {
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
     }
 
-    /// A candidate the judge will never rule on must not hold the queue.
-    /// `reap_candidates` is ordered `retired_at ASC` and the sweep judges
-    /// `max_judged_per_run` rows a run, so the oldest retirement in the base
-    /// is judged first every time — and if that call is refused rather than
-    /// merely failed, it is refused again on the next sweep, and the row
-    /// behind it is never reached.
     #[tokio::test]
     async fn a_candidate_the_judge_refuses_stands_down_and_lets_the_queue_move() {
         let mut core = test_core().await;
@@ -1084,10 +861,6 @@ mod tests {
         );
     }
 
-    /// And a call that merely failed is not that. No model configured is a
-    /// role that has not arrived, and standing every candidate in the base
-    /// down on it would push every `retired_at` forward on every sweep — with
-    /// nothing reapable left once a model finally was configured.
     #[tokio::test]
     async fn a_sweep_with_no_judge_leaves_every_candidate_where_it_was() {
         let mut core = test_core().await;
@@ -1131,9 +904,6 @@ mod tests {
         backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
         run(&core).await.unwrap();
 
-        // `include_deprecated` still means what it means — the stub is gone
-        // from it because it has no vector and no text, not because a new
-        // filter was taught about reaping.
         let q = crate::core::search::SearchQuery {
             q: "zeppelins".into(),
             limit: 10,
@@ -1153,7 +923,6 @@ mod tests {
             hits.iter().all(|h| h.artifact_id != ids[0]),
             "a reaped stub surfaced in search"
         );
-        // And every thread other rows hold into the stub still resolves.
         let stub = core.store.get_artifact(&ids[0]).await.unwrap();
         assert_eq!(stub.superseded_by.as_deref(), Some(ids[1].as_str()));
     }
@@ -1222,7 +991,6 @@ mod tests {
 
         let report = run(&core).await.unwrap();
         assert_eq!(report.rescued, 1);
-        // The generator's own script, so the rescue is its first and only call.
         let rescue_prompt = &scripted.prompts()[0];
         assert!(
             rescue_prompt.contains("mount with ro,loop")
@@ -1279,14 +1047,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_rescue_is_reaped_against_its_own_rewrite_on_the_second_pass() {
-        // The loop the design closes: rescue writes a live rewrite, supersedes
-        // the candidate and stamps it a *new* retired_at — so the second
-        // visit, an age later, judges the candidate against its own living
-        // rewrite and the likely verdict is worthless. The seam this test
-        // exists for: a rescue that failed to stamp a fresh clock would put
-        // the candidate back in front of the judge on the very next interval,
-        // and one that wiped anything would have destroyed text on a
-        // "valuable" verdict.
+        // A rescue must restamp, or the candidate is back before the judge next interval, and must
+        // wipe nothing.
         let mut core = test_core().await;
         core.reaper = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
@@ -1301,7 +1063,6 @@ mod tests {
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         deprecate_long_ago(&core, &ids[0]).await;
 
-        // Pass 1: rescued, not reaped.
         let first = run(&core).await.unwrap();
         assert_eq!((first.reaped, first.rescued), (0, 1));
         let new_id = core
@@ -1313,18 +1074,14 @@ mod tests {
             .expect("superseded by the rewrite");
         crate::jobs::embed::run(&core, &new_id).await.unwrap();
 
-        // The rescue restamped the candidate, so it is not a nominee now.
         let (none_yet, _) = nominees(&core).await.unwrap();
         assert!(
             none_yet.is_empty(),
             "a rescued candidate waits out a fresh age"
         );
 
-        // An age passes — off the clock the rescue itself set.
         backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
 
-        // Pass 2: the candidate is judged against its living rewrite and
-        // lands in the graveyard; the rewrite stays live.
         let second = run(&core).await.unwrap();
         assert_eq!((second.judged, second.reaped, second.rescued), (1, 1, 0));
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
@@ -1341,11 +1098,13 @@ mod tests {
             .set_artifact_status(&ids[0], ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        sqlx::query("UPDATE artifacts SET retired_at = NULL WHERE id = ?")
-            .bind(&ids[0])
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = NULL WHERE id = ?",
+            &ids[0]
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         let (cands, stamped) = nominees(&core).await.unwrap();
         assert_eq!(stamped, 1);
         assert!(cands.is_empty(), "a fresh clock has not run");

@@ -1,30 +1,23 @@
-//! The server lock: one file beside the control database, held for as long as
-//! the server runs.
-//!
-//! A restore replaces files by `rename`, and a running server would keep the
-//! old inode open and go on writing to a file nobody sees. Nothing else tells a
-//! second process that a server is up, so the server takes this at startup and
-//! `--backup --offline` (and, later, `--restore`) refuse while it is held.
+//! The server lock beside the control database: a restore replaces files by `rename`,
+//! and a running server would keep writing to the old inode.
 
 use crate::error::{Error, Result};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-/// Held for its lifetime; dropping it releases the lock.
 #[derive(Debug)]
 pub struct ServerLock {
     _file: File,
 }
 
-/// `<control_path>.lock`. Empty, and not part of any backup.
+/// Empty, and not part of any backup.
 pub fn lock_path(control_path: &Path) -> PathBuf {
     let mut p = control_path.as_os_str().to_owned();
     p.push(".lock");
     PathBuf::from(p)
 }
 
-/// Take the lock, or say who holds it.
 pub fn acquire(control_path: &Path) -> Result<ServerLock> {
     let path = lock_path(control_path);
     let file = OpenOptions::new()
@@ -49,9 +42,7 @@ pub fn acquire(control_path: &Path) -> Result<ServerLock> {
     }
 }
 
-/// Whether a server holds the lock, without taking it and without creating
-/// the lock file: a restore's refusals must leave no trace, and a lock file
-/// that does not exist is one nobody holds.
+/// Never creates the lock file: a restore's refusals must leave no trace.
 pub fn probe(control_path: &Path) -> Result<()> {
     let path = lock_path(control_path);
     let file = match OpenOptions::new().write(true).open(&path) {

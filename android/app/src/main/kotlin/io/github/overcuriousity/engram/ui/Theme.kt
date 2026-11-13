@@ -44,24 +44,23 @@ object EngramColors {
     val dueDark = Color(0xFFE0A060)
 }
 
-val Inter = FontFamily(
-    Font(R.font.inter_400, FontWeight.Normal),
-    Font(R.font.inter_500, FontWeight.Medium),
-    Font(R.font.inter_600, FontWeight.SemiBold),
+val Atkinson = FontFamily(
+    Font(R.font.atkinson_next_400, FontWeight.Normal),
+    Font(R.font.atkinson_next_500, FontWeight.Medium),
+    Font(R.font.atkinson_next_600, FontWeight.SemiBold),
 )
 val Mono = FontFamily(Font(R.font.jetbrains_mono_400, FontWeight.Normal))
 
-/** The type scale: 0.75, 0.8125, 0.875, 0.9375, 1.125, 1.375, 1.75 rem at 16 px. */
+/** The tokens' type scale at 16 px: micro, dense, ui, prose, section, page, and mono. */
 val EngramType = Typography(
-    labelSmall = TextStyle(fontFamily = Inter, fontSize = 12.sp),
-    bodySmall = TextStyle(fontFamily = Inter, fontSize = 13.sp),
-    bodyMedium = TextStyle(fontFamily = Inter, fontSize = 14.sp),
-    bodyLarge = TextStyle(fontFamily = Inter, fontSize = 15.sp),
-    titleMedium = TextStyle(fontFamily = Inter, fontSize = 18.sp, fontWeight = FontWeight.Medium),
-    titleLarge = TextStyle(fontFamily = Inter, fontSize = 22.sp, fontWeight = FontWeight.SemiBold),
-    headlineMedium = TextStyle(fontFamily = Inter, fontSize = 28.sp, fontWeight = FontWeight.SemiBold),
+    labelSmall = TextStyle(fontFamily = Atkinson, fontSize = 12.sp),
+    bodySmall = TextStyle(fontFamily = Atkinson, fontSize = 13.sp),
+    bodyMedium = TextStyle(fontFamily = Atkinson, fontSize = 14.sp),
+    bodyLarge = TextStyle(fontFamily = Atkinson, fontSize = 16.sp),
+    titleMedium = TextStyle(fontFamily = Atkinson, fontSize = 18.sp, fontWeight = FontWeight.Medium),
+    titleLarge = TextStyle(fontFamily = Atkinson, fontSize = 22.sp, fontWeight = FontWeight.SemiBold),
     labelMedium = TextStyle(fontFamily = Mono, fontSize = 13.sp),
-    labelLarge = TextStyle(fontFamily = Inter, fontSize = 14.sp, fontWeight = FontWeight.Medium),
+    labelLarge = TextStyle(fontFamily = Atkinson, fontSize = 14.sp, fontWeight = FontWeight.Medium),
 )
 
 val EngramShapes = Shapes(

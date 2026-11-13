@@ -1,0 +1,146 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT * FROM pursuits WHERE opened_at >= ? AND opened_at < ? ORDER BY opened_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "opened_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "opened_at"
+          }
+        }
+      },
+      {
+        "name": "closed_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "closed_at"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "queries",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "queries"
+          }
+        }
+      },
+      {
+        "name": "sources",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "sources"
+          }
+        }
+      },
+      {
+        "name": "artifact_id",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "query_vec",
+        "ordinal": 8,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "vec_dim",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "vec_dim"
+          }
+        }
+      },
+      {
+        "name": "embed_model",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "embed_model"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "56903903bc6d4ef043c5d8a8a15151b96c0b903397378bdbfa92f466122f02c1"
+}

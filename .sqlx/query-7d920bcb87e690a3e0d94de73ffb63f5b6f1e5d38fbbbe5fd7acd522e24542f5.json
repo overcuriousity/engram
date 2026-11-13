@@ -1,0 +1,374 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT m.* FROM artifacts m\n               JOIN artifact_sources s ON s.child_id = m.id\n               JOIN artifacts r ON r.id = s.root_id\n              WHERE r.corpus_id = ? AND m.provenance IN ('merged', 'synthesized')\n              ORDER BY m.created_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "corpus_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "corpus_id"
+          }
+        }
+      },
+      {
+        "name": "provenance",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "provenance"
+          }
+        }
+      },
+      {
+        "name": "source_count",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "source_count"
+          }
+        }
+      },
+      {
+        "name": "lifecycle_dirty",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "lifecycle_dirty"
+          }
+        }
+      },
+      {
+        "name": "ordinal",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "ordinal"
+          }
+        }
+      },
+      {
+        "name": "text",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "corpus_span",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "corpus_span"
+          }
+        }
+      },
+      {
+        "name": "title",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "category",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "category"
+          }
+        }
+      },
+      {
+        "name": "tags",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "tags"
+          }
+        }
+      },
+      {
+        "name": "embed_state",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "embed_state"
+          }
+        }
+      },
+      {
+        "name": "embed_model",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "embed_model"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "embed_rev",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "embed_rev"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 15,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "updated_at"
+          }
+        }
+      },
+      {
+        "name": "segment_idx",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "segment_idx"
+          }
+        }
+      },
+      {
+        "name": "flags",
+        "ordinal": 17,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "flags"
+          }
+        }
+      },
+      {
+        "name": "flag_detail",
+        "ordinal": 18,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "flag_detail"
+          }
+        }
+      },
+      {
+        "name": "superseded_by",
+        "ordinal": 19,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "superseded_by"
+          }
+        }
+      },
+      {
+        "name": "caveats",
+        "ordinal": 20,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "caveats"
+          }
+        }
+      },
+      {
+        "name": "status",
+        "ordinal": 21,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "status"
+          }
+        }
+      },
+      {
+        "name": "last_verified_at",
+        "ordinal": 22,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "last_verified_at"
+          }
+        }
+      },
+      {
+        "name": "activation",
+        "ordinal": 23,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "activation"
+          }
+        }
+      },
+      {
+        "name": "activated_at",
+        "ordinal": 24,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "activated_at"
+          }
+        }
+      },
+      {
+        "name": "cues",
+        "ordinal": 25,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "cues"
+          }
+        }
+      },
+      {
+        "name": "retired_at",
+        "ordinal": 26,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "retired_at"
+          }
+        }
+      },
+      {
+        "name": "reaped_at",
+        "ordinal": 27,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "reaped_at"
+          }
+        }
+      },
+      {
+        "name": "trashed_at",
+        "ordinal": 28,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "trashed_at"
+          }
+        }
+      },
+      {
+        "name": "trashed_from",
+        "ordinal": 29,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "trashed_from"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "7d920bcb87e690a3e0d94de73ffb63f5b6f1e5d38fbbbe5fd7acd522e24542f5"
+}

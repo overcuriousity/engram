@@ -1,16 +1,5 @@
-//! The operator's hand on the corpus: taking back what the base did.
-//!
-//! The last screen out of `web::ui`. Everything under `/ui/ops`: the buttons
-//! that act on one artifact — take a supersession back, deprecate and
-//! reactivate, undo a merge, undo a condensation. There is no review queue any
-//! more: the base settles every pair itself, and what a person can do is undo
-//! what it settled or hide something by hand.
-//!
-//! Every one of these ends by redrawing the artifact pane, which is why this
-//! module is a caller of `web::artifact` rather than a peer: `artifact_changed`
-//! is the one place that decides between the fragment and a redirect, and
-//! `ReturnTo` is what a form carries so a press knows which page it was made
-//! from.
+//! Everything under `/ui/ops`: the buttons that take back what the base did to one artifact.
+//! Each ends by redrawing the artifact pane through `artifact_changed`; `ReturnTo` says which page a press came from.
 
 use crate::tenants::Tenant;
 use crate::web::artifact::{ArtifactDetailFragment, ArtifactViewParams, build_artifact_detail};
@@ -22,22 +11,14 @@ use axum::extract::{Form, Path, Query};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::post;
 
-/// Where a lifecycle button should land afterwards.
-///
-/// The same actions are offered from two places: the journal on Insights,
-/// where the list is the thing being worked through, and an artifact's own
-/// page, where being thrown onto Insights for pressing "Hide from results"
-/// loses the reader's place. The page that rendered the button says where it
-/// leads; Ops sends nothing and keeps the default.
+/// The same actions are on Insights and on an artifact's page; the page says where to land, Ops sends nothing.
 #[derive(serde::Deserialize, Default)]
 struct ReturnTo {
     to: Option<String>,
 }
 
 impl ReturnTo {
-    /// Only a path inside this UI. A form field is user input, and a redirect
-    /// that will follow anything it is handed is an open redirect — worth
-    /// nothing to the operator and a phishing hop to everyone else.
+    /// Only a path inside this UI: a form field is user input, and following anything is an open redirect.
     fn path(&self) -> &str {
         match self.to.as_deref() {
             Some(p) if p.starts_with("/ui/") && !p.starts_with("/ui//") => p,
@@ -46,19 +27,8 @@ impl ReturnTo {
     }
 }
 
-/// What a lifecycle button answers with: the artifact it just changed.
-///
-/// These buttons say something about an artifact, not about the page it is
-/// on — so the answer is that artifact, re-rendered where it already was, and
-/// nothing navigates. `_artifact_detail.html` is rendered in two places and the
-/// hidden `to` beside each button can only name one of them: it named the
-/// standalone artifact page, so pressing a button on a search result took the
-/// whole window there and the results the operator was working
-/// through were gone. That is the reason `ReturnTo` exists, arrived at from the
-/// other side.
-///
-/// The redirect is still what a browser without htmx gets, and `to` is still
-/// what it follows. Nothing here is the only way any of these buttons work.
+/// Answers with the artifact re-rendered where it was, so nothing navigates.
+/// Without htmx the redirect to `to` still applies.
 async fn artifact_changed(
     tenant: &Tenant,
     headers: &axum::http::HeaderMap,
@@ -67,18 +37,14 @@ async fn artifact_changed(
     back: &ReturnTo,
 ) -> UiResult<Response> {
     if headers.contains_key("hx-request") {
-        // As above: an action on the artifact redraws the pane at its opening
-        // length rather than reconstructing a run nobody passed along.
+        // Redraws the pane at its opening length.
         let d = build_artifact_detail(&tenant.core, aid, terms).await?;
         return Ok(HtmlTemplate(ArtifactDetailFragment { d }).into_response());
     }
     Ok(Redirect::to(back.path()).into_response())
 }
 
-/// Put a superseded artifact back in results, and mark the action undone.
-///
-/// The two halves are one act: `unsupersede` alone leaves the journal claiming
-/// a supersession that no longer holds, which is what the sweep reads.
+/// One act: `unsupersede` alone leaves the journal claiming a supersession the sweep still reads.
 pub(crate) async fn unsupersede_artifact(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
     tenant.core.unsupersede(aid).await?;
     tenant
@@ -116,21 +82,8 @@ async fn deprecate_ui(
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
-/// Put a hidden or buried artifact back in results, and mark undone whichever
-/// of the three actions hid it.
-///
-/// The two halves are one act, as in `unsupersede_artifact`: whichever of the
-/// three hid it stamps, and the others stamp nothing, since `undo_action_on`
-/// matches only open rows of that kind on this subject.
-///
-/// `Supersede` belongs here even though the button that undoes a plain
-/// supersession is `unsupersede_ui`'s. A *buried* artifact can also be
-/// superseded — `graveyard_list` filters on neither — and `Core::reactivate`
-/// falls straight through to `unsupersede_locked` for it. Unstamped, the
-/// supersession's journal row stayed open: it is what
-/// `dedupe::taken_back_before` reads to hand a pair to a person instead of
-/// ruling on it again, so the sweep simply re-applied the supersession the
-/// operator had just undone.
+/// Stamps whichever of the three actions hid it; `undo_action_on` matches only open rows of that kind.
+/// `Supersede` is included: a buried artifact can also be superseded, and an open row would let the sweep redo it.
 pub(crate) async fn reactivate_artifact(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
     tenant.core.reactivate(aid).await?;
     for kind in [
@@ -165,10 +118,7 @@ async fn reactivate_ui(
 
 pub(crate) async fn undo_merge(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
     use crate::store::actions::UndoneBy;
-    // A press on a page that has gone stale: between the render and the press,
-    // a later merge subsumed this one and took its supersession. Saying so is
-    // the whole of what is available from here — the alternative is a redirect
-    // to a queue the row has left, which reads as "done".
+    // A later merge took this one's supersession since the page rendered; say so.
     if let crate::jobs::merge::Undone::HiddenBehind { later } =
         crate::jobs::merge::undo(&tenant.core, aid, crate::store::pairs::DecidedBy::Operator)
             .await?
@@ -191,17 +141,8 @@ async fn undo_merge_ui(tenant: Tenant, Path(aid): Path<String>) -> UiResult<Resp
     Ok(Redirect::to("/ui/insights").into_response())
 }
 
-/// Take a merge back: what it replaced returns, the merge is retired, and the
-/// pairs behind it are dismissed so the sweep does not simply redo it.
-/// Put the version a condensation retired back. One button per open
-/// condensation on the artifact's page; the base's own undo is the same
-/// method with `UndoneBy::Evidence`.
-/// The path is the *condensation's* id and `artifact_changed` wants the
-/// artifact's, so the action is read for its `subject_id` before it is undone
-/// — after which the row still names the same artifact, but reading it first
-/// keeps the failure ordinary: no such action is a `404` with nothing written.
-/// Answers with the artifact the condensation was on, which is what a caller
-/// redrawing a pane needs and what the path does not carry.
+/// The path is the condensation's id, so the action is read for its `subject_id` first; no such action is a 404.
+/// Answers with the artifact, which a caller redrawing a pane needs.
 pub(crate) async fn undo_condensation(
     tenant: &Tenant,
     action_id: &str,
@@ -242,14 +183,6 @@ pub(crate) fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    /// Every button in the artifact pane that posts to `/ui/ops` must carry an
-    /// `hx-post` and a `to`, or pressing it from a search result navigates the
-    /// whole window away and the results being worked through are gone — the
-    /// failure `ReturnTo` exists to prevent. "Restore the last version" was a
-    /// bare `<form method="post">` for exactly as long as nothing checked, and
-    /// `uncondense_ui` redirected to /ui/insights whatever page it was pressed
-    /// from. Asserted over the template rather than on that one button, so the
-    /// next button added is held to it too.
     #[test]
     fn every_ops_button_in_the_artifact_pane_returns_to_where_it_was_pressed() {
         let tpl = include_str!("templates/_artifact_detail.html");
@@ -267,7 +200,6 @@ mod tests {
             );
             checked += 1;
         }
-        // Put it back, reactivate, hide, and restore a condensed version.
         assert!(
             checked >= 4,
             "the pane's ops buttons went missing: {checked}"
@@ -328,8 +260,7 @@ mod tests {
     async fn pressing_undo_on_a_merge_stamps_its_rows_as_taken_back_by_the_operator() {
         use crate::store::actions::{Kind, UndoneBy};
         let mut core = crate::core::test_support::test_core().await;
-        // Through the press: a duplicate verdict is a proposal now and writes
-        // nothing on its own, so the writer is what this test needs.
+        // A duplicate verdict writes nothing on its own, so the writer is needed.
         core.pair_synthesizer = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
                 r#"{"merged":{"title":"Mounting","text":"Mount the filesystem, or attach the volume, before writing.",
@@ -488,24 +419,11 @@ mod tests {
         );
     }
 
-    /// Restore has to stamp whichever row was hiding the artifact, and a
-    /// supersession is one of them.
-    ///
-    /// A *buried* artifact can also be superseded — `graveyard_list` filters
-    /// on neither — so such a row appears under Restore, and
-    /// `Core::reactivate` falls straight through to `unsupersede_locked` for
-    /// it. (A deprecated one no longer reaches here: `artifacts_by_status`
-    /// leaves the superseded to `superseded_artifacts`, which is the row that
-    /// can name the winner.) Unstamped, the supersession's journal row stayed
-    /// open, which is what `dedupe::taken_back_before` reads to hand a pair to
-    /// a person rather than ruling on it again: the sweep simply re-applied
-    /// the supersession the operator had just undone.
     #[tokio::test]
     async fn restoring_a_superseded_artifact_stamps_the_supersession() {
         use crate::store::actions::{Job, Kind, NewAction};
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["clinic hours", "clinic services"]).await;
-        // Hidden behind the other, journaled the way a corpus job journals it.
         core.supersede_with(
             &ids[0],
             &ids[1],

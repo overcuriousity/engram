@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id FROM search_candidates WHERE event_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "964450068255b49a7429f0a243634ab0911221872338d853254623bcc6f99aac"
+}

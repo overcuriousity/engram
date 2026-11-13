@@ -3,6 +3,8 @@ name = "engram"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/overcuriousity/engram"
 
 [lib]
 name = "engram"
@@ -16,15 +18,20 @@ path = "src/main.rs"
 name = "contained"
 required-features = ["contained"]
 
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
 [dependencies]
 axum = { version = "0.8.9", features = ["macros", "multipart"] }
 tokio = { version = "1.53.1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.7", features = ["trace"] }
-# No `migrate` feature: the schema is applied by `Store::migrate` and
-# `Control::migrate`, which read the columns a base has before they touch it.
-# `sqlx::migrate!` was never used, and the feature only compiled its machinery.
-sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite"] }
+tower-http = { version = "0.7", features = ["trace", "sensitive-headers"] }
+# No `migrate` feature: `Store::migrate` / `Control::migrate` read a base's columns before touching it.
+sqlx = { version = "0.9.0", features = ["runtime-tokio", "sqlite", "macros"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
 config = { version = "0.15.25", features = ["toml"] }
@@ -37,24 +44,14 @@ sha2 = "0.11"
 hex = "0.4"
 anyhow = "1"
 async-trait = "0.1.92"
-# One ask is a sequence of events, written as straight-line async code. The
-# alternative is a hand-written state machine over the same control flow, which
-# is the same logic in a form nobody can read against the blocking door.
+# One ask is a sequence of events, written as straight-line async code.
 async-stream = "0.3"
-# The `Stream` trait itself (a re-export of `futures-core`'s) and `next()`.
-# Already in the tree by way of axum and sqlx; named here because this uses it
-# directly.
-tokio-stream = "0.1"
-# `blocking` is for exactly one call: the one-time tokenizer download at boot,
-# which runs on its own OS thread — see `infer::budget::fetch_blocking`.
-# `multipart` is for exactly one other: the speech endpoint, which takes the
-# recording as a form part because that is the shape OpenAI's transcription
-# API has — every other role here posts JSON.
+tokio-stream = { version = "0.1", features = ["sync"] }
+# `blocking`: the boot-time tokenizer download; `multipart`: the speech endpoint's OpenAI form shape.
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream", "blocking", "multipart"] }
 pulldown-cmark = "0.13.4"
 ammonia = "4.1.4"
-# LaTeX → MathML Core, rendered on the server so formulas need no script on
-# the page. 0.7 is the newest that builds on this crate's rust-version.
+# LaTeX to MathML on the server; 0.7 is the newest that builds on this rust-version.
 math-core = "0.7.0"
 argon2 = { version = "0.5.3", features = ["std", "password-hash"] }
 base64 = "0.23"
@@ -63,115 +60,71 @@ rust-embed = "8.12.0"
 mime_guess = "2"
 askama = "0.16.0"
 rmcp = { version = "3.1.2", features = ["server", "transport-streamable-http-server"] }
-# Readability: strips navigation, headers, footers and asides, leaving the
-# article. Hand-rolling these heuristics would be worse code than importing an
-# implementation of them.
+# Readability: strips the page chrome, leaving the article.
 dom_smoothie = "0.19.0"
-# HTML → markdown. A turndown.js port, and it replaced `html2md` for a measured
-# reason rather than a fashionable one: on identical readability output
-# `html2md` recovered no ATX headings at all from several ordinary sites — none
-# against this crate's 38 on a BBC front page, none against 7 on a GitHub
-# repository page — and `src/infer/split.rs` splits on headings before anything
-# else. It also serialised `<sup>`, `<sub>` and geometry-bearing `<img>` back
-# into the corpus verbatim, which came to 43% of the stored bytes of a
-# Wikipedia article. Also pre-1.0; the fallback if that becomes unacceptable is
-# still plain-text extraction, which costs the splitter its heading boundaries.
+# HTML to markdown; `html2md` lost the ATX headings `src/infer/split.rs` splits on first.
 htmd = "0.5.5"
-# What htmd builds its DOM from, named here for the one handler that reads
-# an anchor's parent and siblings. No new build: htmd already pulls it in.
-# The version is htmd's, not ours to bump: a second copy's `NodeData` is a
-# different type from the one htmd's nodes carry.
+# htmd's own version, not ours to bump: a second copy's `NodeData` is a different type.
 markup5ever_rcdom = "0.38"
-# Decoding fetched pages that are not UTF-8. Already in the tree by way of
-# the HTML crates; named here because this uses it directly.
+# Decoding fetched pages that are not UTF-8.
 encoding_rs = "0.8.35"
-# PDF → markdown. The layout work is docling's; the alternative is lopdf plus
-# hand-written column and heading heuristics, which is marker's job description.
-# Pinned exactly: 1.x is days old. The fallback if it becomes unacceptable is
-# pdf-extract, which costs the splitter its heading boundaries.
-#
-# `pdf-text` is the pure-Rust rung: no ONNX runtime, no native libraries, no
-# models to fetch. `--features pdf-ml` swaps in the layout and table models for
-# anyone who wants them; nothing in this tree assumes they are there.
+# PDF to markdown, pinned exactly; `pdf-text` is the pure-Rust rung, `--features pdf-ml` adds the models.
 docling = { version = "=1.53.0", default-features = false, features = ["pdf-text"] }
 
 url = "2"
+ipnet = "2"
+sd-notify = "0.5"
+tower-sessions = "0.15"
+tower-sessions-sqlx-store = { version = "0.16", features = ["sqlite"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs"] }
 
-# The pairing QR, drawn on the server as inline SVG so the page needs no
-# script and no image route. Pure Rust. Default features off: `image` pulls
-# the raster stack in to write a PNG nobody serves, and `svg` is the
-# renderer this page uses, so it is named on its own.
+# The pairing QR as inline SVG; default features off, since `image` only writes an unserved PNG.
 qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
-# RFC 8291 payload encryption and the RFC 8292 VAPID signature, for the
-# UnifiedPush channel, written out in `src/jobs/webpush.rs` on these four
-# RustCrypto primitives. One record, one ECDH, two HKDF expansions and one
-# AES-GCM seal is the whole of the encryption, and the RFC 8291 §5 example is
-# its test. `web-push-native` did this until RUSTSEC-2026-0387: it pinned
-# `p256` 0.13 and with it `crypto-bigint` 0.5, whose constant-time operations
-# are not, under the instance's VAPID key. `web-push` 0.11 was the other
-# candidate: Mozilla's `ece` under it wants OpenSSL by default, and it carries
-# its own HTTP client. `ecdsa` signs the VAPID token, `ecdh` derives the
-# shared secret, `getrandom` makes the per-message key.
+# RFC 8291/8292 Web Push in `src/jobs/webpush.rs`; `web-push-native` pinned a p256 hit by RUSTSEC-2026-0387.
 p256 = { version = "0.14.0", features = ["ecdsa", "ecdh", "getrandom"] }
 aes-gcm = "0.11.1"
 hkdf = "0.13.0"
-# The client's endpoint file, read as a document so a hand-edited file comes
-# back with its comments; two keys do not justify a parser of their own.
+# Keeps the comments of a hand-edited endpoint file.
 toml_edit = "0.25.13"
 schemars = "1.2.2"
-# Decoding, orientation and the downscaled preview of a captured image. Only
-# the three formats a phone or a browser actually hands over.
+# Only the three formats a phone or a browser hands over.
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
-# EXIF is where the phone says when and where a photo was taken.
+# EXIF carries when and where a photo was taken.
 kamadak-exif = "0.6.1"
-# Local time, so "Friday at 15:00" is a question the base can ask of its own
-# log. Storage stays Unix seconds; this is only ever applied at the edge.
+# Local time, applied only at the edge; storage stays Unix seconds.
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
-# The IANA database, because the zone comes from the device
-# (`Intl.DateTimeFormat().resolvedOptions().timeZone`) and a stored offset
-# cannot answer what happens across a DST boundary.
+# The zone comes from the device, and a stored offset cannot cross a DST boundary.
 iana-time-zone = "0.1"
 chrono-tz = { version = "0.10.4", default-features = false, features = ["std"] }
 crossterm = "0.29.0"
 tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
 text-splitter = { version = "0.32", features = ["markdown"] }
 
-# The contained build's vector index: an extension compiled into the SQLite
-# sqlx already bundles, registered at startup and never loaded from storage.
-# Pre-1.0 and pinned exactly. `libsqlite3-sys` is named only for the symbol
-# that registers it, and must stay on the version sqlx resolves.
+# The contained build's vector index, pinned exactly; `libsqlite3-sys` must stay on sqlx's version.
 sqlite-vec = { version = "=0.1.9", optional = true }
 libsqlite3-sys = { version = "0.37", optional = true }
-# llama.cpp in process, for the contained build. CPU only: no OpenMP, which
-# Android does not ship, and no GPU backend. Pinned exactly — the C++ under it
-# moves fast, and an upgrade is a decision.
+# CPU only (Android ships no OpenMP), pinned exactly: the C++ under it moves fast.
 llama-cpp-2 = { version = "=0.1.156", default-features = false, optional = true }
-# Named beside the binding, at the same pin, for one reason: Cargo hands a
-# `links` crate's DEP_* variables to its direct dependents only, and build.rs
-# needs DEP_LLAMA_GGML_CMAKE_DIR to compile whisper.cpp over the ggml this
-# already built. See vendor/whisper.cpp/README.md — the two pins move together.
+# Direct, at the same pin, so build.rs gets DEP_LLAMA_GGML_CMAKE_DIR for whisper.cpp.
 llama-cpp-sys-2 = { version = "=0.1.160", default-features = false, optional = true }
-# A recording, read and brought to the rate Whisper hears at.
+# Reads a recording and resamples it to Whisper's rate.
 hound = { version = "3.5", optional = true }
 rubato = { version = "5", optional = true }
 
 [dev-dependencies]
-# `test-util` is not part of tokio's `full`. It carries the pausable clock the
-# gate's tests run on, so a cooldown is asserted exactly rather than slept
-# through.
+# `test-util` gives the gate's tests a pausable clock.
 tokio = { version = "1.53.1", features = ["full", "test-util"] }
 tempfile = "3"
 temp-env = "0.3"
 wiremock = "0.6.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2", "stream"] }
+oc-check = { git = "https://github.com/overcuriousity/overcuriousity-dev-manifest", tag = "v2026.11.1" }
 
 [build-dependencies]
-# Packs the Chrome extension at compile time. A build dependency, not a
-# runtime one: the zip is a build artifact, not something the server assembles
-# per request.
+# Packs the extension at compile time.
 zip = { version = "9.0.4", default-features = false, features = ["deflate"] }
-# Compiles the vendored whisper.cpp. Only with `contained`.
+# Compiles the vendored whisper.cpp.
 cc = { version = "1.2", features = ["parallel"], optional = true }
 
 [features]
@@ -187,15 +140,8 @@ contained = [
     "dep:cc",
 ]
 
-# docling 1.53.0 drops a ToUnicode `bfrange` whose destination is more than one
-# UTF-16 unit, so a subset font's `fl` ligature vanishes from the text layer
-# (engram#60). The fix is one commit on top of the 1.53.0 release, on branch
-# fix/tounicode-bfrange-multi-unit of overcuriousity/docling.rs; the same
-# commit on upstream master is fix/tounicode-bfrange-multi-unit-master, to be
-# offered to docling-project/docling.rs. All four are patched because the
-# workspace wires them by path: patching docling-pdf alone would pull a second
-# docling-core whose types the converter does not accept. Drop this block for
-# the first crates.io release that carries the fix.
+# docling 1.53.0 drops multi-unit ToUnicode `bfrange` destinations (engram#60); all four crates are
+# patched because the workspace wires them by path. Drop for the first crates.io release with the fix.
 [patch.crates-io]
 docling = { git = "https://github.com/overcuriousity/docling.rs", rev = "73d773b49266314bff3bd089641bd579c3e6d6de" }
 docling-core = { git = "https://github.com/overcuriousity/docling.rs", rev = "73d773b49266314bff3bd089641bd579c3e6d6de" }

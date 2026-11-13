@@ -1,0 +1,159 @@
+/* The frame every page is drawn inside. */
+
+/* Four regions (bar, rail, focus, source); `rail` and `focus` start in the same columns on every page.
+   Container queries, so the workspace answers to the space it is in. */
+.shell {
+  container-type: inline-size;
+  container-name: shell;
+  max-width: 110rem;
+  margin: 0 auto;
+  padding: 0 1rem 4rem;
+}
+
+.regions {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+  grid-template-columns: [rail] 22rem [focus] minmax(0, 1fr);
+  /* The containing block for the absolutely placed column handle, which must not take a grid track. */
+  position: relative;
+}
+
+/* `min-width: auto` would let one unwrappable source line widen the column and the document. */
+.regions > * { min-width: 0; }
+
+.region-bar { grid-column: 1 / -1; }
+.region-side { grid-column: 1 / -1; }
+.region-side[data-off] { display: none; }
+.region-rail { grid-column: rail; }
+.region-focus { grid-column: focus; }
+
+/* The three-up workspace fills the window; `min-height`, so a one-column window still grows and scrolls. */
+body:has(.regions-rail-focus-source) {
+  display: flex; flex-direction: column; min-height: 100dvh;
+}
+/* Not redundant: the auto margin defeats `stretch`, and the shell would shrink to its content. */
+body:has(.regions-rail-focus-source) > .shell {
+  flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column;
+  /* The regions carry their own cap, so 150rem can be reached. */
+  max-width: none;
+}
+body:has(.regions-rail-focus-source) > .shell > .regions { flex: 1; min-height: 0; }
+
+/* The pin. 62rem is `@container shell (width <= 60rem)` as a media query: `body` is outside the container. */
+@media (width >= 62rem) {
+  body:has(.regions-rail-focus-source) { height: 100dvh; overflow: hidden; }
+  body:has(.regions-rail-focus-source) > .shell { padding-bottom: 1rem; }
+}
+
+/* The standalone artifact page: the same two panes with no rail, pinned the same way. */
+body:has(.regions-split) {
+  display: flex; flex-direction: column; min-height: 100dvh;
+}
+body:has(.regions-split) > .shell {
+  flex: 1; min-height: 0; width: 100%; display: flex; flex-direction: column;
+}
+body:has(.regions-split) > .shell > .regions { flex: 1; min-height: 0; }
+
+@media (width >= 62rem) {
+  body:has(.regions-split) { height: 100dvh; overflow: hidden; }
+  body:has(.regions-split) > .shell { padding-bottom: 1rem; }
+  /* `.regions` is `align-items: start`, so the row needs `minmax(0, 1fr)` and `stretch` to have a height. */
+  .regions-split { grid-template-rows: minmax(0, 1fr); }
+  /* The fragment's root is the flex column here. */
+  .regions-split > [data-terms] {
+    display: flex; flex-direction: column; align-self: stretch;
+    flex: 1; min-height: 0;
+  }
+  /* A grid needs `min-height: 0` before `stretch` can hand its columns a height. */
+  .regions-split .split {
+    flex: 1; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr);
+  }
+  .regions-split .split > * { min-height: 0; }
+  .regions-split .split > :first-child { max-height: none; }
+  .regions-split .split > :nth-child(2) {
+    display: flex; flex-direction: column; max-height: none;
+  }
+  .regions-split .raw { max-height: none; flex: 1; min-height: 0; }
+  /* The artifact takes the width; the page still does not scroll. */
+  .regions-split.hide-source .split > :first-child {
+    display: flex; overflow-y: auto;
+  }
+  .regions-split.hide-source .split > :first-child > .artifact-main {
+    min-height: 12rem; overflow-y: auto;
+  }
+  .regions-split.hide-source .split > :first-child > .row-handle { display: block; }
+}
+
+/* Prose is the default; 46rem is the measure (about 75 characters). Only the shell is centred. */
+.regions-focus { grid-template-columns: minmax(0, 46rem); justify-content: center; }
+.regions-focus > * { grid-column: 1 / -1; }
+.regions-table { grid-template-columns: minmax(0, 1fr); }
+/* For pages outside the workspace: signing in and pairing. */
+.regions-center { grid-template-columns: minmax(0, 26rem); justify-content: center; }
+.regions-center > * { grid-column: 1 / -1; }
+.regions-table > * { grid-column: 1 / -1; }
+
+/* The split decides its own two columns. */
+.regions-split { grid-template-columns: minmax(0, 1fr); }
+.regions-split > * { grid-column: 1 / -1; }
+
+/* List and detail; the box is centred, not its tracks, so `--rail-w` (dragged in app.js) stays an offset from its left edge. */
+@container shell (width >= 90rem) {
+  .regions-rail-focus-source {
+    grid-template-columns: [rail] var(--rail-w, 28rem) [focus] minmax(0, 52rem);
+    width: 100%; max-width: calc(var(--rail-w, 28rem) + 53rem); margin-inline: auto;
+  }
+  .regions-rail-focus-source:is(.pane-open, .answering) > .col-handle {
+    display: block; left: var(--rail-w, 28rem); width: 1rem;
+  }
+}
+
+/* Idle, the rail takes the width the pane is not using; opening the top hit would spend a read per search.
+   Chained, not `:not(a, b)`: three classes outrank `.regions.reading` in 74-workspace.css. */
+@container shell (width > 60rem) {
+  .regions-rail-focus-source:not(.pane-open):not(.answering) {
+    grid-template-columns: [rail] minmax(0, 40rem) [focus] minmax(0, 1fr);
+  }
+}
+
+/* The due rail beside them, kept through typing; chained like the rule above to outrank it. */
+@container shell (width >= 150rem) {
+  .regions-rail-focus-source,
+  .regions-rail-focus-source:not(.pane-open):not(.answering) {
+    grid-template-columns: [rail] var(--rail-w, 28rem) [focus] minmax(0, 52rem) [side] 22rem;
+    max-width: calc(var(--rail-w, 28rem) + 76rem);
+  }
+  .regions-rail-focus-source > .region-bar { grid-column: rail / side; }
+  .regions-rail-focus-source > .region-side,
+  .regions-rail-focus-source > .region-side[data-off] { display: block; grid-column: side; grid-row: 1 / -1; }
+  html.typing .regions-rail-focus-source #context-offer { display: none; }
+}
+
+/* A container query, so a half-width desktop window is one-up like a phone. */
+@container shell (width <= 60rem) {
+  .regions { grid-template-columns: minmax(0, 1fr); }
+  .regions > * { grid-column: 1 / -1; }
+  .regions.has-selection .region-rail { display: none; }
+  /* An answer keeps the rail, whose excerpts its `[n]` links point into; it goes under the answer. */
+  .regions.answering .region-rail { order: 1; }
+}
+
+.spacer { flex: 1; }
+
+/* Motion explains what moved; named elements tween, everything else cross-fades. */
+@view-transition { navigation: auto; }
+
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-group(*) { animation-duration: 180ms; }
+  .oc-topbar { view-transition-name: topbar; }
+  .region-rail { view-transition-name: rail; }
+  .region-focus { view-transition-name: focus; }
+}
+
+/* An at-rule cannot sit in a media query, so this is what turns the transition off. */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) { animation: none !important; }
+}

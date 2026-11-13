@@ -1,25 +1,28 @@
 {% extends "layout.html" %}
 {% block title %}Pair the app — engram{% endblock %}
 {% block content %}
-<h1>Pair the app</h1>
-{# The origin is stated because it is the one thing the operator can check:
-   the phone will be pointed at exactly this address. #}
-<p>This pairs the engram app on a phone with <strong>{{ origin }}</strong>.
-Open the app, choose <em>Scan to pair</em>, and point it at the code.</p>
+<div class="oc-page-head"><h1 class="oc-text-page">Pair the app</h1></div>
+<dl class="oc-facts">
+  <dt>Server</dt>
+  <dd><span class="oc-value oc-mono">{{ origin }}
+  </span>{% let copy_label = "server address" %}{% let copy_value = origin.as_str() %}{% include "_copy.html" %}</dd>
+</dl>
+<p>In the app, choose <em>Scan to pair</em>.</p>
 {% match code %}
 {% when Some with ((uri, svg)) %}
-<div class="qr" style="max-width:256px">{{ svg|safe }}</div>
-<p class="mono muted" style="word-break:break-all">{{ uri }}</p>
-<p class="muted">Good for two minutes, and for one phone. Press again for
-another.</p>
+<div class="qr">{{ svg|safe }}</div>
+<dl class="oc-facts">
+  <dt>Link</dt>
+  <dd><span class="oc-value oc-mono break-all">{{ uri }}
+  </span>{% let copy_label = "pairing link" %}{% let copy_value = uri.as_str() %}{% include "_copy.html" %}</dd>
+  <dt>Valid</dt>
+  <dd><span class="oc-value">Two minutes, one phone</span></dd>
+</dl>
 {% when None %}
 {% endmatch %}
-<form method="post" action="/ui/app/grant">
-  <button class="btn btn-accent" type="submit">
-    {% if code.is_some() %}Show a new code{% else %}Show a code for this phone{% endif %}
-  </button>
+<form class="oc-form" method="post" action="/ui/app/grant">
+  <div class="oc-form__actions"><button class="oc-btn{% if code.is_none() %} oc-btn--primary{% endif %}" type="submit">
+    {% if code.is_some() %}Show a new code{% else %}Show a code{% endif %}
+  </button></div>
 </form>
-<p class="muted">The picture carries a code, not a credential: the phone
-trades it for its own token, which then appears under Settings → API tokens
-named for the device, and is revoked there.</p>
 {% endblock %}

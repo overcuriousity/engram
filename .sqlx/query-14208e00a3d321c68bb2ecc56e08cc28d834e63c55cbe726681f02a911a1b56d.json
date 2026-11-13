@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO pair_grants (id, code_hash, subject, created_at, expires_at)\n             VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "14208e00a3d321c68bb2ecc56e08cc28d834e63c55cbe726681f02a911a1b56d"
+}

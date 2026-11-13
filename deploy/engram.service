@@ -1,0 +1,35 @@
+[Unit]
+Description=engram
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30
+ExecStart=/usr/local/bin/engram --config /etc/engram/config.toml
+WorkingDirectory=/var/lib/engram
+# Secrets stay root-only and arrive as credentials, e.g.
+# LoadCredential=oidc-secret:/etc/engram/oidc-secret with ENGRAM__AUTH__OIDC__CLIENT_SECRET_FILE=/run/credentials/engram.service/oidc-secret
+Restart=on-failure
+DynamicUser=yes
+StateDirectory=engram
+ConfigurationDirectory=engram
+UMask=0077
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT type AS \"type!\", name AS \"name!\" FROM sqlite_master ORDER BY type, name",
+  "describe": {
+    "columns": [
+      {
+        "name": "type!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sqlite_master",
+            "name": "type"
+          }
+        }
+      },
+      {
+        "name": "name!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "sqlite_master",
+            "name": "name"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "2fa4b95fe6ef7f6953aa628794f276af24512e3b65dc73a51e3f2f15fb310e53"
+}

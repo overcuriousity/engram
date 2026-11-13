@@ -1,14 +1,8 @@
-//! Pairing grants: the short-lived, single-use codes a QR carries.
-//!
-//! A grant is not a token. It lives two minutes, is spent by one claim, and
-//! is exchanged for the real credential over TLS — see `auth::grants`. The
-//! table holds only a hash of the code, so a reader of the database learns
-//! nothing a scanner of the screen did not.
+//! Pairing grants: two-minute, single-use codes; only a hash of the code is stored.
 
 use super::control::Control;
 use super::now;
 use crate::error::Result;
-use sqlx::Row;
 
 impl Control {
     pub async fn insert_grant(
@@ -18,46 +12,39 @@ impl Control {
         subject: &str,
         expires_at: i64,
     ) -> Result<()> {
-        sqlx::query(
+        sqlx::query!(
             "INSERT INTO pair_grants (id, code_hash, subject, created_at, expires_at)
              VALUES (?, ?, ?, ?, ?)",
+            id,
+            code_hash,
+            subject,
+            now(),
+            expires_at
         )
-        .bind(id)
-        .bind(code_hash)
-        .bind(subject)
-        .bind(now())
-        .bind(expires_at)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// Spend a grant, and say whose it was.
-    ///
-    /// One statement, so two claims racing on the same code cannot both win:
-    /// the row is marked claimed only if it is unclaimed and unexpired, and
-    /// `RETURNING` hands back the subject of the row this call changed —
-    /// nothing, if some other call or the clock got there first. The three
-    /// ways to get `None` are deliberately one answer; the route above turns
-    /// them into one status, so a guesser learns nothing from the difference.
+    /// One statement, so two racing claims cannot both win. The three `None` cases are
+    /// deliberately indistinguishable, so a guesser learns nothing.
     pub async fn claim_grant(&self, code_hash: &str) -> Result<Option<String>> {
         let t = now();
-        let row = sqlx::query(
+        let row = sqlx::query!(
             "UPDATE pair_grants SET claimed_at = ?
              WHERE code_hash = ? AND claimed_at IS NULL AND expires_at > ?
              RETURNING subject",
+            t,
+            code_hash,
+            t
         )
-        .bind(t)
-        .bind(code_hash)
-        .bind(t)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| r.get("subject")))
+        Ok(row.map(|r| r.subject))
     }
 
     pub async fn purge_expired_grants(&self) -> Result<u64> {
-        let r = sqlx::query("DELETE FROM pair_grants WHERE expires_at <= ?")
-            .bind(now())
+        let r = sqlx::query!("DELETE FROM pair_grants WHERE expires_at <= ?", now())
             .execute(&self.pool)
             .await?;
         Ok(r.rows_affected())
@@ -78,7 +65,6 @@ mod tests {
             c.claim_grant("hash-1").await.unwrap().as_deref(),
             Some("alice")
         );
-        // The same code again is nobody's: the row is spent.
         assert_eq!(c.claim_grant("hash-1").await.unwrap(), None);
     }
 

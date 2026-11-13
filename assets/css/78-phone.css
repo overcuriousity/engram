@@ -1,0 +1,123 @@
+/* Phone overrides. Sorts last: each has the specificity of the rule it corrects. */
+
+/* Above 40rem, whatever app.js's `installNudge` decides. */
+.installnudge { display: none; }
+.back { display: none; }
+.oc-fab { display: none; }
+
+/* Appears at exactly the width that hides the rail (a container query, like that rule). */
+@container shell (width <= 60rem) {
+  .back {
+    display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
+    margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
+    font-size: var(--text-ui); font-weight: 500; text-decoration: none;
+    color: var(--color-fg-secondary);
+  }
+  .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+}
+
+@media (width < 48rem) {
+  /* No container here: layout containment would anchor the fixed search bar to `.shell`, not the viewport.
+     Every `@container shell (width <= 60rem)` block is therefore restated below; a new one belongs here too. */
+  .regions { grid-template-columns: minmax(0, 1fr); }
+  .regions > * { grid-column: 1 / -1; }
+  .regions.has-selection .region-rail { display: none; }
+  .regions.answering .region-rail { order: 1; }
+  .back {
+    display: inline-flex; align-items: center; gap: 0.375rem; min-height: 44px;
+    margin: 0 0 0.25rem -0.5rem; padding: 0 0.5rem; border-radius: var(--radius-sm);
+    font-size: var(--text-ui); font-weight: 500; text-decoration: none;
+    color: var(--color-fg-secondary);
+  }
+  .back:hover { background: var(--color-bg-hover); color: var(--color-fg-primary); }
+
+  .shell {
+    container-type: normal;
+    padding-bottom: 5.5rem;                        /* clear of the tab bar */
+    /* Landscape on a notched phone puts the cutout beside the page. */
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
+  }
+
+  /* The top row keeps identity and the way out. */
+  /* Outside `.shell`, the topbar needs its own cutout padding. */
+  .oc-topbar {
+    padding-left: max(var(--space-3), env(safe-area-inset-left));
+    padding-right: max(var(--space-3), env(safe-area-inset-right));
+  }
+  .oc-topnav { display: none; }
+
+  /* On Search the box moves to the thumb; z-index above the tab bar's 10, in the same stacking context. */
+  .regions-rail-focus-source .region-bar {
+    position: fixed; left: 0; right: 0; z-index: 11;
+    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+    padding: 0.5rem max(0.75rem, env(safe-area-inset-left))
+             0.5rem max(0.75rem, env(safe-area-inset-right));
+    background: var(--color-bg-surface);
+    border-top: 1px solid var(--color-border);
+  }
+  /* Idle, the bar is the page; it drops to the thumb with the first keystroke. */
+  html:not(.typing) .regions-rail-focus-source .region-bar {
+    position: static; border-top: 0; padding: 0; background: transparent;
+  }
+  /* The bar sheds page furniture; the staged file and the offer stay, since hiding them still fetched and counted. */
+  .regions-rail-focus-source .region-bar .chips,
+  .regions-rail-focus-source .region-bar .facet-label,
+  .regions-rail-focus-source .region-bar .keyhint { display: none; }
+
+  /* The box starts at one row and grows up to the same cap. */
+  .regions-rail-focus-source .region-bar .verbs { margin-top: 0.4rem; gap: 0.4rem; }
+  .regions-rail-focus-source .region-bar .verbs .oc-btn { min-height: 40px; }
+  .regions-rail-focus-source .region-bar .box { max-height: 40vh; }
+
+  /* Clear of both bars; the shell's 5.5rem clears only the tab bar. */
+  .regions-rail-focus-source { padding-bottom: 4rem; }
+
+  /* Ships `hidden`, and an author `display` beats the UA's `[hidden]` rule. */
+  .installnudge {
+    position: fixed; left: 0.75rem; right: 0.75rem; z-index: 11;
+    bottom: calc(var(--tabbar-h) + 0.75rem + env(safe-area-inset-bottom));
+    display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+    padding: 0.75rem; border: 1px solid var(--color-border);
+    border-radius: var(--radius-md); background: var(--color-bg-surface);
+    font-size: var(--text-dense);
+  }
+  .installnudge[hidden] { display: none; }
+  .installnudge p { flex: 1 1 100%; margin: 0; color: var(--color-fg-secondary); }
+  .installnudge [data-dismiss-install] { margin-left: auto; }
+
+  .oc-tabbar {
+    display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: var(--z-rail);
+    padding-bottom: env(safe-area-inset-bottom);
+    border-top: 1px solid var(--color-border);
+    background: var(--color-bg-surface);
+  }
+  .oc-tabbar a { min-height: var(--tabbar-h); white-space: nowrap; }
+
+  /* Capture, bottom right above the tab bar; on Search the box is the capture. */
+  .oc-fab {
+    display: inline-flex; align-items: center; gap: var(--space-2);
+    position: fixed; z-index: var(--z-rail);
+    right: max(var(--space-4), env(safe-area-inset-right));
+    bottom: calc(var(--tabbar-h) + var(--space-4) + env(safe-area-inset-bottom));
+    min-height: 3rem; padding: 0 var(--space-4); box-shadow: var(--shadow-float);
+  }
+  body:has(.installnudge:not([hidden])) .oc-fab { display: none; }
+  body:has(.oc-fab) .shell { padding-bottom: 10rem; }
+
+  /* 16px, or iOS zooms on focus and a standalone window cannot zoom back; `.box` has its own rule. */
+  .box { font-size: 1rem; }
+
+  .chip > span { padding: 8px 12px; font-size: var(--text-dense); }
+
+  /* No scroller inside a scroller. */
+  .rail, .raw { max-height: none; }
+
+  /* The name matters more than the time here; the corpus page still says when. */
+  .qtime { display: none; }
+  .qmeta { grid-template-columns: auto; }
+
+}
+
+:root { --tabbar-h: 3.5rem; }

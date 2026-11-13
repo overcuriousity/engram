@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\" FROM artifacts\n              WHERE superseded_by IS NOT NULL\n                AND reaped_at IS NULL\n                AND status <> 'trashed'\n                AND superseded_by NOT IN (SELECT id FROM artifacts WHERE status <> 'trashed')",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "517bfbf917d9f6466f8300cfbc7dd6c5291893424520744ae4550b23a1fa48d1"
+}

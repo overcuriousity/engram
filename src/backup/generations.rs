@@ -1,10 +1,5 @@
-//! The alias-and-generation moves a restore makes, over any vector store.
-//!
-//! A restore never writes into what an alias serves: it loads a snapshot into
-//! the next generation, checks it, and only then points the alias at it, the
-//! way `--reindex` does. The previous generation stays as the rollback. This
-//! trait is those moves and nothing else, so the orchestration runs against
-//! in-memory stores in the unit tests and against Qdrant in production.
+//! Restore moves over any vector store: load the next generation, check it, then point the alias at it.
+//! The previous generation stays as the rollback.
 
 use crate::config::VectorConfig;
 use crate::error::Result;
@@ -16,26 +11,21 @@ use std::sync::Arc;
 
 #[async_trait::async_trait]
 pub trait Generations: Send + Sync {
-    /// What `alias` serves now.
     async fn state(&self, alias: &str) -> Result<AliasState>;
-    /// A generation name nothing uses yet.
     async fn next(&self, alias: &str) -> Result<String>;
-    /// Load a snapshot into `target`, which must not exist, at `dim`.
+    /// `target` must not exist.
     async fn import(&self, alias: &str, from: &Path, target: &str, dim: usize) -> Result<()>;
-    /// An empty `target` at `dim`, for `--reembed`.
+    /// For `--reembed`.
     async fn create_empty(&self, alias: &str, target: &str, dim: usize) -> Result<()>;
-    /// Exact points in `target`.
     async fn count(&self, alias: &str, target: &str) -> Result<u64>;
-    /// Delete `target`, which the alias does not serve.
+    /// `target` is not the one the alias serves.
     async fn discard(&self, alias: &str, target: &str) -> Result<()>;
-    /// Point `alias` at `target`; the previous generation is left in place.
+    /// The previous generation is left in place.
     async fn adopt(&self, alias: &str, target: &str) -> Result<()>;
-    /// The store `alias` serves, for verification and pruning.
     async fn open(&self, alias: &str) -> Result<Arc<dyn VectorStore>>;
 }
 
-/// The configured Qdrant, one alias at a time. Nothing here creates an alias
-/// as a side effect: `QdrantFactory` would, through `ensure_collection`.
+/// Creates no alias as a side effect, unlike `QdrantFactory::ensure_collection`.
 pub struct QdrantGenerations {
     pub cfg: VectorConfig,
 }
@@ -93,8 +83,7 @@ impl Generations for QdrantGenerations {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    //! In-memory generations: a map of named `MemoryVectors` and a map of
-    //! aliases, named the way Qdrant's are (`{alias}_v{n}`).
+    //! In-memory generations, named the way Qdrant's are (`{alias}_v{n}`).
 
     use super::*;
     use crate::error::Error;
@@ -113,7 +102,6 @@ pub(crate) mod tests {
     }
 
     impl MemGens {
-        /// A served generation `{alias}_v1` holding `store`.
         pub(crate) fn serve(&self, alias: &str, store: MemoryVectors, dim: usize) {
             let name = format!("{alias}_v1");
             self.gens
@@ -131,7 +119,6 @@ pub(crate) mod tests {
             self.gens.lock().unwrap().keys().cloned().collect()
         }
 
-        /// Forget an alias and every generation behind it.
         pub(crate) fn wipe(&self, alias: &str) {
             self.aliases.lock().unwrap().remove(alias);
             self.gens
@@ -224,8 +211,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// A backup reads vectors through a `VectorFactory`; this one serves what
-    /// the alias serves, so a test can back up and restore one fixture.
     #[async_trait::async_trait]
     impl crate::tenants::VectorFactory for MemGens {
         async fn open(&self, alias: &str, _dim: usize) -> Result<Arc<dyn VectorStore>> {

@@ -1,11 +1,6 @@
-//! Cue probes: the questions a model-written artifact was written for,
-//! embedded once so the base can ask them of itself.
-//!
-//! One unit per artifact, armed at `embed::mark_indexed` and nowhere else.
-//! Idle-only, like `relate::arm`, so a re-embed that reaches this while an
-//! earlier unit is queued does not wind its attempts back. One embedding per
-//! cue, through the query side of the embedder — a cue is a question — and a
-//! cue list is a handful.
+//! Cue probes: the questions a model-written artifact was written for, embedded once on the query
+//! side.
+//! One idle-only unit per artifact, armed only at `embed::mark_indexed`.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -20,10 +15,7 @@ pub async fn arm(core: &Core, artifact_id: &str) -> Result<()> {
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let c = core.store.get_artifact(artifact_id).await?;
-    // Passages have no cues and never get a probe minted from their heading:
-    // that would be a query written while looking at the answer. Everything
-    // else — captured, synthesized, merged — was written by a model with the
-    // questions it answers beside it.
+    // A probe minted from a passage's heading would be a query written while looking at the answer.
     if c.provenance == crate::store::artifacts::Provenance::Passage
         || c.cues.is_empty()
         || !c.in_results()

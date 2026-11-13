@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT slug FROM users ORDER BY slug",
+  "describe": {
+    "columns": [
+      {
+        "name": "slug",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "slug"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cabf103ba2ce7c15ce7a02580aa33ddec712f68b697546b07ca678d2d9d58faf"
+}

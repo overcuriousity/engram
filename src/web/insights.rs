@@ -1,17 +1,5 @@
-//! Insights: what is true about this installation, and what the base did.
-//!
-//! Two halves. The journal half is Housekeeping relocated — what the base
-//! merged, wrote, hid and buried on its own, each with its undo, and the
-//! machine's own readout — and asks nothing of anyone: every decision it
-//! used to queue for a person, the base now makes itself. The measures half
-//! reads aggregates over tables that already exist.
-//!
-//! `/ui/ops` redirects here rather than answering 404: it is in bookmarks, in
-//! the quiet link at the bottom of the workspace, and in at least one runbook.
-//! The `POST /ui/ops/...` actions keep their paths and stay in `ui.rs`, where
-//! `artifact_changed` and `ReturnTo` serve handlers all over the file — moving
-//! the page is the surgical cut, moving those would drag shared machinery
-//! across a boundary for nothing.
+//! Insights: what the base did on its own (each with its undo) and aggregate measures.
+//! `/ui/ops` redirects here because it is bookmarked; the `POST /ui/ops/...` actions stay in `ui.rs`.
 
 use crate::tenants::Tenant;
 use askama::Template;
@@ -26,49 +14,24 @@ use crate::web::state::AppState;
 use crate::web::ui::{SourceRow, row_label, row_subtitle, source_rows, sweep_label, tally_sweep};
 use crate::web::ui_error::UiResult;
 
-/// The retrieval measure, flattened for the template.
-///
-/// The two figures arrive as `f64` and are rendered to two places here rather
-/// than in the markup: every decision this page makes is made in Rust, so the
-/// template holds no logic and a change of precision touches one line.
-///
-/// Not an `Option`, and the em dash is resolved here. There are three states —
-/// measured, recording but nothing judged, not recording — and the card says
-/// the same two rows in all three. As an `Option` with a branch inside it the
-/// template carried four copies of the label-and-gloss markup, so the wording
-/// of a gloss was a four-place edit.
+/// Figures rendered to two places here, so the template holds no logic.
+/// Not an `Option`: all three states render the same two rows.
 struct Retrieval {
     recall_at_10: String,
     mrr: String,
-    /// The line under the two figures: which of the three states this is, in
-    /// words. Rendered `|safe` — it is built here and its only variable part
-    /// is a count.
+    /// Rendered `|safe`: built here, its only variable part a count.
     note: String,
 }
 
-/// The old door. It takes an `Identity` like every other `/ui` route: a
-/// redirect that answers before the session is checked is a route that tells
-/// an anonymous caller which paths exist.
+/// Takes an `Identity`: a redirect before the session check tells anonymous callers which paths exist.
 async fn moved(_: Tenant) -> Response {
     Redirect::to("/ui/insights").into_response()
 }
 
-/// Rows of one housekeeping table before it says there are more.
-///
-/// These tables are read to answer "what happened to X", and the answer to
-/// that is a search for X rather than a scroll — so the cap is stated and the
-/// rest arrive as these are cleared, instead of growing a pager nobody would
-/// page through.
+/// These tables answer "what happened to X", which is a search, so the cap is stated instead of paged.
 const TABLE_CAP: i64 = 25;
 
-/// The same, for the one table that is also an undo.
-///
-/// Deeper than the rest on purpose. A vacuous verdict retires two artifacts
-/// where it is found (`jobs::dedupe::discard_both`), and this list is where an
-/// operator finds them again — every search path in the UI passes
-/// `include_deprecated: false`, so a row that falls off the end is reachable
-/// only by a link someone would have to already have. The first sweep over a
-/// backlog can put hundreds here at once.
+/// Deeper: every UI search excludes deprecated rows, so this list is the only way back to them.
 const DEPRECATED_CAP: i64 = 50;
 
 pub fn routes() -> Router<AppState> {
@@ -77,7 +40,6 @@ pub fn routes() -> Router<AppState> {
         .route("/ui/ops", get(moved))
 }
 
-/// Work that hit something and is waiting to try again by itself.
 #[derive(serde::Serialize)]
 pub struct RetryingRow {
     pub stage: String,
@@ -87,45 +49,30 @@ pub struct RetryingRow {
     pub last_error: String,
 }
 
-/// An artifact the sweep hid, with the one it lost to.
 pub struct SupersededRow {
     pub id: String,
     pub title: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`.
+    /// Whether `title` is a given name; see `ui::RowLabel`.
     pub named: bool,
-    /// When it was written and how it opens. Two artifacts can carry the same
-    /// title — a merge of two documents that named a section identically
-    /// produces exactly that — and a table of them is unreadable without
-    /// something that differs between the rows.
+    /// Two artifacts can share a title (merges), so the rows need something that differs.
     pub subtitle: String,
     pub winner_id: String,
     pub winner_title: String,
-    /// Whether `winner_title` is a name somebody wrote — see `ui::RowLabel`.
-    /// The winner goes through `row_label` like every other row, so it can be
-    /// the opening of a passage that has no name, or the literal `(deleted)`
-    /// standing in for a winner that has since gone; neither is a name and
-    /// neither may be set in the place one goes.
+    /// Whether `winner_title` is a given name; the winner can be a passage opening or `(deleted)`.
     pub winner_named: bool,
 }
 
-/// An artifact flagged stale with no specific replacement.
 pub struct DeprecatedRow {
     pub id: String,
     pub title: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`.
+    /// Whether `title` is a given name; see `ui::RowLabel`.
     pub named: bool,
 }
 
-/// One buried artifact, for the Reaped section.
 pub struct GraveRow {
     pub id: String,
     pub title: String,
-    /// Always true here, and stated rather than left to be noticed: the
-    /// graveyard keeps the title as it stood when the row was buried and has
-    /// no provenance column to say whether that name was the text's own. A
-    /// buried passage is therefore still listed under its section's heading.
+    /// Always true: the graveyard keeps the title with no provenance to say whether it was a name.
     pub named: bool,
     pub ago: String,
     pub reason: Option<String>,
@@ -138,97 +85,66 @@ pub(crate) struct SweepCount {
     what: String,
 }
 
-/// One recorded run, as the history renders it.
 #[derive(serde::Serialize)]
 pub(crate) struct SweepRunRow {
     when: String,
-    /// The stage in words. The identifier it was worded from is on the cell as
-    /// a `title`, because the log and the config still call it that and a
-    /// reader who greps for `arm_dedupe` should find it here too.
+    /// The stage in words; the identifier (e.g. `arm_dedupe`) is on the cell's `title` for grepping.
     stage: String,
     stage_id: String,
     /// Empty unless it failed, in which case it is why.
     error: String,
     took: String,
-    /// The counts, already worded. Empty for a run that did nothing.
+    /// Already worded; empty for a run that did nothing.
     counts: Vec<SweepCount>,
 }
 
 #[derive(Template)]
 #[template(path = "insights.html")]
 struct InsightsTemplate {
-    /// How much is held, and how densely.
     held: crate::store::insights::Held,
-    /// How much use is standing on the base, bucketed in units of an open.
+    /// Bucketed in units of an open.
     used: Vec<crate::store::insights::Bucket>,
-    /// recall@10 and MRR, read from the ranks judged searches actually gave,
-    /// with an em dash where nothing is being recorded — an empty measure is
-    /// worse than no measure, because a zero reads as a score.
+    /// recall@10 and MRR from judged searches; an em dash when not recording, since a zero reads as a score.
     retrieval: Retrieval,
-    /// What the base did while nobody was there. `None` before a generation
-    /// exists, like `evolve`.
+    /// `None` before a generation exists.
     sleep: Option<SleepView>,
-    /// What the base did to its own ranking. `None` before a generation
-    /// exists, which is a base whose boot path has not run yet.
+    /// `None` before a generation exists.
     evolve: Option<EvolveView>,
     job_counts: Vec<(String, i64)>,
     oldest_pending_secs: Option<i64>,
     artifact_count: i64,
     vector_count: u64,
     retrying: Vec<RetryingRow>,
-    /// What the base did on its own and left an undo for, in one list. See
-    /// [`SetAsideRow`] for what this replaced and why.
+    /// What the base did on its own and left an undo for; see [`SetAsideRow`].
     set_aside: Vec<SetAsideRow>,
-    /// Any of the reads behind the list hit its cap, so there are rows this
-    /// page is not showing. Said out loud, because a list that stops without
-    /// saying so reads as a list of everything there is.
+    /// A cap was hit; said, since a list that stops silently reads as complete.
     set_aside_capped: bool,
-    /// `None` when nothing is being learned, which renders nothing at all: a
-    /// count of links on a base that records no searches is a line about a
-    /// feature that is switched off.
+    /// `None` when nothing is learned, which renders nothing.
     links: Option<crate::store::links::LinkCounts>,
-    /// Recent pursuits, only when the feature is on. A count and not a table:
-    /// a pursuit that ended unsatisfied is a hole the base goes on working on
-    /// by itself; one that ended satisfied needs nobody; and one that was
-    /// written up is a `generated` row on the journal below.
+    /// A count, not a table: unsatisfied pursuits are worked on by the base, written-up ones are `generated` rows.
     pursuit_enabled: bool,
     pursuit_recent: usize,
     pursuit_unsatisfied: usize,
-    /// What the sweeps did in the last twenty-four hours, added up. Not "last
-    /// night": units that reschedule themselves on their own periods do not
-    /// line up into one cycle, and there is no cycle identity to group them by.
+    /// Summed over twenty-four hours: units on their own periods form no single cycle.
     last_day: Vec<SweepCount>,
-    /// Runs in the last day that failed. Said separately, because a summary of
-    /// what got done cannot report what did not.
+    /// Said separately: a summary of what got done cannot report what did not.
     last_day_failures: usize,
-    /// The runs themselves, newest first. What a single overwritten summary
-    /// could never give: whether this started yesterday or has been going
-    /// wrong for a week.
+    /// Newest first, so a week-long failure is visible.
     sweep_history: Vec<SweepRunRow>,
-    /// Shown against clicked, by rung. Empty when the offer is switched off, or
-    /// when it has been on and never had anything to say — either way there is
-    /// no table, because a heading over no rows is a claim that something is
-    /// being measured when nothing is.
+    /// Empty when the offer is off or has never offered; then no table is drawn.
     offer_rates: Vec<crate::store::pursuits::OfferRate>,
 }
 
 impl InsightsTemplate {
-    /// Which entry in the top row and the tab bar is the one you are inside.
-    ///
-    /// Read by `layout.html` to set `aria-current="page"`. The empty string is
-    /// "none of them", which is a real answer for a page that hangs off no
-    /// section.
     fn section(&self) -> &'static str {
         "insights"
     }
 }
 
-/// One generated artifact on Ops.
 pub(crate) struct GeneratedRow {
     id: String,
     title: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`.
+    /// Whether `title` is a given name; see `ui::RowLabel`.
     pub named: bool,
     subtitle: String,
     cues: Vec<String>,
@@ -238,81 +154,44 @@ pub(crate) struct GeneratedRow {
 pub(crate) struct MergedRow {
     id: String,
     title: String,
-    /// Whether `title` is a name somebody wrote or the opening of the text
-    /// standing in for one — see `ui::RowLabel`.
+    /// Whether `title` is a given name; see `ui::RowLabel`.
     pub named: bool,
-    /// See `SupersededRow::subtitle`: what tells two rows with one title apart.
+    /// See `SupersededRow::subtitle`.
     subtitle: String,
-    /// What it was written from, in the order the lineage stores them.
+    /// In the order the lineage stores them.
     sources: Vec<SourceRow>,
-    /// True when a source has been deleted since, so the artifact claims less
-    /// provenance than its text carries.
+    /// A source was deleted since, so the artifact claims less provenance than its text carries.
     orphaned: bool,
 }
 
 /// One thing the base did on its own, with the button that takes it back.
-///
-/// Seven tables stood here — Merged, Generated, Hidden as stale, Reaped, Worth
-/// a second look, Hidden as near-identical, and Captures waiting on a decision
-/// — each with a heading, a paragraph explaining its mechanism, and its own
-/// column layout. They were the same shape: a thing, why the base touched it,
-/// what it put beside it, and the button that takes it back. Seven paragraphs
-/// of that is a page about the machine's internal categories; one table with a
-/// reason on each row is a page about what the base did.
-///
-/// Two of the seven were questions rather than work: a capture that resembled
-/// another, and an artifact nobody had confirmed in a while. The base settles
-/// both itself now — the duplicates pass compares what the two say, and a good
-/// answer confirms the notes it was drawn from — so every row left is a
-/// journal entry with its undo.
-///
-/// The reads are unchanged — each source still runs its own query with its own
-/// cap — and this is the fold. `kind` is what the row is called; `why` is the
-/// sentence that used to be the section's paragraph, said per row because it
-/// differs per row.
+/// `kind` is the badge; `why` is said per row because it differs per row.
 pub(crate) struct SetAsideRow {
     href: String,
-    /// What the row's undo names: the artifact, for every kind — `merged`
-    /// included, whose undo route takes the artifact the merge wrote and not
-    /// the journal action that wrote it — so a client reads it against `kind`
-    /// rather than taking it apart. Carried beside `href` rather than parsed
-    /// out of it: a link is a route, not an identity.
-    ///
-    /// Not an identity on its own either: one artifact can be both written by
-    /// the base and later hidden by it, so a row is identified by `kind` and
-    /// `subject_id` together. Under one `kind` a subject appears once — see
-    /// `Store::artifacts_by_status`, which is where that is kept true.
+    /// The artifact for every kind, `merged` included; a row is identified by `kind` and `subject_id` together.
     pub(crate) subject_id: String,
-    /// The artifact to open. The same as `subject_id` on every row now that
-    /// none is about a corpus, and named apart so a client opening one does
-    /// not have to know that.
+    /// The same as `subject_id` on every row, named apart so a client need not know that.
     pub(crate) artifact_id: String,
     pub(crate) title: String,
-    /// See `ui::RowLabel::named`. A label that is the artifact's own opening
-    /// is set as text, not in the place a name would go.
+    /// See `ui::RowLabel::named`.
     pub(crate) named: bool,
-    /// What tells two rows with one title apart. Empty where nothing does.
+    /// Empty where nothing tells two same-titled rows apart.
     pub(crate) subtitle: String,
     /// The one-word name for what put this row here, as a badge.
     pub(crate) kind: &'static str,
-    /// The sentence. Never a mechanism the reader has to already know: "written
-    /// from 3 others" rather than "the dedupe pass wrote this".
+    /// Never a mechanism the reader must know: "written from 3 others", not "the dedupe pass".
     pub(crate) why: String,
-    /// What the base put beside it: the sources a merge came from, the artifact
-    /// a near-duplicate lost to.
+    /// The sources of a merge, or the artifact a near-duplicate lost to.
     pub(crate) beside: Vec<crate::web::ui::SourceRow>,
-    /// A note under the row for the one thing that is not simply reversible.
+    /// For the one thing that is not simply reversible.
     pub(crate) caveat: Option<String>,
     actions: Vec<SetAsideAction>,
 }
 
-/// One button on a set-aside row.
 pub(crate) struct SetAsideAction {
     action: String,
     label: &'static str,
-    /// Why the button is there, for a pointer and for a screen reader. The
-    /// icons these replaced carried it in a `title`, which is nowhere on a
-    /// phone; the labels carry it now and this is the long form.
+    /// The long form for a pointer and a screen reader; the label carries the short one.
     hint: &'static str,
 }
 
@@ -326,18 +205,10 @@ impl SetAsideAction {
     }
 }
 
-/// The five things the base did on its own, folded into one list, and whether
-/// any of their caps bit.
-///
-/// Extracted from the page so the JSON door answers the same rows: two
-/// accounts of what the base did would differ the first time one of the five
-/// sources changed, and the row carries an undo, so the difference
-/// would be about what can still be taken back.
+/// Shared with the JSON door, so both list the same undoable rows.
 pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>, bool)> {
     let mut superseded = Vec::new();
-    // One past the cap, so the page can say it is capped rather than truncate
-    // in silence — a table that stops at 25 with nothing said reads as a table
-    // of everything there is.
+    // One past the cap, so the page can say it is capped.
     for c in tenant
         .core
         .store
@@ -368,7 +239,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
 
     let mut merged = Vec::new();
     let merged_chunks = tenant.core.store.merged_artifacts(TABLE_CAP + 1).await?;
-    // One lineage call per page, not one per row: `roots_of` takes the batch.
+    // One lineage call per page: `roots_of` takes the batch.
     let merged_ids: Vec<String> = merged_chunks.iter().map(|c| c.id.clone()).collect();
     let roots = tenant
         .core
@@ -427,9 +298,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
     let more_superseded = superseded.len() > TABLE_CAP as usize;
     superseded.truncate(TABLE_CAP as usize);
 
-    // One past the cap, as the two tables above do it: this is the undo for
-    // every artifact the judge retires unattended, so a list that stops
-    // without saying so reads as "these are all of them".
+    // One past the cap, as above.
     let mut deprecated: Vec<DeprecatedRow> = tenant
         .core
         .store
@@ -448,9 +317,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
     let more_deprecated = deprecated.len() > DEPRECATED_CAP as usize;
     deprecated.truncate(DEPRECATED_CAP as usize);
 
-    // The graveyard, the same way: the one undo for the one stage that
-    // destroys text, and a list that stops without saying so reads as "these
-    // are all of them".
+    // One past the cap, as above.
     let mut reaped: Vec<GraveRow> = tenant
         .core
         .store
@@ -468,10 +335,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
     let more_reaped = reaped.len() > DEPRECATED_CAP as usize;
     reaped.truncate(DEPRECATED_CAP as usize);
 
-    // Five lists into one, newest kind of work first: what the base wrote,
-    // then what it hid, then what it buried. Every row is something the base
-    // did on its own, with the undo left where it can be found — nothing on
-    // this list is waiting to be told anything.
+    // Newest kind of work first: written, then hidden, then buried.
     let set_aside_capped = more_merged || more_superseded || more_deprecated || more_reaped;
     let mut set_aside: Vec<SetAsideRow> = Vec::new();
     for m in merged {
@@ -489,8 +353,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
                 if n == 1 { "" } else { "s" }
             ),
             beside: m.sources,
-            // Not data loss: the text still says what the deleted source said.
-            // It is a claim of provenance the artifact can no longer support.
+            // Not data loss: a claim of provenance the artifact can no longer support.
             caveat: m
                 .orphaned
                 .then(|| "a source has since been deleted".to_string()),
@@ -543,11 +406,7 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
             beside: vec![crate::web::ui::SourceRow {
                 id: s.winner_id,
                 title: s.winner_title,
-                // Carried, not assumed. `row_label` decided this above, and
-                // discarding its answer here set a passage's opening — or the
-                // `(deleted)` of a winner that has itself gone — in the place
-                // a name goes, which is the one thing `RowLabel` exists to
-                // stop.
+                // Carried from `row_label`, which may have answered a passage opening or `(deleted)`.
                 named: s.winner_named,
                 subtitle: String::new(),
                 corpus_id: String::new(),
@@ -610,8 +469,6 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
     Ok((set_aside, set_aside_capped))
 }
 
-/// The disclosure at the foot of Insights, as data: what the machine is
-/// doing, for the phone.
 #[derive(serde::Serialize)]
 pub(crate) struct Machine {
     pub artifacts: i64,
@@ -627,11 +484,9 @@ pub(crate) struct Machine {
 }
 
 pub(crate) async fn machine(tenant: &Tenant) -> Result<Machine> {
-    use sqlx::Row;
-    let artifacts: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+    let artifacts: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
-        .await?
-        .get("n");
+        .await?;
     let retrying: Vec<RetryingRow> = tenant
         .core
         .store
@@ -715,14 +570,11 @@ pub(crate) async fn machine(tenant: &Tenant) -> Result<Machine> {
     })
 }
 
-/// What the base did on its own, in the sentences Insights says: last night,
-/// the ranking, and the pursuits line. Disclosure, not control: nothing in it
-/// asks for a decision, and what the base did is taken back from the journal.
+/// Disclosure, not control: nothing in it asks for a decision.
 #[derive(serde::Serialize)]
 pub(crate) struct Report {
     pub sleep: Option<SleepView>,
     pub evolve: Option<EvolveView>,
-    /// Runs of searches that went quiet, and how many are on the gap list.
     /// Null while `[learn]` is off.
     pub pursuits: Option<(usize, usize)>,
 }
@@ -753,15 +605,11 @@ pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
 }
 
 async fn page(tenant: Tenant) -> UiResult<Response> {
-    use sqlx::Row;
-
-    let artifact_count: i64 = sqlx::query("SELECT COUNT(*) AS n FROM artifacts")
+    let artifact_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
-        .await?
-        .get("n");
+        .await?;
 
-    // Not a queue of chores: work that hit something and is waiting to try
-    // again on its own. Nothing here needs a person.
+    // Work waiting to retry on its own; nothing here needs a person.
     let retrying: Vec<RetryingRow> = tenant
         .core
         .store
@@ -785,11 +633,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         false => Vec::new(),
     };
     let pursuit_recent = recent.len();
-    // The ones the sentence below can honestly point at. `unsatisfied` is how a
-    // run of searches *ended*, and a capture that answers one afterwards leaves
-    // that word alone deliberately — coverage never rewrites what happened — so
-    // counting the state sent the operator to a gap list that had already
-    // dropped half of them.
+    // Counted off the gap list, not the state: a later capture answering one leaves `unsatisfied` alone.
     let on_the_gap_list = match pursuit_enabled {
         true => tenant
             .core
@@ -803,9 +647,6 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         .iter()
         .filter(|p| p.state == "unsatisfied" && on_the_gap_list.contains(&p.id))
         .count();
-    // What the memory did while nobody was looking. The last day as one
-    // sentence, and under it the runs themselves — which is the half a single
-    // overwritten summary could never give.
     let day = tenant
         .core
         .store
@@ -860,9 +701,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
             .store
             .used(tenant.core.activation.half_life_days, crate::store::now())
             .await?,
-        // Read only where searches are being recorded at all. The measure is
-        // read off judged searches, and on an installation that records none
-        // the honest answer is that there is nothing to say — not 0.00.
+        // Only where searches are recorded; otherwise there is nothing to say, not 0.00.
         retrieval: match tenant.core.learn.enabled {
             true => {
                 let f = tenant
@@ -906,8 +745,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         job_counts: tenant.core.store.job_counts().await?,
         oldest_pending_secs: tenant.core.store.oldest_pending_age().await?,
         artifact_count,
-        // Qdrant being briefly unreachable must not blank the ops page, which
-        // is exactly where you look when something is wrong.
+        // Qdrant briefly unreachable must not blank the page.
         vector_count: tenant.core.vectors.count().await.unwrap_or(0),
         links: match tenant.core.associating() {
             true => Some(tenant.core.store.link_counts().await?),
@@ -919,10 +757,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         last_day,
         last_day_failures,
         sweep_history,
-        // The last month rather than the last day: a weekly pattern needs
-        // weeks, so a hit rate measured over a day would be a number nobody
-        // could act on. Read like `vector_count` — a failure here must not
-        // blank the page you open when something is wrong.
+        // The last month: a weekly pattern needs weeks. A failure must not blank the page.
         offer_rates: match tenant.core.recommends() {
             true => tenant
                 .core
@@ -940,24 +775,16 @@ fn cap_str(c: Option<usize>) -> String {
     c.map_or("none".to_string(), |n| n.to_string())
 }
 
-// ── Last night ──────────────────────────────────────────────────────────────
-
-/// The `_sleep.html` block: what the base did while nobody was there, in
-/// words, and what nothing has ever asked for.
 #[derive(serde::Serialize)]
 pub(crate) struct SleepView {
-    /// One sentence chain per sleep, newest first.
     runs: Vec<String>,
-    /// How long a base has to be quiet before it sleeps, for the empty state.
+    /// For the empty state.
     idle_mins: i64,
-    /// Artifacts nothing has asked for: the count, and the oldest few.
     unrehearsed_count: i64,
     unrehearsed: Vec<(String, String)>,
 }
 
-/// One sleep as a sentence chain. Every number that has an undo has a place
-/// on this page: adoptions and corpus actions on the evolve block below this
-/// one, merges and hidings on the journal further down.
+/// Every number with an undo has a place on this page.
 fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
     let mut s = format!("{} — ", ago(r.started));
     match r.stopped.as_str() {
@@ -967,9 +794,6 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
         "budget" => s.push_str("budget spent. "),
         _ => {}
     }
-    // No conflict count. Nothing writes conflicts any more — the detector was
-    // deleted after it misfired — so the number was always zero and "waiting
-    // for you" pointed at a list that would never hold anything.
     s.push_str(&format!(
         "Integrated {} — {} new, {} known. Rehearsed {} probe{}, {} found.",
         r.integrated,
@@ -979,10 +803,7 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
         if r.rehearsed == 1 { "" } else { "s" },
         r.found
     ));
-    // What it did to the ranking, without the id. A ULID tail is not something
-    // a person can act on or look up — the generation it names is spelled out
-    // in full one block below, under Ranking, which is where somebody who
-    // wants the parameters is going anyway.
+    // Without the id: the generation is spelled out under Ranking.
     if r.adopted.is_some() {
         s.push_str(" Adopted a new ranking — see Ranking below.");
     }
@@ -1001,10 +822,7 @@ fn sleep_sentence(r: &crate::store::sleep_runs::SleepRun) -> String {
         ));
     }
     if r.interference > 0 {
-        // "Saw", not "Filed". The rule files nothing: retrieval competition is
-        // a fact about ranking, and the list this used to write to makes
-        // claims about meaning. A sentence promising pairs sent a reader to a
-        // page that would never show them.
+        // "Saw", not "Filed": retrieval competition is about ranking, not meaning.
         s.push_str(&format!(
             " Saw {} artifact{} outranked in every rehearsal.",
             r.interference,
@@ -1049,46 +867,26 @@ pub(crate) async fn sleep_view(core: &crate::core::Core) -> Result<Option<SleepV
     }))
 }
 
-// ── What the base did on its own ────────────────────────────────────────────
-
-/// The `_evolve.html` block: the state of the self-tuning loop, in words.
 #[derive(serde::Serialize)]
 pub(crate) struct EvolveView {
-    /// Why the loop is not moving, when it is not. Said before anything else.
+    /// Said before anything else.
     suspended: Option<String>,
-    /// Which mode the base is in, in every mode. `standing` below says it only
-    /// where autonomy is *not* moving the ranking, so the default — "ranking"
-    /// — was the one setting the page never named.
+    /// Named in every mode, the default included.
     mode: String,
-    /// The generation in force, and how long it has been.
     live: String,
-    /// Its parameters, as one line of `name value` pairs.
-    ///
-    /// It used to be the middle of `live`, which made that line
-    /// "live generation 247c9618 · recency 0.05, cap 3, pool ×3, half-life
-    /// 180d, lift 0, spread 3, rerank off, review 0.88 · since today" — a
-    /// parameter dump at body size, under no heading, between two sentences.
-    /// The identity and the age are what the line is for; the numbers are for
-    /// whoever came to read numbers, and they are folded.
+    /// As one line of `name value` pairs, folded on the page.
     params: String,
-    /// Whether it is under watch and what it promised, or that autonomy is off,
-    /// or that the base is free to propose.
     standing: String,
-    /// What the live generation scores on the base's own probes, in words —
-    /// and that it is a comparison, not a score.
+    /// Said as a comparison, not a score.
     rehearsed: String,
-    /// Recent generations, newest first, each with how it came to be and how
-    /// it ended.
+    /// Newest first, each with how it came to be and how it ended.
     history: Vec<String>,
-    /// What the base did to the corpus lately, newest first, with evidence
-    /// undos and operator undos told apart.
+    /// Newest first, evidence undos told apart from operator undos.
     actions: Vec<String>,
-    /// What the two corpus rules did the last time they ran, or `None` where
-    /// they have not run yet.
+    /// `None` where the rules have not run yet.
     rules: Option<String>,
 }
 
-/// One corpus action as a sentence.
 fn action_str(a: &crate::store::actions::Action) -> String {
     use crate::store::actions::{Kind, UndoneBy};
     let other = |s: &Option<String>| short(s.as_deref().unwrap_or("?")).to_string();
@@ -1121,7 +919,7 @@ fn action_str(a: &crate::store::actions::Action) -> String {
     format!("{} — {}{}", ago(a.at), what, ended)
 }
 
-/// The rules' last run, as the pass wrote it to `meta`.
+/// As the pass wrote it to `meta`.
 async fn rules_str(core: &crate::core::Core) -> Result<Option<String>> {
     let Some(raw) = core.store.meta_get(crate::jobs::retract::LAST_RUN).await? else {
         return Ok(None);
@@ -1129,7 +927,7 @@ async fn rules_str(core: &crate::core::Core) -> Result<Option<String>> {
     let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
     let n = |k: &str| v.get(k).and_then(|x| x.as_i64()).unwrap_or(0);
     Ok(Some(format!(
-        "Last quiet period, {}, the base reconsidered {} of what it hid, took {} back, and restored {} for a search given up on.",
+        "Last quiet period, {}: {} reconsidered, {} taken back, {} restored.",
         ago(n("at")),
         n("reconsidered"),
         n("undone"),
@@ -1152,8 +950,7 @@ fn params_str(p: &crate::store::generations::GenerationParams) -> String {
     )
 }
 
-/// The tail of an id. Ids are ULIDs, so two minted in one sitting share their
-/// head; the tail is what tells them apart.
+/// Ids are ULIDs, so two minted together share a head; the tail tells them apart.
 pub(crate) fn short(id: &str) -> &str {
     &id[id.len().saturating_sub(8)..]
 }
@@ -1164,7 +961,7 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
     };
     let suspended = match crate::eval::anchor::agreement(core).await? {
         Some(a) if !crate::eval::anchor::trustworthy(&a) => Some(format!(
-            "Over the judged searches that also left an observation, the base's own evidence agreed with your verdicts {} time{} and disagreed {} — no better than chance. It adopts nothing and takes nothing back until that changes; it keeps recording.",
+            "Suspended: its evidence agreed with your verdicts {} time{} and disagreed {}, no better than chance.",
             a.agreed,
             if a.agreed == 1 { "" } else { "s" },
             a.disagreed
@@ -1184,42 +981,35 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
             };
             if crate::eval::lived::settled(&new, &old) {
                 format!(
-                    "adopted by the base and held: {} positive of {} observations, against {} of {} for the generation before it.",
+                    "adopted and held: {} positive of {} observations, against {} of {} before.",
                     new.positives, new.observations, old.positives, old.observations
                 )
             } else {
                 format!(
-                    "under watch — it promised MRR {:+.3} over the replay and has earned {} positive of {} observations so far, against {} of {} for the generation before it. Nothing else is proposed until this is decided.",
+                    "under watch: promised MRR {:+.3}; {} positive of {} observations, against {} of {} before.",
                     predicted, new.positives, new.observations, old.positives, old.observations
                 )
             }
         }
-        _ => "set by hand or at boot; the base may propose a change when it has been quiet."
-            .to_string(),
+        _ => "set by hand or at boot.".to_string(),
     };
-    // Said in every mode, including the default. The block only ever spoke
-    // when autonomy was *not* moving the ranking, so the one setting a reader
-    // is most likely to be on — "ranking", the default — was the one the page
-    // never named, and there was nothing on screen to tell it from "off".
+    // Said in every mode, so "ranking" can be told from "off".
     let mode = format!(
         "Autonomy is {}: {}",
         core.evolve.autonomous.as_str(),
         match core.evolve.autonomous.moves_ranking() {
-            true => "the base may propose a ranking of its own and adopt it once it has earned it.",
-            false => "the file is in force, and the base proposes nothing on its own.",
+            true => "the base may propose and adopt a ranking.",
+            false => "the config file is in force.",
         }
     );
-    // Three modes, and the difference between the last two is the one an
-    // operator has to be able to see: only "full" moves the review threshold
-    // and acts on the corpus, and neither of those is undone by taking a
-    // generation back. "ranking" is the reversible half, and now actually is.
+    // Only "full" moves the review threshold and acts on the corpus; taking a generation back undoes neither.
     let mode = match (
         core.evolve.autonomous.moves_ranking(),
         core.evolve.autonomous.acts_on_corpus(),
     ) {
         (true, true) => format!(
-            "{mode} It may also merge, hide and shorten artifacts, and move the review \
-             threshold. Those are not undone by taking a generation back."
+            "{mode} It may also merge, hide, shorten and move the review threshold; \
+             taking a generation back does not undo those."
         ),
         (true, false) => format!("{mode} It changes nothing in the corpus."),
         _ => mode,
@@ -1229,7 +1019,7 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
         "No probe has been rehearsed under this generation yet.".to_string()
     } else {
         format!(
-            "On the base's own probes: {} of {} found, MRR {:.3}. A comparison between generations, not a score — a probe is the wording of a later capture, not a question anyone asked.",
+            "Own probes: {} of {} found, MRR {:.3}.",
             rehearsed.found, rehearsed.probes, rehearsed.mrr
         )
     };
@@ -1301,8 +1091,6 @@ mod tests {
 
     #[test]
     fn a_generation_says_whether_the_sitting_is_taking_part() {
-        // A knob a generation can carry and the page cannot name is a knob
-        // nobody can check against what they are reading.
         use crate::store::generations::GenerationParams;
         let on = GenerationParams {
             sitting_prime: true,
@@ -1337,10 +1125,6 @@ mod tests {
         body_of(res).await
     }
 
-    /// Housekeeping's tables are anchors and nothing else: the label is the
-    /// whole cell. Emptied for a passage they are links nobody can see or
-    /// click, so a passage is listed by how its text opens — set as text, and
-    /// without the subtitle repeating that same opening underneath it.
     #[tokio::test]
     async fn a_superseded_passage_is_listed_by_how_its_text_opens() {
         let core = crate::core::test_support::test_core().await;
@@ -1393,9 +1177,6 @@ mod tests {
         );
     }
 
-    /// Five headings answered with a zero make a base with nothing wrong with
-    /// it look like a backlog — the same reasoning the housekeeping summary
-    /// already gives for collapsing its own empties into one sentence.
     #[tokio::test]
     async fn insights_over_an_empty_base_is_one_line_and_a_way_back() {
         let core = crate::core::test_support::test_core().await;
@@ -1412,22 +1193,13 @@ mod tests {
             html.contains(r#"href="/ui""#),
             "and a way back to the one place there is anything to do"
         );
-        // Only the measures are gated. A reminder can be due and the sweeps
-        // run whether or not anything was ever captured — a page-wide guard
-        // would hide both. What is noisy rather than absent goes behind the
-        // disclosure at the foot instead.
+        // Only the measures are gated; due reminders and sweeps show regardless.
         assert!(
             html.contains("What the machine is doing"),
             "what the machine is doing is true of an empty base too"
         );
     }
 
-    /// A heading over a band that loads in empty is a claim that something is
-    /// being measured when nothing is — the same reasoning `offer_rates`
-    /// already follows on this page. It is the band that draws it, because the
-    /// band is what swaps: gated from this side, on a read taken once at page
-    /// render, the heading outlived the rows it was a heading for. See
-    /// `_due.html` and `due::render`.
     #[tokio::test]
     async fn the_due_heading_is_the_bands_to_draw_and_not_this_pages() {
         let core = crate::core::test_support::test_core().await;
@@ -1448,16 +1220,11 @@ mod tests {
             "the same band the workspace column shows: {html}"
         );
         assert!(
-            html.contains(r#"head: "1""#),
+            html.contains(r#""head": "1""#),
             "and it is asked for with its heading: {html}"
         );
     }
 
-    /// A closed disclosure with a neutral summary is not a report. The sweep
-    /// failures and the last-error column are the only surfaces that say a
-    /// background pipeline has fallen over, and once they moved in here an
-    /// instance whose every embed job had failed for a week looked from the
-    /// fold exactly like one with nothing to say.
     #[tokio::test]
     async fn a_failing_pipeline_is_not_something_the_page_keeps_to_itself() {
         let core = crate::core::test_support::test_core().await;
@@ -1496,9 +1263,6 @@ mod tests {
         );
     }
 
-    /// Two questions, one page: what is in my memory and what needs me, versus
-    /// what is the machine doing. The second is operator-grade — stage ids,
-    /// target ids, raw error strings — and every user sees this page now.
     #[tokio::test]
     async fn the_machines_own_readout_is_behind_a_disclosure() {
         let core = crate::core::test_support::test_core().await;
@@ -1515,9 +1279,6 @@ mod tests {
             above.contains("What this memory is like"),
             "what is held stays above the fold"
         );
-        // The counts sentence rather than a heading: the section carries the
-        // disclosure's own name now, so the summary is the heading and the
-        // body is what it was always for.
         assert!(
             !above.contains("embedded."),
             "the machine's own readout does not"
@@ -1529,7 +1290,6 @@ mod tests {
         );
     }
 
-    /// The measures read what the base already recorded.
     #[tokio::test]
     async fn the_measures_read_what_the_base_already_recorded() {
         let core = crate::core::test_support::test_core().await;
@@ -1547,19 +1307,10 @@ mod tests {
         );
     }
 
-    /// Nothing judged is not a score of zero.
-    ///
-    /// `0.00` beside "recall@10" reads as a measurement, and a base nobody has
-    /// judged has not scored badly — it has not been measured. This is the one
-    /// figure on the page whose absence must not look like a result.
     #[tokio::test]
     async fn an_unjudged_base_says_so_rather_than_reporting_zero() {
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
-        // Something held, because the measures are gated on that now: a base
-        // with nothing in it has nothing to measure at all, and the rule this
-        // test pins is the narrower one about a base that has content but no
-        // verdicts on it.
         core.ingest("alpha line\n\nbravo line", "web", None)
             .await
             .unwrap();
@@ -1571,10 +1322,6 @@ mod tests {
         );
     }
 
-    /// Read, never computed at request time.
-    ///
-    /// The first of the README's three rules holds here too: no embedding
-    /// and no model call on a page you open to look at numbers.
     #[tokio::test]
     async fn the_measures_embed_nothing() {
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
@@ -1586,19 +1333,12 @@ mod tests {
         assert_eq!(embedder.calls(), before, "the page embeds something");
     }
 
-    /// Every decision the base used to wait on a person for is one it now
-    /// makes itself, so the page that listed them lists what it did instead.
-    /// Seeded with one of each thing that used to put a question here: a
-    /// disagreement, a capture that resembles another, an artifact nobody has
-    /// confirmed in a year, a question nothing answered — and a merge, which
-    /// is the base's own work and keeps its undo.
     #[tokio::test]
     async fn insights_asks_nothing_of_anyone() {
         use crate::store::actions::{Job, Kind, NewAction};
         let mut core = crate::core::test_support::test_core().await;
         core.learn.enabled = true;
 
-        // A disagreement the judge filed and nobody may settle.
         let ids =
             crate::web::test_support::artifacts(&core, &["the timeout is 30", "the timeout is 90"])
                 .await;
@@ -1620,7 +1360,6 @@ mod tests {
             .await
             .unwrap();
 
-        // A capture flagged as resembling another.
         let first = core
             .store
             .insert_corpus("mount the volume first", "web", None)
@@ -1636,7 +1375,6 @@ mod tests {
             .await
             .unwrap();
 
-        // An artifact last confirmed at the epoch and never retrieved since.
         core.ingest("an old note nobody reads", "web", None)
             .await
             .unwrap();
@@ -1652,7 +1390,6 @@ mod tests {
             "the fixture has no unverified artifact to leave off the page"
         );
 
-        // A question nothing answered.
         let ask = core
             .store
             .record_ask(crate::store::asks::NewAsk {
@@ -1671,7 +1408,6 @@ mod tests {
             .await
             .unwrap();
 
-        // And a merge the base wrote and journaled.
         let roots = crate::web::test_support::artifacts(&core, &["left half", "right half"]).await;
         let merged = core
             .store
@@ -1714,10 +1450,6 @@ mod tests {
         );
     }
 
-    /// No door is left that asks for a decision. Every one of these answered
-    /// a question the base now settles itself, so each is a path nobody
-    /// routed — whichever of 404 or 405 the router gives a path it half
-    /// knows.
     #[tokio::test]
     async fn the_decision_routes_are_gone() {
         let core = crate::core::test_support::test_core().await;
@@ -1768,9 +1500,6 @@ mod tests {
         }
     }
 
-    /// The deck is gone: pairs are made at the moment of the search — a result
-    /// read, a bar answered, a gap pressed on the rail — and its page answers
-    /// like any other path nobody routed.
     #[tokio::test]
     async fn every_judge_route_is_gone() {
         let core = crate::core::test_support::test_core().await;
@@ -1875,7 +1604,7 @@ mod tests {
             "{body}"
         );
         assert!(
-            body.contains("reconsidered 3 of what it hid, took 1 back, and restored 2"),
+            body.contains("3 reconsidered, 1 taken back, 2 restored"),
             "{body}"
         );
     }
@@ -1914,8 +1643,6 @@ mod tests {
             body.contains("Refused a proposed ranking on the base&#39;s own probes."),
             "{body}"
         );
-        // Six artifacts, one probed by the fixture, two opened by the
-        // observations: three nothing has asked for.
         assert!(
             body.contains("unrehearsed (3) — nothing has asked for these"),
             "{body}"
@@ -1943,12 +1670,14 @@ mod tests {
             .set_artifact_status(&id, crate::store::artifacts::ArtifactStatus::Deprecated)
             .await
             .unwrap();
-        sqlx::query("UPDATE artifacts SET retired_at = ? WHERE id = ?")
-            .bind(crate::store::now() - 400 * 86_400)
-            .bind(&id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        sqlx::query!(
+            "UPDATE artifacts SET retired_at = ? WHERE id = ?",
+            crate::store::now() - 400 * 86_400,
+            &id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
         core.store
             .bury(
                 &id,
@@ -1962,11 +1691,7 @@ mod tests {
             .unwrap();
 
         let body = insights(core).await;
-        // The section heading became the row's own word. See `SetAsideRow`.
         assert!(body.contains(">buried<"), "{body}");
-        // Once, as buried. The burial keeps the artifact's status, and the
-        // hidden list read the status alone, so the same artifact was also
-        // listed as hidden and "still at its own link".
         assert_eq!(
             body.matches(&format!("/ui/ops/artifacts/{id}/reactivate"))
                 .count(),

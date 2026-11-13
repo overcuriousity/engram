@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT target_id FROM jobs WHERE stage = 'embed'",
+  "describe": {
+    "columns": [
+      {
+        "name": "target_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ff56e8baecab5e5a635199e87b8c2b005cd43e3cb3cbabb0ad53707a00cd9bae"
+}

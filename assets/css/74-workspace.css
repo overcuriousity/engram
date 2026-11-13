@@ -1,0 +1,758 @@
+/* The workspace: the box, its verbs, the rail, the reading pane and its source. Widths belong to 72-layout.css. */
+
+/* The source takes the larger share; 45.45% is `1fr 1.2fr`, and the handle writes `--split-l`. */
+.split {
+  display: grid; grid-template-columns: var(--split-l, 45.45%) minmax(0, 1fr);
+  gap: 0.75rem; align-items: start; position: relative;
+}
+
+/* Out of flow, exactly over the gap: in flow it would eat a track or open a row. Hidden by default. */
+.col-handle {
+  display: none; position: absolute; top: 0; bottom: 0; z-index: 2;
+  appearance: none; background: none; border: 0; padding: 0;
+  cursor: col-resize;
+  /* Or a touch drag scrolls the page out from under the finger. */
+  touch-action: none;
+}
+/* The line appears only on hover or focus; the gap already separates the panes. */
+.col-handle::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 50%;
+  width: 2px; transform: translateX(-50%); border-radius: 1px;
+  background: var(--color-accent);
+  opacity: 0; transition: opacity 120ms ease;
+}
+.col-handle:hover::before,
+.col-handle:focus-visible::before,
+.col-handle.dragging::before { opacity: 0.7; }
+.col-handle:focus-visible { outline: none; }
+/* The pointer is captured during a drag; this only stops text selection. */
+body.col-dragging { user-select: none; cursor: col-resize; }
+
+/* In flow, taking back the card's bottom margin, since this column has no gap to sit over. */
+.row-handle {
+  display: none; flex: none; position: relative;
+  height: 0.75rem; margin-top: -0.75rem; width: 100%;
+  appearance: none; background: none; border: 0; padding: 0;
+  cursor: row-resize;
+  touch-action: none;
+}
+.row-handle::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 50%;
+  height: 2px; transform: translateY(-50%); border-radius: 1px;
+  background: var(--color-accent);
+  opacity: 0; transition: opacity 120ms ease;
+}
+.row-handle:hover::before,
+.row-handle:focus-visible::before,
+.row-handle.dragging::before { opacity: 0.7; }
+.row-handle:focus-visible { outline: none; }
+body.row-dragging { user-select: none; cursor: row-resize; }
+
+@media (prefers-reduced-motion: reduce) {
+  .col-handle::before, .row-handle::before { transition: none; }
+}
+
+/* Only where the split is two columns and the source is shown. */
+@media (width > 62rem) {
+  @container artifact (width > 36rem) {
+    .regions:not(.hide-source) .split > .col-handle {
+      display: block; left: var(--split-l, 45.45%); width: 0.75rem;
+    }
+  }
+}
+
+/* 62rem of viewport is the 60rem container the `@container shell` blocks ask about. */
+@media (width <= 62rem) { .split { grid-template-columns: 1fr; } }
+
+/* Inside the focus pane the window width says nothing, so the split also answers its own container.
+   36rem is where the narrower half turns into a column of syllables. */
+[data-artifact] { container-type: inline-size; container-name: artifact; }
+@container artifact (width <= 36rem) { .split { grid-template-columns: minmax(0, 1fr); } }
+
+/* `min-width: auto` would let one unwrappable source line widen the column and the document. */
+.split > *, .rail-head { min-width: 0; }
+.rail-title, .rail-snippet, .artifact-title, .cited-title { overflow-wrap: anywhere; }
+/* A backstop: anything new that overflows scrolls in its own box. */
+body { overflow-x: hidden; }
+
+/* The hairline after a `.label` runs to the region's edge; `min-width: 0` lets a long label shorten it. */
+.pane-label, .rail-act {
+  display: flex; gap: 0.5rem; align-items: center; margin-bottom: 0.5rem;
+}
+.pane-label > * { min-width: 0; }
+.pane-label::after, .rail-act::after {
+  content: ""; flex: 1 1 auto; height: 1px; min-width: 1rem;
+  background: var(--color-border-subtle);
+}
+/* A trailing link or button would be pushed off by the rule. */
+.pane-label:has(a)::after, .pane-label:has(button)::after { display: none; }
+
+/* Tall enough to stand beside the artifact, and still bounded. */
+.raw {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); overflow: auto; max-height: min(60vh, 45rem);
+  /* Part of the overflow backstop. */
+  max-width: 100%;
+}
+.raw table { border-collapse: collapse; width: 100%; font-family: var(--font-mono); font-size: var(--text-dense); }
+/* Wrapped with a hanging indent, so a wrapped command still reads as one line. */
+.raw td {
+  padding: 1px 0.5rem 1px 2rem; vertical-align: top;
+  white-space: pre-wrap; overflow-wrap: anywhere; text-indent: -1.5rem;
+}
+.raw td.ln {
+  position: sticky; left: 0; background: var(--color-bg-elevated); z-index: 1;
+  width: 3.5rem; text-align: right; color: var(--color-fg-muted); user-select: none;
+  border-right: 1px solid var(--color-border-subtle); font-variant-numeric: tabular-nums;
+  padding: 1px 0.5rem; text-indent: 0;
+}
+/* A bar down the edge marks where the run starts and stops. */
+.raw tr.in td { background: var(--color-accent-dim); }
+.raw tr.in td.ln {
+  background: var(--color-accent-dim); color: var(--color-accent);
+  box-shadow: inset 2px 0 0 var(--color-accent);
+}
+
+/* A textarea needs its own rule: `width: 100%` (intrinsic width is `cols`), `resize: none` (app.js sizes
+   it up to ten lines), `font: inherit` (the UA default is monospace). */
+.box {
+  display: block; width: 100%; box-sizing: border-box;
+  min-height: 2.75rem; padding: 0.625rem 0.75rem;
+  font: inherit; font-size: var(--text-prose); line-height: 1.5;
+  color: var(--color-fg-primary); background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border-strong); border-radius: var(--radius-md);
+  resize: none; overflow-y: auto;
+}
+.box::placeholder { color: var(--color-fg-muted); }
+.box:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-dim);
+}
+/* `[readonly]`, not `:disabled`: a waiting question stays legible, selectable and copyable. */
+.box[readonly] {
+  color: var(--color-fg-secondary); opacity: 1; cursor: wait;
+  background: var(--color-bg-surface);
+}
+
+/* The wrapper gives the microphone an edge; without a speech model the button is not rendered. */
+.box-wrap { position: relative; }
+.box-with-mic { padding-right: 2.75rem; }
+/* Anchored to the top, so it does not walk down as the box grows. */
+.mic {
+  position: absolute; top: 0.375rem; right: 0.375rem;
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 2rem; height: 2rem; padding: 0;
+  color: var(--color-fg-muted); background: transparent;
+  border: 1px solid transparent; border-radius: var(--radius-md);
+  cursor: pointer;
+  /* A long press over a control would otherwise select the query. */
+  -webkit-user-select: none; user-select: none; touch-action: none;
+}
+.mic:hover { color: var(--color-fg-primary); background: var(--color-bg-surface); }
+/* An open microphone must be obvious across a room. */
+.mic.listening {
+  color: var(--color-bg-elevated); background: var(--color-danger);
+  border-color: transparent;
+  animation: mic-pulse 1.4s ease-in-out infinite;
+}
+/* Inert while transcribing: a second press would start another recording over the first. */
+.mic[disabled] { opacity: 0.5; cursor: wait; }
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--color-accent-dim); }
+  50% { box-shadow: 0 0 0 4px var(--color-accent-dim); }
+}
+/* The colour is the signal; the motion is redundant and goes. */
+@media (prefers-reduced-motion: reduce) { .mic.listening { animation: none; } }
+/* Empty on ordinary presses; it is for screen readers and a refused microphone. */
+.mic-status { display: block; margin-top: 0.375rem;
+  font-size: var(--text-dense); color: var(--color-fg-muted); }
+.mic-status:empty { display: none; }
+
+/* It wraps, so a growing chip row never hides a verb. */
+.verbs {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+.verbs-spacer { flex: 1 1 auto; }
+.verbs .oc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Setting one axis to `auto` turns the other to `auto` too, hence `overflow-x: hidden`. */
+.rail {
+  display: flex; flex-direction: column; gap: 0.5rem;
+  max-height: 40rem; overflow-y: auto; overflow-x: hidden;
+}
+/* A search replaces only `#results`, so the rail's heading survives the swap. */
+#results { display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
+.rail-item {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
+}
+.rail-item:hover { background: var(--color-bg-hover); }
+
+.rail-item[aria-selected="true"] { border-color: var(--color-accent); background: var(--color-accent-dim); }
+/* Wrapped: a nowrap badge row would squeeze an `anywhere` title to one character per line. */
+.rail-head { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
+/* An untitled passage's head is one badge; this keeps it the shape of a titled card. */
+.rail-head-bare { margin-bottom: -0.125rem; }
+.rail-rank { font-size: var(--text-micro); color: var(--color-fg-muted); }
+/* `flex-basis: 0`: flex wraps on preferred width, and the title's would push the chips onto their own line.
+   The floor still sends the title to its own line when the chips fill the row. */
+.rail-title { font-weight: 600; font-size: var(--text-ui); flex: 1 1 0; min-width: 7rem; }
+/* A borrowed title (from the note) is quieter than a real one and marked by a word. */
+/* A floor, so an empty excerpt does not collapse the card. */
+.rail-snippet {
+  font-size: var(--text-dense); color: var(--color-fg-secondary); margin-top: 0.25rem;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  min-height: 2.4em;
+}
+/* Unclamped while nothing is open, since the rail has its reading width; keyed to `pane-open`, not `has-selection`. */
+.regions-rail-focus-source:not(.pane-open) .rail-snippet {
+  -webkit-line-clamp: unset; display: block; overflow: visible;
+}
+
+.pane { min-width: 0; }
+
+/* The rule and label keep a recalled hit from reading as the next-best answer. */
+.assoc-rule {
+  margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--color-border-subtle);
+  font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted);
+}
+/* Recalled, not ranked, so it must not look like a ranked card. */
+.rail-assoc { border-style: dashed; background: transparent; }
+/* Empty before a swap fills it, or after a failed one; a hairline alone would hang over the rail. */
+.rail-act:empty { display: none; }
+
+.rail-act::after { order: 2; }
+.result-count {
+  font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted); flex: 0 0 auto;
+}
+/* The reranker confirmed the order; it fades in with the glide so they read as one event. */
+.refined-tick {
+  color: var(--color-fg-faint, var(--color-fg-muted));
+  text-transform: none; letter-spacing: normal;
+  animation: refined-in 300ms ease-out;
+}
+@keyframes refined-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .refined-tick { animation: none; }
+}
+
+/* Past here results still placed, but no longer read as answers. */
+.cliff-rule {
+  margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px dashed var(--color-border-subtle);
+  font-size: var(--text-micro); text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--color-fg-muted);
+}
+/* 0.7 keeps AA; the dashed rule is what says it is past. */
+.rail-past { opacity: 0.7; }
+
+.ask-verdict { margin-top: 0.5rem; gap: 0.5rem; }
+
+.rail-past:hover, .rail-past[aria-selected="true"] { opacity: 1; }
+
+/* Narrower than the rail: a way out of the pane, not a competing list. */
+.related { display: flex; flex-direction: column; gap: 0.375rem; }
+.related .rail-item { padding: 0.5rem 0.625rem; }
+
+/* Dismiss beside the link, revealed on hover or focus; `.muted` marks the less notable same-corpus pair. */
+.seen-row { position: relative; }
+.seen-row .rail-item { padding-right: 2.75rem; }
+.seen-row .rail-del {
+  position: absolute; top: 0.5rem; right: 0.5rem;
+  opacity: 0; transition: opacity 120ms ease;
+}
+.seen-row:hover .rail-del, .seen-row .rail-del:focus-within { opacity: 1; }
+@media (hover: none) { .seen-row .rail-del { opacity: 1; } }
+.seen-row.muted .rail-item { opacity: 0.75; }
+
+/* A flat list with a depth variable: the template cannot include itself. */
+.lineage { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+.lin {
+  display: flex; gap: 0.4rem; padding: 0.4rem 0;
+  padding-left: calc(var(--d, 0) * 1.25rem);
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+.lin:last-child { border-bottom: 0; }
+.lin-tick { color: var(--color-fg-muted); font-family: var(--font-mono); line-height: 1.4; }
+.lin-body { min-width: 0; }
+.lin-head { display: flex; gap: 0.4rem; align-items: baseline; flex-wrap: wrap; }
+.lin-title { font-size: var(--text-ui); }
+.lin-kind {
+  font-size: var(--text-micro); color: var(--color-fg-muted);
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.lin-sub { font-size: var(--text-micro); color: var(--color-fg-muted); }
+/* Struck, not dropped: the text above still carries what it said. */
+.lin-gone .lin-title { text-decoration: line-through; }
+
+/* The card has element ids and renders once; later bands echo the claim. */
+.band-echo { font-size: var(--text-dense); margin: 0 0 0.5rem; }
+
+.raw-flat { margin: 0; padding: 0.5rem 0.75rem; white-space: pre-wrap;
+            overflow-wrap: anywhere; font-family: var(--font-mono); font-size: var(--text-dense); }
+
+.row-sub { font-size: var(--text-micro); }
+
+/* Delete sits apart at the far end (`form + form`, so a lone delete is not stranded). It wraps on a phone. */
+.actions {
+  display: flex; flex-wrap: wrap; gap: 0.375rem; align-items: center;
+  margin-bottom: 0.75rem;
+}
+/* Under a rule, so delete's distance from its siblings reads as caution, not stranding. */
+.pane-header {
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border-subtle);
+}
+
+/* Not sticky: a sticky child rests against the card's content box, one padding down. */
+.actions > form + form:last-of-type { margin-left: auto; }
+
+/* The open card keeps one line, so the ranking keeps its place. */
+.rail-item[aria-selected="true"] .rail-snippet {
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* The two-line floor would defeat the one-line clamp. */
+  min-height: 0;
+  opacity: 0.6;
+}
+
+.pane-label a { color: var(--color-accent); text-decoration: none; }
+.pane-label a:hover { text-decoration: underline; }
+
+/* One line, shown once; quieter than the hint above. */
+.keyhint {
+  display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+  margin: 0 0 0.75rem; font-size: var(--text-micro); color: var(--color-fg-muted);
+}
+/* Ships `hidden`, and an author `display` beats the UA's `[hidden]` rule. */
+.keyhint[hidden] { display: none; }
+.keyhint kbd {
+  font-family: var(--font-mono); font-size: var(--text-micro); line-height: 1.6;
+  padding: 0 5px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm); background: var(--color-bg-surface);
+  color: var(--color-fg-secondary);
+}
+.keyhint button { margin-left: auto; }
+
+/* A short stagger, capped at six; the cliff divider stays put on purpose. */
+@media (prefers-reduced-motion: no-preference) {
+  .rail-item { animation: rail-in 160ms ease-out both; }
+  .rail-item:nth-child(2) { animation-delay: 20ms; }
+  .rail-item:nth-child(3) { animation-delay: 40ms; }
+  .rail-item:nth-child(4) { animation-delay: 60ms; }
+  .rail-item:nth-child(5) { animation-delay: 80ms; }
+  .rail-item:nth-child(6) { animation-delay: 100ms; }
+}
+@keyframes rail-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* `r` narrows the rail to a spine of ranks (at three-up only), so the cliff and position survive.
+   Two tracks: the source is the split's second half, so focus takes all the freed width. */
+@container shell (width >= 90rem) {
+  .regions.reading {
+    grid-template-columns: [rail] 3.25rem [focus] minmax(0, 1fr);
+  }
+  .regions.reading .rail-title,
+  .regions.reading .rail-snippet,
+  .regions.reading .rail-why,
+  .regions.reading .rail-where, .regions.reading .rail-head .oc-status { display: none; }
+  .regions.reading .rail-item {
+    padding: 0.5rem 0; text-align: center;
+  }
+  .regions.reading .rail-head { justify-content: center; }
+  /* At 3rem the line survives without its words. */
+  .regions.reading .cliff-rule {
+    font-size: 0; padding: 0; margin: 0.375rem 0;
+    border-top: 1px dashed var(--color-accent-muted);
+  }
+}
+
+/* `s` hides the split's second half by position: a merge has no source, and its second half is the lineage. */
+.regions.hide-source .split { grid-template-columns: minmax(0, 1fr); }
+.regions.hide-source .split > :nth-child(2) { display: none; }
+
+.rail-why, .rail-where { margin: 0.25rem 0 0; font-size: var(--text-micro); color: var(--color-fg-muted); }
+/* Accented: an offer, not an explanation. */
+.rail-continues { margin: 0.25rem 0 0; font-size: var(--text-micro); color: var(--color-accent); }
+
+/* A fold is a rule with a count, indented past the gutter. */
+.raw tr.srcfold td {
+  cursor: pointer; padding: 0.125rem 0.5rem 0.125rem 3.25rem;
+  border-top: 1px dashed var(--color-border-subtle);
+  color: var(--color-fg-muted); font-size: var(--text-micro);
+}
+.raw tr.srcfold:hover td {
+  color: var(--color-fg-secondary); background: var(--color-bg-hover);
+}
+
+/* Side by side, the card (not the column) scrolls in lockstep with the source; a floor keeps it from a sliver. */
+@container shell (width >= 60rem) {
+ /* Two conditions: the shell's width and the pane's own (`artifact` container, as above). */
+ @container artifact (width > 36rem) {
+  .split > :first-child {
+    display: flex; flex-direction: column; overflow-y: auto;
+    max-height: min(60vh, 45rem);
+  }
+  /* The neighbour lists give way first; both keep a floor. */
+  /* Both written by the row handle; unset, this is `flex: 1 1 auto`. */
+  .split > :first-child > .artifact-main {
+    flex: var(--artifact-fill, 1) 1 var(--artifact-h, auto);
+    min-height: 8rem; overflow-y: auto;
+  }
+  .split > :first-child > .related { flex: 0 4 auto; min-height: 5rem; overflow-y: auto; }
+  .split > :first-child > .pane-label { flex: none; }
+  /* Only where the column has a fixed height with something under the artifact. */
+  .split > :first-child > .row-handle { display: block; }
+
+  /* The cap is on the right column, not the table, so both columns end at the same height. */
+  .split > :nth-child(2) {
+    display: flex; flex-direction: column; max-height: min(60vh, 45rem);
+  }
+  .split > :nth-child(2) > .raw { flex: 1; min-height: 0; max-height: none; }
+ }
+}
+
+/* With the source hidden the artifact stops being a nested scroll box. */
+.regions.hide-source .split > :first-child {
+  display: block; max-height: none; overflow: visible;
+}
+.regions.hide-source .split > :first-child > .artifact-main {
+  min-height: 0; overflow: visible;
+}
+/* And with no box, no height to divide. */
+.regions.hide-source .split > :first-child > .row-handle { display: none; }
+
+/* One height for all three, owned by the row, so the panes share one bottom. Only where all three show. */
+@container shell (width >= 60rem) {
+  .regions-rail-focus-source { grid-template-rows: auto minmax(0, 1fr); }
+  .regions-rail-focus-source > .region-rail,
+  .regions-rail-focus-source > .region-focus,
+  .regions-rail-focus-source > .region-side { align-self: stretch; min-height: 0; }
+  .regions-rail-focus-source > .region-side { overflow-y: auto; }
+
+  /* Each link in the chain needs `min-height: 0`, or one pane grows past the window. */
+  .regions-rail-focus-source .rail { max-height: none; }
+  .regions-rail-focus-source > .region-focus { display: flex; flex-direction: column; }
+  .regions-rail-focus-source .pane > #pane-content,
+  .regions-rail-focus-source #pane-content > [data-terms] {
+    display: flex; flex-direction: column; flex: 1; min-height: 0;
+  }
+  /* The answer is its own scroller beside `#pane-content` (basis zero), or `overflow: hidden` clips it. */
+  .regions-rail-focus-source .pane > #ask-live,
+  .regions-rail-focus-source .pane > #ask-result {
+    flex: 0 1 auto; min-height: 0; overflow-y: auto;
+  }
+  /* An implicit grid row sizes to its content; `minmax(0, 1fr)` gives `stretch` a real height. */
+  .regions-rail-focus-source .split {
+    flex: 1; min-height: 0; align-items: stretch; grid-template-rows: minmax(0, 1fr);
+  }
+  .regions-rail-focus-source .split > * { min-height: 0; }
+  .regions-rail-focus-source .split > :first-child { max-height: none; }
+
+  /* A column, so its label is inside the same height budget as the left one. */
+  .regions-rail-focus-source .split > :nth-child(2) {
+    display: flex; flex-direction: column; max-height: none;
+  }
+  .regions-rail-focus-source .raw { max-height: none; flex: 1; min-height: 0; }
+
+  /* The page does not scroll here, so the card keeps its box and takes the width. */
+  .regions-rail-focus-source.hide-source .split > :first-child {
+    display: flex; overflow-y: auto;
+  }
+  .regions-rail-focus-source.hide-source .split > :first-child > .artifact-main {
+    min-height: 12rem; overflow-y: auto;
+  }
+  .regions-rail-focus-source.hide-source .split > :first-child > .row-handle {
+    display: block;
+  }
+}
+
+.continues { margin: 0.5rem 0 0; font-size: var(--text-dense); }
+
+/* Holds the row open for the fetch after `load`, so nothing below jumps. */
+.offer { min-height: 3.25rem; margin: 0.5rem 0 0.75rem; }
+/* Only around an offer that exists. No hover on the box: only the title is a link. */
+/* Quieter than the due band: the offer is a guess, the band a fact. */
+.offer-filled {
+  background: var(--color-bg-elevated); border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md); padding: 0.625rem 0.75rem;
+}
+
+.offer-title {
+  font-size: var(--text-ui); color: var(--color-fg-primary);
+  font-weight: 500; text-decoration: none;
+}
+.offer-title:hover, .offer-title:focus-visible {
+  text-decoration: underline; text-decoration-color: var(--color-border-strong);
+}
+/* Two lines at most: a card to decide about, not to read. */
+.offer-snippet {
+  margin: 0.25rem 0 0; font-size: var(--text-dense); color: var(--color-fg-secondary);
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.offer-why { font-size: var(--text-micro); margin: 0.125rem 0 0; }
+.offer-detail { display: inline; }
+.offer-detail summary { display: inline; cursor: pointer; color: var(--color-accent); }
+.offer-detail pre {
+  white-space: pre-wrap; word-break: break-all;
+  margin: 0.375rem 0 0; font-size: var(--text-micro);
+}
+/* The left accent tells it apart from the offer above. */
+.due { margin: 0 0 0.75rem; }
+.due-filled {
+  border-left: 3px solid var(--color-due);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in oklab, var(--color-due) 6%, transparent);
+  padding: 0.5rem 0.75rem;
+}
+/* One line per reminder, cut; the full text is the link's title. */
+.due-row {
+  --heat: 0;
+  display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem;
+  align-items: baseline; padding: 0.25rem 0.4rem;
+  border-left: 2px solid transparent; border-radius: 2px;
+}
+.due-title {
+  font-weight: 500;
+  flex: 1 1 8rem; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* One colour mixed against `--heat` (server-set, moved by app.js), so row, edge and time agree. */
+.due-row[data-due-at] {
+  background: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 12%), transparent);
+  border-left-color: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 85%), transparent);
+}
+.due-when {
+  flex: 0 0 auto;
+  font-variant-numeric: tabular-nums;
+  color: color-mix(in oklab, var(--color-danger) calc(var(--heat) * 100%), var(--color-fg-secondary));
+}
+.due-overdue .due-when { font-weight: 600; }
+.due-undated .due-when { font-style: italic; color: var(--color-due); }
+.due-done .due-title { text-decoration: line-through; }
+.due-acts {
+  display: inline-flex; gap: 0.5rem; align-items: baseline;
+  margin-left: auto; flex-wrap: wrap; justify-content: flex-end;
+}
+.due-later[open] { flex-basis: 100%; justify-content: flex-end; }
+.due-later > summary {
+  cursor: pointer;
+  font-size: var(--text-micro);
+  color: var(--color-fg-muted);
+  list-style: none;
+}
+.due-later > summary::-webkit-details-marker { display: none; }
+.due-later > summary:hover { color: var(--color-fg-secondary); }
+.due-later[open] { display: inline-flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; align-items: baseline; }
+.due-snooze { display: inline-flex; gap: 0.25rem; align-items: baseline; font-size: var(--text-micro); }
+/* A real button, since it takes the row off the band; quiet, as the rarest answer. */
+.due-notmine { color: var(--color-fg-muted); font-size: var(--text-micro); }
+.due-notmine:hover { color: var(--color-fg-secondary); }
+.due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
+
+.due-coming { margin: 0.25rem 0 0; }
+.remind-edit { margin-top: 0.5rem; }
+.remind-edit > summary {
+  cursor: pointer;
+  font-size: var(--text-micro);
+  color: var(--color-fg-muted);
+}
+.remind-edit > summary:hover { color: var(--color-fg-secondary); }
+.remind-edit form { flex-wrap: wrap; gap: 0.25rem; margin-top: 0.35rem; }
+
+.due-fold { margin: 0.15rem 0 0; font-size: var(--text-micro); }
+
+@media (width <= 30rem) {
+  .due-filled { padding: 0.4rem 0.5rem; }
+  .due-row { gap: 0.25rem 0.4rem; padding: 0.25rem 0.3rem; }
+  .due-when { font-size: var(--text-micro); }
+  .due-acts { gap: 0.4rem; }
+}
+
+/* One pass: a mark that stayed would be furniture. */
+@keyframes due-arrive {
+  from { background: color-mix(in oklab, var(--color-due) 28%, transparent); }
+  to   { background: transparent; }
+}
+.due-new { animation: due-arrive 1.4s ease-out 1; }
+@media (prefers-reduced-motion: reduce) {
+  .due-new { animation: none; }
+}
+.oc-status--due .oc-icon { color: var(--color-due); }
+
+.day-nav { display: flex; align-items: baseline; gap: 1rem; margin: 1rem 0; }
+.day-nav h1 { flex: 1; text-align: center; margin: 0; font-size: var(--text-section); }
+.day-line { display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline; margin: 0.25rem 0; }
+
+/* The box holds only a staged file; the picker lives in the verb row so it is reachable without a drag. */
+/* `display: flex` beats the UA's `[hidden]`. */
+.staged[hidden] { display: none; }
+.staged {
+  display: flex; align-items: center; gap: 0.625rem; flex-wrap: wrap;
+  margin-top: 0.6rem; padding: 0.6rem 0.625rem;
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated); font-size: var(--text-dense);
+}
+/* The input is the control, hidden only from sight; the ring lands on the visible word. */
+#drop { cursor: pointer; }
+#drop input[type="file"] {
+  position: absolute; width: 1px; height: 1px; margin: -1px;
+  overflow: hidden; clip-path: inset(50%);
+}
+#drop:has(input:focus-visible) {
+  outline: 1.5px solid var(--color-accent); outline-offset: 2px;
+}
+/* On the Attach control too: before a file is staged the box is `display: none`. */
+.staged.dropping {
+  border-color: var(--color-accent); border-style: dashed;
+  background: var(--color-bg-hover);
+}
+#drop.dropping {
+  border-color: var(--color-accent); border-style: dashed;
+  background: var(--color-bg-hover); color: var(--color-fg-primary);
+}
+/* Capped both ways so a portrait photo cannot become the page. */
+.staged img {
+  max-width: 3.5rem; max-height: 3.5rem; border-radius: var(--radius-sm);
+  object-fit: cover; flex: none;
+}
+#staged-name { min-width: 0; overflow-wrap: anywhere; color: var(--color-fg-secondary); }
+#staged-clear { margin-left: auto; }
+
+/* The stream is a fetch and an EventSource, which htmx's indicator class does not know about. */
+#box-form.asking .spinner { visibility: visible; }
+
+/* Quieter than the rendered answer: unfinished, uncited, unchecked. */
+.answer-live {
+  margin: 0 0 1rem; padding: 0.75rem;
+  font-family: var(--font-mono); font-size: var(--text-ui); line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  color: var(--color-fg-secondary);
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border-subtle); border-radius: var(--radius-md);
+}
+
+/* Capped, so it cannot push the answer off screen. */
+.reasoning {
+  margin-bottom: 0.75rem; padding: 0.5rem 0.75rem;
+  font-size: var(--text-dense); line-height: 1.5; white-space: pre-wrap;
+  color: var(--color-fg-muted);
+  border-left: 2px solid var(--color-border-strong);
+  max-height: 12rem; overflow-y: auto;
+}
+
+.cite {
+  font-family: var(--font-mono); font-size: var(--text-micro);
+  vertical-align: super; line-height: 0;
+  text-decoration: none; padding: 0 0.1em;
+}
+.cite:hover { text-decoration: underline; }
+
+/* The same emphasis as a selected result: the row the page is pointing at. */
+.rail-active { border-color: var(--color-accent); background: var(--color-accent-dim); }
+
+.reasoning-box { margin-bottom: 0.75rem; }
+.reasoning-box > summary {
+  cursor: pointer; font-size: var(--text-dense); color: var(--color-fg-muted);
+}
+.reasoning-box > .reasoning { max-height: 14rem; overflow-y: auto; }
+
+/* Centred idle, on the field; back to the shell's width with the first keystroke.
+   `width: 100%`: a grid item with only `max-width` shrinks to its content. */
+html:not(.typing) .regions-rail-focus-source .region-bar {
+  max-width: 52rem; width: 100%; margin-inline: auto;
+}
+@container shell (width < 150rem) {
+  html:not(.typing) .regions-rail-focus-source .region-side {
+    max-width: 52rem; width: 100%; margin-inline: auto;
+  }
+}
+
+/* A little way down on a roomy window, so the box does not read as a toolbar. */
+@media (width >= 62rem) {
+  html:not(.typing) .regions-rail-focus-source { padding-top: clamp(1rem, 8vh, 5.5rem); }
+  .regions-rail-focus-source { transition: padding-top 200ms ease; }
+}
+
+/* Three lines idle (the floor `grow()` in app.js uses); only the placeholder grows, so typing never reflows. */
+html:not(.typing) .regions-rail-focus-source .box {
+  min-height: 6.25rem; padding: 0.875rem 1rem;
+}
+.box { transition: min-height 200ms ease, padding 200ms ease; }
+.box::placeholder { font-size: var(--text-section); }
+
+/* The only place an idle page says what the base holds. */
+.idle-foot { margin: 1rem 0 0; font-size: var(--text-ui); color: var(--color-fg-secondary); }
+.idle-foot .mono { color: var(--color-fg-primary); }
+/* An empty paragraph would still take its margin. */
+.idle-foot:empty { display: none; }
+/* One line, cut; the title holds the full text. Only one link in the line. */
+.idle-foot a {
+  color: var(--color-accent); display: inline-block; max-width: 22rem; vertical-align: bottom;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.idle-foot a[data-day-link] { color: inherit; }
+.teach {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.125rem 0.75rem; margin: 0.75rem 0 0; font-size: var(--text-micro);
+}
+.teach dt { color: var(--color-fg-primary); }
+.teach dd { margin: 0; color: var(--color-fg-secondary); }
+.teach .chip-example { text-align: left; }
+/* Rendered empty in every state: an out-of-band swap can only replace what the response carries. */
+.teach:empty { display: none; }
+
+/* `display: contents`, so the label and chips stay laid out by `.verbs`. */
+.kind-row { display: contents; }
+.kind-row[hidden] { display: none; }
+
+/* Categories are stored lower-case; capitalised here, not in Rust. */
+#kind-chips .chip > span { text-transform: capitalize; }
+
+/* The hint goes with the first keystroke on every screen, like the rest of the idle column. */
+html.typing .regions-rail-focus-source .region-bar .hint { display: none; }
+
+/* A quotation you can press, not a button. */
+.chip-example {
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--color-fg-secondary);
+  cursor: pointer;
+}
+.chip-example:hover { color: var(--color-fg-primary); text-decoration: underline; }
+
+/* `min-height`, so the first recognised cue does not shift the offer and band down. */
+.intent-echo {
+  display: block;
+  min-height: 1.2em;
+  font-size: var(--text-micro);
+  color: var(--color-due);
+}
+.intent-echo-kind { font-weight: 600; }
+
+/* Author `display` beats the UA's `[hidden]`, so `hideIdle`/`showIdle` need this.
+   Last on purpose: it ties on specificity with the rule that opens the pane. */
+.rail[hidden], .pane[hidden] { display: none; }
+
+.answer { margin-bottom: var(--space-4); }
+.answer-keep { margin-top: var(--space-3); }
+.cited { border-top: 1px solid var(--color-border-subtle); padding-block: var(--space-3); }
+.cited-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); }
+.cited-title { font-weight: 600; }
+.cited-head .oc-mono { margin-left: auto; font-size: var(--text-micro); }
+.artifact-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-bottom: var(--space-2); }
+.artifact-title { font-weight: 600; font-size: var(--text-prose); }
+.artifact-meta { margin-top: var(--space-3); }
+.remind-fields { flex-wrap: wrap; align-items: flex-end; }
