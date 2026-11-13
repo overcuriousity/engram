@@ -339,13 +339,14 @@ mod tests {
             .unwrap();
         let back = now() - 40 * 86_400;
         for id in [&old, &judged] {
-            // runtime: a test fixture backdating a row.
-            sqlx::query("UPDATE decide_events SET created_at = ? WHERE id = ?")
-                .bind(back)
-                .bind(id)
-                .execute(&s.pool)
-                .await
-                .unwrap();
+            sqlx::query!(
+                "UPDATE decide_events SET created_at = ? WHERE id = ?",
+                back,
+                id
+            )
+            .execute(&s.pool)
+            .await
+            .unwrap();
         }
         assert_eq!(s.expire_decisions(0).await.unwrap(), 0);
         assert_eq!(s.expire_decisions(30).await.unwrap(), 1);
@@ -359,8 +360,7 @@ mod tests {
         let s = Store::memory().await.unwrap();
         s.record_decision(sample()).await.unwrap();
         assert_eq!(s.purge_decisions().await.unwrap(), 1);
-        // runtime: a test fixture counting rows.
-        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM decide_evidence")
+        let left: i64 = sqlx::query_scalar!("SELECT count(*) FROM decide_evidence")
             .fetch_one(&s.pool)
             .await
             .unwrap();

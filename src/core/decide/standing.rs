@@ -41,6 +41,7 @@ pub fn pick(q: &Question, a: &Answer) -> usize {
     };
     match (a, &q.kind) {
         (Answer::Choice { pick, .. }, Kind::Choice { options }) => {
+            // The decider only returns a named option; 0 is a harmless floor.
             options.iter().position(|(n, _)| n == pick).unwrap_or(0)
         }
         (Answer::Choice { probabilities, .. } | Answer::Score { probabilities, .. }, _) => {
