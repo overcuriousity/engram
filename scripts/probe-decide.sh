@@ -148,8 +148,8 @@ for k in yes no; do
   v=$(jq -r '.answers.bears.noul // empty' "$tmp/out" 2>/dev/null || true)
   printf 'bears, passage %-3s %s  status %s\n' "$k" "${v:--}" "$status"
 done
-fwd=$(jq -nc '{c: {type: "choice", instructions: "Which port does the service use?", criteria: {"8443": "the new port", "8080": "the old port"}}}')
-rev=$(jq -nc '{c: {type: "choice", instructions: "Which port does the service use?", criteria: {"8080": "the old port", "8443": "the new port"}}}')
+fwd=$(jq -nc '{c: {type: "choice", instructions: "Which port does the service use?", criteria: {"new": "port 8443, the new port", "old": "port 8080, the old port"}}}')
+rev=$(jq -nc '{c: {type: "choice", instructions: "Which port does the service use?", criteria: {"old": "port 8080, the old port", "new": "port 8443, the new port"}}}')
 for d in forward reversed; do
   if [ "$d" = forward ]; then q=$fwd; else q=$rev; fi
   call "$tmp/pass.yes" "$q"

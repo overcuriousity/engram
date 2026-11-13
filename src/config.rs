@@ -43,6 +43,8 @@ pub struct Config {
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub decide: DecideConfig,
 }
 
 /// What the two supplied-from-outside capture paths may cost; apart from `MAX_BODY_BYTES`,
@@ -183,6 +185,31 @@ impl Default for FeedbackConfig {
             retain_days: 0,
             explore: 0.1,
             sweep_hours: 6,
+        }
+    }
+}
+
+/// Decide's thresholds. The defaults are a time budget: tokens read, times 1.1 ms.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct DecideConfig {
+    /// The joint read's state, in tokens.
+    pub joint_tokens: usize,
+    /// A passage bears on the question from this probability.
+    pub bears_min: f64,
+    /// A top probability from here is settled.
+    pub settled_at: f64,
+    /// The share of bearing held by passages against the verdict that splits it.
+    pub split_at: f64,
+}
+
+impl Default for DecideConfig {
+    fn default() -> Self {
+        Self {
+            joint_tokens: 2500,
+            bears_min: 0.5,
+            settled_at: 0.80,
+            split_at: 0.34,
         }
     }
 }
@@ -1918,6 +1945,24 @@ impl Config {
                 d.context_tokens
             )));
         }
+        let dc = &self.decide;
+        for (key, v) in [
+            ("decide.bears_min", dc.bears_min),
+            ("decide.settled_at", dc.settled_at),
+            ("decide.split_at", dc.split_at),
+        ] {
+            if !(0.0..=1.0).contains(&v) {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} ({v}) must be between 0 and 1: it is compared with a probability"
+                )));
+            }
+        }
+        if dc.joint_tokens < 256 {
+            return Err(ConfigError::Invalid(format!(
+                "decide.joint_tokens ({}) is below 256: no excerpt would fit the joint read",
+                dc.joint_tokens
+            )));
+        }
         let tz = self.time.default_tz.trim();
         if !tz.is_empty() && tz.parse::<chrono_tz::Tz>().is_err() {
             return Err(ConfigError::Invalid(format!(
@@ -2237,6 +2282,7 @@ impl Config {
             reap: ReapConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
+            decide: DecideConfig::default(),
         }
     }
 }
@@ -3171,6 +3217,35 @@ mode = "off"
             "{MINIMAL_WITHOUT_DECIDE}\n[infer.decide]\nbase_url = \"http://localhost:8080/v1\"\nmodel = \"m\"\n"
         );
         assert!(Config::load(Some(&write(&dir, &body))).is_err());
+    }
+
+    #[test]
+    fn decide_thresholds_default_to_the_spec() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        assert_eq!(
+            (d.joint_tokens, d.bears_min, d.settled_at, d.split_at),
+            (2500, 0.5, 0.80, 0.34)
+        );
+    }
+
+    #[test]
+    fn a_threshold_outside_zero_to_one_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for (line, key) in [
+            ("settled_at = 1.2", "decide.settled_at"),
+            ("bears_min = -0.1", "decide.bears_min"),
+            ("split_at = 2.0", "decide.split_at"),
+            ("joint_tokens = 100", "decide.joint_tokens"),
+        ] {
+            let body = format!("{MINIMAL}\n[decide]\n{line}\n");
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => assert!(m.contains(key), "{m}"),
+                other => panic!("expected Invalid for {key}, got {other:?}"),
+            }
+        }
     }
 
     #[test]

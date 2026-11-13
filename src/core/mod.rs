@@ -2,6 +2,7 @@ pub mod ask;
 pub mod background;
 pub mod context;
 pub mod coverage;
+pub mod decide;
 pub mod explain;
 pub mod extract;
 pub mod fetch;
@@ -153,6 +154,7 @@ pub struct Core {
     pub pinned_boost: f32,
     /// The one switch over everything learned from what happens here.
     pub learn: crate::config::LearnConfig,
+    pub decide_cfg: crate::config::DecideConfig,
     pub feedback: crate::config::FeedbackConfig,
     /// Never read on a path a person waits on.
     pub evolve: crate::config::EvolveConfig,
@@ -464,6 +466,7 @@ impl Core {
             line: working.line,
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
+            decide_cfg: cfg.decide.clone(),
             feedback: cfg.feedback.clone(),
             capture: cfg.capture.clone(),
             associate: cfg.associate.clone(),
@@ -750,6 +753,7 @@ pub mod test_support {
                 enabled: false,
                 ..Default::default()
             },
+            decide_cfg: crate::config::DecideConfig::default(),
             feedback: crate::config::FeedbackConfig::default(),
             capture: crate::config::CaptureConfig::default(),
             associate: crate::config::AssociateConfig::default(),

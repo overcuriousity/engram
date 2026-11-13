@@ -135,6 +135,17 @@ context_tokens = 8192
 # parallel = 1
 # api_key = ""
 
+# Decide's thresholds. The defaults are a time budget: tokens read, times 1.1 ms.
+# [decide]
+# Tokens in the joint read's state (at least 256).
+# joint_tokens = 2500
+# A passage bears on the question from this probability.
+# bears_min = 0.5
+# A top probability from here is settled.
+# settled_at = 0.80
+# The share of bearing against the verdict that makes it split.
+# split_at = 0.34
+
 # Optional reranker; style is "tei", "cohere" or "vllm".
 # [infer.rerank]
 # base_url = "http://localhost:8001"
