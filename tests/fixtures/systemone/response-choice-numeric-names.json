@@ -1,0 +1,64 @@
+{
+  "run": {
+    "state": "We are ten people and the restaurant has tables for different group sizes.",
+    "questions": [
+      {
+        "key": "seats",
+        "type": "choice",
+        "text": "How many seats should we book?",
+        "options": [
+          {
+            "id": "o1",
+            "name": "10",
+            "description": "Ten seats"
+          },
+          {
+            "id": "o2",
+            "name": "2",
+            "description": "Two seats"
+          },
+          {
+            "id": "o3",
+            "name": "1",
+            "description": "One seat"
+          }
+        ]
+      }
+    ]
+  },
+  "body": {
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "answers": {
+      "seats": {
+        "type": "choice",
+        "choice": "10",
+        "probabilities": {
+          "1": 0.02153385967147132,
+          "2": 0.009431413391327744,
+          "10": 0.9690347269372008
+        },
+        "confidence": 0.9535520904058012
+      }
+    },
+    "usage": {
+      "input_tokens": 160,
+      "output_tokens": 0
+    }
+  },
+  "expected": {
+    "answers": {
+      "seats": {
+        "type": "choice",
+        "choice": "10",
+        "probabilities": [
+          0.9690347269372008,
+          0.009431413391327744,
+          0.02153385967147132
+        ],
+        "confidence": 0.9535520904058012
+      }
+    },
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "inputTokens": 160
+  }
+}

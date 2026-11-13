@@ -1,0 +1,59 @@
+{
+  "run": {
+    "state": "The server crashed twice today and customers are complaining.",
+    "questions": [
+      {
+        "key": "team",
+        "type": "choice",
+        "text": "Which team should handle this?",
+        "options": [
+          {
+            "id": "o1",
+            "name": "ops",
+            "description": "Servers, outages, deployments"
+          },
+          {
+            "id": "o2",
+            "name": "support",
+            "description": "Customer questions and complaints"
+          },
+          {
+            "id": "o3",
+            "name": "sales",
+            "description": "Quotes and contracts"
+          }
+        ]
+      },
+      {
+        "key": "urgency",
+        "type": "score",
+        "text": "How urgent is this?",
+        "levels": [
+          {
+            "id": "l0",
+            "text": "Not urgent"
+          },
+          {
+            "id": "l1",
+            "text": "Can wait a week"
+          },
+          {
+            "id": "l2",
+            "text": "Should be handled today"
+          },
+          {
+            "id": "l3",
+            "text": "Drop everything"
+          }
+        ]
+      },
+      {
+        "key": "outage",
+        "type": "noul",
+        "text": "Is this an outage?"
+      }
+    ]
+  },
+  "model": "clef-flash:9b-q8_0-8192",
+  "expected_json": "{\"model\":\"clef-flash:9b-q8_0-8192\",\"state\":\"The server crashed twice today and customers are complaining.\",\"questions\":{\"team\":{\"type\":\"choice\",\"instructions\":\"Which team should handle this?\",\"criteria\":{\"ops\":\"Servers, outages, deployments\",\"support\":\"Customer questions and complaints\",\"sales\":\"Quotes and contracts\"}},\"urgency\":{\"type\":\"score\",\"instructions\":\"How urgent is this?\",\"criteria\":[\"Not urgent\",\"Can wait a week\",\"Should be handled today\",\"Drop everything\"]},\"outage\":{\"type\":\"noul\",\"instructions\":\"Is this an outage?\"}}}"
+}

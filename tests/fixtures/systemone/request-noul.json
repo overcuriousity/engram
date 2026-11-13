@@ -1,0 +1,14 @@
+{
+  "run": {
+    "state": "",
+    "questions": [
+      {
+        "key": "wet",
+        "type": "noul",
+        "text": "Is water wet?"
+      }
+    ]
+  },
+  "model": "clef-flash:9b-q8_0-8192",
+  "expected_json": "{\"model\":\"clef-flash:9b-q8_0-8192\",\"state\":\"\",\"questions\":{\"wet\":{\"type\":\"noul\",\"instructions\":\"Is water wet?\"}}}"
+}

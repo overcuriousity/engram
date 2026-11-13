@@ -1,0 +1,31 @@
+{
+  "run": {
+    "state": "We are ten people and the restaurant has tables for different group sizes.",
+    "questions": [
+      {
+        "key": "seats",
+        "type": "choice",
+        "text": "How many seats should we book?",
+        "options": [
+          {
+            "id": "o1",
+            "name": "10",
+            "description": "Ten seats"
+          },
+          {
+            "id": "o2",
+            "name": "2",
+            "description": "Two seats"
+          },
+          {
+            "id": "o3",
+            "name": "1",
+            "description": "One seat"
+          }
+        ]
+      }
+    ]
+  },
+  "model": "clef-flash:9b-q8_0-8192",
+  "expected_json": "{\"model\":\"clef-flash:9b-q8_0-8192\",\"state\":\"We are ten people and the restaurant has tables for different group sizes.\",\"questions\":{\"seats\":{\"type\":\"choice\",\"instructions\":\"How many seats should we book?\",\"criteria\":{\"10\":\"Ten seats\",\"2\":\"Two seats\",\"1\":\"One seat\"}}}}"
+}

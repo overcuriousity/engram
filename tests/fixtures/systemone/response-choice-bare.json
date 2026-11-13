@@ -1,0 +1,64 @@
+{
+  "run": {
+    "state": "We are four people, one is vegetarian, and it is raining.",
+    "questions": [
+      {
+        "key": "dinner",
+        "type": "choice",
+        "text": "What should we have for dinner tonight?",
+        "options": [
+          {
+            "id": "o1",
+            "name": "pizza",
+            "description": ""
+          },
+          {
+            "id": "o2",
+            "name": "sushi",
+            "description": ""
+          },
+          {
+            "id": "o3",
+            "name": "home",
+            "description": ""
+          }
+        ]
+      }
+    ]
+  },
+  "body": {
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "answers": {
+      "dinner": {
+        "type": "choice",
+        "choice": "sushi",
+        "probabilities": {
+          "home": 0.041644612543537796,
+          "pizza": 0.2947953015478066,
+          "sushi": 0.6635600859086556
+        },
+        "confidence": 0.49534012886298334
+      }
+    },
+    "usage": {
+      "input_tokens": 159,
+      "output_tokens": 0
+    }
+  },
+  "expected": {
+    "answers": {
+      "dinner": {
+        "type": "choice",
+        "choice": "sushi",
+        "probabilities": [
+          0.2947953015478066,
+          0.6635600859086556,
+          0.041644612543537796
+        ],
+        "confidence": 0.49534012886298334
+      }
+    },
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "inputTokens": 159
+  }
+}

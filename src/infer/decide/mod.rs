@@ -4,6 +4,8 @@ use crate::error::{Error, Result};
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 
+pub mod wire;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Question {
     pub key: String,
