@@ -513,7 +513,7 @@ impl Store {
     }
 
     /// Not by state: `synthesis_asked` says the writing is owed, `merged_into` whether done.
-    /// Held back past `MAX_UNREADABLE_JUDGEMENTS`, like `pairs_to_judge`.
+    /// Held back past `MAX_UNREADABLE_JUDGEMENTS`: the writer's own cap on unreadable replies.
     pub async fn pairs_awaiting_synthesis(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
         let rows = sqlx::query_as!(
             crate::store::pairs::PairRow,
@@ -1038,7 +1038,7 @@ impl Store {
                  FROM artifact_pairs p
                  JOIN artifacts a ON a.id = p.a_id
                  JOIN artifacts b ON b.id = p.b_id
-                WHERE p.state = 'pending' AND p.synthesis_asked = 0 AND p.judge_unreadable < ?
+                WHERE p.state = 'pending' AND p.synthesis_asked = 0
                   AND NOT EXISTS (
                       SELECT 1 FROM decisions d
                        WHERE d.question_id = 'pair_relation' AND d.subject_kind = 'pair'
@@ -1046,7 +1046,6 @@ impl Store {
                          AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
                          AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
                 ORDER BY p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?"#,
-            MAX_UNREADABLE_JUDGEMENTS,
             era,
             limit
         )
@@ -1382,19 +1381,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_the_judge_can_never_read_stops_costing_calls() {
+    async fn a_pair_the_writer_can_never_read_stops_costing_calls() {
         // The unit closes at `MAX_ATTEMPTS`; without a ceiling each sweep re-arms it for five more.
         let s = Store::memory().await.unwrap();
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
         let id = s.pairs_to_judge("test/v1", 10).await.unwrap()[0].id;
+        assert!(s.ask_pair_synthesis(id).await.unwrap());
 
         for _ in 0..MAX_UNREADABLE_JUDGEMENTS - 1 {
             s.record_judge_attempt(id).await.unwrap();
             s.record_unreadable_judgement(id).await.unwrap();
         }
         assert_eq!(
-            s.pairs_to_judge("test/v1", 10).await.unwrap().len(),
+            s.pairs_awaiting_synthesis(10).await.unwrap().len(),
             1,
             "a pair short of the ceiling was already being held back"
         );
@@ -1402,8 +1402,8 @@ mod tests {
         s.record_judge_attempt(id).await.unwrap();
         s.record_unreadable_judgement(id).await.unwrap();
         assert!(
-            s.pairs_to_judge("test/v1", 10).await.unwrap().is_empty(),
-            "a pair the judge has never once been able to read is still being asked about"
+            s.pairs_awaiting_synthesis(10).await.unwrap().is_empty(),
+            "a pair the writer has never once been able to read is still being asked about"
         );
         assert_eq!(
             s.pairs_by_state(PairState::Pending, 10)
@@ -1411,7 +1411,7 @@ mod tests {
                 .unwrap()
                 .len(),
             1,
-            "holding a pair back from the judge took it off the review queue"
+            "holding a pair back from the writer took it off the review queue"
         );
     }
 
@@ -1473,9 +1473,29 @@ mod tests {
             .await
             .unwrap();
 
+        for unreadable in [5, 9] {
+            let ids = n_artifacts(&s, 2).await;
+            s.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+            let shelved = s.pair_between(&ids[0], &ids[1]).await.unwrap().unwrap().id;
+            sqlx::query!(
+                "UPDATE artifact_pairs SET judge_unreadable = ? WHERE id = ?",
+                unreadable,
+                shelved
+            )
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        }
+
         let pairs = s.pairs_to_judge("test/v1", 10).await.unwrap();
-        assert_eq!(pairs.len(), 1, "the half-judged pair was lost: {pairs:?}");
-        assert_eq!((pairs[0].judge_attempts, pairs[0].judge_unreadable), (3, 4));
+        assert_eq!(
+            pairs.len(),
+            3,
+            "a pair an older version shelved was lost: {pairs:?}"
+        );
+        let mut unreadable: Vec<i64> = pairs.iter().map(|p| p.judge_unreadable).collect();
+        unreadable.sort();
+        assert_eq!(unreadable, [4, 5, 9]);
         let links = s
             .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
             .await

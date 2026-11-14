@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT p.id AS \"id!\", p.a_id, p.b_id, p.score, p.state, p.detail, p.created_at,\n                      p.judge_attempts, p.judge_unreadable, p.obsolete_id, p.merged_into,\n                      p.decided_by, p.synthesis_asked, p.synthesis_by\n                 FROM artifact_pairs p\n                 JOIN artifacts a ON a.id = p.a_id\n                 JOIN artifacts b ON b.id = p.b_id\n                WHERE p.state = 'pending' AND p.synthesis_asked = 0 AND p.judge_unreadable < ?\n                  AND NOT EXISTS (\n                      SELECT 1 FROM decisions d\n                       WHERE d.question_id = 'pair_relation' AND d.subject_kind = 'pair'\n                         AND d.subject_a = CAST(p.id AS TEXT) AND d.era = ?\n                         AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev\n                         AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')\n                ORDER BY p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?",
+  "query": "SELECT p.id AS \"id!\", p.a_id, p.b_id, p.score, p.state, p.detail, p.created_at,\n                      p.judge_attempts, p.judge_unreadable, p.obsolete_id, p.merged_into,\n                      p.decided_by, p.synthesis_asked, p.synthesis_by\n                 FROM artifact_pairs p\n                 JOIN artifacts a ON a.id = p.a_id\n                 JOIN artifacts b ON b.id = p.b_id\n                WHERE p.state = 'pending' AND p.synthesis_asked = 0\n                  AND NOT EXISTS (\n                      SELECT 1 FROM decisions d\n                       WHERE d.question_id = 'pair_relation' AND d.subject_kind = 'pair'\n                         AND d.subject_a = CAST(p.id AS TEXT) AND d.era = ?\n                         AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev\n                         AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')\n                ORDER BY p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -159,7 +159,7 @@
       }
     ],
     "parameters": {
-      "Right": 3
+      "Right": 2
     },
     "nullable": [
       null,
@@ -178,5 +178,5 @@
       true
     ]
   },
-  "hash": "5f2a929b9c6512eb0c03efb5a591747321653b2a92212dfbfb70dc1adbdfca50"
+  "hash": "9d0aa52bc003dff2940f09267f4dbef8172e33855a1b69ae5dce364e70409282"
 }

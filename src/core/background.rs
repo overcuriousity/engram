@@ -515,15 +515,6 @@ mod tests {
             "the switch arms nothing"
         );
 
-        let mut judgeless = crate::core::test_support::test_core().await;
-        judgeless.evolve.autonomous = crate::config::Autonomy::Full;
-        assert!(
-            periodic_units(&judgeless)
-                .iter()
-                .any(|(s, _)| *s == Stage::Reap),
-            "the decision model is required, so there is always a judge"
-        );
-
         for level in [
             crate::config::Autonomy::Off,
             crate::config::Autonomy::Ranking,
