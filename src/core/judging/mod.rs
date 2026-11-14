@@ -2,6 +2,7 @@
 
 pub mod band;
 pub mod catalogue;
+pub mod state;
 
 use crate::core::Core;
 use crate::error::{Error, Result};
