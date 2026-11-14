@@ -67,7 +67,7 @@
 
   /* The box starts at one row and grows up to the same cap. */
   .regions-rail-focus-source .region-bar .verbs { margin-top: 0.4rem; gap: 0.4rem; }
-  .regions-rail-focus-source .region-bar .verbs .oc-btn { min-height: 40px; }
+  .regions-rail-focus-source .region-bar .verbs .oc-btn { min-height: 44px; }
   .decide-option { flex-direction: column; align-items: stretch; }
   .decide-option, .decide-level { display: flex; flex-basis: 100%; }
   .decide-option details, .decide-option details .oc-input { width: 100%; }

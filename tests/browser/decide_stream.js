@@ -66,6 +66,23 @@ const SCENARIOS = {
     press();
     later(500, function () { send({}); });
   `,
+  // Enter in the row presses Decide: a staged file disables it, an empty box says why.
+  enter: `
+    q('Should I keep it?');
+    press();
+    var enter = function () {
+      document.getElementById('decide-row').querySelector('input[name="decide-kind"]:checked')
+        .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    };
+    document.getElementById('staged').hidden = false;
+    q('Should I keep it?');
+    enter();
+    var staged = document.getElementById('decide-problem').textContent;
+    document.getElementById('staged').hidden = true;
+    q('');
+    enter();
+    later(500, function () { send({ problemWhenStaged: staged }); });
+  `,
   // 390 px: eight options of forty characters, then a result naming them with eight rail rows.
   narrow: `
     q('Which of these eight should I keep for the winter?');
@@ -81,7 +98,8 @@ const SCENARIOS = {
     var addDisabled = add.disabled;
     press();
     later(4500, function () {
-      send({ optionCount: names.length, addDisabled: addDisabled, rowOpen: row, result: measure() });
+      send({ optionCount: names.length, addDisabled: addDisabled, rowOpen: row, result: measure(),
+        decideHeight: document.querySelector('[data-verb="decide"]').getBoundingClientRect().height });
     });
   `,
 };
@@ -107,11 +125,11 @@ const HARNESS = `
       var r = document.querySelector('input[name="decide-kind"][value="' + v + '"]');
       r.click();
     }
-    // Whether the document scrolls sideways, and every touch target in the row under 44 px.
+    // Whether the document scrolls sideways, and every touch target in the verbs and the row under 44 px.
     function measure() {
       var de = document.documentElement;
       var small = [];
-      var targets = document.querySelectorAll('#decide-row input, #decide-row button, #decide-row summary');
+      var targets = document.querySelectorAll('.verbs .oc-btn, #decide-row input, #decide-row button, #decide-row summary');
       for (var i = 0; i < targets.length; i++) {
         var el = targets[i];
         // A radio is drawn by its chip; the chip is what the thumb hits.
@@ -168,6 +186,7 @@ const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div class="region-bar">
 <form id="box-form" hx-get="/ui/search/results" hx-target="#results" hx-params="q,category">
 <div class="box-wrap"><textarea class="box" name="q" rows="1" aria-label="Search, ask, or capture"></textarea></div>
+<div id="staged" class="staged" hidden></div>
 <div class="verbs">
 <span id="ask-verb-slot"><button class="oc-btn" type="button" data-verb="ask" disabled>Ask</button></span>
 <span id="decide-verb-slot"><button class="oc-btn" type="button" data-verb="decide" disabled aria-expanded="false" aria-controls="decide-row">Decide</button></span>

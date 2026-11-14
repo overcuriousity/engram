@@ -186,6 +186,10 @@ fn nothing_runs_off_a_phone() {
             "{at}: targets under 44 px: {m}"
         );
     }
+    assert!(
+        r["decideHeight"].as_f64().unwrap() >= 44.0,
+        "the Decide button is under 44 px: {r}"
+    );
     assert_eq!(r["railRows"], 8, "{r}");
     assert!(
         r["resultHtml"]
@@ -194,5 +198,19 @@ fn nothing_runs_off_a_phone() {
             .contains("option 8 with a name forty characters"),
         "{r}"
     );
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn enter_in_the_row_presses_decide_and_respects_its_state() {
+    let out = drive("enter");
+    let r = &out["report"];
+    assert_eq!(
+        out["parkRequests"], 0,
+        "Enter went around a disabled Decide: {out}"
+    );
+    assert_eq!(r["problemWhenStaged"], "", "{r}");
+    assert_eq!(r["problemText"], "Type a question first", "{r}");
     no_errors(r);
 }

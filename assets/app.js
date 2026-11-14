@@ -843,7 +843,15 @@
       // A summary opens its description and a button does its own act.
       if (e.target.closest('summary, button')) return;
       e.preventDefault();
-      if (form.getAttribute('aria-busy') !== 'true') run();
+      // Through the button, so whatever disables it (busy, a staged file) holds here too.
+      var btn = form.querySelector('[data-verb="decide"]');
+      if (btn && !btn.disabled) { btn.click(); return; }
+      var staged = document.getElementById('staged');
+      var busy = form.getAttribute('aria-busy') === 'true';
+      // An empty box is the one reason worth saying; the button cannot say it.
+      if (!busy && !box.value.trim() && !(staged && !staged.hidden)) {
+        said.textContent = window.engramDecide.problem(box.value, shape());
+      }
     });
   }
 
