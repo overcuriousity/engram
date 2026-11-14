@@ -16,6 +16,8 @@ use crate::store::jobs::Stage;
 const UNFAITHFUL: &str = "a check found the draft unfaithful";
 /// The gate before the writer found no answer in the sources.
 const UNANSWERED: &str = "the sources do not hold the answer";
+/// The gate before the writer was unsure.
+const UNSURE: &str = "the sources may not hold the answer";
 
 /// One call, superseding nothing. Idempotent: a retry after a crash between insert and update must
 /// not write twice.
@@ -114,25 +116,25 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n\n");
 
-    // Before the writer: do these sources hold the answer? Not judged on cut text: what does not
-    // fit is written as before. A failed gate is an outage, retried, never a writer call.
-    match answerable_gate(core, pursuit_id, &p.queries, &sources)
+    // Before the writer: do these sources hold the answer? Judged only when every packed source
+    // fits; otherwise written as before. A failed gate is an outage, retried, never a writer call.
+    let gate = answerable_gate(core, pursuit_id, &p.queries, &sources)
         .await
-        .map_err(outage)?
-    {
+        .map_err(outage)?;
+    match gate {
         Gate::Write => {}
-        Gate::Wait => {
-            tracing::info!(
-                pursuit = pursuit_id,
-                "the sources may not hold the answer; waiting for another"
-            );
-            return Ok(());
-        }
-        Gate::Close => {
+        // Closed either way: an unsatisfied pursuit is a gap a capture can cover or the owner
+        // dismiss; nothing would try an open one again.
+        Gate::Unsure | Gate::Close => {
+            let reason = if matches!(gate, Gate::Unsure) {
+                UNSURE
+            } else {
+                UNANSWERED
+            };
             core.store
-                .close_pursuit(pursuit_id, "unsatisfied", UNANSWERED, now)
+                .close_pursuit(pursuit_id, "unsatisfied", reason, now)
                 .await?;
-            tracing::info!(pursuit = pursuit_id, "the sources do not hold the answer");
+            tracing::info!(pursuit = pursuit_id, reason, "the gate wrote nothing");
             return Ok(());
         }
     }
@@ -234,13 +236,13 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
 
 enum Gate {
     Write,
-    Wait,
+    Unsure,
     Close,
 }
 
-/// `answerable` over the questions and the packed sources, logged as kind "pursuit", state `done`:
-/// no Unsure row; in between it is `leave`, reason `waiting`. The packed sources are the second
-/// subject, so a waiting pursuit is not asked again until they change.
+/// `answerable` over the questions and every packed source, logged as kind "pursuit", state `done`:
+/// no Unsure row; in between it is `leave`, reason `unsure`. The packed sources are the second
+/// subject, so a retry after a writer outage is not asked again.
 async fn answerable_gate(
     core: &Core,
     pursuit_id: &str,
@@ -259,7 +261,7 @@ async fn answerable_gate(
         })
         .collect();
     let Some(shown) =
-        state::answerable(queries, &excerpts, &core.counter, state::room(core, &[&a]))
+        state::answerable_whole(queries, &excerpts, &core.counter, state::room(core, &[&a]))
     else {
         return Ok(Gate::Write);
     };
@@ -324,7 +326,7 @@ async fn answerable_gate(
             } else {
                 Band::Leave
             },
-            reason: matches!(gate, Gate::Wait).then(|| "waiting".into()),
+            reason: matches!(gate, Gate::Unsure).then(|| "unsure".into()),
             state: State::Done,
         })
         .await?;
@@ -337,7 +339,7 @@ fn gate_at(yes: f64, t: crate::core::judging::band::Thresholds) -> Gate {
     } else if yes < t.ask_at {
         Gate::Close
     } else {
-        Gate::Wait
+        Gate::Unsure
     }
 }
 
@@ -1313,47 +1315,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn in_between_the_pursuit_waits_and_is_tried_again_with_another_source() {
-        let (core, d, line, writer, pid) = gated(0.7).await;
+    async fn in_between_the_pursuit_closes_as_a_gap_and_no_writer_is_called() {
+        let (core, d, _, writer, _) = gated(0.7).await;
+        // With a vector, so the closed pursuit can stand as a gap.
+        let v = core.embedder.embed_query("read the journal").await.unwrap();
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(
+                200,
+                &["read the journal".into()],
+                &ids,
+                Some((&v, core.embedder.model())),
+            )
+            .await
+            .unwrap();
         generate(&core, &pid).await.unwrap();
-        assert_eq!(writer.calls(), 0);
-        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+        assert_eq!(gate_asks(&d), 1);
+        assert_eq!(writer.calls(), 0, "the writer was called");
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert_eq!(p.reason.as_deref(), Some(UNSURE));
         let r = gate_row(&core, &pid).await;
         assert_eq!(r.band, crate::core::judging::band::Band::Leave);
-        assert_eq!(r.reason.as_deref(), Some("waiting"));
+        assert_eq!(r.reason.as_deref(), Some("unsure"));
+        let open = core
+            .store
+            .open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert!(
+            open.gaps
+                .iter()
+                .any(|g| g.gap.kind == crate::store::gaps::GapKind::Pursuit && g.gap.id == pid),
+            "not listed as a gap"
+        );
+    }
 
-        // The same sources again: not asked twice.
+    #[tokio::test]
+    async fn a_writer_outage_after_a_yes_is_not_asked_again() {
+        let (mut core, d, _, _, pid) = gated(0.9).await;
+        // An exhausted script is an outage: retried.
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![]),
+        ));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+        let writer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+        ]));
+        core.generator = Some(writer.clone());
         generate(&core, &pid).await.unwrap();
         assert_eq!(gate_asks(&d), 1, "asked again on unchanged sources");
-        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+        assert_eq!(writer.calls(), 1);
+        assert_eq!(
+            core.store.get_pursuit(&pid).await.unwrap().state,
+            "generated"
+        );
+    }
 
-        // A third source, and now they hold the answer.
+    #[tokio::test]
+    async fn sources_that_do_not_all_fit_are_not_judged() {
+        let (core, d, _, writer, _) = gated(0.01).await;
         let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
-        let third = core
+        let long = "journal words for sizing ".repeat(60);
+        let na = |o: i64, t: &str| NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            title: Some(format!("L{o}")),
+            ..Default::default()
+        };
+        let ids: Vec<String> = core
             .store
             .insert_artifacts(
                 &src.id,
-                &[NewArtifact {
-                    ordinal: 0,
-                    text: "journalctl --file reads a copied journal".into(),
-                    title: Some("S2".into()),
-                    ..Default::default()
-                }],
+                &[na(0, "read the journal at /var/log/journal"), na(1, &long)],
             )
             .await
             .unwrap()
-            .remove(0)
-            .id;
-        let mut sources = core.store.get_pursuit(&pid).await.unwrap().sources;
-        sources.push(third);
-        let json = serde_json::to_string(&sources).unwrap();
-        sqlx::query!("UPDATE pursuits SET sources = ? WHERE id = ?", json, pid)
-            .execute(&core.store.pool)
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        let queries = vec!["read the journal".to_string()];
+        let pid = core
+            .store
+            .insert_pursuit(300, &queries, &ids, None)
             .await
             .unwrap();
-        *line.lock().unwrap() = 0.9;
+        // A window where the first source fits and both do not.
+        let a = answerable();
+        let note = |t: &'static str, x: &'static str| Note {
+            title: Some(t),
+            day: None,
+            text: x,
+        };
+        let short = [note("L0", "read the journal at /var/log/journal")];
+        let one = core
+            .counter
+            .count(&state::answerable(&queries, &short, &core.counter, usize::MAX).unwrap());
+        let overhead = core.decider.context_tokens() - state::room(&core, &[&a]);
+        d.set_context_tokens(overhead + one + 5);
         generate(&core, &pid).await.unwrap();
-        assert_eq!(gate_asks(&d), 2);
+        assert_eq!(gate_asks(&d), 0, "judged on a prefix of the sources");
         assert_eq!(writer.calls(), 1);
         assert_eq!(
             core.store.get_pursuit(&pid).await.unwrap().state,

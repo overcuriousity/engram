@@ -129,24 +129,38 @@ pub fn window(text: &str, counter: &TokenCounter, tokens: usize) -> Option<Strin
     (counter.count(text) <= tokens).then(|| text.to_string())
 }
 
+fn answerable_of(questions: &[String], excerpts: &[Note]) -> String {
+    let mut parts = vec![format!("Questions:\n{}", questions.join("\n"))];
+    parts.extend(
+        excerpts
+            .iter()
+            .enumerate()
+            .map(|(i, n)| plain(&format!("Excerpt {}: ", i + 1), n)),
+    );
+    join(parts)
+}
+
 pub fn answerable(
     questions: &[String],
     excerpts: &[Note],
     counter: &TokenCounter,
     tokens: usize,
 ) -> Option<String> {
-    let qs = format!("Questions:\n{}", questions.join("\n"));
     (1..=excerpts.len()).rev().find_map(|kept| {
-        let mut parts = vec![qs.clone()];
-        parts.extend(
-            excerpts[..kept]
-                .iter()
-                .enumerate()
-                .map(|(i, n)| plain(&format!("Excerpt {}: ", i + 1), n)),
-        );
-        let s = join(parts);
+        let s = answerable_of(questions, &excerpts[..kept]);
         (counter.count(&s) <= tokens).then_some(s)
     })
+}
+
+/// Every excerpt or no state: a gate that closes must not judge a prefix.
+pub fn answerable_whole(
+    questions: &[String],
+    excerpts: &[Note],
+    counter: &TokenCounter,
+    tokens: usize,
+) -> Option<String> {
+    let s = answerable_of(questions, excerpts);
+    (!excerpts.is_empty() && counter.count(&s) <= tokens).then_some(s)
 }
 
 pub fn rewrite(
@@ -188,6 +202,19 @@ mod tests {
     }
     fn c() -> TokenCounter {
         TokenCounter::default()
+    }
+
+    #[test]
+    fn a_whole_answerable_state_has_every_excerpt_or_is_none() {
+        let qs = vec!["q".to_string()];
+        let long = "word ".repeat(200);
+        let ex = [note(Some("a"), None, "short"), note(Some("b"), None, &long)];
+        let one = c().count(&answerable(&qs, &ex[..1], &c(), 1000).unwrap());
+        assert!(answerable(&qs, &ex, &c(), one).is_some(), "a prefix fits");
+        assert!(answerable_whole(&qs, &ex, &c(), one).is_none());
+        let full = answerable_whole(&qs, &ex, &c(), 10_000).unwrap();
+        assert_eq!(full, answerable(&qs, &ex, &c(), 10_000).unwrap());
+        assert!(answerable_whole(&qs, &[], &c(), 10_000).is_none());
     }
 
     #[test]
