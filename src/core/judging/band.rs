@@ -79,12 +79,8 @@ pub fn pick_and_top(q: &Question, a: &Answer) -> (String, f64) {
 
 /// A choice acts only when its swapped read agreed; `None` means no swapped read applies.
 pub fn band(top: f64, swapped_agree: Option<bool>, t: Thresholds) -> Band {
-    if swapped_agree == Some(false) {
-        return if top >= t.act_at {
-            Band::Ask
-        } else {
-            Band::Leave
-        };
+    if swapped_agree == Some(false) && top >= t.act_at {
+        return Band::Ask;
     }
     if top >= t.act_at {
         Band::Act
@@ -117,6 +113,7 @@ mod tests {
         assert_eq!(band(0.99, Some(false), T), Band::Ask);
         assert_eq!(band(0.99, Some(true), T), Band::Act);
         assert_eq!(band(0.50, Some(false), T), Band::Leave);
+        assert_eq!(band(0.75, Some(false), T), Band::Ask);
     }
 
     #[test]
