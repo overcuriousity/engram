@@ -120,6 +120,11 @@ model = "embeddinggemma"
 dim = 768
 max_input_tokens = 2048
 
+[infer.decide]
+base_url = "http://127.0.0.1:9/v1"
+model = "clef-flash"
+context_tokens = 8192
+
 [infer.ask]
 tier = "device-ask"
 plan = false
@@ -205,6 +210,7 @@ pub async fn start_with(data_dir: &Path, setup: Setup) -> Result<(Started, Runni
             deployment: deployment.clone(),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     };
 
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);

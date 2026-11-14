@@ -842,6 +842,7 @@ impl Store {
         // Every table holding typed words ages: questions and observations too.
         Ok(searches
             + self.expire_asks(retain_days).await?
+            + self.expire_decisions(retain_days).await?
             + self.expire_observations(retain_days).await?)
     }
 
@@ -866,6 +867,7 @@ impl Store {
             + situations
             + profiles
             + self.purge_asks().await?
+            + self.purge_decisions().await?
             + self.purge_pursuits().await?
             + self.purge_observations().await?)
     }

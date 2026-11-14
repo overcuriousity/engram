@@ -52,6 +52,8 @@ pub fn routes() -> Router<AppState> {
 struct WorkspaceTemplate {
     /// See `state::ask_enabled`; the button is absent rather than greyed out.
     ask_enabled: bool,
+    /// See `state::decide_enabled`.
+    decide_enabled: bool,
     /// A deep link's `?q=`, or an answer kept from an ask.
     q: String,
     /// Rendered as chips, so a category need not be known in advance.
@@ -102,6 +104,7 @@ impl WorkspaceTemplate {
 #[template(path = "_held.html")]
 struct HeldTemplate {
     ask_enabled: bool,
+    decide_enabled: bool,
     /// See `WorkspaceTemplate`; `_box_hint.html` reads these.
     example_remind: &'static str,
     example_lang: &'static str,
@@ -119,6 +122,7 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResul
     let (example_remind, example_lang) = examples(&tenant.core, &headers);
     Ok(HtmlTemplate(HeldTemplate {
         ask_enabled: crate::web::state::ask_enabled(&tenant),
+        decide_enabled: crate::web::state::decide_enabled(&tenant),
         example_remind,
         example_lang,
         held: true,
@@ -191,6 +195,7 @@ async fn base_template(
     let (example_remind, example_lang) = examples(&tenant.core, headers);
     Ok(WorkspaceTemplate {
         ask_enabled: crate::web::state::ask_enabled(tenant),
+        decide_enabled: crate::web::state::decide_enabled(tenant),
         q,
         facets,
         category,
@@ -929,7 +934,10 @@ mod tests {
     }
 
     async fn workspace_held(uri: &str) -> String {
-        let core = crate::core::test_support::test_core().await;
+        workspace_held_by(crate::core::test_support::test_core().await, uri).await
+    }
+
+    async fn workspace_held_by(core: crate::core::Core, uri: &str) -> String {
         core.ingest_capture(crate::core::ingest::Capture::new(
             "LevelDB tombstones survive compaction longer than the manual admits.",
             "ui",
@@ -1439,6 +1447,7 @@ mod tests {
         let held = body_of(res).await;
         for region in [
             r#"id="ask-verb-slot""#,
+            r#"id="decide-verb-slot""#,
             r#"id="keyhint-slot""#,
             r#"id="box-hint""#,
             r#"id="pane-idle""#,
@@ -1447,7 +1456,7 @@ mod tests {
         }
         assert_eq!(
             held.matches(r#"hx-swap-oob="true""#).count(),
-            4,
+            5,
             "every region names its own target, or it lands nowhere: {held}"
         );
         assert!(
@@ -1484,6 +1493,51 @@ mod tests {
             to.contains("why") && to.contains("reindex"),
             "with the question still in it: {to}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_workspace_offers_decide_once_the_base_holds_something() {
+        let html = workspace_held("/ui").await;
+        assert!(html.contains(r#"data-verb="decide""#), "{html}");
+        let row = html.split(r#"id="decide-row""#).nth(1).expect("the row");
+        assert!(row.split('>').next().unwrap().contains("hidden"), "{row}");
+        assert!(
+            html.contains(r#"name="decide-kind" value="noul" checked"#),
+            "{html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_core_that_does_not_decide_offers_no_decide_verb() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.decides = false;
+        for uri in ["/ui", "/ui/held"] {
+            let html = workspace_held_by(core.clone(), uri).await;
+            assert!(html.contains(r#"id="decide-verb-slot""#), "{html}");
+            assert!(!html.contains(r#"data-verb="decide""#), "{uri}: {html}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_base_has_the_slot_and_no_button() {
+        let html = workspace("/ui").await;
+        assert!(html.contains(r#"id="decide-verb-slot""#), "{html}");
+        assert!(!html.contains(r#"data-verb="decide""#), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_held_bundle_swaps_the_decide_verb_in() {
+        let html = workspace_held("/ui/held").await;
+        assert!(
+            html.contains(r#"id="decide-verb-slot" hx-swap-oob="true""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"data-verb="decide""#), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_shortcut_is_listed() {
+        assert!(workspace("/ui").await.contains("<dd>Decide</dd>"));
     }
 
     #[tokio::test]
@@ -1980,24 +2034,29 @@ mod tests {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
 
-        let stop = js
-            .split_once("function stop() {")
-            .expect("the driver has no stop()")
-            .1;
-        let stop = &stop[..stop.find("\n    }").expect("stop() does not end")];
-        assert!(
-            stop.contains("setBusy(false)"),
-            "stop() does not give the surface back: {stop}"
-        );
+        // Ask's and Decide's: the ones that close a stream.
+        let stops: Vec<&str> = js
+            .split("function stop() {")
+            .skip(1)
+            .map(|s| &s[..s.find("\n    }").expect("stop() does not end")])
+            .filter(|s| s.contains("source.close()"))
+            .collect();
+        assert_eq!(stops.len(), 2, "a driver has no stop()");
+        for stop in &stops {
+            assert!(
+                stop.contains("boxBusy(form, false)"),
+                "stop() does not give the surface back: {stop}"
+            );
+        }
 
         let busy = js
-            .split_once("function setBusy(")
-            .expect("the driver has no setBusy()")
+            .split_once("function boxBusy(")
+            .expect("the drivers have no boxBusy()")
             .1;
-        let busy = &busy[..busy.find("\n    }").expect("setBusy() does not end")];
+        let busy = &busy[..busy.find("\n  }").expect("boxBusy() does not end")];
         assert!(
             busy.contains("box.readOnly"),
-            "setBusy does not silence the box, so typing still searches: {busy}"
+            "boxBusy does not silence the box, so typing still searches: {busy}"
         );
         assert!(
             !busy.contains("box.disabled"),
@@ -2006,24 +2065,24 @@ mod tests {
         );
 
         assert_eq!(
-            js.matches("setBusy(false)").count(),
-            1,
-            "setBusy(false) is called from more than one place"
+            js.matches("boxBusy(form, false)").count(),
+            stops.len(),
+            "the surface is given back from somewhere other than stop()"
         );
     }
 
     #[test]
-    fn the_two_verbs_are_reachable_from_the_keys() {
+    fn the_three_verbs_are_reachable_from_the_keys() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
 
         let chord = js
-            .split_once("if (e.key !== 'Enter'")
+            .split_once("box.addEventListener('keydown', function (e) {")
             .expect("nothing commits the box from the keyboard")
             .1;
         let chord = &chord[..chord.find("\n    });").expect("the handler does not end")];
         assert!(
-            chord.contains("e.shiftKey ? 'capture' : 'ask'"),
+            chord.contains("e.shiftKey ? 'capture' : 'ask'") && chord.contains("'decide'"),
             "the chord does not pick a verb: {chord}"
         );
         assert!(

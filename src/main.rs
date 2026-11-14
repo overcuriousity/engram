@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[command(
     name = "engram",
     version = env!("ENGRAM_VERSION"),
-    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s, -a, --show or --status it is a client of one."
+    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s, -a, -d, --show or --status it is a client of one."
 )]
 struct Args {
     #[arg(long)]
@@ -125,6 +125,9 @@ async fn startup_checks(cfg: &Config) -> Result<()> {
         cfg.infer.embed.api_key.as_deref(),
     )
     .await;
+    let d = &cfg.infer.decide;
+    engram::infer::openai::probe("decide", &d.base_url, d.api_key.as_deref()).await;
+    tracing::info!(model = %d.model, context_tokens = d.context_tokens, parallel = d.parallel, "decision model");
     if let Some(r) = &cfg.infer.rerank {
         engram::infer::openai::probe_path(
             "rerank",
@@ -341,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
         || data_command(&args)
         || args.user.is_some();
     use std::io::IsTerminal;
-    if let Some(verb) = engram::cli::args::verb(
+    let verb = engram::cli::args::verb(
         &args.cli,
         server_command,
         !std::io::stdin().is_terminal(),
@@ -351,7 +354,16 @@ async fn main() -> anyhow::Result<()> {
             std::io::stdin().read_to_string(&mut s)?;
             Ok(s)
         },
-    )? {
+    );
+    // A refused verb is the client's failure, so it exits 2 as the client does, not anyhow's 1.
+    let verb = match verb {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}", engram::cli::say(&e));
+            std::process::exit(2);
+        }
+    };
+    if let Some(verb) = verb {
         let code = engram::cli::run(verb, &args.cli).await;
         std::process::exit(code);
     }
@@ -559,6 +571,7 @@ async fn main() -> anyhow::Result<()> {
             deployment: deployment.clone(),
         }),
         ask_handoff: Default::default(),
+        decide_handoff: Default::default(),
     };
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

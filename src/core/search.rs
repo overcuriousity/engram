@@ -77,6 +77,8 @@ pub struct SearchOutcome {
     pub explanation: crate::core::explain::SearchExplanation,
     /// The capture this search wrote, where the door waited for it (UI only); `None` elsewhere.
     pub event: Option<String>,
+    /// What `q` was embedded as; empty when the search fell back to keywords.
+    pub query_vec: Vec<f32>,
 }
 
 /// A stage of the search pipeline, in order; named by the server, which decides whether reranking
@@ -1247,6 +1249,7 @@ impl Core {
                                     ..explanation
                                 },
                                 event: None,
+                                query_vec: Vec::new(),
                             },
                         ));
                     }
@@ -1663,6 +1666,7 @@ impl Core {
                     ..explanation
                 },
                 event: captured_event,
+                query_vec: vector,
             },
         ))
     }

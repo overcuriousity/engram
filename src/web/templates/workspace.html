@@ -48,6 +48,7 @@
   </div>
   <div class="verbs">
     {% include "_ask_verb.html" %}
+    {% include "_decide_verb.html" %}
     <button class="oc-btn" type="button" data-verb="capture" disabled
             title="Type or attach something first">Capture</button>
     {# The input is the control, hidden only from sight, so keyboard and the phone camera reach it. #}
@@ -80,6 +81,7 @@
     </span>
     {% endif %}
   </div>
+  {% include "_decide_row.html" %}
   {% include "_box_hint.html" %}
 </form>
 

@@ -16,6 +16,8 @@ passages that answer you. Three doors, one backend: the web UI, a REST API at
   Dictation where `[infer.transcribe]` is set.
 - **Ask** — one streamed answer across the base; abstains when the base has
   nothing and badges commands or paths no excerpt supports.
+- **Decide** — a typed question (yes or no, options, a scale) answered from the
+  notes that bear on it, with each note's own reading beside the verdict.
 - **Judge** — verdicts under a search or an answer give recall@10 and MRR on
   Insights and drive the idle pass's ranking moves.
 - **Duplicates and disagreements** — judged in the background; merges never drop
@@ -33,7 +35,8 @@ reminded), an **event** (mentions a date) or a **link** (restates a kept note).
 ## Requirements
 
 Rust 1.94+, Qdrant (REST API), and an OpenAI-compatible endpoint for chat and
-embeddings.
+embeddings. A decision model, `[infer.decide]`, is required: without it engram
+does not start.
 
 ## Install
 
@@ -124,11 +127,12 @@ archives you made; encrypting and shipping them is yours to do.
   engram -c notes.pdf                 # capture; `pbpaste | engram` captures a pipe
   engram -s 40 "loop device"          # search
   engram -a "how did I mount it?"     # stream an answer
+  engram -d "keep bge-m3?"            # decide: yes or no, or --option / --level
   engram -r "call the bank tomorrow"  # hint: a reminder
   engram --show 3                     # the third hit of the last search
   ```
 
-  Exit `1` means nothing was found.
+  Exit `1` means nothing was found or held.
 - **Android** — a client of `/api/v1`, or a contained server on the phone;
   pairs by QR. [android/README.md](android/README.md); the APK is on the
   [releases page](https://github.com/overcuriousity/engram/releases).

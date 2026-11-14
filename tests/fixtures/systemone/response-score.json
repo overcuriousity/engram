@@ -1,0 +1,73 @@
+{
+  "run": {
+    "state": "The server crashed twice today and customers are complaining.",
+    "questions": [
+      {
+        "key": "urgency",
+        "type": "score",
+        "text": "How urgent is this?",
+        "levels": [
+          {
+            "id": "l0",
+            "text": "Not urgent"
+          },
+          {
+            "id": "l1",
+            "text": "Can wait a week"
+          },
+          {
+            "id": "l2",
+            "text": "Should be handled today"
+          },
+          {
+            "id": "l3",
+            "text": "Drop everything"
+          }
+        ]
+      }
+    ]
+  },
+  "body": {
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "answers": {
+      "urgency": {
+        "type": "score",
+        "score": 2.2296282454039096,
+        "legend": {
+          "0": "Not urgent",
+          "1": "Can wait a week",
+          "2": "Should be handled today",
+          "3": "Drop everything"
+        },
+        "probabilities": {
+          "0": 0.03627766467380398,
+          "1": 0.020864461569718846,
+          "2": 0.6198098374352404,
+          "3": 0.3230480363212367
+        },
+        "confidence": 0.5835321727614365
+      }
+    },
+    "usage": {
+      "input_tokens": 174,
+      "output_tokens": 0
+    }
+  },
+  "expected": {
+    "answers": {
+      "urgency": {
+        "type": "score",
+        "score": 2.2296282454039096,
+        "probabilities": [
+          0.03627766467380398,
+          0.020864461569718846,
+          0.6198098374352404,
+          0.3230480363212367
+        ],
+        "confidence": 0.5835321727614365
+      }
+    },
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "inputTokens": 174
+  }
+}

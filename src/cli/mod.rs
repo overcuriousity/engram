@@ -4,6 +4,7 @@
 pub mod args;
 pub mod ask;
 pub mod capture;
+pub mod decide;
 pub mod endpoint;
 pub mod face;
 pub mod last;
@@ -26,7 +27,7 @@ pub(crate) fn encode(raw: &str) -> String {
 }
 
 /// An error as a sentence for the terminal, without `Validation`'s kind prefix.
-fn say(e: &crate::error::Error) -> String {
+pub fn say(e: &crate::error::Error) -> String {
     match e {
         crate::error::Error::Validation(msg) => msg.clone(),
         other => other.to_string(),
@@ -45,6 +46,15 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             return 2;
         }
     };
+    dispatch(&endpoint, verb, cli).await
+}
+
+/// `run` past the endpoint, so a test can name the server.
+pub(crate) async fn dispatch(
+    endpoint: &endpoint::Endpoint,
+    verb: args::Verb,
+    cli: &args::CliArgs,
+) -> i32 {
     // One face for the whole invocation, so the upload track, readout and lamps agree.
     let face = face::Face::decide(
         cli,
@@ -57,7 +67,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             let captured = match &verb {
                 args::Verb::Capture(targets) => {
                     capture::run(
-                        &endpoint,
+                        endpoint,
                         targets,
                         cli.title.as_deref(),
                         cli.note.as_deref(),
@@ -67,7 +77,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                 }
                 args::Verb::CapturePiped(text) => {
                     capture::run_piped(
-                        &endpoint,
+                        endpoint,
                         text.clone(),
                         cli.title.as_deref(),
                         cli.note.as_deref(),
@@ -84,7 +94,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                     }
                     if cli.watch {
                         for id in &ids {
-                            if let Err(e) = capture::watch(&endpoint, id, &face).await {
+                            if let Err(e) = capture::watch(endpoint, id, &face).await {
                                 eprintln!("{}", say(&e));
                                 return 2;
                             }
@@ -99,7 +109,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
             }
         }
         args::Verb::Search { limit, query } => {
-            match search::run(&endpoint, limit, &query, cli).await {
+            match search::run(endpoint, limit, &query, cli).await {
                 Ok(code) => code,
                 Err(e) => {
                     eprintln!("{}", say(&e));
@@ -107,21 +117,32 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                 }
             }
         }
-        args::Verb::Show(which) => match show::run(&endpoint, &which, last::load()).await {
+        args::Verb::Show(which) => match show::run(endpoint, &which, last::load()).await {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("{}", say(&e));
                 2
             }
         },
-        args::Verb::Status => match status::run(&endpoint, &face, cli.json).await {
+        args::Verb::Status => match status::run(endpoint, &face, cli.json).await {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("{}", say(&e));
                 2
             }
         },
-        args::Verb::Ask(question) => match ask::run(&endpoint, &question, cli).await {
+        args::Verb::Ask(question) => match ask::run(endpoint, &question, cli).await {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("{}", say(&e));
+                2
+            }
+        },
+        args::Verb::Decide {
+            question,
+            kind,
+            situation,
+        } => match decide::run(endpoint, &question, &kind, situation.as_deref(), cli).await {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("{}", say(&e));
@@ -130,7 +151,7 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
         },
         args::Verb::Remind(text) => {
             match capture::run_text(
-                &endpoint,
+                endpoint,
                 text,
                 cli.title.as_deref(),
                 cli.note.as_deref(),

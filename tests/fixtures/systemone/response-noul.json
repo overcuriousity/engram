@@ -1,0 +1,35 @@
+{
+  "run": {
+    "state": "",
+    "questions": [
+      {
+        "key": "wet",
+        "type": "noul",
+        "text": "Is water wet?"
+      }
+    ]
+  },
+  "body": {
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "answers": {
+      "wet": {
+        "type": "noul",
+        "noul": 0.9784768909885947
+      }
+    },
+    "usage": {
+      "input_tokens": 140,
+      "output_tokens": 0
+    }
+  },
+  "expected": {
+    "answers": {
+      "wet": {
+        "type": "noul",
+        "noul": 0.9784768909885947
+      }
+    },
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "inputTokens": 140
+  }
+}

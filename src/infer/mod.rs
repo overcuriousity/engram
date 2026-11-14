@@ -1,5 +1,6 @@
 pub mod budget;
 pub mod context;
+pub mod decide;
 pub mod fake;
 pub mod gate;
 pub mod lang;

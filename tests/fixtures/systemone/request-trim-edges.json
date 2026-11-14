@@ -1,0 +1,26 @@
+{
+  "run": {
+    "state": "x",
+    "questions": [
+      {
+        "key": "pick",
+        "type": "choice",
+        "text": "﻿Pick one",
+        "options": [
+          {
+            "id": "o1",
+            "name": "﻿a",
+            "description": "﻿"
+          },
+          {
+            "id": "o2",
+            "name": "b",
+            "description": " note"
+          }
+        ]
+      }
+    ]
+  },
+  "model": "m",
+  "expected_json": "{\"model\":\"m\",\"state\":\"x\",\"questions\":{\"pick\":{\"type\":\"choice\",\"instructions\":\"Pick one\",\"criteria\":{\"a\":\"a\",\"b\":\" note\"}}}}"
+}

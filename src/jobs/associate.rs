@@ -864,7 +864,9 @@ mod tests {
         let mut core = test_core().await;
         on(&mut core).await;
         let ids = seed(&core, 2).await;
-        for q in ["one", "two", "three", "four"] {
+        // Five, not four: four sit exactly on `judge_min`, and a second ticking before the sweep
+        // decays them just under it.
+        for q in ["one", "two", "three", "four", "five"] {
             core.store
                 .bump_link(&ids[0], &ids[1], 1.0, Some(q), 30.0, crate::store::now())
                 .await

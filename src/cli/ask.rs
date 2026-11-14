@@ -7,12 +7,12 @@ use crate::error::{Error, Result};
 /// One line on stderr, redrawn in place; gone before the answer starts so it never reaches
 /// the scrollback.
 #[derive(Default)]
-struct Note {
+pub(crate) struct Note {
     drawn: bool,
 }
 
 impl Note {
-    fn show(&mut self, line: Option<String>) {
+    pub(crate) fn show(&mut self, line: Option<String>) {
         let Some(line) = line else { return };
         use std::io::Write;
         eprint!("\r\u{1b}[2K  {line}");
@@ -20,7 +20,7 @@ impl Note {
         self.drawn = true;
     }
 
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         if self.drawn {
             use std::io::Write;
             eprint!("\r\u{1b}[2K");
@@ -38,7 +38,11 @@ impl Drop for Note {
 }
 
 /// One lamp line within the terminal width; clipped before escapes make counting columns wrong.
-fn within(face: &crate::cli::face::Face, lamp: crate::cli::face::Lamp, said: &str) -> String {
+pub(crate) fn within(
+    face: &crate::cli::face::Face,
+    lamp: crate::cli::face::Lamp,
+    said: &str,
+) -> String {
     face.lamp_line(
         lamp,
         &crate::cli::face::clip(said, face.width.saturating_sub(4), face.unicode),

@@ -1,0 +1,9 @@
+{% for r in rows %}
+{% if let Some(g) = r.group %}
+<div class="assoc-rule" role="separator">{{ g }}</div>
+{% endif %}
+{% include "_decide_rail_row.html" %}
+{% endfor %}
+{% if rest > 0 %}
+<p class="muted rail-rest">{{ rest }}{% if !rows.is_empty() %} more{% endif %} did not bear on it</p>
+{% endif %}

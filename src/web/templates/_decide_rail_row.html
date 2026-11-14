@@ -1,0 +1,19 @@
+{# Opens in the pane as a search hit does: the decision is finished, nothing streams over it. #}
+<div class="rail-row">
+  <a class="rail-item" role="option" aria-selected="false"
+     href="/ui/artifacts/{{ r.artifact_id }}"
+     hx-get="/ui/artifacts/{{ r.artifact_id }}"
+     hx-target="#pane-content" hx-swap="innerHTML transition:true" hx-push-url="true">
+    <div class="rail-head{% if r.title.is_empty() %} rail-head-bare{% endif %}">
+      <span class="rail-rank mono">[{{ r.n }}]</span>
+      {% if !r.title.is_empty() %}<span class="rail-title">{{ r.title }}</span>{% endif %}
+      {% match r.pick %}
+      {% when Some with (p) %}<span class="rail-pick mono">{{ p }}</span>
+      {% when None %}<span class="rail-pick muted">does not bear</span>
+      {% endmatch %}
+      {% if r.against %}
+      <span class="oc-status oc-status--warning">{{ crate::web::icons::icon("triangle-alert", 14) }}<span>against</span></span>
+      {% endif %}
+    </div>
+  </a>
+</div>

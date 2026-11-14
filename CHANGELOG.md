@@ -5,7 +5,12 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 
 ## [Unreleased]
 
+### Added
+- `scripts/probe-decide.sh` measures a decision endpoint.
+- Decide: a typed question answered from the notes that bear on it, with each note's own reading. Judging a decision confirms the notes that agree and sends the ones against to the pair judge. `POST /api/v1/decide`, `/decide/stream`, `/decisions/{id}/verdict`; thresholds under `[decide]`. In the web UI beside Search and Ask (Alt+Enter). Also the MCP tool decide and engram -d. Not on the Android app, which runs no decision model.
+
 ### Changed
+- **`[infer.decide]` is required.** engram needs a decision model (System One, `POST {base_url}/systemone`); a config without the block is refused at start. Copy it from `config.example.toml`.
 - engram follows the overcuriousity dev manifest v2026.11.1, profile everyday; deviations are listed in `AGENTS.md`.
 - Pages, the extension panel and the READMEs say less: labels and short glosses only.
 - The interface uses the manifest's tokens, Atkinson Hyperlegible Next and Lucide icons; theme and text size are stored per user.

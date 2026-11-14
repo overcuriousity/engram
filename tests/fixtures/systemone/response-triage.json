@@ -1,0 +1,128 @@
+{
+  "run": {
+    "state": "The server crashed twice today and customers are complaining.",
+    "questions": [
+      {
+        "key": "team",
+        "type": "choice",
+        "text": "Which team should handle this?",
+        "options": [
+          {
+            "id": "o1",
+            "name": "ops",
+            "description": "Servers, outages, deployments"
+          },
+          {
+            "id": "o2",
+            "name": "support",
+            "description": "Customer questions and complaints"
+          },
+          {
+            "id": "o3",
+            "name": "sales",
+            "description": "Quotes and contracts"
+          }
+        ]
+      },
+      {
+        "key": "urgency",
+        "type": "score",
+        "text": "How urgent is this?",
+        "levels": [
+          {
+            "id": "l0",
+            "text": "Not urgent"
+          },
+          {
+            "id": "l1",
+            "text": "Can wait a week"
+          },
+          {
+            "id": "l2",
+            "text": "Should be handled today"
+          },
+          {
+            "id": "l3",
+            "text": "Drop everything"
+          }
+        ]
+      },
+      {
+        "key": "outage",
+        "type": "noul",
+        "text": "Is this an outage?"
+      }
+    ]
+  },
+  "body": {
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "answers": {
+      "team": {
+        "type": "choice",
+        "choice": "ops",
+        "probabilities": {
+          "ops": 0.938138238035139,
+          "sales": 0.00216724553184277,
+          "support": 0.05969451643301845
+        },
+        "confidence": 0.9072073570527083
+      },
+      "urgency": {
+        "type": "score",
+        "score": 2.452405810240454,
+        "legend": {
+          "0": "Not urgent",
+          "1": "Can wait a week",
+          "2": "Should be handled today",
+          "3": "Drop everything"
+        },
+        "probabilities": {
+          "0": 0.011121224718787393,
+          "1": 0.0037251694229868187,
+          "2": 0.5067801767572107,
+          "3": 0.4783734291010152
+        },
+        "confidence": 0.49565895203842314
+      },
+      "outage": {
+        "type": "noul",
+        "noul": 0.8796997851618287
+      }
+    },
+    "usage": {
+      "input_tokens": 344,
+      "output_tokens": 0
+    }
+  },
+  "expected": {
+    "answers": {
+      "team": {
+        "type": "choice",
+        "choice": "ops",
+        "probabilities": [
+          0.938138238035139,
+          0.05969451643301845,
+          0.00216724553184277
+        ],
+        "confidence": 0.9072073570527083
+      },
+      "urgency": {
+        "type": "score",
+        "score": 2.452405810240454,
+        "probabilities": [
+          0.011121224718787393,
+          0.0037251694229868187,
+          0.5067801767572107,
+          0.4783734291010152
+        ],
+        "confidence": 0.49565895203842314
+      },
+      "outage": {
+        "type": "noul",
+        "noul": 0.8796997851618287
+      }
+    },
+    "model": "ggml-org/Clef-Flash-GGUF:Q8_0",
+    "inputTokens": 344
+  }
+}

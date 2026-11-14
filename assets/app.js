@@ -390,6 +390,76 @@
     });
   }
 
+  // Ask and Decide share the box: one model call at a time, one Stop button, one ticking spinner.
+  var boxRun = { started: 0, ticker: null, stops: [] };
+
+  // Read-only, not disabled, so the question stays selectable and focused; it fires no `input`.
+  // Cleared by each driver's `stop()`, which every exit runs, including a transport error.
+  function boxBusy(form, busy) {
+    var box = form.querySelector('textarea[name="q"]');
+    var spinner = document.getElementById('search-spinner');
+    if (boxRun.ticker) { clearInterval(boxRun.ticker); boxRun.ticker = null; }
+    document.getElementById('ask-stop').hidden = !busy;
+    spinner.textContent = 'searching…';
+    form.classList.toggle('asking', busy);
+    box.readOnly = busy;
+    form.setAttribute('aria-busy', busy ? 'true' : 'false');
+    var vs = form.querySelectorAll('[data-verb]');
+    for (var i = 0; i < vs.length; i++) vs[i].disabled = busy;
+    // A chip clicked mid-answer would swap a "0 results" rail over the citations.
+    var chips = form.querySelectorAll('#kind-chips input');
+    for (var j = 0; j < chips.length; j++) chips[j].disabled = busy;
+    if (busy) {
+      // From the press: retrieval before the model is most of the wait.
+      boxRun.started = Date.now();
+      boxRun.ticker = setInterval(function () {
+        spinner.textContent = 'thinking… ' + boxSecs() + 's';
+      }, 1000);
+    } else {
+      // A box emptied while streaming must not come back with live verbs.
+      box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
+    }
+  }
+
+  // One Stop for every verb, live from the press: a run still parking its question has no stream
+  // yet, and `boxStopAll` bumps each driver's generation so that stream is never opened.
+  function boxStop() {
+    var form = document.getElementById('box-form');
+    var btn = document.getElementById('ask-stop');
+    if (!form || !btn) return;
+    btn.addEventListener('click', function () {
+      if (form.getAttribute('aria-busy') !== 'true') return;
+      var secs = boxSecs();
+      boxStopAll();
+      // What arrived stays: the reader stopped the wait, not the answer.
+      document.getElementById('ask-status').textContent = 'stopped after ' + secs + ' seconds';
+    });
+  }
+
+  function boxSecs() {
+    return Math.round((Date.now() - boxRun.started) / 1000);
+  }
+
+  // Ends every stream from the box and drops its late frames; a new run starts after it.
+  function boxStopAll() {
+    boxRun.stops.forEach(function (f) { f(); });
+  }
+
+  // The rail holds this act's passages; the button re-runs the box's search rather than keeping them.
+  function railHeadBack(head, text) {
+    head.innerHTML = '';
+    var label = document.createElement('span');
+    label.className = 'result-count';
+    label.textContent = text;
+    var back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'oc-btn';
+    back.setAttribute('data-rerun', '');
+    back.textContent = 'Back to results';
+    head.appendChild(label);
+    head.appendChild(back);
+  }
+
   // Ask: POST parks the question and the GET stream spends the id once, since a GET running a model call
   // would be a free-inference hole. The page only moves server-rendered HTML or sets text.
   function askDriver() {
@@ -406,12 +476,7 @@
     var rail = document.getElementById('results');
     var result = document.getElementById('ask-result');
     var status = document.getElementById('ask-status');
-    var spinner = document.getElementById('search-spinner');
-    var stopBtn = document.getElementById('ask-stop');
     var source = null;
-    // From the submit: retrieval before the model is most of the wait.
-    var started = 0;
-    var ticker = null;
     // Which ask the page belongs to. See the submit handler.
     var generation = 0;
 
@@ -419,49 +484,14 @@
     // and a reconnect could be a second model call and a second bill.
     function stop() {
       if (source) { source.close(); source = null; }
-      if (ticker) { clearInterval(ticker); ticker = null; }
-      stopBtn.hidden = true;
-      spinner.textContent = 'searching…';
-      form.classList.remove('asking');
-      setBusy(false);
+      boxBusy(form, false);
     }
-
-    // Read-only, not disabled, so the question stays selectable and focused; it fires no `input`.
-    // Re-enabled only in `stop()`, which every exit runs, including a transport error.
-    function setBusy(busy) {
-      box.readOnly = busy;
-      form.setAttribute('aria-busy', busy ? 'true' : 'false');
-      var vs = form.querySelectorAll('[data-verb]');
-      for (var i = 0; i < vs.length; i++) vs[i].disabled = busy;
-      // A chip clicked mid-answer would swap a "0 results" rail over the citations.
-      var chips = form.querySelectorAll('#kind-chips input');
-      for (var j = 0; j < chips.length; j++) chips[j].disabled = busy;
-      // A box emptied while streaming must not come back with live verbs.
-      if (!busy) box.dispatchEvent(new Event(VERB_SYNC, { bubbles: true }));
-    }
-
-    function startTicking() {
-      started = Date.now();
-      stopBtn.hidden = false;
-      if (ticker) clearInterval(ticker);
-      ticker = setInterval(function () {
-        var secs = Math.round((Date.now() - started) / 1000);
-        spinner.textContent = 'thinking… ' + secs + 's';
-      }, 1000);
-    }
+    boxRun.stops.push(function () { generation++; stop(); });
 
     // The one gate every htmx request from this form passes; a debounce armed before Ask, or the
     // "← results" anchor, would otherwise swap a rail over the citations.
     form.addEventListener('htmx:configRequest', function (e) {
       if (form.getAttribute('aria-busy') === 'true') e.preventDefault();
-    });
-
-    stopBtn.addEventListener('click', function () {
-      if (!source) return;
-      var secs = Math.round((Date.now() - started) / 1000);
-      stop();
-      // What arrived stays: the reader stopped the wait, not the answer.
-      status.textContent = 'stopped after ' + secs + ' seconds';
     });
 
     function fail(message) {
@@ -493,20 +523,7 @@
         enhance(rail);
         // The rail now holds this act's excerpts; the anchor re-runs the box's search rather than keeping stale results.
         var head = document.getElementById('rail-head');
-        if (head) {
-          var n = rail.querySelectorAll('.rail-item').length;
-          head.innerHTML = '';
-          var label = document.createElement('span');
-          label.className = 'result-count';
-          label.textContent = 'Written from · ' + n;
-          var back = document.createElement('button');
-          back.type = 'button';
-          back.className = 'oc-btn';
-          back.setAttribute('data-rerun', '');
-          back.textContent = 'Back to results';
-          head.appendChild(label);
-          head.appendChild(back);
-        }
+        if (head) railHeadBack(head, 'Written from · ' + rail.querySelectorAll('.rail-item').length);
       });
       // Shows the fan-out's queries; with `plan = false` this never fires.
       source.addEventListener('needs', function (e) {
@@ -573,8 +590,8 @@
       hideIdle();
       // Two submits before the first POST resolves would open two streams, the first unclosable.
       // Anything from an older generation is dropped, including the stream it was about to open.
+      boxStopAll();
       var mine = ++generation;
-      stop();
       status.textContent = '';
       live.textContent = '';
       reasoning.textContent = '';
@@ -595,9 +612,7 @@
         regions.classList.remove('pane-open');
         regions.classList.add('answering');
       }
-      form.classList.add('asking');
-      setBusy(true);
-      startTicking();
+      boxBusy(form, true);
 
       fetch('/ui/ask', {
         method: 'POST',
@@ -629,6 +644,218 @@
       });
       target.classList.add('rail-active');
       target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    });
+  }
+
+  // Decide: parked and streamed as ask is, against the options in `#decide-row`; the rail fills as
+  // each passage is read. Text from the stream is set as text; only server-rendered fragments are HTML.
+  function decideDriver() {
+    var form = document.getElementById('box-form');
+    var row = document.getElementById('decide-row');
+    if (!form || !row) return;
+    var box = form.querySelector('textarea[name="q"]');
+    var progress = document.getElementById('ask-progress');
+    var rail = document.getElementById('results');
+    var result = document.getElementById('ask-result');
+    var status = document.getElementById('ask-status');
+    var head = document.getElementById('rail-head');
+    var said = document.getElementById('decide-problem');
+    var lists = {
+      choice: document.getElementById('decide-options'),
+      score: document.getElementById('decide-levels'),
+    };
+    var source = null;
+    // As ask's: a frame from a superseded decision must not write into this one.
+    var generation = 0;
+
+    function stop() {
+      if (source) { source.close(); source = null; }
+      boxBusy(form, false);
+    }
+    boxRun.stops.push(function () { generation++; stop(); });
+
+    function checked() {
+      return row.querySelector('input[name="decide-kind"]:checked');
+    }
+
+    function expand(on) {
+      row.hidden = !on;
+      var btn = form.querySelector('[data-verb="decide"]');
+      if (btn) btn.setAttribute('aria-expanded', on ? 'true' : 'false');
+      if (on && checked()) checked().focus();
+      if (!on) box.focus();
+    }
+
+    function shape() {
+      var kind = checked() ? checked().value : 'noul';
+      return {
+        kind: kind,
+        options: Array.prototype.map.call(lists.choice.querySelectorAll('.decide-option'), function (o) {
+          return {
+            name: o.querySelector('[name="decide-option"]').value,
+            description: o.querySelector('[name="decide-desc"]').value,
+          };
+        }),
+        levels: Array.prototype.map.call(lists.score.querySelectorAll('[name="decide-level"]'), function (i) {
+          return i.value;
+        }),
+      };
+    }
+
+    function line(text) {
+      progress.textContent = text;
+      progress.hidden = !text;
+    }
+
+    function fail(message) {
+      stop();
+      head.textContent = '';
+      result.textContent = '';
+      // textContent inside: an error string never went through the sanitizer.
+      result.appendChild(notice('danger', message));
+      line('');
+    }
+
+    function openStream(id, mine) {
+      if (mine !== generation) return;
+      var D = window.engramDecide;
+      source = new EventSource('/ui/decide/' + encodeURIComponent(id) + '/stream');
+      function current() { return mine === generation; }
+      var read = 0;
+      var bearing = 0;
+      source.addEventListener('retrieved', function (e) {
+        if (!current()) return;
+        head.textContent = 'Reading';
+        line(D.progressText(0, JSON.parse(e.data).passages, 0));
+      });
+      source.addEventListener('read', function (e) {
+        if (!current()) return;
+        var p = JSON.parse(e.data);
+        rail.insertAdjacentHTML('beforeend', p.row);
+        // Bound now: a row clicked mid-stream must open in the pane, not navigate the decision away.
+        if (window.htmx && rail.lastElementChild) window.htmx.process(rail.lastElementChild);
+        read++;
+        if (p.bearing) bearing++;
+        line(D.progressText(read, p.of, bearing));
+      });
+      source.addEventListener('done', function (e) {
+        if (!current()) return;
+        stop();
+        var p = JSON.parse(e.data);
+        result.innerHTML = p.html;
+        rail.innerHTML = p.rail;
+        railHeadBack(head, p.rail_head);
+        [result, rail].forEach(function (el) {
+          enhance(el);
+          // htmx binds `hx-*` only on markup it swapped or was told about.
+          if (window.htmx) window.htmx.process(el);
+        });
+        line('');
+        status.textContent = 'The decision is ready.';
+      });
+      // Also the browser's transport error, which is already queuing a reconnect.
+      source.addEventListener('error', function (e) {
+        if (!current()) return;
+        // The server's frame is `{ error }`, as on `/api/v1/decide/stream`.
+        var said = null;
+        try { said = e.data ? JSON.parse(e.data).error : null; } catch (_) { said = null; }
+        fail(said || 'The connection to the decision was lost. Press Decide to try again.');
+      });
+    }
+
+    function run() {
+      var D = window.engramDecide;
+      var q = box.value;
+      var r = shape();
+      var why = D.problem(q, r);
+      said.textContent = why;
+      if (why) return;
+      hideIdle();
+      boxStopAll();
+      var mine = ++generation;
+      status.textContent = '';
+      line('');
+      head.textContent = '';
+      rail.textContent = '';
+      result.textContent = '';
+      // Whatever a stopped ask left streaming, or an artifact, belongs to the superseded act.
+      ['ask-live', 'ask-reasoning-box'].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.hidden = true;
+      });
+      var pane = document.getElementById('pane-content');
+      if (pane) pane.textContent = '';
+      var regions = document.querySelector('.regions');
+      if (regions) {
+        regions.classList.remove('pane-open');
+        regions.classList.add('answering');
+      }
+      boxBusy(form, true);
+      fetch('/ui/decide', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'content-type': 'application/json' },
+        body: D.bodyText(q, r),
+      }).then(function (res) {
+        if (!res.ok) throw new Error('The decision was refused (' + res.status + '). Check the options and try again.');
+        return res.json();
+      }).then(function (out) {
+        openStream(out.id, mine);
+      }).catch(function (err) {
+        if (mine !== generation) return;
+        fail(err.message || 'The decision could not be sent. Try again.');
+      });
+    }
+
+    // Delegated: the button arrives out of band on the first capture.
+    form.addEventListener('click', function (e) {
+      var btn = e.target.closest ? e.target.closest('[data-verb="decide"]') : null;
+      if (!btn || btn.disabled) return;
+      e.preventDefault();
+      if (row.hidden) expand(true);
+      else run();
+    });
+
+    row.addEventListener('change', function (e) {
+      if (e.target.name !== 'decide-kind') return;
+      lists.choice.hidden = e.target.value !== 'choice';
+      lists.score.hidden = e.target.value !== 'score';
+      said.textContent = '';
+    });
+
+    row.addEventListener('click', function (e) {
+      var add = e.target.closest ? e.target.closest('[data-decide-add]') : null;
+      if (!add || add.disabled) return;
+      var one = add.getAttribute('data-decide-add');
+      var cls = one === 'option' ? '.decide-option' : '.decide-level';
+      var max = window.engramDecide.LIMITS[one === 'option' ? 'options' : 'levels'][1];
+      var fresh = document.getElementById('decide-' + one + '-row').content.firstElementChild.cloneNode(true);
+      add.parentNode.insertBefore(fresh, add);
+      fresh.querySelector('input').focus();
+      add.disabled = add.parentNode.querySelectorAll(cls).length >= max;
+    });
+
+    row.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') {
+        // Stopped here, or the page's Escape would blur the box it just focused.
+        e.preventDefault();
+        e.stopPropagation();
+        expand(false);
+        return;
+      }
+      if (e.key !== 'Enter' || e.isComposing) return;
+      // A summary opens its description and a button does its own act.
+      if (e.target.closest('summary, button')) return;
+      e.preventDefault();
+      // Through the button, so whatever disables it (busy, a staged file) holds here too.
+      var btn = form.querySelector('[data-verb="decide"]');
+      if (btn && !btn.disabled) { btn.click(); return; }
+      var staged = document.getElementById('staged');
+      var busy = form.getAttribute('aria-busy') === 'true';
+      // An empty box is the one reason worth saying; the button cannot say it.
+      if (!busy && !box.value.trim() && !(staged && !staged.hidden)) {
+        said.textContent = window.engramDecide.problem(box.value, shape());
+      }
     });
   }
 
@@ -1138,7 +1365,7 @@
 
     // A staged file is something for Capture to act on, even over an empty box.
     function sync() {
-      // `setBusy` owns the verbs during an ask; a mid-answer drop would otherwise re-enable them.
+      // `boxBusy` owns the verbs during an ask or a decision; a mid-answer drop would otherwise re-enable them.
       if (form.getAttribute('aria-busy') === 'true') return;
       var hasText = !!box.value.trim();
       var stagedEl = document.getElementById('staged');
@@ -1155,7 +1382,8 @@
           ? !(hasText || hasFile)
           // Asking a file's note makes no sense.
           : (!hasText || hasFile);
-        var lead = verb === 'ask' ? (asksLike && !keepsLike) : keepsLike;
+        // Decide is never the likelier verb: it is chosen, not guessed.
+        var lead = verb === 'ask' ? (asksLike && !keepsLike) : verb === 'capture' && keepsLike;
         buttons[i].classList.toggle('oc-btn--primary', lead && !buttons[i].disabled);
       }
     }
@@ -1183,9 +1411,12 @@
 
     // Enter is a line break; the chord is the button's act, routed through it so a disabled verb stays inert.
     box.addEventListener('keydown', function (e) {
-      if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey) return;
-      var verb = form.querySelector(
-        '[data-verb="' + (e.shiftKey ? 'capture' : 'ask') + '"]');
+      if (e.key !== 'Enter') return;
+      var mod = e.metaKey || e.ctrlKey;
+      var name = mod && !e.altKey ? (e.shiftKey ? 'capture' : 'ask')
+        : e.altKey && !mod && !e.shiftKey ? 'decide' : null;
+      if (!name) return;
+      var verb = form.querySelector('[data-verb="' + name + '"]');
       if (!verb || verb.disabled) return;
       e.preventDefault();
       verb.click();
@@ -2170,6 +2401,8 @@
     captureVerb();
     micButton();
     askDriver();
+    decideDriver();
+    boxStop();
     refinePass();
     rerunAfterRead();
     trackDwell();

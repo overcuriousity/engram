@@ -1,0 +1,21 @@
+{# Weights out of 100 and a standing, never a probability as the truth; the evidence is in the rail. #}
+<section class="answer decision">
+  <h2 class="oc-text-section">{{ question }}</h2>
+  {% if !bars.is_empty() %}
+  <div class="bars">
+    {% for b in bars %}
+    <div class="bar{% if b.picked %} picked{% endif %}">
+      <span class="bar-label" aria-hidden="true">{{ b.label }}</span>
+      <svg class="bar-track" viewBox="0 0 100 4" preserveAspectRatio="none" aria-hidden="true"><rect class="bar-fill" width="{{ b.weight }}" height="4"/><rect class="bar-prior" x="{{ b.prior_x() }}" width="1" height="4"/></svg>
+      <span class="bar-weight mono" aria-hidden="true">{{ b.weight }}</span>
+      <span class="oc-sr-only">{{ b.label }}: {{ b.weight }} of 100, {{ b.prior }} without notes</span>
+    </div>
+    {% endfor %}
+  </div>
+  <p class="muted bar-legend"><svg class="bar-key" viewBox="0 0 1 4" preserveAspectRatio="none" aria-hidden="true"><rect class="bar-prior" width="1" height="4"/></svg> without notes</p>
+  <p class="standing">{{ standing }}</p>
+  {% else %}
+  <div class="oc-notice oc-notice--info" role="status">{{ crate::web::icons::icon("info", 16) }}<span class="oc-notice__text">Nothing here: the base does not hold this</span></div>
+  {% endif %}
+  {{ verdict_bar|safe }}
+</section>

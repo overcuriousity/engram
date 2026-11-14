@@ -1,0 +1,23 @@
+{# Shown by app.js when Decide is chosen: how the answer should look. #}
+<fieldset id="decide-row" class="decide-row" hidden>
+  <legend class="muted">Answer</legend>
+  <label class="chip"><input type="radio" name="decide-kind" value="noul" checked><span>yes / no</span></label>
+  <label class="chip"><input type="radio" name="decide-kind" value="choice"><span>options</span></label>
+  <label class="chip"><input type="radio" name="decide-kind" value="score"><span>scale</span></label>
+  <div id="decide-options" class="decide-list" hidden>
+    {%- for _ in 0..2 %}
+    {% include "_decide_option.html" %}
+    {%- endfor %}
+    <button class="oc-btn oc-btn--icon" type="button" data-decide-add="option" aria-label="Add an option">{{ crate::web::icons::icon("plus", 16) }}</button>
+  </div>
+  <div id="decide-levels" class="decide-list" hidden>
+    <span class="muted">lowest first</span>
+    {%- for _ in 0..2 %}
+    {% include "_decide_level.html" %}
+    {%- endfor %}
+    <button class="oc-btn oc-btn--icon" type="button" data-decide-add="level" aria-label="Add a level">{{ crate::web::icons::icon("plus", 16) }}</button>
+  </div>
+  <p id="decide-problem" class="muted" role="status"></p>
+  <template id="decide-option-row">{% include "_decide_option.html" %}  </template>
+  <template id="decide-level-row">{% include "_decide_level.html" %}  </template>
+</fieldset>

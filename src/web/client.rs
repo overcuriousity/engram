@@ -15,6 +15,7 @@ pub fn routes() -> Router<AppState> {
         .route("/asks/{id}/verdict", post(ask_verdict))
         .route("/asks/{id}/carried", post(ask_carried))
         .route("/asks/{id}/keep", post(ask_keep))
+        .route("/decisions/{id}/verdict", post(decision_verdict))
         .route("/moments/{id}/date", post(moment_date))
         .route("/moments/{id}/not-a-reminder", post(not_a_reminder))
         .route("/artifacts/{id}/is-a-reminder", post(is_a_reminder))
@@ -126,6 +127,64 @@ async fn ask_verdict(
         .ok_or(Error::NotFound)?;
     Ok(Json(AskVerdictAnswer {
         verdict: ev.verdict.map(crate::web::workspace::verdict_label),
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct DecisionVerdictBody {
+    /// `right`, `wrong`, `nothing_here`, or `none` to take it back.
+    pub verdict: String,
+    /// `{key: answer}` for the first question, read only with `wrong`.
+    #[serde(default)]
+    pub correct: Option<serde_json::Map<String, serde_json::Value>>,
+}
+
+#[derive(serde::Serialize)]
+pub struct DecisionVerdictAnswer {
+    pub verdict: Option<String>,
+    /// As stored, the implied right answer filled in.
+    pub correct: Option<serde_json::Value>,
+}
+
+/// One entry, keyed by the first question; what it may say is `Core::judge_decision`'s to check.
+fn correction(
+    m: serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<crate::core::decide::verdict::Correct>> {
+    if m.len() > 1 {
+        return Err(Error::Validation(
+            "decide: correct one question, with an option name, a level index, or \"yes\" or \"no\".".into(),
+        ));
+    }
+    Ok(m.into_iter()
+        .next()
+        .map(|(k, value)| crate::core::decide::verdict::Correct {
+            key: Some(k),
+            value,
+        }))
+}
+
+/// The rules are `Core::judge_decision`'s.
+async fn decision_verdict(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Json(b): Json<DecisionVerdictBody>,
+) -> Result<Json<DecisionVerdictAnswer>> {
+    use crate::store::asks::AskVerdict;
+    let judged = match b.verdict.as_str() {
+        "none" => tenant.core.unjudge_decision(&id).await?,
+        v => {
+            let verdict = AskVerdict::parse(v)
+                .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
+            let correct = match (verdict, b.correct) {
+                (AskVerdict::Wrong, Some(m)) => correction(m)?,
+                _ => None,
+            };
+            tenant.core.judge_decision(&id, verdict, correct).await?
+        }
+    };
+    Ok(Json(DecisionVerdictAnswer {
+        verdict: judged.verdict.map(crate::web::workspace::verdict_label),
+        correct: judged.correct.and_then(|c| serde_json::from_str(&c).ok()),
     }))
 }
 

@@ -498,6 +498,53 @@ CREATE TABLE IF NOT EXISTS ask_subjects (
 CREATE INDEX IF NOT EXISTS idx_ask_subjects_open
   ON ask_subjects(dismissed_at, created_at DESC);
 
+-- ── Decisions ────────────────────────────────────────────────────────────────
+-- What Decide read and said, with every passage read: the evidence cannot be
+-- rebuilt later. A verdict is the person's, and never changes a note.
+CREATE TABLE IF NOT EXISTS decide_events (
+  id           TEXT PRIMARY KEY,
+  question     TEXT NOT NULL,
+  -- System One's shape.
+  questions    TEXT NOT NULL,
+  situation    TEXT,
+  scope        TEXT,
+  filters      TEXT NOT NULL DEFAULT '{}',
+  -- NULL when not held.
+  answers      TEXT,
+  prior        TEXT NOT NULL,
+  -- {key: standing}
+  standing     TEXT NOT NULL,
+  not_held     INTEGER NOT NULL,
+  model        TEXT NOT NULL,
+  read         INTEGER NOT NULL,
+  dropped      INTEGER NOT NULL,
+  query_vec    BLOB NOT NULL,
+  vec_dim      INTEGER NOT NULL,
+  embed_model  TEXT NOT NULL,
+  created_at   INTEGER NOT NULL,
+  judged_at    INTEGER,
+  verdict      TEXT,
+  -- {key: answer}, the right answer when known.
+  correct      TEXT,
+  dismissed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_decides_created ON decide_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_decides_open ON decide_events(not_held, verdict, dismissed_at);
+CREATE TABLE IF NOT EXISTS decide_evidence (
+  event_id    TEXT NOT NULL REFERENCES decide_events(id) ON DELETE CASCADE,
+  -- Retrieval order; every passage read has a row.
+  rank        INTEGER NOT NULL,
+  artifact_id TEXT NOT NULL,
+  bears       REAL NOT NULL,
+  bearing     INTEGER NOT NULL,
+  joint       INTEGER NOT NULL,
+  -- Place in the evidence; NULL when it did not bear.
+  n           INTEGER,
+  -- {key: answer}
+  read        TEXT NOT NULL,
+  PRIMARY KEY (event_id, rank)
+);
+
 -- ── Knowledge gaps ───────────────────────────────────────────────────────────
 -- Unanswered questions and gap searches, grouped by their stored vectors and
 -- named once. Membership is identity: a group whose members change is a new

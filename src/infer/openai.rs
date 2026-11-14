@@ -108,7 +108,7 @@ pub(crate) struct ChatReply {
 }
 
 impl Endpoint {
-    fn new(
+    pub(crate) fn new(
         base_url: &str,
         model: &str,
         api_key: Option<&str>,
@@ -187,6 +187,24 @@ impl Endpoint {
             });
         }
         Ok(res)
+    }
+
+    /// A body already written out: the caller's key order is the request.
+    pub(crate) async fn post_text(&self, path: &str, body: String) -> Result<String> {
+        let role = self.role;
+        let req = self
+            .client
+            .post(url(&self.base_url, path))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+        self.send(req)
+            .await?
+            .text()
+            .await
+            .map_err(|e| Error::Inference {
+                role,
+                detail: e.to_string(),
+            })
     }
 
     async fn post_json(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {

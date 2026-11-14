@@ -24,52 +24,86 @@ pub struct AppState {
     /// `EventSource` is GET-only, and a mutating GET is replayable; a one-shot id is not.
     /// Each entry is answered for the subject who parked it alone.
     pub ask_handoff: Arc<Mutex<HashMap<String, ParkedAsk>>>,
+    /// Decide's, parked and spent as an ask's is.
+    pub decide_handoff: Arc<Mutex<HashMap<String, ParkedDecide>>>,
 }
 
-pub struct ParkedAsk {
-    pub req: crate::core::ask::AskRequest,
+pub struct Parked<T> {
+    pub req: T,
     pub subject: String,
     pub at: Instant,
 }
 
+pub type ParkedAsk = Parked<crate::core::ask::AskRequest>;
+pub type ParkedDecide = Parked<crate::core::decide::DecideRequest>;
+
+/// Swept on every park: the map only grows when someone parks.
+fn park<T>(map: &Mutex<HashMap<String, Parked<T>>>, req: T, subject: &str) -> String {
+    let id = crate::store::new_id();
+    if let Ok(mut m) = map.lock() {
+        let now = Instant::now();
+        m.retain(|_, p| now.duration_since(p.at) < ASK_HANDOFF_TTL);
+        m.insert(
+            id.clone(),
+            Parked {
+                req,
+                subject: subject.to_string(),
+                at: now,
+            },
+        );
+    }
+    id
+}
+
+/// One shot, so a reload cannot spend a second model call.
+/// Another subject gets the unknown-id answer and the entry stays.
+fn take<T>(map: &Mutex<HashMap<String, Parked<T>>>, id: &str, subject: &str) -> Option<T> {
+    let mut m = map.lock().ok()?;
+    if m.get(id).is_some_and(|p| p.subject != subject) {
+        return None;
+    }
+    let p = m.remove(id)?;
+    (Instant::now().duration_since(p.at) < ASK_HANDOFF_TTL).then_some(p.req)
+}
+
 impl AppState {
-    /// Swept on every park: the map only grows when someone parks.
     pub fn ask_handoff_park(&self, req: crate::core::ask::AskRequest, subject: &str) -> String {
-        let id = crate::store::new_id();
-        if let Ok(mut m) = self.ask_handoff.lock() {
-            let now = Instant::now();
-            m.retain(|_, p| now.duration_since(p.at) < ASK_HANDOFF_TTL);
-            m.insert(
-                id.clone(),
-                ParkedAsk {
-                    req,
-                    subject: subject.to_string(),
-                    at: now,
-                },
-            );
-        }
-        id
+        park(&self.ask_handoff, req, subject)
     }
 
-    /// One shot, so a reload cannot spend a second model call.
-    /// Another subject gets the unknown-id answer and the entry stays.
     pub fn ask_handoff_take(
         &self,
         id: &str,
         subject: &str,
     ) -> Option<crate::core::ask::AskRequest> {
-        let mut m = self.ask_handoff.lock().ok()?;
-        if m.get(id).is_some_and(|p| p.subject != subject) {
-            return None;
-        }
-        let p = m.remove(id)?;
-        (Instant::now().duration_since(p.at) < ASK_HANDOFF_TTL).then_some(p.req)
+        take(&self.ask_handoff, id, subject)
+    }
+
+    pub fn decide_handoff_park(
+        &self,
+        req: crate::core::decide::DecideRequest,
+        subject: &str,
+    ) -> String {
+        park(&self.decide_handoff, req, subject)
+    }
+
+    pub fn decide_handoff_take(
+        &self,
+        id: &str,
+        subject: &str,
+    ) -> Option<crate::core::decide::DecideRequest> {
+        take(&self.decide_handoff, id, subject)
     }
 }
 
 /// Whether `[infer.ask]` is configured; the nav reads it on every page.
 pub fn ask_enabled(t: &crate::tenants::Tenant) -> bool {
     t.core.asks()
+}
+
+/// See `Core::decides`; the button is absent, as Ask's is.
+pub fn decide_enabled(t: &crate::tenants::Tenant) -> bool {
+    t.core.decides()
 }
 
 /// The account setting, else `Accept-Language`, else English.

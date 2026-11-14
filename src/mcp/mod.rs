@@ -411,6 +411,30 @@ pub struct AskParams {
     pub q: String,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideOption {
+    /// The option's name, as it will appear in the answer.
+    pub name: String,
+    /// What choosing it means. Optional.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct DecideParams {
+    /// The question to decide from the knowledge base.
+    pub q: String,
+    /// Two to eight options to choose between. Leave out, with `levels`, for yes or no.
+    #[serde(default)]
+    pub options: Option<Vec<DecideOption>>,
+    /// Two to ten levels of a scale, lowest first.
+    #[serde(default)]
+    pub levels: Option<Vec<String>>,
+    /// Facts about the present situation that the notes cannot know.
+    #[serde(default)]
+    pub situation: Option<String>,
+}
+
 #[tool_router]
 impl PkdbTools {
     /// `ask` is absent rather than "not configured" when nothing can answer.
@@ -649,6 +673,50 @@ impl PkdbTools {
             Err(e) => format!("Ask failed: {e}"),
         }
     }
+    #[tool(
+        name = "decide",
+        description = "Decide a typed question from the notes that bear on it: yes or no, one of several options, or a level on a scale. Returns weights, how firmly the notes hold it, and each note's own reading. It answers what the notes support, not what is advisable."
+    )]
+    pub(crate) async fn decide(&self, Parameters(p): Parameters<DecideParams>) -> String {
+        use crate::infer::decide::{Kind, Question};
+        let kind = match (p.options, p.levels) {
+            (Some(_), Some(_)) => return "Decide failed: give options or levels, not both".into(),
+            (Some(options), None) => Some(Kind::Choice {
+                options: options
+                    .into_iter()
+                    .map(|o| (o.name, o.description.unwrap_or_default()))
+                    .collect(),
+            }),
+            (None, Some(levels)) => Some(Kind::Score { levels }),
+            (None, None) => None,
+        };
+        let req = crate::core::decide::DecideRequest {
+            q: p.q,
+            // Empty instructions ask `q`.
+            questions: kind
+                .map(|kind| Question {
+                    key: "verdict".into(),
+                    kind,
+                    instructions: String::new(),
+                })
+                .into_iter()
+                .collect(),
+            situation: p.situation,
+            ..Default::default()
+        };
+        let core = match self.source.core().await {
+            Ok(c) => c,
+            Err(e) => return format!("Decide failed: {e}"),
+        };
+        // See `Core::decides`: only the contained build, whose decider stands for nothing.
+        if !core.decides() {
+            return "Decide failed: this instance has no decision model".into();
+        }
+        match core.decide(&req, crate::store::feedback::Door::Mcp).await {
+            Ok(d) => format_decision(&d),
+            Err(e) => format!("Decide failed: {e}"),
+        }
+    }
 }
 
 #[rmcp::tool_handler(router = self.routes())]
@@ -702,6 +770,82 @@ fn format_answer(a: &crate::core::ask::AskResponse) -> String {
         out.push_str(&format!(
             "\n\n_{} further excerpt(s) omitted for context budget._",
             a.dropped
+        ));
+    }
+    out
+}
+
+/// A title an agent's markdown cannot break; see `md_line`.
+fn md_title(e: &crate::core::decide::Evidence) -> String {
+    let t = e
+        .title
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| crate::web::markdown::stand_in_title(&e.text, 60));
+    md_line(&t)
+}
+
+/// One line an agent's markdown cannot break: no table cell, emphasis, code, link, image, HTML,
+/// entity or strikethrough. Never at a line's start, so `#`, `>` and list markers need no escape.
+fn md_line(t: &str) -> String {
+    t.replace(['\r', '\n'], " ")
+        .chars()
+        .fold(String::new(), |mut o, c| {
+            if matches!(
+                c,
+                '\\' | '|' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '&' | '~'
+            ) {
+                o.push('\\');
+            }
+            o.push(c);
+            o
+        })
+}
+
+/// The first question only: every door asks one, keyed `verdict`.
+pub fn format_decision(d: &crate::core::decide::Decision) -> String {
+    use crate::web::decide::{bars, pick_label, standing_copy};
+    let mut out = format!("**{}**", md_line(&d.question));
+    let (Some(q), Some((_, prior))) = (d.questions.first(), d.prior.first()) else {
+        return out;
+    };
+    // Nothing bears: no verdict from the model's own prior either.
+    let Some((_, joint)) = d.answers.as_ref().and_then(|a| a.first()) else {
+        out.push_str("\n\nNothing here: the base does not hold this.");
+        return out;
+    };
+    let without = bars(q, prior, prior)
+        .iter()
+        .map(|b| format!("{} {}", md_line(&b.label), b.weight))
+        .collect::<Vec<_>>()
+        .join(", ");
+    out.push_str("\n\n");
+    for b in bars(q, &joint.answer, prior) {
+        out.push_str(&format!("- {}: {}\n", md_line(&b.label), b.weight));
+    }
+    let standing = d.standing.first().map_or("", |(_, s)| standing_copy(*s));
+    out.push_str(&format!("\n{standing} Without notes: {without}."));
+    if !d.evidence.is_empty() {
+        let verdict = pick_label(q, &joint.answer);
+        out.push_str("\n\n---\n\n**Evidence**\n");
+        for e in &d.evidence {
+            out.push_str(&format!("\n{}. {}", e.n, md_title(e)));
+            if let Some((_, a)) = e.read.iter().find(|(k, _)| *k == q.key) {
+                let own = pick_label(q, a);
+                let against = if own == verdict { "" } else { " (against)" };
+                out.push_str(&format!(" — {}{against}", md_line(&own)));
+            }
+        }
+    }
+    let rest = d.read.saturating_sub(d.evidence.len());
+    if rest > 0 {
+        let s = if rest == 1 { "" } else { "s" };
+        out.push_str(&format!("\n\n_{rest} more passage{s} did not bear on it._"));
+    }
+    if d.dropped > 0 {
+        out.push_str(&format!(
+            "\n\n_{} bearing passage(s) did not fit the joint read._",
+            d.dropped
         ));
     }
     out
@@ -1725,5 +1869,315 @@ mod tests {
             "{out}"
         );
         assert_eq!(format_due(&[], now), "_Nothing is due._");
+    }
+
+    fn keep_or_switch() -> crate::infer::decide::Question {
+        crate::infer::decide::Question {
+            key: "verdict".into(),
+            kind: crate::infer::decide::Kind::Choice {
+                options: vec![
+                    ("keep".into(), String::new()),
+                    ("switch to gemma".into(), String::new()),
+                ],
+            },
+            instructions: "Should I keep the bge-m3 embedder?".into(),
+        }
+    }
+
+    fn chose(pick: &str, p: [f64; 2]) -> crate::infer::decide::Answer {
+        crate::infer::decide::Answer::Choice {
+            pick: pick.into(),
+            probabilities: p.to_vec(),
+            confidence: p[0].max(p[1]),
+        }
+    }
+
+    fn evidence_row(n: usize, title: Option<&str>, pick: &str) -> crate::core::decide::Evidence {
+        let p = if pick == "keep" {
+            [0.9, 0.1]
+        } else {
+            [0.2, 0.8]
+        };
+        crate::core::decide::Evidence {
+            n,
+            artifact_id: format!("A{n}"),
+            title: title.map(str::to_string),
+            text: format!("Passage {n} about the embedder.").into(),
+            bears: 0.9,
+            joint: true,
+            read: vec![("verdict".into(), chose(pick, p))],
+        }
+    }
+
+    /// The spec's example: keep 81 / switch 19, prior 55 / 45, settled, two of four passages bearing.
+    fn decision() -> crate::core::decide::Decision {
+        crate::core::decide::Decision {
+            question: "Should I keep the bge-m3 embedder?".into(),
+            questions: vec![keep_or_switch()],
+            answers: Some(vec![(
+                "verdict".into(),
+                crate::core::decide::Verdict {
+                    answer: chose("keep", [0.81, 0.19]),
+                    swapped_agree: Some(true),
+                },
+            )]),
+            prior: vec![("verdict".into(), chose("keep", [0.55, 0.45]))],
+            standing: vec![("verdict".into(), crate::core::decide::Standing::Settled)],
+            evidence: vec![
+                evidence_row(1, Some("Reindex notes 09/14"), "keep"),
+                evidence_row(2, Some("GPU budget"), "switch to gemma"),
+            ],
+            read: 4,
+            dropped: 0,
+            model: "rule".into(),
+            event_id: None,
+            state: None,
+            reads: vec![],
+        }
+    }
+
+    fn not_held() -> crate::core::decide::Decision {
+        let mut d = decision();
+        d.answers = None;
+        d.standing = vec![("verdict".into(), crate::core::decide::Standing::NotHeld)];
+        d.evidence = vec![];
+        d
+    }
+
+    #[test]
+    fn the_mcp_decision_reads_as_weights_standing_and_evidence() {
+        assert_eq!(
+            format_decision(&decision()),
+            "**Should I keep the bge-m3 embedder?**\n\
+             \n\
+             - keep: 81\n\
+             - switch to gemma: 19\n\
+             \n\
+             Settled. Without notes: keep 55, switch to gemma 45.\n\
+             \n\
+             ---\n\
+             \n\
+             **Evidence**\n\
+             \n\
+             1. Reindex notes 09/14 — keep\n\
+             2. GPU budget — switch to gemma (against)\n\
+             \n\
+             _2 more passages did not bear on it._"
+        );
+    }
+
+    #[test]
+    fn a_decision_the_base_does_not_hold_says_so_and_lists_nothing() {
+        let out = format_decision(&not_held());
+        assert!(
+            out.starts_with("**Should I keep the bge-m3 embedder?**"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Nothing here: the base does not hold this."),
+            "{out}"
+        );
+        assert!(!out.contains("Without notes"), "{out}");
+        assert_eq!(
+            out,
+            "**Should I keep the bge-m3 embedder?**\n\nNothing here: the base does not hold this."
+        );
+        assert!(!out.contains("**Evidence**"), "{out}");
+        assert!(!out.contains("- keep:"), "{out}");
+    }
+
+    #[test]
+    fn no_percent_sign_and_no_likelihood() {
+        let mut dropped = decision();
+        dropped.dropped = 1;
+        for out in [
+            format_decision(&decision()),
+            format_decision(&not_held()),
+            format_decision(&dropped),
+        ] {
+            assert!(!out.contains('%'), "{out}");
+            assert!(!out.to_lowercase().contains("likely"), "{out}");
+        }
+        assert!(
+            format_decision(&dropped)
+                .contains("_1 bearing passage(s) did not fit the joint read._")
+        );
+    }
+
+    #[test]
+    fn an_awkward_title_stays_one_list_item() {
+        let mut d = decision();
+        d.evidence[0].title = Some("a|b *c*\nd".into());
+        d.evidence[1].title = None;
+        let out = format_decision(&d);
+        let line = out.lines().find(|l| l.starts_with("1. ")).unwrap();
+        assert_eq!(line, r"1. a\|b \*c\* d — keep", "{out}");
+        assert!(
+            out.contains("2. Passage 2 about the embedder. — switch to gemma"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_awkward_question_or_label_stays_on_its_line() {
+        let awkward = "a|b *c*\nd";
+        let mut d = decision();
+        d.question = "Keep *it*\nor | not?".into();
+        d.questions[0].kind = crate::infer::decide::Kind::Choice {
+            options: vec![
+                (awkward.into(), String::new()),
+                ("_e_".into(), String::new()),
+            ],
+        };
+        d.answers.as_mut().unwrap()[0].1.answer = chose(awkward, [0.81, 0.19]);
+        d.prior = vec![("verdict".into(), chose(awkward, [0.55, 0.45]))];
+        for e in &mut d.evidence {
+            e.read = vec![("verdict".into(), chose(awkward, [0.9, 0.1]))];
+        }
+        let out = format_decision(&d);
+        assert!(out.starts_with(r"**Keep \*it\* or \| not?**"), "{out}");
+        assert!(out.contains(r"- a\|b \*c\* d: 81"), "{out}");
+        assert!(out.contains(r"- \_e\_: 19"), "{out}");
+        assert!(
+            out.contains(r"Without notes: a\|b \*c\* d 55, \_e\_ 45."),
+            "{out}"
+        );
+        assert!(
+            out.contains(r"1. Reindex notes 09/14 — a\|b \*c\* d"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn yes_or_no_lists_yes_and_no() {
+        use crate::infer::decide::{Answer, Question};
+        let mut d = decision();
+        d.questions = vec![Question::noul("verdict", "Keep it?")];
+        d.answers = Some(vec![(
+            "verdict".into(),
+            crate::core::decide::Verdict {
+                answer: Answer::Noul { yes: 0.7 },
+                swapped_agree: None,
+            },
+        )]);
+        d.prior = vec![("verdict".into(), Answer::Noul { yes: 0.4 })];
+        for e in &mut d.evidence {
+            e.read = vec![("verdict".into(), Answer::Noul { yes: 0.9 })];
+        }
+        let out = format_decision(&d);
+        assert!(out.contains("- yes: 70\n- no: 30"), "{out}");
+        assert!(out.contains("Without notes: yes 40, no 60."), "{out}");
+        assert!(out.contains("1. Reindex notes 09/14 — yes\n"), "{out}");
+    }
+
+    #[test]
+    fn a_line_cannot_carry_a_link_html_or_a_line_break() {
+        assert_eq!(
+            md_line("[click](https://x.example) <b>&amp;\n~~a\\b~~"),
+            r"\[click\](https://x.example) \<b\>\&amp; \~\~a\\b\~\~"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_decide_tool_is_always_offered() {
+        let core = crate::core::test_support::test_core().await;
+        assert!(PkdbTools::over(core.clone()).routes().has_route("decide"));
+        let mut core = core;
+        core.completer = None;
+        assert!(PkdbTools::over(core).routes().has_route("decide"));
+    }
+
+    fn params(q: &str, options: Option<&[&str]>, levels: Option<&[&str]>) -> DecideParams {
+        DecideParams {
+            q: q.into(),
+            options: options.map(|o| {
+                o.iter()
+                    .map(|n| DecideOption {
+                        name: n.to_string(),
+                        description: None,
+                    })
+                    .collect()
+            }),
+            levels: levels.map(|l| l.iter().map(|s| s.to_string()).collect()),
+            situation: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_tool_decides_yes_or_no_by_default_and_from_options_when_given() {
+        use crate::core::decide::tests::{deciding, marked, three_base};
+        use crate::infer::decide::Kind;
+        let mut core = three_base().await;
+        let d = deciding(&mut core, marked(0.9));
+        let tools = PkdbTools::over(core);
+
+        let out = tools
+            .decide(Parameters(params("Keep bge-m3?", None, None)))
+            .await;
+        assert!(out.contains("- yes:"), "{out}");
+
+        let out = tools
+            .decide(Parameters(params(
+                "Which embedder?",
+                Some(&["switch", "keep"]),
+                None,
+            )))
+            .await;
+        let (s, k) = (out.find("- switch:").unwrap(), out.find("- keep:").unwrap());
+        assert!(s < k, "{out}");
+        assert!(d.requests().iter().any(|(_, qs)| qs.iter().any(|q| matches!(
+            &q.kind,
+            Kind::Choice { options } if options.iter().map(|(n, _)| n.as_str()).eq(["switch", "keep"])
+        ))));
+    }
+
+    #[tokio::test]
+    async fn options_and_levels_together_are_refused_without_a_call() {
+        use crate::core::decide::tests::{deciding, marked, three_base};
+        let mut core = three_base().await;
+        let d = deciding(&mut core, marked(0.9));
+        let tools = PkdbTools::over(core);
+        let out = tools
+            .decide(Parameters(params(
+                "Q?",
+                Some(&["a", "b"]),
+                Some(&["low", "high"]),
+            )))
+            .await;
+        assert_eq!(out, "Decide failed: give options or levels, not both");
+        assert_eq!(d.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn one_option_is_refused_in_one_sentence() {
+        use crate::core::decide::tests::{deciding, marked, three_base};
+        let mut core = three_base().await;
+        let d = deciding(&mut core, marked(0.9));
+        let tools = PkdbTools::over(core);
+        let out = tools
+            .decide(Parameters(params("Q?", Some(&["only"]), None)))
+            .await;
+        assert!(out.starts_with("Decide failed:"), "{out}");
+        assert!(!out.contains('\n'), "{out}");
+        assert_eq!(d.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_mcp_decision_is_not_recorded() {
+        use crate::core::decide::tests::{deciding, marked, three_base};
+        let mut core = three_base().await;
+        core.learn.enabled = true;
+        deciding(&mut core, marked(0.9));
+        let pool = core.store.pool.clone();
+        let tools = PkdbTools::over(core);
+        let out = tools
+            .decide(Parameters(params("Keep bge-m3?", None, None)))
+            .await;
+        assert!(!out.starts_with("Decide failed"), "{out}");
+        let n: i64 = sqlx::query_scalar!("SELECT count(*) FROM decide_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

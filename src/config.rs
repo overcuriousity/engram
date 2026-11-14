@@ -43,6 +43,8 @@ pub struct Config {
     pub recommend: RecommendConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub decide: DecideConfig,
 }
 
 /// What the two supplied-from-outside capture paths may cost; apart from `MAX_BODY_BYTES`,
@@ -183,6 +185,31 @@ impl Default for FeedbackConfig {
             retain_days: 0,
             explore: 0.1,
             sweep_hours: 6,
+        }
+    }
+}
+
+/// Decide's thresholds. The defaults are a time budget: tokens read, times 1.1 ms.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct DecideConfig {
+    /// The joint read's state, in tokens.
+    pub joint_tokens: usize,
+    /// A passage bears on the question from this probability.
+    pub bears_min: f64,
+    /// A top probability from here is settled.
+    pub settled_at: f64,
+    /// The share of bearing held by passages against the verdict that splits it.
+    pub split_at: f64,
+}
+
+impl Default for DecideConfig {
+    fn default() -> Self {
+        Self {
+            joint_tokens: 2500,
+            bears_min: 0.5,
+            settled_at: 0.80,
+            split_at: 0.34,
         }
     }
 }
@@ -785,6 +812,8 @@ pub struct InferConfig {
     pub vision: Option<VisionRole>,
     /// The speech model behind the search-box microphone; `None` removes the button.
     pub transcribe: Option<TranscribeRole>,
+    /// Required: Decide and background judgement run on it.
+    pub decide: DecideRole,
 }
 
 /// The file's shape, before tiers fold into the roles; endpoint fields default from the tier.
@@ -805,6 +834,9 @@ pub struct RawInferConfig {
     vision: Option<RawVisionRole>,
     #[serde(default)]
     transcribe: Option<TranscribeRole>,
+    /// Optional here so the refusal is ours to word.
+    #[serde(default)]
+    decide: Option<DecideRole>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1005,6 +1037,13 @@ impl TryFrom<RawInferConfig> for InferConfig {
             );
         }
 
+        let decide = raw.decide.ok_or_else(|| {
+            "[infer.decide] is missing. engram needs a decision model: Decide and background \
+             judgement run on it. Copy the block from config.example.toml and point base_url \
+             at a System One server."
+                .to_string()
+        })?;
+
         Ok(InferConfig {
             tokenizer: raw.tokenizer,
             synthesize,
@@ -1014,6 +1053,7 @@ impl TryFrom<RawInferConfig> for InferConfig {
             vision,
             // Never borrows synthesize's endpoint: speech and chat are different servers.
             transcribe: raw.transcribe,
+            decide,
         })
     }
 }
@@ -1456,6 +1496,28 @@ fn default_transcribe_timeout_secs() -> u64 {
     60
 }
 
+/// Not tier-based: a decision endpoint is not a chat endpoint.
+#[derive(Debug, Deserialize, Clone)]
+pub struct DecideRole {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    pub context_tokens: usize,
+    #[serde(default = "default_decide_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_decide_parallel")]
+    pub parallel: usize,
+}
+
+fn default_decide_timeout_secs() -> u64 {
+    30
+}
+
+fn default_decide_parallel() -> usize {
+    1
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AuthConfig {
     pub mode: AuthMode,
@@ -1870,6 +1932,37 @@ impl Config {
             .templates()
             .validate()
             .map_err(ConfigError::Invalid)?;
+        let d = &self.infer.decide;
+        if d.parallel == 0 {
+            return Err(ConfigError::Invalid(
+                "infer.decide.parallel is 0: no request could ever run, so every decision would wait forever"
+                    .into(),
+            ));
+        }
+        if d.context_tokens < 1024 {
+            return Err(ConfigError::Invalid(format!(
+                "infer.decide.context_tokens ({}) is below 1024: the margin and the questions must leave room for a state",
+                d.context_tokens
+            )));
+        }
+        let dc = &self.decide;
+        for (key, v) in [
+            ("decide.bears_min", dc.bears_min),
+            ("decide.settled_at", dc.settled_at),
+            ("decide.split_at", dc.split_at),
+        ] {
+            if !(0.0..=1.0).contains(&v) {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} ({v}) must be between 0 and 1: it is compared with a probability"
+                )));
+            }
+        }
+        if dc.joint_tokens < 256 {
+            return Err(ConfigError::Invalid(format!(
+                "decide.joint_tokens ({}) is below 256: no excerpt would fit the joint read",
+                dc.joint_tokens
+            )));
+        }
         let tz = self.time.default_tz.trim();
         if !tz.is_empty() && tz.parse::<chrono_tz::Tz>().is_err() {
             return Err(ConfigError::Invalid(format!(
@@ -2059,6 +2152,7 @@ impl Config {
         if let Some(t) = c.infer.transcribe.as_mut() {
             t.api_key = t.api_key.as_ref().map(|_| R.into());
         }
+        c.infer.decide.api_key = c.infer.decide.api_key.map(|_| R.into());
         if let Some(o) = c.auth.oidc.as_mut() {
             o.client_secret = o.client_secret.as_ref().map(|_| R.into());
         }
@@ -2156,6 +2250,14 @@ impl Config {
                 rerank: None,
                 vision: None,
                 transcribe: None,
+                decide: DecideRole {
+                    base_url: "http://127.0.0.1:9/v1".into(),
+                    model: "clef-flash".into(),
+                    api_key: None,
+                    context_tokens: 8192,
+                    timeout_secs: 30,
+                    parallel: 1,
+                },
             },
             auth: AuthConfig {
                 mode: AuthMode::Local,
@@ -2180,6 +2282,7 @@ impl Config {
             reap: ReapConfig::default(),
             recommend: RecommendConfig::default(),
             ui: UiConfig::default(),
+            decide: DecideConfig::default(),
         }
     }
 }
@@ -2601,7 +2704,9 @@ mod tests {
         assert!(!cfg.reap.enabled);
     }
 
-    const MINIMAL: &str = r#"
+    macro_rules! minimal_without_decide {
+        () => {
+            r#"
 [server]
 bind = "127.0.0.1:8080"
 
@@ -2637,7 +2742,21 @@ mode = "local"
 [auth.local]
 username = "dev"
 password_hash = "$argon2id$v=19$m=19456,t=2,p=1$c29tZXNhbHQ$aaaa"
-"#;
+"#
+        };
+    }
+
+    const MINIMAL_WITHOUT_DECIDE: &str = minimal_without_decide!();
+
+    const MINIMAL: &str = concat!(
+        minimal_without_decide!(),
+        r#"
+[infer.decide]
+base_url = "http://localhost:8080/v1"
+model = "clef-flash:9b-q8_0-8192"
+context_tokens = 8192
+"#
+    );
 
     const FIVE_SECTIONS: &str = r#"
 [server]
@@ -2661,6 +2780,11 @@ base_url = "http://localhost:8000/v1"
 model = "bge-m3"
 dim = 1024
 max_input_tokens = 8192
+
+[infer.decide]
+base_url = "http://localhost:8080/v1"
+model = "m"
+context_tokens = 8192
 
 [auth]
 mode = "local"
@@ -3062,6 +3186,106 @@ mode = "off"
     }
 
     #[test]
+    fn a_config_without_a_decision_model_is_refused_by_name() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let e = Config::load(Some(&write(&dir, MINIMAL_WITHOUT_DECIDE))).unwrap_err();
+        let m = e.to_string();
+        assert!(m.contains("[infer.decide]"), "{m}");
+        assert!(m.contains("config.example.toml"), "{m}");
+    }
+
+    #[test]
+    fn the_decide_role_loads_with_its_defaults() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config::load(Some(&write(&dir, MINIMAL))).unwrap();
+        let d = cfg.infer.decide;
+        assert_eq!(d.base_url, "http://localhost:8080/v1");
+        assert_eq!(d.model, "clef-flash:9b-q8_0-8192");
+        assert_eq!(d.context_tokens, 8192);
+        assert_eq!(d.timeout_secs, 30);
+        assert_eq!(d.parallel, 1);
+        assert!(d.api_key.is_none());
+    }
+
+    #[test]
+    fn a_decide_role_without_a_window_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL_WITHOUT_DECIDE}\n[infer.decide]\nbase_url = \"http://localhost:8080/v1\"\nmodel = \"m\"\n"
+        );
+        assert!(Config::load(Some(&write(&dir, &body))).is_err());
+    }
+
+    #[test]
+    fn decide_thresholds_default_to_the_spec() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        assert_eq!(
+            (d.joint_tokens, d.bears_min, d.settled_at, d.split_at),
+            (2500, 0.5, 0.80, 0.34)
+        );
+    }
+
+    #[test]
+    fn a_threshold_outside_zero_to_one_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for (line, key) in [
+            ("settled_at = 1.2", "decide.settled_at"),
+            ("bears_min = -0.1", "decide.bears_min"),
+            ("split_at = 2.0", "decide.split_at"),
+            ("joint_tokens = 100", "decide.joint_tokens"),
+        ] {
+            let body = format!("{MINIMAL}\n[decide]\n{line}\n");
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => assert!(m.contains(key), "{m}"),
+                other => panic!("expected Invalid for {key}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_decide_role_with_no_slot_or_no_room_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for (edit, key) in [
+            (
+                "context_tokens = 8192\nparallel = 0",
+                "infer.decide.parallel",
+            ),
+            ("context_tokens = 512", "infer.decide.context_tokens"),
+        ] {
+            let body = MINIMAL.replace("context_tokens = 8192\n", &format!("{edit}\n"));
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => assert!(m.contains(key), "{m}"),
+                other => panic!("expected Invalid for {key}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn redacted_hides_the_decide_key_and_shows_the_role() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("{MINIMAL}api_key = \"s3cret\"\n");
+        let cfg = Config::load(Some(&write(&dir, &body))).unwrap();
+        let dump = cfg.redacted();
+        assert!(!dump.contains("s3cret"), "{dump}");
+        assert!(dump.contains("clef-flash:9b-q8_0-8192"));
+    }
+
+    #[test]
+    fn the_example_config_carries_a_live_decide_block() {
+        let _guard = env_guard();
+        let cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        assert_eq!(cfg.infer.decide.context_tokens, 8192);
+    }
+
+    #[test]
     fn redacted_hides_secrets() {
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -3267,6 +3491,10 @@ mode = "off"
         max_output_tokens = 16384
         [infer.synthesize]
         tier = "efficient"
+        [infer.decide]
+        base_url = "http://localhost:8080/v1"
+        model = "m"
+        context_tokens = 8192
         [infer.embed]
         base_url = "http://localhost:8000/v1"
         model = "bge-m3"
@@ -3317,6 +3545,10 @@ mode = "off"
         [infer.synthesize]
         tier = "deep"
         output_ratio = 8.0
+        [infer.decide]
+        base_url = "http://localhost:8080/v1"
+        model = "m"
+        context_tokens = 8192
         [infer.embed]
         base_url = "http://localhost:8000/v1"
         model = "bge-m3"
@@ -3364,6 +3596,10 @@ mode = "off"
         [infer.synthesize]
         tier = "efficent"
         output_ratio = 8.0
+        [infer.decide]
+        base_url = "http://localhost:8080/v1"
+        model = "m"
+        context_tokens = 8192
         [infer.embed]
         base_url = "http://localhost:8000/v1"
         model = "bge-m3"
@@ -3417,6 +3653,10 @@ mode = "off"
         [infer.synthesize]
         tier = "efficient"
         output_ratio = 8.0
+        [infer.decide]
+        base_url = "http://localhost:8080/v1"
+        model = "m"
+        context_tokens = 8192
         [infer.embed]
         base_url = "http://localhost:8000/v1"
         model = "bge-m3"
@@ -3670,6 +3910,10 @@ mode = "off"
         let _guard = env_guard();
         let cfg = load_infer(&format!(
             "{EMBED_PREAMBLE}
+            [infer.decide]
+            base_url = \"http://localhost:8080/v1\"
+            model = \"m\"
+            context_tokens = 8192
             [infer.embed]
             base_url = \"http://localhost:8000/v1\"
             model = \"embeddinggemma\"
@@ -3686,6 +3930,10 @@ mode = "off"
         let _guard = env_guard();
         let cfg = load_infer(&format!(
             "{EMBED_PREAMBLE}
+            [infer.decide]
+            base_url = \"http://localhost:8080/v1\"
+            model = \"m\"
+            context_tokens = 8192
             [infer.embed]
             base_url = \"http://localhost:8000/v1\"
             model = \"bge-m3\"
@@ -3705,6 +3953,10 @@ mode = "off"
         let _guard = env_guard();
         let err = load_infer(&format!(
             "{EMBED_PREAMBLE}
+            [infer.decide]
+            base_url = \"http://localhost:8080/v1\"
+            model = \"m\"
+            context_tokens = 8192
             [infer.embed]
             base_url = \"http://localhost:8000/v1\"
             model = \"embeddinggemma\"
@@ -3730,6 +3982,10 @@ mode = "off"
         model = "qwen"
         context_tokens = 32768
         max_output_tokens = 16384
+        [infer.decide]
+        base_url = "http://localhost:8080/v1"
+        model = "m"
+        context_tokens = 8192
         [infer.embed]
         base_url = "http://localhost:8000/v1"
         model = "embeddinggemma"
@@ -3837,6 +4093,10 @@ mode = "off"
             "{BARE_PREAMBLE_NO_EMBED}
             [infer.synthesize]
             tier = \"efficient\"
+            [infer.decide]
+            base_url = \"http://localhost:8080/v1\"
+            model = \"m\"
+            context_tokens = 8192
             [infer.embed]
             base_url = \"http://localhost:8000/v1\"
             model = \"small\"

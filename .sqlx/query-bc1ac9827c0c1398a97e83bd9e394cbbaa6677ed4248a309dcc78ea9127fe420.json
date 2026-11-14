@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gap_coverage\n              WHERE (score < ? AND (covered_by IS NULL OR covered_by <> 'capture'))\n                 OR (kind = 'ask'\n                     AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = gap_coverage.gap_id))\n                 OR (kind IN ('search', 'unmatched')\n                     AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = gap_coverage.gap_id))\n                 OR (kind = 'pursuit'\n                     AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = gap_coverage.gap_id))\n                 OR (kind = 'subject'\n                     AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = gap_coverage.gap_id))\n                 OR (kind = 'decide'\n                     AND NOT EXISTS (SELECT 1 FROM decide_events WHERE id = gap_coverage.gap_id))\n                 OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject', 'decide')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bc1ac9827c0c1398a97e83bd9e394cbbaa6677ed4248a309dcc78ea9127fe420"
+}

@@ -123,6 +123,29 @@ tier = "deep"
 # Tier for that planning call.
 # plan_tier = "efficient"
 
+# The decision model: Decide and background judgement run on it. Required.
+# Point it at a System One server (a small, fast, non-thinking model).
+[infer.decide]
+base_url = "http://localhost:8080/v1"
+model = "clef-flash:9b-q8_0-8192"
+# The server's real window per request, in tokens (at least 1024).
+context_tokens = 8192
+# timeout_secs = 30
+# Requests in flight at once; match the server's slots.
+# parallel = 1
+# api_key = ""
+
+# Decide's thresholds. The defaults are a time budget: tokens read, times 1.1 ms.
+# [decide]
+# Tokens in the joint read's state (at least 256).
+# joint_tokens = 2500
+# A passage bears on the question from this probability.
+# bears_min = 0.5
+# A top probability from here is settled.
+# settled_at = 0.80
+# The share of bearing against the verdict that makes it split.
+# split_at = 0.34
+
 # Optional reranker; style is "tei", "cohere" or "vllm".
 # [infer.rerank]
 # base_url = "http://localhost:8001"

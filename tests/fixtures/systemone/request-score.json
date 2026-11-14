@@ -1,0 +1,32 @@
+{
+  "run": {
+    "state": "The server crashed twice today and customers are complaining.",
+    "questions": [
+      {
+        "key": "urgency",
+        "type": "score",
+        "text": "How urgent is this?",
+        "levels": [
+          {
+            "id": "l0",
+            "text": "Not urgent"
+          },
+          {
+            "id": "l1",
+            "text": "Can wait a week"
+          },
+          {
+            "id": "l2",
+            "text": "Should be handled today"
+          },
+          {
+            "id": "l3",
+            "text": "Drop everything"
+          }
+        ]
+      }
+    ]
+  },
+  "model": "clef-flash:9b-q8_0-8192",
+  "expected_json": "{\"model\":\"clef-flash:9b-q8_0-8192\",\"state\":\"The server crashed twice today and customers are complaining.\",\"questions\":{\"urgency\":{\"type\":\"score\",\"instructions\":\"How urgent is this?\",\"criteria\":[\"Not urgent\",\"Can wait a week\",\"Should be handled today\",\"Drop everything\"]}}}"
+}

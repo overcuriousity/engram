@@ -1195,6 +1195,20 @@ async fn ask(
     Ok(Json(tenant.core.ask(&req, origin).await?))
 }
 
+async fn decide(
+    tenant: Tenant,
+    Query(q): Query<AskParams>,
+    Json(body): Json<crate::core::decide::wire::DecideBody>,
+) -> Result<Json<crate::core::decide::Decision>> {
+    // No decision model, no decide door. See `Core::decides`.
+    if !tenant.core.decides() {
+        return Err(Error::NotFound);
+    }
+    let req = body.into_request()?;
+    let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Api);
+    Ok(Json(tenant.core.decide(&req, origin).await?))
+}
+
 /// In the query rather than the body: `AskRequest` is built by hand by many internal callers.
 #[derive(serde::Deserialize)]
 pub struct AskParams {
@@ -1751,6 +1765,55 @@ async fn ask_stream(
         .into_response())
 }
 
+/// One POST streams its own response, as `ask_stream` does.
+async fn decide_stream(
+    tenant: Tenant,
+    Query(q): Query<AskParams>,
+    Json(body): Json<crate::core::decide::wire::DecideBody>,
+) -> Result<Response> {
+    if !tenant.core.decides() {
+        return Err(Error::NotFound);
+    }
+    let req = body.into_request()?;
+    // As the pipeline normalises them, so a read names the options `done` names.
+    let questions = crate::core::decide::normalised_questions(&req)?;
+    let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Api);
+    Ok(crate::web::decide::decide_sse(
+        &tenant,
+        req,
+        origin,
+        move |e| decide_sse_event(e, &questions),
+    ))
+}
+
+fn decide_sse_event(
+    ev: crate::core::decide::DecideEvent,
+    questions: &[crate::infer::decide::Question],
+) -> Result<SseEvent> {
+    use crate::core::decide::DecideEvent::*;
+    let (name, data) = match ev {
+        Retrieved { passages } => ("retrieved", serde_json::json!({ "passages": passages })),
+        Read(r) => (
+            "read",
+            serde_json::json!({
+                "rank": r.rank,
+                "of": r.of,
+                "artifact_id": r.artifact_id,
+                "title": r.title,
+                "bears": r.bears,
+                "bearing": r.bearing,
+                "read": crate::core::decide::wire::read_json(questions, &r.read),
+            }),
+        ),
+        Done(d) => (
+            "done",
+            serde_json::to_value(*d)
+                .map_err(|e| Error::Internal(format!("the decision would not serialise: {e}")))?,
+        ),
+    };
+    Ok(SseEvent::default().event(name).data(data.to_string()))
+}
+
 /// Not an arm of `api_sse_event`: a test asserts the panel handles every frame name there.
 fn search_sse_event(ev: crate::core::search::SearchEvent) -> Result<SseEvent> {
     use crate::core::search::SearchEvent::*;
@@ -1788,7 +1851,7 @@ async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<
 }
 
 /// `stream` names the route in the log line.
-fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
+pub(crate) fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
     if e.status().is_server_error() {
         tracing::error!(error = %e, stream, "stream failed");
     } else {
@@ -1861,6 +1924,8 @@ pub fn api_router(image_max_bytes: usize, pdf_max_bytes: usize) -> Router<AppSta
         .route("/search/stream", get(search_stream))
         .route("/ask", post(ask))
         .route("/ask/stream", post(ask_stream))
+        .route("/decide", post(decide))
+        .route("/decide/stream", post(decide_stream))
         .route("/resurface", get(resurface))
         .route("/days/{date}", get(crate::web::day::api_day))
         .route("/context", post(context))
@@ -3665,6 +3730,9 @@ pub(crate) mod tests {
             ("POST", "/api/v1/corpora/abc/reprocess"),
             ("POST", "/api/v1/ask"),
             ("POST", "/api/v1/ask/stream"),
+            ("POST", "/api/v1/decide"),
+            ("POST", "/api/v1/decide/stream"),
+            ("POST", "/api/v1/decisions/x/verdict"),
             ("GET", "/api/v1/artifacts/abc"),
             ("PATCH", "/api/v1/artifacts/abc"),
             ("DELETE", "/api/v1/artifacts/abc"),
@@ -4044,6 +4112,354 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// The body as written, so a choice's option order is the test's own and not a JSON map's.
+    fn post_text(uri: &str, token: &str, body: &str) -> Request<Body> {
+        Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn deciding_app(
+        rule: impl Fn(
+            &str,
+            &[crate::infer::decide::Question],
+        ) -> crate::error::Result<crate::infer::decide::Answers>
+        + Send
+        + Sync
+        + 'static,
+        learn: bool,
+    ) -> (axum::Router, String) {
+        let mut core = crate::core::decide::tests::three_base().await;
+        core.learn.enabled = learn;
+        crate::core::decide::tests::deciding(&mut core, rule);
+        app_with_token(core).await
+    }
+
+    /// `(event, data)` in order.
+    fn sse_frames(body: &str) -> Vec<(String, serde_json::Value)> {
+        body.split("\n\n")
+            .filter_map(|f| {
+                let event = f.lines().find_map(|l| l.strip_prefix("event:"))?.trim();
+                let data = f.lines().find_map(|l| l.strip_prefix("data:"))?.trim();
+                Some((event.to_string(), serde_json::from_str(data).ok()?))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn api_decide_answers_a_bare_question_with_yes_or_no() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), true).await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/decide",
+                &token,
+                serde_json::json!({"q": "Keep bge-m3?"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = json_of(res).await;
+        assert_eq!(v["answers"]["verdict"]["type"], "noul", "{v}");
+        assert!(v["standing"]["verdict"].is_string(), "{v}");
+        assert_eq!(v["read"], 3);
+        assert!(
+            v.get("event_id").is_none(),
+            "the API door is not recorded: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn api_decide_takes_system_ones_questions_in_the_callers_order() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), false).await;
+        let res = app
+            .oneshot(post_text(
+                "/api/v1/decide",
+                &token,
+                r#"{"q":"Should I keep the bge-m3 embedder?","questions":{"verdict":{"type":"choice","instructions":"Which embedder do the notes favour?","criteria":{"switch":"Move to EmbeddingGemma","keep":"Stay on bge-m3"}}},"situation":"The GPU has 12 GB.","limit":8,"tags":[],"category":null,"explain":false}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = crate::web::test_support::body_of(res).await;
+        assert!(body.contains("\"probabilities\":{\"switch\":"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn api_decide_says_not_held_with_200() {
+        let (app, token) = deciding_app(crate::core::decide::tests::none_bear(), false).await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/decide",
+                &token,
+                serde_json::json!({"q": "Keep bge-m3?"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let v = json_of(res).await;
+        assert!(v["answers"].is_null(), "{v}");
+        assert_eq!(v["evidence"], serde_json::json!([]));
+        assert_eq!(v["standing"]["verdict"], "not_held");
+        assert!(v["prior"]["verdict"].is_object(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn a_core_that_does_not_decide_has_no_decide_route() {
+        let mut core = crate::core::decide::tests::three_base().await;
+        core.decides = false;
+        let (app, token) = app_with_token(core).await;
+        for path in ["/api/v1/decide", "/api/v1/decide/stream"] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    path,
+                    &token,
+                    serde_json::json!({"q": "Keep bge-m3?"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_decide_refuses_a_bad_request_in_one_sentence() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), false).await;
+        let nine: serde_json::Map<String, serde_json::Value> = (0..9)
+            .map(|i| (format!("q{i}"), serde_json::json!({"type": "noul"})))
+            .collect();
+        for body in [
+            serde_json::json!({"q": ""}),
+            serde_json::json!({"q": "x", "questions": {"bears": {"type": "noul"}}}),
+            serde_json::json!({"q": "x", "questions": nine}),
+            serde_json::json!({"q": "x", "questions": {"v": {"type": "box"}}}),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(post_json("/api/v1/decide", &token, body.clone()))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+            let v = json_of(res).await;
+            assert!(v["error"].is_string(), "{body} -> {v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_decide_explain_adds_the_state() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), false).await;
+        for (explain, has) in [(true, true), (false, false)] {
+            let v = json_of(
+                app.clone()
+                    .oneshot(post_json(
+                        "/api/v1/decide",
+                        &token,
+                        serde_json::json!({"q": "Keep bge-m3?", "explain": explain}),
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(v.get("state").is_some_and(|s| s.is_string()), has, "{v}");
+        }
+    }
+
+    #[tokio::test]
+    async fn api_decide_stream_sends_retrieved_reads_and_done() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), false).await;
+        let blocking = json_of(
+            app.clone()
+                .oneshot(post_json(
+                    "/api/v1/decide",
+                    &token,
+                    serde_json::json!({"q": "Keep bge-m3?"}),
+                ))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/decide/stream",
+                &token,
+                serde_json::json!({"q": "Keep bge-m3?"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/event-stream")
+        );
+        let body = crate::web::test_support::body_of(res).await;
+        let frames = sse_frames(&body);
+        let names: Vec<&str> = frames.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["retrieved", "read", "read", "read", "done"],
+            "{body}"
+        );
+        assert_eq!(frames[0].1, serde_json::json!({"passages": 3}));
+        for (_, r) in &frames[1..4] {
+            assert!(r["bearing"].is_boolean(), "{r}");
+            assert_eq!(r["of"], 3);
+            assert!(
+                r["artifact_id"].is_string() && r["bears"].is_number(),
+                "{r}"
+            );
+            assert_eq!(r["read"]["verdict"]["type"], "noul", "{r}");
+        }
+        let done = &frames[4].1;
+        let keys =
+            |v: &serde_json::Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys(done), keys(&blocking));
+        assert_eq!(done["answers"], blocking["answers"]);
+    }
+
+    #[tokio::test]
+    async fn a_read_frame_names_a_choices_options() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), false).await;
+        let res = app
+            .oneshot(post_text(
+                "/api/v1/decide/stream",
+                &token,
+                r#"{"q":"Keep?","questions":{"verdict":{"type":"choice","criteria":{" switch ":"Move","keep":"Stay"}}}}"#,
+            ))
+            .await
+            .unwrap();
+        let body = crate::web::test_support::body_of(res).await;
+        let frames = sse_frames(&body);
+        let reads: Vec<_> = frames.iter().filter(|(n, _)| n == "read").collect();
+        assert_eq!(reads.len(), 3, "{body}");
+        for (_, r) in reads {
+            let keys: Vec<&String> = r["read"]["verdict"]["probabilities"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{r}"))
+                .keys()
+                .collect();
+            assert_eq!(
+                keys,
+                ["switch", "keep"],
+                "named, trimmed, in option order: {r}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn api_decide_stream_ends_on_an_error_frame() {
+        let (app, token) = deciding_app(
+            |_, _| Err(crate::error::Error::Internal("the rule erred".into())),
+            false,
+        )
+        .await;
+        let res = app
+            .oneshot(post_json(
+                "/api/v1/decide/stream",
+                &token,
+                serde_json::json!({"q": "Keep bge-m3?"}),
+            ))
+            .await
+            .unwrap();
+        let body = crate::web::test_support::body_of(res).await;
+        let frames = sse_frames(&body);
+        let (name, data) = frames.last().unwrap_or_else(|| panic!("no frames: {body}"));
+        assert_eq!(name, "error", "{body}");
+        assert!(data["error"].is_string());
+    }
+
+    #[tokio::test]
+    async fn a_decision_from_the_app_is_recorded_and_judged() {
+        let (app, token) = deciding_app(crate::core::decide::tests::marked(0.9), true).await;
+        let decide = |body: &'static str| {
+            let app = app.clone();
+            let token = token.clone();
+            async move {
+                json_of(
+                    app.oneshot(post_text("/api/v1/decide?door=app", &token, body))
+                        .await
+                        .unwrap(),
+                )
+                .await
+            }
+        };
+        let judge = |id: String, body: serde_json::Value| {
+            let app = app.clone();
+            let token = token.clone();
+            async move {
+                let res = app
+                    .oneshot(post_json(
+                        &format!("/api/v1/decisions/{id}/verdict"),
+                        &token,
+                        body,
+                    ))
+                    .await
+                    .unwrap();
+                (res.status(), json_of(res).await)
+            }
+        };
+
+        let d = decide(
+            r#"{"q":"Keep bge-m3?","questions":{"verdict":{"type":"choice","criteria":{"keep":"Stay","switch":"Move"}}}}"#,
+        )
+        .await;
+        let id = d["event_id"]
+            .as_str()
+            .expect("the app door is recorded")
+            .to_string();
+        let (status, v) = judge(id.clone(), serde_json::json!({"verdict": "right"})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            v,
+            serde_json::json!({"verdict": "right", "correct": {"verdict": "keep"}})
+        );
+        let (_, v) = judge(id.clone(), serde_json::json!({"verdict": "none"})).await;
+        assert_eq!(v, serde_json::json!({"verdict": null, "correct": null}));
+        let (status, v) = judge(id.clone(), serde_json::json!({"verdict": "maybe"})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(v["error"].is_string());
+
+        let d = decide(
+            r#"{"q":"Which?","questions":{"verdict":{"type":"choice","criteria":{"a":"A","b":"B","c":"C"}}}}"#,
+        )
+        .await;
+        let id = d["event_id"].as_str().unwrap().to_string();
+        let (status, v) = judge(
+            id.clone(),
+            serde_json::json!({"verdict": "wrong", "correct": {"verdict": "c"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            v,
+            serde_json::json!({"verdict": "wrong", "correct": {"verdict": "c"}})
+        );
+        let (status, _) = judge(
+            id.clone(),
+            serde_json::json!({"verdict": "wrong", "correct": {"verdict": "zzz"}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, v) = judge(
+            id.clone(),
+            serde_json::json!({"verdict": "wrong", "correct": {"other": "c"}}),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a key that is not the question's: {v}"
+        );
+
+        let (status, _) = judge("nope".into(), serde_json::json!({"verdict": "right"})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     /// A frame name the panel's switch does not handle vanishes silently.

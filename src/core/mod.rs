@@ -2,6 +2,7 @@ pub mod ask;
 pub mod background;
 pub mod context;
 pub mod coverage;
+pub mod decide;
 pub mod explain;
 pub mod extract;
 pub mod fetch;
@@ -17,6 +18,7 @@ pub mod sitting;
 
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
+use crate::infer::decide::{Decider, HttpDecider};
 use crate::infer::openai::{
     HttpCompleter, HttpDescriber, HttpEmbedder, HttpReranker, HttpSynthesizer, HttpTranscriber,
 };
@@ -107,6 +109,11 @@ pub struct Core {
     /// passages.
     pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
+    /// Always there: `[infer.decide]` is required.
+    pub decider: Arc<dyn Decider>,
+    /// `false` where the decider stands for nothing: the contained build, whose role points at a
+    /// port no model listens on. See `Core::decides`.
+    pub decides: bool,
     pub reranker: Option<Arc<dyn Reranker>>,
     /// `[infer.rerank].apply`; meaningless without a reranker.
     pub rerank_apply: Vec<crate::config::RerankApply>,
@@ -150,6 +157,7 @@ pub struct Core {
     pub pinned_boost: f32,
     /// The one switch over everything learned from what happens here.
     pub learn: crate::config::LearnConfig,
+    pub decide_cfg: crate::config::DecideConfig,
     pub feedback: crate::config::FeedbackConfig,
     /// Never read on a path a person waits on.
     pub evolve: crate::config::EvolveConfig,
@@ -342,6 +350,8 @@ impl Core {
         if let (Some(path), Some(role)) = (&models.ask, cfg.infer.ask.as_ref()) {
             self.completer = Some(Arc::new(LocalCompleter::new(path.clone(), role)));
         }
+        // No decision model runs on the device; `[infer.decide]` there points at port 9.
+        self.decides = false;
         // No config role stands behind this: the file's presence opens the microphone.
         if let Some(path) = &models.speech {
             self.transcriber = Some(Arc::new(crate::infer::local::LocalTranscriber::new(
@@ -386,6 +396,8 @@ impl Core {
                 ) as Arc<dyn Synthesizer>
             }),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
+            decider: Arc::new(HttpDecider::new(&cfg.infer.decide).with_counter(counter.clone())),
+            decides: true,
             reranker: cfg
                 .infer
                 .rerank
@@ -460,6 +472,7 @@ impl Core {
             line: working.line,
             pinned_boost: cfg.vector.pinned_boost,
             learn: cfg.learn.clone(),
+            decide_cfg: cfg.decide.clone(),
             feedback: cfg.feedback.clone(),
             capture: cfg.capture.clone(),
             associate: cfg.associate.clone(),
@@ -515,6 +528,11 @@ impl Core {
         self.completer.is_some()
     }
 
+    /// `false`: no Decide verb, no `/api/v1/decide`, no decide tool. Only the contained build.
+    pub fn decides(&self) -> bool {
+        self.decides
+    }
+
     /// `false` is the embed-only floor: no judged read, reminders, moments, promotion or day
     /// reading.
     pub fn synthesizes(&self) -> bool {
@@ -547,8 +565,8 @@ impl Core {
 pub mod test_support {
     use super::*;
     use crate::infer::fake::{
-        FailingReranker, FakeCompleter, FakeDescriber, FakeEmbedder, FakeReranker, FakeSynthesizer,
-        FakeTranscriber,
+        FailingReranker, FakeCompleter, FakeDecider, FakeDescriber, FakeEmbedder, FakeReranker,
+        FakeSynthesizer, FakeTranscriber,
     };
     use crate::vector::memory::MemoryVectors;
 
@@ -703,6 +721,8 @@ pub mod test_support {
             vectors: Arc::new(MemoryVectors::new()),
             synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
+            decider: Arc::new(FakeDecider::default()),
+            decides: true,
             reranker,
             rerank_apply: vec![
                 crate::config::RerankApply::Ask,
@@ -745,6 +765,7 @@ pub mod test_support {
                 enabled: false,
                 ..Default::default()
             },
+            decide_cfg: crate::config::DecideConfig::default(),
             feedback: crate::config::FeedbackConfig::default(),
             capture: crate::config::CaptureConfig::default(),
             associate: crate::config::AssociateConfig::default(),
@@ -1028,6 +1049,26 @@ mod tests {
         assert!(core.reranker.is_some());
     }
 
+    #[tokio::test]
+    async fn a_core_decides_with_the_configured_window_and_model() {
+        let store = crate::store::Store::memory().await.unwrap();
+        let vectors = Arc::new(crate::vector::memory::MemoryVectors::new());
+        let mut cfg = Config::load(Some(std::path::Path::new("config.example.toml"))).unwrap();
+        cfg.infer.decide.context_tokens = 4096;
+        cfg.infer.decide.model = "m".into();
+        let core = Core::from_config(&cfg, vectors, store);
+        assert_eq!(core.decider.context_tokens(), 4096);
+        assert_eq!(core.decider.model(), "m");
+    }
+
+    #[tokio::test]
+    async fn the_test_core_decides_with_the_fake() {
+        assert_eq!(
+            test_support::test_core().await.decider.model(),
+            "fake-decider"
+        );
+    }
+
     #[test]
     fn a_config_still_setting_a_mode_is_refused_naming_the_reshape() {
         let cfg_toml = r#"
@@ -1045,6 +1086,10 @@ mod tests {
         model = "embeddinggemma"
         dim = 768
         max_input_tokens = 2048
+        [infer.decide]
+        base_url = "http://127.0.0.1:9/v1"
+        model = "m"
+        context_tokens = 8192
         [auth]
         mode = "local"
         [auth.local]
@@ -1112,6 +1157,19 @@ mod contained_tests {
             again.count().await.unwrap(),
             core.vectors.count().await.unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn the_device_offers_no_decide() {
+        let cfg = crate::config::Config::test_default();
+        let none = crate::infer::local::LocalModels {
+            embed: None,
+            rerank: None,
+            ask: None,
+            speech: None,
+        };
+        assert!(test_core().await.decides());
+        assert!(!test_core().await.with_local_models(&cfg, &none).decides());
     }
 
     #[tokio::test]
