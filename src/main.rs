@@ -333,14 +333,21 @@ async fn run_account_command(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // The replay's report is stdout and is redirected to a file: its logs go to stderr.
+    let logs = if args.replay_decisions {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
+    } else {
+        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout)
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "engram=info,tower_http=info".into()),
         )
+        .with_writer(logs)
         .init();
-
-    let args = Args::parse();
 
     if let Some(pw) = &args.hash_password {
         println!("{}", engram::auth::local::hash_password(pw)?);

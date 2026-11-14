@@ -62,7 +62,58 @@ pub struct QuestionReport {
     pub suggested: Option<Thresholds>,
     /// The thresholds in config the bands were counted at.
     pub bands_at: Thresholds,
+    /// `None` for what the base decided; otherwise which unjudged cases these are.
+    pub scope: Option<String>,
+    /// Unjudged choices: the five highest tops per pick, in option order. Titles only.
+    pub confident: Vec<Confident>,
+    /// How often each answer was given, most first (a noul: yes, then no).
+    pub picks: Vec<(String, usize)>,
+    /// Per past verdict (`related` for the old link verdict), the answers given for it.
+    pub past_picks: Vec<(String, Vec<(String, usize)>)>,
+    /// A reading taken at a fixed line: that line, and how many said yes at or above it.
+    pub reading: Option<(f64, usize)>,
 }
+
+/// Readings are taken, not banded; these are their fixed lines (`category` takes its top pick).
+fn fixed_line(id: &str) -> Option<f64> {
+    match id {
+        "pinned" => Some(0.90),
+        "time_bound" | "self_contained" => Some(0.5),
+        "asks_reminder" | "has_date" => Some(0.3),
+        _ => None,
+    }
+}
+
+fn is_reading(id: &str) -> bool {
+    id == "category" || fixed_line(id).is_some()
+}
+
+fn yes_of(r: &Row) -> f64 {
+    if r.pick == "yes" { r.top } else { 1.0 - r.top }
+}
+
+/// Counts most first, then by name; none at zero.
+fn tally<'a>(picks: impl Iterator<Item = &'a str>) -> Vec<(String, usize)> {
+    let mut n: BTreeMap<&str, usize> = BTreeMap::new();
+    for p in picks {
+        *n.entry(p).or_default() += 1;
+    }
+    let mut v: Vec<(String, usize)> = n.into_iter().map(|(k, c)| (k.to_string(), c)).collect();
+    v.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
+    v
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Confident {
+    pub pick: String,
+    pub top: f64,
+    pub title: String,
+    /// The pair's cosine, where the case is a pair the vector store found.
+    pub similarity: Option<f32>,
+}
+
+/// The cosine down to which unjudged neighbours are asked; part 5 makes this `consolidate.scan_min`.
+const NET_MIN: f32 = 0.70;
 
 /// Old link verdict `related`: any of the new kinds that show a link.
 const RELATED: &str = "continues|example|alternative|background";
@@ -137,6 +188,8 @@ struct Found {
     texts: Vec<Option<Text>>,
     /// Kept out of the neighbours: a rescue's own rewrite.
     not: Option<String>,
+    /// The cosine of an unjudged pair.
+    sim: Option<f32>,
 }
 
 impl Found {
@@ -150,6 +203,7 @@ impl Found {
             words: vec![],
             texts: vec![],
             not: None,
+            sim: None,
         }
     }
 }
@@ -510,6 +564,7 @@ async fn shown(core: &Core, a: &Asked, f: &Found) -> Result<Option<(Option<Strin
             let (Some(x), Some(y)) = (text_of(core, &f.a).await?, other) else {
                 return Ok(None);
             };
+            let both = format!("{} ↔ {}", title(&x), title(&y));
             let s = if a.id == "pair_relation" {
                 let (sa, sb) = (
                     sources(core, &f.a).await?,
@@ -521,7 +576,7 @@ async fn shown(core: &Core, a: &Asked, f: &Found) -> Result<Option<(Option<Strin
             } else {
                 state::link(&x.note(), &y.note(), &f.words, c, room)
             };
-            Some((s, title(&x)))
+            Some((s, both))
         }
         "reap_worth" => {
             let Some(x) = text_of(core, &f.a).await? else {
@@ -568,6 +623,7 @@ struct Item {
     case: Case,
     asked: Asked,
     title: String,
+    sim: Option<f32>,
 }
 
 struct Gathered {
@@ -577,7 +633,88 @@ struct Gathered {
 }
 
 async fn gather(core: &Core, a: &Asked, limit: usize) -> Result<Gathered> {
-    let mut all = found(core, a.id).await?;
+    gather_from(core, a, found(core, a.id).await?, limit).await
+}
+
+/// Live notes newest first, each with its nearest live neighbours at `NET_MIN` or above, as the
+/// relate stage reads them; a pair already filed in any state is not unjudged.
+async fn neighbour_pairs(core: &Core) -> Result<Vec<Found>> {
+    let (mut seen, mut out) = (HashSet::new(), Vec::new());
+    for c in core
+        .store
+        .artifacts_by_status(ArtifactStatus::Active, i64::MAX)
+        .await?
+    {
+        for h in core
+            .vectors
+            .neighbours(&c.id, core.consolidate.per_point)
+            .await?
+        {
+            let other = h.payload.artifact_id.as_str();
+            let Some(sim) = h.similarity.filter(|s| *s >= NET_MIN) else {
+                continue;
+            };
+            let (a, b) = crate::store::links::canonical(&c.id, other);
+            if a == b || !seen.insert((a.to_string(), b.to_string())) {
+                continue;
+            }
+            if core.store.pair_state_between(a, b).await?.is_some()
+                || core.store.artifact_in_results(other).await? != Some(true)
+            {
+                continue;
+            }
+            let mut f = Found::new(c.created_at, a, Some(b), None);
+            f.sim = Some(sim);
+            out.push(f);
+        }
+    }
+    Ok(out)
+}
+
+/// Superseded notes no burial or rescue judged, newest retirement first, with what replaced them.
+async fn retired(core: &Core) -> Result<Vec<Found>> {
+    let judged: HashSet<String> = reaps(core).await?.into_iter().map(|f| f.a).collect();
+    Ok(core
+        .store
+        .superseded_artifacts(i64::MAX)
+        .await?
+        .into_iter()
+        .filter(|c| !judged.contains(&c.id))
+        .map(|c| {
+            Found::new(
+                c.retired_at.unwrap_or(c.created_at),
+                &c.id,
+                c.superseded_by.as_deref(),
+                None,
+            )
+        })
+        .collect())
+}
+
+/// The unjudged section a question has, if any: its scope and its cases.
+async fn unjudged(core: &Core, id: &str) -> Result<Option<(&'static str, Vec<Found>)>> {
+    Ok(match id {
+        "pair_relation" => Some(("unjudged neighbours", neighbour_pairs(core).await?)),
+        "reap_worth" => Some(("unjudged retired notes", retired(core).await?)),
+        _ => None,
+    })
+}
+
+/// The unjudged cases for `pair_relation` or `reap_worth`, newest first, and how many `limit` left out.
+pub async fn unjudged_cases(core: &Core, a: &Asked, limit: usize) -> Result<(Vec<Case>, usize)> {
+    let Some((_, all)) = unjudged(core, a.id).await? else {
+        return Ok((vec![], 0));
+    };
+    let g = gather_from(core, a, all, limit).await?;
+    Ok((g.items.into_iter().map(|i| i.case).collect(), g.left_out))
+}
+
+async fn gather_from(
+    core: &Core,
+    a: &Asked,
+    mut all: Vec<Found>,
+    limit: usize,
+) -> Result<Gathered> {
     all.sort_by(|x, y| (y.at, &y.a, &y.b).cmp(&(x.at, &x.a, &x.b)));
     let left_out = all.len().saturating_sub(limit);
     all.truncate(limit);
@@ -601,6 +738,7 @@ async fn gather(core: &Core, a: &Asked, limit: usize) -> Result<Gathered> {
             },
             asked,
             title,
+            sim: f.sim,
         });
     }
     Ok(Gathered {
@@ -655,8 +793,10 @@ fn summarize(
     a: &Asked,
     rows: &[Row],
     titles: &[String],
+    sims: &[Option<f32>],
     bands_at: Thresholds,
     counts: (usize, usize, usize),
+    scope: Option<&str>,
 ) -> QuestionReport {
     let (skipped_too_long, skipped_no_text, left_out) = counts;
     let agree = |r: &Row| r.past.as_deref().is_some_and(|p| agrees(p, &r.pick));
@@ -695,15 +835,30 @@ fn summarize(
         .rev()
         .map(|(h, (c, n))| (h as f64 / 100.0, c, n))
         .collect();
-    let mut extremes = Vec::new();
-    if agrees_with_past.is_none() {
+    let (mut extremes, mut confident) = (Vec::new(), Vec::new());
+    if let (Some(_), QKind::Choice { options }) = (scope, &a.question.kind) {
+        for (name, _) in options {
+            let mut mine: Vec<Confident> = rows
+                .iter()
+                .zip(titles.iter().zip(sims))
+                .filter(|(r, _)| &r.pick == name)
+                .map(|(r, (t, sim))| Confident {
+                    pick: r.pick.clone(),
+                    top: r.top,
+                    title: t.clone(),
+                    similarity: *sim,
+                })
+                .collect();
+            mine.sort_by(|x, y| y.top.total_cmp(&x.top));
+            confident.extend(mine.into_iter().take(5));
+        }
+    } else if agrees_with_past.is_none() {
         let noul = matches!(a.question.kind, QKind::Noul);
         extremes = rows
             .iter()
             .zip(titles)
             .map(|(r, t)| match (noul, r.pick == "yes") {
-                (true, true) => (r.top, t.clone()),
-                (true, false) => (1.0 - r.top, t.clone()),
+                (true, _) => (yes_of(r), t.clone()),
                 (false, _) => (r.top, format!("{} · {t}", r.pick)),
             })
             .collect();
@@ -731,6 +886,33 @@ fn summarize(
             .count(),
         extremes,
         bands_at,
+        scope: scope.map(str::to_string),
+        confident,
+        picks: if matches!(a.question.kind, QKind::Noul) {
+            let yes = rows.iter().filter(|r| r.pick == "yes").count();
+            vec![("yes".into(), yes), ("no".into(), rows.len() - yes)]
+        } else {
+            tally(rows.iter().map(|r| r.pick.as_str()))
+        },
+        past_picks: {
+            let mut by: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+            for r in rows {
+                if let Some(p) = r.past.as_deref() {
+                    by.entry(if p == RELATED { "related" } else { p })
+                        .or_default()
+                        .push(&r.pick);
+                }
+            }
+            let mut v: Vec<(String, Vec<(String, usize)>)> = by
+                .into_iter()
+                .map(|(k, ps)| (k.to_string(), tally(ps.into_iter())))
+                .collect();
+            let total = |x: &[(String, usize)]| x.iter().map(|p| p.1).sum::<usize>();
+            v.sort_by(|x, y| total(&y.1).cmp(&total(&x.1)).then_with(|| x.0.cmp(&y.0)));
+            v
+        },
+        reading: fixed_line(a.id)
+            .map(|at| (at, rows.iter().filter(|r| yes_of(r) >= at - 1e-9).count())),
     }
 }
 
@@ -751,20 +933,25 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
         }
         None => catalogue::all(),
     };
+    // Each question's judged section, then its unjudged one where it has one.
     let mut gathered = Vec::new();
     for a in &asked {
-        gathered.push(gather(core, a, limit).await?);
+        gathered.push((a, None, gather(core, a, limit).await?));
+        if let Some((scope, all)) = unjudged(core, a.id).await? {
+            gathered.push((a, Some(scope), gather_from(core, a, all, limit).await?));
+        }
     }
     let n: usize = gathered
         .iter()
-        .flat_map(|g| &g.items)
+        .flat_map(|(_, _, g)| &g.items)
         .filter(|i| i.case.state.is_some())
         .count();
     eprintln!("{n} cases to ask, about {} at 0.6 s each", estimate(n));
     let mut out = Vec::new();
-    for (a, g) in asked.iter().zip(gathered) {
+    for (a, scope, g) in gathered {
         let at = core.decide_cfg.bands.of(a.id);
-        let (mut rows, mut titles, mut too_long) = (Vec::new(), Vec::new(), 0);
+        let (mut rows, mut titles, mut sims, mut too_long) =
+            (Vec::new(), Vec::new(), Vec::new(), 0);
         for item in g.items {
             let Some(state) = &item.case.state else {
                 too_long += 1;
@@ -781,9 +968,16 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
                 person: item.case.person,
             });
             titles.push(item.title);
+            sims.push(item.sim);
         }
-        let r = summarize(a, &rows, &titles, at, (too_long, g.no_text, g.left_out));
-        eprintln!("{}: {} asked", r.id, r.asked);
+        let counts = (too_long, g.no_text, g.left_out);
+        let r = summarize(a, &rows, &titles, &sims, at, counts, scope);
+        eprintln!(
+            "{}{}: {} asked",
+            r.id,
+            scope.map(|s| format!(" ({s})")).unwrap_or_default(),
+            r.asked
+        );
         out.push(r);
     }
     Ok(out)
@@ -820,8 +1014,13 @@ pub fn suggest(by_top: &[(f64, usize, usize)]) -> Option<Thresholds> {
 }
 
 fn render_one(r: &QuestionReport) -> String {
+    let scope = r
+        .scope
+        .as_deref()
+        .map(|s| format!(" · {s}"))
+        .unwrap_or_default();
     let mut s = format!(
-        "{} v{} · {} asked · {} too long · {} without text · {} left out\n",
+        "{} v{}{scope} · {} asked · {} too long · {} without text · {} left out\n",
         r.id, r.version, r.asked, r.skipped_too_long, r.skipped_no_text, r.left_out
     );
     if r.asked + r.skipped_too_long + r.skipped_no_text + r.left_out == 0 {
@@ -848,12 +1047,16 @@ fn render_one(r: &QuestionReport) -> String {
     if r.asked == 0 {
         return s;
     }
-    let [act, ask, leave] = r.bands;
-    let would = format!("would act {act} · ask {ask} · leave {leave}");
-    s += &format!(
-        "  {would:<37} (act_at {:.2}, ask_at {:.2})\n",
-        r.bands_at.act_at, r.bands_at.ask_at
-    );
+    if let Some((at, yes)) = r.reading {
+        s += &format!("  at {at:.2}   yes {yes} of {}\n", r.asked);
+    } else if !is_reading(&r.id) {
+        let [act, ask, leave] = r.bands;
+        let would = format!("would act {act} · ask {ask} · leave {leave}");
+        s += &format!(
+            "  {would:<37} (act_at {:.2}, ask_at {:.2})\n",
+            r.bands_at.act_at, r.bands_at.ask_at
+        );
+    }
     let past = r.agrees_with_past.is_some();
     s += if past {
         "  top     cases  agree\n"
@@ -872,6 +1075,18 @@ fn render_one(r: &QuestionReport) -> String {
         }
         s += "\n";
     }
+    let list = |ps: &[(String, usize)]| {
+        ps.iter()
+            .map(|(p, n)| format!("{p} {n}"))
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    if !r.picks.is_empty() {
+        s += &format!("  picks   {}\n", list(&r.picks));
+    }
+    for (past, ps) in &r.past_picks {
+        s += &format!("  past {past:<12} {}\n", list(ps));
+    }
     if past {
         s += &match r.suggested {
             Some(t) => format!(
@@ -882,9 +1097,24 @@ fn render_one(r: &QuestionReport) -> String {
         };
     }
     if !r.extremes.is_empty() {
-        s += "  highest and lowest yes\n";
+        let noul = catalogue::by_id(&r.id).is_some_and(|a| matches!(a.question.kind, QKind::Noul));
+        s += if noul {
+            "  highest and lowest yes\n"
+        } else {
+            "  most and least sure\n"
+        };
         for (v, t) in &r.extremes {
             s += &format!("  {v:.2}  {t}\n");
+        }
+    }
+    if !r.confident.is_empty() {
+        s += "  most confident\n";
+        for c in &r.confident {
+            let sim = c
+                .similarity
+                .map(|x| format!("  (cosine {x:.2})"))
+                .unwrap_or_default();
+            s += &format!("  {:<13} {:.2}  {}{sim}\n", c.pick, c.top, c.title);
         }
     }
     s
@@ -1279,7 +1509,7 @@ mod tests {
         bury(&core, &ids[1], None).await;
 
         let r = run(&core, Some("pair_relation"), 200).await.unwrap();
-        assert_eq!(r.len(), 1);
+        assert_eq!(r.len(), 2, "judged, then unjudged neighbours");
         assert_eq!((r[0].asked, r[0].skipped_no_text), (0, 1));
         assert_eq!(decider.calls(), 0);
     }
@@ -1514,8 +1744,8 @@ mod tests {
 
         let r = run(&core, Some("pair_relation"), 200).await.unwrap();
         assert_eq!(
-            r,
-            vec![QuestionReport {
+            r[..1],
+            [QuestionReport {
                 id: "pair_relation".into(),
                 version: 1,
                 asked: 3,
@@ -1529,6 +1759,14 @@ mod tests {
                 swap_disagreed: 1,
                 extremes: vec![],
                 suggested: None,
+                scope: None,
+                confident: vec![],
+                picks: vec![("conflict".into(), 2), ("duplicate".into(), 1)],
+                past_picks: vec![(
+                    "conflict".into(),
+                    vec![("conflict".into(), 2), ("duplicate".into(), 1)]
+                )],
+                reading: None,
                 bands_at: Thresholds {
                     act_at: 0.90,
                     ask_at: 0.60
@@ -1647,8 +1885,8 @@ mod tests {
         );
         assert_eq!(
             r.len(),
-            catalogue::all().len(),
-            "every question is reported"
+            catalogue::all().len() + 2,
+            "every question, and two unjudged sections"
         );
     }
 
@@ -1684,6 +1922,11 @@ mod tests {
                 act_at: 0.86,
                 ask_at: 0.62,
             }),
+            scope: None,
+            confident: vec![],
+            picks: vec![],
+            past_picks: vec![],
+            reading: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -1720,6 +1963,11 @@ mod tests {
             swap_disagreed: 0,
             extremes: vec![(0.97, "Port moved".into()), (0.48, "Spuren".into())],
             suggested: None,
+            scope: None,
+            confident: vec![],
+            picks: vec![],
+            past_picks: vec![],
+            reading: Some((0.5, 1)),
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -1728,7 +1976,7 @@ mod tests {
         assert_eq!(
             render(&[r]),
             "time_bound v1 · 2 asked · 0 too long · 0 without text · 0 left out
-  would act 1 · ask 0 · leave 1         (act_at 0.90, ask_at 0.60)
+  at 0.50   yes 1 of 2
   top     cases
   0.95        1
   0.50        1
@@ -1797,6 +2045,11 @@ mod tests {
             swap_disagreed: 0,
             extremes: vec![],
             suggested: None,
+            scope: None,
+            confident: vec![],
+            picks: vec![],
+            past_picks: vec![],
+            reading: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -1854,6 +2107,11 @@ mod tests {
             swap_disagreed: 1,
             extremes: vec![],
             suggested: None,
+            scope: None,
+            confident: vec![],
+            picks: vec![],
+            past_picks: vec![],
+            reading: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -1923,5 +2181,431 @@ mod tests {
         assert_eq!(cases.len(), 1, "{cases:?}");
         assert_eq!(cases[0].subjects.0, ids[5]);
         assert_eq!(cases[0].person, Some(PersonSaid::Disagreed));
+    }
+
+    async fn titled_at(core: &Core, rows: &[(&str, [f32; 2])]) -> Vec<String> {
+        let rows: Vec<(&str, &str, [f32; 2])> = rows.iter().map(|(t, v)| (*t, *t, *v)).collect();
+        seed_titled(core, &rows).await
+    }
+
+    #[tokio::test]
+    async fn unjudged_neighbours_are_found_once_and_filed_pairs_are_not() {
+        let core = core_with(anything()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("a", [1.0, 0.0]),
+                ("b", [1.0, 0.1]),
+                ("c", [0.0, 1.0]),
+                ("d", [0.1, 1.0]),
+            ],
+        )
+        .await;
+        core.store
+            .record_pair(&ids[2], &ids[3], 0.99)
+            .await
+            .unwrap();
+
+        let (cases, left_out) = unjudged_cases(&core, &catalogue::pair_relation(), 200)
+            .await
+            .unwrap();
+        let got: Vec<(String, Option<String>)> = cases.iter().map(|c| c.subjects.clone()).collect();
+        let (x, y) = crate::store::links::canonical(&ids[0], &ids[1]);
+        assert_eq!(
+            got,
+            [(x.to_string(), Some(y.to_string()))],
+            "a↔b once; c↔d is filed"
+        );
+        assert_eq!(left_out, 0);
+        assert!(cases[0].past.is_none() && cases[0].person.is_none());
+        let state = cases[0].state.as_deref().unwrap();
+        assert!(
+            state.starts_with("A: ") && state.contains("(captured "),
+            "{state}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_under_the_net_is_not_asked() {
+        let decider = anything();
+        let core = core_with(decider.clone()).await;
+        titled_at(&core, &[("a", [1.0, 0.0]), ("e", [0.6, 0.8])]).await;
+        let (cases, _) = unjudged_cases(&core, &catalogue::pair_relation(), 200)
+            .await
+            .unwrap();
+        assert!(
+            cases.is_empty(),
+            "cosine 0.60 is under {NET_MIN}: {cases:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_unjudged_limit_takes_the_newest_and_counts_the_rest() {
+        let core = core_with(anything()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("a", [1.0, 0.0]),
+                ("b", [1.0, 0.0]),
+                ("c", [0.0, 1.0]),
+                ("d", [0.0, 1.0]),
+            ],
+        )
+        .await;
+        for (id, at) in ids.iter().zip([100_i64, 100, 300, 300]) {
+            sqlx::query!("UPDATE artifacts SET created_at = ? WHERE id = ?", at, id)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+        }
+        let (cases, left_out) = unjudged_cases(&core, &catalogue::pair_relation(), 1)
+            .await
+            .unwrap();
+        assert_eq!(cases.len(), 1);
+        assert_eq!(cases[0].subjects.0, ids[2].clone().min(ids[3].clone()));
+        assert_eq!(left_out, 1);
+    }
+
+    #[tokio::test]
+    async fn the_most_confident_are_listed_per_pick_with_titles_and_cosine() {
+        let core = core_with(rule(|state, q| {
+            if state.contains("alpha") {
+                pick(q, "duplicate", 0.9)
+            } else {
+                pick(q, "distinct", 0.8)
+            }
+        }))
+        .await;
+        titled_at(
+            &core,
+            &[
+                ("alpha one", [1.0, 0.0]),
+                ("alpha two", [1.0, 0.0]),
+                ("beta one", [0.0, 1.0]),
+                ("beta two", [0.0, 1.0]),
+            ],
+        )
+        .await;
+
+        let r = run(&core, Some("pair_relation"), 200).await.unwrap();
+        let u = &r[1];
+        assert_eq!(u.scope.as_deref(), Some("unjudged neighbours"));
+        assert_eq!(u.asked, 2);
+        let got: Vec<(&str, f64, &str)> = u
+            .confident
+            .iter()
+            .map(|c| (c.pick.as_str(), c.top, c.title.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("duplicate", 0.9, "alpha one ↔ alpha two"),
+                ("distinct", 0.8, "beta one ↔ beta two")
+            ]
+        );
+        assert!(
+            u.confident
+                .iter()
+                .all(|c| c.similarity.is_some_and(|s| s > 0.99))
+        );
+        assert!(u.extremes.is_empty());
+    }
+
+    #[test]
+    fn at_most_five_are_listed_per_pick() {
+        let rows: Vec<Row> = (0..7)
+            .map(|i| Row {
+                pick: "distinct".into(),
+                top: 0.5 + f64::from(i) / 20.0,
+                swapped_agree: Some(true),
+                band: Band::Leave,
+                past: None,
+                person: None,
+            })
+            .collect();
+        let titles: Vec<String> = (0..7).map(|i| format!("t{i}")).collect();
+        let sims = vec![Some(0.8); 7];
+        let r = summarize(
+            &catalogue::pair_relation(),
+            &rows,
+            &titles,
+            &sims,
+            Thresholds {
+                act_at: 0.9,
+                ask_at: 0.6,
+            },
+            (0, 0, 0),
+            Some("unjudged neighbours"),
+        );
+        let tops: Vec<&str> = r.confident.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(tops, ["t6", "t5", "t4", "t3", "t2"]);
+    }
+
+    #[tokio::test]
+    async fn superseded_notes_are_unjudged_reap_cases_with_their_successor() {
+        let core = core_with(anything()).await;
+        let ids = titled_at(&core, &[("old port", [1.0, 0.0]), ("new port", [1.0, 0.0])]).await;
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+
+        let (cases, _) = unjudged_cases(&core, &catalogue::reap_worth(), 200)
+            .await
+            .unwrap();
+        assert_eq!(cases.len(), 1, "{cases:?}");
+        assert_eq!(cases[0].subjects, (ids[0].clone(), Some(ids[1].clone())));
+        let state = cases[0].state.as_deref().unwrap();
+        assert!(
+            state.contains("Retired note: old port") && state.contains("Its replacement: new port"),
+            "{state}"
+        );
+
+        let r = run(&core, Some("reap_worth"), 200).await.unwrap();
+        assert_eq!(r.len(), 2);
+        let u = &r[1];
+        assert_eq!(u.scope.as_deref(), Some("unjudged retired notes"));
+        assert_eq!(
+            (u.asked, u.agrees_with_past, u.agrees_with_person),
+            (1, None, None)
+        );
+        assert_eq!(u.suggested, None);
+        assert_eq!(u.extremes, [(0.9, "old port".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn the_unjudged_sections_carry_no_agreement_and_no_suggestion() {
+        let core = core_with(anything()).await;
+        titled_at(&core, &[("a", [1.0, 0.0]), ("b", [1.0, 0.0])]).await;
+        let r = run(&core, Some("pair_relation"), 200).await.unwrap();
+        assert_eq!(r[0].scope, None, "the judged section comes first");
+        let u = &r[1];
+        assert_eq!(u.asked, 1);
+        assert_eq!(
+            (u.agrees_with_past, u.agrees_with_person, u.suggested),
+            (None, None, None)
+        );
+        let text = render(&r[1..]);
+        assert!(
+            !text.contains("agrees with")
+                && !text.contains("cases  agree")
+                && !text.contains("suggested"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_unjudged_section_reads_with_its_scope_and_most_confident() {
+        let r = QuestionReport {
+            id: "pair_relation".into(),
+            version: 1,
+            asked: 2,
+            skipped_too_long: 0,
+            skipped_no_text: 0,
+            left_out: 3,
+            agrees_with_past: None,
+            agrees_with_person: None,
+            bands: [1, 0, 1],
+            by_top: vec![(0.90, 1, 0), (0.80, 1, 0)],
+            swap_disagreed: 0,
+            extremes: vec![],
+            suggested: None,
+            scope: Some("unjudged neighbours".into()),
+            confident: vec![
+                Confident {
+                    pick: "duplicate".into(),
+                    top: 0.93,
+                    title: "Ports ↔ Ports v2".into(),
+                    similarity: Some(0.91),
+                },
+                Confident {
+                    pick: "distinct".into(),
+                    top: 0.81,
+                    title: "Spuren ↔ Hash".into(),
+                    similarity: Some(0.72),
+                },
+            ],
+            picks: vec![],
+            past_picks: vec![],
+            reading: None,
+            bands_at: Thresholds {
+                act_at: 0.90,
+                ask_at: 0.60,
+            },
+        };
+        assert_eq!(
+            render(&[r]),
+            "pair_relation v1 · unjudged neighbours · 2 asked · 0 too long · 0 without text · 3 left out
+  swapped reads disagreed          0
+  would act 1 · ask 0 · leave 1         (act_at 0.90, ask_at 0.60)
+  top     cases
+  0.90        1
+  0.80        1
+  most confident
+  duplicate     0.93  Ports ↔ Ports v2  (cosine 0.91)
+  distinct      0.81  Spuren ↔ Hash  (cosine 0.72)
+"
+        );
+    }
+
+    fn row(pick: &str, top: f64, past: Option<&str>) -> Row {
+        Row {
+            pick: pick.into(),
+            top,
+            swapped_agree: Some(true),
+            band: Band::Leave,
+            past: past.map(String::from),
+            person: None,
+        }
+    }
+
+    #[test]
+    fn the_picks_are_counted_and_broken_down_by_past_verdict() {
+        let rows = [
+            row("background", 0.9, Some(RELATED)),
+            row("background", 0.8, Some(RELATED)),
+            row("unrelated", 0.7, Some(RELATED)),
+            row("unrelated", 0.9, Some("unrelated")),
+        ];
+        let titles = vec!["t".to_string(); 4];
+        let r = summarize(
+            &catalogue::link_kind(),
+            &rows,
+            &titles,
+            &[None; 4],
+            Thresholds {
+                act_at: 0.9,
+                ask_at: 0.6,
+            },
+            (0, 0, 0),
+            None,
+        );
+        assert_eq!(
+            r.picks,
+            [("background".to_string(), 2), ("unrelated".to_string(), 2)]
+        );
+        assert_eq!(
+            r.past_picks,
+            [
+                (
+                    "related".to_string(),
+                    vec![("background".to_string(), 2), ("unrelated".to_string(), 1)]
+                ),
+                ("unrelated".to_string(), vec![("unrelated".to_string(), 1)]),
+            ]
+        );
+        let text = render(&[r]);
+        assert!(
+            text.contains(
+                "  0.70        1      0\n  picks   background 2 · unrelated 2\n  past related      background 2 · unrelated 1\n  past unrelated    unrelated 1\n  suggested"
+            ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_noul_names_yes_then_no_and_a_reading_shows_its_fixed_line_not_bands() {
+        let rows = [row("yes", 0.95, None), row("no", 0.7, None)];
+        let titles = vec!["Port moved".to_string(), "Spuren".to_string()];
+        let r = summarize(
+            &catalogue::pinned(),
+            &rows,
+            &titles,
+            &[None; 2],
+            Thresholds {
+                act_at: 0.9,
+                ask_at: 0.6,
+            },
+            (0, 0, 0),
+            None,
+        );
+        assert_eq!(r.picks, [("yes".to_string(), 1), ("no".to_string(), 1)]);
+        assert_eq!(r.reading, Some((0.90, 1)));
+        let text = render(&[r]);
+        assert!(!text.contains("would act"), "{text}");
+        assert!(
+            text.contains("\n  at 0.90   yes 1 of 2\n  top     cases\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  picks   yes 1 · no 1\n  highest and lowest yes\n"),
+            "{text}"
+        );
+        for (id, at) in [
+            ("time_bound", 0.5),
+            ("self_contained", 0.5),
+            ("asks_reminder", 0.3),
+            ("has_date", 0.3),
+        ] {
+            let r = summarize(
+                &catalogue::by_id(id).unwrap(),
+                &rows,
+                &titles,
+                &[None; 2],
+                Thresholds {
+                    act_at: 0.9,
+                    ask_at: 0.6,
+                },
+                (0, 0, 0),
+                None,
+            );
+            assert_eq!(r.reading.map(|x| x.0), Some(at), "{id}");
+        }
+    }
+
+    #[test]
+    fn category_shows_its_picks_and_no_bands() {
+        let rows = [
+            row("procedure", 0.9, Some("procedure")),
+            row("concept", 0.6, Some("procedure")),
+        ];
+        let titles = vec!["t".to_string(); 2];
+        let r = summarize(
+            &catalogue::category(),
+            &rows,
+            &titles,
+            &[None; 2],
+            Thresholds {
+                act_at: 0.9,
+                ask_at: 0.6,
+            },
+            (0, 0, 0),
+            None,
+        );
+        assert_eq!(r.reading, None);
+        let text = render(&[r]);
+        assert!(
+            !text.contains("would act") && !text.contains("  at "),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "  picks   concept 1 · procedure 1\n  past procedure    concept 1 · procedure 1\n"
+            ),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_two_note_choice_lists_both_titles_as_most_and_least_sure() {
+        let core = core_with(rule(|_, q| pick(q, "a_first", 0.8))).await;
+        let ids = titled_at(&core, &[("Steps", [1.0, 0.0]), ("Why", [1.0, 0.0])]).await;
+        let (a, b) = crate::store::links::canonical(&ids[0], &ids[1]);
+        core.store
+            .bump_link(a, b, 1.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(a, b, LinkState::Related, Some("steps"), Some((0, 0)))
+            .await
+            .unwrap();
+
+        let r = run(&core, Some("link_direction"), 200).await.unwrap();
+        assert_eq!(r[0].extremes, [(0.8, "a_first · Steps ↔ Why".to_string())]);
+        let text = render(&r);
+        assert!(
+            text.contains("  most and least sure\n  0.80  a_first · Steps ↔ Why\n"),
+            "{text}"
+        );
     }
 }
