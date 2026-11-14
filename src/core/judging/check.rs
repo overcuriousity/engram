@@ -314,4 +314,40 @@ mod tests {
         assert!(got.is_err());
         assert!(outage(got.unwrap_err()).retryable(), "the unit is retried");
     }
+
+    #[tokio::test]
+    async fn checks_do_not_spend_the_judging_budget() {
+        let (core, _, _) = checked(0.9, 0.9, Which::Both).await;
+        let full = core.decide_cfg.max_per_tick;
+        assert_eq!(core.judging_budget().await.unwrap(), full);
+        for _ in 0..3 {
+            check(&core, "s2", &[note("O", "x")], &note("W", "x"), Which::Both)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            core.judging_budget().await.unwrap(),
+            full,
+            "a check is not armed judging"
+        );
+        crate::core::judging::ask(
+            &core,
+            &crate::core::judging::catalogue::reap_worth(),
+            crate::core::judging::Subjects {
+                kind: "artifact",
+                a: "x".into(),
+                b: None,
+                rev_a: None,
+                rev_b: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            core.judging_budget().await.unwrap(),
+            full - 1,
+            "a decision still spends it"
+        );
+    }
 }

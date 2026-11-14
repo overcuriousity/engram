@@ -208,7 +208,10 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         chunks = within_allowance(chunks, &text, allowance);
     }
 
-    let chunks = faithful(core, target, &text, chunks).await;
+    // A re-run that will hand back what is already written is not checked again.
+    if written_already(core, corpus_id, idx).await?.is_none() {
+        chunks = faithful(core, target, &text, chunks).await;
+    }
 
     // Kept beside the chunks: `corpus_lines` is the model's claim, the span is what became of it.
     let body: String = text.clone();
@@ -336,14 +339,16 @@ async fn faithful(
     }];
     let mut kept = Vec::with_capacity(chunks.len());
     let mut asking = true;
-    for c in chunks {
+    for (n, c) in chunks.into_iter().enumerate() {
         if asking {
             let rewrite = state::Note {
                 title: c.title.as_deref(),
                 day: None,
                 text: &c.text,
             };
-            match check(core, target, &original, &rewrite, Which::AddsNothingOnly).await {
+            // Named by its place in the proposed batch: a dropped artifact has no row of its own.
+            let subject = format!("{target}#{n}");
+            match check(core, &subject, &original, &rewrite, Which::AddsNothingOnly).await {
                 Ok(Checked::Refused { question, yes }) => {
                     tracing::info!(
                         target,
@@ -647,35 +652,19 @@ pub(crate) async fn write_segment_artifacts(
     new: Vec<NewArtifact>,
 ) -> Result<Vec<crate::store::artifacts::Chunk>> {
     let _corpus = core.corpus_lock(corpus_id).await;
+    if let Some(have) = written_already(core, corpus_id, segment_idx).await? {
+        tracing::info!(
+            corpus_id,
+            window = segment_idx,
+            "window already written under keep_artifacts; not writing again"
+        );
+        return Ok(have);
+    }
     // The mark or a verbatim state, as `run` asks it.
     let keep = core
         .store
         .segment_write_appends(corpus_id, segment_idx)
         .await?;
-    if keep {
-        // A promotion re-run under append: return the earlier non-passage rows and insert none.
-        let rows = core
-            .store
-            .artifacts_for_segment(corpus_id, segment_idx)
-            .await?;
-        let is_promotion = rows
-            .iter()
-            .any(|c| c.provenance == crate::store::artifacts::Provenance::Passage);
-        let have: Vec<_> = rows
-            .into_iter()
-            .filter(|c| {
-                c.provenance != crate::store::artifacts::Provenance::Passage && c.in_results()
-            })
-            .collect();
-        if is_promotion && !have.is_empty() {
-            tracing::info!(
-                corpus_id,
-                window = segment_idx,
-                "window already written under keep_artifacts; not writing again"
-            );
-            return Ok(have);
-        }
-    }
     if !keep {
         let old = core
             .store
@@ -689,6 +678,34 @@ pub(crate) async fn write_segment_artifacts(
         }
     }
     core.store.insert_artifacts(corpus_id, &new).await
+}
+
+/// A promotion re-run under append: the earlier non-passage rows, which the write returns instead
+/// of inserting any.
+async fn written_already(
+    core: &Core,
+    corpus_id: &str,
+    segment_idx: i64,
+) -> Result<Option<Vec<crate::store::artifacts::Chunk>>> {
+    if !core
+        .store
+        .segment_write_appends(corpus_id, segment_idx)
+        .await?
+    {
+        return Ok(None);
+    }
+    let rows = core
+        .store
+        .artifacts_for_segment(corpus_id, segment_idx)
+        .await?;
+    let is_promotion = rows
+        .iter()
+        .any(|c| c.provenance == crate::store::artifacts::Provenance::Passage);
+    let have: Vec<_> = rows
+        .into_iter()
+        .filter(|c| c.provenance != crate::store::artifacts::Provenance::Passage && c.in_results())
+        .collect();
+    Ok((is_promotion && !have.is_empty()).then_some(have))
 }
 
 /// One per thirty tokens, at least one: the floor under the prompt, because a prompt is a request.
@@ -1039,6 +1056,61 @@ mod tests {
             core.store.segment_state(&out.id, 0).await.unwrap(),
             Some(SegmentState::Done)
         );
+    }
+
+    async fn write_rows(core: &Core) -> Vec<String> {
+        sqlx::query_scalar!(
+            "SELECT subject_a FROM decisions WHERE subject_kind = 'write' ORDER BY subject_a"
+        )
+        .fetch_all(&core.store.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn each_check_row_names_the_artifact_it_judged() {
+        let mut core = test_core().await;
+        core.decider = refusing("bravo");
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let t = unit_target(&out.id, 0);
+        assert_eq!(
+            write_rows(&core).await,
+            [format!("{t}#0"), format!("{t}#1")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rerun_of_a_window_already_written_is_not_checked_again() {
+        let mut core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let before = write_rows(&core).await;
+        assert!(!before.is_empty(), "the first run was checked");
+        let dec = refusing("alpha");
+        core.decider = dec.clone();
+
+        core.store.reset_segment(&out.id, 0, true).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let checks = dec
+            .requests()
+            .into_iter()
+            .filter(|(_, qs)| crate::core::judging::check::test_support::is_check(qs))
+            .count();
+        assert_eq!(
+            checks, 0,
+            "the re-run paid for checks of what it will not write"
+        );
+        assert_eq!(write_rows(&core).await, before, "and logged rows for them");
     }
 
     #[tokio::test]

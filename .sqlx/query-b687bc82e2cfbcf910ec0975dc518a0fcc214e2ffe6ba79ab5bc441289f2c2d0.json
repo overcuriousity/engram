@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT COUNT(*) FROM decisions WHERE decided_at >= ?",
+  "query": "SELECT COUNT(*) FROM decisions WHERE decided_at >= ? AND subject_kind != 'write'",
   "describe": {
     "columns": [
       {
@@ -17,5 +17,5 @@
       false
     ]
   },
-  "hash": "7499119e777801e755483373ad577ad7a7953bdeddb9f2cccb73ae343a230b11"
+  "hash": "b687bc82e2cfbcf910ec0975dc518a0fcc214e2ffe6ba79ab5bc441289f2c2d0"
 }
