@@ -4,6 +4,12 @@
 pub async fn serve_test_app() -> (String, String, crate::core::Core) {
     let core = crate::core::test_support::test_core().await;
     let handle = core.clone();
+    let (url, token) = serve(core).await;
+    (url, token, handle)
+}
+
+/// `(base_url, token)` over a core the test prepared.
+pub async fn serve(core: crate::core::Core) -> (String, String) {
     let (app, token) = crate::web::test_support::app_with_token(core).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -12,5 +18,5 @@ pub async fn serve_test_app() -> (String, String, crate::core::Core) {
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
     });
-    (format!("http://{addr}"), token, handle)
+    (format!("http://{addr}"), token)
 }
