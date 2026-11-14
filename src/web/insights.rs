@@ -115,6 +115,8 @@ struct InsightsTemplate {
     artifact_count: i64,
     vector_count: u64,
     retrying: Vec<RetryingRow>,
+    /// What the base is torn on; renders nothing when empty.
+    unsure: crate::web::unsure::Unsure,
     /// What the base did on its own and left an undo for; see [`SetAsideRow`].
     set_aside: Vec<SetAsideRow>,
     /// A cap was hit; said, since a list that stops silently reads as complete.
@@ -693,6 +695,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         .collect();
 
     Ok(HtmlTemplate(InsightsTemplate {
+        unsure: crate::web::unsure::unsure(&tenant).await?,
         sleep: sleep_view(&tenant.core).await?,
         evolve: evolve_view(&tenant.core).await?,
         held: tenant.core.store.held().await?,

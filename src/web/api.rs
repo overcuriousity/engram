@@ -148,6 +148,8 @@ pub struct StatusResponse {
     pub recommend: bool,
     /// Units waiting on a generation model; on a phone, what the closed gate holds back.
     pub waiting_generation: i64,
+    /// Open rows of the Unsure block.
+    pub unsure: i64,
     pub held: HeldBrief,
     /// Null on an empty base.
     pub last_kept: Option<LastKept>,
@@ -1712,6 +1714,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
                 &crate::store::jobs::Stage::GENERATORS,
             )
             .await?,
+        unsure: tenant.core.store.open_ask_count().await?,
         held: HeldBrief {
             corpora: held_corpora,
             artifacts: held_artifacts,
@@ -3737,6 +3740,9 @@ pub(crate) mod tests {
             ("PATCH", "/api/v1/artifacts/abc"),
             ("DELETE", "/api/v1/artifacts/abc"),
             ("GET", "/api/v1/status"),
+            ("GET", "/api/v1/unsure"),
+            ("POST", "/api/v1/unsure/x/answer"),
+            ("POST", "/api/v1/unsure/x/again"),
         ] {
             let req = Request::builder()
                 .uri(uri)

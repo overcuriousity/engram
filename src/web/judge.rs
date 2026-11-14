@@ -116,6 +116,55 @@ pub fn routes() -> Router<AppState> {
         .route("/artifacts/{id}/unsupersede", post(unsupersede))
         .route("/merges/{id}/undo", post(undo_merge))
         .route("/condensations/{id}/undo", post(undo_condensation))
+        .route("/unsure", get(unsure))
+        .route("/unsure/{id}/answer", post(answer_unsure))
+        .route("/unsure/{id}/again", post(ask_unsure_again))
+}
+
+/// What the base is torn on; `answers` are the picks `/answer` takes, null being Leave.
+async fn unsure(tenant: Tenant) -> Result<Json<serde_json::Value>> {
+    let items: Vec<serde_json::Value> = crate::web::unsure::open_rows(&tenant.core)
+        .await?
+        .into_iter()
+        .map(|o| {
+            serde_json::json!({
+                "id": o.id,
+                "label": o.label,
+                "subjects": o.subjects.into_iter()
+                    .map(|(id, title)| serde_json::json!({ "id": id, "title": title }))
+                    .collect::<Vec<_>>(),
+                "weights": o.weights.into_iter()
+                    .map(|(k, n)| (k, serde_json::json!(n)))
+                    .collect::<serde_json::Map<_, _>>(),
+                "answers": o.buttons.into_iter().map(|(p, _)| p).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(Json(serde_json::json!({
+        "items": items,
+        "waiting": tenant.core.store.waiting_ask_count().await?,
+        "next": serde_json::Value::Null,
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct PickBody {
+    pick: Option<String>,
+}
+
+async fn answer_unsure(
+    tenant: Tenant,
+    Path(id): Path<String>,
+    Json(b): Json<PickBody>,
+) -> Result<StatusCode> {
+    // Null is Leave.
+    crate::core::judging::answer(&tenant.core, &id, b.pick.as_deref()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn ask_unsure_again(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
+    crate::core::judging::ask_again(&tenant.core, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn deprecate(tenant: Tenant, Path(aid): Path<String>) -> Result<StatusCode> {

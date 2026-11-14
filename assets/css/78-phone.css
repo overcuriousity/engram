@@ -122,6 +122,9 @@
   /* No scroller inside a scroller. */
   .rail, .raw { max-height: none; }
 
+  /* Thumb-sized answers. */
+  .unsure-answers .oc-btn, .unsure-answered .oc-btn { min-height: 44px; }
+
   /* The name matters more than the time here; the corpus page still says when. */
   .qtime { display: none; }
   .qmeta { grid-template-columns: auto; }

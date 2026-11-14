@@ -459,6 +459,15 @@ impl Store {
         )
     }
 
+    /// Asks with no seat yet.
+    pub async fn waiting_ask_count(&self) -> Result<i64> {
+        Ok(sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM decisions WHERE band = 'ask' AND state = 'waiting'"
+        )
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
     /// Confirmed or corrected with no journal row, newest first; a reason of `asked_again` leaves the list.
     pub async fn answered_without_action(&self, limit: i64) -> Result<Vec<Logged>> {
         self.select_logged(

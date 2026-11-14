@@ -59,6 +59,8 @@
 </h2>
 <div hx-get="/ui/queue" hx-trigger="load" hx-swap="outerHTML"></div>
 
+{% include "_unsure.html" %}
+
 {# One journal of what the base did on its own, each row with its undo. `web::insights::SetAsideRow` is the fold. #}
 {% if !set_aside.is_empty() %}
 <h2 class="oc-text-section">What the base did</h2>

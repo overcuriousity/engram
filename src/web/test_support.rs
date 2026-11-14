@@ -226,7 +226,29 @@ fn playwright_build(dir: &std::ffi::OsStr) -> u64 {
 pub(crate) async fn every_page() -> Vec<(String, String)> {
     use crate::store::corpora::{CorpusStatus, Reading};
 
-    let (app, cookie, core) = crate::web::test_support::app_session_and_core().await;
+    use crate::core::judging::test_support::{CHOICE, TestApplier, by_state, core_with, seeded};
+
+    // An Unsure row with as many long answers as any question has.
+    let (core, _, _) = core_with(
+        TestApplier::new(CHOICE).with_buttons(&[
+            ("duplicate", "Duplicate of each other"),
+            ("replaced_a", "Replaced by the first one"),
+            ("replaced_b", "Replaced by the second one"),
+            ("conflict", "In conflict with each other"),
+            ("distinct", "Distinct and worth keeping apart"),
+        ]),
+        by_state,
+    )
+    .await;
+    let (app, cookie) = app_with_cookie(core.clone()).await;
+    seeded(
+        &core,
+        CHOICE,
+        "a-subject-with-a-rather-long-unbroken-identifier",
+        serde_json::json!({"duplicate": 0.48, "distinct": 0.41, "replaced_a": 0.09, "conflict": 0.02}),
+        crate::core::judging::band::Band::Ask,
+    )
+    .await;
     let doc = core
         .store
         .insert_attached_corpus(

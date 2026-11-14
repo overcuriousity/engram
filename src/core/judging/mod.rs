@@ -348,6 +348,7 @@ pub(crate) mod test_support {
         changed: AtomicBool,
         applied: Mutex<Vec<(String, DecidedBy)>>,
         reopened: Mutex<Vec<String>>,
+        buttons: Option<Vec<(String, String)>>,
     }
 
     impl TestApplier {
@@ -360,7 +361,17 @@ pub(crate) mod test_support {
                 changed: AtomicBool::new(false),
                 applied: Mutex::new(vec![]),
                 reopened: Mutex::new(vec![]),
+                buttons: None,
             }
+        }
+        /// Answers other than the defaults, as (pick, label).
+        pub(crate) fn with_buttons(mut self, b: &[(&str, &str)]) -> Self {
+            self.buttons = Some(
+                b.iter()
+                    .map(|(p, l)| (p.to_string(), l.to_string()))
+                    .collect(),
+            );
+            self
         }
         pub(crate) fn spending(mut self, job: Option<Job>) -> Self {
             self.job = job;
@@ -401,6 +412,9 @@ pub(crate) mod test_support {
             self.job
         }
         async fn buttons(&self, _: &Core, _: &Logged) -> Result<Vec<(String, String)>> {
+            if let Some(b) = &self.buttons {
+                return Ok(b.clone());
+            }
             let b = if self.id == CHOICE {
                 [("same", "Same"), ("different", "Different")]
             } else {
@@ -533,6 +547,52 @@ pub(crate) mod test_support {
             version: 1,
             question: Question::noul("keep", "Is this worth keeping?"),
             swapped: false,
+        }
+    }
+
+    /// A decision about `a` and `a-other` with `answer` as its weights, logged in `band` and `state`;
+    /// a waiting ask is settled, so it opens while there is a seat.
+    pub(crate) async fn seeded(
+        core: &Core,
+        question_id: &str,
+        a: &str,
+        answer: serde_json::Value,
+        band: Band,
+    ) -> Logged {
+        let pick = answer
+            .as_object()
+            .and_then(|m| {
+                m.iter()
+                    .max_by(|x, y| x.1.as_f64().partial_cmp(&y.1.as_f64()).unwrap())
+            })
+            .map(|(k, _)| k.clone())
+            .unwrap_or_default();
+        let top = answer[&pick].as_f64().unwrap_or(0.0);
+        let id = core
+            .store
+            .log_decision(&NewLogged {
+                question_id: question_id.into(),
+                question_version: 1,
+                model: core.decider.model().into(),
+                subject_kind: "pair",
+                subject_a: a.into(),
+                subject_b: Some(format!("{a}-other")),
+                rev_a: Some(1),
+                rev_b: Some(1),
+                answer: answer.to_string(),
+                top,
+                pick,
+                swapped_agree: None,
+                band,
+                reason: None,
+                state: State::Waiting,
+            })
+            .await
+            .unwrap();
+        let d = logged(core, &id).await.unwrap();
+        match band {
+            Band::Ask => settle(core, d).await.unwrap(),
+            _ => d,
         }
     }
 

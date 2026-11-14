@@ -95,6 +95,11 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
         out.push_str(&format!("  jobs       {line}\n"));
     }
 
+    // Only when something waits on a person.
+    if let Some(n) = s["unsure"].as_i64().filter(|n| *n > 0) {
+        out.push_str(&format!("  unsure     {n}\n"));
+    }
+
     // Absent while `[learn]` is off: four zeroes would read like a failure.
     if let Some(l) = s["learning"].as_object() {
         let n = |k: &str| l.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
@@ -224,6 +229,17 @@ mod tests {
         );
         let without = render(&face(), &endpoint(), &body(serde_json::Value::Null));
         assert!(!without.contains("reap"), "{without}");
+    }
+
+    #[test]
+    fn the_unsure_count_is_said_only_when_there_is_one() {
+        let mut b = body(serde_json::Value::Null);
+        b["unsure"] = serde_json::json!(3);
+        let out = render(&face(), &endpoint(), &b);
+        assert!(out.contains("  unsure     3\n"), "{out}");
+        b["unsure"] = serde_json::json!(0);
+        let out = render(&face(), &endpoint(), &b);
+        assert!(!out.contains("unsure"), "{out}");
     }
 
     #[test]

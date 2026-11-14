@@ -7,6 +7,7 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 
 ### Added
 - `scripts/probe-decide.sh` measures a decision endpoint.
+- Insights shows what the base is unsure about, with a button per answer. Nothing produces these rows yet.
 - Decide: a typed question answered from the notes that bear on it, with each note's own reading. Judging a decision confirms the notes that agree and sends the ones against to the pair judge. `POST /api/v1/decide`, `/decide/stream`, `/decisions/{id}/verdict`; thresholds under `[decide]`. In the web UI beside Search and Ask (Alt+Enter). Also the MCP tool decide and engram -d. Not on the Android app, which runs no decision model.
 
 ### Changed
