@@ -202,7 +202,8 @@ async fn json(e: &Endpoint, body: String) -> Result<(String, i32)> {
         .text()
         .await
         .map_err(|err| Error::Validation(format!("{err}")))?;
-    let v: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    let v: Value = serde_json::from_str(&text)
+        .map_err(|err| Error::Validation(format!("the decision did not arrive as JSON: {err}")))?;
     Ok((text, if v["answers"].is_null() { 1 } else { 0 }))
 }
 
@@ -340,18 +341,18 @@ mod tests {
         );
     }
 
-    /// The spec's example as the server sends it: two of four passages bear, the second against.
+    /// The spec's example as the server sends it, options not in alphabetical order: two of four passages bear, the second against.
     fn held() -> serde_json::Value {
         let read = |pick: &str, keep: f64| {
             serde_json::json!({"verdict": {"type": "choice", "choice": pick,
-                "probabilities": {"keep": keep, "switch to gemma": 1.0 - keep}, "confidence": 0.8}})
+                "probabilities": {"switch to gemma": 1.0 - keep, "keep": keep}, "confidence": 0.8}})
         };
         serde_json::json!({
             "answers": {"verdict": {"type": "choice", "choice": "keep",
-                "probabilities": {"keep": 0.81, "switch to gemma": 0.19},
+                "probabilities": {"switch to gemma": 0.19, "keep": 0.81},
                 "confidence": 0.62, "swapped_agree": true}},
             "prior": {"verdict": {"type": "choice", "choice": "keep",
-                "probabilities": {"keep": 0.55, "switch to gemma": 0.45}, "confidence": 0.07}},
+                "probabilities": {"switch to gemma": 0.45, "keep": 0.55}, "confidence": 0.07}},
             "standing": {"verdict": "settled"},
             "evidence": [
                 {"n": 1, "artifact_id": "01AAA", "title": "Reindex notes 09/14", "text": "…",
@@ -369,8 +370,8 @@ mod tests {
     fn a_decision_prints_bars_a_standing_and_its_evidence() {
         assert_eq!(
             render(&held(), true),
-            "keep             ████████████░░░  81\n\
-             switch to gemma  ███░░░░░░░░░░░░  19\n\
+            "switch to gemma  ███░░░░░░░░░░░░  19\n\
+             keep             ████████████░░░  81\n\
              Settled.\n\
              \n\
              from:\n\
@@ -460,7 +461,7 @@ mod tests {
         .await
         .expect("the stream must end")
         .expect("the stream must not fail");
-        assert!(code == 0 || code == 1, "unexpected exit code {code}");
+        assert_eq!(code, 0, "the fake decider holds a seeded base");
     }
 
     #[tokio::test]
@@ -491,7 +492,53 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&printed).unwrap();
         assert!(v.get("standing").is_some(), "{printed}");
-        assert_eq!(code, if v["answers"].is_null() { 1 } else { 0 });
+        assert_eq!(code, 0, "{printed}");
+    }
+
+    #[tokio::test]
+    async fn a_reply_that_is_not_json_is_a_failure() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port");
+        let addr = listener.local_addr().expect("the port it got");
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            let (mut sock, _) = listener.accept().await.expect("a client");
+            // Read the request first: closing it unread sends a reset.
+            let mut head = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let reply = "<html>a proxy page</html>";
+            sock.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .ok();
+            sock.flush().await.ok();
+        });
+        let e = Endpoint {
+            url: format!("http://{addr}"),
+            token: "engram_x".into(),
+        };
+        let verb = Verb::Decide {
+            question: "Keep it?".into(),
+            kind: DecideKind::Noul,
+            situation: None,
+        };
+        let json = CliArgs {
+            json: true,
+            ..Default::default()
+        };
+        assert_eq!(crate::cli::dispatch(&e, verb, &json).await, 2);
     }
 
     #[tokio::test]

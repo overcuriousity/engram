@@ -27,7 +27,7 @@ pub(crate) fn encode(raw: &str) -> String {
 }
 
 /// An error as a sentence for the terminal, without `Validation`'s kind prefix.
-fn say(e: &crate::error::Error) -> String {
+pub fn say(e: &crate::error::Error) -> String {
     match e {
         crate::error::Error::Validation(msg) => msg.clone(),
         other => other.to_string(),

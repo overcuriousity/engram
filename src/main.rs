@@ -344,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
         || data_command(&args)
         || args.user.is_some();
     use std::io::IsTerminal;
-    if let Some(verb) = engram::cli::args::verb(
+    let verb = engram::cli::args::verb(
         &args.cli,
         server_command,
         !std::io::stdin().is_terminal(),
@@ -354,7 +354,16 @@ async fn main() -> anyhow::Result<()> {
             std::io::stdin().read_to_string(&mut s)?;
             Ok(s)
         },
-    )? {
+    );
+    // A refused verb is the client's failure, so it exits 2 as the client does, not anyhow's 1.
+    let verb = match verb {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("{}", engram::cli::say(&e));
+            std::process::exit(2);
+        }
+    };
+    if let Some(verb) = verb {
         let code = engram::cli::run(verb, &args.cli).await;
         std::process::exit(code);
     }
