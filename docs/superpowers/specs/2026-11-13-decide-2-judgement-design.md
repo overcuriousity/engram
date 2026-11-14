@@ -698,7 +698,7 @@ What was fixed from it:
   | `pair_relation`, `link_kind` | 0.90 | 0.60 | what reaches 0.90 on this base is closing a pair as distinct and shelving a link; anything else still needs the agreeing swapped read, the daily cap, and has its undo |
   | `answers_query` | 0.90 | 0.60 | 16 of 17 with the person at that line; it labels searches and closes gaps |
   | `reap_worth` | 0.99 | 0.60 | no burial was ever judged here, and 99 of 99 "no" cannot be told from a lean toward "no": it asks |
-  | `answerable` | 0.99 | 0.60 | nothing to measure it on: it asks |
+  | `answerable` | 0.85 | 0.60 | nothing to measure it on. It gates a pursuit and opens no Unsure row, so a high line does not ask, it switches pursuits off; the owner wants them written with some freedom, and a written one is still checked against its sources |
 
   Starting every question at 0.99, as stage 2's plan has it for a question
   without a suggestion, would make the base ask about nearly all of the 15105
