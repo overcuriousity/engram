@@ -457,14 +457,16 @@ mod tests {
             &self,
             input: SegmentInput<'_>,
         ) -> crate::error::Result<SegmentReply> {
+            // As the real writer: no judgement unless the judged schema was asked for.
+            let asked = input.judge.is_some();
             Ok(SegmentReply {
                 artifacts: self.segment(input).await?,
-                judgement: Some(
+                judgement: asked.then(|| {
                     self.0
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone(),
-                ),
+                        .clone()
+                }),
             })
         }
         fn budget(&self) -> SynthesisBudget {
@@ -756,6 +758,71 @@ mod tests {
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].subject_id, rows[0].moment.id);
         assert_eq!(journal[0].detail.as_deref(), Some("due"));
+    }
+
+    #[tokio::test]
+    async fn a_reminder_still_arms_from_the_writers_when() {
+        use crate::infer::decide::{Answer, Answers, Kind, Question};
+        let mut core = test_core().await;
+        // The pre-read says "a reminder" and "no date": the date is the writer's alone.
+        let dec = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(
+            |_, qs: &[Question]| {
+                let answers = qs
+                    .iter()
+                    .map(|q| {
+                        let a = match &q.kind {
+                            Kind::Noul if q.key == "asks_reminder" => Answer::Noul { yes: 0.97 },
+                            Kind::Noul => Answer::Noul { yes: 0.0 },
+                            Kind::Choice { options } => Answer::Choice {
+                                pick: options[0].0.clone(),
+                                probabilities: vec![1.0 / options.len() as f64; options.len()],
+                                confidence: 0.0,
+                            },
+                            Kind::Score { levels } => Answer::Score {
+                                score: 0.0,
+                                probabilities: vec![1.0 / levels.len() as f64; levels.len()],
+                                confidence: 0.0,
+                            },
+                        };
+                        (q.key.clone(), a)
+                    })
+                    .collect();
+                Ok(Answers {
+                    answers,
+                    model: "rule-decider".into(),
+                    input_tokens: 0,
+                })
+            },
+        ));
+        core.decider = dec.clone();
+        core.synthesizer = Some(judged_core_reply(Judgement {
+            intent: Some("remind".into()),
+            when: Some("2099-09-04T09:00".into()),
+            rule: None,
+            events: vec![],
+            links: vec![],
+        }));
+        let out = core
+            .ingest("remind me to send the invoice", "web", None)
+            .await
+            .unwrap();
+        drain(&core).await;
+        assert!(
+            dec.requests()
+                .iter()
+                .any(|(_, qs)| qs.iter().any(|q| q.key == "asks_reminder")),
+            "the window was pre-read"
+        );
+        let rows = core.store.open_due(0, i64::MAX).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let tz = crate::core::moments::zone(Some(&crate::core::moments::default_zone_name(
+            &core.time.default_tz,
+        )));
+        assert_eq!(rows[0].moment.at, parse_local("2099-09-04T09:00", tz));
+        assert_eq!(
+            core.store.get_corpus(&out.id).await.unwrap().metadata["pre_read"]["has_date"],
+            0.0
+        );
     }
 
     #[tokio::test]

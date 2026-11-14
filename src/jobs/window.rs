@@ -2,10 +2,16 @@
 //! own attempt budget.
 
 use crate::core::Core;
+use crate::core::judging::catalogue::{asks_reminder, has_date};
+use crate::core::judging::{Asked, state};
 use crate::error::{Error, Result};
 use crate::store::artifacts::{CorpusSpan, NewArtifact, SpanSource};
 use crate::store::jobs::MAX_ATTEMPTS;
 use crate::store::segments::SegmentState;
+
+/// The pre-read's line: either answer at or above it asks the writer for the judged schema. Low,
+/// because a missed reminder is worse than a wasted schema.
+pub const PRE_READ_LINE: f64 = 0.3;
 
 /// A corpus id is a UUID and cannot contain `#`, so the split is unambiguous from the right.
 pub fn unit_target(corpus_id: &str, idx: i64) -> String {
@@ -50,11 +56,28 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // The stored text: line numbers cannot address a unit smaller than a line.
     let text = w.text.clone();
 
-    // Only a single-window capture is judged by the call that rewrites it. The language is the
-    // corpus's.
-    let lang = crate::infer::lang::of_corpus(&core.store.get_corpus(corpus_id).await?.metadata);
+    // The language is the corpus's.
+    let corpus = core.store.get_corpus(corpus_id).await?;
+    let lang = crate::infer::lang::of_corpus(&corpus.metadata);
 
-    let judging = all.len() == 1;
+    // No budget is not a small budget: the call would return a non-retryable 400 with no cause
+    // named.
+    let Some(window_budget) = super::synthesize::segment_budget(core, lang) else {
+        let reason = super::synthesize::no_budget_reason(core, lang);
+        tracing::error!(corpus_id, window = idx, %reason, "no window can be synthesized");
+        return Err(crate::error::Error::Validation(reason));
+    };
+
+    // Only a single-window capture is judged by the call that rewrites it, and only when the
+    // pre-read finds something a moment could hang on.
+    let judging = wants_judged(
+        core,
+        corpus_id,
+        &text,
+        corpus.metadata["intent"].as_str(),
+        all.len() == 1,
+    )
+    .await?;
     let neighbors = if judging {
         neighbor_context(core, corpus_id, idx).await
     } else {
@@ -65,14 +88,6 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         Some(build_judge_ask(core, corpus_id, neighbors).await?)
     } else {
         None
-    };
-
-    // No budget is not a small budget: the call would return a non-retryable 400 with no cause
-    // named.
-    let Some(window_budget) = super::synthesize::segment_budget(core, lang) else {
-        let reason = super::synthesize::no_budget_reason(core, lang);
-        tracing::error!(corpus_id, window = idx, %reason, "no window can be synthesized");
-        return Err(crate::error::Error::Validation(reason));
     };
     let window_tokens = core.counter.count(&text);
     debug_assert!(
@@ -290,6 +305,66 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         .await?;
 
     settle(core, corpus_id).await
+}
+
+/// Whether this window is synthesized with the judged schema.
+pub(crate) async fn wants_judged(
+    core: &Core,
+    corpus_id: &str,
+    text: &str,
+    forced_intent: Option<&str>,
+    single_window: bool,
+) -> Result<bool> {
+    if !single_window {
+        return Ok(false);
+    }
+    if forced_intent.is_some() {
+        return Ok(true);
+    }
+    let asked = [asks_reminder(), has_date()];
+    let refs: Vec<&Asked> = asked.iter().collect();
+    // Not asked on cut text: the cut-off part may hold the reminder.
+    let Some(shown) = state::window(text, &core.counter, state::room(core, &refs)) else {
+        return Ok(true);
+    };
+    let questions: Vec<_> = asked.iter().map(|a| a.question.clone()).collect();
+    // The unit holds no permit here; the writer's turn is taken after this one is given back.
+    let permit = core.gate.background_light().await;
+    let got = core.decider.decide(&shown, &questions).await;
+    permit.finished();
+    let yes = got.and_then(|a| {
+        asked
+            .iter()
+            .map(|q| match a.answers.get(&q.question.key) {
+                Some(crate::infer::decide::Answer::Noul { yes }) => Ok(*yes),
+                _ => Err(Error::InferenceRejected {
+                    role: "decide",
+                    detail: format!("the answer has no noul for \"{}\"", q.id),
+                }),
+            })
+            .collect::<Result<Vec<f64>>>()
+    });
+    let yes = match yes {
+        Ok(yes) => yes,
+        // When in doubt, the judged schema: a missed reminder is worse than a wasted schema.
+        Err(e) => {
+            tracing::warn!(corpus_id, error = %e, "the pre-read failed; asking for the judged schema");
+            return Ok(true);
+        }
+    };
+    // Read fresh, as `record_intent`: another writer of this column may have run since.
+    let kept = async {
+        let mut meta = core.store.get_corpus(corpus_id).await?.metadata;
+        if !meta.is_object() {
+            meta = serde_json::json!({});
+        }
+        meta["pre_read"] = serde_json::json!({"asks_reminder": yes[0], "has_date": yes[1]});
+        core.store.set_corpus_metadata(corpus_id, &meta).await
+    };
+    if let Err(e) = kept.await {
+        tracing::warn!(corpus_id, error = %e, "the pre-read's answers could not be kept");
+    }
+    Ok(yes.iter().any(|y| *y >= PRE_READ_LINE))
 }
 
 /// Only a promotion needs this, since it hides existing text on the strength of new text. Returns
@@ -1161,5 +1236,184 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    mod pre_read {
+        use super::super::*;
+        use crate::core::ingest::Capture;
+        use crate::core::moments::Intent;
+        use crate::core::test_support::test_core;
+        use crate::infer::decide::{Answer, Answers, Question};
+        use crate::infer::fake::{FAKE_BUDGET, RecordingSynthesizer, RuleDecider};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        /// `asks_reminder` says `remind`, `has_date` says `date`; anything else a flat noul.
+        fn pre_reader(remind: f64, date: f64) -> Arc<RuleDecider> {
+            Arc::new(RuleDecider::new(move |_, qs: &[Question]| {
+                let answers: HashMap<_, _> = qs
+                    .iter()
+                    .map(|q| {
+                        let yes = match q.key.as_str() {
+                            "asks_reminder" => remind,
+                            "has_date" => date,
+                            _ => 0.5,
+                        };
+                        (q.key.clone(), Answer::Noul { yes })
+                    })
+                    .collect();
+                Ok(Answers {
+                    answers,
+                    model: "rule-decider".into(),
+                    input_tokens: 0,
+                })
+            }))
+        }
+
+        fn pre_reads(d: &RuleDecider) -> Vec<(String, Vec<Question>)> {
+            d.requests()
+                .into_iter()
+                .filter(|(_, qs)| qs.iter().any(|q| q.key == "asks_reminder"))
+                .collect()
+        }
+
+        /// Runs the capture's first window; returns the corpus and whether each writer call was
+        /// asked for the judged schema.
+        async fn synthesized(
+            core: &mut Core,
+            text: &str,
+            intent: Option<Intent>,
+        ) -> (String, Vec<bool>) {
+            let rec = Arc::new(RecordingSynthesizer::new(FAKE_BUDGET));
+            core.synthesizer = Some(rec.clone());
+            let out = core
+                .ingest_capture(Capture::new(text, "web").with_intent(intent))
+                .await
+                .unwrap();
+            crate::jobs::synthesize::plan(core, &out.id).await.unwrap();
+            run(core, &unit_target(&out.id, 0)).await.unwrap();
+            (out.id, rec.judged())
+        }
+
+        #[tokio::test]
+        async fn a_note_that_asks_to_be_reminded_is_synthesized_with_the_judged_schema() {
+            let mut core = test_core().await;
+            let dec = pre_reader(0.97, 0.0);
+            core.decider = dec.clone();
+            let (_, judged) = synthesized(&mut core, "Remind me to call the dentist.", None).await;
+            assert_eq!(judged, [true]);
+            let asked = pre_reads(&dec);
+            assert_eq!(asked.len(), 1, "one request");
+            let keys: Vec<&str> = asked[0].1.iter().map(|q| q.key.as_str()).collect();
+            assert_eq!(keys, ["asks_reminder", "has_date"]);
+            assert_eq!(asked[0].0, "Remind me to call the dentist.");
+        }
+
+        #[tokio::test]
+        async fn a_note_with_a_deadline_is_too() {
+            let mut core = test_core().await;
+            core.decider = pre_reader(0.0, 0.31);
+            let (_, judged) =
+                synthesized(&mut core, "The report is due on the 3rd of March.", None).await;
+            assert_eq!(judged, [true]);
+        }
+
+        #[tokio::test]
+        async fn the_line_itself_is_judged() {
+            let mut core = test_core().await;
+            core.decider = pre_reader(PRE_READ_LINE, 0.0);
+            let (_, judged) = synthesized(&mut core, "Maybe ping Anna.", None).await;
+            assert_eq!(judged, [true]);
+        }
+
+        #[tokio::test]
+        async fn a_note_with_neither_gets_the_plain_schema() {
+            let mut core = test_core().await;
+            let dec = pre_reader(0.29, 0.29);
+            core.decider = dec.clone();
+            let (_, judged) = synthesized(&mut core, "The proxy listens on port 8080.", None).await;
+            assert_eq!(judged, [false]);
+            assert_eq!(pre_reads(&dec).len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_forced_intent_needs_no_question() {
+            let mut core = test_core().await;
+            let dec = pre_reader(0.0, 0.0);
+            core.decider = dec.clone();
+            let (_, judged) = synthesized(
+                &mut core,
+                "The proxy listens on port 8080.",
+                Some(Intent::Remind),
+            )
+            .await;
+            assert_eq!(judged, [true]);
+            assert_eq!(dec.calls(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_window_too_long_to_ask_about_is_judged() {
+            let mut core = test_core().await;
+            let dec = pre_reader(0.0, 0.0);
+            dec.set_context_tokens(200);
+            core.decider = dec.clone();
+            let text: String = (0..300).map(|i| format!("word{i} ")).collect();
+            let (id, judged) = synthesized(&mut core, text.trim(), None).await;
+            assert_eq!(
+                core.store.segments_for_corpus(&id).await.unwrap().len(),
+                1,
+                "the fixture is one window"
+            );
+            assert_eq!(judged, [true]);
+            assert_eq!(dec.calls(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_pre_read_that_fails_falls_to_the_judged_schema() {
+            let mut core = test_core().await;
+            let dec = Arc::new(RuleDecider::new(|_, _| {
+                Err(crate::error::Error::Inference {
+                    role: "decide",
+                    detail: "down".into(),
+                })
+            }));
+            core.decider = dec.clone();
+            let (id, judged) =
+                synthesized(&mut core, "The proxy listens on port 8080.", None).await;
+            assert_eq!(judged, [true]);
+            assert_eq!(dec.calls(), 1);
+            assert_eq!(
+                core.store.segment_state(&id, 0).await.unwrap(),
+                Some(SegmentState::Done),
+                "the capture goes on"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_capture_of_several_windows_is_never_judged() {
+            let mut core = test_core().await;
+            let dec = pre_reader(0.97, 0.97);
+            core.decider = dec.clone();
+            let body = (0..400)
+                .map(|i| format!("paragraph number {i} with some filler text"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let (id, judged) = synthesized(&mut core, &body, None).await;
+            assert!(core.store.segments_for_corpus(&id).await.unwrap().len() > 1);
+            assert_eq!(judged, [false]);
+            assert_eq!(dec.calls(), 0);
+        }
+
+        #[tokio::test]
+        async fn the_two_answers_are_kept_with_the_capture() {
+            let mut core = test_core().await;
+            core.decider = pre_reader(0.97, 0.25);
+            let (id, _) = synthesized(&mut core, "Remind me to call the dentist.", None).await;
+            let meta = core.store.get_corpus(&id).await.unwrap().metadata;
+            assert_eq!(
+                meta["pre_read"],
+                serde_json::json!({"asks_reminder": 0.97, "has_date": 0.25})
+            );
+        }
     }
 }

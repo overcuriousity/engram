@@ -393,6 +393,8 @@ impl Synthesizer for GreedySynthesizer {
 /// So a test asserts what the window was given, not what it was supposed to be given.
 pub struct RecordingSynthesizer {
     pub seen: std::sync::Mutex<Vec<(String, crate::infer::context::WindowContext)>>,
+    /// Per `segment_judged` call: whether it was asked for the judged schema.
+    pub judged: std::sync::Mutex<Vec<bool>>,
     pub budget: SynthesisBudget,
 }
 
@@ -400,13 +402,30 @@ impl RecordingSynthesizer {
     pub fn new(budget: SynthesisBudget) -> Self {
         Self {
             seen: std::sync::Mutex::new(Vec::new()),
+            judged: std::sync::Mutex::new(Vec::new()),
             budget,
         }
+    }
+    pub fn judged(&self) -> Vec<bool> {
+        self.judged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
 #[async_trait]
 impl Synthesizer for RecordingSynthesizer {
+    async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<SegmentReply> {
+        self.judged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(input.judge.is_some());
+        Ok(SegmentReply {
+            artifacts: self.segment(input).await?,
+            judgement: None,
+        })
+    }
     async fn segment(&self, input: SegmentInput<'_>) -> Result<Vec<ProposedArtifact>> {
         self.seen
             .lock()
