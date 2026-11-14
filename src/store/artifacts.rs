@@ -1070,16 +1070,19 @@ impl Store {
 
     /// `status` moves in lockstep; this is the one place keeping the two columns consistent.
     pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
-        self.set_superseded_by_with(artifact_id, by, None).await
+        self.set_superseded_by_with(artifact_id, by, None)
+            .await
+            .map(|_| ())
     }
 
     /// One transaction: a hidden artifact with no open journal row can never be restored.
+    /// Returns the journal row's id when one was written.
     pub async fn set_superseded_by_with(
         &self,
         artifact_id: &str,
         by: Option<&str>,
         journal: Option<&crate::store::actions::NewAction>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let status = if by.is_some() {
             ArtifactStatus::Superseded
         } else {
@@ -1103,16 +1106,19 @@ impl Store {
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
-        if let Some(a) = journal {
-            crate::store::actions::insert(&mut *tx, a).await?;
-        }
+        let row = match journal {
+            Some(a) => Some(crate::store::actions::insert(&mut *tx, a).await?),
+            None => None,
+        };
         tx.commit().await?;
-        Ok(())
+        Ok(row)
     }
 
     /// Does not touch `superseded_by`; use `set_superseded_by(id, None)` to clear one.
     pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
-        self.set_artifact_status_with(id, status, None).await
+        self.set_artifact_status_with(id, status, None)
+            .await
+            .map(|_| ())
     }
 
     pub async fn set_artifact_status_with(
@@ -1120,7 +1126,7 @@ impl Store {
         id: &str,
         status: ArtifactStatus,
         journal: Option<&crate::store::actions::NewAction>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         // Marks dirty and stamps `retired_at` in the statement that moves the status, as
         // `set_superseded_by` does.
         let mut tx = self.pool.begin().await?;
@@ -1137,11 +1143,12 @@ impl Store {
             .execute(&mut *tx)
             .await?,
         )?;
-        if let Some(a) = journal {
-            crate::store::actions::insert(&mut *tx, a).await?;
-        }
+        let row = match journal {
+            Some(a) => Some(crate::store::actions::insert(&mut *tx, a).await?),
+            None => None,
+        };
         tx.commit().await?;
-        Ok(())
+        Ok(row)
     }
 
     pub async fn trash_artifact(&self, id: &str, at: i64) -> Result<()> {

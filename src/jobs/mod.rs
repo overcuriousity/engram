@@ -133,6 +133,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
+        (Stage::Merge, _) => dedupe::merge(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Probe, _) => probe::run(core, &job.target_id).await,
         (Stage::Condense, _) => condense::run(core, &job.target_id).await,
@@ -191,7 +192,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 }
                 // A name is decoration, and an unjudged pair stays pending for a later sweep;
                 // everything else stays queued, as it carries knowledge.
-                (Stage::Dedupe | Stage::Title, _) if exhausted => {
+                (Stage::Dedupe | Stage::Merge | Stage::Title, _) if exhausted => {
                     tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;
                 }

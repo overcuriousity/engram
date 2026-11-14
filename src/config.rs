@@ -674,7 +674,8 @@ pub struct ConsolidateConfig {
     pub interval_hours: u64,
     /// How often the dedupe ticker arms units, in minutes: the budget is a rate the hardware sets.
     pub dedupe_interval_mins: u64,
-    /// Units armed per tick; zero switches the model off, while pairs are still found and recorded.
+    /// Decisions armed per tick, inside `decide.max_per_tick`; zero switches judging off, while
+    /// pairs are still found and recorded.
     pub max_dedupe_per_tick: usize,
     /// Days unverified (`last_verified_at`) before an active artifact is a deprecation candidate.
     pub stale_after_days: u32,
@@ -692,7 +693,7 @@ impl Default for ConsolidateConfig {
             per_point: 5,
             interval_hours: 24,
             dedupe_interval_mins: 15,
-            max_dedupe_per_tick: 5,
+            max_dedupe_per_tick: 20,
             stale_after_days: 365,
             stale_max_hits: 0,
         }

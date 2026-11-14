@@ -834,7 +834,7 @@ mod tests {
         run(&core, &ids[1]).await.unwrap();
         assert!(core.store.get_artifact(&ids[0]).await.unwrap().in_results());
         assert!(core.store.get_artifact(&ids[1]).await.unwrap().in_results());
-        let to_judge = core.store.pairs_to_judge(10).await.unwrap();
+        let to_judge = core.store.pairs_to_judge("test/v1", 10).await.unwrap();
         assert_eq!(to_judge.len(), 1, "{to_judge:?}");
         assert!(
             core.store

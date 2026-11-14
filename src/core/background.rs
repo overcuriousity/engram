@@ -69,9 +69,8 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     let mut out = Vec::new();
     if core.consolidate.enabled {
         out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
-        // Arming the judging without a judge is a treadmill: `dedupe::run` returns `Ok(())` and the
-        // pair stays `Pending`.
-        if core.consolidate.max_dedupe_per_tick > 0 && core.judge.is_some() {
+        // The decision model is required, so there is always something to judge with.
+        if core.consolidate.max_dedupe_per_tick > 0 {
             out.push((Stage::ArmDedupe, CONSOLIDATE_TARGET));
         }
     }
@@ -363,7 +362,7 @@ pub const ASSOCIATE_TARGET: &str = "collection";
 mod tests {
 
     #[tokio::test]
-    async fn dedupe_judging_is_not_armed_on_a_base_with_no_judge() {
+    async fn dedupe_judging_is_armed_without_a_chat_judge_and_off_at_zero() {
         use crate::store::jobs::Stage;
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = true;
@@ -380,14 +379,18 @@ mod tests {
         );
         assert!(
             armed(&core).contains(&Stage::ArmDedupe),
-            "and with a judge, so does the judging"
+            "and so does the judging"
         );
         assert!(
             super::periodic_period(&core, Stage::ArmDedupe).is_some(),
             "with a period to go with it"
         );
 
+        // The decision model judges; a chat judge is not needed.
         core.judge = None;
+        assert!(armed(&core).contains(&Stage::ArmDedupe));
+
+        core.consolidate.max_dedupe_per_tick = 0;
         assert!(armed(&core).contains(&Stage::Consolidate));
         assert!(!armed(&core).contains(&Stage::ArmDedupe));
         assert!(super::periodic_period(&core, Stage::ArmDedupe).is_none());

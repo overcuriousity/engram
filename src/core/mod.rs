@@ -204,6 +204,13 @@ impl Budget {
     }
 }
 
+/// What each built-in question's answers do.
+fn builtin_appliers() -> Arc<crate::core::judging::Appliers> {
+    let mut a = crate::core::judging::Appliers::default();
+    a.register(Arc::new(crate::jobs::dedupe::PairApplier));
+    Arc::new(a)
+}
+
 impl Core {
     /// One job's day: what it has written, and what it may.
     pub async fn budget(&self, job: crate::store::actions::Job) -> crate::error::Result<Budget> {
@@ -493,7 +500,7 @@ impl Core {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
-            appliers: Arc::new(Default::default()),
+            appliers: builtin_appliers(),
             decodes: Arc::new(tokio::sync::Semaphore::new(
                 crate::core::image::MAX_CONCURRENT_DECODES,
             )),
@@ -792,7 +799,7 @@ pub mod test_support {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
-            appliers: Arc::new(Default::default()),
+            appliers: builtin_appliers(),
             decodes: Arc::new(tokio::sync::Semaphore::new(
                 crate::core::image::MAX_CONCURRENT_DECODES,
             )),

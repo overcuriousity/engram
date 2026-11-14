@@ -48,11 +48,13 @@ pub enum Stage {
     Fetch,
     /// Collection-targeted: applies waiting decisions, seats waiting asks, lapses old ones. No call.
     Decisions,
+    /// One pair's merge, written after a decision or a person asked for it.
+    Merge,
 }
 
 impl Stage {
     /// Written out: a stage missing here is not a compile error, just invisible to the backfill.
-    pub const ALL: [Stage; 22] = [
+    pub const ALL: [Stage; 23] = [
         Stage::Synthesize,
         Stage::SegmentWindow,
         Stage::Title,
@@ -75,6 +77,7 @@ impl Stage {
         Stage::Condense,
         Stage::Fetch,
         Stage::Decisions,
+        Stage::Merge,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -101,17 +104,18 @@ impl Stage {
             Stage::Condense => "condense",
             Stage::Fetch => "fetch",
             Stage::Decisions => "decisions",
+            Stage::Merge => "merge",
         }
     }
     /// In `ALL`'s order.
     pub const GENERATORS: [Stage; 7] = [
         Stage::SegmentWindow,
         Stage::Title,
-        Stage::Dedupe,
         Stage::LinkJudge,
         Stage::Generate,
         Stage::Reap,
         Stage::Condense,
+        Stage::Merge,
     ];
 
     /// A base with nothing to generate with passes these over at the claim, unpenalised.
@@ -120,12 +124,14 @@ impl Stage {
         match self {
             Stage::SegmentWindow
             | Stage::Title
-            | Stage::Dedupe
             | Stage::LinkJudge
             | Stage::Generate
             | Stage::Reap
-            | Stage::Condense => true,
-            Stage::Synthesize
+            | Stage::Condense
+            | Stage::Merge => true,
+            // A decision takes the light turn and no cooldown.
+            Stage::Dedupe
+            | Stage::Synthesize
             | Stage::Embed
             | Stage::Consolidate
             | Stage::Relate
@@ -168,7 +174,8 @@ impl Stage {
             | Stage::Probe
             | Stage::Condense
             | Stage::Fetch
-            | Stage::Decisions => 1,
+            | Stage::Decisions
+            | Stage::Merge => 1,
         }
     }
 
@@ -197,7 +204,8 @@ impl Stage {
             | Stage::Probe
             | Stage::Condense
             | Stage::Fetch
-            | Stage::Decisions => false,
+            | Stage::Decisions
+            | Stage::Merge => false,
         }
     }
 
@@ -225,6 +233,7 @@ impl Stage {
             "condense" => Some(Stage::Condense),
             "fetch" => Some(Stage::Fetch),
             "decisions" => Some(Stage::Decisions),
+            "merge" => Some(Stage::Merge),
             _ => None,
         }
     }
@@ -1853,8 +1862,21 @@ mod tests {
     }
 
     #[test]
+    fn merge_is_a_background_writer_and_dedupe_no_longer_one() {
+        assert_eq!(Stage::ALL.len(), 23);
+        assert_eq!(Stage::Merge.as_str(), "merge");
+        assert_eq!(Stage::parse("merge"), Some(Stage::Merge));
+        assert!(Stage::GENERATORS.contains(&Stage::Merge));
+        assert!(Stage::Merge.calls_a_generator());
+        assert_eq!(Stage::Merge.class(), 1);
+        assert!(!Stage::Merge.reads_a_capture());
+        assert!(!Stage::GENERATORS.contains(&Stage::Dedupe));
+        assert!(!Stage::Dedupe.calls_a_generator());
+    }
+
+    #[test]
     fn decisions_is_the_twenty_second_stage_a_background_sweep_that_calls_no_generator() {
-        assert_eq!(Stage::ALL.len(), 22);
+        assert_eq!(Stage::ALL[21], Stage::Decisions);
         assert!(Stage::ALL.contains(&Stage::Decisions));
         assert_eq!(Stage::Decisions.as_str(), "decisions");
         assert_eq!(Stage::parse("decisions"), Some(Stage::Decisions));

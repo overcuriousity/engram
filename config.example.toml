@@ -227,9 +227,10 @@ auto_supersede = 0.95
 # Neighbours considered per artifact.
 per_point = 5
 interval_hours = 24
-# Model calls per dedupe tick, every interval; max_dedupe_per_tick = 0 turns the model off.
+# Pair decisions per dedupe tick, every interval, inside [decide] max_per_tick;
+# max_dedupe_per_tick = 0 turns judging off.
 dedupe_interval_mins = 15
-max_dedupe_per_tick = 5
+max_dedupe_per_tick = 20
 
 [feedback]
 # Candidates stored per recorded search.

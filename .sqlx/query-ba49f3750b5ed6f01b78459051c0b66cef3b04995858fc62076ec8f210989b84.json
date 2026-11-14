@@ -145,6 +145,17 @@
             "name": "synthesis_asked"
           }
         }
+      },
+      {
+        "name": "synthesis_by",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_pairs",
+            "name": "synthesis_by"
+          }
+        }
       }
     ],
     "parameters": {
@@ -163,7 +174,8 @@
       true,
       true,
       true,
-      false
+      false,
+      true
     ]
   },
   "hash": "ba49f3750b5ed6f01b78459051c0b66cef3b04995858fc62076ec8f210989b84"

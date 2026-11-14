@@ -289,6 +289,9 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- decided to do about it — two facts about one pair, and storing the second
   -- on top of the first would lose the finding that put it on the queue.
   synthesis_asked INTEGER NOT NULL DEFAULT 0,
+  -- Who asked for the writing: 'model' (a decision) or 'operator'. NULL on rows
+  -- asked before the column, which were all a person's press.
+  synthesis_by   TEXT,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);
