@@ -1,6 +1,7 @@
 //! The judgement layer: every background judgement goes through it.
 
 pub mod band;
+pub mod catalogue;
 
 use crate::core::Core;
 use crate::error::{Error, Result};
