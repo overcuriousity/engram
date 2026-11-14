@@ -1,5 +1,6 @@
 //! `Stage::Decisions`: lapse unanswered rows, close outcome windows, apply waiting acts, seat waiting asks,
-//! and while the base is quiet, queue readings for the notes that have none.
+//! while the base is quiet, queue readings for the notes that have none, and queue relevance labels
+//! for recorded searches.
 
 use crate::core::Core;
 use crate::core::judging::settle_counted;
@@ -20,6 +21,7 @@ pub struct Report {
     pub lapsed: u64,
     pub kept: u64,
     pub scanned: u64,
+    pub labelled: u64,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -99,7 +101,44 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
     r.scanned = scan(core).await?;
+    r.labelled = label(core).await?;
     Ok(r)
+}
+
+/// Recorded searches the model has not labelled, oldest first: a quarter of what the tick has left
+/// after the pair judge, a search counting as its candidates. One already queued holds its share,
+/// and the oldest that does not fit waits for a tick with room rather than being passed over.
+async fn label(core: &Core) -> Result<u64> {
+    let mut left = core.judging_budget().await? / 4;
+    if left == 0 {
+        return Ok(0);
+    }
+    let version = crate::core::judging::catalogue::answers_query("").version;
+    let mut armed = 0;
+    for id in core
+        .store
+        .unlabelled_searches(
+            version,
+            core.decider.model(),
+            i64::try_from(left).unwrap_or(i64::MAX),
+        )
+        .await?
+    {
+        let Some((_, candidates)) = core.store.search_to_label(&id).await? else {
+            continue;
+        };
+        let cost = candidates.len().max(1);
+        if cost > left {
+            break;
+        }
+        left -= cost;
+        if core.store.live_job(Stage::Label, &id).await? {
+            continue;
+        }
+        crate::jobs::label::arm(core, &id).await?;
+        armed += 1;
+    }
+    Ok(armed)
 }
 
 /// Notes from before readings existed, newest first, while nobody is using the base. Half of what

@@ -347,8 +347,8 @@ fn gate_at(yes: f64, t: crate::core::judging::band::Thresholds) -> Gate {
 /// leave nothing to judge.
 const ANSWER_PROBE_EXTRA: usize = 3;
 
-/// An unseen artifact created after the pursuit opened that now answers it at or above
-/// `weak_below`. `None` across embedding models: their cosines are not distances.
+/// An unseen artifact created after the pursuit opened, found at or above `weak_below`, that the
+/// decision model says answers it. `None` across embedding models: their cosines are not distances.
 async fn answered_since(
     core: &Core,
     p: &crate::store::pursuits::Pursuit,
@@ -375,13 +375,29 @@ async fn answered_since(
     if fresh.is_empty() {
         return Ok(None);
     }
-    Ok(core
-        .store
-        .artifacts_by_ids(&fresh)
-        .await?
-        .into_iter()
-        .find(|c| c.created_at > p.opened_at && c.in_results())
-        .map(|c| c.id))
+    // Found by distance; answered only when the note, asked alone, would help with the pursuit's
+    // leading query, the one its gap shows. A failed call is the unit's to retry, never an answer.
+    let Some(query) = p.queries.first() else {
+        return Ok(None);
+    };
+    let relevant_at = crate::jobs::label::relevant_at(core).await?;
+    let notes = core.store.artifacts_by_ids(&fresh).await?;
+    for id in &fresh {
+        let Some(c) = notes
+            .iter()
+            .find(|c| &c.id == id && c.created_at > p.opened_at && c.in_results())
+        else {
+            continue;
+        };
+        match crate::jobs::label::answers(core, query, c).await? {
+            Some(yes) if yes >= relevant_at => return Ok(Some(c.id.clone())),
+            Some(_) => {}
+            None => {
+                tracing::info!(pursuit = p.id, artifact_id = %c.id, "the note is too long to ask about whole; not counted as an answer")
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub const PURSUIT_AFTER: &str = "pursuit.events_after";
@@ -1044,6 +1060,83 @@ mod tests {
         );
         let p = core.store.get_pursuit(&pid).await.unwrap();
         assert_eq!(p.state, "satisfied", "{p:?}");
+    }
+
+    #[tokio::test]
+    async fn a_pursuit_counts_as_answered_only_by_a_note_that_answers_it() {
+        use crate::infer::decide::{Answer, Answers, Question};
+        let saying = |yes: f64| {
+            std::sync::Arc::new(crate::infer::fake::RuleDecider::new(
+                move |_, qs: &[Question]| {
+                    Ok(Answers {
+                        answers: qs
+                            .iter()
+                            .map(|q| (q.key.clone(), Answer::Noul { yes }))
+                            .collect(),
+                        model: "rule-decider".into(),
+                        input_tokens: 0,
+                    })
+                },
+            ))
+        };
+        for (yes, answered) in [(0.2, false), (0.95, true)] {
+            let mut core = test_core().await;
+            core.generator = Some(std::sync::Arc::new(
+                crate::infer::fake::ScriptedCompleter::new(vec![
+                    r#"{"artifact":{"title":"T","text":"read the journal with journalctl","category":"concept","tags":[],"caveats":[]}}"#.into(),
+                ]),
+            ));
+            let ids = two_sources(&core).await;
+            let v = core.embedder.embed_query("read the journal").await.unwrap();
+            let pid = core
+                .store
+                .insert_pursuit(
+                    crate::store::now() - 100,
+                    &["read the journal".into()],
+                    &ids,
+                    Some((&v, core.embedder.model())),
+                )
+                .await
+                .unwrap();
+            let src = core
+                .ingest("read the journal at /var/log/journal", "web", None)
+                .await
+                .unwrap();
+            while crate::jobs::run_one(&core).await.unwrap() {}
+            core.background.wait_idle().await;
+            let at = core
+                .vectors
+                .search(
+                    &v,
+                    &Default::default(),
+                    1,
+                    &crate::vector::SearchFilter {
+                        corpus_id: Some(src.id.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .first()
+                .and_then(|h| h.similarity)
+                .expect("the capture embedded nothing")
+                - 0.01;
+            core.set_weak_below(at);
+            let dec = saying(yes);
+            core.decider = dec.clone();
+
+            generate(&core, &pid).await.unwrap();
+
+            assert!(
+                dec.requests()
+                    .iter()
+                    .any(|(_, qs)| qs[0].key == "answers_query"
+                        && qs[0].instructions.contains("«read the journal»")),
+                "the note was not asked whether it answers the pursuit"
+            );
+            let p = core.store.get_pursuit(&pid).await.unwrap();
+            assert_eq!(p.state == "satisfied", answered, "{yes}: {p:?}");
+        }
     }
 
     #[tokio::test]

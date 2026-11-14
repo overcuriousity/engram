@@ -214,6 +214,12 @@ pub struct DecideConfig {
     pub tick_mins: u32,
     /// A rewrite whose `complete` or `adds_nothing` is below this is not stored. A refusal line, not a pass line.
     pub refuse_below: f64,
+    /// Searches a person judged a hit that the model also labelled, at least, before its labels may steer a sweep.
+    pub label_overlap_min: usize,
+    /// The share of those whose expected note the model called relevant, at least.
+    pub label_agree_min: f64,
+    /// The mean share of a search's candidates the model calls relevant, at most.
+    pub label_select_max: f64,
 }
 
 /// Probability thresholds: from `act_at` the judge acts, from `ask_at` it asks a person.
@@ -283,6 +289,9 @@ impl Default for DecideConfig {
             max_per_tick: 60,
             tick_mins: 15,
             refuse_below: 0.25,
+            label_overlap_min: 30,
+            label_agree_min: 0.85,
+            label_select_max: 0.30,
         }
     }
 }
@@ -2036,6 +2045,8 @@ impl Config {
             ("decide.settled_at", dc.settled_at),
             ("decide.split_at", dc.split_at),
             ("decide.refuse_below", dc.refuse_below),
+            ("decide.label_agree_min", dc.label_agree_min),
+            ("decide.label_select_max", dc.label_select_max),
         ] {
             if !(0.0..=1.0).contains(&v) {
                 return Err(ConfigError::Invalid(format!(

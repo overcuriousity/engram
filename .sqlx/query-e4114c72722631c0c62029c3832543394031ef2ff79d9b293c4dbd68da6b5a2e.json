@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id AS \"artifact_id!\" FROM search_candidates WHERE event_id = ?\n                GROUP BY artifact_id ORDER BY MIN(rank)",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e4114c72722631c0c62029c3832543394031ef2ff79d9b293c4dbd68da6b5a2e"
+}

@@ -24,6 +24,7 @@ pub mod pairs;
 pub mod pursuits;
 pub mod readings;
 pub mod rehearsals;
+pub mod search_labels;
 pub mod segments;
 pub mod shingle;
 pub mod sleep_runs;

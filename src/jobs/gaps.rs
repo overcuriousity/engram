@@ -83,8 +83,9 @@ impl TypedFrom {
     }
 }
 
-/// Closes, silently and reversibly, each open gap this corpus's own artifacts answer at
-/// `weak_below` plus margin; no model call. Every failure is a warning: a stored capture is stored.
+/// Closes, silently and reversibly, each open gap this corpus's own artifacts answer: its best hit
+/// above `weak_below`, asked `answers_query` alone, says yes at `act_at`. Every failure is a
+/// warning: a stored capture is stored.
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
     // What closes the gap the capture was typed from is the link, not a score (`close_line`).
     let typed_from =
@@ -170,23 +171,46 @@ pub async fn cover_answering(
         }
     }
     let mut closed = 0;
+    let relevant_at = crate::jobs::label::relevant_at(core).await?;
     for (g, hit) in open.gaps.iter().zip(best) {
         let typed = typed_from.matches(g);
         // `gap_coverage` names the answering artifact, so even the linked gap needs a hit.
         let Some(hit) = hit else { continue };
-        // `None` is "no opinion", and closing by distance is a claim about distance. On the linked
-        // gap the score is recorded, not read.
+        // A hit above the weak line is found; whether it covers is the model's to say, the note
+        // alone against the gap's question. `None` is "no opinion" and finds nothing. On the linked
+        // gap the score is recorded, not read, and nothing is asked.
         if !typed {
             let Some(sim) = hit.similarity else { continue };
-            if sim < cover_line(core) {
+            if sim < core.weak_below() {
                 continue;
+            }
+            let answered = match core.store.get_artifact(&hit.payload.artifact_id).await {
+                Ok(note) if note.in_results() => {
+                    crate::jobs::label::answers(core, &g.gap.text, &note).await
+                }
+                Ok(_) => continue,
+                Err(e) => Err(e),
+            };
+            match answered {
+                Ok(Some(yes)) if yes >= relevant_at => {}
+                Ok(Some(_)) => continue,
+                Ok(None) => {
+                    tracing::info!(gap_id = %g.gap.id, artifact_id = %hit.payload.artifact_id, "the note is too long to ask about whole; the gap stays open");
+                    continue;
+                }
+                // Never closed on an error; reported once every answered gap is written.
+                Err(e) => {
+                    tracing::warn!(gap_id = %g.gap.id, error = %e, "could not ask whether a capture answers a gap");
+                    failure.get_or_insert(e);
+                    continue;
+                }
             }
         }
         let sim = hit.similarity.unwrap_or_default();
         let by = if typed {
             crate::store::gaps::CoveredBy::Capture
         } else {
-            crate::store::gaps::CoveredBy::Distance
+            crate::store::gaps::CoveredBy::Model
         };
         // Skipped, not returned: the vector store can name an artifact SQLite no longer has, and
         // `cover` runs only once.
@@ -624,6 +648,152 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    fn saying(yes: f64) -> std::sync::Arc<crate::infer::fake::RuleDecider> {
+        use crate::infer::decide::{Answer, Answers, Question};
+        std::sync::Arc::new(crate::infer::fake::RuleDecider::new(
+            move |_, qs: &[Question]| {
+                Ok(Answers {
+                    answers: qs
+                        .iter()
+                        .map(|q| (q.key.clone(), Answer::Noul { yes }))
+                        .collect(),
+                    model: "rule-decider".into(),
+                    input_tokens: 0,
+                })
+            },
+        ))
+    }
+
+    fn asked_about(d: &crate::infer::fake::RuleDecider, q: &str) -> usize {
+        d.requests()
+            .iter()
+            .filter(|(_, qs)| {
+                qs.len() == 1
+                    && qs[0].key == "answers_query"
+                    && qs[0].instructions.contains(&format!("«{q}»"))
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_gap_closes_when_a_new_note_answers_its_question() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        // Found, but under the old line: only the answer can close it.
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01);
+        let dec = saying(0.95);
+        core.decider = dec.clone();
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+        assert_eq!(asked_about(&dec, "how do I mount an E01"), 1);
+        let covered = core.store.gaps_covered_by(&corpus).await.unwrap();
+        assert_eq!(covered.len(), 1);
+        assert_eq!(covered[0].id, id);
+        // A model's answer is not a distance: moving the line does not reopen it.
+        core.store.trim_gap_coverage(1.0).await.unwrap();
+        assert_eq!(core.store.gaps_covered_by(&corpus).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_similar_note_that_does_not_answer_leaves_the_gap_open() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
+        let dec = saying(0.2);
+        core.decider = dec.clone();
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(asked_about(&dec, "how do I mount an E01"), 1);
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .any(|g| g.gap.id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_call_that_fails_leaves_the_gap_open() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Internal(
+                "the decision model is down".into(),
+            ))
+        }));
+
+        assert!(cover(&core, &corpus).await.is_err());
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .any(|g| g.gap.id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decide_gap_closes_the_same_way() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = core
+            .store
+            .record_decision(crate::store::decisions::NewDecision {
+                question: "Keep the E01 mounted?".into(),
+                questions: "{}".into(),
+                situation: None,
+                scope: None,
+                filters: "{}".into(),
+                answers: None,
+                prior: "{}".into(),
+                standing: r#"{"verdict":"not_held"}"#.into(),
+                not_held: true,
+                model: "clef".into(),
+                read: 0,
+                dropped: 0,
+                query_vec: v.clone(),
+                embed_model: core.embedder.model().to_string(),
+                evidence: vec![],
+            })
+            .await
+            .unwrap();
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01);
+        let dec = saying(0.95);
+        core.decider = dec.clone();
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+        assert_eq!(asked_about(&dec, "Keep the E01 mounted?"), 1);
+        assert!(
+            core.store
+                .gaps_covered_by(&corpus)
+                .await
+                .unwrap()
+                .iter()
+                .any(|g| g.id == id && g.kind == GapKind::Decide)
         );
     }
 

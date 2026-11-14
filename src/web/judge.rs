@@ -84,10 +84,25 @@ async fn insights(tenant: Tenant) -> Result<Json<serde_json::Value>> {
                 .store
                 .feedback_stats(tenant.core.weak_below())
                 .await?;
+            let m = tenant.core.label_figures().await?;
+            let (r, g) = (&m.retrieval, &m.agreement);
             serde_json::json!({
                 "judged": f.judged,
                 "recall_at_10": (f.judged > 0).then_some(f.recall_at_10),
                 "mrr": (f.judged > 0).then_some(f.mrr),
+                "by_model": {
+                    "searches": r.searches,
+                    "left_out": r.left_out,
+                    "recall_at_10": (r.searches > 0).then_some(r.recall_at_10),
+                    "mrr": (r.searches > 0).then_some(r.mrr),
+                },
+                "agreement": {
+                    "judged": g.judged,
+                    "hit_rate": (g.judged > 0).then_some(g.hit_rate),
+                    "selectivity": (g.judged > 0).then_some(g.selectivity),
+                },
+                "bears": { "held_up": m.bears.held_up, "ruled_on": m.bears.ruled_on },
+                "labels_count": m.counts,
             })
         }
         false => serde_json::Value::Null,
@@ -244,6 +259,20 @@ mod tests {
             body.get("tune").is_none(),
             "the one route that writes config.toml has no business here: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn insights_gives_the_models_figures_beside_the_persons() {
+        let (app, cookie, _core) =
+            crate::web::test_support::app_session_and_core_with_feedback().await;
+        let body = json_of(app.oneshot(get("/api/v1/insights", &cookie)).await.unwrap()).await;
+        let r = &body["retrieval"];
+        assert_eq!(r["by_model"]["searches"], 0, "{body}");
+        assert!(r["by_model"]["recall_at_10"].is_null(), "{body}");
+        assert_eq!(r["agreement"]["judged"], 0);
+        assert!(r["agreement"]["hit_rate"].is_null());
+        assert_eq!(r["bears"]["ruled_on"], 0);
+        assert_eq!(r["labels_count"], false);
     }
 
     #[tokio::test]

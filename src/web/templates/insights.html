@@ -36,6 +36,8 @@
     </dl>
     {# Built in Rust; its only variable part is a count. See `Retrieval::note`. #}
     <p class="measure-sub">{{ retrieval.note|safe }}</p>
+    {# The same figures off the decision model's labels; see `model_lines`. #}
+    {% for line in retrieval.by_model %}<p class="measure-sub">{{ line }}</p>{% endfor %}
   </section>
 </div>
 {% include "_sleep.html" %}

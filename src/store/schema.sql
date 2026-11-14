@@ -417,6 +417,19 @@ CREATE TABLE IF NOT EXISTS search_context (
   context   TEXT NOT NULL
 );
 
+-- What the decision model said of each candidate of a recorded search: would
+-- this note help someone who searched for the query? One row per candidate,
+-- the newest era kept; never the person's verdict, which stays on the event.
+CREATE TABLE IF NOT EXISTS search_labels (
+  event_id TEXT NOT NULL REFERENCES search_events(id) ON DELETE CASCADE,
+  artifact_id TEXT NOT NULL,
+  yes REAL NOT NULL,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (event_id, artifact_id)
+);
+
 -- ── Idle passes ──────────────────────────────────────────────────────────────
 -- One row per idle pass over the evidence: what the running configuration
 -- scored, the best the ladder found, and the pairs that moved between them.
@@ -604,10 +617,11 @@ CREATE TABLE IF NOT EXISTS gap_coverage (
   score       REAL NOT NULL,
   -- How the hole came to be closed: 'distance' for the coverage check's own
   -- measurement, 'capture' for a capture typed into the box the query was
-  -- typed into. The two are not the same claim and are not collected the same
+  -- typed into, 'model' for a note the decision model said answers the gap's
+  -- question. They are not the same claim and are not collected the same
   -- way — `trim_gap_coverage` drops a measurement that has fallen under the
-  -- line, and a capture never scored against one. NULL on every row written
-  -- before the column, all of which were measurements.
+  -- line, and neither a capture nor a model's answer scored against one. NULL
+  -- on every row written before the column, all of which were measurements.
   covered_by  TEXT,
   covered_at  INTEGER NOT NULL,
   PRIMARY KEY (kind, gap_id)

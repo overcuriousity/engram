@@ -21,6 +21,54 @@ struct Retrieval {
     mrr: String,
     /// Rendered `|safe`: built here, its only variable part a count.
     note: String,
+    /// Retrieval by the model's labels and how far they agree with the person; empty before any.
+    by_model: Vec<String>,
+}
+
+fn searches(n: usize) -> String {
+    format!("{n} search{}", if n == 1 { "" } else { "es" })
+}
+
+/// The lines under the person's figures; a line with nothing to say is left out.
+fn model_lines(f: &crate::jobs::label::Figures) -> Vec<String> {
+    let mut out = Vec::new();
+    let r = &f.retrieval;
+    if r.searches + r.left_out == 0 {
+        return out;
+    }
+    out.push(match r.searches {
+        0 => format!("by the model: {} left out", searches(r.left_out)),
+        _ => format!(
+            "by the model: recall@10 {:.2} · MRR {:.2} · {} left out",
+            r.recall_at_10,
+            r.mrr,
+            searches(r.left_out)
+        ),
+    });
+    let g = &f.agreement;
+    if g.judged > 0 {
+        out.push(format!(
+            "agreement: hit rate {:.2} · selectivity {:.2} over {} judged {}",
+            g.hit_rate,
+            g.selectivity,
+            g.judged,
+            if g.judged == 1 { "search" } else { "searches" }
+        ));
+    }
+    if f.bears.ruled_on > 0 {
+        out.push(format!(
+            "bears held up: {} of {}",
+            f.bears.held_up, f.bears.ruled_on
+        ));
+    }
+    out.push(
+        match f.counts {
+            true => "model labels count toward sweeps",
+            false => "model labels are shown only",
+        }
+        .into(),
+    );
+    out
 }
 
 /// Takes an `Identity`: a redirect before the session check tells anonymous callers which paths exist.
@@ -704,6 +752,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                     .store
                     .feedback_stats(tenant.core.weak_below())
                     .await?;
+                let by_model = model_lines(&tenant.core.label_figures().await?);
                 match f.judged {
                     0 => Retrieval {
                         recall_at_10: "—".into(),
@@ -713,6 +762,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                              <em>Was this what you were looking for?</em> under a result",
                             f.captured
                         ),
+                        by_model,
                     },
                     judged => Retrieval {
                         recall_at_10: format!("{:.2}", f.recall_at_10),
@@ -725,6 +775,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                                 p => format!(", {p} waiting"),
                             }
                         ),
+                        by_model,
                     },
                 }
             }
@@ -732,6 +783,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                 recall_at_10: "—".into(),
                 mrr: "—".into(),
                 note: "not recording searches, so there is nothing to measure".into(),
+                by_model: Vec::new(),
             },
         },
         retrying,
@@ -1314,6 +1366,73 @@ mod tests {
         assert!(
             !html.contains(">0.00<"),
             "an unmeasured base reports a score: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn insights_shows_retrieval_by_the_person_and_by_the_model() {
+        use crate::store::feedback::{Door, Labeller, NewCandidate, NewEvent};
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        let (version, model) = (
+            crate::core::judging::catalogue::answers_query("").version,
+            core.decider.model().to_string(),
+        );
+        let search = |q: &'static str| NewEvent {
+            query: q.into(),
+            door: Door::Ui,
+            scope: None,
+            filters: "{}".into(),
+            query_vec: vec![0.1, 0.2],
+            embed_model: "fake".into(),
+            candidates: ["a", "b"]
+                .iter()
+                .map(|a| NewCandidate {
+                    artifact_id: (*a).into(),
+                    score: 0.5,
+                    similarity: Some(0.5),
+                    shown: true,
+                    ..Default::default()
+                })
+                .collect(),
+            answered: false,
+            fold_onto: None,
+            context: None,
+        };
+        let judged = core.store.record_search(search("alpha"), 0).await.unwrap();
+        let rows = [("a".to_string(), 0.95), ("b".to_string(), 0.1)];
+        core.store
+            .put_search_labels(&judged, &rows, version, &model)
+            .await
+            .unwrap();
+        core.store
+            .judge_hit(&judged, "a", Labeller::Confirm)
+            .await
+            .unwrap();
+        let none = core.store.record_search(search("bravo"), 0).await.unwrap();
+        let rows = [("a".to_string(), 0.1), ("b".to_string(), 0.1)];
+        core.store
+            .put_search_labels(&none, &rows, version, &model)
+            .await
+            .unwrap();
+        let html = insights(core).await;
+
+        assert!(html.contains("from 1 judged search"), "{html}");
+        assert!(
+            html.contains("by the model: recall@10 1.00 · MRR 1.00 · 1 search left out"),
+            "{html}"
+        );
+        assert!(
+            html.contains("agreement: hit rate 1.00 · selectivity 0.50 over 1 judged search"),
+            "{html}"
+        );
+        assert!(html.contains("model labels are shown only"), "{html}");
+        assert!(
+            !html.contains("bears held up"),
+            "nothing ruled on yet: {html}"
         );
     }
 

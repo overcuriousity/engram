@@ -83,6 +83,23 @@ than its parent's; and the verdict anchor (`src/eval/anchor.rs`), which
 suspends adoption entirely when the base's own evidence stops agreeing with the
 people using it. Three instruments, all inside the base, none of them frozen.
 
+The decision model labels every recorded search too: each candidate still in
+results is asked alone, *would this note help someone who searched for …?*, and
+a yes at `answers_query`'s `act_at` (0.90 by default) makes it relevant. The
+labels give a second recall@10 and MRR on Insights, *by the model*, with the
+searches it found nothing relevant in counted as left out rather than scored.
+Two figures say how far to trust them, both over the searches you judged a hit
+whose expected note the model labelled: the **hit rate**, how often it called
+your note relevant, and the **selectivity**, the mean share of a search's
+candidates it called relevant. A model that says yes to everything has a
+perfect hit rate and a selectivity of 1.0, which is why both are read. A label
+never becomes your verdict. An unjudged search adds the note the model rates
+highest to a sweep's pairs only while, over at least `decide.label_overlap_min`
+(30) of your judged searches, the hit rate is at least `decide.label_agree_min`
+(0.85) and the selectivity at most `decide.label_select_max` (0.30); otherwise
+the labels are shown and count for nothing. A new model or a new wording of
+the question labels again from scratch.
+
 A grade is satisfied by anything that **superseded** the artifact it names.
 Merging moves knowledge into a new artifact and search correctly returns that
 one; scoring only the original would report a retrieval regression that is
@@ -186,6 +203,7 @@ to run *something* and call the question answered.
 |---|---|
 | `src/eval/metrics.rs` | `recall_at` and `mrr`. |
 | `src/eval/sweep.rs` | The pairs, the gate and the candidate chooser the idle pass replays with. See 4. |
+| `src/jobs/label.rs`, `src/store/search_labels.rs` | The model's relevance labels, their figures and whether a sweep may use them. See 2. |
 | `src/core/ranking.rs` | The ladders the idle pass may walk, priming among them. |
 | `src/eval/lived.rs` | What a generation earned while it was serving, against the one it replaced. No replay. |
 | `src/eval/rehearsed.rs` | A candidate scored on the base's own probes. Refuses and reverts; never adopts. |

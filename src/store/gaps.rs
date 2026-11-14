@@ -53,6 +53,8 @@ impl GapKind {
 pub enum CoveredBy {
     Distance,
     Capture,
+    /// The decision model said the note answers the gap's question; no line wrote it.
+    Model,
 }
 
 impl CoveredBy {
@@ -60,6 +62,7 @@ impl CoveredBy {
         match self {
             CoveredBy::Distance => "distance",
             CoveredBy::Capture => "capture",
+            CoveredBy::Model => "model",
         }
     }
 }
@@ -716,11 +719,11 @@ impl Store {
     }
 
     /// `gap_id` names one of several tables, so no foreign key cascades. Also drops coverage
-    /// scored under `below`, except `capture` rows, which no line wrote.
+    /// scored under `below`, except `capture` and `model` rows, which no line wrote.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
         Ok(sqlx::query!(
             "DELETE FROM gap_coverage
-              WHERE (score < ? AND (covered_by IS NULL OR covered_by <> 'capture'))
+              WHERE (score < ? AND (covered_by IS NULL OR covered_by NOT IN ('capture', 'model')))
                  OR (kind = 'ask'
                      AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = gap_coverage.gap_id))
                  OR (kind IN ('search', 'unmatched')
