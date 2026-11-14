@@ -308,6 +308,11 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- Who asked for the writing: 'model' (a decision) or 'operator'. NULL on rows
   -- asked before the column, which were all a person's press.
   synthesis_by   TEXT,
+  -- Which net filed the pair, when it is not one that may act alone: 'wide'
+  -- (similarity alone, or below the review line) or 'decide' (a judged decision
+  -- queued it). NULL: containment or one shared document at the review line,
+  -- or a link.
+  net            TEXT,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);

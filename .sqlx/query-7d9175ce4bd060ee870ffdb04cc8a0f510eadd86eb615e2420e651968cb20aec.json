@@ -156,6 +156,17 @@
             "name": "synthesis_by"
           }
         }
+      },
+      {
+        "name": "net",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_pairs",
+            "name": "net"
+          }
+        }
       }
     ],
     "parameters": {
@@ -175,6 +186,7 @@
       true,
       true,
       false,
+      true,
       true
     ]
   },

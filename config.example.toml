@@ -224,8 +224,10 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 enabled = true
 # Shingle overlap above which a capture is parked as a near-duplicate (measured: 0.79 vs 0.04).
 near_dupe_min = 0.60
-# Cosine floor for putting a pair to the judge; the idle pass moves it.
+# Cosine floor for a pair the judge may act on alone; the idle pass moves it.
 review_min = 0.88
+# Cosine down to which pairs are judged, below review_min; nothing under review_min acts without you.
+scan_min = 0.70
 # Pairs at or above this are judged first.
 auto_supersede = 0.95
 # Neighbours considered per artifact.

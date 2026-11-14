@@ -124,9 +124,6 @@ pub struct Confident {
     pub similarity: Option<f32>,
 }
 
-/// The cosine down to which unjudged neighbours are asked; part 5 makes this `consolidate.scan_min`.
-const NET_MIN: f32 = 0.70;
-
 /// Old link verdict `related`: any of the new kinds that show a link.
 const RELATED: &str = "continues|example|alternative|background";
 
@@ -670,7 +667,7 @@ async fn gather(core: &Core, a: &Asked, limit: usize) -> Result<Gathered> {
     gather_from(core, a, found(core, a.id).await?, limit).await
 }
 
-/// Live notes newest first, each with its nearest live neighbours at `NET_MIN` or above, as the
+/// Live notes newest first, each with its nearest live neighbours at `consolidate.scan_min` or above, as the
 /// relate stage reads them; a pair already filed in any state is not unjudged.
 async fn neighbour_pairs(core: &Core) -> Result<Vec<Found>> {
     let (mut seen, mut out) = (HashSet::new(), Vec::new());
@@ -685,7 +682,7 @@ async fn neighbour_pairs(core: &Core) -> Result<Vec<Found>> {
             .await?
         {
             let other = h.payload.artifact_id.as_str();
-            let Some(sim) = h.similarity.filter(|s| *s >= NET_MIN) else {
+            let Some(sim) = h.similarity.filter(|s| *s >= core.consolidate.scan_min) else {
                 continue;
             };
             let (a, b) = crate::store::links::canonical(&c.id, other);
@@ -2326,10 +2323,7 @@ mod tests {
         let (cases, _) = unjudged_cases(&core, &catalogue::pair_relation(), 200)
             .await
             .unwrap();
-        assert!(
-            cases.is_empty(),
-            "cosine 0.60 is under {NET_MIN}: {cases:?}"
-        );
+        assert!(cases.is_empty(), "cosine 0.60 is under scan_min: {cases:?}");
     }
 
     #[tokio::test]

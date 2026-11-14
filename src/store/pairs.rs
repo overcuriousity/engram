@@ -89,6 +89,33 @@ impl PairState {
     }
 }
 
+/// Why a pair was filed when it may not act alone; `None` on a plain pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Net {
+    /// Similarity alone, or corroborated below the review line.
+    Wide,
+    /// A judged decision queued it.
+    Decide,
+}
+
+impl Net {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Net::Wide => "wide",
+            Net::Decide => "decide",
+        }
+    }
+
+    /// Anything unrecognised reads as `Wide`: an unknown net must not act alone.
+    fn parse(s: &str) -> Self {
+        match s {
+            "decide" => Net::Decide,
+            _ => Net::Wide,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BandRecord {
     pub judged: usize,
@@ -165,6 +192,8 @@ pub struct ArtifactPair {
     pub obsolete_id: Option<String>,
     /// Lets the stranded-merge reap reopen exactly the pairs a never-embedded merge closed.
     pub merged_into: Option<String>,
+    /// `Some` when the pair may not act without a person, whatever its score.
+    pub net: Option<Net>,
 }
 
 /// Two counts: `jobs::did_work` reads this report, and counting only `moved` made the sweep
@@ -204,6 +233,7 @@ pub(crate) struct PairRow {
     pub decided_by: Option<String>,
     pub synthesis_asked: i64,
     pub synthesis_by: Option<String>,
+    pub net: Option<String>,
 }
 
 pub(crate) fn row_to_pair(r: PairRow) -> ArtifactPair {
@@ -222,24 +252,14 @@ pub(crate) fn row_to_pair(r: PairRow) -> ArtifactPair {
         merged_into: r.merged_into,
         synthesis_asked: r.synthesis_asked != 0,
         synthesis_by: r.synthesis_by.as_deref().and_then(DecidedBy::parse),
+        net: r.net.as_deref().map(Net::parse),
     }
 }
 
 impl Store {
     /// `INSERT OR IGNORE`, not an upsert: re-arming a dismissed row defeats dismissing.
     pub async fn record_pair(&self, a: &str, b: &str, score: f32) -> Result<bool> {
-        let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let res = sqlx::query!(
-            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)
-             VALUES (?, ?, ?, 'pending', ?)",
-            a,
-            b,
-            score as f64,
-            now()
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected() > 0)
+        self.record_pair_in(a, b, score, None, None).await
     }
 
     /// A duplicate found via a link has no cosine: `score` is zero and `detail` explains.
@@ -250,14 +270,29 @@ impl Store {
         score: f32,
         detail: &str,
     ) -> Result<bool> {
+        self.record_pair_in(a, b, score, None, Some(detail)).await
+    }
+
+    /// `record_pair` with the net that filed it. A row already there keeps its net, as it keeps
+    /// its state.
+    pub async fn record_pair_in(
+        &self,
+        a: &str,
+        b: &str,
+        score: f32,
+        net: Option<Net>,
+        detail: Option<&str>,
+    ) -> Result<bool> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let net = net.map(|n| n.as_str());
         let res = sqlx::query!(
-            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, detail, created_at)
-             VALUES (?, ?, ?, 'pending', ?, ?)",
+            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, detail, net, created_at)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?)",
             a,
             b,
             score as f64,
             detail,
+            net,
             now()
         )
         .execute(&self.pool)
@@ -345,7 +380,8 @@ impl Store {
     }
 
     /// All counts are pairs, not journal rows (a merge writes one per original), over one set:
-    /// pairs a verdict settled, or whose verdict led to a journal row. Operator asks excluded.
+    /// pairs a verdict settled, or whose verdict led to a journal row. Operator asks excluded, and
+    /// so is the wide net, which never acts alone.
     pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
         let r = sqlx::query!(
             "WITH acts AS (
@@ -361,7 +397,7 @@ impl Store {
                     COALESCE(SUM(acts.undone), 0) AS undone
                FROM artifact_pairs p
                LEFT JOIN acts ON acts.pair_id = p.id
-              WHERE p.score >= ? AND p.score < ? AND p.state <> 'pending'
+              WHERE p.score >= ? AND p.score < ? AND p.state <> 'pending' AND p.net IS NULL
                 AND (p.decided_by IN ('model', 'evidence') OR acts.pair_id IS NOT NULL)",
             lo,
             hi
@@ -1034,7 +1070,7 @@ impl Store {
             crate::store::pairs::PairRow,
             r#"SELECT p.id AS "id!", p.a_id, p.b_id, p.score, p.state, p.detail, p.created_at,
                       p.judge_attempts, p.judge_unreadable, p.obsolete_id, p.merged_into,
-                      p.decided_by, p.synthesis_asked, p.synthesis_by
+                      p.decided_by, p.synthesis_asked, p.synthesis_by, p.net
                  FROM artifact_pairs p
                  JOIN artifacts a ON a.id = p.a_id
                  JOIN artifacts b ON b.id = p.b_id
@@ -1209,6 +1245,23 @@ mod tests {
                 undone: 0
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_band_record_leaves_out_the_pairs_that_may_not_act_alone() {
+        // The tuner moves the line for pairs that may act; a wide-net pair never does alone.
+        let s = Store::memory().await.unwrap();
+        for net in [Net::Wide, Net::Decide] {
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair_in(&a, &b, 0.90, Some(net), None)
+                .await
+                .unwrap();
+            let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+            s.set_pair_state(id, PairState::NoConflict, None, DecidedBy::Model)
+                .await
+                .unwrap();
+        }
+        assert_eq!(s.band_record(0.88, 1.0).await.unwrap().judged, 0);
     }
 
     #[tokio::test]

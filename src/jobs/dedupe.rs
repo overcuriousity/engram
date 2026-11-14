@@ -173,6 +173,26 @@ async fn asked_already(core: &Core, p: &ArtifactPair, a: &Chunk, b: &Chunk) -> R
     }))
 }
 
+/// Whether this pair may act without a person.
+pub(crate) fn restricted(pair: &ArtifactPair, live_review_min: f32) -> bool {
+    pair.net.is_some() || (pair.score > 0.0 && pair.score < live_review_min)
+}
+
+/// `restricted`, against the review line in force, which the tuner moves.
+fn restricted_now(core: &Core, pair: &ArtifactPair) -> bool {
+    let live = core
+        .ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .review_min;
+    restricted(pair, live)
+}
+
+/// What a restricted pair's sure answer may still do alone: open a disagreement, or close it.
+fn acts_alone_when_restricted(pick: &str) -> bool {
+    matches!(pick, "conflict" | "distinct")
+}
+
 /// `Stage::Dedupe`: ask `pair_relation` about one pair and settle the answer.
 pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     let id: i64 = pair_id.parse().map_err(|_| Error::NotFound)?;
@@ -224,8 +244,14 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         rev_b: Some(b.embed_rev),
     };
     let d = judging::ask(core, &asked, subjects, s.as_deref()).await?;
+    // Below the review line, or put forward by similarity or a judged decision alone: a person's.
+    let d = if d.band == Band::Act
+        && !acts_alone_when_restricted(&d.pick)
+        && restricted_now(core, &p)
+    {
+        judging::demote_to_ask(core, d, "restricted").await?
     // Nothing can write a merge: a sure duplicate is a person's to resolve, keeping one.
-    let d = if d.band == Band::Act && d.pick == "duplicate" && core.pair_synthesizer.is_none() {
+    } else if d.band == Band::Act && d.pick == "duplicate" && core.pair_synthesizer.is_none() {
         judging::demote_to_ask(core, d, "no_writer").await?
     } else {
         d
@@ -463,6 +489,18 @@ impl Applier for PairApplier {
         if p.state != PairState::Pending {
             return Ok(vec![]);
         }
+        // `run` demotes these before `settle`; nothing else may act on them as the model either.
+        // Put back to be asked again, where it becomes an ask row.
+        if by == DecidedBy::Model && !acts_alone_when_restricted(pick) && restricted_now(core, &p) {
+            tracing::warn!(
+                pair = p.id,
+                decision = d.id,
+                pick,
+                "refused to act alone on a restricted pair"
+            );
+            core.store.set_decision_reason(&d.id, "changed").await?;
+            return Ok(vec![]);
+        }
         carry_out(core, &p, pick, by, &d.id).await
     }
 
@@ -605,6 +643,7 @@ pub(crate) mod tests {
     use crate::store::artifacts::ArtifactStatus;
     use crate::store::decision_log::{Logged, Outcome, State};
     use crate::store::jobs::Stage;
+    use crate::store::pairs::Net;
     use std::sync::Arc;
 
     /// Every choice answered `pick` at `top`; the reversed read picks `reversed` when given.
@@ -2303,5 +2342,275 @@ pub(crate) mod tests {
         let p = core.store.get_pair(pair).await.unwrap();
         assert!(p.synthesis_asked);
         assert_eq!(p.state, PairState::Pending);
+    }
+
+    // ---- the wide net: nothing below the review line acts alone ----
+
+    /// A pair filed by similarity alone, below the review line.
+    async fn queue_wide(core: &Core, a: &str, b: &str) -> i64 {
+        core.store
+            .record_pair_in(a, b, 0.74, Some(Net::Wide), None)
+            .await
+            .unwrap();
+        core.store.pair_between(a, b).await.unwrap().unwrap().id
+    }
+
+    async fn asked_restricted(core: &Core, pair: i64) -> Logged {
+        let d = decision(core, pair).await;
+        assert_eq!((d.band, d.state), (Band::Ask, State::Open));
+        assert_eq!(d.reason.as_deref(), Some("restricted"));
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Pending
+        );
+        d
+    }
+
+    #[tokio::test]
+    async fn a_sure_conflict_in_the_wide_net_opens_a_disagreement() {
+        let mut core = test_core().await;
+        deciding(&mut core, "conflict", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Contradiction
+        );
+        let d = decision(&core, pair).await;
+        assert_eq!((d.band, d.state), (Band::Act, State::Done));
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_sure_duplicate_in_the_wide_net_is_asked_and_nothing_is_merged() {
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
+        deciding(&mut core, "duplicate", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        asked_restricted(&core, pair).await;
+        assert!(!core.store.get_pair(pair).await.unwrap().synthesis_asked);
+        assert!(
+            !core
+                .store
+                .live_job(Stage::Merge, &pair.to_string())
+                .await
+                .unwrap()
+        );
+        assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sure_replacement_in_the_wide_net_is_asked_and_nothing_is_superseded() {
+        let mut core = test_core().await;
+        deciding(&mut core, "b_replaces_a", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        asked_restricted(&core, pair).await;
+        for id in &ids {
+            assert!(superseded_by(&core, id).await.is_none());
+        }
+        assert!(core.store.recent_actions(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_sure_vacuous_in_the_wide_net_is_asked_and_nothing_is_discarded() {
+        let mut core = test_core().await;
+        deciding(&mut core, "vacuous", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        asked_restricted(&core, pair).await;
+        for id in &ids {
+            assert_eq!(
+                core.store.get_artifact(id).await.unwrap().status,
+                ArtifactStatus::Active
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_distinct_or_weak_answer_in_the_wide_net_is_recorded_and_left() {
+        let mut core = test_core().await;
+        deciding(&mut core, "distinct", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::NoConflict
+        );
+
+        let mut core = test_core().await;
+        deciding(&mut core, "duplicate", 0.4);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        assert_eq!(decision(&core, pair).await.band, Band::Leave);
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn a_person_may_still_merge_a_wide_net_pair_from_the_unsure_row() {
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
+        deciding(&mut core, "duplicate", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        let d = asked_restricted(&core, pair).await;
+
+        crate::core::judging::answer(&core, &d.id, Some("duplicate"))
+            .await
+            .unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.synthesis_asked);
+        assert_eq!(p.synthesis_by, Some(DecidedBy::Operator));
+        assert!(
+            core.store
+                .live_job(Stage::Merge, &pair.to_string())
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_a_judged_decision_queued_is_asked_below_scan_min() {
+        let mut core = test_core().await;
+        deciding(&mut core, "b_replaces_a", 0.95);
+        let ids = disagreeing(&core).await;
+        core.store
+            .record_pair_in(
+                &ids[0],
+                &ids[1],
+                0.0,
+                Some(Net::Decide),
+                Some(crate::core::decide::verdict::PAIR_DETAIL),
+            )
+            .await
+            .unwrap();
+        let queued = core
+            .store
+            .pairs_to_judge(&pair_era(&core), 10)
+            .await
+            .unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].net, Some(Net::Decide));
+        let pair = queued[0].id;
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        asked_restricted(&core, pair).await;
+        assert!(superseded_by(&core, &ids[0]).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pair_handed_over_from_a_link_still_acts_alone() {
+        let mut core = test_core().await;
+        deciding(&mut core, "b_replaces_a", 0.95);
+        let ids = disagreeing(&core).await;
+        core.store
+            .record_pair_with_detail(&ids[0], &ids[1], 0.0, "link")
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!restricted(&p, 0.88));
+
+        run(&core, &p.id.to_string()).await.unwrap();
+
+        assert_eq!(
+            superseded_by(&core, &p.a_id).await.as_deref(),
+            Some(p.b_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plain_pair_below_the_live_review_line_is_asked_not_acted() {
+        let mut core = test_core().await;
+        deciding(&mut core, "b_replaces_a", 0.95);
+        let ids = disagreeing(&core).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.86)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(restricted(&p, 0.88));
+        assert!(!restricted(&p, 0.84), "the live line, not the file's");
+
+        run(&core, &p.id.to_string()).await.unwrap();
+
+        asked_restricted(&core, p.id).await;
+        assert!(superseded_by(&core, &ids[0]).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_model_never_acts_on_a_restricted_pair_through_the_applier() {
+        // Defence in depth: whatever reaches `apply` as the model's, a restricted pair is not acted on.
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
+        deciding(&mut core, "b_replaces_a", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        let d = asked_restricted(&core, pair).await;
+
+        for pick in [
+            "b_replaces_a",
+            "a_replaces_b",
+            "keep_a",
+            "vacuous",
+            "duplicate",
+        ] {
+            let rows = PairApplier
+                .apply(&core, &d, pick, DecidedBy::Model)
+                .await
+                .unwrap();
+            assert!(rows.is_empty(), "{pick}");
+        }
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.state, PairState::Pending);
+        assert!(!p.synthesis_asked);
+        for id in &ids {
+            let c = core.store.get_artifact(id).await.unwrap();
+            assert!(c.in_results() && c.superseded_by.is_none());
+        }
+        assert!(core.store.recent_actions(10).await.unwrap().is_empty());
+        // Put back to be asked again, where it lands as an ask row.
+        assert_eq!(
+            core.store
+                .pairs_to_judge(&pair_era(&core), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

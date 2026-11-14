@@ -670,6 +670,9 @@ pub struct ConsolidateConfig {
     /// real duplicate scored 0.789 and the next pair 0.036 over 3916 corpus pairs.
     pub near_dupe_min: f64,
     pub review_min: f32,
+    /// Cosine down to which neighbours are filed for the pair judge; below `review_min` a pair
+    /// never acts without a person. Must sit below `review_min`.
+    pub scan_min: f32,
     /// Cosine at or above which a pair goes to the dedupe judge first; never a hide on its own,
     /// since embeddings barely see negation. Must exceed `review_min`.
     pub auto_supersede: f32,
@@ -692,6 +695,7 @@ impl Default for ConsolidateConfig {
             enabled: true,
             near_dupe_min: 0.60,
             review_min: default_review_min(),
+            scan_min: 0.70,
             auto_supersede: 0.95,
             per_point: 5,
             interval_hours: 24,
@@ -2001,6 +2005,13 @@ impl Config {
                 c.auto_supersede, c.review_min
             )));
         }
+        if c.scan_min >= c.review_min {
+            return Err(ConfigError::Invalid(format!(
+                "consolidate.scan_min ({}) must be below consolidate.review_min ({}): \
+                 it is how far below the review line pairs are filed for a person",
+                c.scan_min, c.review_min
+            )));
+        }
         self.infer
             .embed
             .templates()
@@ -3224,6 +3235,24 @@ mode = "off"
             Config::load(Some(&p)),
             Err(ConfigError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn scan_min_must_sit_below_review_min() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0.88", "0.90"] {
+            let p = write(
+                &dir,
+                &format!("{MINIMAL}\n[consolidate]\nreview_min = 0.88\nscan_min = {bad}\n"),
+            );
+            assert!(
+                matches!(Config::load(Some(&p)), Err(ConfigError::Invalid(_))),
+                "scan_min {bad}"
+            );
+        }
+        let p = write(&dir, MINIMAL);
+        assert_eq!(Config::load(Some(&p)).unwrap().consolidate.scan_min, 0.70);
     }
 
     #[test]
