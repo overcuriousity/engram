@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideBody, bodyText, problem, progressText } from "./decide.js";
+import { bodyText, problem, progressText } from "./decide.js";
 
 const opt = (name, description = "") => ({ name, description });
+const sent = (q, row) => JSON.parse(bodyText(q, row));
 
 test("yes or no sends the question alone", () => {
-  assert.deepEqual(decideBody(" Keep it? ", { kind: "noul", options: [], levels: [] }), { q: "Keep it?" });
+  assert.deepEqual(sent(" Keep it? ", { kind: "noul", options: [], levels: [] }), { q: "Keep it?" });
 });
 
 test("options are sent in the order they were typed", () => {
@@ -15,13 +16,13 @@ test("options are sent in the order they were typed", () => {
 
 test("blank option rows are dropped", () => {
   const row = { kind: "choice", options: [opt("a"), opt("  ", " "), opt("b")], levels: [] };
-  const b = decideBody("Q", row);
+  const b = sent("Q", row);
   assert.deepEqual(Object.keys(b.questions.verdict.criteria), ["a", "b"]);
 });
 
 test("a scale sends its levels lowest first", () => {
   const row = { kind: "score", options: [], levels: ["can wait", " this month", "now", ""] };
-  const v = decideBody("Q", row).questions.verdict;
+  const v = sent("Q", row).questions.verdict;
   assert.equal(v.type, "score");
   assert.deepEqual(v.criteria, ["can wait", "this month", "now"]);
 });
@@ -54,7 +55,7 @@ test("progress counts reads, then weighs", () => {
 
 test("an option with no name is no option", () => {
   const row = { kind: "choice", options: [opt("a"), opt("", "only a description")], levels: [] };
-  assert.deepEqual(Object.keys(decideBody("Q", row).questions.verdict.criteria), ["a"]);
+  assert.deepEqual(Object.keys(sent("Q", row).questions.verdict.criteria), ["a"]);
   const three = { kind: "choice", options: [opt("", "x"), opt("", "y"), opt("a")], levels: [] };
   assert.equal(problem("Q", three), "Name at least two options");
 });

@@ -778,6 +778,11 @@ fn md_title(e: &crate::core::decide::Evidence) -> String {
         .clone()
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| crate::web::markdown::stand_in_title(&e.text, 60));
+    md_line(&t)
+}
+
+/// One line an agent's markdown cannot break: no table cell, emphasis or code.
+fn md_line(t: &str) -> String {
     t.replace(['\r', '\n'], " ")
         .chars()
         .fold(String::new(), |mut o, c| {
@@ -792,24 +797,23 @@ fn md_title(e: &crate::core::decide::Evidence) -> String {
 /// The first question only: every door asks one, keyed `verdict`.
 pub fn format_decision(d: &crate::core::decide::Decision) -> String {
     use crate::web::decide::{bars, pick_label, standing_copy};
-    let mut out = format!("**{}**", d.question);
+    let mut out = format!("**{}**", md_line(&d.question));
     let (Some(q), Some((_, prior))) = (d.questions.first(), d.prior.first()) else {
+        return out;
+    };
+    // Nothing bears: no verdict from the model's own prior either.
+    let Some((_, joint)) = d.answers.as_ref().and_then(|a| a.first()) else {
+        out.push_str("\n\nNothing here: the base does not hold this.");
         return out;
     };
     let without = bars(q, prior, prior)
         .iter()
-        .map(|b| format!("{} {}", b.label, b.weight))
+        .map(|b| format!("{} {}", md_line(&b.label), b.weight))
         .collect::<Vec<_>>()
         .join(", ");
-    let Some((_, joint)) = d.answers.as_ref().and_then(|a| a.first()) else {
-        out.push_str(&format!(
-            "\n\nNothing here: the base does not hold this. Without notes: {without}."
-        ));
-        return out;
-    };
     out.push_str("\n\n");
     for b in bars(q, &joint.answer, prior) {
-        out.push_str(&format!("- {}: {}\n", b.label, b.weight));
+        out.push_str(&format!("- {}: {}\n", md_line(&b.label), b.weight));
     }
     let standing = d.standing.first().map_or("", |(_, s)| standing_copy(*s));
     out.push_str(&format!("\n{standing} Without notes: {without}."));
@@ -821,7 +825,7 @@ pub fn format_decision(d: &crate::core::decide::Decision) -> String {
             if let Some((_, a)) = e.read.iter().find(|(k, _)| *k == q.key) {
                 let own = pick_label(q, a);
                 let against = if own == verdict { "" } else { " (against)" };
-                out.push_str(&format!(" — {own}{against}"));
+                out.push_str(&format!(" — {}{against}", md_line(&own)));
             }
         }
     }
@@ -1965,9 +1969,10 @@ mod tests {
             out.contains("Nothing here: the base does not hold this."),
             "{out}"
         );
-        assert!(
-            out.contains("Without notes: keep 55, switch to gemma 45."),
-            "{out}"
+        assert!(!out.contains("Without notes"), "{out}");
+        assert_eq!(
+            out,
+            "**Should I keep the bge-m3 embedder?**\n\nNothing here: the base does not hold this."
         );
         assert!(!out.contains("**Evidence**"), "{out}");
         assert!(!out.contains("- keep:"), "{out}");
@@ -2001,6 +2006,36 @@ mod tests {
         assert_eq!(line, r"1. a\|b \*c\* d — keep", "{out}");
         assert!(
             out.contains("2. Passage 2 about the embedder. — switch to gemma"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_awkward_question_or_label_stays_on_its_line() {
+        let awkward = "a|b *c*\nd";
+        let mut d = decision();
+        d.question = "Keep *it*\nor | not?".into();
+        d.questions[0].kind = crate::infer::decide::Kind::Choice {
+            options: vec![
+                (awkward.into(), String::new()),
+                ("_e_".into(), String::new()),
+            ],
+        };
+        d.answers.as_mut().unwrap()[0].1.answer = chose(awkward, [0.81, 0.19]);
+        d.prior = vec![("verdict".into(), chose(awkward, [0.55, 0.45]))];
+        for e in &mut d.evidence {
+            e.read = vec![("verdict".into(), chose(awkward, [0.9, 0.1]))];
+        }
+        let out = format_decision(&d);
+        assert!(out.starts_with(r"**Keep \*it\* or \| not?**"), "{out}");
+        assert!(out.contains(r"- a\|b \*c\* d: 81"), "{out}");
+        assert!(out.contains(r"- \_e\_: 19"), "{out}");
+        assert!(
+            out.contains(r"Without notes: a\|b \*c\* d 55, \_e\_ 45."),
+            "{out}"
+        );
+        assert!(
+            out.contains(r"1. Reindex notes 09/14 — a\|b \*c\* d"),
             "{out}"
         );
     }

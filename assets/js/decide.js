@@ -10,18 +10,6 @@ function levels(row) {
   return row.levels.map((l) => l.trim()).filter(Boolean);
 }
 
-export function decideBody(q, row) {
-  const body = { q: q.trim() };
-  if (row.kind === "choice") {
-    const criteria = {};
-    for (const o of options(row)) criteria[o.name] = o.description;
-    body.questions = { verdict: { type: "choice", criteria } };
-  } else if (row.kind === "score") {
-    body.questions = { verdict: { type: "score", criteria: levels(row) } };
-  }
-  return body;
-}
-
 // Assembled as text: a JS object would reorder integer-like option names.
 export function bodyText(q, row) {
   const head = `"q":${JSON.stringify(q.trim())}`;
@@ -57,5 +45,5 @@ export function progressText(read, of, bearing) {
 }
 
 if (typeof document !== "undefined") {
-  globalThis.engramDecide = { decideBody, bodyText, problem, progressText, LIMITS };
+  globalThis.engramDecide = { bodyText, problem, progressText, LIMITS };
 }

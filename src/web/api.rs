@@ -1778,11 +1778,14 @@ async fn decide_stream(
         let s = core.decide_events(&req, origin);
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
-            // Terminal: the `try_stream!` producer ends at its first error.
-            yield Ok::<_, Error>(match ev {
-                Ok(e) => decide_sse_event(e, &questions).unwrap_or_else(|e| error_frame("decide", &e)),
-                Err(e) => error_frame("decide", &e),
-            });
+            // An error ends the stream, a render failure too.
+            match ev.and_then(|e| decide_sse_event(e, &questions)) {
+                Ok(frame) => yield Ok::<_, Error>(frame),
+                Err(e) => {
+                    yield Ok(error_frame("decide", &e));
+                    break;
+                }
+            }
         }
     };
     // Kept alive: sixteen reads on a slow model outlast a proxy's idle timeout.

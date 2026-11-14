@@ -216,13 +216,15 @@ fn decide(args: &CliArgs, stdin: impl FnOnce() -> std::io::Result<String>) -> Re
         ));
     }
     let kind = if !args.options.is_empty() {
-        DecideKind::Choice(
-            args.options
-                .iter()
-                .map(|o| option(o))
-                .collect::<Result<_>>()?,
-        )
+        let options: Vec<_> = args
+            .options
+            .iter()
+            .map(|o| option(o))
+            .collect::<Result<_>>()?;
+        once("--option", options.iter().map(|(n, _)| n.as_str()))?;
+        DecideKind::Choice(options)
     } else if !args.levels.is_empty() {
+        once("--level", args.levels.iter().map(String::as_str))?;
         DecideKind::Score(args.levels.clone())
     } else {
         DecideKind::Noul
@@ -237,6 +239,20 @@ fn decide(args: &CliArgs, stdin: impl FnOnce() -> std::io::Result<String>) -> Re
         kind,
         situation,
     })
+}
+
+/// A repeated option merges silently into one key; a repeated level is no scale.
+fn once<'a>(flag: &str, names: impl Iterator<Item = &'a str>) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for n in names {
+        if !seen.insert(n.trim()) {
+            return Err(Error::Validation(format!(
+                "{flag} \"{}\" is given twice",
+                n.trim()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The words a verb was given, or stdin when they are just `-`.
@@ -552,6 +568,22 @@ mod tests {
             decided(&["-d", "Q?", "--option", "=x", "--option", "b"], ""),
             Err(Error::Validation(_))
         ));
+    }
+
+    #[test]
+    fn an_option_or_level_given_twice_is_refused() {
+        for argv in [
+            &[
+                "-d", "Q?", "--option", "keep", "--option", "keep", "--option", "b",
+            ][..],
+            &["-d", "Q?", "--option", "keep=x", "--option", " keep =y"][..],
+            &["-d", "Q?", "--level", "low", "--level", "low "][..],
+        ] {
+            assert!(
+                matches!(decided(argv, ""), Err(Error::Validation(_))),
+                "{argv:?}"
+            );
+        }
     }
 
     #[test]

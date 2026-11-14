@@ -1,7 +1,7 @@
 #!/bin/sh
 # Measures a decision endpoint (POST <ENGRAM_DECIDE_URL>/systemone): cost, parallelism, limits, behaviour.
 # Needs curl, jq, ENGRAM_DECIDE_URL, ENGRAM_DECIDE_MODEL; ENGRAM_DECIDE_KEY goes to curl on stdin only.
-# STATES sets the cost row sizes in words; exit 0 when cost, questions, repeat and behaviour answered 200.
+# STATES: cost row sizes in words, each under the 8192-token window; exit 0 when cost, questions, repeat, behaviour answered 200.
 set -eu
 
 case ${1:-} in
@@ -18,7 +18,7 @@ for t in curl jq; do
   command -v "$t" >/dev/null 2>&1 || { echo "probe-decide.sh: $t is needed" >&2; exit 2; }
 done
 
-STATES=${STATES:-"0 400 2400 4800 7500"}
+STATES=${STATES:-"0 400 2400 4800 6500"}
 url="${ENGRAM_DECIDE_URL%/}/systemone"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -157,6 +157,24 @@ for d in forward reversed; do
   pk=$(jq -r '.answers.c.choice // empty' "$tmp/out" 2>/dev/null || true)
   pr=$(jq -c '.answers.c.probabilities // empty' "$tmp/out" 2>/dev/null || true)
   printf 'choice %-8s pick %s  probabilities %s  status %s\n' "$d" "${pk:--}" "${pr:--}" "$status"
+done
+# Names out of alphabetical order, on no state: does the order given reach the model?
+printf 'No information.' > "$tmp/pass.none"
+zfwd=$(jq -nc '{c: {type: "choice", instructions: "Which one?", criteria: {"zeta": "the first option", "alpha": "the second option"}}}')
+zrev=$(jq -nc '{c: {type: "choice", instructions: "Which one?", criteria: {"alpha": "the second option", "zeta": "the first option"}}}')
+for st in empty none; do
+  if [ "$st" = empty ]; then sf=$empty; else sf=$tmp/pass.none; fi
+  for d in forward reversed; do
+    if [ "$d" = forward ]; then q=$zfwd; else q=$zrev; fi
+    call "$sf" "$q"
+    need200
+    pk=$(jq -r '.answers.c.choice // empty' "$tmp/out" 2>/dev/null || true)
+    jq -c '.answers.c.probabilities // empty' "$tmp/out" > "$tmp/z.$st.$d" 2>/dev/null || : > "$tmp/z.$st.$d"
+    printf 'zeta/alpha %-5s %-8s pick %s  probabilities %s  status %s\n' "$st" "$d" "${pk:--}" "$(cat "$tmp/z.$st.$d")" "$status"
+  done
+  if [ -s "$tmp/z.$st.forward" ] && cmp -s "$tmp/z.$st.forward" "$tmp/z.$st.reversed"; then
+    echo "zeta/alpha $st: reversal had no effect"
+  fi
 done
 
 exit "$fail"
