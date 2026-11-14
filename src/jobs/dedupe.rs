@@ -320,8 +320,14 @@ pub(crate) async fn carry_out(
             }
             // Again on a retry: the ask is idempotent while the pair is open.
             if core.store.ask_pair_synthesis_by(pair.id, by).await? {
+                // Behind capture work, as `arm_dedupe` arms it.
                 core.store
-                    .rearm_idle_seq(Stage::Merge, "pair", &pair.id.to_string(), 0)
+                    .rearm_idle_seq(
+                        Stage::Merge,
+                        "pair",
+                        &pair.id.to_string(),
+                        crate::jobs::consolidate::DEDUPE_SEQ_BASE,
+                    )
                     .await?;
             }
             Ok(vec![])
@@ -390,6 +396,12 @@ async fn replace(
             )),
         )
         .await?;
+    // Linked as written: a failure after this must not leave the action without its decision.
+    if let Some(r) = &row {
+        core.store
+            .link_decision_actions(decision_id, std::slice::from_ref(r))
+            .await?;
+    }
     tracing::info!(superseded = %obsolete, by = %winner, "applied a replacement");
     settle_as(core, pair, PairState::Dismissed, None, by).await?;
     Ok(row.into_iter().collect())
@@ -700,7 +712,14 @@ pub(crate) async fn discard_both(
                 None => row,
             }
         });
-        rows.extend(core.deprecate_with(id, journal).await?);
+        let row = core.deprecate_with(id, journal).await?;
+        // Linked as written, so a failure on the second side leaves the first one undoable.
+        if let (Some(r), Some(d)) = (&row, decision_id) {
+            core.store
+                .link_decision_actions(d, std::slice::from_ref(r))
+                .await?;
+        }
+        rows.extend(row);
     }
     // The only record of an unattended discard; `core.deprecate` logs like an operator press.
     tracing::info!(
@@ -1951,6 +1970,95 @@ pub(crate) mod tests {
 
         assert!(superseded_by(&core, &ids[0]).await.is_none());
         assert_eq!(decision(&core, pair).await.outcome, Some(Outcome::Undone));
+    }
+
+    /// Makes the next statement matching `when` on `table` fail, as a crash part-way would.
+    async fn fail_on(core: &Core, table: &str, when: &str) {
+        // runtime: a test-only trigger, the seam for a failure after the first side effect.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE TRIGGER fail_here BEFORE UPDATE ON {table} WHEN {when}
+             BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        )))
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_replacement_that_fails_after_the_supersede_still_links_its_row() {
+        let mut core = test_core().await;
+        deciding(&mut core, "b_replaces_a", 0.95);
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        fail_on(&core, "artifact_pairs", "NEW.state = 'dismissed'").await;
+
+        assert!(run(&core, &pair.to_string()).await.is_err());
+
+        let row = core
+            .store
+            .open_action_on(&ids[0], Kind::Supersede)
+            .await
+            .unwrap()
+            .expect("the supersede was written before the failure");
+        let d = decision(&core, pair).await;
+        assert_eq!(
+            core.store.decision_action_ids(&d.id).await.unwrap(),
+            vec![row.id],
+            "an action done for a decision was left unlinked"
+        );
+        core.store
+            .undo_action_on(
+                &ids[0],
+                Kind::Supersede,
+                crate::store::actions::UndoneBy::Operator,
+                "put back",
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision(&core, pair).await.outcome, Some(Outcome::Undone));
+    }
+
+    #[tokio::test]
+    async fn a_discard_that_fails_on_the_second_side_links_the_first() {
+        let mut core = test_core().await;
+        deciding(&mut core, "vacuous", 0.95);
+        let ids = seed(
+            &core,
+            &[("notes/a.md", [1.0, 0.0]), ("notes/b.md", [0.99, 0.01])],
+        )
+        .await;
+        let pid = queue_pair(&core, &ids[0], &ids[1]).await;
+        let p = core.store.get_pair(pid).await.unwrap();
+        fail_on(
+            &core,
+            "artifacts",
+            &format!("NEW.status = 'deprecated' AND NEW.id = '{}'", p.b_id),
+        )
+        .await;
+
+        assert!(run(&core, &pid.to_string()).await.is_err());
+
+        let row = core
+            .store
+            .open_action_on(&p.a_id, Kind::Discard)
+            .await
+            .unwrap()
+            .expect("the first side was retired before the failure");
+        let d = decision(&core, pid).await;
+        assert_eq!(
+            core.store.decision_action_ids(&d.id).await.unwrap(),
+            vec![row.id]
+        );
+        core.store
+            .undo_action_on(
+                &p.a_id,
+                Kind::Discard,
+                crate::store::actions::UndoneBy::Operator,
+                "put back",
+            )
+            .await
+            .unwrap();
+        assert_eq!(decision(&core, pid).await.outcome, Some(Outcome::Undone));
     }
 
     #[tokio::test]

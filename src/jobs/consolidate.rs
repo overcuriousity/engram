@@ -80,7 +80,7 @@ fn close_filed_pair(
 
 /// `claim_job` orders by `(state, attempts, seq, id)`, so this puts hygiene behind every capture
 /// window.
-const DEDUPE_SEQ_BASE: i64 = 1_000_000;
+pub(crate) const DEDUPE_SEQ_BASE: i64 = 1_000_000;
 
 pub(crate) fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
     crate::vector::LifecycleRow {
@@ -322,11 +322,7 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
-    // Arming nothing when the budget is spent is what lets the empty-run backoff engage.
-    if !core.may_act(crate::store::actions::Job::Dedupe).await? {
-        tracing::info!("budget spent; no pairs armed until the window moves");
-        return Ok(0);
-    }
+    // No `may_act` here: a decision is not an action. Past the cap an act waits (`settle`).
     // An ask whose first run wrote nothing; `pairs_awaiting_synthesis` excludes merged and
     // unparseable pairs, so it cannot loop.
     if core.pair_synthesizer.is_some() {
@@ -1988,21 +1984,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_spent_day_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
+    async fn a_spent_day_still_arms_decisions_that_wait_rather_than_act() {
+        use crate::core::judging::band::Band;
+        use crate::store::decision_log::State;
         let mut core = test_core().await;
+        crate::jobs::dedupe::tests::deciding(&mut core, "b_replaces_a", 0.95);
         core.evolve.autonomous = crate::config::Autonomy::Full;
         core.evolve.max_actions_per_day = 0;
-        disagreeing(&core).await;
-        assert_eq!(arm_dedupe(&core).await.unwrap(), 0, "nothing is armed");
+        let ids = disagreeing(&core).await;
         assert_eq!(
-            core.store
-                .pairs_by_state(PairState::Pending, 10)
-                .await
-                .unwrap()
-                .len(),
+            arm_dedupe(&core).await.unwrap(),
             1,
-            "and the pair waits, exactly as it was"
+            "a decision is not an action"
         );
+        while crate::jobs::run_one(&core).await.unwrap() {}
+
+        let pair = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap();
+        assert_eq!(pair.len(), 1, "and the pair waits, exactly as it was");
+        let era = crate::core::judging::band::era("rule-decider", 1);
+        let d = core
+            .store
+            .last_logged("pair_relation", &pair[0].id.to_string(), None, &era)
+            .await
+            .unwrap()
+            .expect("the pair was asked");
+        assert_eq!((d.band, d.state), (Band::Act, State::Waiting));
+        for id in &ids {
+            assert!(
+                core.store.get_artifact(id).await.unwrap().in_results(),
+                "it acted"
+            );
+        }
+        // Asked once: the waiting decision keeps it off the queue, not re-armed for ever.
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0);
     }
 
     #[test]
