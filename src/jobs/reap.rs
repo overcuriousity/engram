@@ -1,9 +1,17 @@
-//! Revisit the long-retired and act without asking: bury the worthless, rewrite the valuable live.
-//! A wrong burial answers to its journal row, the Reaped listing's Restore, and `retract`'s
-//! exhumation.
+//! Revisit the long-retired: `reap_worth` through the judgement layer. `ReapApplier` buries the
+//! worthless and asks `Stage::Rescue` to rewrite the valuable live. A wrong burial answers to its
+//! journal row, the Reaped listing's Restore, and `retract`'s exhumation.
 
 use crate::core::Core;
-use crate::error::Result;
+use crate::core::judging::band::{Band, era};
+use crate::core::judging::{self, Applier, Subjects, catalogue, state};
+use crate::error::{Error, Result};
+use crate::store::actions::{Job, Kind, NewAction};
+use crate::store::artifacts::Chunk;
+use crate::store::decision_log::{Logged, State};
+use crate::store::jobs::Stage;
+use crate::store::pairs::DecidedBy;
+use async_trait::async_trait;
 
 /// Flat numbers: `jobs::did_work` reads any non-zero flat count as work, and each count here is
 /// this pass acting.
@@ -11,9 +19,14 @@ use crate::error::Result;
 pub struct Report {
     pub judged: u64,
     pub reaped: u64,
+    /// Rescue units armed.
     pub rescued: u64,
     /// Retired rows given a `retired_at` because they predate the column.
     pub stamped: u64,
+}
+
+pub(crate) fn reap_era(core: &Core) -> String {
+    era(core.decider.model(), catalogue::reap_worth().version)
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -24,93 +37,129 @@ pub async fn run(core: &Core) -> Result<Report> {
     let mut report = Report::default();
     let (cands, stamped) = nominees(core).await?;
     report.stamped = stamped;
+    let asked = catalogue::reap_worth();
+    // Inside the tick's budget. The daily cap is not checked here: past it a burial waits.
+    let mut budget = core.judging_budget().await?;
     for c in &cands {
-        // Reap's own daily cap, before the judge call: burial is the action here that destroys
-        // text.
-        if !core.may_act(crate::store::actions::Job::Reap).await? {
-            tracing::info!("budget spent; the rest of the nominees wait for the window to move");
+        if budget == 0 {
+            tracing::info!("the tick's judging is spent; the rest of the nominees wait");
             break;
         }
-        // A burial taken back is not bought again; checked before the expensive judge call.
-        if core
-            .store
-            .action_was_undone(&c.id, crate::store::actions::Kind::Reap)
-            .await?
-        {
+        // A burial taken back is not bought again; checked before the call.
+        if core.store.action_was_undone(&c.id, Kind::Reap).await? {
             tracing::debug!(artifact_id = %c.id, "a burial taken back before; left alone");
             // Stood down, not skipped: `reap_candidates` orders by `retired_at ASC`, so an
             // unstamped row would hold a nominee slot forever.
             step_aside(core, &c.id).await;
             continue;
         }
-        let verdict = judge_one(core, c).await;
-        // Counted only when a judgement came back, or a sweep with a dead endpoint looks busy and
-        // never backs off.
-        if verdict.is_ok() {
-            report.judged += 1;
-        }
-        match verdict {
-            Ok(crate::infer::prompt::Reap::Worthless { reason }) => {
-                match reap_one(core, c, &reason, min_age_secs(core)).await {
-                    Ok(()) => {
-                        report.reaped += 1;
-                        tracing::info!(artifact_id = %c.id, reason, "reaped a retired artifact");
-                    }
-                    Err(e) => {
-                        tracing::warn!(artifact_id = %c.id, error = %e, "could not bury a worthless artifact");
-                        step_aside(core, &c.id).await;
-                    }
-                }
-            }
-            Ok(crate::infer::prompt::Reap::Valuable { reason }) => {
-                // Bounded per run so one bad judging batch cannot flood the live base with
-                // model-written text.
-                if report.rescued >= core.reap.max_rescues_per_run {
-                    tracing::info!(artifact_id = %c.id, reason, "valuable, but over this run's rescue cap; it waits");
-                    continue;
-                }
-                // Checked before the row is touched: a missing generator is a wait, not this
-                // candidate's failure.
-                if core.generator.is_none() {
-                    tracing::info!(artifact_id = %c.id, reason, "valuable, but no generator model to rewrite it with; it waits");
-                    continue;
-                }
-                match rescue_one(core, c, &reason).await {
-                    Ok(new_id) => {
-                        report.rescued += 1;
-                        tracing::info!(artifact_id = %c.id, new_id, reason, "rescued a retired artifact into a rewrite");
-                    }
-                    Err(e) => {
-                        tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; it waits");
-                        // Restamped only for a failure about this row; an unanswered or busy
-                        // endpoint says nothing about it, and the sweep's cadence is the retry.
-                        if !matches!(
-                            e,
-                            crate::error::Error::Inference { .. }
-                                | crate::error::Error::InferenceBusy { .. }
-                        ) {
-                            step_aside(core, &c.id).await;
-                        }
-                    }
-                }
-            }
-            // A failed or unreadable reply acts on nothing. A rejection (`InferenceRejected`) is
-            // about this row and stands it down; "no reap model" is a wait and must not.
-            Err(e @ crate::error::Error::InferenceRejected { .. }) => {
-                tracing::warn!(artifact_id = %c.id, error = %e, "the judge will not rule on this candidate; standing it down");
+        if let Some(d) = asked_already(core, c).await? {
+            // A question still open or waiting, or a rescue still to be written, keeps the row as
+            // it is; anything else answered goes to the back.
+            if !matches!(d.state, State::Waiting | State::Open)
+                && !core.store.live_job(Stage::Rescue, &c.id).await?
+            {
                 step_aside(core, &c.id).await;
             }
+            continue;
+        }
+        let s = state_of(core, c, &asked).await?;
+        let subjects = Subjects {
+            kind: "artifact",
+            a: c.id.clone(),
+            b: c.superseded_by.clone(),
+            rev_a: Some(c.embed_rev),
+            rev_b: None,
+        };
+        budget -= 1;
+        let d = match judging::ask(core, &asked, subjects, s.as_deref()).await {
+            Ok(d) => d,
+            // A rejection is about this row and stands it down; an outage is a wait and must not.
+            Err(e @ Error::InferenceRejected { .. }) => {
+                tracing::warn!(artifact_id = %c.id, error = %e, "the judge will not rule on this candidate; standing it down");
+                step_aside(core, &c.id).await;
+                continue;
+            }
             Err(e) => {
-                tracing::warn!(artifact_id = %c.id, error = %e, "reap judgement failed; candidate waits")
+                tracing::warn!(artifact_id = %c.id, error = %e, "reap judgement failed; candidate waits");
+                continue;
+            }
+        };
+        // Counted only when a judgement came back, or a sweep with a dead endpoint looks busy and
+        // never backs off.
+        if s.is_some() {
+            report.judged += 1;
+        }
+        let d = match judging::settle(core, d).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(artifact_id = %c.id, error = %e, "a reap decision could not be carried out; it waits");
+                continue;
+            }
+        };
+        if d.band == Band::Act && d.state == State::Done {
+            if core.store.get_artifact(&c.id).await?.reaped_at.is_some() {
+                report.reaped += 1;
+            } else if core.store.live_job(Stage::Rescue, &c.id).await? {
+                report.rescued += 1;
             }
         }
     }
     Ok(report)
 }
 
+/// Asked in this era about the note as it is now, against the same replacement, since it was last
+/// stamped retired, and not put back since. A rescue restamps it and may name a new replacement, so
+/// the note is asked again an age later, against its rewrite.
+async fn asked_already(core: &Core, c: &Chunk) -> Result<Option<Logged>> {
+    let last = core
+        .store
+        .last_logged(
+            "reap_worth",
+            &c.id,
+            c.superseded_by.as_deref(),
+            &reap_era(core),
+        )
+        .await?;
+    Ok(last.filter(|d| {
+        d.rev_a == Some(c.embed_rev)
+            && d.decided_at >= c.retired_at.unwrap_or(0)
+            && !matches!(d.reason.as_deref(), Some("asked_again" | "changed"))
+    }))
+}
+
+fn note<'a>(title: Option<&'a str>, text: &'a str) -> state::Note<'a> {
+    state::Note {
+        title,
+        day: None,
+        text,
+    }
+}
+
+/// The retired note, its replacement and its nearest live notes; `None` when even the note alone
+/// does not fit.
+async fn state_of(core: &Core, c: &Chunk, asked: &judging::Asked) -> Result<Option<String>> {
+    let successor = match &c.superseded_by {
+        Some(id) => core.store.get_artifact(id).await.ok(),
+        None => None,
+    };
+    let neighbours = live_neighbours(core, &c.id).await?;
+    let live: Vec<state::Note> = neighbours.iter().map(|(t, x)| note(Some(t), x)).collect();
+    let successor = successor
+        .as_ref()
+        .map(|s| note(s.title.as_deref(), &s.text));
+    Ok(state::reap(
+        &note(c.title.as_deref(), &c.text),
+        successor.as_ref(),
+        &live,
+        &core.counter,
+        state::room(core, &[asked]),
+    ))
+}
+
 /// Moves a candidate the sweep could not act on to the back of the queue with a fresh `retired_at`,
 /// so one that fails the same way every time cannot starve the rest.
-async fn step_aside(core: &Core, id: &str) {
+pub(crate) async fn step_aside(core: &Core, id: &str) {
     if let Err(e) = core.store.restamp_retired(id).await {
         tracing::warn!(artifact_id = %id, error = %e, "could not restamp a candidate the sweep could not act on");
     }
@@ -118,7 +167,7 @@ async fn step_aside(core: &Core, id: &str) {
 
 /// The nearest live artifacts, `(title, text)`. Errors propagate: a failed search read as "nothing
 /// near" would let the judge bury text with no evidence in front of it.
-async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String, String)>> {
+pub(crate) async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String, String)>> {
     let mut out: Vec<(String, String)> = Vec::new();
     for h in core.vectors.neighbours(id, 6).await? {
         if h.payload.artifact_id == id {
@@ -142,131 +191,16 @@ async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String, String)>>
     Ok(out)
 }
 
-/// Source text rewrites from itself; a model-written candidate rewrites from its roots' text, never
-/// from a paraphrase, and is skipped if they are gone.
-async fn rescue_one(
-    core: &Core,
-    c: &crate::store::artifacts::Chunk,
-    reason: &str,
-) -> Result<String> {
-    // `core.generator`, not `core.judge`: `RESCUE_SYSTEM` needs `for_generating`'s response format.
-    let writer = core
-        .generator
-        .as_ref()
-        .ok_or_else(|| crate::error::Error::Validation("no generator model configured".into()))?;
-    let mut excerpts: Vec<(String, String)> = Vec::new();
-    if c.provenance.is_source_text() {
-        excerpts.push((
-            c.title.clone().unwrap_or_else(|| "untitled".into()),
-            c.text.clone(),
-        ));
-    } else {
-        let roots = core
-            .store
-            .roots_of(std::slice::from_ref(&c.id))
-            .await?
-            .remove(&c.id)
-            .unwrap_or_default();
-        for root in &roots {
-            if let Ok(r) = core.store.get_artifact(root).await
-                && !r.text.trim().is_empty()
-            {
-                excerpts.push((
-                    r.title.clone().unwrap_or_else(|| "untitled".into()),
-                    r.text.clone(),
-                ));
-            }
-        }
-        if excerpts.is_empty() {
-            return Err(crate::error::Error::Validation(
-                "a model-written candidate with no surviving source text cannot be rescued".into(),
-            ));
-        }
-    }
-    let mut user = String::new();
-    user.push_str(&format!("What the live base lacks: {reason}\n\n"));
-    user.push_str("----- SOURCE EXCERPTS -----\n");
-    for (title, text) in &excerpts {
-        user.push_str(&format!("Title: {title}\n\n{text}\n\n"));
-    }
-    let neighbours = live_neighbours(core, &c.id).await?;
-    if !neighbours.is_empty() {
-        user.push_str("----- CLOSEST LIVE ARTIFACTS -----\n");
-        for (title, text) in &neighbours {
-            user.push_str(&format!("Title: {title}\n\n{text}\n\n"));
-        }
-    }
-    let permit = core.gate.background().await;
-    let reply = writer
-        .complete(crate::infer::prompt::RESCUE_SYSTEM, &user)
-        .await;
-    permit.finished();
-    let g = crate::infer::prompt::parse_generation(&reply?)?;
-    let made = core
-        .store
-        .insert_synthesized_artifact(
-            &crate::store::artifacts::NewSynthesized {
-                text: g.text,
-                title: Some(g.title),
-                category: g.category,
-                tags: g.tags,
-                caveats: g.caveats,
-                cues: vec![format!("reap rescue: {reason}")],
-            },
-            std::slice::from_ref(&c.id),
-        )
-        .await?;
-    core.store
-        .enqueue(crate::store::jobs::Stage::Embed, "artifact", &made.id)
-        .await?;
-    // Through the store, not `core.supersede()`, whose both-active guard refuses a retired loser.
-    // Re-checked like `bury`: the row may have been reactivated during the model calls.
-    if c.superseded_by.is_none() {
-        let _guard = core.lifecycle_lock.lock().await;
-        match core
-            .store
-            .supersede_if_reapable(&c.id, &made.id, min_age_secs(core))
-            .await
-        {
-            Ok(()) => {
-                core.vectors
-                    .set_lifecycle(
-                        &c.id,
-                        crate::store::artifacts::ArtifactStatus::Superseded,
-                        Some(&made.id),
-                    )
-                    .await?;
-                core.store
-                    .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
-                    .await?;
-            }
-            Err(crate::error::Error::NotFound) => {
-                tracing::info!(
-                    artifact_id = %c.id,
-                    new_id = %made.id,
-                    "the candidate stopped being one while it was being rewritten; \
-                     the rewrite stands and the row is left alone"
-                );
-                return Ok(made.id);
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    // Restamped on both branches, so the second visit is an age later, against the rewrite.
-    core.store.restamp_retired(&c.id).await?;
-    Ok(made.id)
-}
-
 /// Row before point, marker before delete: a failed delete leaves `lifecycle_dirty` for the repair
-/// pass. Under `lifecycle_lock` so no restore lands between copy and wipe.
-async fn reap_one(
+/// pass. Under `lifecycle_lock` so no restore lands between copy and wipe. The journal row is linked
+/// to `decision_id` as it is written; a row that stopped being a candidate journals nothing.
+pub(crate) async fn reap_one(
     core: &Core,
-    c: &crate::store::artifacts::Chunk,
-    reason: &str,
-    min_age_secs: i64,
-) -> Result<()> {
+    c: &Chunk,
+    decision_id: &str,
+    by: DecidedBy,
+) -> Result<Vec<String>> {
     let meta = serde_json::json!({
-        "reason": reason,
         "status": c.status.as_str(),
         "superseded_by": c.superseded_by,
         "provenance": c.provenance.as_str(),
@@ -285,30 +219,48 @@ async fn reap_one(
             None
         }
     };
-    let journal = crate::store::actions::NewAction {
-        job: crate::store::actions::Job::Reap,
-        kind: crate::store::actions::Kind::Reap,
+    let mut evidence = serde_json::json!({
+        "status": c.status.as_str(),
+        "retired_at": c.retired_at,
+        "created_at": c.created_at,
+        "decision": decision_id,
+    });
+    if by == DecidedBy::Operator {
+        evidence["asked_by"] = serde_json::json!("operator");
+    }
+    let journal = NewAction {
+        job: Job::Reap,
+        kind: Kind::Reap,
         subject_id: c.id.clone(),
         survivor_id: None,
-        detail: Some(reason.to_string()),
-        evidence: serde_json::json!({
-            "status": c.status.as_str(),
-            "retired_at": c.retired_at,
-            "created_at": c.created_at,
-        }),
+        detail: None,
+        evidence,
         pair_score: None,
     };
     let _guard = core.lifecycle_lock.lock().await;
     // `bury` sets `lifecycle_dirty` and writes the journal row in its own transaction.
-    core.store
+    let row = match core
+        .store
         .bury(
             &c.id,
             &meta,
-            min_age_secs,
+            min_age_secs(core),
             dense.as_deref(),
             c.embed_model.as_deref(),
             &journal,
         )
+        .await
+    {
+        Ok(row) => row,
+        Err(Error::NotFound) => {
+            tracing::info!(artifact_id = %c.id, "no longer a candidate when its burial came; left alone");
+            return Ok(vec![]);
+        }
+        Err(e) => return Err(e),
+    };
+    // Linked as written: a failure after this must not leave the burial without its decision.
+    core.store
+        .link_decision_actions(decision_id, std::slice::from_ref(&row))
         .await?;
     core.vectors
         .delete_artifacts(std::slice::from_ref(&c.id))
@@ -316,22 +268,135 @@ async fn reap_one(
     core.store
         .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
         .await?;
-    Ok(())
+    tracing::info!(artifact_id = %c.id, "reaped a retired artifact");
+    Ok(vec![row])
+}
+
+/// Asks `Stage::Rescue` to write. The model's asks are paced by `max_rescues_per_run` in flight;
+/// one over waits as its decision does. A person's is not paced.
+async fn arm_rescue(core: &Core, c: &Chunk, by: DecidedBy) -> Result<()> {
+    if core.generator.is_none() {
+        tracing::info!(artifact_id = %c.id, "valuable, but no generator model to rewrite it with; nothing is armed");
+        return Ok(());
+    }
+    if by == DecidedBy::Model
+        && !core.store.live_job(Stage::Rescue, &c.id).await?
+        && core
+            .store
+            .control
+            .live_count(&core.store.subject, Stage::Rescue)
+            .await?
+            >= i64::try_from(core.reap.max_rescues_per_run).unwrap_or(i64::MAX)
+    {
+        return Err(Error::Validation(
+            "as many rescues are armed as a run may write; this one waits".into(),
+        ));
+    }
+    // Behind capture work, as the merge is.
+    core.store
+        .rearm_idle_seq(
+            Stage::Rescue,
+            "artifact",
+            &c.id,
+            crate::jobs::consolidate::DEDUPE_SEQ_BASE,
+        )
+        .await
+}
+
+/// What `reap_worth`'s answers do: "no" buries, "yes" asks for a rescue.
+pub struct ReapApplier;
+
+async fn note_of(core: &Core, d: &Logged) -> Result<Option<Chunk>> {
+    match core.store.get_artifact(&d.subject_a).await {
+        Ok(c) => Ok(Some(c)),
+        Err(Error::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+#[async_trait]
+impl Applier for ReapApplier {
+    fn question_id(&self) -> &'static str {
+        "reap_worth"
+    }
+
+    fn label(&self) -> &'static str {
+        "Worth keeping?"
+    }
+
+    fn job(&self) -> Option<Job> {
+        Some(Job::Reap)
+    }
+
+    async fn buttons(&self, _: &Core, _: &Logged) -> Result<Vec<(String, String)>> {
+        Ok([("yes", "Valuable"), ("no", "Worthless")]
+            .iter()
+            .map(|(p, l)| (p.to_string(), l.to_string()))
+            .collect())
+    }
+
+    async fn subjects(&self, core: &Core, d: &Logged) -> Result<Vec<(String, String)>> {
+        Ok(note_of(core, d)
+            .await?
+            .map(|c| (c.id.clone(), crate::web::ui::row_label(&c).text))
+            .into_iter()
+            .collect())
+    }
+
+    async fn unchanged(&self, core: &Core, d: &Logged) -> Result<bool> {
+        let Some(c) = note_of(core, d).await? else {
+            return Ok(false);
+        };
+        Ok(Some(c.embed_rev) == d.rev_a
+            && c.superseded_by == d.subject_b
+            && core.store.reapable(&c.id, min_age_secs(core)).await?)
+    }
+
+    async fn apply(
+        &self,
+        core: &Core,
+        d: &Logged,
+        pick: &str,
+        by: DecidedBy,
+    ) -> Result<Vec<String>> {
+        let Some(c) = note_of(core, d).await? else {
+            return Ok(vec![]);
+        };
+        match pick {
+            "no" => {
+                // Again here: a waiting burial can outlive a restore. A person's verdict wins.
+                if by == DecidedBy::Model && core.store.action_was_undone(&c.id, Kind::Reap).await?
+                {
+                    tracing::info!(artifact_id = %c.id, "a burial taken back before; left alone");
+                    return Ok(vec![]);
+                }
+                reap_one(core, &c, &d.id, by).await
+            }
+            "yes" => arm_rescue(core, &c, by).await.map(|()| vec![]),
+            other => Err(Error::Validation(format!(
+                "\"{other}\" is not an answer about a retired note"
+            ))),
+        }
+    }
+
+    async fn reopen(&self, core: &Core, d: &Logged) -> Result<()> {
+        core.store.restamp_retired(&d.subject_a).await
+    }
 }
 
 /// Rows read per row to judge: the seen-since-retired filter runs on vector payloads after the page
 /// is fetched.
 const OVERFETCH: i64 = 4;
 
-/// How long out of `active` before the sweep may look; `nominees` and `reap_one` must re-check
-/// against the same number.
-fn min_age_secs(core: &Core) -> i64 {
+/// How long out of `active` before the sweep may look; `nominees`, `reap_one` and the rescue must
+/// re-check against the same number.
+pub(crate) fn min_age_secs(core: &Core) -> i64 {
     (core.reap.min_age_days as i64).saturating_mul(86_400)
 }
 
 /// Who goes before the judge: `reap_candidates` holds every SQL rule; the seen-since-retired rule
 /// reads the vector point.
-async fn nominees(core: &Core) -> Result<(Vec<crate::store::artifacts::Chunk>, u64)> {
+pub(crate) async fn nominees(core: &Core) -> Result<(Vec<Chunk>, u64)> {
     let stamped = core.store.stamp_unaged_retired().await?;
     if stamped > 0 {
         tracing::info!(stamped, "gave pre-column retirements a clock");
@@ -364,43 +429,20 @@ fn goes_before_the_judge(retired_at: Option<i64>, last_seen_at: Option<i64>) -> 
     last_seen_at.is_none_or(|t| t < retired_at.unwrap_or(0))
 }
 
-/// `core.reaper` compares the candidate with its successor and its nearest live neighbours; the
-/// prompt's "when unsure, valuable" protects a candidate with none.
-async fn judge_one(
-    core: &Core,
-    c: &crate::store::artifacts::Chunk,
-) -> Result<crate::infer::prompt::Reap> {
-    let judge = core
-        .reaper
-        .as_ref()
-        .ok_or_else(|| crate::error::Error::Validation("no reap model configured".into()))?;
-    let successor = match &c.superseded_by {
-        Some(id) => core.store.get_artifact(id).await.ok(),
-        None => None,
-    };
-    let neighbours = live_neighbours(core, &c.id).await?;
-    let case = crate::infer::prompt::ReapCase {
-        title: c.title.as_deref().unwrap_or("untitled"),
-        text: &c.text,
-        successor: successor
-            .as_ref()
-            .map(|s| (s.title.as_deref().unwrap_or("untitled"), s.text.as_str())),
-        neighbours: neighbours
-            .iter()
-            .map(|(t, x)| (t.as_str(), x.as_str()))
-            .collect(),
-    };
-    let user = crate::infer::prompt::reap_prompt(&case);
-    let permit = core.gate.background().await;
-    let reply = judge
-        .complete(crate::infer::prompt::REAP_SYSTEM, &user)
-        .await;
-    permit.finished();
-    crate::infer::prompt::parse_reap(&reply?)
-}
-
 #[cfg(test)]
 pub(crate) mod test_support {
+    use crate::core::Core;
+    use crate::error::Result;
+    use crate::infer::decide::{Answer, Answers, Question};
+    use crate::infer::fake::RuleDecider;
+    use crate::store::artifacts::{ArtifactStatus, NewArtifact};
+    use std::sync::Arc;
+
+    /// `reap_worth`'s "no" past the built-in line (0.99).
+    pub(crate) const SURE_NO: f64 = 0.005;
+    /// Its "yes" past the same line.
+    pub(crate) const SURE_YES: f64 = 0.995;
+
     pub(crate) fn row(id: &str) -> crate::store::actions::NewAction {
         crate::store::actions::NewAction {
             job: crate::store::actions::Job::Reap,
@@ -412,27 +454,53 @@ pub(crate) mod test_support {
             pair_score: None,
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::core::test_support::test_core;
-
-    #[test]
-    fn a_missing_retirement_stamp_defends_the_row() {
-        assert!(goes_before_the_judge(Some(100), None));
-        assert!(goes_before_the_judge(None, None));
-        assert!(!goes_before_the_judge(Some(100), Some(100)));
-        assert!(!goes_before_the_judge(Some(100), Some(200)));
-        assert!(goes_before_the_judge(Some(100), Some(99)));
-        assert!(!goes_before_the_judge(None, Some(1)));
-        assert!(!goes_before_the_judge(None, Some(i64::MAX)));
+    /// Every question answered "yes" with probability `yes`.
+    pub(crate) fn answers(qs: &[Question], yes: f64) -> Result<Answers> {
+        Ok(Answers {
+            answers: qs
+                .iter()
+                .map(|q| (q.key.clone(), Answer::Noul { yes }))
+                .collect(),
+            model: "rule-decider".into(),
+            input_tokens: 0,
+        })
     }
 
-    use crate::store::artifacts::{ArtifactStatus, NewArtifact, NewMerged};
+    /// A decider answering `reap_worth` "yes" with probability `yes`, whatever the state.
+    pub(crate) fn deciding(core: &mut Core, yes: f64) -> Arc<RuleDecider> {
+        let d = Arc::new(RuleDecider::new(move |_, qs| answers(qs, yes)));
+        core.decider = d.clone();
+        d
+    }
 
-    async fn seed(core: &Core, texts: &[&str]) -> Vec<String> {
+    /// A decider that answers each call with the next of `yes`, the last one for ever.
+    pub(crate) fn scripted(core: &mut Core, yes: &[f64]) -> Arc<RuleDecider> {
+        let left = std::sync::Mutex::new(yes.to_vec());
+        let d = Arc::new(RuleDecider::new(move |_, qs| {
+            let mut left = left.lock().unwrap();
+            let p = if left.len() > 1 {
+                left.remove(0)
+            } else {
+                left[0]
+            };
+            answers(qs, p)
+        }));
+        core.decider = d.clone();
+        d
+    }
+
+    /// A decider that fails every call with `e`.
+    pub(crate) fn failing(
+        core: &mut Core,
+        e: impl Fn() -> crate::error::Error + Send + Sync + 'static,
+    ) -> Arc<RuleDecider> {
+        let d = Arc::new(RuleDecider::new(move |_, _| Err(e())));
+        core.decider = d.clone();
+        d
+    }
+
+    pub(crate) async fn seed(core: &Core, texts: &[&str]) -> Vec<String> {
         let src = core
             .store
             .insert_corpus(&texts.join(" | "), "web", None)
@@ -457,7 +525,7 @@ mod tests {
             .collect()
     }
 
-    async fn backdate_retired_at(core: &Core, id: &str, secs_ago: i64) {
+    pub(crate) async fn backdate_retired_at(core: &Core, id: &str, secs_ago: i64) {
         sqlx::query!(
             "UPDATE artifacts SET retired_at = ? WHERE id = ?",
             crate::store::now() - secs_ago,
@@ -468,7 +536,7 @@ mod tests {
         .unwrap();
     }
 
-    async fn deprecate_long_ago(core: &Core, id: &str) {
+    pub(crate) async fn deprecate_long_ago(core: &Core, id: &str) {
         core.store
             .set_artifact_status(id, ArtifactStatus::Deprecated)
             .await
@@ -476,12 +544,65 @@ mod tests {
         backdate_retired_at(core, id, 100 * 86_400).await;
     }
 
+    /// The last `reap_worth` decision about `id` against `successor`.
+    pub(crate) async fn decision(
+        core: &Core,
+        id: &str,
+        successor: Option<&str>,
+    ) -> crate::store::decision_log::Logged {
+        core.store
+            .last_logged("reap_worth", id, successor, &super::reap_era(core))
+            .await
+            .unwrap()
+            .expect("the note was asked about")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::*;
+    use super::*;
+    use crate::core::judging::Applier;
+    use crate::core::judging::band::Band;
+    use crate::core::test_support::test_core;
+    use crate::store::decision_log::{Outcome, State};
+    use crate::store::jobs::Stage;
+
+    #[test]
+    fn a_missing_retirement_stamp_defends_the_row() {
+        assert!(goes_before_the_judge(Some(100), None));
+        assert!(goes_before_the_judge(None, None));
+        assert!(!goes_before_the_judge(Some(100), Some(100)));
+        assert!(!goes_before_the_judge(Some(100), Some(200)));
+        assert!(goes_before_the_judge(Some(100), Some(99)));
+        assert!(!goes_before_the_judge(None, Some(1)));
+        assert!(!goes_before_the_judge(None, Some(i64::MAX)));
+    }
+
+    use crate::store::artifacts::{ArtifactStatus, NewMerged};
+
+    fn tenant(core: &Core) -> crate::tenants::Tenant {
+        crate::tenants::Tenant {
+            core: core.clone(),
+            user: crate::store::control::User {
+                subject: core.store.subject.clone(),
+                email: None,
+                slug: "u".into(),
+                created_at: 0,
+            },
+        }
+    }
+
     #[tokio::test]
     async fn a_burial_taken_back_stands_down_instead_of_holding_its_slot() {
         use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
         let mut core = test_core().await;
         core.reap.enabled = true;
-        // No judge: every nominee fails at the call, below the branch under test.
+        // A decider that never answers: every nominee fails at the call, below the branch under test.
+        failing(&mut core, || crate::error::Error::Inference {
+            role: "decide",
+            detail: "connection refused".into(),
+        });
         let ids = seed(&core, &["taken back before", "behind it"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
         deprecate_long_ago(&core, &ids[1]).await;
@@ -608,40 +729,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_judge_sees_the_successor_and_answers_from_the_script() {
+    async fn the_retired_note_its_replacement_and_live_notes_are_what_is_shown() {
         let mut core = test_core().await;
-        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
-        ]));
-        core.reaper = Some(scripted.clone());
-        let ids = seed(&core, &["the old wording", "the new wording"]).await;
+        let dec = deciding(&mut core, 0.5);
+        let ids = seed(
+            &core,
+            &[
+                "the old wording",
+                "the new wording",
+                "a live note beside it",
+            ],
+        )
+        .await;
+        for id in &ids {
+            crate::jobs::embed::run(&core, id).await.unwrap();
+        }
         core.store
             .set_superseded_by(&ids[0], Some(&ids[1]))
             .await
             .unwrap();
-        let c = core.store.get_artifact(&ids[0]).await.unwrap();
-        let verdict = judge_one(&core, &c).await.unwrap();
-        assert!(matches!(
-            verdict,
-            crate::infer::prompt::Reap::Worthless { .. }
-        ));
-        assert_eq!(scripted.calls(), 1);
-        let prompts = scripted.prompts();
-        assert!(
-            prompts[0].contains("the old wording") && prompts[0].contains("the new wording"),
-            "the judge must see both sides: {}",
-            prompts[0]
-        );
+        backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
+
+        run(&core).await.unwrap();
+
+        assert_eq!(dec.calls(), 1);
+        let (state, questions) = dec.requests().remove(0);
+        assert_eq!(questions[0].key, "reap_worth");
+        for want in [
+            "Retired note",
+            "the old wording",
+            "Its replacement",
+            "the new wording",
+            "Live notes",
+            "a live note beside it",
+        ] {
+            assert!(state.contains(want), "{want} is missing: {state}");
+        }
     }
 
     #[tokio::test]
     async fn a_disabled_sweep_does_not_run_a_unit_that_was_already_pending() {
         let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
-            ]),
-        ));
+        let dec = deciding(&mut core, SURE_NO);
         let ids = seed(&core, &["stale duplicate fact"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         deprecate_long_ago(&core, &ids[0]).await;
@@ -649,6 +778,7 @@ mod tests {
 
         let report = run(&core).await.unwrap();
         assert_eq!((report.judged, report.reaped, report.rescued), (0, 0, 0));
+        assert_eq!(dec.calls(), 0);
         assert_eq!(
             core.store.get_artifact(&ids[0]).await.unwrap().text,
             "stale duplicate fact",
@@ -658,12 +788,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_spent_budget_judges_nothing_and_buries_nothing() {
+    async fn a_spent_budget_buries_nothing_and_the_decision_waits() {
         let mut core = test_core().await;
-        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
-        ]));
-        core.reaper = Some(scripted.clone());
+        deciding(&mut core, SURE_NO);
         core.evolve.autonomous = crate::config::Autonomy::Full;
         core.evolve.max_actions_per_day = 0;
         let ids = seed(&core, &["stale duplicate fact"]).await;
@@ -671,26 +798,54 @@ mod tests {
         deprecate_long_ago(&core, &ids[0]).await;
 
         let report = run(&core).await.unwrap();
-        assert_eq!((report.judged, report.reaped), (0, 0));
-        assert_eq!(scripted.calls(), 0);
+        // Judging goes on past the cap; only the burial waits for the window to move.
+        assert_eq!((report.judged, report.reaped), (1, 0));
         assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!((d.band, d.state), (Band::Act, State::Waiting));
+    }
+
+    #[tokio::test]
+    async fn a_burial_past_the_daily_cap_waits_and_happens_later_without_a_second_call() {
+        let mut core = test_core().await;
+        let dec = deciding(&mut core, SURE_NO);
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_day = 0;
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let first = run(&core).await.unwrap();
+        assert_eq!(first.reaped, 0);
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+        assert_eq!(dec.calls(), 1);
+        // The next sweep does not ask again about a burial that is only waiting.
+        let again = run(&core).await.unwrap();
+        assert_eq!((again.judged, again.reaped), (0, 0));
+        assert_eq!(dec.calls(), 1);
+
+        core.evolve.max_actions_per_day = 20;
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(r.applied, 1);
+        assert_eq!(dec.calls(), 1, "the waiting burial was asked about again");
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!(d.state, State::Done);
+        assert_eq!(
+            core.store.decision_action_ids(&d.id).await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]
     async fn a_burial_taken_back_before_is_not_bought_again() {
         use crate::store::actions::{Kind, UndoneBy};
         let mut core = test_core().await;
-        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"verdict":"worthless","reason":"covered"}"#.into(),
-        ]));
-        core.reaper = Some(scripted.clone());
+        let dec = deciding(&mut core, SURE_NO);
         let ids = seed(&core, &["stale duplicate fact"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         deprecate_long_ago(&core, &ids[0]).await;
-        core.store
-            .record_action(&test_support::row(&ids[0]))
-            .await
-            .unwrap();
+        core.store.record_action(&row(&ids[0])).await.unwrap();
         core.store
             .undo_action_on(&ids[0], Kind::Reap, UndoneBy::Operator, "restored")
             .await
@@ -699,7 +854,7 @@ mod tests {
         let report = run(&core).await.unwrap();
         assert_eq!((report.judged, report.reaped), (0, 0));
         assert_eq!(
-            scripted.calls(),
+            dec.calls(),
             0,
             "the judge was asked about a burial taken back"
         );
@@ -714,13 +869,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_worthless_verdict_reaches_the_graveyard_and_the_point_dies() {
+    async fn a_sure_no_buries_and_the_burial_is_the_decisions_action() {
         let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
-            ]),
-        ));
+        deciding(&mut core, SURE_NO);
         let ids = seed(&core, &["stale duplicate fact"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         deprecate_long_ago(&core, &ids[0]).await;
@@ -738,7 +889,8 @@ mod tests {
             .unwrap()
             .expect("a grave");
         assert!(text.contains("stale duplicate fact"));
-        assert!(meta.contains("covered"));
+        let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+        assert!(meta.get("reason").is_none(), "{meta}");
         let rows = core
             .store
             .open_actions(&[crate::store::actions::Kind::Reap], 10)
@@ -746,7 +898,16 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].subject_id, ids[0]);
-        assert_eq!(rows[0].detail.as_deref(), Some("covered"));
+        assert_eq!(rows[0].detail, None);
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!(
+            (d.band, d.state, d.pick.as_str()),
+            (Band::Act, State::Done, "no")
+        );
+        assert_eq!(
+            core.store.decision_action_ids(&d.id).await.unwrap(),
+            vec![rows[0].id.clone()]
+        );
         let kept: i64 = sqlx::query_scalar!(
             "SELECT vec IS NOT NULL FROM graveyard WHERE id = ?",
             &ids[0]
@@ -774,13 +935,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn restoring_that_note_marks_the_decision_undone() {
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_NO);
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        assert_eq!(run(&core).await.unwrap().reaped, 1);
+
+        crate::web::ops::reactivate_artifact(&tenant(&core), &ids[0])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().text,
+            "stale duplicate fact"
+        );
+        assert_eq!(
+            decision(&core, &ids[0], None).await.outcome,
+            Some(Outcome::Undone)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sure_yes_arms_a_rescue_and_buries_nothing() {
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_YES);
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped, report.rescued), (1, 0, 1));
+        assert!(core.store.live_job(Stage::Rescue, &ids[0]).await.unwrap());
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+        let old = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert_eq!(old.text, "the admin port is 8443");
+        assert!(
+            old.superseded_by.is_none(),
+            "the sweep writes nothing itself"
+        );
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!(
+            (d.band, d.state, d.pick.as_str()),
+            (Band::Act, State::Done, "yes")
+        );
+    }
+
+    #[tokio::test]
+    async fn in_between_is_an_unsure_row_and_the_note_stays() {
+        let mut core = test_core().await;
+        let dec = deciding(&mut core, 0.3);
+        let ids = seed(&core, &["half a fact"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped, report.rescued), (1, 0, 0));
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!((d.band, d.state), (Band::Ask, State::Open));
+        let buttons = ReapApplier.buttons(&core, &d).await.unwrap();
+        assert_eq!(
+            buttons,
+            vec![
+                ("yes".to_string(), "Valuable".to_string()),
+                ("no".to_string(), "Worthless".to_string())
+            ]
+        );
+        assert_eq!(ReapApplier.label(), "Worth keeping?");
+        let subjects = ReapApplier.subjects(&core, &d).await.unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].0, ids[0]);
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().text,
+            "half a fact"
+        );
+        assert!(!core.store.live_job(Stage::Rescue, &ids[0]).await.unwrap());
+
+        // Asked once: an open question is not asked again by the next sweep.
+        run(&core).await.unwrap();
+        assert_eq!(dec.calls(), 1);
+        assert_eq!(core.store.open_ask_count().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_burial_line_is_the_higher_one() {
+        let mut core = test_core().await;
+        core.decide_cfg.bands.per.insert(
+            "reap_worth".into(),
+            crate::config::BandOverride {
+                act_at: Some(0.97),
+                ask_at: None,
+            },
+        );
+        deciding(&mut core, 0.05);
+        let ids = seed(&core, &["a fact the live base mostly has"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+
+        let report = run(&core).await.unwrap();
+        assert_eq!(report.reaped, 0);
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!((d.pick.as_str(), d.band), ("no", Band::Ask));
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_person_pressing_worthless_buries_past_the_cap() {
+        let mut core = test_core().await;
+        deciding(&mut core, 0.7);
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_day = 0;
+        let ids = seed(&core, &["a fact a person reads"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!(d.state, State::Open);
+
+        let d = crate::core::judging::answer(&core, &d.id, Some("no"))
+            .await
+            .unwrap();
+
+        assert_eq!(d.outcome, Some(Outcome::Corrected));
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+        assert_eq!(
+            core.store.decision_action_ids(&d.id).await.unwrap().len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_runs_without_a_synthesize_role_and_only_rescue_needs_one() {
+        let mut core = crate::core::test_support::test_core_without_synthesizer().await;
+        let d = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|state, qs| {
+            answers(
+                qs,
+                if state.contains("bury me") {
+                    SURE_NO
+                } else {
+                    SURE_YES
+                },
+            )
+        }));
+        core.decider = d;
+        let ids = seed(&core, &["bury me", "keep me"]).await;
+        for id in &ids {
+            deprecate_long_ago(&core, id).await;
+        }
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped, report.rescued), (2, 1, 0));
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+        assert!(
+            !core.store.live_job(Stage::Rescue, &ids[1]).await.unwrap(),
+            "nothing can write a rescue, so none is armed"
+        );
+        assert_eq!(
+            core.store.get_artifact(&ids[1]).await.unwrap().text,
+            "keep me"
+        );
+    }
+
+    #[tokio::test]
     async fn restoring_a_buried_superseded_artifact_brings_its_text_back() {
         let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
-            ]),
-        ));
+        deciding(&mut core, SURE_NO);
         let ids = seed(&core, &["the loser's own words", "the keeper"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         core.supersede(&ids[0], &ids[1]).await.unwrap();
@@ -813,9 +1130,10 @@ mod tests {
     #[tokio::test]
     async fn a_failed_reply_leaves_the_candidate_untouched() {
         let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![]),
-        ));
+        failing(&mut core, || crate::error::Error::Inference {
+            role: "decide",
+            detail: "no reply".into(),
+        });
         let ids = seed(&core, &["still here"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
 
@@ -833,9 +1151,10 @@ mod tests {
     #[tokio::test]
     async fn a_candidate_the_judge_refuses_stands_down_and_lets_the_queue_move() {
         let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::rejecting("HTTP 400: input too long"),
-        ));
+        failing(&mut core, || crate::error::Error::InferenceRejected {
+            role: "decide",
+            detail: "HTTP 400: input too long".into(),
+        });
         let ids = seed(&core, &["the one it will not read"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
         let before = core
@@ -862,9 +1181,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sweep_with_no_judge_leaves_every_candidate_where_it_was() {
+    async fn a_sweep_whose_decider_is_down_leaves_every_candidate_where_it_was() {
         let mut core = test_core().await;
-        core.reaper = None;
+        failing(&mut core, || crate::error::Error::InferenceBusy {
+            role: "decide",
+            detail: "HTTP 503".into(),
+        });
         let ids = seed(&core, &["waiting for a judge"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
         let before = core
@@ -890,11 +1212,7 @@ mod tests {
     #[tokio::test]
     async fn a_buried_stub_is_out_of_reach_by_consequence_not_by_filter() {
         let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"worthless","reason":"covered"}"#.into(),
-            ]),
-        ));
+        deciding(&mut core, SURE_NO);
         let ids = seed(&core, &["a fact about zeppelins", "its living successor"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
         core.store
@@ -927,167 +1245,17 @@ mod tests {
         assert_eq!(stub.superseded_by.as_deref(), Some(ids[1].as_str()));
     }
 
-    const RESCUE_REPLY: &str = r#"{"artifact":{"title":"Kept fact","text":"the port is 8443","category":null,"tags":[],"caveats":[]}}"#;
-
-    #[tokio::test]
-    async fn a_valuable_deprecated_artifact_is_rewritten_and_superseded_by_the_rewrite() {
-        let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
-            ]),
-        ));
-        core.generator = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![RESCUE_REPLY.into()]),
-        ));
-        let ids = seed(&core, &["the admin port is 8443"]).await;
-        deprecate_long_ago(&core, &ids[0]).await;
-
-        let report = run(&core).await.unwrap();
-        assert_eq!((report.judged, report.reaped, report.rescued), (1, 0, 1));
-
-        let old = core.store.get_artifact(&ids[0]).await.unwrap();
-        let new_id = old.superseded_by.expect("superseded by the rewrite");
-        let new = core.store.get_artifact(&new_id).await.unwrap();
-        assert_eq!(
-            new.provenance,
-            crate::store::artifacts::Provenance::Synthesized
-        );
-        assert_eq!(new.text, "the port is 8443");
-        assert!(new.in_results(), "the rewrite is live");
-        assert!(!old.text.is_empty(), "a rescue wipes nothing");
-    }
-
-    #[tokio::test]
-    async fn a_model_written_candidate_is_rewritten_from_its_roots() {
-        let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"valuable","reason":"names the mount flags"}"#.into(),
-            ]),
-        ));
-        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            RESCUE_REPLY.into(),
-        ]));
-        core.generator = Some(scripted.clone());
-        let ids = seed(&core, &["mount with ro,loop", "journal at /var/log"]).await;
-        let merge = core
-            .store
-            .insert_merged_artifact(
-                &NewMerged {
-                    text: "a paraphrase of both".into(),
-                    title: Some("M".into()),
-                    ..Default::default()
-                },
-                &ids,
-            )
-            .await
-            .unwrap();
-        core.store
-            .set_artifact_status(&merge.id, ArtifactStatus::Deprecated)
-            .await
-            .unwrap();
-        backdate_retired_at(&core, &merge.id, 100 * 86_400).await;
-
-        let report = run(&core).await.unwrap();
-        assert_eq!(report.rescued, 1);
-        let rescue_prompt = &scripted.prompts()[0];
-        assert!(
-            rescue_prompt.contains("mount with ro,loop")
-                && rescue_prompt.contains("journal at /var/log"),
-            "the rewrite must be fed source text: {rescue_prompt}"
-        );
-        assert!(
-            !rescue_prompt.contains("a paraphrase of both"),
-            "never the model-written candidate's own text"
-        );
-        let new_id = core
-            .store
-            .get_artifact(&merge.id)
-            .await
-            .unwrap()
-            .superseded_by
-            .unwrap();
-        let mut roots = core
-            .store
-            .roots_of(std::slice::from_ref(&new_id))
-            .await
-            .unwrap()
-            .remove(&new_id)
-            .unwrap();
-        roots.sort();
-        let mut want = ids.clone();
-        want.sort();
-        assert_eq!(
-            roots, want,
-            "the rewrite's lineage names the captured roots"
-        );
-    }
-
     #[tokio::test]
     async fn the_rescue_cap_holds() {
         let mut core = test_core().await;
         core.reap.max_rescues_per_run = 1;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"valuable","reason":"one"}"#.into(),
-                r#"{"verdict":"valuable","reason":"two"}"#.into(),
-            ]),
-        ));
-        core.generator = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![RESCUE_REPLY.into()]),
-        ));
+        deciding(&mut core, SURE_YES);
         let ids = seed(&core, &["first fact", "second fact"]).await;
         for id in &ids {
             deprecate_long_ago(&core, id).await;
         }
         let report = run(&core).await.unwrap();
         assert_eq!((report.judged, report.rescued), (2, 1));
-    }
-
-    #[tokio::test]
-    async fn a_rescue_is_reaped_against_its_own_rewrite_on_the_second_pass() {
-        // A rescue must restamp, or the candidate is back before the judge next interval, and must
-        // wipe nothing.
-        let mut core = test_core().await;
-        core.reaper = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![
-                r#"{"verdict":"valuable","reason":"names the port"}"#.into(),
-                r#"{"verdict":"worthless","reason":"the rewrite carries it"}"#.into(),
-            ]),
-        ));
-        core.generator = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec![RESCUE_REPLY.into()]),
-        ));
-        let ids = seed(&core, &["the admin port is 8443"]).await;
-        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
-        deprecate_long_ago(&core, &ids[0]).await;
-
-        let first = run(&core).await.unwrap();
-        assert_eq!((first.reaped, first.rescued), (0, 1));
-        let new_id = core
-            .store
-            .get_artifact(&ids[0])
-            .await
-            .unwrap()
-            .superseded_by
-            .expect("superseded by the rewrite");
-        crate::jobs::embed::run(&core, &new_id).await.unwrap();
-
-        let (none_yet, _) = nominees(&core).await.unwrap();
-        assert!(
-            none_yet.is_empty(),
-            "a rescued candidate waits out a fresh age"
-        );
-
-        backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
-
-        let second = run(&core).await.unwrap();
-        assert_eq!((second.judged, second.reaped, second.rescued), (1, 1, 0));
-        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
-        let rewrite = core.store.get_artifact(&new_id).await.unwrap();
-        assert!(rewrite.in_results());
-        assert_eq!(rewrite.text, "the port is 8443");
     }
 
     #[tokio::test]

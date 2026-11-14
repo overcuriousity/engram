@@ -363,7 +363,8 @@ async fn reaps(core: &Core) -> Result<Vec<Found>> {
         out.push(f);
     }
     for s in core.store.synthesized_artifacts(i64::MAX).await? {
-        if !s.cues.iter().any(|c| c.starts_with("reap rescue:")) {
+        // "reap rescue" now; "reap rescue: <reason>" on rows written before.
+        if !s.cues.iter().any(|c| c.starts_with("reap rescue")) {
             continue;
         }
         for id in core.store.artifacts_superseded_by(&s.id).await? {

@@ -75,7 +75,6 @@ pub struct GraveRow {
     /// Always true: the graveyard keeps the title with no provenance to say whether it was a name.
     pub named: bool,
     pub ago: String,
-    pub reason: Option<String>,
 }
 
 /// One phrase of the last day: "412 links forgotten".
@@ -331,7 +330,6 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
             title: g.title.unwrap_or_else(|| "(untitled)".to_string()),
             ago: ago(g.reaped_at),
             id: g.id,
-            reason: g.reason,
         })
         .collect();
     let more_reaped = reaped.len() > DEPRECATED_CAP as usize;
@@ -449,16 +447,10 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
             title: g.title,
             subtitle: String::new(),
             kind: "buried",
-            why: match g.reason {
-                Some(r) => format!(
-                    "buried {} · {r} — out of search and out of the index, text kept",
-                    g.ago
-                ),
-                None => format!(
-                    "buried {} — out of search and out of the index, text kept",
-                    g.ago
-                ),
-            },
+            why: format!(
+                "buried {} — out of search and out of the index, text kept",
+                g.ago
+            ),
             beside: Vec::new(),
             caveat: None,
             actions: vec![SetAsideAction::new(
@@ -1702,11 +1694,54 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("Old note"), "{body}");
-        assert!(body.contains("nothing new in it"), "{body}");
         assert!(
             body.contains(&format!("/ui/ops/artifacts/{id}/reactivate")),
             "the restore button posts to the existing route: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn insights_shows_a_burial_without_a_reason() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let id = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "an old note nobody needs".into(),
+                    title: Some("Old note".into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        core.store
+            .set_artifact_status(&id, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        // A grave from before keeps the model's words in its meta; they are not shown.
+        core.store
+            .bury(
+                &id,
+                r#"{"reason":"the model's own words"}"#,
+                -86_400,
+                None,
+                None,
+                &crate::jobs::reap::test_support::row(&id),
+            )
+            .await
+            .unwrap();
+
+        let body = insights(core).await;
+        assert!(
+            body.contains("— out of search and out of the index, text kept"),
+            "{body}"
+        );
+        assert!(body.contains("buried "), "{body}");
+        assert!(!body.contains("the model's own words"), "{body}");
     }
 
     #[tokio::test]

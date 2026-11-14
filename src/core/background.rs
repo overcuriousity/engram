@@ -84,7 +84,7 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     }
     // `acts_on_corpus()`, not `may_act()` (always true below `full`): burial destroys text,
     // and `jobs::retract`, which undoes it, is itself gated on `acts_on_corpus()`.
-    if core.reap.enabled && core.judge.is_some() && core.evolve.autonomous.acts_on_corpus() {
+    if core.reap.enabled && core.evolve.autonomous.acts_on_corpus() {
         out.push((Stage::Reap, CONSOLIDATE_TARGET));
     }
     // Always: waiting decisions are applied and seated whatever else is switched off.
@@ -498,7 +498,7 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn the_reap_sweep_is_armed_only_when_enabled_a_judge_exists_and_it_may_act() {
+    async fn the_reap_sweep_is_armed_only_when_enabled_and_it_may_act() {
         use crate::store::jobs::Stage;
         let mut core = crate::core::test_support::test_core().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
@@ -519,14 +519,16 @@ mod tests {
             "the switch arms nothing"
         );
 
+        // The decision model judges; a chat judge is not needed.
         let mut judgeless = crate::core::test_support::test_core().await;
         judgeless.evolve.autonomous = crate::config::Autonomy::Full;
         judgeless.judge = None;
+        judgeless.reaper = None;
         assert!(
-            !periodic_units(&judgeless)
+            periodic_units(&judgeless)
                 .iter()
                 .any(|(s, _)| *s == Stage::Reap),
-            "no judge, no sweep — the rules alone may never tombstone"
+            "the decision model is required, so there is always a judge"
         );
 
         for level in [

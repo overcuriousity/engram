@@ -518,14 +518,14 @@ impl Default for TimeConfig {
 }
 
 /// The reap sweep: bury long-retired artifacts the live base already states, rewrite the rest.
-/// Runs only in a declared `[reap]` block with a judge; see `Config::disable_undeclared_reap`.
+/// Runs only in a declared `[reap]` block; see `Config::disable_undeclared_reap`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ReapConfig {
     pub enabled: bool,
     pub interval_mins: u64,
     pub min_age_days: u64,
-    /// Model calls per run: the sweep's whole inference budget.
+    /// Decisions per run, inside the tick's judging budget.
     pub max_judged_per_run: u64,
     /// Rescue rewrites per run, so one bad batch cannot flood the base with model-written text.
     pub max_rescues_per_run: u64,
@@ -537,7 +537,7 @@ impl Default for ReapConfig {
             enabled: true,
             interval_mins: 1440,
             min_age_days: 90,
-            max_judged_per_run: 20,
+            max_judged_per_run: 50,
             max_rescues_per_run: 3,
         }
     }

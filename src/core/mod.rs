@@ -209,6 +209,7 @@ fn builtin_appliers() -> Arc<crate::core::judging::Appliers> {
     let mut a = crate::core::judging::Appliers::default();
     a.register(Arc::new(crate::jobs::dedupe::PairApplier));
     a.register(Arc::new(crate::jobs::associate::LinkApplier));
+    a.register(Arc::new(crate::jobs::reap::ReapApplier));
     Arc::new(a)
 }
 

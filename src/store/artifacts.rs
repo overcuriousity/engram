@@ -39,7 +39,6 @@ pub struct Grave {
     pub id: String,
     pub title: Option<String>,
     pub reaped_at: i64,
-    pub reason: Option<String>,
 }
 
 /// Where an artifact stands: still current, flagged stale with no named
@@ -1528,7 +1527,7 @@ impl Store {
         vec: Option<&[f32]>,
         embed_model: Option<&str>,
         journal: &crate::store::actions::NewAction,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let reaped_at = now();
         let cutoff = reaped_at - min_age_secs;
         let mut tx = self.pool.begin().await?;
@@ -1560,15 +1559,32 @@ impl Store {
         )
         .execute(&mut *tx)
         .await?;
-        crate::store::actions::insert(&mut *tx, journal).await?;
+        let row = crate::store::actions::insert(&mut *tx, journal).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(row)
+    }
+
+    /// Whether `id` is still a reap candidate by every rule `reap_candidates` holds.
+    pub async fn reapable(&self, id: &str, min_age_secs: i64) -> Result<bool> {
+        let cutoff = now() - min_age_secs;
+        // runtime: shares the REAPABLE predicate with the graveyard insert and the bury update.
+        let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM artifacts art WHERE art.id = ? AND {}",
+            Self::REAPABLE
+        )))
+        .bind(id)
+        .bind(cutoff)
+        .bind(cutoff)
+        .bind(cutoff)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
     }
 
     /// Only graves whose stub exists: this list is the Restore button.
     pub async fn graveyard_list(&self, limit: i64) -> Result<Vec<Grave>> {
         sqlx::query!(
-            r#"SELECT g.id AS "id!", g.title AS title, g.meta_json AS meta_json, g.reaped_at AS reaped_at
+            r#"SELECT g.id AS "id!", g.title AS title, g.reaped_at AS reaped_at
                FROM graveyard g
                JOIN artifacts a ON a.id = g.id
               ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?"#,
@@ -1578,15 +1594,10 @@ impl Store {
         .await?
         .into_iter()
         .map(|r| {
-            let meta: serde_json::Value = serde_json::from_str(&r.meta_json).unwrap_or_default();
             Ok(Grave {
                 id: r.id,
                 title: r.title,
                 reaped_at: r.reaped_at,
-                reason: meta
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
             })
         })
         .collect()

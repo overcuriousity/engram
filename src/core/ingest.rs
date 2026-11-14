@@ -1651,7 +1651,8 @@ impl Core {
             | Stage::Condense
             | Stage::LinkJudge
             | Stage::Generate
-            | Stage::Merge => {
+            | Stage::Merge
+            | Stage::Rescue => {
                 return Err(Error::Validation(
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"

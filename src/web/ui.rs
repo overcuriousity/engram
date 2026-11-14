@@ -173,6 +173,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "fetch" => "Fetching links again",
         "decisions" => "Applying decisions",
         "merge" => "Writing merges",
+        "rescue" => "Writing rescues",
         other => other,
     }
 }

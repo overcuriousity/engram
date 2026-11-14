@@ -22,6 +22,7 @@ pub mod refetch;
 pub mod relate;
 pub mod remind;
 pub mod replay;
+pub mod rescue_unit;
 pub mod retention;
 pub mod retract;
 pub mod sleep;
@@ -135,6 +136,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Merge, _) => merge_unit::run(core, &job.target_id).await,
+        (Stage::Rescue, _) => rescue_unit::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Probe, _) => probe::run(core, &job.target_id).await,
         (Stage::Condense, _) => condense::run(core, &job.target_id).await,
@@ -191,9 +193,9 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                     tracing::warn!(error = %e, "could not record a push after every retry; standing the unit down until the repair pass");
                     core.store.complete_job(job.id).await?;
                 }
-                // A name is decoration, and an unjudged pair stays pending for a later sweep;
-                // everything else stays queued, as it carries knowledge.
-                (Stage::Dedupe | Stage::Merge | Stage::Title, _) if exhausted => {
+                // A name is decoration, an unjudged pair stays pending, and a note not rescued
+                // keeps its text; everything else stays queued, as it carries knowledge.
+                (Stage::Dedupe | Stage::Merge | Stage::Rescue | Stage::Title, _) if exhausted => {
                     tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;
                 }

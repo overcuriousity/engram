@@ -1679,7 +1679,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
         }),
     };
 
-    let reap = if tenant.core.reap.enabled && tenant.core.judge.is_some() {
+    let reap = if tenant.core.reap.enabled {
         let last = tenant.core.store.last_sweep_run("reap").await?;
         let n = |d: &serde_json::Value, k: &str| d.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
         let detail: serde_json::Value = last

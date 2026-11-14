@@ -337,8 +337,8 @@ enabled = true
 interval_mins = 1440
 # Days retired before an artifact is judged.
 min_age_days = 90
-# Model calls per run.
-max_judged_per_run = 20
+# Decisions per run.
+max_judged_per_run = 50
 # Rewrites per run.
 max_rescues_per_run = 3
 
