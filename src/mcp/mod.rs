@@ -771,7 +771,7 @@ fn format_answer(a: &crate::core::ask::AskResponse) -> String {
     out
 }
 
-/// A title an agent's markdown cannot break: one line, no table cell, emphasis or code.
+/// A title an agent's markdown cannot break; see `md_line`.
 fn md_title(e: &crate::core::decide::Evidence) -> String {
     let t = e
         .title
@@ -781,12 +781,16 @@ fn md_title(e: &crate::core::decide::Evidence) -> String {
     md_line(&t)
 }
 
-/// One line an agent's markdown cannot break: no table cell, emphasis or code.
+/// One line an agent's markdown cannot break: no table cell, emphasis, code, link, image, HTML,
+/// entity or strikethrough. Never at a line's start, so `#`, `>` and list markers need no escape.
 fn md_line(t: &str) -> String {
     t.replace(['\r', '\n'], " ")
         .chars()
         .fold(String::new(), |mut o, c| {
-            if matches!(c, '|' | '*' | '_' | '`') {
+            if matches!(
+                c,
+                '\\' | '|' | '*' | '_' | '`' | '[' | ']' | '<' | '>' | '&' | '~'
+            ) {
                 o.push('\\');
             }
             o.push(c);
@@ -2060,6 +2064,14 @@ mod tests {
         assert!(out.contains("- yes: 70\n- no: 30"), "{out}");
         assert!(out.contains("Without notes: yes 40, no 60."), "{out}");
         assert!(out.contains("1. Reindex notes 09/14 — yes\n"), "{out}");
+    }
+
+    #[test]
+    fn a_line_cannot_carry_a_link_html_or_a_line_break() {
+        assert_eq!(
+            md_line("[click](https://x.example) <b>&amp;\n~~a\\b~~"),
+            r"\[click\](https://x.example) \<b\>\&amp; \~\~a\\b\~\~"
+        );
     }
 
     #[tokio::test]

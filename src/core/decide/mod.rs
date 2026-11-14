@@ -26,6 +26,10 @@ pub const MAX_CALLER_QUESTIONS: usize = 8;
 pub const MAX_SITUATION_TOKENS: usize = 2000;
 /// What tokenising the joined state may cost beyond its counted parts.
 const SEAM_TOKENS: usize = 32;
+/// The most of a title a read carries.
+const TITLE_TOKENS: usize = 32;
+/// The least of a passage a read must carry for the situation to be allowed.
+const EXCERPT_FLOOR: usize = 64;
 
 #[derive(Debug, Clone, Default)]
 pub struct DecideRequest {
@@ -201,13 +205,45 @@ struct Passage {
 }
 
 impl Passage {
-    fn excerpt<'a>(&'a self, text: &'a str) -> Excerpt<'a> {
+    fn excerpt<'a>(&'a self, title: Option<&'a str>, text: &'a str) -> Excerpt<'a> {
         Excerpt {
-            title: self.title.as_deref(),
+            title,
             day: &self.day,
             text,
         }
     }
+
+    /// The title as the model reads it, cut to `TITLE_TOKENS`, so no title crowds out its passage.
+    fn prompt_title(&self, counter: &TokenCounter) -> Option<String> {
+        self.title
+            .as_deref()
+            .and_then(|t| counter.cut(t, TITLE_TOKENS, true))
+    }
+}
+
+/// Refused before anything is searched or read: a situation that leaves no excerpt `EXCERPT_FLOOR`
+/// tokens beside a full-length title, in a single read or the joint one, could only fail later.
+fn fits(counter: &TokenCounter, situation: Option<&str>, room: usize) -> Result<()> {
+    let Some(s) = situation else { return Ok(()) };
+    let frame = counter.count(&single_state(
+        Some(s),
+        &Excerpt {
+            title: None,
+            day: "0000-00-00",
+            text: "",
+        },
+    ));
+    let need = frame + TITLE_TOKENS + EXCERPT_FLOOR;
+    if need > room {
+        let (n, fit) = (
+            counter.count(s),
+            (room + counter.count(s)).saturating_sub(need),
+        );
+        return Err(refuse(&format!(
+            "the situation is {n} tokens and {fit} fit this decision model's window."
+        )));
+    }
+    Ok(())
 }
 
 impl Core {
@@ -242,40 +278,61 @@ impl Core {
             // Every spawned read holds a clone: a read still in flight keeps the lane until it is aborted.
             let lane = std::sync::Arc::new(core.gate.interactive());
 
-            let passages = core.decide_passages(&req, &asked).await?;
-            let of = passages.len();
-            yield DecideEvent::Retrieved { passages: of };
-
             let decider = core.decider.clone();
-            let got = decider.decide(&prior_state(situation), questions).await?;
-            let prior = in_order(questions, &got)?;
-            let mut model = got.model;
-
             let mut with_bears = questions.clone();
             with_bears.push(bears_question(&asked.q));
             let window = decider.context_tokens();
             let room = budget(&core.counter, window, &with_bears).saturating_sub(SEAM_TOKENS);
+            let joint_room = cfg
+                .joint_tokens
+                .min(budget(&core.counter, window, &swapped_questions(questions)));
+            fits(&core.counter, situation, room.min(joint_room))?;
+
+            let passages = core.decide_passages(&req, &asked).await?;
+            let of = passages.len();
+            yield DecideEvent::Retrieved { passages: of };
+
             // Dropping the set aborts every read still running, when the reader leaves.
+            // The prior rides in it as `None`: it depends on no read, so it need not go first.
             let mut set = tokio::task::JoinSet::new();
+            {
+                let (decider, state, asked, lane) =
+                    (decider.clone(), prior_state(situation), questions.clone(), lane.clone());
+                set.spawn(async move {
+                    let _lane = lane;
+                    (None, decider.decide(&state, &asked).await)
+                });
+            }
             for (i, p) in passages.iter().enumerate() {
-                // The frame is counted, not allowed for: a long title would not fit a fixed allowance.
-                let frame = core.counter.count(&single_state(situation, &p.excerpt("")));
+                let title = p.prompt_title(&core.counter);
+                let frame = core
+                    .counter
+                    .count(&single_state(situation, &p.excerpt(title.as_deref(), "")));
                 let text = core
                     .counter
                     .cut(&p.text, room.saturating_sub(frame), true)
                     .unwrap_or_default();
-                let state = single_state(situation, &p.excerpt(&text));
+                let state = single_state(situation, &p.excerpt(title.as_deref(), &text));
                 let (decider, asked, lane) = (decider.clone(), with_bears.clone(), lane.clone());
                 set.spawn(async move {
                     let _lane = lane;
-                    (i, decider.decide(&state, &asked).await)
+                    (Some(i), decider.decide(&state, &asked).await)
                 });
             }
+            let mut prior = Vec::new();
+            let mut model = String::new();
             let mut reads: Vec<PassageRead> = Vec::with_capacity(of);
             while let Some(joined) = set.join_next().await {
                 let (i, got) = joined.map_err(|e| Error::Internal(format!("decide: a read did not finish: {e}")))?;
                 // One failed read fails the decision: a partial verdict would be a guess.
                 let got = got?;
+                let Some(i) = i else {
+                    prior = in_order(questions, &got)?;
+                    if reads.is_empty() {
+                        model = got.model;
+                    }
+                    continue;
+                };
                 let bears = match got.answers.get(BEARS_KEY) {
                     Some(Answer::Noul { yes }) => *yes,
                     _ => Err(rejected(format!("the answer has no noul for \"{BEARS_KEY}\"")))?,
@@ -286,6 +343,7 @@ impl Core {
                     of,
                     artifact_id: p.artifact_id.clone(),
                     title: p.title.clone(),
+                    text: p.text.clone(),
                     bears,
                     bearing: bears >= cfg.bears_min,
                     read: in_order(questions, &got)?,
@@ -320,17 +378,18 @@ impl Core {
                 return;
             }
 
-            let excerpts: Vec<Excerpt<'_>> = bearing
+            let titled: Vec<(&Passage, Option<String>)> = bearing
                 .iter()
                 .map(|r| {
                     let p = &passages[r.rank - 1];
-                    p.excerpt(&p.text)
+                    (p, p.prompt_title(&core.counter))
                 })
                 .collect();
-            let tokens = cfg
-                .joint_tokens
-                .min(budget(&core.counter, window, &swapped_questions(questions)));
-            let (state, packed) = joint_state(situation, &excerpts, &core.counter, tokens);
+            let excerpts: Vec<Excerpt<'_>> = titled
+                .iter()
+                .map(|(p, t)| p.excerpt(t.as_deref(), &p.text))
+                .collect();
+            let (state, packed) = joint_state(situation, &excerpts, &core.counter, joint_room);
             let joint = decide_swapped(decider.as_ref(), &state, questions).await?;
 
             let evidence: Vec<Evidence> = bearing
@@ -340,7 +399,7 @@ impl Core {
                     n: j + 1,
                     artifact_id: r.artifact_id.clone(),
                     title: r.title.clone(),
-                    text: passages[r.rank - 1].text.clone(),
+                    text: r.text.clone(),
                     bears: r.bears,
                     joint: j < packed,
                     read: r.read.clone(),
@@ -696,6 +755,37 @@ pub(crate) mod tests {
                 .iter()
                 .all(|(s, _)| s.starts_with("Situation:\n12 GB."))
         );
+    }
+
+    #[tokio::test]
+    async fn a_situation_the_window_cannot_hold_is_refused_before_anything_is_read() {
+        let mut core = three_base().await;
+        let dec = deciding(&mut core, marked(0.9));
+        dec.set_context_tokens(1024);
+        let r = DecideRequest {
+            situation: Some("twelve gigabytes of memory ".repeat(150)),
+            ..req("Keep bge-m3?")
+        };
+        let e = core.decide(&r, Door::Api).await.unwrap_err();
+        assert!(
+            matches!(&e, Error::Validation(m) if m.contains("this decision model's window")),
+            "{e:?}"
+        );
+        assert_eq!(dec.calls(), 0);
+    }
+
+    #[test]
+    fn a_title_longer_than_the_window_is_cut_to_its_allowance() {
+        let c = TokenCounter::default();
+        let p = Passage {
+            artifact_id: "A".into(),
+            title: Some("A heading that goes on ".repeat(300)),
+            text: "The passage.".into(),
+            day: "2026-11-14".into(),
+        };
+        let t = p.prompt_title(&c).unwrap();
+        assert!(c.count(&t) <= TITLE_TOKENS && !t.is_empty());
+        assert!(p.title.as_deref().unwrap().starts_with(&t));
     }
 
     #[tokio::test]

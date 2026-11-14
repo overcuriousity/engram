@@ -165,21 +165,23 @@ fn own(q: &Question, read: &[(String, Answer)]) -> Option<usize> {
         .map(|(_, a)| pick(q, a))
 }
 
+/// The same while it streams and once it is done, so a row keeps its title.
+fn row_title(title: Option<&str>, text: &str) -> String {
+    title
+        .filter(|t| !t.trim().is_empty())
+        .map_or_else(|| stand_in_title(text, 60), str::to_string)
+}
+
 fn evidence_row(
     e: &Evidence,
     q: Option<&Question>,
     verdict: Option<usize>,
 ) -> (Option<usize>, Row) {
     let mine = q.and_then(|q| own(q, &e.read));
-    let title = e
-        .title
-        .clone()
-        .filter(|t| !t.trim().is_empty())
-        .unwrap_or_else(|| stand_in_title(&e.text, 60));
     let row = Row {
         n: e.n,
         artifact_id: e.artifact_id.clone(),
-        title,
+        title: row_title(e.title.as_deref(), &e.text),
         pick: q.zip(mine).and_then(|(q, i)| label(q, i)),
         against: verdict.is_some() && mine.is_some() && mine != verdict,
         group: None,
@@ -227,7 +229,7 @@ pub fn reading_row(p: &PassageRead, q: &Question) -> Result<String> {
         r: Row {
             n: p.rank,
             artifact_id: p.artifact_id.clone(),
-            title: p.title.clone().unwrap_or_default(),
+            title: row_title(p.title.as_deref(), &p.text),
             pick: own(q, &p.read)
                 .filter(|_| p.bearing)
                 .and_then(|i| label(q, i)),
@@ -418,19 +420,6 @@ struct VerdictForm {
     correct: Option<String>,
 }
 
-fn correction(q: &Question, c: &str) -> Result<Correct> {
-    Ok(match (&q.kind, c) {
-        (Kind::Score { .. }, _) => {
-            Correct::Level(c.parse().map_err(|_| {
-                Error::Validation("decide: a level is corrected by its index.".into())
-            })?)
-        }
-        (_, "yes") => Correct::Yes,
-        (_, "no") => Correct::No,
-        _ => Correct::Option(c.to_string()),
-    })
-}
-
 /// As much of the decision as the bar reads, from what was stored.
 fn recorded(s: &StoredDecision) -> Result<Decision> {
     let questions = stored_questions(&s.questions)?;
@@ -468,32 +457,26 @@ async fn decide_verdict(
     Path(id): Path<String>,
     Form(f): Form<VerdictForm>,
 ) -> UiResult<Response> {
-    let stored = tenant
-        .core
-        .store
-        .decision(&id)
-        .await?
-        .ok_or(Error::NotFound)?;
-    let d = recorded(&stored)?;
     let judged = match f.verdict.as_str() {
         "none" => tenant.core.unjudge_decision(&id).await?,
         v => {
             let verdict = AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
-            let correct = match (verdict, f.correct.as_deref(), d.questions.first()) {
-                (AskVerdict::Wrong, Some(c), Some(q)) if c != "-" => Some(correction(q, c)?),
+            let correct = match (verdict, f.correct.as_deref()) {
+                (AskVerdict::Wrong, Some(c)) if c != "-" => Some(Correct::named(c)),
                 _ => None,
             };
             tenant.core.judge_decision(&id, verdict, correct).await?
         }
     };
+    let d = recorded(&judged.decision)?;
     let verdict = judged.verdict.map(verdict_label);
     // "Not sure" stores the verdict alone; the bar does not ask again.
     let correct = judged
         .correct
         .or_else(|| (f.correct.as_deref() == Some("-")).then(|| "-".to_string()));
     let mut bar = verdict_bar(&d, verdict.as_deref(), correct.as_deref());
-    bar.held = !stored.not_held;
+    bar.held = !judged.decision.not_held;
     Ok(Html(verdict_fragment(&bar)?).into_response())
 }
 
@@ -761,10 +744,24 @@ mod tests {
             of: 8,
             artifact_id: "A2".into(),
             title: Some("Embedder comparison".into()),
+            text: "We compared bge-m3 with gemma.".into(),
             bears: 0.9,
             bearing: true,
             read: vec![("verdict".into(), chose(&q, &[0.2, 0.8]))],
         };
+        let mut untitled = p.clone();
+        untitled.title = None;
+        let e = Evidence {
+            title: None,
+            text: untitled.text.clone(),
+            ..evidence(2, None, chose(&q, &[0.2, 0.8]))
+        };
+        let streamed = reading_row(&untitled, &q).unwrap();
+        let (_, done) = evidence_row(&e, Some(&q), None);
+        assert!(
+            !done.title.is_empty() && streamed.contains(&done.title),
+            "an untitled row keeps its title at done"
+        );
         let h = reading_row(&p, &q).unwrap();
         assert!(h.contains(r#"class="rail-row""#) && h.contains("[2]"));
         assert!(h.contains("Embedder comparison"));
@@ -805,6 +802,7 @@ mod tests {
             of: 1,
             artifact_id: "A1".into(),
             title: Some("<i>title</i>".into()),
+            text: String::new(),
             bears: 0.9,
             bearing: true,
             read: d.evidence[0].read.clone(),

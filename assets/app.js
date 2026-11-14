@@ -726,6 +726,8 @@
         if (!current()) return;
         var p = JSON.parse(e.data);
         rail.insertAdjacentHTML('beforeend', p.row);
+        // Bound now: a row clicked mid-stream must open in the pane, not navigate the decision away.
+        if (window.htmx && rail.lastElementChild) window.htmx.process(rail.lastElementChild);
         read++;
         if (p.bearing) bearing++;
         line(D.progressText(read, p.of, bearing));

@@ -146,29 +146,21 @@ pub struct DecisionVerdictAnswer {
     pub correct: Option<serde_json::Value>,
 }
 
-/// One entry, keyed by the first question: an option name, a level index, or yes / no.
+/// One entry, keyed by the first question; what it may say is `Core::judge_decision`'s to check.
 fn correction(
     m: serde_json::Map<String, serde_json::Value>,
-    key: &str,
 ) -> Result<Option<crate::core::decide::verdict::Correct>> {
-    use crate::core::decide::verdict::Correct;
-    use serde_json::Value;
-    let refuse = || {
-        Error::Validation("decide: correct one question, with an option name, a level index, or \"yes\" or \"no\".".into())
-    };
-    if m.len() > 1 || m.keys().any(|k| k != key) {
-        return Err(refuse());
+    if m.len() > 1 {
+        return Err(Error::Validation(
+            "decide: correct one question, with an option name, a level index, or \"yes\" or \"no\".".into(),
+        ));
     }
-    Ok(match m.into_iter().next().map(|(_, v)| v) {
-        None => None,
-        Some(Value::String(s)) => Some(match s.as_str() {
-            "yes" => Correct::Yes,
-            "no" => Correct::No,
-            _ => Correct::Option(s),
-        }),
-        Some(Value::Number(n)) => Some(Correct::Level(n.as_u64().ok_or_else(refuse)? as usize)),
-        Some(_) => return Err(refuse()),
-    })
+    Ok(m.into_iter()
+        .next()
+        .map(|(k, value)| crate::core::decide::verdict::Correct {
+            key: Some(k),
+            value,
+        }))
 }
 
 /// The rules are `Core::judge_decision`'s.
@@ -184,20 +176,7 @@ async fn decision_verdict(
             let verdict = AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
             let correct = match (verdict, b.correct) {
-                (AskVerdict::Wrong, Some(m)) => {
-                    let d = tenant
-                        .core
-                        .store
-                        .decision(&id)
-                        .await?
-                        .ok_or(Error::NotFound)?;
-                    let questions = crate::core::decide::wire::stored_questions(&d.questions)?;
-                    let key = questions
-                        .first()
-                        .map(|q| q.key.as_str())
-                        .unwrap_or_default();
-                    correction(m, key)?
-                }
+                (AskVerdict::Wrong, Some(m)) => correction(m)?,
                 _ => None,
             };
             tenant.core.judge_decision(&id, verdict, correct).await?

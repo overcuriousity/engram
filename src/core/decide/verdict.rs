@@ -6,14 +6,24 @@ use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::infer::decide::{Answer, Kind, Question, trim};
 use crate::store::asks::AskVerdict;
+use crate::store::decisions::StoredDecision;
 
-/// What the person corrected a wrong verdict to, as the client sends it.
+/// What the person corrected a wrong verdict to, as every door sends it: an option name, a level index
+/// (a number or its digits), or yes / no; `key`, when the door names one, must be the first question's.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Correct {
-    Option(String),
-    Level(usize),
-    Yes,
-    No,
+pub struct Correct {
+    pub key: Option<String>,
+    pub value: serde_json::Value,
+}
+
+impl Correct {
+    /// For the first question, whatever its key.
+    pub fn named(value: impl Into<serde_json::Value>) -> Self {
+        Self {
+            key: None,
+            value: value.into(),
+        }
+    }
 }
 
 pub const MAX_QUEUED_PAIRS: usize = 3;
@@ -26,11 +36,13 @@ pub struct Sides {
     pub against: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Judged {
     pub verdict: Option<AskVerdict>,
     /// The stored JSON, `{key: answer}`.
     pub correct: Option<String>,
+    /// As it was read for the verdict, so a door need not read it again; its own verdict fields are stale.
+    pub decision: StoredDecision,
 }
 
 fn answers_to(q: &Question) -> usize {
@@ -41,28 +53,32 @@ fn answers_to(q: &Question) -> usize {
     }
 }
 
-/// `pick`'s index for what the person named; a client may spell yes and no either way.
+/// `pick`'s index for what the person named.
 fn told(q: &Question, c: &Correct) -> Result<usize> {
-    let named = match (&q.kind, c) {
-        (Kind::Choice { options }, Correct::Option(_) | Correct::Yes | Correct::No) => {
-            let want = match c {
-                Correct::Option(n) => trim(n),
-                Correct::Yes => "yes",
-                _ => "no",
-            };
-            options.iter().position(|(n, _)| trim(n) == want)
+    if c.key.as_deref().is_some_and(|k| k != q.key) {
+        return Err(refuse(&format!(
+            "correct one question, \"{}\", with an option name, a level index, or \"yes\" or \"no\".",
+            q.key
+        )));
+    }
+    let named = c.value.as_str().map(trim);
+    let i = match &q.kind {
+        Kind::Choice { options } => {
+            named.and_then(|n| options.iter().position(|(o, _)| trim(o) == n))
         }
-        (Kind::Score { levels }, Correct::Level(i)) => (*i < levels.len()).then_some(*i),
-        (Kind::Noul, Correct::Yes) => Some(0),
-        (Kind::Noul, Correct::No) => Some(1),
-        (Kind::Noul, Correct::Option(n)) => match trim(n) {
-            "yes" => Some(0),
-            "no" => Some(1),
+        Kind::Score { levels } => c
+            .value
+            .as_u64()
+            .map(|i| i as usize)
+            .or_else(|| named.and_then(|n| n.parse().ok()))
+            .filter(|i| *i < levels.len()),
+        Kind::Noul => match named {
+            Some("yes") => Some(0),
+            Some("no") => Some(1),
             _ => None,
         },
-        _ => None,
     };
-    named.ok_or_else(|| refuse(&format!("the correction names no answer to \"{}\".", q.key)))
+    i.ok_or_else(|| refuse(&format!("the correction names no answer to \"{}\".", q.key)))
 }
 
 /// The right answer's index for this question (as `pick` counts), when it can be known:
@@ -176,6 +192,7 @@ impl Core {
         Ok(Judged {
             verdict: Some(verdict),
             correct: stored,
+            decision: d,
         })
     }
 
@@ -185,7 +202,8 @@ impl Core {
         let d = self.store.decision(id).await?.ok_or(Error::NotFound)?;
         Ok(Judged {
             verdict: d.verdict,
-            correct: d.correct,
+            correct: d.correct.clone(),
+            decision: d,
         })
     }
 }
@@ -258,13 +276,7 @@ mod tests {
             Some(1)
         );
         assert_eq!(
-            right_answer(
-                &q,
-                &joint,
-                AskVerdict::Right,
-                Some(&Correct::Option("zzz".into()))
-            )
-            .unwrap(),
+            right_answer(&q, &joint, AskVerdict::Right, Some(&Correct::named("zzz"))).unwrap(),
             Some(1),
             "a correction given with right is ignored"
         );
@@ -297,13 +309,7 @@ mod tests {
             None
         );
         assert_eq!(
-            right_answer(
-                &q,
-                &joint,
-                AskVerdict::Wrong,
-                Some(&Correct::Option("c".into()))
-            )
-            .unwrap(),
+            right_answer(&q, &joint, AskVerdict::Wrong, Some(&Correct::named("c"))).unwrap(),
             Some(2)
         );
         assert_eq!(
@@ -311,7 +317,7 @@ mod tests {
                 &levels(3),
                 &level(3, 2),
                 AskVerdict::Wrong,
-                Some(&Correct::Level(0))
+                Some(&Correct::named(0))
             )
             .unwrap(),
             Some(0)
@@ -322,7 +328,7 @@ mod tests {
     fn a_correction_must_name_another_answer() {
         let q = choice(&["a", "b", "c"]);
         let joint = choose(&q, "a");
-        for c in [Correct::Option("zzz".into()), Correct::Option("a".into())] {
+        for c in [Correct::named("zzz"), Correct::named("a")] {
             assert!(
                 matches!(
                     right_answer(&q, &joint, AskVerdict::Wrong, Some(&c)),
@@ -336,7 +342,7 @@ mod tests {
                 &levels(3),
                 &level(3, 0),
                 AskVerdict::Wrong,
-                Some(&Correct::Level(9))
+                Some(&Correct::named(9))
             ),
             Err(Error::Validation(_))
         ));
@@ -346,8 +352,28 @@ mod tests {
                 &noul,
                 &Answer::Noul { yes: 0.9 },
                 AskVerdict::Wrong,
-                Some(&Correct::Yes)
+                Some(&Correct::named("yes"))
             ),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn a_level_may_come_as_a_number_or_its_digits_and_the_key_must_match() {
+        let (q, joint) = (levels(3), level(3, 2));
+        for c in [Correct::named(0), Correct::named("0")] {
+            assert_eq!(
+                right_answer(&q, &joint, AskVerdict::Wrong, Some(&c)).unwrap(),
+                Some(0),
+                "{c:?}"
+            );
+        }
+        let other = Correct {
+            key: Some("other".into()),
+            value: 0.into(),
+        };
+        assert!(matches!(
+            right_answer(&q, &joint, AskVerdict::Wrong, Some(&other)),
             Err(Error::Validation(_))
         ));
     }
@@ -360,7 +386,7 @@ mod tests {
                 &q,
                 &choose(&q, "a"),
                 AskVerdict::NothingHere,
-                Some(&Correct::Option("b".into()))
+                Some(&Correct::named("b"))
             )
             .unwrap(),
             None
@@ -565,7 +591,7 @@ mod tests {
         assert_eq!((s.verdict, s.correct), (Some(AskVerdict::Wrong), None));
 
         let j = core
-            .judge_decision(&id, AskVerdict::Wrong, Some(Correct::Option("c".into())))
+            .judge_decision(&id, AskVerdict::Wrong, Some(Correct::named("c")))
             .await
             .unwrap();
         assert_eq!(j.correct.as_deref(), Some(r#"{"verdict":"c"}"#));
@@ -644,11 +670,7 @@ mod tests {
         let core = test_core().await;
         let (ids, id) = keep_or_switch(&core).await;
         let j = core
-            .judge_decision(
-                &id,
-                AskVerdict::NothingHere,
-                Some(Correct::Option("switch".into())),
-            )
+            .judge_decision(&id, AskVerdict::NothingHere, Some(Correct::named("switch")))
             .await
             .unwrap();
         assert_eq!(
