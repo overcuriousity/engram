@@ -51,6 +51,9 @@ fn keeper(members: &[Chunk]) -> Option<&Chunk> {
     members.iter().max_by_key(|c| (c.created_at, c.id.as_str()))
 }
 
+/// How a pair this pass closed on similarity alone begins its detail; no judge ruled on it.
+pub(crate) const NEAR_IDENTICAL: &str = "near-identical";
+
 /// `known` is false when a member could not be read; closing on that would settle a live pair for
 /// good.
 fn close_filed_pair(
@@ -67,9 +70,11 @@ fn close_filed_pair(
     match (a_live, b_live) {
         // Both still in results: a supersede failed and warned; the pair stays filed.
         (true, true) => None,
-        (true, false) => Some(format!("near-identical; {a_id} kept")),
-        (false, true) => Some(format!("near-identical; {b_id} kept")),
-        (false, false) => Some("near-identical; neither side is in results any more".to_string()),
+        (true, false) => Some(format!("{NEAR_IDENTICAL}; {a_id} kept")),
+        (false, true) => Some(format!("{NEAR_IDENTICAL}; {b_id} kept")),
+        (false, false) => Some(format!(
+            "{NEAR_IDENTICAL}; neither side is in results any more"
+        )),
     }
 }
 

@@ -8,6 +8,8 @@ use crate::core::judging::catalogue;
 use crate::core::judging::state::{self, Note};
 use crate::error::{Error, Result};
 use crate::infer::decide::{Kind as QKind, decide_swapped};
+use crate::infer::retry::transiently;
+use crate::jobs::consolidate::NEAR_IDENTICAL;
 use crate::store::actions::{Action, Kind, UndoneBy};
 use crate::store::artifacts::ArtifactStatus;
 use crate::store::links::LinkState;
@@ -52,7 +54,7 @@ pub struct QuestionReport {
     pub agrees_with_person: Option<(usize, usize)>,
     /// Act, ask, leave at `bands_at`.
     pub bands: [usize; 3],
-    /// Bin floor (0.50 … 0.95, highest first, a top under 0.50 in 0.50), cases, of which agreeing with the past.
+    /// Bin floor (0.95 … 0.50, then 0.0 for tops under 0.50), cases, of which agreeing with the past.
     pub by_top: Vec<(f64, usize, usize)>,
     pub swap_disagreed: usize,
     /// With no past verdict: the 10 highest and 10 lowest (P(yes) for a noul), with a title.
@@ -169,7 +171,12 @@ fn evidence(r: &Action) -> serde_json::Value {
 
 /// The plan's mapping of a settled pair onto `pair_relation`; `None` leaves it out.
 fn pair_past(p: &ArtifactPair, rows: &[&Action]) -> Option<&'static str> {
-    if p.decided_by == Some(DecidedBy::Evidence) {
+    // The base took it back, or consolidate closed it on similarity alone: no judgement either way.
+    if p.decided_by == Some(DecidedBy::Evidence)
+        || p.detail
+            .as_deref()
+            .is_some_and(|d| d.starts_with(NEAR_IDENTICAL))
+    {
         return None;
     }
     let of = |k: Kind| rows.iter().filter(move |r| r.kind == k);
@@ -332,7 +339,12 @@ async fn rewrites(core: &Core) -> Result<Vec<Found>> {
         }
     }
     let mut out = Vec::new();
+    let by_evidence = |r: &&Action| r.undone_by == Some(UndoneBy::Evidence);
     for (merged, rows) in merges {
+        // The base took it back on what use showed: neither the past verdict nor the person's.
+        if rows.iter().any(by_evidence) {
+            continue;
+        }
         let mut f = Found::new(
             rows.iter().map(|r| r.at).max().unwrap_or(0),
             merged,
@@ -359,6 +371,9 @@ async fn rewrites(core: &Core) -> Result<Vec<Found>> {
         out.push(f);
     }
     for r in journal.iter().filter(|r| r.kind == Kind::Condense) {
+        if by_evidence(&r) {
+            continue;
+        }
         let versions = core.store.versions_of(&r.subject_id).await?;
         let Some(v) = versions.iter().find(|v| v.action_id == r.id) else {
             continue;
@@ -405,10 +420,12 @@ async fn found(core: &Core, id: &str) -> Result<Vec<Found>> {
         "link_direction" => links(core, true).await,
         "reap_worth" => reaps(core).await,
         "category" => live(core, true).await,
-        "pinned" | "time_bound" | "self_contained" => live(core, false).await,
+        "pinned" | "time_bound" | "self_contained" | "asks_reminder" | "has_date" => {
+            live(core, false).await
+        }
         "complete" | "adds_nothing" => rewrites(core).await,
         "answers_query" => searches(core).await,
-        // `asks_reminder`, `has_date`, `answerable`: no past verdict or reading is kept for them.
+        // `answerable`: the base keeps no record of what a pursuit was given to write from.
         _ => Ok(vec![]),
     }
 }
@@ -516,6 +533,12 @@ async fn shown(core: &Core, a: &Asked, f: &Found) -> Result<Option<(Option<Strin
             let s = state::reap(&x.note(), successor.as_ref(), &near, c, room);
             Some((s, title(&x)))
         }
+        "asks_reminder" | "has_date" => {
+            let Some(x) = text_of(core, &f.a).await? else {
+                return Ok(None);
+            };
+            Some((state::window(&x.text, c, room), title(&x)))
+        }
         "complete" | "adds_nothing" => {
             let Some(texts) = f
                 .texts
@@ -593,6 +616,9 @@ pub async fn cases(core: &Core, a: &Asked, limit: usize) -> Result<(Vec<Case>, u
     Ok((g.items.into_iter().map(|i| i.case).collect(), g.left_out))
 }
 
+/// How long one call may wait out a busy or failing endpoint before the run ends with its error.
+const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// Straight to the decider, swapped where the question is: no gate, no log.
 async fn put(core: &Core, a: &Asked, state: &str) -> Result<(String, f64, Option<bool>)> {
     let questions = [a.question.clone()];
@@ -619,8 +645,10 @@ fn agrees(past: &str, pick: &str) -> bool {
     past.split('|').any(|p| p == pick)
 }
 
+/// The bin in hundredths; a top under 0.50 (a choice can have one) is bin 0, shown as `<0.50`.
 fn floor(top: f64) -> i64 {
-    (((top * 100.0 + 1e-9).floor() as i64) / 5 * 5).clamp(50, 95)
+    let h = (top * 100.0 + 1e-9).floor() as i64;
+    if h < 50 { 0 } else { (h / 5 * 5).min(95) }
 }
 
 fn summarize(
@@ -742,7 +770,8 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
                 too_long += 1;
                 continue;
             };
-            let (pick, top, agree) = put(core, &item.asked, state).await?;
+            let (pick, top, agree) =
+                transiently(RETRY_BUDGET, || put(core, &item.asked, state)).await?;
             rows.push(Row {
                 pick,
                 top,
@@ -796,7 +825,11 @@ fn render_one(r: &QuestionReport) -> String {
         r.id, r.version, r.asked, r.skipped_too_long, r.skipped_no_text, r.left_out
     );
     if r.asked + r.skipped_too_long + r.skipped_no_text + r.left_out == 0 {
-        s.push_str("  nothing in this base to ask it about\n");
+        s.push_str(if r.id == "answerable" {
+            "  not asked: the base keeps nothing this question can be replayed over\n"
+        } else {
+            "  nothing in this base to ask it about\n"
+        });
         return s;
     }
     let line = |label: &str, value: String| format!("  {label:<31}{value}\n");
@@ -828,7 +861,12 @@ fn render_one(r: &QuestionReport) -> String {
         "  top     cases\n"
     };
     for (f, c, a) in &r.by_top {
-        s += &format!("  {f:.2}{c:>9}");
+        let label = if *f < 0.5 {
+            "<0.50".to_string()
+        } else {
+            format!("{f:.2}")
+        };
+        s += &format!("  {label}{c:>w$}", w = 13 - label.len());
         if past {
             s += &format!("{a:>7}");
         }
@@ -1487,7 +1525,7 @@ mod tests {
                 agrees_with_past: Some((2, 3)),
                 agrees_with_person: None,
                 bands: [1, 1, 1],
-                by_top: vec![(0.95, 1, 1), (0.70, 1, 1), (0.50, 1, 0)],
+                by_top: vec![(0.95, 1, 1), (0.70, 1, 1), (0.0, 1, 0)],
                 swap_disagreed: 1,
                 extremes: vec![],
                 suggested: None,
@@ -1699,5 +1737,191 @@ mod tests {
   0.48  Spuren
 "
         );
+    }
+
+    #[tokio::test]
+    async fn a_pair_consolidate_closed_as_near_identical_is_not_a_case() {
+        let core = core_with(anything()).await;
+        let ids = seed(&core, &[("one", [1.0, 0.0]), ("one.", [1.0, 0.0])]).await;
+        let p = pair(&core, &ids[0], &ids[1]).await;
+        let detail = format!(
+            "{}; {} kept",
+            crate::jobs::consolidate::NEAR_IDENTICAL,
+            ids[0]
+        );
+        core.store
+            .set_pair_state(p.id, PairState::NoConflict, Some(&detail), DecidedBy::Model)
+            .await
+            .unwrap();
+        let (cases, _) = cases(&core, &catalogue::pair_relation(), 200)
+            .await
+            .unwrap();
+        assert!(
+            cases.is_empty(),
+            "a heuristic closed it, not a judgement: {cases:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_window_readings_are_asked_over_the_newest_live_notes() {
+        let core = core_with(anything()).await;
+        seed_titled(
+            &core,
+            &[
+                ("Call", "remind me to call Anna", [1.0, 0.0]),
+                ("Ports", "use 8080", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        for id in ["asks_reminder", "has_date"] {
+            let r = run(&core, Some(id), 200).await.unwrap();
+            assert_eq!(r[0].asked, 2, "{id}");
+            assert_eq!(r[0].agrees_with_past, None, "{id}");
+            assert_eq!(r[0].extremes.len(), 2, "{id}");
+        }
+    }
+
+    #[test]
+    fn answerable_says_plainly_that_it_is_not_asked() {
+        let r = QuestionReport {
+            id: "answerable".into(),
+            version: 1,
+            asked: 0,
+            skipped_too_long: 0,
+            skipped_no_text: 0,
+            left_out: 0,
+            agrees_with_past: None,
+            agrees_with_person: None,
+            bands: [0, 0, 0],
+            by_top: vec![],
+            swap_disagreed: 0,
+            extremes: vec![],
+            suggested: None,
+            bands_at: Thresholds {
+                act_at: 0.90,
+                ask_at: 0.60,
+            },
+        };
+        assert_eq!(
+            render(&[r]),
+            "answerable v1 · 0 asked · 0 too long · 0 without text · 0 left out
+  not asked: the base keeps nothing this question can be replayed over
+"
+        );
+    }
+
+    // Real backoff, kept short: a paused clock starves the SQLite pool.
+    #[tokio::test]
+    async fn a_busy_endpoint_is_waited_out_and_the_run_finishes() {
+        let busy = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = busy.clone();
+        let decider = Arc::new(RuleDecider::new(move |_, qs| {
+            if seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                return Err(crate::error::Error::InferenceBusy {
+                    role: "decide",
+                    detail: "HTTP 429 Too Many Requests".into(),
+                });
+            }
+            Ok(Answers {
+                answers: qs
+                    .iter()
+                    .map(|q| (q.key.clone(), Answer::Noul { yes: 0.9 }))
+                    .collect(),
+                model: "rule-decider".into(),
+                input_tokens: 0,
+            })
+        }));
+        let core = core_with(decider.clone()).await;
+        seed(&core, &[("one", [1.0, 0.0]), ("two", [1.0, 0.0])]).await;
+        let r = run(&core, Some("pinned"), 200).await.unwrap();
+        assert_eq!(r[0].asked, 2);
+        assert_eq!(decider.calls(), 4, "two refusals, then both asked");
+    }
+
+    #[test]
+    fn tops_under_a_half_get_their_own_row() {
+        let r = QuestionReport {
+            id: "pair_relation".into(),
+            version: 1,
+            asked: 2,
+            skipped_too_long: 0,
+            skipped_no_text: 0,
+            left_out: 0,
+            agrees_with_past: Some((1, 2)),
+            agrees_with_person: None,
+            bands: [0, 0, 2],
+            by_top: vec![(0.50, 1, 1), (0.0, 1, 0)],
+            swap_disagreed: 1,
+            extremes: vec![],
+            suggested: None,
+            bands_at: Thresholds {
+                act_at: 0.90,
+                ask_at: 0.60,
+            },
+        };
+        let text = render(&[r]);
+        assert!(
+            text.contains("\n  0.50        1      1\n  <0.50       1      0\n"),
+            "{text}"
+        );
+        assert_eq!(
+            suggest(&[(0.80, 40, 40), (0.0, 100, 0)]).unwrap().act_at,
+            0.80,
+            "counted from 0.50 up"
+        );
+    }
+
+    #[tokio::test]
+    async fn rewrites_the_base_took_back_itself_are_left_out() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("a", [1.0, 0.0]),
+                ("b", [1.0, 0.0]),
+                ("m1", [1.0, 0.0]),
+                ("c", [1.0, 0.0]),
+                ("d", [1.0, 0.0]),
+                ("m2", [1.0, 0.0]),
+                ("long note here", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        let row = |subject: &str, survivor: &str| NewAction {
+            job: Job::Dedupe,
+            kind: Kind::Merge,
+            subject_id: subject.into(),
+            survivor_id: Some(survivor.into()),
+            detail: None,
+            evidence: serde_json::json!({}),
+            pair_score: None,
+        };
+        for (s, m) in [(0, 2), (1, 2), (3, 5), (4, 5)] {
+            core.store
+                .record_action(&row(&ids[s], &ids[m]))
+                .await
+                .unwrap();
+        }
+        core.store
+            .undo_action_on(&ids[0], Kind::Merge, UndoneBy::Evidence, "use showed")
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(&ids[3], Kind::Merge, UndoneBy::Operator, "put back")
+            .await
+            .unwrap();
+        core.store
+            .condense_artifact(&ids[6], None, "short", None, &[], serde_json::json!({}))
+            .await
+            .unwrap();
+        core.store
+            .undo_action_on(&ids[6], Kind::Condense, UndoneBy::Evidence, "use showed")
+            .await
+            .unwrap();
+
+        let (cases, _) = cases(&core, &catalogue::complete(), 200).await.unwrap();
+        assert_eq!(cases.len(), 1, "{cases:?}");
+        assert_eq!(cases[0].subjects.0, ids[5]);
+        assert_eq!(cases[0].person, Some(PersonSaid::Disagreed));
     }
 }
