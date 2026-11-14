@@ -540,11 +540,12 @@ impl Store {
         .rows_affected())
     }
 
-    /// Armed judging only: an after-write check (`subject_kind = 'write'`) rides on a writer call,
-    /// which the generator's cooldown already paces.
+    /// Armed judging only: an after-write check (`subject_kind = 'write'`) and the gate before a
+    /// pursuit is written (`'pursuit'`) ride on a writer unit, which the queue already paces.
     pub async fn decided_since(&self, at: i64) -> Result<i64> {
         Ok(sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM decisions WHERE decided_at >= ? AND subject_kind != 'write'",
+            "SELECT COUNT(*) FROM decisions
+              WHERE decided_at >= ? AND subject_kind NOT IN ('write', 'pursuit')",
             at
         )
         .fetch_one(&self.pool)

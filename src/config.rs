@@ -246,8 +246,8 @@ impl Default for Bands {
 const DEFAULTS: &[(&str, f64, f64)] = &[
     // No burial or rescue has ever been judged on the base it was measured on: it asks, it does not act.
     ("reap_worth", 0.99, 0.60),
-    // Nothing to replay it over: it asks, it does not act.
-    ("answerable", 0.99, 0.60),
+    // The gate before a pursuit is written; it opens no Unsure row, so a high line would switch pursuits off. The owner's line.
+    ("answerable", 0.85, 0.60),
 ];
 
 impl Bands {
@@ -3365,9 +3365,8 @@ mode = "off"
             ask_at: k,
         };
         let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
-        for id in ["reap_worth", "answerable"] {
-            assert_eq!(d.bands.of(id), t(0.99, 0.60), "{id}");
-        }
+        assert_eq!(d.bands.of("reap_worth"), t(0.99, 0.60));
+        assert_eq!(d.bands.of("answerable"), t(0.85, 0.60));
         for id in ["pair_relation", "link_kind", "answers_query", "unknown"] {
             assert_eq!(d.bands.of(id), t(0.90, 0.60), "{id}");
         }

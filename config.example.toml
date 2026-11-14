@@ -163,11 +163,12 @@ context_tokens = 8192
 # One question's own bands go under [decide.bands.<id>]; they win over everything else. A question
 # with a starting line below outranks the global act_at / ask_at above.
 # Starting lines, from the replay on a real base (2026-11-14). pair_relation, link_kind and
-# answers_query start at the defaults above; these two start by asking only:
+# answers_query start at the defaults above; reap_worth starts by asking only:
 # [decide.bands.reap_worth]
 # act_at = 0.99
+# answerable gates writing a pursuit and asks no one, so a line it never reaches stops pursuits:
 # [decide.bands.answerable]
-# act_at = 0.99
+# act_at = 0.85
 
 # Optional reranker; style is "tei", "cohere" or "vllm".
 # [infer.rerank]

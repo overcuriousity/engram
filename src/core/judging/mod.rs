@@ -155,7 +155,7 @@ async fn logged(core: &Core, id: &str) -> Result<Logged> {
 }
 
 /// Probability by pick, named as `pick_and_top` names picks; no text of the model's is kept.
-fn weights(q: &Question, a: &Answer) -> serde_json::Value {
+pub(crate) fn weights(q: &Question, a: &Answer) -> serde_json::Value {
     let by_index = |p: &[f64]| -> Vec<(String, f64)> {
         p.iter()
             .enumerate()
