@@ -1,9 +1,11 @@
-//! `Stage::Decisions`: lapse unanswered rows, close outcome windows, apply waiting acts, seat waiting asks.
+//! `Stage::Decisions`: lapse unanswered rows, close outcome windows, apply waiting acts, seat waiting asks,
+//! and while the base is quiet, queue readings for the notes that have none.
 
 use crate::core::Core;
 use crate::core::judging::settle_counted;
 use crate::error::Result;
 use crate::store::decision_log::State;
+use crate::store::jobs::Stage;
 
 /// Waiting acts looked at per sweep, highest top first.
 const ACTS_PER_RUN: i64 = 200;
@@ -17,6 +19,7 @@ pub struct Report {
     pub seated: u64,
     pub lapsed: u64,
     pub kept: u64,
+    pub scanned: u64,
 }
 
 pub async fn run(core: &Core) -> Result<Report> {
@@ -95,13 +98,42 @@ pub async fn run(core: &Core) -> Result<Report> {
             }
         }
     }
+    r.scanned = scan(core).await?;
     Ok(r)
+}
+
+/// Notes from before readings existed, newest first, while nobody is using the base. Half of what
+/// the tick has left, so the pair judge is never starved; a note already queued keeps its slot, so
+/// a queue that has not caught up is not piled onto.
+async fn scan(core: &Core) -> Result<u64> {
+    let idle = crate::store::now() - core.evolve.idle_secs.max(0);
+    if core.store.activity_since(idle).await? {
+        return Ok(0);
+    }
+    let half = i64::try_from(core.judging_budget().await? / 2).unwrap_or(i64::MAX);
+    if half == 0 {
+        return Ok(0);
+    }
+    let asked = crate::jobs::read::reading_questions();
+    let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
+    let mut armed = 0;
+    for id in core
+        .store
+        .artifacts_lacking_readings(&versions, half)
+        .await?
+    {
+        if core.store.live_job(Stage::Read, &id).await? {
+            continue;
+        }
+        crate::jobs::read::arm(core, &id).await?;
+        armed += 1;
+    }
+    Ok(armed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::jobs::Stage;
 
     #[tokio::test]
     async fn the_sweep_is_always_armed_every_tick() {
@@ -116,6 +148,119 @@ mod tests {
         assert_eq!(
             crate::core::background::periodic_period(&core, Stage::Decisions),
             Some(std::time::Duration::from_secs(7 * 60))
+        );
+    }
+
+    /// `n` notes no reading has touched, the last the newest.
+    async fn unread(core: &Core, n: i64) -> Vec<String> {
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let id = core
+                .store
+                .insert_artifacts(
+                    &src.id,
+                    &[crate::store::artifacts::NewArtifact {
+                        ordinal: i,
+                        text: format!("note {i}"),
+                        ..Default::default()
+                    }],
+                )
+                .await
+                .unwrap()
+                .remove(0)
+                .id;
+            sqlx::query!(
+                "UPDATE artifacts SET created_at = ? WHERE id = ?",
+                1_000 + i,
+                &id
+            )
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        ids
+    }
+
+    async fn armed(core: &Core, ids: &[String]) -> Vec<bool> {
+        let mut out = Vec::new();
+        for id in ids {
+            out.push(core.store.live_job(Stage::Read, id).await.unwrap());
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn notes_from_before_readings_existed_are_read_newest_first_while_the_base_is_quiet() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.decide_cfg.max_per_tick = 4;
+        let ids = unread(&core, 5).await;
+        let r = run(&core).await.unwrap();
+        assert_eq!(r.scanned, 2);
+        assert_eq!(armed(&core, &ids).await, [false, false, false, true, true]);
+    }
+
+    #[tokio::test]
+    async fn the_scan_stops_when_the_person_is_active() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.decide_cfg.max_per_tick = 4;
+        let ids = unread(&core, 3).await;
+        core.store
+            .record_search(
+                crate::store::feedback::NewEvent {
+                    fold_onto: None,
+                    query: "a search just now".into(),
+                    door: crate::store::feedback::Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: vec![0.1, 0.2],
+                    embed_model: "fake".into(),
+                    candidates: vec![],
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let r = run(&core).await.unwrap();
+        assert_eq!(r.scanned, 0);
+        assert_eq!(armed(&core, &ids).await, [false, false, false]);
+    }
+
+    #[tokio::test]
+    async fn the_scan_takes_at_most_half_of_what_the_tick_has_left() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.decide_cfg.max_per_tick = 10;
+        let now = crate::store::now();
+        for i in 0..4 {
+            let id = format!("spent-{i}");
+            sqlx::query!(
+                "INSERT INTO decisions (id, question_id, question_version, model, era, subject_kind,
+                   subject_a, answer, top, pick, band, state, decided_at)
+                 VALUES (?, 'pair_relation', 1, 'm', 'e', 'pair', 'x', '{}', 0.5, 'distinct', 'leave', 'done', ?)",
+                id,
+                now
+            )
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(core.judging_budget().await.unwrap(), 6);
+        let ids = unread(&core, 6).await;
+        // Already queued (as after its embed): skipped, and its slot is not given to an older note.
+        crate::jobs::read::arm(&core, &ids[4]).await.unwrap();
+        let r = run(&core).await.unwrap();
+        assert_eq!(r.scanned, 2);
+        assert_eq!(
+            armed(&core, &ids).await,
+            [false, false, false, true, true, true]
+        );
+        assert_eq!(
+            core.judging_budget().await.unwrap(),
+            6,
+            "a reading is not a decision, so the pair judge keeps its budget"
         );
     }
 

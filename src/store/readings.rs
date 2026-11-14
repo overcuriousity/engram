@@ -70,6 +70,33 @@ impl Store {
             .collect())
     }
 
+    /// Live artifacts with no reading at the current version of some reading question, newest first.
+    pub async fn artifacts_lacking_readings(
+        &self,
+        versions: &[(&str, u32)],
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        // One JSON object of question id to version keeps the SQL literal.
+        let asked: serde_json::Map<String, serde_json::Value> = versions
+            .iter()
+            .map(|(id, v)| ((*id).to_string(), (*v).into()))
+            .collect();
+        let asked = serde_json::Value::Object(asked).to_string();
+        Ok(sqlx::query_scalar!(
+            r#"SELECT a.id AS "id!" FROM artifacts a
+                WHERE a.status = 'active' AND a.superseded_by IS NULL
+                  AND EXISTS (SELECT 1 FROM json_each(?) q
+                               WHERE NOT EXISTS (SELECT 1 FROM artifact_readings r
+                                                  WHERE r.artifact_id = a.id AND r.question_id = q.key
+                                                    AND r.question_version = q.value))
+                ORDER BY a.created_at DESC, a.id DESC LIMIT ?"#,
+            asked,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// The yes of a noul reading, when the artifact has one at this version.
     pub async fn reading_yes(&self, artifact_id: &str, a: &Asked) -> Result<Option<f64>> {
         let answer = sqlx::query_scalar!(
@@ -172,6 +199,60 @@ mod tests {
         };
         store.put_readings(&id, &[(&c, &kind)], "m").await.unwrap();
         assert_eq!(store.reading_yes(&id, &c).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_note_already_read_at_this_version_is_not_read_again_and_a_new_version_reads_all_again()
+     {
+        let store = Store::memory().await.unwrap();
+        let (old, new, gone) = (
+            one_artifact(&store).await,
+            one_artifact(&store).await,
+            one_artifact(&store).await,
+        );
+        for (id, at) in [(&old, 100), (&new, 300), (&gone, 200)] {
+            sqlx::query!("UPDATE artifacts SET created_at = ? WHERE id = ?", at, id)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        store.trash_artifact(&gone, 400).await.unwrap();
+        let asked = crate::jobs::read::reading_questions();
+        let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
+        assert_eq!(
+            store
+                .artifacts_lacking_readings(&versions, 10)
+                .await
+                .unwrap(),
+            [new.clone(), old.clone()],
+            "newest first, and a note out of results is not read"
+        );
+        let yes = noul(0.5);
+        let rows: Vec<(&Asked, &Answer)> = asked.iter().map(|a| (a, &yes)).collect();
+        store.put_readings(&old, &rows, "m").await.unwrap();
+        // Three of four is not read.
+        store.put_readings(&new, &rows[..3], "m").await.unwrap();
+        assert_eq!(
+            store
+                .artifacts_lacking_readings(&versions, 10)
+                .await
+                .unwrap(),
+            std::slice::from_ref(&new)
+        );
+        assert_eq!(
+            store
+                .artifacts_lacking_readings(&versions, 1)
+                .await
+                .unwrap(),
+            std::slice::from_ref(&new)
+        );
+        let mut next = versions.clone();
+        next[2].1 = 2;
+        assert_eq!(
+            store.artifacts_lacking_readings(&next, 10).await.unwrap(),
+            [new, old],
+            "a question at a new version reads every note again"
+        );
     }
 
     #[tokio::test]

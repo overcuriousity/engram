@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!\" FROM artifacts a\n                WHERE a.status = 'active' AND a.superseded_by IS NULL\n                  AND EXISTS (SELECT 1 FROM json_each(?) q\n                               WHERE NOT EXISTS (SELECT 1 FROM artifact_readings r\n                                                  WHERE r.artifact_id = a.id AND r.question_id = q.key\n                                                    AND r.question_version = q.value))\n                ORDER BY a.created_at DESC, a.id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4fd5ed9c724375158fd5f24241e4138015f6def14ce4ef8c736af5b8590e5355"
+}

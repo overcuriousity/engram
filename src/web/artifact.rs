@@ -79,6 +79,8 @@ pub struct ArtifactDetail {
     pub due_in: Option<String>,
     /// The open reminder, or a blank one the editor offers to make.
     pub reminder: ReminderView,
+    /// Live, read as time-bound, and not confirmed within `consolidate.stale_after_days`.
+    pub may_be_out_of_date: bool,
 }
 
 /// Read and posted back in the row's own zone, so a save that changes nothing moves nothing.
@@ -467,7 +469,16 @@ pub(crate) async fn build_artifact_detail(
             },
             |m| reminder_view(&m),
         );
+    let stale_before = crate::store::now() - i64::from(core.consolidate.stale_after_days) * 86_400;
+    let may_be_out_of_date = c.in_results()
+        && c.last_verified_at.is_some_and(|t| t < stale_before)
+        && core
+            .store
+            .reading_yes(artifact_id, &crate::core::judging::catalogue::time_bound())
+            .await?
+            .is_some_and(|y| y >= crate::jobs::read::TIME_BOUND_AT);
     Ok(ArtifactDetail {
+        may_be_out_of_date,
         reminder,
         tag,
         probes,
@@ -802,6 +813,67 @@ mod tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(core.store.get_artifact(&id).await.unwrap().status, before);
+    }
+
+    #[tokio::test]
+    async fn the_detail_page_says_a_time_bound_note_may_be_out_of_date() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core.ingest("raw", "web", None).await.unwrap();
+        let made = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &(0..3)
+                    .map(|i| crate::store::artifacts::NewArtifact {
+                        ordinal: i,
+                        text: format!("the build server runs Debian 1{i}"),
+                        ..Default::default()
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .await
+            .unwrap();
+        let (old_bound, fresh_bound, old_lasting) = (&made[0].id, &made[1].id, &made[2].id);
+        let tb = crate::core::judging::catalogue::time_bound();
+        for (id, yes) in [(old_bound, 0.5), (fresh_bound, 0.9), (old_lasting, 0.4)] {
+            core.store
+                .put_readings(
+                    id,
+                    &[(&tb, &crate::infer::decide::Answer::Noul { yes })],
+                    "m",
+                )
+                .await
+                .unwrap();
+        }
+        core.store.set_last_verified_at(old_bound, 1).await.unwrap();
+        core.store
+            .set_last_verified_at(old_lasting, 1)
+            .await
+            .unwrap();
+        let page = |id: String| {
+            let core = &core;
+            async move {
+                let d = super::build_artifact_detail(core, &id, "").await.unwrap();
+                let out = d.may_be_out_of_date;
+                (
+                    out,
+                    askama::Template::render(&ArtifactDetailFragment { d }).unwrap(),
+                )
+            }
+        };
+        let (flag, html) = page(old_bound.clone()).await;
+        assert!(flag && html.contains("May be out of date"), "{html}");
+        for id in [fresh_bound, old_lasting] {
+            let (flag, html) = page(id.clone()).await;
+            assert!(
+                !flag && !html.contains("May be out of date"),
+                "{id}: {html}"
+            );
+        }
+        // Hidden says so already.
+        core.deprecate(old_bound).await.unwrap();
+        let (flag, _) = page(old_bound.clone()).await;
+        assert!(!flag);
     }
 
     #[tokio::test]

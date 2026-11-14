@@ -1019,19 +1019,28 @@ impl Core {
     /// Candidates for an operator to review; a one-way signal, so it creates no popularity loop.
     pub async fn stale_candidates(&self, limit: usize) -> Result<Vec<SearchResult>> {
         let cutoff = now_secs() - self.consolidate.stale_after_days as i64 * SECONDS_PER_DAY;
+        let limit = limit.clamp(1, MAX_LIMIT);
         let hits = self
             .vectors
-            .stale_candidates(
-                cutoff,
-                self.consolidate.stale_max_hits,
-                limit.clamp(1, MAX_LIMIT),
-            )
+            .stale_candidates(cutoff, self.consolidate.stale_max_hits, limit * 4)
             .await?;
-        Ok(hits
-            .into_iter()
-            // Drawn, not matched: nothing here is weak.
-            .map(SearchResult::from)
-            .collect())
+        // A note read as lasting is not stale for being old; one with no reading is as before.
+        let time_bound = crate::core::judging::catalogue::time_bound();
+        let mut kept = Vec::new();
+        for h in hits {
+            if kept.len() == limit {
+                break;
+            }
+            let yes = self
+                .store
+                .reading_yes(&h.payload.artifact_id, &time_bound)
+                .await?;
+            if yes.is_none_or(|y| y >= crate::jobs::read::TIME_BOUND_AT) {
+                // Drawn, not matched: nothing here is weak.
+                kept.push(SearchResult::from(h));
+            }
+        }
+        Ok(kept)
     }
 
     /// The hot path: one embedding, one vector search, optionally one rerank. No completion, ever.
@@ -3125,6 +3134,55 @@ mod tests {
             core.stale_candidates(10).await.unwrap().is_empty(),
             "an artifact ingested seconds ago is not a deprecation candidate"
         );
+    }
+
+    /// One old, unused note, with a `time_bound` reading of `yes` when given.
+    async fn old_unused(core: &crate::core::Core, yes: Option<f64>) -> String {
+        seed(core, &[("the build server runs Debian 12", "note", &[])]).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        core.vectors
+            .set_last_verified_at(&id, 1, false)
+            .await
+            .unwrap();
+        if let Some(yes) = yes {
+            core.store
+                .put_readings(
+                    &id,
+                    &[(
+                        &crate::core::judging::catalogue::time_bound(),
+                        &crate::infer::decide::Answer::Noul { yes },
+                    )],
+                    "m",
+                )
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    fn ids_of(hits: &[SearchResult]) -> Vec<&str> {
+        hits.iter().map(|h| h.artifact_id.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn an_old_unused_note_that_is_not_time_bound_is_no_longer_a_stale_candidate() {
+        let core = test_core().await;
+        old_unused(&core, Some(0.2)).await;
+        assert!(core.stale_candidates(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_old_unused_time_bound_note_is() {
+        let core = test_core().await;
+        let id = old_unused(&core, Some(0.5)).await;
+        assert_eq!(ids_of(&core.stale_candidates(10).await.unwrap()), [id]);
+    }
+
+    #[tokio::test]
+    async fn an_old_unused_note_with_no_reading_is_as_today() {
+        let core = test_core().await;
+        let id = old_unused(&core, None).await;
+        assert_eq!(ids_of(&core.stale_candidates(10).await.unwrap()), [id]);
     }
 
     #[tokio::test]
