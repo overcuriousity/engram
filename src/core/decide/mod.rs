@@ -55,7 +55,8 @@ pub struct Evidence {
     pub n: usize,
     pub artifact_id: String,
     pub title: Option<String>,
-    pub text: String,
+    /// Shared with the passage's read; see `PassageRead::text`.
+    pub text: std::sync::Arc<str>,
     pub bears: f64,
     /// It went into the joint read.
     pub joint: bool,
@@ -200,7 +201,7 @@ fn in_order(questions: &[Question], got: &Answers) -> Result<Vec<(String, Answer
 struct Passage {
     artifact_id: String,
     title: Option<String>,
-    text: String,
+    text: std::sync::Arc<str>,
     day: String,
 }
 
@@ -221,12 +222,12 @@ impl Passage {
     }
 }
 
-/// Refused before anything is searched or read: a situation that leaves no excerpt `EXCERPT_FLOOR`
-/// tokens beside a full-length title, in a single read or the joint one, could only fail later.
+/// Refused before anything is searched or read: questions and a situation that leave no excerpt
+/// `EXCERPT_FLOOR` tokens beside a full-length title, in a single read or the joint one, could only
+/// fail later.
 fn fits(counter: &TokenCounter, situation: Option<&str>, room: usize) -> Result<()> {
-    let Some(s) = situation else { return Ok(()) };
     let frame = counter.count(&single_state(
-        Some(s),
+        situation,
         &Excerpt {
             title: None,
             day: "0000-00-00",
@@ -234,16 +235,19 @@ fn fits(counter: &TokenCounter, situation: Option<&str>, room: usize) -> Result<
         },
     ));
     let need = frame + TITLE_TOKENS + EXCERPT_FLOOR;
-    if need > room {
-        let (n, fit) = (
-            counter.count(s),
-            (room + counter.count(s)).saturating_sub(need),
-        );
-        return Err(refuse(&format!(
-            "the situation is {n} tokens and {fit} fit this decision model's window."
-        )));
+    if need <= room {
+        return Ok(());
     }
-    Ok(())
+    let Some(s) = situation else {
+        return Err(refuse(
+            "the question and its options leave no room for a passage in this decision model's window.",
+        ));
+    };
+    let n = counter.count(s);
+    let fit = (room + n).saturating_sub(need);
+    Err(refuse(&format!(
+        "the situation is {n} tokens and {fit} fit this decision model's window."
+    )))
 }
 
 impl Core {
@@ -288,7 +292,7 @@ impl Core {
                 .min(budget(&core.counter, window, &swapped_questions(questions)));
             fits(&core.counter, situation, room.min(joint_room))?;
 
-            let passages = core.decide_passages(&req, &asked).await?;
+            let (passages, query_vec) = core.decide_passages(&req, &asked).await?;
             let of = passages.len();
             yield DecideEvent::Retrieved { passages: of };
 
@@ -373,7 +377,7 @@ impl Core {
             };
             if bearing.is_empty() {
                 decision.reads = reads;
-                core.record_decision(&req, &asked, &origin, &mut decision).await;
+                core.record_decision(&req, &asked, &origin, query_vec, &mut decision).await;
                 yield DecideEvent::Done(Box::new(decision));
                 return;
             }
@@ -417,8 +421,12 @@ impl Core {
                 .zip(&answers)
                 .enumerate()
                 .map(|(i, (q, (k, v)))| {
-                    let each: Vec<(f64, &Answer)> =
-                        evidence.iter().map(|e| (e.bears, &e.read[i].1)).collect();
+                    // Only what the verdict was made from: a dropped passage was never weighed in it.
+                    let each: Vec<(f64, &Answer)> = evidence
+                        .iter()
+                        .filter(|e| e.joint)
+                        .map(|e| (e.bears, &e.read[i].1))
+                        .collect();
                     let s = standing::standing(q, &v.answer, v.swapped_agree, &each, &cfg);
                     (k.clone(), s)
                 })
@@ -429,7 +437,7 @@ impl Core {
             decision.model = joint.answers.model;
             decision.state = req.explain.then_some(state);
             decision.reads = reads;
-            core.record_decision(&req, &asked, &origin, &mut decision).await;
+            core.record_decision(&req, &asked, &origin, query_vec, &mut decision).await;
             yield DecideEvent::Done(Box::new(decision));
         }
     }
@@ -440,6 +448,7 @@ impl Core {
         req: &DecideRequest,
         asked: &Asked,
         origin: &Origin,
+        query_vec: Vec<f32>,
         d: &mut Decision,
     ) {
         if !(self.learn.enabled && matches!(origin.door, Door::Ui | Door::Cli | Door::App)) {
@@ -489,7 +498,7 @@ impl Core {
             model: d.model.clone(),
             read: d.read,
             dropped: d.dropped,
-            query_vec: self.cached_query_vector(&asked.q).unwrap_or_default(),
+            query_vec,
             embed_model: self.embedder.model().to_string(),
             evidence,
         };
@@ -502,8 +511,13 @@ impl Core {
     }
 
     /// Asks search for twice the limit, so dropping retired notes still leaves `limit` to read.
-    async fn decide_passages(&self, req: &DecideRequest, asked: &Asked) -> Result<Vec<Passage>> {
-        let (hits, _) = self
+    /// The passages, and the vector the question was embedded as (empty on a keyword fallback).
+    async fn decide_passages(
+        &self,
+        req: &DecideRequest,
+        asked: &Asked,
+    ) -> Result<(Vec<Passage>, Vec<f32>)> {
+        let (hits, outcome) = self
             .search_with(
                 &SearchQuery {
                     q: asked.q.clone(),
@@ -528,7 +542,7 @@ impl Core {
             .collect();
         let ids: Vec<String> = hits.iter().map(|h| h.artifact_id.clone()).collect();
         let born = self.store.created_at_among(&ids).await?;
-        Ok(hits
+        let passages = hits
             .into_iter()
             .map(|h| Passage {
                 day: born
@@ -537,9 +551,10 @@ impl Core {
                     .unwrap_or_default(),
                 artifact_id: h.artifact_id,
                 title: h.title,
-                text: h.text,
+                text: h.text.into(),
             })
-            .collect())
+            .collect();
+        Ok((passages, outcome.query_vec))
     }
 }
 
@@ -898,6 +913,68 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_dropped_passage_reading_against_does_not_split_the_verdict() {
+        let words = |w: &str| format!("{MARK} {w} {}", "note ".repeat(75));
+        let notes = [
+            ("A", words("alpha")),
+            ("B", words("bravo")),
+            ("C", words("charlie")),
+            ("D", words("delta")),
+        ];
+        let refs: Vec<(&str, &str)> = notes.iter().map(|(t, x)| (*t, x.as_str())).collect();
+        let mut core = base(&refs).await;
+        core.decide_cfg.joint_tokens = 300;
+        // Charlie and delta bear least, so they are the two the joint read has no room for, and
+        // read alone they say no. Weighed, they would hold 1.6 of 3.4: a split.
+        deciding(&mut core, |state, qs| {
+            let weak = state.contains("charlie") || state.contains("delta");
+            let single = state.contains("Excerpt:");
+            Ok(answers(qs, |q| match q.key.as_str() {
+                "bears" => Answer::Noul {
+                    yes: if weak { 0.8 } else { 0.9 },
+                },
+                _ if single && weak => Answer::Noul { yes: 0.1 },
+                _ => Answer::Noul { yes: 0.9 },
+            }))
+        });
+        let d = core.decide(&req("Which word?"), Door::Api).await.unwrap();
+        assert_eq!(d.dropped, 2);
+        assert!(
+            d.evidence
+                .iter()
+                .filter(|e| !e.joint)
+                .all(|e| e.text.contains("charlie") || e.text.contains("delta")),
+            "{:?}",
+            d.evidence
+        );
+        assert_eq!(d.standing, vec![("verdict".into(), Standing::Settled)]);
+    }
+
+    #[tokio::test]
+    async fn questions_the_window_cannot_hold_are_refused_before_anything_is_read() {
+        let mut core = three_base().await;
+        let dec = deciding(&mut core, marked(0.9));
+        dec.set_context_tokens(1024);
+        let long = "a description that runs on and on ".repeat(30);
+        let r = DecideRequest {
+            questions: vec![Question {
+                key: "verdict".into(),
+                kind: Kind::Choice {
+                    options: vec![("keep".into(), long.clone()), ("switch".into(), long)],
+                },
+                instructions: String::new(),
+            }],
+            ..req("Keep bge-m3?")
+        };
+        let e = core.decide(&r, Door::Api).await.unwrap_err();
+        assert!(
+            matches!(&e, Error::Validation(m) if m.contains("leave no room for a passage")),
+            "{e:?}"
+        );
+        assert_eq!(dec.calls(), 0);
+    }
+
+    #[tokio::test]
     async fn a_passage_longer_than_the_window_is_cut_not_refused() {
         let long = format!("{MARK} {}", "word ".repeat(3000));
         // A heading of its own size too: the title is not inside the allowance.
@@ -918,7 +995,7 @@ pub(crate) mod tests {
             .find(|(s, _)| s.contains("Excerpt:"))
             .unwrap();
         assert!(
-            !single.0.contains(&d.evidence[0].text),
+            !single.0.contains(&*d.evidence[0].text),
             "the passage went in whole"
         );
         assert!(single.0.contains(MARK));

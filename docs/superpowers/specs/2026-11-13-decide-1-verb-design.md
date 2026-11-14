@@ -191,9 +191,10 @@ instructions are `q`), an optional caller `situation`, the usual filters.
    `choice` gets a swapped read. This is the verdict.
 6. **Standing**, per question, on the joint answer. *Top* is the largest
    probability (for `noul`, the larger of yes and no).
-   - `split`: the swapped picks disagree, or evidence passages whose own pick
-     differs from the joint pick hold at least `decide.split_at` (0.34) of the
-     summed bearing.
+   - `split`: the swapped picks disagree, or evidence passages in the joint
+     read whose own pick differs from the joint pick hold at least
+     `decide.split_at` (0.34) of their summed bearing; a dropped passage was
+     never weighed and does not count.
    - `settled`: not split and top `>= decide.settled_at` (0.80).
    - `leaning`: otherwise.
    - `not_held`: step 4 found nothing.

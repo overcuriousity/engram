@@ -58,6 +58,21 @@ const SCENARIOS = {
     });
     later(4500, function () { send({}); });
   `,
+  // Stop while the question is still being parked: no stream may open after it.
+  stop: `
+    q('Should I keep it?');
+    press();
+    press();
+    later(100, function () { document.getElementById('ask-stop').click(); });
+    later(1500, function () { send({}); });
+  `,
+  // The server's error frame is the API's: '{ error }', read as its sentence.
+  error: `
+    q('Should I keep it?');
+    press();
+    press();
+    later(1500, function () { send({}); });
+  `,
   invalid: `
     q('Which one?');
     press();
@@ -249,6 +264,10 @@ function stream(req, res, n) {
   const at = (ms, f) => setTimeout(() => { if (!res.writableEnded) f(); }, ms * pace);
   const labels = labelsOf(n);
   at(0, () => send('retrieved', { passages: 3 }));
+  if (SCENARIO === 'error') {
+    at(60, () => { send('error', { error: 'the decision model is not answering.' }); res.end(); });
+    return;
+  }
   [true, true, false].forEach((bearing, i) =>
     at(60 * (i + 1), () => send('read', {
       rank: i + 1, of: 3, bearing, row: railRow(i + 1, 'note ' + (i + 1) + ' of ' + n, bearing ? labels[0] : 'does not bear')
@@ -287,8 +306,13 @@ const server = http.createServer((req, res) => {
     req.on('data', (c) => (body += c));
     return req.on('end', () => {
       bodies.push({ type: req.headers['content-type'], body });
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ id: 'handoff-' + n }));
+      const answer = () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ id: 'handoff-' + n }));
+      };
+      // Late enough for Stop to land while the page waits on it.
+      if (SCENARIO === 'stop') setTimeout(answer, 600);
+      else answer();
     });
   }
   const m = req.url.match(/^\/ui\/decide\/handoff-(\d+)\/stream$/);

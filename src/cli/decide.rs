@@ -2,7 +2,10 @@
 
 use crate::cli::args::{CliArgs, DecideKind};
 use crate::cli::endpoint::{Endpoint, client};
+use crate::core::decide::wire::answer_from;
 use crate::error::{Error, Result};
+use crate::infer::decide::{Kind, Question};
+use crate::web::decide::{pick_label, weights};
 use serde_json::{Map, Value, json};
 
 const CELLS: u32 = 15;
@@ -42,56 +45,22 @@ pub fn bar(weight: u8, unicode: bool) -> String {
         .collect()
 }
 
-fn weight(p: f64) -> u8 {
-    (p * 100.0).round().clamp(0.0, 100.0) as u8
-}
-
-/// Each answer's label and probability in its own order; a score's levels are what `run` adds as `levels`.
-fn labelled(answer: &Value, levels: &[String]) -> Vec<(String, f64)> {
-    let ps = &answer["probabilities"];
-    match answer["type"].as_str() {
-        Some("noul") => {
-            let yes = answer["noul"].as_f64().unwrap_or(0.0);
-            vec![("yes".into(), yes), ("no".into(), 1.0 - yes)]
-        }
-        Some("choice") => ps
-            .as_object()
-            .map(|m| {
-                m.iter()
-                    .map(|(k, v)| (k.clone(), v.as_f64().unwrap_or(0.0)))
-                    .collect()
-            })
-            .unwrap_or_default(),
-        _ => ps
-            .as_array()
-            .map(|a| {
-                a.iter()
-                    .enumerate()
-                    .map(|(i, v)| {
-                        let name = levels
-                            .get(i)
-                            .cloned()
-                            .unwrap_or_else(|| format!("level {}", i + 1));
-                        (name, v.as_f64().unwrap_or(0.0))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+/// The question as the server asks it, so its answers read back with the server's own parser.
+pub fn question(question: &str, kind: &DecideKind) -> Question {
+    let kind = match kind {
+        DecideKind::Noul => Kind::Noul,
+        DecideKind::Choice(options) => Kind::Choice {
+            options: options.clone(),
+        },
+        DecideKind::Score(levels) => Kind::Score {
+            levels: levels.clone(),
+        },
+    };
+    Question {
+        key: "verdict".into(),
+        kind,
+        instructions: question.into(),
     }
-}
-
-/// What an answer picks, as a label: a choice says so, a noul and a score by their heaviest answer.
-fn pick(answer: &Value, levels: &[String]) -> Option<String> {
-    if let Some(c) = answer["choice"].as_str() {
-        return Some(c.to_string());
-    }
-    labelled(answer, levels)
-        .into_iter()
-        .fold(None, |b: Option<(String, f64)>, (l, p)| match b {
-            Some((_, bp)) if bp >= p => b,
-            _ => Some((l, p)),
-        })
-        .map(|(l, _)| l)
 }
 
 fn standing_copy(d: &Value) -> &'static str {
@@ -100,28 +69,19 @@ fn standing_copy(d: &Value) -> &'static str {
         .unwrap_or("")
 }
 
-pub fn render(decision: &Value, unicode: bool) -> String {
-    let verdict = &decision["answers"]["verdict"];
-    if verdict.is_null() {
+pub fn render(decision: &Value, q: &Question, unicode: bool) -> String {
+    let Some(verdict) = answer_from(q, &decision["answers"][&q.key]) else {
         return "Nothing here: the base does not hold this.\n".into();
-    }
-    let levels: Vec<String> = decision["levels"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter_map(|l| l.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-    let rows = labelled(verdict, &levels);
+    };
+    let rows = weights(q, &verdict);
     let w = rows
         .iter()
         .map(|(l, _)| l.chars().count())
         .max()
         .unwrap_or(0);
     let mut out = String::new();
-    for (label, p) in &rows {
-        let n = weight(*p);
+    for (label, n) in &rows {
+        let n = *n;
         out.push_str(&format!("{label:<w$}  {} {n:>3}\n", bar(n, unicode)));
     }
     out.push_str(standing_copy(decision));
@@ -129,7 +89,7 @@ pub fn render(decision: &Value, unicode: bool) -> String {
 
     let evidence = decision["evidence"].as_array().cloned().unwrap_or_default();
     if !evidence.is_empty() {
-        let chose = pick(verdict, &levels);
+        let chose = pick_label(q, &verdict);
         let (tee, last) = if unicode {
             ("├─", "└─")
         } else {
@@ -143,8 +103,8 @@ pub fn render(decision: &Value, unicode: bool) -> String {
                 Some(t) => t.replace(['\r', '\n'], " "),
                 None => crate::web::markdown::stand_in_title(e["text"].as_str().unwrap_or(""), 60),
             };
-            let own = match pick(&e["read"]["verdict"], &levels) {
-                Some(p) if Some(&p) != chose.as_ref() => format!("  {p} (against)"),
+            let own = match answer_from(q, &e["read"][&q.key]).map(|a| pick_label(q, &a)) {
+                Some(p) if p != chose => format!("  {p} (against)"),
                 Some(p) => format!("  {p}"),
                 None => String::new(),
             };
@@ -216,6 +176,7 @@ pub async fn run(
 ) -> Result<i32> {
     use tokio_stream::StreamExt;
     let body = body(question, kind, situation, cli);
+    let q = self::question(question, kind);
     if cli.json {
         let (text, code) = json(e, body).await?;
         println!("{text}");
@@ -247,7 +208,7 @@ pub async fn run(
         let chunk = chunk.map_err(|err| Error::Validation(format!("{err}")))?;
         pending.extend_from_slice(&chunk);
         buf.push_str(&crate::cli::ask::decode(&mut pending)?);
-        for (name, mut data) in crate::cli::ask::frames(&mut buf) {
+        for (name, data) in crate::cli::ask::frames(&mut buf) {
             match name.as_str() {
                 "retrieved" => note.show(reading(0, data["passages"].as_u64().unwrap_or(0))),
                 // Reads finish out of rank order, so the count is of frames seen.
@@ -257,11 +218,7 @@ pub async fn run(
                 }
                 "done" => {
                     note.clear();
-                    // The response names no levels; the client asked them.
-                    if let DecideKind::Score(levels) = kind {
-                        data["levels"] = json!(levels);
-                    }
-                    print!("{}", render(&data, face.unicode && face.on));
+                    print!("{}", render(&data, &q, face.unicode && face.on));
                     let ids = evidence_ids(&data);
                     if !ids.is_empty() && crate::cli::last::worth_remembering(is_tty, false) {
                         crate::cli::last::save(question, ids);
@@ -341,6 +298,19 @@ mod tests {
         );
     }
 
+    fn held_q() -> Question {
+        let options = ["switch to gemma", "keep"];
+        question(
+            "Keep?",
+            &DecideKind::Choice(
+                options
+                    .iter()
+                    .map(|n| (n.to_string(), String::new()))
+                    .collect(),
+            ),
+        )
+    }
+
     /// The spec's example as the server sends it, options not in alphabetical order: two of four passages bear, the second against.
     fn held() -> serde_json::Value {
         let read = |pick: &str, keep: f64| {
@@ -369,7 +339,7 @@ mod tests {
     #[test]
     fn a_decision_prints_bars_a_standing_and_its_evidence() {
         assert_eq!(
-            render(&held(), true),
+            render(&held(), &held_q(), true),
             "switch to gemma  ███░░░░░░░░░░░░  19\n\
              keep             ████████████░░░  81\n\
              Settled.\n\
@@ -389,13 +359,13 @@ mod tests {
             "standing": {"verdict": "leaning"},
             "evidence": [], "read": 0, "dropped": 0, "model": "rule"
         });
-        let out = render(&noul, false);
+        let out = render(&noul, &question("Keep?", &DecideKind::Noul), false);
         assert!(
             out.starts_with("yes  ###########....  70\nno   #####..........  30\nLeaning.\n"),
             "{out}"
         );
 
-        let mut scale = serde_json::json!({
+        let scale = serde_json::json!({
             "answers": {"verdict": {"type": "score", "score": 1.1,
                 "probabilities": [0.1, 0.7, 0.2], "confidence": 0.5}},
             "prior": {"verdict": {"type": "score", "score": 1.0,
@@ -403,8 +373,8 @@ mod tests {
             "standing": {"verdict": "split"},
             "evidence": [], "read": 0, "dropped": 0, "model": "rule"
         });
-        scale["levels"] = serde_json::json!(["can wait", "this month", "now"]);
-        let out = render(&scale, true);
+        let levels = DecideKind::Score(vec!["can wait".into(), "this month".into(), "now".into()]);
+        let out = render(&scale, &question("How soon?", &levels), true);
         assert!(out.contains("this month  ███████████░░░░  70\n"), "{out}");
         assert!(out.contains("Split."), "{out}");
     }
@@ -416,14 +386,14 @@ mod tests {
         d["standing"] = serde_json::json!({"verdict": "not_held"});
         d["evidence"] = serde_json::json!([]);
         assert_eq!(
-            render(&d, true),
+            render(&d, &held_q(), true),
             "Nothing here: the base does not hold this.\n"
         );
     }
 
     #[test]
     fn no_percent_sign_and_no_likelihood() {
-        let out = render(&held(), true);
+        let out = render(&held(), &held_q(), true);
         assert!(
             !out.contains('%') && !out.to_lowercase().contains("likely"),
             "{out}"
@@ -660,7 +630,7 @@ mod tests {
                 .as_object()
                 .expect("a choice's probabilities by name")
                 .iter()
-                .map(|(k, p)| (k.clone(), weight(p.as_f64().unwrap())))
+                .map(|(k, p)| (k.clone(), (p.as_f64().unwrap() * 100.0).round() as u8))
                 .collect()
         };
         let evidence = |v: &Value| -> Vec<(String, String)> {
@@ -703,7 +673,7 @@ mod tests {
         assert_eq!(weights(&cli), want, "CLI: {text}");
         assert_eq!(cli["standing"], rest["standing"], "CLI: {text}");
         assert_eq!(evidence(&cli), ev, "CLI: {text}");
-        let printed = render(&cli, true);
+        let printed = render(&cli, &question(q, &kind), true);
         assert!(
             printed.contains(" 81\n") && printed.contains(" 19\n") && printed.contains("Settled."),
             "{printed}"

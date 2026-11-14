@@ -421,6 +421,21 @@
     }
   }
 
+  // One Stop for every verb, live from the press: a run still parking its question has no stream
+  // yet, and `boxStopAll` bumps each driver's generation so that stream is never opened.
+  function boxStop() {
+    var form = document.getElementById('box-form');
+    var btn = document.getElementById('ask-stop');
+    if (!form || !btn) return;
+    btn.addEventListener('click', function () {
+      if (form.getAttribute('aria-busy') !== 'true') return;
+      var secs = boxSecs();
+      boxStopAll();
+      // What arrived stays: the reader stopped the wait, not the answer.
+      document.getElementById('ask-status').textContent = 'stopped after ' + secs + ' seconds';
+    });
+  }
+
   function boxSecs() {
     return Math.round((Date.now() - boxRun.started) / 1000);
   }
@@ -461,7 +476,6 @@
     var rail = document.getElementById('results');
     var result = document.getElementById('ask-result');
     var status = document.getElementById('ask-status');
-    var stopBtn = document.getElementById('ask-stop');
     var source = null;
     // Which ask the page belongs to. See the submit handler.
     var generation = 0;
@@ -478,14 +492,6 @@
     // "← results" anchor, would otherwise swap a rail over the citations.
     form.addEventListener('htmx:configRequest', function (e) {
       if (form.getAttribute('aria-busy') === 'true') e.preventDefault();
-    });
-
-    stopBtn.addEventListener('click', function () {
-      if (!source) return;
-      var secs = boxSecs();
-      stop();
-      // What arrived stays: the reader stopped the wait, not the answer.
-      status.textContent = 'stopped after ' + secs + ' seconds';
     });
 
     function fail(message) {
@@ -750,7 +756,10 @@
       // Also the browser's transport error, which is already queuing a reconnect.
       source.addEventListener('error', function (e) {
         if (!current()) return;
-        fail(e.data ? e.data : 'The connection to the decision was lost. Press Decide to try again.');
+        // The server's frame is `{ error }`, as on `/api/v1/decide/stream`.
+        var said = null;
+        try { said = e.data ? JSON.parse(e.data).error : null; } catch (_) { said = null; }
+        fail(said || 'The connection to the decision was lost. Press Decide to try again.');
       });
     }
 
@@ -805,13 +814,6 @@
       e.preventDefault();
       if (row.hidden) expand(true);
       else run();
-    });
-
-    document.getElementById('ask-stop').addEventListener('click', function () {
-      if (!source) return;
-      var secs = boxSecs();
-      stop();
-      status.textContent = 'stopped after ' + secs + ' seconds';
     });
 
     row.addEventListener('change', function (e) {
@@ -2400,6 +2402,7 @@
     micButton();
     askDriver();
     decideDriver();
+    boxStop();
     refinePass();
     rerunAfterRead();
     trackDwell();

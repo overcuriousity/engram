@@ -101,6 +101,11 @@ pub fn ask_enabled(t: &crate::tenants::Tenant) -> bool {
     t.core.asks()
 }
 
+/// See `Core::decides`; the button is absent, as Ask's is.
+pub fn decide_enabled(t: &crate::tenants::Tenant) -> bool {
+    t.core.decides()
+}
+
 /// The account setting, else `Accept-Language`, else English.
 /// Resolved at the door and stamped on the corpus: background jobs know no subject.
 pub async fn capture_lang(

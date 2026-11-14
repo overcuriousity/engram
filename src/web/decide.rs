@@ -62,17 +62,27 @@ fn weight(p: Option<&f64>) -> u8 {
         .clamp(0.0, 100.0) as u8
 }
 
-/// One per option or level; a noul gives "yes" and "no". Weights are (p * 100).round().
-pub fn bars(q: &Question, joint: &Answer, prior: &Answer) -> Vec<Bar> {
-    let (j, p) = (probabilities(joint), probabilities(prior));
-    let picked = pick(q, joint);
+/// Each option or level with its weight, (p * 100).round(); a noul gives "yes" and "no".
+/// Every door draws a decision from this, so the rounding is one rule.
+pub fn weights(q: &Question, a: &Answer) -> Vec<(String, u8)> {
+    let p = probabilities(a);
     labels(q)
         .into_iter()
         .enumerate()
-        .map(|(i, label)| Bar {
+        .map(|(i, label)| (label, weight(p.get(i))))
+        .collect()
+}
+
+pub fn bars(q: &Question, joint: &Answer, prior: &Answer) -> Vec<Bar> {
+    let picked = pick(q, joint);
+    weights(q, joint)
+        .into_iter()
+        .zip(weights(q, prior))
+        .enumerate()
+        .map(|(i, ((label, weight), (_, prior)))| Bar {
             label,
-            weight: weight(j.get(i)),
-            prior: weight(p.get(i)),
+            weight,
+            prior,
             picked: i == picked,
         })
         .collect()
@@ -198,8 +208,9 @@ pub fn rail_fragment(d: &Decision) -> Result<String> {
         .map(|e| evidence_row(e, q, verdict))
         .collect();
     if d.standing.first().map(|(_, s)| *s) == Some(Standing::Split) {
+        // The verdict's side first, the others by option, a row with no read of its own last.
         // Stable, so each side keeps the evidence's own order.
-        rows.sort_by_key(|(i, _)| *i);
+        rows.sort_by_key(|(i, _)| (*i != verdict, i.is_none(), *i));
         let mut last = None;
         for (i, r) in rows.iter_mut() {
             if *i != last {
@@ -326,6 +337,9 @@ async fn decide_submit(
     tenant: Tenant,
     Json(body): Json<DecideBody>,
 ) -> UiResult<Response> {
+    if !tenant.core.decides() {
+        return Err(Error::NotFound.into());
+    }
     let req = body.into_request()?;
     if req.questions.len() > 1 {
         return Err(
@@ -344,8 +358,6 @@ async fn decide_stream(
     tenant: Tenant,
     Path(handoff): Path<String>,
 ) -> UiResult<Response> {
-    use tokio_stream::StreamExt as _;
-
     let req = st
         .decide_handoff_take(&handoff, &tenant.user.subject)
         .ok_or(Error::NotFound)?;
@@ -354,27 +366,39 @@ async fn decide_stream(
         .into_iter()
         .next()
         .ok_or_else(|| Error::Internal("a decision without a question".into()))?;
+    let origin = Door::Ui.by(tenant.user.subject.clone());
+    Ok(decide_sse(&tenant, req, origin, move |e| sse_event(e, &q)))
+}
+
+/// Both doors' decide stream: each event through the door's `frame`, ending on the first error,
+/// a render failure too, with the `{ error }` frame every stream sends.
+pub(crate) fn decide_sse(
+    tenant: &Tenant,
+    req: crate::core::decide::DecideRequest,
+    origin: crate::store::feedback::Origin,
+    frame: impl Fn(DecideEvent) -> Result<SseEvent> + Send + 'static,
+) -> Response {
+    use tokio_stream::StreamExt as _;
+
     let core = tenant.core.clone();
-    let origin = Door::Ui.by(tenant.user.subject);
     let events = async_stream::stream! {
         let s = core.decide_events(&req, origin);
         tokio::pin!(s);
         while let Some(ev) = s.next().await {
             // Terminal: the `try_stream!` producer ends at its first error.
-            match ev.and_then(|e| sse_event(e, &q)) {
+            match ev.and_then(&frame) {
                 Ok(e) => yield Ok::<_, Error>(e),
-                // An error ends the stream, a render failure too.
                 Err(e) => {
-                    yield Ok(error_event(&e));
+                    yield Ok(crate::web::api::error_frame("decide", &e));
                     break;
                 }
             }
         }
     };
     // Kept alive: sixteen reads on a slow model outlast a proxy's idle timeout.
-    Ok(Sse::new(events)
+    Sse::new(events)
         .keep_alive(KeepAlive::default())
-        .into_response())
+        .into_response()
 }
 
 /// JSON for every payload but `error`: SSE frames data by line.
@@ -403,13 +427,6 @@ fn sse_event(ev: DecideEvent, q: &Question) -> Result<SseEvent> {
         ),
     };
     Ok(SseEvent::default().event(name).data(data.to_string()))
-}
-
-fn error_event(e: &Error) -> SseEvent {
-    if e.status().is_server_error() {
-        tracing::error!(error = %e, "decide stream failed");
-    }
-    SseEvent::default().event("error").data(e.client_message())
 }
 
 #[derive(serde::Deserialize)]
@@ -537,7 +554,7 @@ mod tests {
             n,
             artifact_id: format!("A{n}"),
             title: title.map(str::to_string),
-            text: format!("Passage {n} about the embedder."),
+            text: format!("Passage {n} about the embedder.").into(),
             bears: 1.0 - n as f64 * 0.05,
             joint: true,
             read: vec![("verdict".into(), read)],
@@ -737,6 +754,29 @@ mod tests {
     }
 
     #[test]
+    fn a_split_rail_leads_with_the_verdicts_side() {
+        let mut d = held();
+        let q = d.questions[0].clone();
+        // The verdict is the second option; most of the evidence reads the first.
+        d.answers = Some(vec![(
+            "verdict".into(),
+            Verdict {
+                answer: chose(&q, &[0.19, 0.81]),
+                swapped_agree: Some(true),
+            },
+        )]);
+        d.standing = vec![("verdict".into(), Standing::Split)];
+        let r = rail_fragment(&d).unwrap();
+        let keep = r.find(r#"role="separator">keep<"#).unwrap();
+        let switch = r.find(r#"role="separator">switch to gemma<"#).unwrap();
+        assert!(switch < keep, "{r}");
+        assert!(
+            r.find("[3]").unwrap() < keep,
+            "the one note for the verdict leads"
+        );
+    }
+
+    #[test]
     fn a_reading_row_says_what_the_passage_says_or_that_it_does_not_bear() {
         let q = choice(&["keep", "switch to gemma"]);
         let mut p = PassageRead {
@@ -802,7 +842,7 @@ mod tests {
             of: 1,
             artifact_id: "A1".into(),
             title: Some("<i>title</i>".into()),
-            text: String::new(),
+            text: "".into(),
             bears: 0.9,
             bearing: true,
             read: d.evidence[0].read.clone(),
@@ -1116,6 +1156,9 @@ mod tests {
             !data.contains("the rule erred"),
             "an internal error stays in the log"
         );
+        // The same frame as `/api/v1/decide/stream`'s.
+        let v: serde_json::Value = serde_json::from_str(&data).unwrap();
+        assert!(v["error"].is_string(), "{data}");
     }
 
     #[tokio::test]

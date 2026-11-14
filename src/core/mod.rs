@@ -111,6 +111,9 @@ pub struct Core {
     pub embedder: Arc<dyn Embedder>,
     /// Always there: `[infer.decide]` is required.
     pub decider: Arc<dyn Decider>,
+    /// `false` where the decider stands for nothing: the contained build, whose role points at a
+    /// port no model listens on. See `Core::decides`.
+    pub decides: bool,
     pub reranker: Option<Arc<dyn Reranker>>,
     /// `[infer.rerank].apply`; meaningless without a reranker.
     pub rerank_apply: Vec<crate::config::RerankApply>,
@@ -347,6 +350,8 @@ impl Core {
         if let (Some(path), Some(role)) = (&models.ask, cfg.infer.ask.as_ref()) {
             self.completer = Some(Arc::new(LocalCompleter::new(path.clone(), role)));
         }
+        // No decision model runs on the device; `[infer.decide]` there points at port 9.
+        self.decides = false;
         // No config role stands behind this: the file's presence opens the microphone.
         if let Some(path) = &models.speech {
             self.transcriber = Some(Arc::new(crate::infer::local::LocalTranscriber::new(
@@ -392,6 +397,7 @@ impl Core {
             }),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
             decider: Arc::new(HttpDecider::new(&cfg.infer.decide).with_counter(counter.clone())),
+            decides: true,
             reranker: cfg
                 .infer
                 .rerank
@@ -520,6 +526,11 @@ impl Core {
     /// `false` means no `[infer.ask]`: no ask page, no nav entry, no MCP tool, no `/api/ask`.
     pub fn asks(&self) -> bool {
         self.completer.is_some()
+    }
+
+    /// `false`: no Decide verb, no `/api/v1/decide`, no decide tool. Only the contained build.
+    pub fn decides(&self) -> bool {
+        self.decides
     }
 
     /// `false` is the embed-only floor: no judged read, reminders, moments, promotion or day
@@ -711,6 +722,7 @@ pub mod test_support {
             synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             decider: Arc::new(FakeDecider::default()),
+            decides: true,
             reranker,
             rerank_apply: vec![
                 crate::config::RerankApply::Ask,
@@ -1145,6 +1157,19 @@ mod contained_tests {
             again.count().await.unwrap(),
             core.vectors.count().await.unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn the_device_offers_no_decide() {
+        let cfg = crate::config::Config::test_default();
+        let none = crate::infer::local::LocalModels {
+            embed: None,
+            rerank: None,
+            ask: None,
+            speech: None,
+        };
+        assert!(test_core().await.decides());
+        assert!(!test_core().await.with_local_models(&cfg, &none).decides());
     }
 
     #[tokio::test]

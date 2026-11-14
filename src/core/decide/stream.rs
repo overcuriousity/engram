@@ -10,8 +10,9 @@ pub struct PassageRead {
     pub of: usize,
     pub artifact_id: String,
     pub title: Option<String>,
-    /// The passage as it was read; a door titles an untitled note from it.
-    pub text: String,
+    /// The passage as it was read; a door titles an untitled note from it. Shared with the
+    /// passage and its evidence row, so a decision holds each text once.
+    pub text: std::sync::Arc<str>,
     pub bears: f64,
     pub bearing: bool,
     /// The caller's questions, in their order; `bears` is not among them.

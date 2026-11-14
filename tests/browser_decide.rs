@@ -107,6 +107,38 @@ fn a_second_decision_supersedes_the_first() {
 
 #[test]
 #[ignore = "needs node and a headless Chrome; see the module comment"]
+fn stop_before_the_stream_opens_keeps_it_from_opening() {
+    let out = drive("stop");
+    let r = &out["report"];
+    assert_eq!(out["parkRequests"], 1, "{out}");
+    assert_eq!(
+        out["streamRequests"], 0,
+        "the stopped decision opened its stream anyway: {out}"
+    );
+    assert!(
+        r["status"].as_str().unwrap().starts_with("stopped after"),
+        "{r}"
+    );
+    assert_eq!(r["formBusy"], false, "{r}");
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn an_error_frame_is_shown_as_its_sentence() {
+    let out = drive("error");
+    let r = &out["report"];
+    let html = r["resultHtml"].as_str().unwrap();
+    assert!(
+        html.contains("the decision model is not answering.") && !html.contains("{"),
+        "{html}"
+    );
+    assert_eq!(r["formBusy"], false, "{r}");
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
 fn a_row_that_cannot_be_sent_posts_nothing_and_says_why() {
     let out = drive("invalid");
     let r = &out["report"];

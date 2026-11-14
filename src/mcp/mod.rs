@@ -708,6 +708,10 @@ impl PkdbTools {
             Ok(c) => c,
             Err(e) => return format!("Decide failed: {e}"),
         };
+        // See `Core::decides`: only the contained build, whose decider stands for nothing.
+        if !core.decides() {
+            return "Decide failed: this instance has no decision model".into();
+        }
         match core.decide(&req, crate::store::feedback::Door::Mcp).await {
             Ok(d) => format_decision(&d),
             Err(e) => format!("Decide failed: {e}"),
@@ -1898,7 +1902,7 @@ mod tests {
             n,
             artifact_id: format!("A{n}"),
             title: title.map(str::to_string),
-            text: format!("Passage {n} about the embedder."),
+            text: format!("Passage {n} about the embedder.").into(),
             bears: 0.9,
             joint: true,
             read: vec![("verdict".into(), chose(pick, p))],

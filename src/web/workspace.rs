@@ -52,6 +52,8 @@ pub fn routes() -> Router<AppState> {
 struct WorkspaceTemplate {
     /// See `state::ask_enabled`; the button is absent rather than greyed out.
     ask_enabled: bool,
+    /// See `state::decide_enabled`.
+    decide_enabled: bool,
     /// A deep link's `?q=`, or an answer kept from an ask.
     q: String,
     /// Rendered as chips, so a category need not be known in advance.
@@ -102,6 +104,7 @@ impl WorkspaceTemplate {
 #[template(path = "_held.html")]
 struct HeldTemplate {
     ask_enabled: bool,
+    decide_enabled: bool,
     /// See `WorkspaceTemplate`; `_box_hint.html` reads these.
     example_remind: &'static str,
     example_lang: &'static str,
@@ -119,6 +122,7 @@ async fn held_regions(tenant: Tenant, headers: axum::http::HeaderMap) -> UiResul
     let (example_remind, example_lang) = examples(&tenant.core, &headers);
     Ok(HtmlTemplate(HeldTemplate {
         ask_enabled: crate::web::state::ask_enabled(&tenant),
+        decide_enabled: crate::web::state::decide_enabled(&tenant),
         example_remind,
         example_lang,
         held: true,
@@ -191,6 +195,7 @@ async fn base_template(
     let (example_remind, example_lang) = examples(&tenant.core, headers);
     Ok(WorkspaceTemplate {
         ask_enabled: crate::web::state::ask_enabled(tenant),
+        decide_enabled: crate::web::state::decide_enabled(tenant),
         q,
         facets,
         category,
@@ -929,7 +934,10 @@ mod tests {
     }
 
     async fn workspace_held(uri: &str) -> String {
-        let core = crate::core::test_support::test_core().await;
+        workspace_held_by(crate::core::test_support::test_core().await, uri).await
+    }
+
+    async fn workspace_held_by(core: crate::core::Core, uri: &str) -> String {
         core.ingest_capture(crate::core::ingest::Capture::new(
             "LevelDB tombstones survive compaction longer than the manual admits.",
             "ui",
@@ -1497,6 +1505,17 @@ mod tests {
             html.contains(r#"name="decide-kind" value="noul" checked"#),
             "{html}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_core_that_does_not_decide_offers_no_decide_verb() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.decides = false;
+        for uri in ["/ui", "/ui/held"] {
+            let html = workspace_held_by(core.clone(), uri).await;
+            assert!(html.contains(r#"id="decide-verb-slot""#), "{html}");
+            assert!(!html.contains(r#"data-verb="decide""#), "{uri}: {html}");
+        }
     }
 
     #[tokio::test]

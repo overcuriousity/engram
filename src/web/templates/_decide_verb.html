@@ -1,6 +1,6 @@
 {# Always present, like the ask slot, so `_held.html` can swap the button in. Decide never takes the primary style. #}
 <span id="decide-verb-slot"{% if oob %} hx-swap-oob="true"{% endif %}>
-  {%- if held -%}
+  {%- if decide_enabled && held -%}
   <button class="oc-btn" type="button" data-verb="decide" disabled
           title="Type or attach something first" aria-expanded="false" aria-controls="decide-row">Decide</button>
   {%- endif -%}

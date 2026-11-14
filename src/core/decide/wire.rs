@@ -171,7 +171,11 @@ pub(crate) fn stored_questions(text: &str) -> Result<Vec<Question>> {
 /// `q`'s answer in a stored `{key: answer}`, as `AnswerOut` wrote it; `None` when it does not read.
 pub(crate) fn stored_answer(q: &Question, text: &str) -> Option<Answer> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
-    let a = v.get(&q.key)?;
+    answer_from(q, v.get(&q.key)?)
+}
+
+/// One answer as `AnswerOut` writes it, in the response and in the store alike.
+pub(crate) fn answer_from(q: &Question, a: &serde_json::Value) -> Option<Answer> {
     let f = |k: &str| a.get(k).and_then(serde_json::Value::as_f64);
     Some(match &q.kind {
         Kind::Choice { options } => {
@@ -332,7 +336,7 @@ impl serde::Serialize for EvidenceOut<'_> {
         m.serialize_entry("n", &e.n)?;
         m.serialize_entry("artifact_id", &e.artifact_id)?;
         m.serialize_entry("title", &e.title)?;
-        m.serialize_entry("text", &e.text)?;
+        m.serialize_entry("text", &*e.text)?;
         m.serialize_entry("bears", &e.bears)?;
         m.serialize_entry("joint", &e.joint)?;
         m.serialize_entry("read", &plain(self.0, &e.read))?;

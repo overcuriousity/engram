@@ -1200,6 +1200,10 @@ async fn decide(
     Query(q): Query<AskParams>,
     Json(body): Json<crate::core::decide::wire::DecideBody>,
 ) -> Result<Json<crate::core::decide::Decision>> {
+    // No decision model, no decide door. See `Core::decides`.
+    if !tenant.core.decides() {
+        return Err(Error::NotFound);
+    }
     let req = body.into_request()?;
     let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Api);
     Ok(Json(tenant.core.decide(&req, origin).await?))
@@ -1767,31 +1771,19 @@ async fn decide_stream(
     Query(q): Query<AskParams>,
     Json(body): Json<crate::core::decide::wire::DecideBody>,
 ) -> Result<Response> {
-    use tokio_stream::StreamExt as _;
-
+    if !tenant.core.decides() {
+        return Err(Error::NotFound);
+    }
     let req = body.into_request()?;
     // As the pipeline normalises them, so a read names the options `done` names.
     let questions = crate::core::decide::normalised_questions(&req)?;
-    let core = tenant.core.clone();
     let origin = ask_origin(&q, &tenant, crate::store::feedback::Door::Api);
-    let events = async_stream::stream! {
-        let s = core.decide_events(&req, origin);
-        tokio::pin!(s);
-        while let Some(ev) = s.next().await {
-            // An error ends the stream, a render failure too.
-            match ev.and_then(|e| decide_sse_event(e, &questions)) {
-                Ok(frame) => yield Ok::<_, Error>(frame),
-                Err(e) => {
-                    yield Ok(error_frame("decide", &e));
-                    break;
-                }
-            }
-        }
-    };
-    // Kept alive: sixteen reads on a slow model outlast a proxy's idle timeout.
-    Ok(Sse::new(events)
-        .keep_alive(KeepAlive::default())
-        .into_response())
+    Ok(crate::web::decide::decide_sse(
+        &tenant,
+        req,
+        origin,
+        move |e| decide_sse_event(e, &questions),
+    ))
 }
 
 fn decide_sse_event(
@@ -1859,7 +1851,7 @@ async fn search_stream(tenant: Tenant, Query(q): Query<SearchParams>) -> Result<
 }
 
 /// `stream` names the route in the log line.
-fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
+pub(crate) fn error_frame(stream: &'static str, e: &Error) -> SseEvent {
     if e.status().is_server_error() {
         tracing::error!(error = %e, stream, "stream failed");
     } else {
@@ -4215,6 +4207,25 @@ pub(crate) mod tests {
         assert_eq!(v["evidence"], serde_json::json!([]));
         assert_eq!(v["standing"]["verdict"], "not_held");
         assert!(v["prior"]["verdict"].is_object(), "{v}");
+    }
+
+    #[tokio::test]
+    async fn a_core_that_does_not_decide_has_no_decide_route() {
+        let mut core = crate::core::decide::tests::three_base().await;
+        core.decides = false;
+        let (app, token) = app_with_token(core).await;
+        for path in ["/api/v1/decide", "/api/v1/decide/stream"] {
+            let res = app
+                .clone()
+                .oneshot(post_json(
+                    path,
+                    &token,
+                    serde_json::json!({"q": "Keep bge-m3?"}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND, "{path}");
+        }
     }
 
     #[tokio::test]
