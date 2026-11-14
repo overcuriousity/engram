@@ -195,22 +195,19 @@ impl Synthesizer for FakeSynthesizer {
             .map(|(i, p)| ProposedArtifact {
                 text: p.to_string(),
                 title: Some(format!("chunk {i}")),
-                category: Some("reference".into()),
                 tags: vec!["fake".into()],
                 corpus_lines: None,
                 caveats: vec![],
-                pinned: false,
             })
             .collect())
     }
-    /// The door's forced intent, else "none", with no date and no links.
+    /// The door's forced intent, else "none", with no date.
     async fn segment_judged(&self, input: SegmentInput<'_>) -> Result<crate::infer::SegmentReply> {
         let judgement = input.judge.map(|j| crate::infer::Judgement {
             intent: Some(j.forced_intent.clone().unwrap_or_else(|| "none".into())),
             when: None,
             rule: None,
             events: vec![],
-            links: vec![],
         });
         Ok(crate::infer::SegmentReply {
             artifacts: self.segment(input).await?,
@@ -279,11 +276,9 @@ impl Synthesizer for ParaphrasingSynthesizer {
         Ok(vec![ProposedArtifact {
             text: body,
             title: Some("paraphrased".into()),
-            category: Some("reference".into()),
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
-            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -340,11 +335,9 @@ impl Synthesizer for JudgingParaphraser {
             artifacts: vec![ProposedArtifact {
                 text,
                 title: Some("read".into()),
-                category: Some("reference".into()),
                 tags: vec![],
                 corpus_lines: None,
                 caveats: vec![],
-                pinned: false,
             }],
             judgement: if first {
                 Some(self.judgement.clone())
@@ -376,11 +369,9 @@ impl Synthesizer for GreedySynthesizer {
             out.push(ProposedArtifact {
                 text: line.to_string(),
                 title: Some("greedy".into()),
-                category: Some("reference".into()),
                 tags: vec![],
                 corpus_lines: None,
                 caveats: vec![],
-                pinned: false,
             });
         }
         Ok(out)
@@ -434,11 +425,9 @@ impl Synthesizer for RecordingSynthesizer {
         Ok(vec![ProposedArtifact {
             text: input.core.lines().next().unwrap_or("empty").to_string(),
             title: Some("recorded".into()),
-            category: Some("reference".into()),
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
-            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {
@@ -465,11 +454,9 @@ impl Synthesizer for MisreportingSynthesizer {
         Ok(vec![ProposedArtifact {
             text,
             title: Some(title.into()),
-            category: None,
             tags: vec![],
             corpus_lines: Some((9_000, 9_100)),
             caveats: vec![],
-            pinned: false,
         }])
     }
     fn budget(&self) -> SynthesisBudget {

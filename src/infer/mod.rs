@@ -23,16 +23,13 @@ use async_trait::async_trait;
 pub struct ProposedArtifact {
     pub text: String,
     pub title: Option<String>,
-    pub category: Option<String>,
     pub tags: Vec<String>,
     pub corpus_lines: Option<(i64, i64)>,
     /// As the source states them; the model already holds the segment, so they cost tokens, not a call.
     pub caveats: Vec<String>,
-    /// A decision or commitment the operator made. Honored only on the judged capture path; a promotion never pins.
-    pub pinned: bool,
 }
 
-/// Id-addressable, so the reply's links can only name what was on the table.
+/// Context for the writer; afterwards each shown id is asked `link_kind` (`judging::link_shown`).
 #[derive(Debug, Clone)]
 pub struct Neighbor {
     pub id: String,
@@ -50,12 +47,6 @@ pub struct JudgeAsk {
     pub neighbors: Vec<Neighbor>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProposedLink {
-    pub artifact_id: String,
-    pub reason: String,
-}
-
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Judgement {
     /// "remind" | "none".
@@ -66,15 +57,12 @@ pub struct Judgement {
     pub rule: Option<String>,
     /// Datetimes the note states without being the reminder.
     pub events: Vec<String>,
-    pub links: Vec<ProposedLink>,
 }
 
 impl Judgement {
     /// A reply without artifacts fails unless this is true. `intent: "none"` is an answer, not a claim.
     pub fn says_something(&self) -> bool {
-        self.intent.as_deref() == Some("remind")
-            || !self.events.is_empty()
-            || !self.links.is_empty()
+        self.intent.as_deref() == Some("remind") || !self.events.is_empty()
     }
 }
 
@@ -96,7 +84,7 @@ pub struct SynthesisBudget {
 pub struct SegmentInput<'a> {
     pub core: &'a str,
     pub context: &'a crate::infer::context::WindowContext,
-    /// `Some` on the judged capture path, where the same call reads intent, events and links.
+    /// `Some` on the judged capture path, where the same call reads intent and events.
     pub judge: Option<&'a JudgeAsk>,
     /// Per call, not per synthesizer: it belongs to the document's corpus. See `infer::lang`.
     pub lang: crate::infer::lang::Lang,

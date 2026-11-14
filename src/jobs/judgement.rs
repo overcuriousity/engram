@@ -1,4 +1,4 @@
-//! What a judged synthesis reply becomes: moments and links.
+//! What a judged synthesis reply becomes: moments. Links come from `judging::link_shown`.
 //! Best-effort throughout: a judgement that cannot be applied is a warning, never a lost capture.
 
 use crate::core::Core;
@@ -29,14 +29,7 @@ async fn journal(core: &Core, moment_id: &str, anchor_id: &str, what: &str) {
 }
 
 /// Idempotent per re-read: read rows are replaced; done, set and refused rows are kept.
-/// `shown` bounds the links: the model can only relate what it was shown.
-pub async fn apply(
-    core: &Core,
-    corpus_id: &str,
-    anchor_id: &str,
-    j: &Judgement,
-    shown: &[String],
-) -> Result<()> {
+pub async fn apply(core: &Core, corpus_id: &str, anchor_id: &str, j: &Judgement) -> Result<()> {
     let src = core.store.get_corpus(corpus_id).await?;
     let tz_name = src.metadata["tz"]
         .as_str()
@@ -56,8 +49,7 @@ pub async fn apply(
     core.store.delete_read_events(anchor_id).await?;
 
     // Dates the note states without being the reminder: the day page's rows.
-    // Each section below fails on its own: `shown` can name a row since reaped, and the reminder
-    // comes last.
+    // Each section below fails on its own, and the reminder comes last.
     for e in &j.events {
         let Some(at) = parse_local(e, tz) else {
             continue;
@@ -92,27 +84,6 @@ pub async fn apply(
             Err(err) => {
                 tracing::warn!(corpus_id, error = %err, "could not record a judged event");
             }
-        }
-    }
-
-    // Dedup and supersession stay with the sweeps; the model proposes no merges.
-    for l in &j.links {
-        if l.artifact_id == anchor_id || !shown.iter().any(|s| s == &l.artifact_id) {
-            continue;
-        }
-        if let Err(err) = core
-            .store
-            // Twice `show_min`: an asserted relation stays visible for one half-life, then fades.
-            .relate_synthesized(
-                anchor_id,
-                &l.artifact_id,
-                &l.reason,
-                core.associate.show_min * 2.0,
-                core.associate.half_life_days,
-            )
-            .await
-        {
-            tracing::warn!(corpus_id, other = %l.artifact_id, error = %err, "could not record a judged link");
         }
     }
 
@@ -417,7 +388,7 @@ mod tests {
     use crate::core::test_support::test_core;
     use crate::infer::fake::FAKE_BUDGET;
     use crate::infer::{
-        ProposedArtifact, ProposedLink, SegmentInput, SegmentReply, SynthesisBudget, Synthesizer,
+        ProposedArtifact, SegmentInput, SegmentReply, SynthesisBudget, Synthesizer,
     };
     use crate::jobs::test_support::drain;
     use async_trait::async_trait;
@@ -446,11 +417,9 @@ mod tests {
             Ok(vec![ProposedArtifact {
                 text: input.core.to_string(),
                 title: Some("judged".into()),
-                category: Some("other".into()),
                 tags: vec![],
                 corpus_lines: None,
                 caveats: vec![],
-                pinned: false,
             }])
         }
         async fn segment_judged(
@@ -511,7 +480,6 @@ mod tests {
             when: Some("2099-09-04T13:45".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         })));
         let out = core
             .ingest(
@@ -547,7 +515,6 @@ mod tests {
             when: Some("2099-09-04T13:45".into()),
             rule: Some("FREQ=WEEKLY;BYDAY=FR;COUNT=1;INTERVAL=1".into()),
             events: vec![],
-            links: vec![],
         }));
         core.ingest("den Termin am Freitag 13:45", "web", None)
             .await
@@ -569,7 +536,6 @@ mod tests {
             when: None,
             rule: Some("FREQ=WEEKLY;BYDAY=FR;COUNT=1".into()),
             events: vec![],
-            links: vec![],
         }));
         core.ingest("den Termin am Freitag", "web", None)
             .await
@@ -594,7 +560,6 @@ mod tests {
             when: Some("2099-09-04T09:00".into()),
             rule: None,
             events: vec!["2099-09-12T20:00".into()],
-            links: vec![],
         }));
         core.ingest(
             "friday i pick up the car; the concert is on 2099-09-12",
@@ -637,7 +602,6 @@ mod tests {
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest("den wagen abholen, freitag", "web", None)
@@ -662,9 +626,7 @@ mod tests {
                 when: Some("2099-09-04T15:00".into()),
                 rule: None,
                 events: vec![],
-                links: vec![],
             },
-            &[],
         )
         .await
         .unwrap();
@@ -682,7 +644,6 @@ mod tests {
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest("erinnere mich freitag, /mnt/backup prüfen", "web", None)
@@ -702,9 +663,7 @@ mod tests {
                 when: None,
                 rule: None,
                 events: vec![],
-                links: vec![],
             },
-            &[],
         )
         .await
         .unwrap();
@@ -723,9 +682,7 @@ mod tests {
                 when: None,
                 rule: None,
                 events: vec![],
-                links: vec![],
             },
-            &[],
         )
         .await
         .unwrap();
@@ -740,7 +697,6 @@ mod tests {
             when: Some("2099-09-04T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         core.ingest("remind me to send the invoice on friday", "web", None)
             .await
@@ -800,7 +756,6 @@ mod tests {
             when: Some("2099-09-04T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest("remind me to send the invoice", "web", None)
@@ -833,7 +788,6 @@ mod tests {
             when: Some("2020-01-01T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         core.ingest(
             "erinnere mich, dass ich um 18 Uhr einkaufen gehen muss.",
@@ -867,7 +821,6 @@ mod tests {
                 when: Some(when.into()),
                 rule: None,
                 events: vec![],
-                links: vec![],
             }));
             let mut c = Capture::new("erinnere mich heute an die Anmeldung", "web");
             c.metadata["tz"] = serde_json::Value::String("UTC".into());
@@ -899,7 +852,6 @@ mod tests {
             when: None,
             rule: Some("FREQ=WEEKLY;BYDAY=FR".into()),
             events: vec![],
-            links: vec![],
         }));
         let mut c = Capture::new("freitags den müll rausstellen", "web");
         c.metadata["tz"] = serde_json::Value::String("UTC".into());
@@ -940,7 +892,6 @@ mod tests {
             when: None,
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest("the gutters need clearing at some point", "web", None)
@@ -961,7 +912,6 @@ mod tests {
             when: None,
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let mut c = Capture::new("remind me about the gutters", "web");
         c.metadata["intent"] = serde_json::Value::String("remind".into());
@@ -978,9 +928,8 @@ mod tests {
             when: Some("2099-01-01T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         };
-        apply(&core, &out.id, &aid, &j, &[]).await.unwrap();
+        apply(&core, &out.id, &aid, &j).await.unwrap();
         assert!(
             core.store.open_due(0, i64::MAX).await.unwrap().is_empty(),
             "the refusal outlived the re-read; {:?}",
@@ -997,7 +946,6 @@ mod tests {
                 when: Some("2099-01-01T09:00".into()),
                 rule: None,
                 events: vec![],
-                links: vec![],
             }));
             let mut c = Capture::new("remind me about the gutters on the first", "web");
             c.metadata["intent"] = serde_json::Value::String("remind".into());
@@ -1021,7 +969,6 @@ mod tests {
             when: Some("2099-01-01T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest_capture(Capture::new("water the gutters on the first", "web"))
@@ -1046,9 +993,8 @@ mod tests {
             when: Some("2099-02-01T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         };
-        apply(&core, &out.id, &aid, &j, &[])
+        apply(&core, &out.id, &aid, &j)
             .await
             .expect("the reading is filed rather than panicking");
         let meta = core.store.get_corpus(&out.id).await.unwrap().metadata;
@@ -1063,7 +1009,6 @@ mod tests {
             when: Some("2099-01-01T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest_capture(Capture::new("clear the gutters before the frost", "web"))
@@ -1084,9 +1029,8 @@ mod tests {
             when: Some("2099-03-01T09:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         };
-        apply(&core, &out.id, &aid, &j, &[]).await.unwrap();
+        apply(&core, &out.id, &aid, &j).await.unwrap();
         assert_eq!(
             core.store.open_due(0, i64::MAX).await.unwrap().len(),
             1,
@@ -1114,7 +1058,6 @@ mod tests {
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest("die rechnung schicken", "web", None)
@@ -1139,9 +1082,7 @@ mod tests {
                 when: Some("2099-09-04T15:00".into()),
                 rule: None,
                 events: vec![],
-                links: vec![],
             },
-            &[],
         )
         .await
         .unwrap();
@@ -1159,7 +1100,6 @@ mod tests {
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let mut c = Capture::new("die reifen wechseln, freitag", "web");
         c.metadata["intent"] = serde_json::Value::String("remind".into());
@@ -1180,9 +1120,7 @@ mod tests {
                 when: None,
                 rule: None,
                 events: vec![],
-                links: vec![],
             },
-            &[],
         )
         .await
         .unwrap();
@@ -1200,7 +1138,6 @@ mod tests {
             when: Some("2099-09-04T14:00".into()),
             rule: None,
             events: vec![],
-            links: vec![],
         }));
         let out = core
             .ingest("freitags den müll rausstellen", "web", None)
@@ -1221,9 +1158,7 @@ mod tests {
                 when: Some("2099-09-04T14:00".into()),
                 rule: Some("FREQ=WEEKLY;BYDAY=FR".into()),
                 events: vec![],
-                links: vec![],
             },
-            &[],
         )
         .await
         .unwrap();
@@ -1242,23 +1177,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn events_land_and_links_only_to_what_was_shown() {
+    async fn events_still_land_from_the_writer() {
         let core = test_core().await;
-        let other = core
-            .ingest("the invoice workflow notes", "web", None)
-            .await
-            .unwrap();
-        drain(&core).await;
-        let neighbor = core
-            .store
-            .artifacts_for_corpus(&other.id)
-            .await
-            .unwrap()
-            .into_iter()
-            .find(|c| c.in_results())
-            .unwrap()
-            .id;
-
         let out = core
             .ingest("the release lands next month, mark it", "web", None)
             .await
@@ -1279,29 +1199,308 @@ mod tests {
             when: None,
             rule: None,
             events: vec!["2099-09-12T00:00".into()],
-            links: vec![
-                ProposedLink {
-                    artifact_id: neighbor.clone(),
-                    reason: "same billing flow".into(),
-                },
-                ProposedLink {
-                    artifact_id: "ghost-99".into(),
-                    reason: "invented".into(),
-                },
-            ],
         };
-        apply(&core, &out.id, &anchor, &j, std::slice::from_ref(&neighbor))
-            .await
-            .unwrap();
+        apply(&core, &out.id, &anchor, &j).await.unwrap();
 
         let events = core.store.event_moments_between(0, i64::MAX).await.unwrap();
         assert!(
             events.iter().any(|r| r.moment.artifact_id == anchor),
             "{events:?}"
         );
-        let links = core.store.links_touching(&anchor).await.unwrap();
-        assert_eq!(links.len(), 1, "only the shown id landed: {links:?}");
-        assert_eq!(links[0].state, crate::store::links::LinkState::Related);
-        assert_eq!(links[0].reason.as_deref(), Some("same billing flow"));
+        assert!(
+            core.store.links_touching(&anchor).await.unwrap().is_empty(),
+            "the writer names no links"
+        );
+    }
+
+    mod shown {
+        use super::*;
+        use crate::infer::decide::{Answer, Answers, Kind as QKind};
+        use crate::infer::fake::RuleDecider;
+        use crate::store::links::{LinkKind, LinkState};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        /// The fake budget shows no neighbours; this one does, and still leaves the window room.
+        const SHOWING: SynthesisBudget = SynthesisBudget {
+            context: crate::infer::context::ContextBudget {
+                neighbors: 512,
+                ..FAKE_BUDGET.context
+            },
+            ..FAKE_BUDGET
+        };
+
+        /// One artifact, the window as it is, titled by its first word; judged when asked.
+        struct Showing;
+
+        #[async_trait]
+        impl Synthesizer for Showing {
+            async fn segment(
+                &self,
+                input: SegmentInput<'_>,
+            ) -> crate::error::Result<Vec<ProposedArtifact>> {
+                Ok(vec![ProposedArtifact {
+                    text: input.core.to_string(),
+                    title: input.core.split_whitespace().next().map(String::from),
+                    tags: vec![],
+                    corpus_lines: None,
+                    caveats: vec![],
+                }])
+            }
+            async fn segment_judged(
+                &self,
+                input: SegmentInput<'_>,
+            ) -> crate::error::Result<SegmentReply> {
+                let asked = input.judge.is_some();
+                Ok(SegmentReply {
+                    artifacts: self.segment(input).await?,
+                    judgement: asked.then(|| Judgement {
+                        intent: Some("none".into()),
+                        ..Default::default()
+                    }),
+                })
+            }
+            fn budget(&self) -> SynthesisBudget {
+                SHOWING
+            }
+        }
+
+        /// Every note may ask a reminder, so a capture is judged. `link_kind` favours `kind` at
+        /// 0.95 and its swapped twin says `twin`; the note that says "general" comes first,
+        /// whichever label it carries; any other choice its first option.
+        fn linking(kind: &'static str, twin: &'static str) -> Arc<RuleDecider> {
+            Arc::new(RuleDecider::new(move |state, qs| {
+                let a_block = state.split("\n\nB: ").next().unwrap_or_default();
+                let mut answers = HashMap::new();
+                for q in qs {
+                    let a = match &q.kind {
+                        QKind::Noul => Answer::Noul { yes: 0.97 },
+                        QKind::Choice { options } => {
+                            let is_kind = options.iter().any(|(n, _)| n == "unrelated");
+                            let favoured = if options.iter().any(|(n, _)| n == "a_first") {
+                                if a_block.contains("general") {
+                                    "a_first"
+                                } else {
+                                    "b_first"
+                                }
+                            } else if is_kind {
+                                kind
+                            } else {
+                                options[0].0.as_str()
+                            };
+                            let said = if is_kind && q.key.ends_with('r') {
+                                twin
+                            } else {
+                                favoured
+                            };
+                            let rest = 0.05 / (options.len() - 1) as f64;
+                            Answer::Choice {
+                                pick: said.into(),
+                                probabilities: options
+                                    .iter()
+                                    .map(|(n, _)| if n == favoured { 0.95 } else { rest })
+                                    .collect(),
+                                confidence: 0.95,
+                            }
+                        }
+                        QKind::Score { levels } => Answer::Score {
+                            score: 0.0,
+                            probabilities: (0..levels.len())
+                                .map(|i| if i == 0 { 1.0 } else { 0.0 })
+                                .collect(),
+                            confidence: 0.95,
+                        },
+                    };
+                    answers.insert(q.key.clone(), a);
+                }
+                Ok(Answers {
+                    answers,
+                    model: "rule-decider".into(),
+                    input_tokens: 0,
+                })
+            }))
+        }
+
+        /// A neighbour in the base, then a judged capture that is shown it: (anchor, neighbour).
+        async fn captured_beside_a_neighbour(core: &mut Core) -> (String, String) {
+            core.synthesizer = Some(Arc::new(Showing));
+            // The fake embedder's cosines are noise; every neighbour is worth showing here.
+            core.weak_floor = -1.0;
+            let first = core
+                .ingest(
+                    "general invoice workflow: open it, check it, pay it",
+                    "web",
+                    None,
+                )
+                .await
+                .unwrap();
+            drain(core).await;
+            let neighbour = live(core, &first.id).await;
+            let out = core
+                .ingest("paying the march invoice from acme", "web", None)
+                .await
+                .unwrap();
+            drain(core).await;
+            (live(core, &out.id).await, neighbour)
+        }
+
+        /// The written artifact of a capture.
+        async fn live(core: &Core, corpus_id: &str) -> String {
+            core.store
+                .artifacts_for_corpus(corpus_id)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|c| {
+                    c.in_results() && c.provenance != crate::store::artifacts::Provenance::Passage
+                })
+                .expect("the window wrote an artifact")
+                .id
+        }
+
+        /// The `link_kind` decision on these two, if they were asked about.
+        async fn decision(
+            core: &Core,
+            x: &str,
+            y: &str,
+        ) -> Option<crate::store::decision_log::Logged> {
+            let (a, b) = crate::store::links::canonical(x, y);
+            core.store
+                .last_logged(
+                    "link_kind",
+                    a,
+                    Some(b),
+                    &crate::jobs::associate::link_era(core),
+                )
+                .await
+                .unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_neighbour_shown_at_capture_is_linked_when_the_decision_model_is_sure() {
+            let mut core = test_core().await;
+            core.decider = linking("example", "example");
+            let (anchor, neighbour) = captured_beside_a_neighbour(&mut core).await;
+
+            let l = core
+                .store
+                .get_link(&anchor, &neighbour)
+                .await
+                .unwrap()
+                .expect("the shown neighbour was linked");
+            assert_eq!(l.state, LinkState::Related);
+            assert_eq!(l.kind, Some(LinkKind::Example));
+            assert_eq!(l.reason, None, "no text of the model's is stored");
+            // The general workflow comes first, and held with the notes exchanged.
+            let (a, _) = crate::store::links::canonical(&anchor, &neighbour);
+            assert_eq!(l.first_is_a, Some(a == neighbour));
+            let from_anchor = core
+                .store
+                .links_from(
+                    std::slice::from_ref(&anchor),
+                    &[LinkState::Related],
+                    core.associate.half_life_days,
+                    crate::store::now(),
+                    core.associate.show_min,
+                    10,
+                )
+                .await
+                .unwrap();
+            let line = from_anchor
+                .iter()
+                .find(|t| t.other == neighbour)
+                .and_then(|t| t.reason.clone());
+            assert_eq!(line.as_deref(), Some("What this is an example of"));
+            let d = decision(&core, &anchor, &neighbour).await.expect("asked");
+            assert_eq!(d.band, crate::core::judging::band::Band::Act);
+            assert_eq!(d.subject_kind, "shown");
+        }
+
+        #[tokio::test]
+        async fn a_neighbour_it_calls_unrelated_gets_no_link() {
+            let mut core = test_core().await;
+            core.decider = linking("unrelated", "unrelated");
+            let (anchor, neighbour) = captured_beside_a_neighbour(&mut core).await;
+            let d = decision(&core, &anchor, &neighbour).await.expect("asked");
+            assert_eq!(d.pick, "unrelated");
+            assert!(
+                core.store
+                    .get_link(&anchor, &neighbour)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "an unrelated neighbour leaves no row"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_torn_neighbour_is_an_unsure_row_and_a_pick_creates_the_link() {
+            let mut core = test_core().await;
+            core.decider = linking("example", "background");
+            let (anchor, neighbour) = captured_beside_a_neighbour(&mut core).await;
+            assert!(
+                core.store
+                    .get_link(&anchor, &neighbour)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let d = decision(&core, &anchor, &neighbour).await.expect("asked");
+            assert_eq!(d.band, crate::core::judging::band::Band::Ask);
+            assert_eq!(
+                d.state,
+                crate::store::decision_log::State::Open,
+                "an Unsure row"
+            );
+            assert!(
+                crate::core::judging::Applier::unchanged(
+                    &crate::jobs::associate::LinkApplier,
+                    &core,
+                    &d
+                )
+                .await
+                .unwrap(),
+                "no link row yet is not a change"
+            );
+
+            crate::core::judging::answer(&core, &d.id, Some("alternative"))
+                .await
+                .unwrap();
+            let l = core
+                .store
+                .get_link(&anchor, &neighbour)
+                .await
+                .unwrap()
+                .expect("the pick made the link");
+            assert_eq!(l.state, LinkState::Related);
+            assert_eq!(l.kind, Some(LinkKind::Alternative));
+            assert!(
+                l.weight >= core.associate.show_min * 2.0,
+                "shown above the floor: {}",
+                l.weight
+            );
+        }
+
+        #[tokio::test]
+        async fn link_shown_spends_no_more_than_the_judging_budget() {
+            let mut core = test_core().await;
+            core.decider = linking("example", "example");
+            let (anchor, neighbour) = captured_beside_a_neighbour(&mut core).await;
+            core.decide_cfg.max_per_tick = 0;
+            let other = crate::core::test_support::seed_artifact(&core, "elsewhere").await;
+            let made =
+                crate::core::judging::link_shown(&core, &anchor, std::slice::from_ref(&other))
+                    .await
+                    .unwrap();
+            assert_eq!(made, 0);
+            assert!(
+                core.store
+                    .get_link(&anchor, &other)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let _ = neighbour;
+        }
     }
 }

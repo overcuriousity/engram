@@ -2936,13 +2936,35 @@ mod tests {
         }
     }
 
+    /// A corpus written, embedded and read: the writer names no category, the reading does.
+    /// Returns the category the reading gave.
+    async fn app_with_read_corpus() -> (axum::Router, String, String) {
+        let core = crate::core::test_support::test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::test_support::drain(&core).await;
+        let read = core
+            .store
+            .artifacts_for_corpus(&out.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|c| c.in_results())
+            .and_then(|c| c.category)
+            .expect("the reading gave a category");
+        let (app, cookie) = app_with_cookie(core).await;
+        (app, cookie, read)
+    }
+
     #[tokio::test]
     async fn the_search_page_offers_a_chip_for_what_the_collection_contains() {
-        let (app, cookie) = app_with_embedded_corpus().await;
+        let (app, cookie, read) = app_with_read_corpus().await;
         let html = flat(&get(&app, "/ui/search", &cookie).await);
 
         assert!(
-            html.contains(r#"name="category" value="reference""#),
+            html.contains(&format!(r#"name="category" value="{read}""#)),
             "no category chip was rendered"
         );
         assert!(!html.contains(r#"name="tags""#), "the tag row is gone");
@@ -2993,16 +3015,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_chip_narrows_the_result_list() {
-        let (app, cookie) = app_with_embedded_corpus().await;
+        let (app, cookie, read) = app_with_read_corpus().await;
+        let other = if read == "procedure" {
+            "snippet"
+        } else {
+            "procedure"
+        };
         let matching = get(
             &app,
-            "/ui/search/results?q=alpha&category=reference",
+            &format!("/ui/search/results?q=alpha&category={read}"),
             &cookie,
         )
         .await;
         let missing = get(
             &app,
-            "/ui/search/results?q=alpha&category=procedure",
+            &format!("/ui/search/results?q=alpha&category={other}"),
             &cookie,
         )
         .await;

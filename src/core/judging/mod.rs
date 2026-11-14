@@ -91,6 +91,61 @@ impl Core {
     }
 }
 
+/// After a judged capture: ask link_kind between the anchor and each neighbour it was shown.
+/// Banded like any link: only an act makes the link here, an Unsure row's pick makes it later.
+/// Returns the links made.
+pub async fn link_shown(core: &Core, anchor_id: &str, shown: &[String]) -> Result<usize> {
+    use crate::jobs::associate::{SHOWN, ask_link, asked_already};
+    use crate::store::links::LinkState;
+    let anchor = core.store.get_artifact(anchor_id).await?;
+    if !anchor.in_results() {
+        return Ok(0);
+    }
+    let mut budget = core.judging_budget().await?;
+    let mut made = 0;
+    for id in shown {
+        if budget == 0 {
+            break;
+        }
+        if id == anchor_id {
+            continue;
+        }
+        let other = match core.store.get_artifact(id).await {
+            Ok(c) if c.in_results() => c,
+            Ok(_) | Err(Error::NotFound) => continue,
+            Err(e) => return Err(e),
+        };
+        // A link already ruled on, or dismissed by a person, is not asked about again here.
+        if core
+            .store
+            .get_link(anchor_id, id)
+            .await?
+            .is_some_and(|l| l.state != LinkState::Learning)
+        {
+            continue;
+        }
+        let (a, b) = if anchor.id <= other.id {
+            (&anchor, &other)
+        } else {
+            (&other, &anchor)
+        };
+        if asked_already(core, a, b).await? {
+            continue;
+        }
+        budget -= 1;
+        ask_link(core, SHOWN, a, b, &[]).await?;
+        if core
+            .store
+            .get_link(anchor_id, id)
+            .await?
+            .is_some_and(|l| l.state == LinkState::Related)
+        {
+            made += 1;
+        }
+    }
+    Ok(made)
+}
+
 /// The reason an act carries between `ask` and its stage's `settle` or `demote_to_ask`.
 const UNSETTLED: &str = "unsettled";
 

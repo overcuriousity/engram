@@ -269,8 +269,8 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     }
     // Anchored to the first live row, which may be the verbatim passage: a pure reminder writes
     // none.
-    if let Some(j) = judgement {
-        let anchor = match live.iter().find(|c| c.in_results()) {
+    let anchor = if judgement.is_some() || !shown_ids.is_empty() {
+        match live.iter().find(|c| c.in_results()) {
             Some(c) => Some(c.id.clone()),
             None => core
                 .store
@@ -279,12 +279,14 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
                 .into_iter()
                 .find(|c| c.in_results())
                 .map(|c| c.id),
-        };
-        match anchor {
+        }
+    } else {
+        None
+    };
+    if let Some(j) = judgement {
+        match &anchor {
             Some(anchor) => {
-                if let Err(e) =
-                    crate::jobs::judgement::apply(core, corpus_id, &anchor, &j, &shown_ids).await
-                {
+                if let Err(e) = crate::jobs::judgement::apply(core, corpus_id, anchor, &j).await {
                     tracing::warn!(
                         corpus_id,
                         error = %e,
@@ -304,7 +306,15 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         .set_segment_state(corpus_id, idx, SegmentState::Done, None)
         .await?;
 
-    settle(core, corpus_id).await
+    let settled = settle(core, corpus_id).await;
+    // After the capture is stored and settled: a link question that fails costs no capture.
+    if let Some(anchor) = &anchor
+        && !shown_ids.is_empty()
+        && let Err(e) = crate::core::judging::link_shown(core, anchor, &shown_ids).await
+    {
+        tracing::warn!(corpus_id, error = %e, "the shown neighbours could not be asked about");
+    }
+    settled
 }
 
 /// Whether this window is synthesized with the judged schema.
@@ -724,7 +734,8 @@ pub(crate) fn proposed_to_new(
             text: p.text,
             corpus_span: spans.next(),
             title: p.title,
-            category: p.category,
+            // A written artifact has no category until it is read (`Stage::Read`).
+            category: None,
             tags: p.tags,
             caveats: p.caveats,
             segment_idx: Some(segment_idx),
@@ -869,6 +880,41 @@ mod tests {
                 .all(|w| w.state == SegmentState::Verbatim),
             "a unit segmented a window that was not its own"
         );
+    }
+
+    #[tokio::test]
+    async fn a_written_artifact_has_no_category_until_it_is_read() {
+        let core = test_core().await;
+        let out = core
+            .ingest("The proxy listens on port 8080.", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let written =
+            |rows: Vec<crate::store::artifacts::Chunk>| -> Vec<crate::store::artifacts::Chunk> {
+                rows.into_iter()
+                    .filter(|c| c.provenance != crate::store::artifacts::Provenance::Passage)
+                    .collect()
+            };
+        let rows = written(core.store.artifacts_for_corpus(&out.id).await.unwrap());
+        assert!(!rows.is_empty(), "the window wrote an artifact");
+        for c in &rows {
+            assert_eq!(c.category, None, "the writer gave {} a category", c.id);
+        }
+
+        crate::jobs::test_support::drain(&core).await;
+        for c in written(core.store.artifacts_for_corpus(&out.id).await.unwrap()) {
+            if c.in_results() {
+                assert!(c.category.is_some(), "{} was never read", c.id);
+                let by =
+                    sqlx::query_scalar!("SELECT category_by FROM artifacts WHERE id = ?", c.id)
+                        .fetch_one(&core.store.pool)
+                        .await
+                        .unwrap();
+                assert_eq!(by.as_deref(), Some("reading"));
+            }
+        }
     }
 
     #[tokio::test]
@@ -1120,11 +1166,9 @@ mod tests {
         let art = |text: &str| crate::infer::ProposedArtifact {
             text: text.into(),
             title: None,
-            category: None,
             tags: vec![],
             corpus_lines: None,
             caveats: vec![],
-            pinned: false,
         };
         let chunks = vec![
             art("The note references a specific future event on Friday at 13:45."),

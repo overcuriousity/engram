@@ -144,18 +144,22 @@ pub struct Link {
 }
 
 impl Store {
-    /// Lands `related`; `dismissed` stays unbeatable and keeps its weight. Judged revisions must
-    /// be stamped or `reopen_stale_judged_links` demotes it next sweep. `weight` must clear
-    /// `associate.show_min` with room to decay; the conflict branch folds decay in before max.
-    pub async fn relate_synthesized(
+    /// A decided kind lands `related`, revisions stamped; `dismissed` stays unbeatable. `first_is_a`
+    /// names `a` as given. `weight` must clear `associate.show_min` with room to decay; the conflict
+    /// branch folds decay in before max.
+    pub async fn relate_by_kind(
         &self,
         a: &str,
         b: &str,
-        reason: &str,
+        kind: LinkKind,
+        first_is_a: Option<bool>,
         weight: f64,
         half_life_days: f64,
     ) -> Result<()> {
+        let flipped = canonical(a, b).0 != a;
         let (a, b) = canonical(a, b);
+        let first = first_is_a.map(|f| if f != flipped { "a" } else { "b" });
+        let kind = kind.as_str();
         let at = now();
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         let existing = sqlx::query!(
@@ -176,9 +180,9 @@ impl Store {
             .unwrap_or(0.0);
         sqlx::query!(
             "INSERT INTO artifact_links
-                   (a_id, b_id, weight, bumped_at, queries, cues, state, reason,
+                   (a_id, b_id, weight, bumped_at, queries, cues, state, reason, kind, first,
                     judged_rev_a, judged_rev_b, created_at)
-             VALUES (?, ?, ?, ?, 0, '[]', 'related', ?,
+             VALUES (?, ?, ?, ?, 0, '[]', 'related', NULL, ?, ?,
                      (SELECT embed_rev FROM artifacts WHERE id = ?),
                      (SELECT embed_rev FROM artifacts WHERE id = ?), ?)
              ON CONFLICT(a_id, b_id) DO UPDATE SET
@@ -189,11 +193,11 @@ impl Store {
                state = CASE WHEN artifact_links.state = 'dismissed'
                             THEN artifact_links.state ELSE 'related' END,
                reason = CASE WHEN artifact_links.state = 'dismissed'
-                             THEN artifact_links.reason ELSE excluded.reason END,
+                             THEN artifact_links.reason ELSE NULL END,
                kind = CASE WHEN artifact_links.state = 'dismissed'
-                           THEN artifact_links.kind ELSE NULL END,
+                           THEN artifact_links.kind ELSE excluded.kind END,
                first = CASE WHEN artifact_links.state = 'dismissed'
-                            THEN artifact_links.first ELSE NULL END,
+                            THEN artifact_links.first ELSE excluded.first END,
                judged_rev_a = CASE WHEN artifact_links.state = 'dismissed'
                                    THEN artifact_links.judged_rev_a
                                    ELSE excluded.judged_rev_a END,
@@ -208,7 +212,8 @@ impl Store {
                 weight.max(carried)
             },
             at,
-            reason,
+            kind,
+            first,
             a,
             b,
             at
@@ -700,7 +705,8 @@ impl Store {
     }
 
     /// Cross-corpus is decided over origins in Rust: a merge belongs to every corpus it drew from.
-    /// A link asked about in `era` is not listed again until a text changes or it is asked again.
+    /// A link asked about in `era`, by search or as a neighbour shown at capture, is not listed
+    /// again until a text changes or it is asked again.
     pub async fn links_to_judge(
         &self,
         era: &str,
@@ -723,7 +729,7 @@ impl Store {
                 AND b.status = 'active' AND b.superseded_by IS NULL
                 AND NOT EXISTS (
                     SELECT 1 FROM decisions d
-                     WHERE d.question_id = 'link_kind' AND d.subject_kind = 'link'
+                     WHERE d.question_id = 'link_kind' AND d.subject_kind IN ('link', 'shown')
                        AND d.subject_a = l.a_id AND d.subject_b = l.b_id AND d.era = ?
                        AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
                        AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
@@ -1435,11 +1441,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_synthesized_relation_is_not_reopened_by_the_next_sweep() {
+    async fn a_decided_relation_is_not_reopened_by_the_next_sweep() {
         let store = Store::memory().await.unwrap();
         let (a, b) = two_corpora(&store).await;
         store
-            .relate_synthesized(&a, &b, "both describe the same procedure", 4.0, 30.0)
+            .relate_by_kind(&b, &a, LinkKind::Example, Some(true), 4.0, 30.0)
             .await
             .unwrap();
 
@@ -1450,10 +1456,11 @@ mod tests {
         );
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(l.state, LinkState::Related);
-        assert_eq!(
-            l.reason.as_deref(),
-            Some("both describe the same procedure")
-        );
+        assert_eq!(l.kind, Some(LinkKind::Example));
+        assert_eq!(l.reason, None, "no text of the model's is stored");
+        // `first_is_a` names `b` as given above.
+        let (lo, _) = canonical(&a, &b);
+        assert_eq!(l.first_is_a, Some(lo == b));
         assert_eq!((l.judged_rev_a, l.judged_rev_b), (Some(0), Some(0)));
 
         store
@@ -1473,12 +1480,15 @@ mod tests {
             .unwrap();
         store.dismiss_link(&a, &b).await.unwrap();
         store
-            .relate_synthesized(&a, &b, "the model disagrees", 4.0, 30.0)
+            .relate_by_kind(&a, &b, LinkKind::Background, None, 4.0, 30.0)
             .await
             .unwrap();
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(l.state, LinkState::Dismissed);
-        assert_ne!(l.reason.as_deref(), Some("the model disagrees"));
+        assert_eq!(
+            l.kind, None,
+            "the model's kind does not land on a dismissal"
+        );
         assert_eq!(
             l.weight, 5.0,
             "a dismissal keeps the evidence it was made against"
@@ -1486,18 +1496,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_synthesized_relation_clears_the_floor_it_has_to_be_shown_over() {
+    async fn a_decided_relation_clears_the_floor_it_has_to_be_shown_over() {
         let store = Store::memory().await.unwrap();
         let (a, b) = two_corpora(&store).await;
         let show_min = 2.0;
         store
-            .relate_synthesized(
-                &a,
-                &b,
-                "both describe the same procedure",
-                show_min * 2.0,
-                30.0,
-            )
+            .relate_by_kind(&a, &b, LinkKind::Alternative, None, show_min * 2.0, 30.0)
             .await
             .unwrap();
         let at = now();
@@ -1543,7 +1547,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .relate_synthesized(&a, &b, "the model agrees", 4.0, 30.0)
+            .relate_by_kind(&a, &b, LinkKind::Alternative, None, 4.0, 30.0)
             .await
             .unwrap();
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
@@ -1559,7 +1563,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .relate_synthesized(&c, &d, "the model agrees", 4.0, 30.0)
+            .relate_by_kind(&c, &d, LinkKind::Alternative, None, 4.0, 30.0)
             .await
             .unwrap();
         let l = store.get_link(&c, &d).await.unwrap().unwrap();

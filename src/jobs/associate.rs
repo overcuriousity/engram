@@ -294,11 +294,16 @@ pub(crate) fn link_era(core: &Core) -> String {
     crate::core::judging::band::era(core.decider.model(), catalogue::link_kind().version)
 }
 
-/// Asked in this era about both texts as they are now, and not put back since.
-async fn asked_already(core: &Core, l: &Link, a: &Chunk, b: &Chunk) -> Result<bool> {
+/// The subject kind of a `link_kind` decision on a neighbour shown at capture, which has no link
+/// row until its answer makes one. A link found by searches is `"link"`.
+pub const SHOWN: &str = "shown";
+
+/// Asked in this era about both texts as they are now, and not put back since. `a` and `b` in
+/// canonical order, as every link question is asked.
+pub(crate) async fn asked_already(core: &Core, a: &Chunk, b: &Chunk) -> Result<bool> {
     let last = core
         .store
-        .last_logged("link_kind", &l.a_id, Some(&l.b_id), &link_era(core))
+        .last_logged("link_kind", &a.id, Some(&b.id), &link_era(core))
         .await?;
     Ok(last.is_some_and(|d| {
         d.rev_a == Some(a.embed_rev)
@@ -331,18 +336,30 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
         return Ok(());
     }
     // A retried or second unit must not ask what is already answered.
-    if asked_already(core, &link, &a, &b).await? {
+    if asked_already(core, &a, &b).await? {
         return Ok(());
     }
-
-    let (kind, direction) = (catalogue::link_kind(), catalogue::link_direction());
     let cues: Vec<String> = link.cues.iter().map(|c| c.q.clone()).collect();
+    ask_link(core, "link", &a, &b, &cues).await?;
+    Ok(())
+}
+
+/// The one way a link is asked about: `link_kind` with `link_direction` in the same request, the
+/// direction checked with the notes exchanged, then settled. `a` and `b` in canonical order.
+pub(crate) async fn ask_link(
+    core: &Core,
+    subject_kind: &'static str,
+    a: &Chunk,
+    b: &Chunk,
+    cues: &[String],
+) -> Result<Logged> {
+    let (kind, direction) = (catalogue::link_kind(), catalogue::link_direction());
     let room = state::room(core, &[&kind, &direction]);
-    let s = state::link(&note(&a), &note(&b), &cues, &core.counter, room);
+    let s = state::link(&note(a), &note(b), cues, &core.counter, room);
     let subjects = Subjects {
-        kind: "link",
-        a: link.a_id.clone(),
-        b: Some(link.b_id.clone()),
+        kind: subject_kind,
+        a: a.id.clone(),
+        b: Some(b.id.clone()),
         rev_a: Some(a.embed_rev),
         rev_b: Some(b.embed_rev),
     };
@@ -354,9 +371,8 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
         s.as_deref(),
     )
     .await?;
-    let d = exchanged(core, d, &a, &b, &cues).await?;
-    judging::settle(core, d).await?;
-    Ok(())
+    let d = exchanged(core, d, a, b, cues).await?;
+    judging::settle(core, d).await
 }
 
 /// A direction the pick could store is asked once more with the notes exchanged (B's text under
@@ -539,7 +555,8 @@ impl Applier for LinkApplier {
         let Some(b_id) = d.subject_b.as_deref() else {
             return Ok(false);
         };
-        if core.store.get_link(&d.subject_a, b_id).await?.is_none() {
+        // A shown neighbour has no row until its answer makes one; a searched link's row is gone.
+        if d.subject_kind != SHOWN && core.store.get_link(&d.subject_a, b_id).await?.is_none() {
             return Ok(false);
         }
         for (id, rev) in [(d.subject_a.as_str(), d.rev_a), (b_id, d.rev_b)] {
@@ -565,13 +582,40 @@ impl Applier for LinkApplier {
         let Some(b_id) = d.subject_b.as_deref() else {
             return Ok(vec![]);
         };
-        let Some(link) = core.store.get_link(&d.subject_a, b_id).await? else {
-            return Ok(vec![]);
+        let link = match core.store.get_link(&d.subject_a, b_id).await? {
+            Some(link) => {
+                // Settled since it was asked, by a person's dismissal or a sibling: nothing is left.
+                if link.state != LinkState::Learning {
+                    return Ok(vec![]);
+                }
+                link
+            }
+            // A neighbour shown at capture: the answer makes the link, unless it says there is none.
+            None if d.subject_kind == SHOWN && kind != LinkKind::Unrelated => {
+                if artifact(core, &d.subject_a).await?.is_none()
+                    || artifact(core, b_id).await?.is_none()
+                {
+                    return Ok(vec![]);
+                }
+                let first = first_is_a(d).filter(|_| kind.directional());
+                // Twice `show_min`: a decided relation stays visible for one half-life, then fades.
+                core.store
+                    .relate_by_kind(
+                        &d.subject_a,
+                        b_id,
+                        kind,
+                        first,
+                        core.associate.show_min * 2.0,
+                        core.associate.half_life_days,
+                    )
+                    .await?;
+                core.store
+                    .get_link(&d.subject_a, b_id)
+                    .await?
+                    .ok_or(Error::NotFound)?
+            }
+            None => return Ok(vec![]),
         };
-        // Settled since it was asked, by a person's dismissal or a sibling: nothing is left to do.
-        if link.state != LinkState::Learning {
-            return Ok(vec![]);
-        }
         let (Some(a), Some(b)) = (
             artifact(core, &link.a_id).await?,
             artifact(core, &link.b_id).await?,
