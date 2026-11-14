@@ -128,6 +128,11 @@ pub async fn run(verb: args::Verb, cli: &args::CliArgs) -> i32 {
                 2
             }
         },
+        // The client arrives in the next commit.
+        args::Verb::Decide { .. } => {
+            eprintln!("-d is not in this build yet");
+            2
+        }
         args::Verb::Remind(text) => {
             match capture::run_text(
                 &endpoint,

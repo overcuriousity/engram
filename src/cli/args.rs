@@ -6,22 +6,35 @@ use crate::error::{Error, Result};
 #[derive(clap::Args, Debug, Default, Clone)]
 pub struct CliArgs {
     /// Capture a file, a link, a sentence, or `-` for standard input. Repeatable.
-    #[arg(short = 'c', value_name = "PATH|URL|TEXT|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind"])]
+    #[arg(short = 'c', value_name = "PATH|URL|TEXT|-", num_args = 1.., conflicts_with_all = ["search", "ask", "remind", "decide"])]
     pub capture: Vec<String>,
     /// Search. A leading bare integer is how many hits are wanted.
-    #[arg(short = 's', value_name = "[N] QUERY", num_args = 1.., conflicts_with_all = ["capture", "ask", "remind"])]
+    #[arg(short = 's', value_name = "[N] QUERY", num_args = 1.., conflicts_with_all = ["capture", "ask", "remind", "decide"])]
     pub search: Vec<String>,
     /// Ask one question across the base.
-    #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search", "remind"])]
+    #[arg(short = 'a', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search", "remind", "decide"])]
     pub ask: Vec<String>,
+    /// Decide one question from the base: yes or no, or from --option or --level.
+    #[arg(short = 'd', value_name = "QUESTION", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "remind", "show", "status"])]
+    pub decide: Vec<String>,
+    // The other verbs are refused here too: clap waives `requires` when a present flag conflicts with what is required.
+    /// An option to choose between, as NAME or NAME=DESCRIPTION. Repeatable.
+    #[arg(long = "option", value_name = "NAME[=DESCRIPTION]", requires = "decide", conflicts_with_all = ["levels", "capture", "search", "ask", "remind", "show", "status"])]
+    pub options: Vec<String>,
+    /// A level of a scale, lowest first. Repeatable.
+    #[arg(long = "level", value_name = "TEXT", requires = "decide", conflicts_with_all = ["capture", "search", "ask", "remind", "show", "status"])]
+    pub levels: Vec<String>,
+    /// What the notes cannot know about now; `-` reads it from stdin.
+    #[arg(long, value_name = "TEXT|-", requires = "decide", conflicts_with_all = ["capture", "search", "ask", "remind", "show", "status"])]
+    pub situation: Option<String>,
     /// Capture as a reminder: the classifier is skipped and the note is dated.
-    #[arg(short = 'r', value_name = "TEXT", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "show", "status"])]
+    #[arg(short = 'r', value_name = "TEXT", num_args = 1.., conflicts_with_all = ["capture", "search", "ask", "show", "status", "decide"])]
     pub remind: Vec<String>,
     /// What to call this capture (only with `-c`).
-    #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "show", "status"])]
+    #[arg(long, value_name = "TITLE", conflicts_with_all = ["search", "ask", "decide", "show", "status"])]
     pub title: Option<String>,
     /// A note stored beside the capture: where it came from, why it matters.
-    #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "show", "status"])]
+    #[arg(long, value_name = "NOTE", conflicts_with_all = ["search", "ask", "decide", "show", "status"])]
     pub note: Option<String>,
     /// Narrow a search to artifacts carrying this tag. Repeatable.
     #[arg(long = "tag", value_name = "TAG", conflicts_with_all = ["ask", "show", "status", "remind"])]
@@ -43,13 +56,13 @@ pub struct CliArgs {
     #[arg(long, value_name = "WHEN", default_value = "auto")]
     pub fancy: Fancy,
     /// After capturing, follow the background stages until they finish.
-    #[arg(long, conflicts_with_all = ["search", "ask", "show", "status", "remind"])]
+    #[arg(long, conflicts_with_all = ["search", "ask", "decide", "show", "status", "remind"])]
     pub watch: bool,
     /// Read one artifact in full: a rank from the last search, an id prefix, or a whole id.
-    #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask"])]
+    #[arg(long, value_name = "RANK|ID", conflicts_with_all = ["capture", "search", "ask", "decide"])]
     pub show: Option<String>,
     /// What the base holds, what it is working through, and what it has been learning.
-    #[arg(long, conflicts_with_all = ["capture", "search", "ask", "show"])]
+    #[arg(long, conflicts_with_all = ["capture", "search", "ask", "decide", "show"])]
     pub status: bool,
     // Flags `--show` does not honour refuse it from their side, so each conflict is declared once;
     // `--status` likewise, except `--json`, which it honours.
@@ -74,10 +87,36 @@ pub enum Verb {
         query: String,
     },
     Ask(String),
+    Decide {
+        question: String,
+        kind: DecideKind,
+        situation: Option<String>,
+    },
     Remind(String),
     Status,
     /// One artifact, read in full; carries what was typed, as a rank needs the remembered list.
     Show(String),
+}
+
+/// What `-d` asks: yes or no unless options or levels were given.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecideKind {
+    Noul,
+    /// (name, description), in the order given.
+    Choice(Vec<(String, String)>),
+    /// Lowest first.
+    Score(Vec<String>),
+}
+
+/// `NAME` or `NAME=DESCRIPTION`, split at the first `=` so a description may hold one.
+pub fn option(raw: &str) -> Result<(String, String)> {
+    let (name, description) = raw.split_once('=').unwrap_or((raw, ""));
+    if name.trim().is_empty() {
+        return Err(Error::Validation(format!(
+            "--option \"{raw}\" needs a name before any ="
+        )));
+    }
+    Ok((name.to_string(), description.to_string()))
 }
 
 /// The verb, or `None` to be the server. `stdin` is a closure so this runs in a test.
@@ -92,6 +131,7 @@ pub fn verb(
         !args.capture.is_empty(),
         !args.search.is_empty(),
         !args.ask.is_empty(),
+        !args.decide.is_empty(),
         !args.remind.is_empty(),
         args.show.is_some(),
         args.status,
@@ -103,7 +143,7 @@ pub fn verb(
         // Before stdin is read: `echo yes | engram --delete-user x` must not capture "yes".
         if named > 0 {
             return Err(Error::Validation(
-                "`-c`, `-s`, `-a`, `-r`, `--show` and `--status` are the client half \
+                "`-c`, `-s`, `-a`, `-d`, `-r`, `--show` and `--status` are the client half \
                  of this binary; run them on their own, without the server's \
                  own flags"
                     .into(),
@@ -115,7 +155,7 @@ pub fn verb(
     if named > 1 {
         // clap refuses this first; this is for callers that build `CliArgs` themselves.
         return Err(Error::Validation(
-            "one verb at a time: `-c`, `-s`, `-a`, `-r`, `--show` or `--status`".into(),
+            "one verb at a time: `-c`, `-s`, `-a`, `-d`, `-r`, `--show` or `--status`".into(),
         ));
     }
 
@@ -133,6 +173,9 @@ pub fn verb(
     }
     if !args.ask.is_empty() {
         return Ok(Some(Verb::Ask(read(&args.ask, stdin)?)));
+    }
+    if !args.decide.is_empty() {
+        return decide(args, stdin).map(Some);
     }
     if !args.remind.is_empty() {
         return Ok(Some(Verb::Remind(read(&args.remind, stdin)?)));
@@ -162,6 +205,38 @@ pub fn verb(
         return Ok(Some(Verb::CapturePiped(piped)));
     }
     Ok(None)
+}
+
+fn decide(args: &CliArgs, stdin: impl FnOnce() -> std::io::Result<String>) -> Result<Verb> {
+    let dash = |words: &[String]| words.join(" ").trim() == "-";
+    let situation_dash = args.situation.as_deref().map(str::trim) == Some("-");
+    if dash(&args.decide) && situation_dash {
+        return Err(Error::Validation(
+            "stdin holds one text: give the question or the situation as `-`, not both".into(),
+        ));
+    }
+    let kind = if !args.options.is_empty() {
+        DecideKind::Choice(
+            args.options
+                .iter()
+                .map(|o| option(o))
+                .collect::<Result<_>>()?,
+        )
+    } else if !args.levels.is_empty() {
+        DecideKind::Score(args.levels.clone())
+    } else {
+        DecideKind::Noul
+    };
+    let (question, situation) = if situation_dash {
+        (args.decide.join(" "), Some(read(&["-".into()], stdin)?))
+    } else {
+        (read(&args.decide, stdin)?, args.situation.clone())
+    };
+    Ok(Verb::Decide {
+        question,
+        kind,
+        situation,
+    })
 }
 
 /// The words a verb was given, or stdin when they are just `-`.
@@ -398,5 +473,176 @@ mod tests {
             verb(&both, false, false, || Ok(String::new())).is_err(),
             "one verb at a time"
         );
+    }
+
+    #[derive(clap::Parser)]
+    struct OnlyTheClientHalf {
+        #[command(flatten)]
+        cli: CliArgs,
+    }
+
+    fn parse(argv: &[&str]) -> std::result::Result<CliArgs, clap::Error> {
+        <OnlyTheClientHalf as clap::Parser>::try_parse_from(
+            std::iter::once("engram").chain(argv.iter().copied()),
+        )
+        .map(|p| p.cli)
+    }
+
+    fn decided(argv: &[&str], stdin: &'static str) -> Result<Option<Verb>> {
+        verb(
+            &parse(argv).unwrap(),
+            false,
+            !stdin.is_empty(),
+            piped(stdin),
+        )
+    }
+
+    #[test]
+    fn d_alone_is_yes_or_no() {
+        assert_eq!(
+            decided(&["-d", "Keep", "it?"], "").unwrap(),
+            Some(Verb::Decide {
+                question: "Keep it?".into(),
+                kind: DecideKind::Noul,
+                situation: None,
+            })
+        );
+    }
+
+    #[test]
+    fn options_split_at_the_first_equals() {
+        let v = decided(
+            &[
+                "-d",
+                "Which?",
+                "--option",
+                "keep",
+                "--option",
+                "switch=Move to Gemma",
+                "--option",
+                "a=b=c",
+            ],
+            "",
+        )
+        .unwrap();
+        let pairs = |p: &[(&str, &str)]| {
+            p.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            v,
+            Some(Verb::Decide {
+                question: "Which?".into(),
+                kind: DecideKind::Choice(pairs(&[
+                    ("keep", ""),
+                    ("switch", "Move to Gemma"),
+                    ("a", "b=c")
+                ])),
+                situation: None,
+            })
+        );
+    }
+
+    #[test]
+    fn an_option_without_a_name_is_refused() {
+        assert!(matches!(option("=x"), Err(Error::Validation(_))));
+        assert!(matches!(option(""), Err(Error::Validation(_))));
+        assert!(matches!(
+            decided(&["-d", "Q?", "--option", "=x", "--option", "b"], ""),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn levels_make_a_scale_in_the_order_given() {
+        let v = decided(
+            &[
+                "-d",
+                "How urgent?",
+                "--level",
+                "can wait",
+                "--level",
+                "this month",
+                "--level",
+                "now",
+            ],
+            "",
+        )
+        .unwrap();
+        assert!(matches!(
+            v,
+            Some(Verb::Decide { kind: DecideKind::Score(ref l), .. }) if l == &["can wait", "this month", "now"]
+        ));
+    }
+
+    #[test]
+    fn options_and_levels_cannot_be_mixed() {
+        assert!(
+            parse(&[
+                "-d", "Q?", "--option", "a", "--option", "b", "--level", "low"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_decide_flags_need_d() {
+        assert!(parse(&["--option", "a", "-s", "x"]).is_err());
+        assert!(parse(&["--level", "a", "-a", "x"]).is_err());
+        assert!(parse(&["--situation", "x"]).is_err());
+    }
+
+    #[test]
+    fn d_takes_the_filters_and_json() {
+        let a = parse(&["-d", "x", "--tag", "t", "--category", "c", "--json"]).unwrap();
+        assert_eq!(a.tags, ["t"]);
+        assert_eq!(a.category.as_deref(), Some("c"));
+        assert!(a.json);
+    }
+
+    #[test]
+    fn d_and_another_verb_are_refused() {
+        assert!(parse(&["-d", "x", "-a", "y"]).is_err());
+        for other in [["-c", "y"], ["-s", "y"], ["-r", "y"], ["--show", "3"]] {
+            let mut argv = vec!["-d", "x"];
+            argv.extend_from_slice(&other);
+            assert!(parse(&argv).is_err(), "{argv:?}");
+        }
+        assert!(parse(&["-d", "x", "--status"]).is_err());
+    }
+
+    #[test]
+    fn a_dash_reads_the_question_or_the_situation_from_stdin_but_not_both() {
+        assert!(matches!(
+            decided(&["-d", "-"], "Q?\n").unwrap(),
+            Some(Verb::Decide { ref question, situation: None, .. }) if question == "Q?"
+        ));
+        assert!(matches!(
+            decided(&["-d", "Q", "--situation", "-"], "12 GB\n").unwrap(),
+            Some(Verb::Decide { ref question, ref situation, .. })
+                if question == "Q" && situation.as_deref() == Some("12 GB")
+        ));
+        assert!(matches!(
+            decided(&["-d", "-", "--situation", "-"], "x"),
+            Err(Error::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn the_one_verb_message_names_d() {
+        let a = CliArgs {
+            decide: vec!["x".into()],
+            ask: vec!["y".into()],
+            ..Default::default()
+        };
+        let Err(Error::Validation(m)) = verb(&a, false, false, piped("")) else {
+            panic!("two verbs were accepted");
+        };
+        assert!(m.contains("`-d`"), "{m}");
+        let Err(Error::Validation(m)) = verb(&a, true, false, piped("")) else {
+            panic!("a verb beside a server command was accepted");
+        };
+        assert!(m.contains("`-d`"), "{m}");
     }
 }

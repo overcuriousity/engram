@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[command(
     name = "engram",
     version = env!("ENGRAM_VERSION"),
-    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s, -a, --show or --status it is a client of one."
+    about = "engram: a self-hosted personal knowledge base.\n\nWith no verb flag it is the server. With -c, -s, -a, -d, --show or --status it is a client of one."
 )]
 struct Args {
     #[arg(long)]
