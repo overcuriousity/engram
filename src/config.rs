@@ -240,12 +240,30 @@ impl Default for Bands {
     }
 }
 
+/// Starting lines per question, fixed from the replay on a real base (2026-11-14); a `[decide.bands.<id>]` in the file wins.
+const DEFAULTS: &[(&str, f64, f64)] = &[
+    // No burial or rescue has ever been judged on the base it was measured on: it asks, it does not act.
+    ("reap_worth", 0.99, 0.60),
+    // Nothing to replay it over: it asks, it does not act.
+    ("answerable", 0.99, 0.60),
+];
+
 impl Bands {
+    /// Per field: the file's `[decide.bands.<id>]` value, else the question's entry in `DEFAULTS`,
+    /// else the global `act_at` / `ask_at`. A built-in entry therefore outranks a global value set in
+    /// the file: the per-question line is the more specific one.
     pub fn of(&self, question_id: &str) -> Thresholds {
         let o = self.per.get(question_id);
+        let d = DEFAULTS.iter().find(|d| d.0 == question_id);
         Thresholds {
-            act_at: o.and_then(|o| o.act_at).unwrap_or(self.act_at),
-            ask_at: o.and_then(|o| o.ask_at).unwrap_or(self.ask_at),
+            act_at: o
+                .and_then(|o| o.act_at)
+                .or(d.map(|d| d.1))
+                .unwrap_or(self.act_at),
+            ask_at: o
+                .and_then(|o| o.ask_at)
+                .or(d.map(|d| d.2))
+                .unwrap_or(self.ask_at),
         }
     }
 }
@@ -2020,6 +2038,8 @@ impl Config {
             dc.bands
                 .per
                 .keys()
+                .map(String::as_str)
+                .chain(DEFAULTS.iter().map(|d| d.0))
                 .map(|k| (format!("decide.bands.{k}"), dc.bands.of(k))),
         );
         for (key, t) in bands {
@@ -3328,6 +3348,40 @@ mode = "off"
             }
         );
         assert_eq!(d.bands.of("x"), base);
+    }
+
+    #[test]
+    fn bands_start_per_question_from_the_replay() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let t = |a, k| Thresholds {
+            act_at: a,
+            ask_at: k,
+        };
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        for id in ["reap_worth", "answerable"] {
+            assert_eq!(d.bands.of(id), t(0.99, 0.60), "{id}");
+        }
+        for id in ["pair_relation", "link_kind", "answers_query", "unknown"] {
+            assert_eq!(d.bands.of(id), t(0.90, 0.60), "{id}");
+        }
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nact_at = 0.97\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!(d.bands.of("reap_worth"), t(0.97, 0.60));
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nask_at = 0.70\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!(d.bands.of("reap_worth"), t(0.99, 0.70));
+    }
+
+    #[test]
+    fn an_ask_at_above_a_built_in_act_at_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nask_at = 0.995\n");
+        match Config::load(Some(&write(&dir, &body))) {
+            Err(ConfigError::Invalid(m)) => assert!(m.contains("decide.bands.reap_worth"), "{m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
     }
 
     #[test]
