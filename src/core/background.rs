@@ -88,6 +88,8 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     if core.reap.enabled && core.judge.is_some() && core.evolve.autonomous.acts_on_corpus() {
         out.push((Stage::Reap, CONSOLIDATE_TARGET));
     }
+    // Always: waiting decisions are applied and seated whatever else is switched off.
+    out.push((Stage::Decisions, CONSOLIDATE_TARGET));
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
         // Behind the generator: a pursuit reaching `Generate` with no `[infer.generate]` would stay
@@ -120,6 +122,7 @@ pub fn periodic_period(
         Stage::Context => crate::jobs::context::INTERVAL_HOURS.saturating_mul(3600),
         Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
         Stage::Reap => core.reap.interval_mins.max(1).saturating_mul(60),
+        Stage::Decisions => u64::from(core.decide_cfg.tick_mins.max(1)).saturating_mul(60),
         // Shorter than the idle window, so a run of searches is grouped soon after it goes quiet.
         Stage::Pursuit => (core.pursuit.idle_secs / 2).max(60),
         _ => return None,

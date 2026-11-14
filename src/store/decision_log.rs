@@ -324,6 +324,53 @@ impl Store {
         Ok(tx.commit().await?)
     }
 
+    /// The journal rows a decision wrote.
+    pub async fn decision_action_ids(&self, id: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT action_id FROM decision_actions WHERE decision_id = ? ORDER BY action_id",
+            id
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    pub async fn set_decision_reason(&self, id: &str, reason: &str) -> Result<()> {
+        sqlx::query!("UPDATE decisions SET reason = ? WHERE id = ?", reason, id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// A waiting act becomes a waiting ask with `reason`. False: it was not a waiting act.
+    pub async fn demote_decision(&self, id: &str, reason: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET band = 'ask', reason = ?
+              WHERE id = ? AND band = 'act' AND state = 'waiting'",
+            reason,
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// A waiting ask takes an open row if fewer than `max` are open, in one statement so two
+    /// workers cannot both take the last. False: no seat, or it was no longer waiting.
+    pub async fn seat_ask(&self, id: &str, max: i64) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET state = 'open'
+              WHERE id = ? AND band = 'ask' AND state = 'waiting'
+                AND (SELECT COUNT(*) FROM decisions WHERE state = 'open') < ?",
+            id,
+            max
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
     /// Band act, waiting, highest top first.
     pub async fn waiting_acts(&self, limit: i64) -> Result<Vec<Logged>> {
         self.select_logged(

@@ -112,6 +112,8 @@ pub struct Core {
     pub embedder: Arc<dyn Embedder>,
     /// Always there: `[infer.decide]` is required.
     pub decider: Arc<dyn Decider>,
+    /// What each question's answers do, by question id; empty until a stage registers.
+    pub appliers: Arc<crate::core::judging::Appliers>,
     /// `false` where the decider stands for nothing: the contained build, whose role points at a
     /// port no model listens on. See `Core::decides`.
     pub decides: bool,
@@ -491,6 +493,7 @@ impl Core {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            appliers: Arc::new(Default::default()),
             decodes: Arc::new(tokio::sync::Semaphore::new(
                 crate::core::image::MAX_CONCURRENT_DECODES,
             )),
@@ -789,6 +792,7 @@ pub mod test_support {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            appliers: Arc::new(Default::default()),
             decodes: Arc::new(tokio::sync::Semaphore::new(
                 crate::core::image::MAX_CONCURRENT_DECODES,
             )),

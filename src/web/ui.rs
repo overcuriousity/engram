@@ -171,6 +171,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "probe" => "Minting probes",
         "condense" => "Condensing",
         "fetch" => "Fetching links again",
+        "decisions" => "Applying decisions",
         other => other,
     }
 }
@@ -493,6 +494,11 @@ const SWEEP_WORDS: &[(&str, &str, &str)] = &[
     ("retention", "expired", "records expired"),
     ("retention", "named", "gaps named"),
     ("pursuit", "pursuits", "pursuits opened"),
+    ("decisions", "applied", "decisions applied"),
+    ("decisions", "reasked", "changed, asked again"),
+    ("decisions", "seated", "questions put to you"),
+    ("decisions", "lapsed", "questions lapsed"),
+    ("decisions", "kept", "decisions kept"),
 ];
 
 pub(crate) fn tally_sweep(stage: &str, detail: &str, totals: &mut Vec<(String, i64)>) {

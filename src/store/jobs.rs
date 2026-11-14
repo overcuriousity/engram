@@ -46,11 +46,13 @@ pub enum Stage {
     Condense,
     /// Local, background: a page that stays down is retried at the ceiling, then left.
     Fetch,
+    /// Collection-targeted: applies waiting decisions, seats waiting asks, lapses old ones. No call.
+    Decisions,
 }
 
 impl Stage {
     /// Written out: a stage missing here is not a compile error, just invisible to the backfill.
-    pub const ALL: [Stage; 21] = [
+    pub const ALL: [Stage; 22] = [
         Stage::Synthesize,
         Stage::SegmentWindow,
         Stage::Title,
@@ -72,6 +74,7 @@ impl Stage {
         Stage::Probe,
         Stage::Condense,
         Stage::Fetch,
+        Stage::Decisions,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -97,6 +100,7 @@ impl Stage {
             Stage::Probe => "probe",
             Stage::Condense => "condense",
             Stage::Fetch => "fetch",
+            Stage::Decisions => "decisions",
         }
     }
     /// In `ALL`'s order.
@@ -134,7 +138,8 @@ impl Stage {
             | Stage::Context
             | Stage::Remind
             | Stage::Probe
-            | Stage::Fetch => false,
+            | Stage::Fetch
+            | Stage::Decisions => false,
         }
     }
 
@@ -162,7 +167,8 @@ impl Stage {
             | Stage::Reap
             | Stage::Probe
             | Stage::Condense
-            | Stage::Fetch => 1,
+            | Stage::Fetch
+            | Stage::Decisions => 1,
         }
     }
 
@@ -190,7 +196,8 @@ impl Stage {
             | Stage::Reap
             | Stage::Probe
             | Stage::Condense
-            | Stage::Fetch => false,
+            | Stage::Fetch
+            | Stage::Decisions => false,
         }
     }
 
@@ -217,6 +224,7 @@ impl Stage {
             "probe" => Some(Stage::Probe),
             "condense" => Some(Stage::Condense),
             "fetch" => Some(Stage::Fetch),
+            "decisions" => Some(Stage::Decisions),
             _ => None,
         }
     }
@@ -1842,5 +1850,16 @@ mod tests {
             .filter(|s| s.calls_a_generator())
             .collect();
         assert_eq!(named, Stage::GENERATORS);
+    }
+
+    #[test]
+    fn decisions_is_the_twenty_second_stage_a_background_sweep_that_calls_no_generator() {
+        assert_eq!(Stage::ALL.len(), 22);
+        assert!(Stage::ALL.contains(&Stage::Decisions));
+        assert_eq!(Stage::Decisions.as_str(), "decisions");
+        assert_eq!(Stage::parse("decisions"), Some(Stage::Decisions));
+        assert!(!Stage::GENERATORS.contains(&Stage::Decisions));
+        assert_eq!(Stage::Decisions.class(), 1);
+        assert!(!Stage::Decisions.reads_a_capture());
     }
 }

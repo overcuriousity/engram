@@ -1659,7 +1659,8 @@ impl Core {
             | Stage::ArmDedupe
             | Stage::Context
             | Stage::Remind
-            | Stage::Reap => {
+            | Stage::Reap
+            | Stage::Decisions => {
                 return Err(Error::Validation(
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));

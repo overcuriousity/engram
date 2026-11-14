@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET state = 'open'\n              WHERE id = ? AND band = 'ask' AND state = 'waiting'\n                AND (SELECT COUNT(*) FROM decisions WHERE state = 'open') < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a5b47e0c5b84b59add89af471fef6147922e0babc363d4a81f125ee0e21cf8e3"
+}
