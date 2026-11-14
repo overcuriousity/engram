@@ -32,6 +32,25 @@ pub async fn run(core: &Core) -> Result<Report> {
             .await?,
         ..Default::default()
     };
+    // A stage that died between `ask` and `settle`: closed and asked again, never applied.
+    let orphaned = now - i64::from(core.decide_cfg.tick_mins.max(1)) * 60;
+    for d in core.store.unsettled_acts(orphaned).await? {
+        let Some(applier) = core.appliers.get(&d.question_id) else {
+            continue;
+        };
+        if !core.store.close_unsettled(&d.id).await? {
+            continue;
+        }
+        if let Err(e) = applier.reopen(core, &d).await {
+            tracing::warn!(decision = d.id, error = %e, "could not ask an orphaned decision again");
+            core.store
+                .set_decision_state(&d.id, State::Done, State::Waiting)
+                .await?;
+            core.store.set_decision_reason(&d.id, "unsettled").await?;
+            continue;
+        }
+        r.reasked += 1;
+    }
     for d in core.store.waiting_acts(ACTS_PER_RUN).await? {
         let Some(applier) = core.appliers.get(&d.question_id) else {
             continue;
@@ -45,11 +64,7 @@ pub async fn run(core: &Core) -> Result<Report> {
             },
             Ok(false) => {
                 // Closed before the reopen, so a second worker reaching it does neither.
-                if !core
-                    .store
-                    .set_decision_state(&d.id, State::Waiting, State::Done)
-                    .await?
-                {
+                if !core.store.claim_act(&d.id).await? {
                     continue;
                 }
                 match applier.reopen(core, &d).await {

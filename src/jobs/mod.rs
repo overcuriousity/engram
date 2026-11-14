@@ -333,7 +333,8 @@ async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: 
     let Some(period) = crate::core::background::periodic_period(core, stage) else {
         return;
     };
-    let empty = if did_work {
+    // Decisions keep their tick: a freed seat or a new day's cap is nothing `arm_now` hears of.
+    let empty = if did_work || stage == Stage::Decisions {
         0
     } else {
         core.store.empty_runs(stage, target).await.unwrap_or(0) + 1
@@ -903,6 +904,21 @@ mod tests {
     async fn waits_about(core: &Core, stage: Stage, expected: i64) -> bool {
         let (run_after, _) = pending_row(core, stage).await;
         (run_after - crate::store::now()).abs_diff(expected) <= 2
+    }
+
+    #[tokio::test]
+    async fn the_decisions_sweep_keeps_its_pace_when_it_finds_nothing() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Decisions)
+            .unwrap()
+            .as_secs() as i64;
+        for run in 1..=3 {
+            sweep_finds(&core, Stage::Decisions, false).await;
+            assert!(
+                waits_about(&core, Stage::Decisions, base).await,
+                "empty run {run} backed off"
+            );
+        }
     }
 
     #[tokio::test]

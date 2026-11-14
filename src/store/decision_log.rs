@@ -371,10 +371,61 @@ impl Store {
             == 1)
     }
 
-    /// Band act, waiting, highest top first.
+    /// An act the stage that asked has settled: the sweep may now claim it.
+    pub async fn mark_act_settled(&self, id: &str) -> Result<()> {
+        sqlx::query!(
+            "UPDATE decisions SET reason = NULL
+              WHERE id = ? AND band = 'act' AND state = 'waiting' AND reason = 'unsettled'",
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A settled waiting act to done, for the one worker that acts on it. False: it was not
+    /// one (taken, demoted, or not yet settled).
+    pub async fn claim_act(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET state = 'done'
+              WHERE id = ? AND state = 'waiting' AND band = 'act' AND reason IS NOT 'unsettled'",
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Acts no stage settled or demoted before `older_than`: the stage died in between.
+    pub async fn unsettled_acts(&self, older_than: i64) -> Result<Vec<Logged>> {
+        self.select_logged(
+            "WHERE band = 'act' AND state = 'waiting' AND reason = 'unsettled' AND decided_at < ?
+             ORDER BY decided_at, id LIMIT 200",
+            &[],
+            Some(older_than),
+        )
+        .await
+    }
+
+    /// An orphaned unsettled act to done with reason `changed`. False: someone settled it.
+    pub async fn close_unsettled(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET state = 'done', reason = 'changed'
+              WHERE id = ? AND state = 'waiting' AND band = 'act' AND reason = 'unsettled'",
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// Band act, waiting and settled, highest top first.
     pub async fn waiting_acts(&self, limit: i64) -> Result<Vec<Logged>> {
         self.select_logged(
-            "WHERE band = 'act' AND state = 'waiting' ORDER BY top DESC, id LIMIT ?",
+            "WHERE band = 'act' AND state = 'waiting' AND reason IS NOT 'unsettled'
+             ORDER BY top DESC, id LIMIT ?",
             &[],
             Some(limit),
         )
@@ -432,12 +483,15 @@ impl Store {
         .rows_affected())
     }
 
-    /// Done act decisions with an action and no outcome become kept.
+    /// Done act decisions with no outcome whose newest action is older than `older_than`
+    /// become kept: the window runs from the act, not from the decision, which may have waited.
     pub async fn close_outcome_windows(&self, older_than: i64) -> Result<u64> {
         Ok(sqlx::query!(
             "UPDATE decisions SET outcome = 'kept', outcome_at = ?
-              WHERE band = 'act' AND state = 'done' AND outcome IS NULL AND decided_at < ?
-                AND EXISTS (SELECT 1 FROM decision_actions WHERE decision_id = decisions.id)",
+              WHERE band = 'act' AND state = 'done' AND outcome IS NULL
+                AND (SELECT MAX(a.at) FROM decision_actions da
+                       JOIN corpus_actions a ON a.id = da.action_id
+                      WHERE da.decision_id = decisions.id) < ?",
             now(),
             older_than
         )
@@ -776,6 +830,37 @@ mod tests {
         );
         assert_eq!(store.logged(&bare).await.unwrap().unwrap().outcome, None);
         assert_eq!(store.logged(&waiting).await.unwrap().unwrap().outcome, None);
+    }
+
+    #[tokio::test]
+    async fn kept_is_counted_from_the_action_not_the_decision() {
+        let store = Store::memory().await.unwrap();
+        let fresh = merged(&store, &["x"]).await;
+        let old = merged(&store, &["y"]).await;
+        for id in [&fresh, &old] {
+            age(&store, id, now() - 40 * 86_400).await;
+        }
+        for (subject, days) in [("x", 1), ("y", 31)] {
+            // runtime: test-only backdating.
+            sqlx::query("UPDATE corpus_actions SET at = ? WHERE subject_id = ?")
+                .bind(now() - days * 86_400)
+                .bind(subject)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store
+                .close_outcome_windows(now() - 30 * 86_400)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(store.logged(&fresh).await.unwrap().unwrap().outcome, None);
+        assert_eq!(
+            store.logged(&old).await.unwrap().unwrap().outcome,
+            Some(Outcome::Kept)
+        );
     }
 
     #[tokio::test]

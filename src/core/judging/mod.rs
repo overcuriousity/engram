@@ -89,6 +89,9 @@ impl Core {
     }
 }
 
+/// The reason an act carries between `ask` and its stage's `settle` or `demote_to_ask`.
+const UNSETTLED: &str = "unsettled";
+
 async fn logged(core: &Core, id: &str) -> Result<Logged> {
     core.store.logged(id).await?.ok_or(Error::NotFound)
 }
@@ -174,7 +177,8 @@ pub async fn ask(core: &Core, a: &Asked, s: Subjects, state: Option<&str>) -> Re
         row.pick = pick;
         row.swapped_agree = agree;
         row.band = b;
-        row.reason = None;
+        // Hidden from the sweep until the stage that asked settles or demotes it.
+        row.reason = (b == Band::Act).then(|| UNSETTLED.into());
         row.state = if b == Band::Leave {
             State::Done
         } else {
@@ -206,20 +210,18 @@ pub(crate) async fn settle_counted(core: &Core, d: Logged) -> Result<(Logged, bo
     }
     match d.band {
         Band::Act => {
+            // Settled whatever happens next: a waiting act is the sweep's from here.
+            core.store.mark_act_settled(&d.id).await?;
             let Some(applier) = core.appliers.get(&d.question_id) else {
-                return Ok((d, false));
+                return Ok((logged(core, &d.id).await?, false));
             };
             if let Some(job) = applier.job()
                 && !core.may_act(job).await?
             {
-                return Ok((d, false));
+                return Ok((logged(core, &d.id).await?, false));
             }
-            // Claimed before the act, so a second worker reaching it does nothing.
-            if !core
-                .store
-                .set_decision_state(&d.id, State::Waiting, State::Done)
-                .await?
-            {
+            // Claimed before the act, so a second worker, or a demotion since `d` was read, wins.
+            if !core.store.claim_act(&d.id).await? {
                 return Ok((logged(core, &d.id).await?, false));
             }
             match applier.apply(core, &d, &d.pick, DecidedBy::Model).await {
@@ -233,11 +235,9 @@ pub(crate) async fn settle_counted(core: &Core, d: Logged) -> Result<(Logged, bo
         }
         Band::Ask => {
             let max = i64::try_from(core.decide_cfg.ask_open_max).unwrap_or(i64::MAX);
-            if core.store.seat_ask(&d.id, max).await? {
-                Ok((logged(core, &d.id).await?, true))
-            } else {
-                Ok((d, false))
-            }
+            let seated = core.store.seat_ask(&d.id, max).await?;
+            // As it stands: a sweep may have seated it since `d` was read.
+            Ok((logged(core, &d.id).await?, seated))
         }
         Band::Leave => Ok((d, false)),
     }
@@ -693,6 +693,79 @@ mod tests {
             .unwrap();
         assert_eq!(settle(&core, d).await.unwrap().state, State::Done);
         assert_eq!(ap.applied().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_sweep_does_not_see_an_unsettled_act() {
+        let (core, ap, _) = core_with(TestApplier::new(CHOICE), by_state).await;
+        let d = ask(&core, &q_choice(), subjects("a"), Some("0.95"))
+            .await
+            .unwrap();
+        assert!(core.store.waiting_acts(10).await.unwrap().is_empty());
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!((r.applied, r.reasked), (0, 0));
+        assert!(ap.applied().is_empty());
+        assert_eq!(state_of(&core, &d.id).await, State::Waiting);
+        // Settled, it is the sweep's to apply.
+        assert_eq!(settle(&core, d).await.unwrap().state, State::Done);
+    }
+
+    #[tokio::test]
+    async fn a_demote_racing_a_sweep_never_applies() {
+        let (core, ap, _) = core_with(TestApplier::new(CHOICE), by_state).await;
+        let d = ask(&core, &q_choice(), subjects("a"), Some("0.99"))
+            .await
+            .unwrap();
+        let (r, demoted) = tokio::join!(
+            crate::jobs::decisions::run(&core),
+            demote_to_ask(&core, d, "restricted")
+        );
+        assert_eq!(r.unwrap().applied, 0);
+        let d = settle(&core, demoted.unwrap()).await.unwrap();
+        assert_eq!((d.band, d.state), (Band::Ask, State::Open));
+        assert!(ap.applied().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_act_read_before_its_demotion_is_not_claimed() {
+        let (mut core, ap, _) = core_with(TestApplier::new(CHOICE), by_state).await;
+        core.evolve.max_actions_per_day = 0;
+        let d = ask(&core, &q_choice(), subjects("a"), Some("0.99"))
+            .await
+            .unwrap();
+        settle(&core, d).await.unwrap();
+        let stale = core.store.waiting_acts(10).await.unwrap().remove(0);
+        demote_to_ask(&core, stale.clone(), "restricted")
+            .await
+            .unwrap();
+        core.evolve.max_actions_per_day = 20;
+        settle(&core, stale.clone()).await.unwrap();
+        assert!(ap.applied().is_empty());
+        let stored = core.store.logged(&stale.id).await.unwrap().unwrap();
+        assert_eq!((stored.band, stored.state), (Band::Ask, State::Waiting));
+    }
+
+    #[tokio::test]
+    async fn an_orphaned_unsettled_act_is_closed_and_asked_again_not_applied() {
+        let (core, ap, _) = core_with(TestApplier::new(CHOICE), by_state).await;
+        let young = ask(&core, &q_choice(), subjects("young"), Some("0.95"))
+            .await
+            .unwrap();
+        let orphan = ask(&core, &q_choice(), subjects("orphan"), Some("0.95"))
+            .await
+            .unwrap();
+        backdate(&core, &orphan.id, 16 * 60).await;
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!((r.reasked, r.applied), (1, 0));
+        assert_eq!(ap.reopened(), vec![orphan.id.clone()]);
+        assert!(ap.applied().is_empty());
+        let stored = core.store.logged(&orphan.id).await.unwrap().unwrap();
+        assert_eq!(stored.state, State::Done);
+        assert_eq!(stored.reason.as_deref(), Some("changed"));
+        assert_eq!(state_of(&core, &young.id).await, State::Waiting);
+        // The stage that asked cannot apply it afterwards either.
+        settle(&core, orphan).await.unwrap();
+        assert!(ap.applied().is_empty());
     }
 
     #[tokio::test]
