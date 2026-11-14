@@ -297,18 +297,36 @@ impl Store {
         by: UndoneBy,
         reason: &str,
     ) -> Result<u64> {
-        Ok(sqlx::query!(
+        let at = now();
+        let mut tx = self.pool.begin().await?;
+        let n = sqlx::query!(
             "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?
               WHERE subject_id = ? AND kind = ? AND undone_at IS NULL",
-            now(),
+            at,
             by.as_str(),
             reason,
             subject_id,
             kind.as_str()
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
-        .rows_affected())
+        .rows_affected();
+        // The ones this call stamped: this subject and kind, undone at `at`.
+        sqlx::query!(
+            "UPDATE decisions SET outcome = 'undone', outcome_at = ?
+              WHERE (outcome IS NULL OR outcome = 'kept')
+                AND id IN (SELECT da.decision_id FROM decision_actions da
+                             JOIN corpus_actions ca ON ca.id = da.action_id
+                            WHERE ca.subject_id = ? AND ca.kind = ? AND ca.undone_at = ?)",
+            at,
+            subject_id,
+            kind.as_str(),
+            at
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(n)
     }
 
     /// Only merge rows: a merge can later win a supersession, and stamping that row would report
@@ -319,17 +337,33 @@ impl Store {
         by: UndoneBy,
         reason: &str,
     ) -> Result<u64> {
-        Ok(sqlx::query!(
+        let at = now();
+        let mut tx = self.pool.begin().await?;
+        let n = sqlx::query!(
             "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?
               WHERE survivor_id = ? AND kind = 'merge' AND undone_at IS NULL",
-            now(),
+            at,
             by.as_str(),
             reason,
             survivor_id
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
-        .rows_affected())
+        .rows_affected();
+        sqlx::query!(
+            "UPDATE decisions SET outcome = 'undone', outcome_at = ?
+              WHERE (outcome IS NULL OR outcome = 'kept')
+                AND id IN (SELECT da.decision_id FROM decision_actions da
+                             JOIN corpus_actions ca ON ca.id = da.action_id
+                            WHERE ca.survivor_id = ? AND ca.kind = 'merge' AND ca.undone_at = ?)",
+            at,
+            survivor_id,
+            at
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(n)
     }
 
     pub async fn recent_actions(&self, limit: usize) -> Result<Vec<Action>> {

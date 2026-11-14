@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET outcome = 'kept', outcome_at = ?\n              WHERE band = 'act' AND state = 'done' AND outcome IS NULL AND decided_at < ?\n                AND EXISTS (SELECT 1 FROM decision_actions WHERE decision_id = decisions.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "e14d65003d602bc1997fbf4d9bcd15e861773b2f7e25f7fc19c8cc41844f77f8"
+}

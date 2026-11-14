@@ -843,6 +843,48 @@ CREATE TABLE IF NOT EXISTS corpus_actions (
   undone_by     TEXT,
   undone_reason TEXT
 );
+
+-- Every background decision, whatever it led to: what was asked, what came back, which band, what became of it.
+CREATE TABLE IF NOT EXISTS decisions (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  era TEXT NOT NULL,
+  subject_kind TEXT NOT NULL,      -- pair | link | artifact | pursuit | write | search
+  subject_a TEXT NOT NULL,
+  subject_b TEXT,
+  rev_a INTEGER,                   -- what the subjects were when asked
+  rev_b INTEGER,
+  answer TEXT NOT NULL,            -- probabilities as returned
+  top REAL NOT NULL,
+  pick TEXT NOT NULL,
+  swapped_agree INTEGER,
+  band TEXT NOT NULL,              -- act | ask | leave
+  reason TEXT,                     -- too_long, restricted, ...
+  state TEXT NOT NULL,             -- waiting | open | done | lapsed
+  outcome TEXT,                    -- kept | undone | confirmed | corrected | refused
+  outcome_at INTEGER,
+  answered_pick TEXT,              -- what a person chose, on an ask row
+  decided_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_subject ON decisions(question_id, subject_a, subject_b, era);
+CREATE INDEX IF NOT EXISTS idx_decisions_band ON decisions(band, state, top DESC);
+CREATE INDEX IF NOT EXISTS idx_decisions_at ON decisions(decided_at);
+CREATE TABLE IF NOT EXISTS decision_actions (
+  decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+  action_id TEXT NOT NULL,
+  PRIMARY KEY (decision_id, action_id)
+);
+CREATE TABLE IF NOT EXISTS decision_thresholds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  question_id TEXT NOT NULL,
+  era TEXT NOT NULL,
+  act_at REAL NOT NULL,
+  ask_at REAL NOT NULL,
+  reason TEXT NOT NULL,
+  moved_at INTEGER NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_corpus_actions_open
   ON corpus_actions(kind, at) WHERE undone_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_corpus_actions_subject

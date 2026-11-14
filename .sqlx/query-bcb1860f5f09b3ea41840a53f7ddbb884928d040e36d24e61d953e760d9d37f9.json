@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET outcome = 'undone', outcome_at = ?\n              WHERE (outcome IS NULL OR outcome = 'kept')\n                AND id IN (SELECT da.decision_id FROM decision_actions da\n                             JOIN corpus_actions ca ON ca.id = da.action_id\n                            WHERE ca.subject_id = ? AND ca.kind = ? AND ca.undone_at = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "bcb1860f5f09b3ea41840a53f7ddbb884928d040e36d24e61d953e760d9d37f9"
+}

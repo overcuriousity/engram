@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO decision_thresholds (question_id, era, act_at, ask_at, reason, moved_at)\n             VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "ce9050a3ef1f9ab6f60607c14d02b2e6f41389b3b57b4bca7d4e2c860ae80286"
+}
