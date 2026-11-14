@@ -72,6 +72,18 @@ pub struct QuestionReport {
     pub past_picks: Vec<(String, Vec<(String, usize)>)>,
     /// A reading taken at a fixed line: that line, and how many said yes at or above it.
     pub reading: Option<(f64, usize)>,
+    /// `link_direction`: of the cases asked again with the notes exchanged, how many flipped their pick.
+    pub exchanged_holds: Option<(usize, usize)>,
+    /// Judged choices: the ten most confident answers that disagree with the past verdict.
+    pub disagreements: Vec<Miss>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Miss {
+    pub top: f64,
+    pub past: String,
+    pub pick: String,
+    pub title: String,
 }
 
 /// Readings are taken, not banded; these are their fixed lines (`category` takes its top pick).
@@ -624,6 +636,27 @@ struct Item {
     asked: Asked,
     title: String,
     sim: Option<f32>,
+    /// `link_direction`: the same case with B's note under `A:` and A's under `B:`.
+    exchanged: Option<String>,
+}
+
+/// A direction that holds flips its pick when the notes trade places; the option swap cannot see a pull to `A`.
+async fn exchanged(core: &Core, a: &Asked, f: &Found) -> Result<Option<String>> {
+    let other = match f.b.as_deref() {
+        Some(b) => text_of(core, b).await?,
+        None => None,
+    };
+    let (Some(x), Some(y)) = (text_of(core, &f.a).await?, other) else {
+        return Ok(None);
+    };
+    let room = state::room(core, &[a]);
+    Ok(state::link(
+        &y.note(),
+        &x.note(),
+        &f.words,
+        &core.counter,
+        room,
+    ))
 }
 
 struct Gathered {
@@ -679,7 +712,7 @@ async fn retired(core: &Core) -> Result<Vec<Found>> {
         .superseded_artifacts(i64::MAX)
         .await?
         .into_iter()
-        .filter(|c| !judged.contains(&c.id))
+        .filter(|c| c.status != ArtifactStatus::Trashed && !judged.contains(&c.id))
         .map(|c| {
             Found::new(
                 c.retired_at.unwrap_or(c.created_at),
@@ -729,6 +762,11 @@ async fn gather_from(
             no_text += 1;
             continue;
         };
+        let ex = if a.id == "link_direction" && state.is_some() {
+            exchanged(core, &asked, &f).await?
+        } else {
+            None
+        };
         items.push(Item {
             case: Case {
                 subjects: (f.a, f.b),
@@ -739,6 +777,7 @@ async fn gather_from(
             asked,
             title,
             sim: f.sim,
+            exchanged: ex,
         });
     }
     Ok(Gathered {
@@ -911,6 +950,25 @@ fn summarize(
             v.sort_by(|x, y| total(&y.1).cmp(&total(&x.1)).then_with(|| x.0.cmp(&y.0)));
             v
         },
+        exchanged_holds: None,
+        disagreements: {
+            let mut v: Vec<Miss> = Vec::new();
+            if scope.is_none() && matches!(a.question.kind, QKind::Choice { .. }) {
+                for (r, t) in rows.iter().zip(titles) {
+                    if let Some(p) = r.past.as_deref().filter(|p| !agrees(p, &r.pick)) {
+                        v.push(Miss {
+                            top: r.top,
+                            past: if p == RELATED { "related" } else { p }.to_string(),
+                            pick: r.pick.clone(),
+                            title: t.clone(),
+                        });
+                    }
+                }
+            }
+            v.sort_by(|x, y| y.top.total_cmp(&x.top));
+            v.truncate(10);
+            v
+        },
         reading: fixed_line(a.id)
             .map(|at| (at, rows.iter().filter(|r| yes_of(r) >= at - 1e-9).count())),
     }
@@ -944,11 +1002,12 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
     let n: usize = gathered
         .iter()
         .flat_map(|(_, _, g)| &g.items)
-        .filter(|i| i.case.state.is_some())
-        .count();
+        .map(|i| usize::from(i.case.state.is_some()) + usize::from(i.exchanged.is_some()))
+        .sum();
     eprintln!("{n} cases to ask, about {} at 0.6 s each", estimate(n));
     let mut out = Vec::new();
     for (a, scope, g) in gathered {
+        let (mut holds, mut exchanged_n) = (0, 0);
         let at = core.decide_cfg.bands.of(a.id);
         let (mut rows, mut titles, mut sims, mut too_long) =
             (Vec::new(), Vec::new(), Vec::new(), 0);
@@ -959,6 +1018,12 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
             };
             let (pick, top, agree) =
                 transiently(RETRY_BUDGET, || put(core, &item.asked, state)).await?;
+            if let Some(ex) = &item.exchanged {
+                let (again, _, _) =
+                    transiently(RETRY_BUDGET, || put(core, &item.asked, ex)).await?;
+                exchanged_n += 1;
+                holds += usize::from(again != pick && (again == "a_first" || again == "b_first"));
+            }
             rows.push(Row {
                 pick,
                 top,
@@ -971,7 +1036,10 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
             sims.push(item.sim);
         }
         let counts = (too_long, g.no_text, g.left_out);
-        let r = summarize(a, &rows, &titles, &sims, at, counts, scope);
+        let mut r = summarize(a, &rows, &titles, &sims, at, counts, scope);
+        if a.id == "link_direction" && scope.is_none() {
+            r.exchanged_holds = Some((holds, exchanged_n));
+        }
         eprintln!(
             "{}{}: {} asked",
             r.id,
@@ -1044,6 +1112,9 @@ fn render_one(r: &QuestionReport) -> String {
             format!("{:>3}", r.swap_disagreed),
         );
     }
+    if let Some((n, m)) = r.exchanged_holds {
+        s += &format!("  holds when the notes are exchanged   {n} of {m}\n");
+    }
     if r.asked == 0 {
         return s;
     }
@@ -1086,6 +1157,12 @@ fn render_one(r: &QuestionReport) -> String {
     }
     for (past, ps) in &r.past_picks {
         s += &format!("  past {past:<12} {}\n", list(ps));
+    }
+    for m in &r.disagreements {
+        s += &format!(
+            "  disagrees  {:.2}  past {} → {}  {}\n",
+            m.top, m.past, m.pick, m.title
+        );
     }
     if past {
         s += &match r.suggested {
@@ -1767,6 +1844,13 @@ mod tests {
                     vec![("conflict".into(), 2), ("duplicate".into(), 1)]
                 )],
                 reading: None,
+                exchanged_holds: None,
+                disagreements: vec![Miss {
+                    top: 0.468,
+                    past: "conflict".into(),
+                    pick: "duplicate".into(),
+                    title: "untitled ↔ untitled".into(),
+                }],
                 bands_at: Thresholds {
                     act_at: 0.90,
                     ask_at: 0.60
@@ -1927,6 +2011,8 @@ mod tests {
             picks: vec![],
             past_picks: vec![],
             reading: None,
+            exchanged_holds: None,
+            disagreements: vec![],
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -1968,6 +2054,8 @@ mod tests {
             picks: vec![],
             past_picks: vec![],
             reading: Some((0.5, 1)),
+            exchanged_holds: None,
+            disagreements: vec![],
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2050,6 +2138,8 @@ mod tests {
             picks: vec![],
             past_picks: vec![],
             reading: None,
+            exchanged_holds: None,
+            disagreements: vec![],
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2112,6 +2202,8 @@ mod tests {
             picks: vec![],
             past_picks: vec![],
             reading: None,
+            exchanged_holds: None,
+            disagreements: vec![],
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2428,6 +2520,8 @@ mod tests {
             picks: vec![],
             past_picks: vec![],
             reading: None,
+            exchanged_holds: None,
+            disagreements: vec![],
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2497,7 +2591,7 @@ mod tests {
         let text = render(&[r]);
         assert!(
             text.contains(
-                "  0.70        1      0\n  picks   background 2 · unrelated 2\n  past related      background 2 · unrelated 1\n  past unrelated    unrelated 1\n  suggested"
+                "  0.70        1      0\n  picks   background 2 · unrelated 2\n  past related      background 2 · unrelated 1\n  past unrelated    unrelated 1\n  disagrees  0.70  past related → unrelated  t\n  suggested"
             ),
             "{text}"
         );
@@ -2607,5 +2701,120 @@ mod tests {
             text.contains("  most and least sure\n  0.80  a_first · Steps ↔ Why\n"),
             "{text}"
         );
+    }
+
+    async fn a_related_link(core: &Core) {
+        let ids = titled_at(core, &[("Steps", [1.0, 0.0]), ("Why", [1.0, 0.0])]).await;
+        let (a, b) = crate::store::links::canonical(&ids[0], &ids[1]);
+        core.store
+            .bump_link(a, b, 1.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(a, b, LinkState::Related, Some("steps"), Some((0, 0)))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_direction_drawn_to_the_first_note_does_not_hold_when_the_notes_are_exchanged() {
+        let decider = rule(|_, q| pick(q, "a_first", 0.8));
+        let core = core_with(decider.clone()).await;
+        a_related_link(&core).await;
+        let r = run(&core, Some("link_direction"), 200).await.unwrap();
+        assert_eq!(r[0].exchanged_holds, Some((0, 1)));
+        assert_eq!(
+            r[0].picks,
+            [("a_first".to_string(), 1)],
+            "picks describe the first read"
+        );
+        assert_eq!(decider.calls(), 2, "each case is asked twice");
+        assert!(render(&r).contains("  swapped reads disagreed          0\n  holds when the notes are exchanged   0 of 1\n"), "{}", render(&r));
+    }
+
+    #[tokio::test]
+    async fn a_direction_that_follows_the_text_holds_when_the_notes_are_exchanged() {
+        let decider = rule(|state, q| {
+            if state.starts_with("A: Steps") {
+                pick(q, "a_first", 0.8)
+            } else {
+                pick(q, "b_first", 0.8)
+            }
+        });
+        let core = core_with(decider.clone()).await;
+        a_related_link(&core).await;
+        let r = run(&core, Some("link_direction"), 200).await.unwrap();
+        assert_eq!(r[0].exchanged_holds, Some((1, 1)));
+        let other = run(&core, Some("link_kind"), 200).await.unwrap();
+        assert_eq!(
+            other[0].exchanged_holds, None,
+            "only link_direction is exchanged"
+        );
+    }
+
+    #[test]
+    fn the_most_confident_disagreements_are_listed_with_past_and_pick() {
+        let mut rows: Vec<Row> = (0..12)
+            .map(|i| row("unrelated", 0.6 + f64::from(i) / 50.0, Some(RELATED)))
+            .collect();
+        rows.push(row("background", 0.99, Some(RELATED)));
+        let titles: Vec<String> = (0..13).map(|i| format!("A{i} ↔ B{i}")).collect();
+        let r = summarize(
+            &catalogue::link_kind(),
+            &rows,
+            &titles,
+            &[None; 13],
+            Thresholds {
+                act_at: 0.9,
+                ask_at: 0.6,
+            },
+            (0, 0, 0),
+            None,
+        );
+        assert_eq!(r.disagreements.len(), 10);
+        let first = &r.disagreements[0];
+        assert_eq!(
+            (
+                first.past.as_str(),
+                first.pick.as_str(),
+                first.title.as_str()
+            ),
+            ("related", "unrelated", "A11 ↔ B11")
+        );
+        assert!((first.top - 0.82).abs() < 1e-9);
+        assert!(
+            r.disagreements.iter().all(|d| d.pick != "background"),
+            "an agreement is no disagreement"
+        );
+        let text = render(&[r]);
+        assert!(text.contains("  past related      unrelated 12 · background 1\n  disagrees  0.82  past related → unrelated  A11 ↔ B11\n"), "{text}");
+        let u = summarize(
+            &catalogue::pair_relation(),
+            &[row("distinct", 0.9, None)],
+            &["x".to_string()],
+            &[None],
+            Thresholds {
+                act_at: 0.9,
+                ask_at: 0.6,
+            },
+            (0, 0, 0),
+            Some("unjudged neighbours"),
+        );
+        assert!(u.disagreements.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_trashed_note_is_no_unjudged_retired_case() {
+        let core = core_with(anything()).await;
+        let ids = titled_at(&core, &[("old", [1.0, 0.0]), ("new", [1.0, 0.0])]).await;
+        core.store
+            .set_superseded_by(&ids[0], Some(&ids[1]))
+            .await
+            .unwrap();
+        core.store.trash_artifact(&ids[0], 1).await.unwrap();
+        let (cases, _) = unjudged_cases(&core, &catalogue::reap_worth(), 200)
+            .await
+            .unwrap();
+        assert!(cases.is_empty(), "{cases:?}");
     }
 }

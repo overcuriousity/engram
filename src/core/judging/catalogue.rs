@@ -86,13 +86,25 @@ pub fn link_kind() -> Asked {
     )
 }
 
+/// v2: v1 picked `a_first` in 53 of 53 real cases; each option now says what the other note does.
 pub fn link_direction() -> Asked {
-    choice(
+    let mut a = choice(
         "link_direction",
         true,
-        "Which note comes first: the earlier step, the general description, or the explanation?",
-        &[("a_first", "A"), ("b_first", "B")],
-    )
+        "One of these two notes comes first: it is the earlier step, the general description, or the explanation the other one builds on. Which one?",
+        &[
+            (
+                "a_first",
+                "A comes first; B follows from it, is a case of it, or uses it",
+            ),
+            (
+                "b_first",
+                "B comes first; A follows from it, is a case of it, or uses it",
+            ),
+        ],
+    );
+    a.version = 2;
+    a
 }
 
 pub fn reap_worth() -> Asked {
@@ -221,7 +233,9 @@ mod tests {
         for a in all() {
             validate(std::slice::from_ref(&a.question)).unwrap();
             assert_eq!(a.question.key, a.id);
-            assert_eq!(a.version, 1);
+            assert!(a.version >= 1, "{}", a.id);
+            let want = if a.id == "link_direction" { 2 } else { 1 };
+            assert_eq!(a.version, want, "{}", a.id);
         }
     }
 
@@ -254,6 +268,33 @@ mod tests {
             panic!()
         };
         assert!(options.iter().all(|(_, d)| !d.is_empty()));
+    }
+
+    #[test]
+    fn link_direction_v2_names_both_notes_in_each_option() {
+        let a = link_direction();
+        assert!(a.swapped);
+        assert_eq!(a.version, 2);
+        assert_eq!(
+            a.question.instructions,
+            "One of these two notes comes first: it is the earlier step, the general description, or the explanation the other one builds on. Which one?"
+        );
+        let Kind::Choice { options } = &a.question.kind else {
+            panic!()
+        };
+        assert_eq!(
+            options,
+            &[
+                (
+                    "a_first".to_string(),
+                    "A comes first; B follows from it, is a case of it, or uses it".to_string()
+                ),
+                (
+                    "b_first".to_string(),
+                    "B comes first; A follows from it, is a case of it, or uses it".to_string()
+                ),
+            ]
+        );
     }
 
     #[test]
