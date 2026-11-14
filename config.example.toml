@@ -254,7 +254,7 @@ show_min = 2.0
 judge_min = 4.0
 # Distinct questions a link needs before it is judged.
 judge_min_queries = 3
-judge_per_sweep = 10
+judge_per_sweep = 30
 # Top hits asked for links, and associated hits appended after the list.
 spread_from = 3
 spread_max = 3

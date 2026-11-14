@@ -134,6 +134,28 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "name": "kind",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "first",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "first"
+          }
+        }
       }
     ],
     "parameters": {
@@ -151,7 +173,9 @@
       true,
       true,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
   "hash": "4dbb2f592d5af8614045599964a2b87edb3ce397a5303b933e506be6340b37d2"

@@ -108,10 +108,9 @@ impl Stage {
         }
     }
     /// In `ALL`'s order.
-    pub const GENERATORS: [Stage; 7] = [
+    pub const GENERATORS: [Stage; 6] = [
         Stage::SegmentWindow,
         Stage::Title,
-        Stage::LinkJudge,
         Stage::Generate,
         Stage::Reap,
         Stage::Condense,
@@ -124,13 +123,13 @@ impl Stage {
         match self {
             Stage::SegmentWindow
             | Stage::Title
-            | Stage::LinkJudge
             | Stage::Generate
             | Stage::Reap
             | Stage::Condense
             | Stage::Merge => true,
             // A decision takes the light turn and no cooldown.
             Stage::Dedupe
+            | Stage::LinkJudge
             | Stage::Synthesize
             | Stage::Embed
             | Stage::Consolidate
@@ -1853,12 +1852,19 @@ mod tests {
     }
 
     #[test]
-    fn the_stages_that_call_a_generator_are_the_seven() {
+    fn the_stages_that_call_a_generator_are_the_six() {
         let named: Vec<_> = Stage::ALL
             .into_iter()
             .filter(|s| s.calls_a_generator())
             .collect();
         assert_eq!(named, Stage::GENERATORS);
+    }
+
+    #[test]
+    fn link_judge_is_a_decision_and_no_longer_a_writer() {
+        assert!(!Stage::GENERATORS.contains(&Stage::LinkJudge));
+        assert!(!Stage::LinkJudge.calls_a_generator());
+        assert_eq!(Stage::LinkJudge.class(), 1);
     }
 
     #[test]

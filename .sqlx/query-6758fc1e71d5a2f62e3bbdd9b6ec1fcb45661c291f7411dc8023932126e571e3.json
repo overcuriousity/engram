@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT l.* FROM artifact_links l\n               JOIN artifacts a ON a.id = l.a_id\n               JOIN artifacts b ON b.id = l.b_id\n              WHERE l.state = 'learning'\n                AND l.weight >= ? AND l.queries >= ?\n                AND a.status = 'active' AND a.superseded_by IS NULL\n                AND b.status = 'active' AND b.superseded_by IS NULL\n              ORDER BY l.weight DESC LIMIT ?",
+  "query": "SELECT l.* FROM artifact_links l\n               JOIN artifacts a ON a.id = l.a_id\n               JOIN artifacts b ON b.id = l.b_id\n              WHERE l.state = 'learning'\n                AND l.weight >= ? AND l.queries >= ?\n                AND a.status = 'active' AND a.superseded_by IS NULL\n                AND b.status = 'active' AND b.superseded_by IS NULL\n                AND NOT EXISTS (\n                    SELECT 1 FROM decisions d\n                     WHERE d.question_id = 'link_kind' AND d.subject_kind = 'link'\n                       AND d.subject_a = l.a_id AND d.subject_b = l.b_id AND d.era = ?\n                       AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev\n                       AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')\n              ORDER BY l.weight DESC LIMIT ?",
   "describe": {
     "columns": [
       {
@@ -134,10 +134,32 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "name": "kind",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "first",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "first"
+          }
+        }
       }
     ],
     "parameters": {
-      "Right": 3
+      "Right": 4
     },
     "nullable": [
       false,
@@ -151,8 +173,10 @@
       true,
       true,
       false,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "f8992ca672551a2b8c2dbc4e8d841766fb49f3bc38a2effa8e85fb700de1ed3e"
+  "hash": "6758fc1e71d5a2f62e3bbdd9b6ec1fcb45661c291f7411dc8023932126e571e3"
 }

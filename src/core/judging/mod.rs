@@ -99,7 +99,7 @@ async fn logged(core: &Core, id: &str) -> Result<Logged> {
 }
 
 /// Probability by pick, named as `pick_and_top` names picks; no text of the model's is kept.
-fn weights(q: &Question, a: &Answer) -> String {
+fn weights(q: &Question, a: &Answer) -> serde_json::Value {
     let by_index = |p: &[f64]| -> Vec<(String, f64)> {
         p.iter()
             .enumerate()
@@ -125,12 +125,24 @@ fn weights(q: &Question, a: &Answer) -> String {
         .into_iter()
         .map(|(k, v)| (k, serde_json::json!(v)))
         .collect();
-    serde_json::Value::Object(map).to_string()
+    serde_json::Value::Object(map)
 }
 
 /// Put the question, band it, log it. `state` is the whole state; `None` means the subjects do not fit:
 /// logged as leave with reason "too_long" and no call.
 pub async fn ask(core: &Core, a: &Asked, s: Subjects, state: Option<&str>) -> Result<Logged> {
+    ask_with(core, a, &[], s, state).await
+}
+
+/// `ask`, with more questions in the same request, read as `a` is (swapped or not). The decision is
+/// `a`'s; each other read is kept in its answer JSON under its name, as `pick`, `top` and `agree`.
+pub async fn ask_with(
+    core: &Core,
+    a: &Asked,
+    with: &[(&str, &Asked)],
+    s: Subjects,
+    state: Option<&str>,
+) -> Result<Logged> {
     let mut row = NewLogged {
         question_id: a.id.into(),
         question_version: a.version,
@@ -149,32 +161,46 @@ pub async fn ask(core: &Core, a: &Asked, s: Subjects, state: Option<&str>) -> Re
         state: State::Done,
     };
     if let Some(state) = state {
-        let questions = [a.question.clone()];
+        let mut questions = vec![a.question.clone()];
+        questions.extend(with.iter().map(|(_, w)| w.question.clone()));
         let key = &a.question.key;
         // The light turn: a decision is short and does not serve or start the cooldown.
         let permit = core.gate.background_light().await;
         let got = if a.swapped {
             decide_swapped(core.decider.as_ref(), state, &questions)
                 .await
-                .map(|s| (s.answers, s.agree.get(key).copied()))
+                .map(|s| (s.answers, s.agree))
         } else {
             core.decider
                 .decide(state, &questions)
                 .await
-                .map(|a| (a, None))
+                .map(|a| (a, HashMap::new()))
         };
         permit.finished();
-        let (answers, agree) = got?;
-        let answer = answers
-            .answers
-            .get(key)
-            .ok_or_else(|| Error::InferenceRejected {
-                role: "decide",
-                detail: format!("the answer has none for \"{key}\""),
-            })?;
+        let (answers, agreed) = got?;
+        let read = |q: &Question| {
+            answers
+                .answers
+                .get(&q.key)
+                .ok_or_else(|| Error::InferenceRejected {
+                    role: "decide",
+                    detail: format!("the answer has none for \"{}\"", q.key),
+                })
+        };
+        let answer = read(&a.question)?;
+        let agree = agreed.get(key).copied();
         let (pick, top) = pick_and_top(&a.question, answer);
         let b = band(top, agree, core.thresholds(a).await?);
-        row.answer = weights(&a.question, answer);
+        let mut json = weights(&a.question, answer);
+        for (name, w) in with {
+            let (pick, top) = pick_and_top(&w.question, read(&w.question)?);
+            json[*name] = serde_json::json!({
+                "pick": pick,
+                "top": top,
+                "agree": agreed.get(&w.question.key),
+            });
+        }
+        row.answer = json.to_string();
         row.top = top;
         row.pick = pick;
         row.swapped_agree = agree;

@@ -613,7 +613,8 @@ CREATE TABLE IF NOT EXISTS artifact_links (
   cues        TEXT NOT NULL DEFAULT '[]',
   -- 'learning' | 'related' | 'unrelated' | 'dismissed'
   state       TEXT NOT NULL DEFAULT 'learning',
-  -- The judge's one line, for `related`.
+  -- A fixed hand-over line, or the line a judge wrote before kinds. Never the
+  -- decision model's text: a kind's line is rendered at read time.
   reason      TEXT,
   -- Revisions the judge read. A re-embed of either side reopens the verdict:
   -- the text changed under it.
@@ -621,6 +622,12 @@ CREATE TABLE IF NOT EXISTS artifact_links (
   judged_rev_b INTEGER,
   judge_attempts INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
+  -- `link_kind`'s pick: 'continues' | 'example' | 'alternative' | 'background'
+  -- | 'contradicts' | 'unrelated'. NULL for a link judged before kinds.
+  kind        TEXT,
+  -- For a directional kind, the end that comes first: 'a' | 'b'. NULL when the
+  -- direction did not hold.
+  first       TEXT,
   PRIMARY KEY (a_id, b_id),
   CHECK (a_id < b_id)
 );

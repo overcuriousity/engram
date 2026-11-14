@@ -341,6 +341,14 @@ impl Store {
         Ok(())
     }
 
+    /// A read the stage that asked added before settling; only probabilities and picks, no text.
+    pub async fn set_decision_answer(&self, id: &str, answer: &str) -> Result<()> {
+        sqlx::query!("UPDATE decisions SET answer = ? WHERE id = ?", answer, id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// A waiting act becomes a waiting ask with `reason`. False: it was not a waiting act.
     pub async fn demote_decision(&self, id: &str, reason: &str) -> Result<bool> {
         Ok(sqlx::query!(

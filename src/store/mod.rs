@@ -100,7 +100,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 23] = [
+        const ADDITIVE: [(&str, &str, &str); 25] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -218,6 +218,17 @@ impl Store {
                 "artifact_pairs",
                 "synthesis_by",
                 "ALTER TABLE artifact_pairs ADD COLUMN synthesis_by TEXT",
+            ),
+            // NULL: a link judged before kinds keeps its written reason.
+            (
+                "artifact_links",
+                "kind",
+                "ALTER TABLE artifact_links ADD COLUMN kind TEXT",
+            ),
+            (
+                "artifact_links",
+                "first",
+                "ALTER TABLE artifact_links ADD COLUMN first TEXT",
             ),
         ];
         apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;

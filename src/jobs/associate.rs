@@ -1,5 +1,5 @@
-//! Learning what belongs together: a pure-SQLite sweep over the search log, and a queued model
-//! judge per link.
+//! Learning what belongs together: a pure-SQLite sweep over the search log, and a queued decision
+//! per link: what kind of relation it is, rendered as a line, never written by a model.
 
 use crate::core::Core;
 use crate::error::Result;
@@ -87,20 +87,22 @@ pub async fn run(core: &Core) -> Result<Report> {
         .reopen_stale_judged_links(PRUNE_SCAN_LIMIT)
         .await?;
 
-    // No judge, no units: nothing is queued that could never be claimed.
-    let to_judge = if core.link_judge.is_some() {
-        core.store
-            .links_to_judge(
-                core.associate.judge_min,
-                core.associate.judge_min_queries,
-                core.associate.half_life_days,
-                at,
-                core.associate.judge_per_sweep,
-            )
-            .await?
-    } else {
-        Vec::new()
-    };
+    // A decision unit: armed only inside this tick's decision budget.
+    let budget = core
+        .associate
+        .judge_per_sweep
+        .min(i64::try_from(core.judging_budget().await?).unwrap_or(i64::MAX));
+    let to_judge = core
+        .store
+        .links_to_judge(
+            &link_era(core),
+            core.associate.judge_min,
+            core.associate.judge_min_queries,
+            core.associate.half_life_days,
+            at,
+            budget,
+        )
+        .await?;
     let mut armed = 0;
     for l in to_judge {
         let target = link_target(&l.a_id, &l.b_id);
@@ -265,11 +267,16 @@ async fn shown_candidates(core: &Core, event_id: &str) -> Result<Vec<String>> {
     .await?)
 }
 
+use crate::core::judging::band::Band;
+use crate::core::judging::{self, Applier, Subjects, catalogue, state};
 use crate::error::Error;
-use crate::store::links::LinkState;
-
-/// Unreadable replies after which a link is shelved rather than asked forever.
-pub const MAX_UNREADABLE_LINK_JUDGEMENTS: i64 = 3;
+use crate::infer::decide::decide_swapped;
+use crate::store::actions::Job;
+use crate::store::artifacts::{Chunk, Provenance};
+use crate::store::decision_log::Logged;
+use crate::store::links::{Link, LinkKind, LinkState};
+use crate::store::pairs::DecidedBy;
+use async_trait::async_trait;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkVerdict {
@@ -278,8 +285,7 @@ pub enum LinkVerdict {
     Duplicate,
 }
 
-/// Unreadable is an error, not a verdict: defaulting either way misleads, and failing leaves the
-/// link `learning` for the queue to retry.
+/// The chat judge's reply, read; nothing judges links with it any more. Goes with its prompt.
 pub fn parse_link(body: &str) -> Result<(LinkVerdict, String)> {
     #[derive(serde::Deserialize)]
     struct Raw {
@@ -304,10 +310,40 @@ pub fn parse_link(body: &str) -> Result<(LinkVerdict, String)> {
     Ok((verdict, r.reason.unwrap_or_default()))
 }
 
-/// `target` is `"<a_id>|<b_id>"`.
+fn day(at: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(at, 0).map(|d| d.format("%Y-%m-%d").to_string())
+}
+
+fn note(c: &Chunk) -> state::Note<'_> {
+    state::Note {
+        title: c.title.as_deref(),
+        day: day(c.created_at),
+        text: &c.text,
+    }
+}
+
+pub(crate) fn link_era(core: &Core) -> String {
+    crate::core::judging::band::era(core.decider.model(), catalogue::link_kind().version)
+}
+
+/// Asked in this era about both texts as they are now, and not put back since.
+async fn asked_already(core: &Core, l: &Link, a: &Chunk, b: &Chunk) -> Result<bool> {
+    let last = core
+        .store
+        .last_logged("link_kind", &l.a_id, Some(&l.b_id), &link_era(core))
+        .await?;
+    Ok(last.is_some_and(|d| {
+        d.rev_a == Some(a.embed_rev)
+            && d.rev_b == Some(b.embed_rev)
+            && !matches!(d.reason.as_deref(), Some("asked_again" | "changed"))
+    }))
+}
+
+/// `Stage::LinkJudge`, target `"<a_id>|<b_id>"`: ask `link_kind`, with `link_direction` in the same
+/// request, and settle the answer.
 pub async fn judge(core: &Core, target: &str) -> Result<()> {
-    // A unit queued before `[learn]` was switched off must not spend a model call after the
-    // operator said stop.
+    // A unit queued before `[learn]` was switched off must not spend a call after the operator
+    // said stop.
     if !core.associating() {
         return Ok(());
     }
@@ -326,130 +362,288 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
     if !a.in_results() || !b.in_results() {
         return Ok(());
     }
-
-    let Some(judge) = core.link_judge.clone() else {
+    // A retried or second unit must not ask what is already answered.
+    if asked_already(core, &link, &a, &b).await? {
         return Ok(());
-    };
+    }
+
+    let (kind, direction) = (catalogue::link_kind(), catalogue::link_direction());
     let cues: Vec<String> = link.cues.iter().map(|c| c.q.clone()).collect();
-    let permit = core.gate.background().await;
-    let reply = judge
-        .complete(
-            crate::infer::prompt::LINK_SYSTEM,
-            &crate::infer::prompt::link_prompt(
-                (a.title.as_deref().unwrap_or("untitled"), &a.text),
-                (b.title.as_deref().unwrap_or("untitled"), &b.text),
-                &cues,
-                link.judge_attempts,
-            ),
-        )
-        .await;
-    permit.finished();
-    // An unanswered call says nothing about the link; the queue backs the unit off.
-    let reply = reply?;
-
-    let revs = Some((a.embed_rev, b.embed_rev));
-    let (verdict, reason) = match parse_link(&reply) {
-        Ok(v) => v,
-        Err(e) => {
-            // The only failure that says anything about the link itself.
-            let attempts = core
-                .store
-                .record_link_judge_attempt(&link.a_id, &link.b_id)
-                .await?;
-            if attempts >= MAX_UNREADABLE_LINK_JUDGEMENTS {
-                tracing::warn!(
-                    target,
-                    attempts,
-                    "shelving a link the model will not answer for"
-                );
-                core.store
-                    .set_link_state(
-                        &link.a_id,
-                        &link.b_id,
-                        LinkState::Unrelated,
-                        Some("unreadable"),
-                        revs,
-                    )
-                    .await?;
-                return Ok(());
-            }
-            tracing::warn!(
-                target,
-                attempts,
-                reply_len = reply.len(),
-                error = %e,
-                "link reply unreadable"
-            );
-            return Err(e);
-        }
+    let room = state::room(core, &[&kind, &direction]);
+    let s = state::link(&note(&a), &note(&b), &cues, &core.counter, room);
+    let subjects = Subjects {
+        kind: "link",
+        a: link.a_id.clone(),
+        b: Some(link.b_id.clone()),
+        rev_a: Some(a.embed_rev),
+        rev_b: Some(b.embed_rev),
     };
+    let d = judging::ask_with(
+        core,
+        &kind,
+        &[("direction", &direction)],
+        subjects,
+        s.as_deref(),
+    )
+    .await?;
+    let d = exchanged(core, d, &a, &b, &cues).await?;
+    judging::settle(core, d).await?;
+    Ok(())
+}
 
-    // Never stored as `Some("")`: the pane falls back to the binding query only for a missing
-    // reason.
-    let reason = reason.trim();
-    let reason = (!reason.is_empty()).then_some(reason);
+/// A direction the pick could store is asked once more with the notes exchanged (B's text under
+/// `A:`, A's under `B:`): option order cannot show a pull to the note labelled A, this can. The
+/// exchanged pick is kept beside the direction's read; it is not a decision of its own.
+async fn exchanged(
+    core: &Core,
+    d: Logged,
+    a: &Chunk,
+    b: &Chunk,
+    cues: &[String],
+) -> Result<Logged> {
+    let directional = LinkKind::parse(&d.pick).is_some_and(LinkKind::directional);
+    let mut answer: serde_json::Value = serde_json::from_str(&d.answer).unwrap_or_default();
+    let agreed = answer["direction"]["agree"].as_bool() == Some(true);
+    if d.band == Band::Leave || !directional || !agreed {
+        return Ok(d);
+    }
+    let direction = catalogue::link_direction();
+    let room = state::room(core, &[&direction]);
+    let Some(s) = state::link(&note(b), &note(a), cues, &core.counter, room) else {
+        return Ok(d);
+    };
+    let permit = core.gate.background_light().await;
+    let got = decide_swapped(
+        core.decider.as_ref(),
+        &s,
+        std::slice::from_ref(&direction.question),
+    )
+    .await;
+    permit.finished();
+    let got = got?;
+    let key = &direction.question.key;
+    let read = got
+        .answers
+        .answers
+        .get(key)
+        .ok_or_else(|| Error::InferenceRejected {
+            role: "decide",
+            detail: format!("the answer has none for \"{key}\""),
+        })?;
+    let (again, _) = crate::core::judging::band::pick_and_top(&direction.question, read);
+    answer["direction"]["exchanged"] = again.into();
+    core.store
+        .set_decision_answer(&d.id, &answer.to_string())
+        .await?;
+    core.store.logged(&d.id).await?.ok_or(Error::NotFound)
+}
 
-    match verdict {
-        LinkVerdict::Related => {
-            core.store
-                .set_link_state(&link.a_id, &link.b_id, LinkState::Related, reason, revs)
-                .await?;
-        }
-        LinkVerdict::Unrelated => {
-            core.store
-                .set_link_state(&link.a_id, &link.b_id, LinkState::Unrelated, reason, revs)
-                .await?;
-        }
-        LinkVerdict::Duplicate => {
-            // Handed to consolidation, which owns every decision that hides an artifact; score zero
-            // because no cosine was measured. `INSERT OR IGNORE` hands nothing over for a pair
-            // already on file. Never over passages: they are not consolidation's material.
-            let over_passages = a.provenance == crate::store::artifacts::Provenance::Passage
-                || b.provenance == crate::store::artifacts::Provenance::Passage;
-            // Rendered verbatim beside the link, so it must not claim a handover that did not
-            // happen, nor call an artifact stored source text when only one side is.
-            let reason = if over_passages {
-                tracing::debug!(
-                    a = %link.a_id, b = %link.b_id,
-                    "duplicate verdict over a passage; not handing it to consolidation"
-                );
-                if a.provenance == crate::store::artifacts::Provenance::Passage
-                    && b.provenance == crate::store::artifacts::Provenance::Passage
+/// Whether the decision's `subject_a` comes first: only when the direction's swapped read agreed
+/// and, with the notes exchanged, the other label was named.
+fn first_is_a(d: &Logged) -> Option<bool> {
+    let v: serde_json::Value = serde_json::from_str(&d.answer).ok()?;
+    let r = v.get("direction")?;
+    if !r.get("agree")?.as_bool()? {
+        return None;
+    }
+    match (r.get("pick")?.as_str()?, r.get("exchanged")?.as_str()?) {
+        ("a_first", "b_first") => Some(true),
+        ("b_first", "a_first") => Some(false),
+        _ => None,
+    }
+}
+
+/// What a kind does to a link. No journal row: a link hides nothing.
+async fn carry_out(
+    core: &Core,
+    link: &Link,
+    a: &Chunk,
+    b: &Chunk,
+    kind: LinkKind,
+    first_is_a: Option<bool>,
+    revs: Option<(i64, i64)>,
+) -> Result<()> {
+    let (x, y) = (link.a_id.as_str(), link.b_id.as_str());
+    // Never over passages: they are not consolidation's material.
+    let passages = [a, b]
+        .iter()
+        .filter(|c| c.provenance == Provenance::Passage)
+        .count();
+    match kind {
+        LinkKind::Duplicate => {
+            // Consolidation owns every decision that hides an artifact; score zero, as no cosine was
+            // measured. The line is shown verbatim, so it claims no handover that did not happen
+            // and calls only a passage stored source text.
+            let reason = match passages {
+                2 => "same content, and both are stored source text",
+                1 => "same content, and one of these is stored source text",
+                _ if core
+                    .store
+                    .record_pair_with_detail(x, y, 0.0, "link")
+                    .await? =>
                 {
-                    "same content, and both are stored source text"
-                } else {
-                    "same content, and one of these is stored source text"
+                    "same content; handed to consolidation"
                 }
-            } else if core
-                .store
-                .record_pair_with_detail(&link.a_id, &link.b_id, 0.0, "link")
-                .await?
-            {
-                "same content; handed to consolidation"
-            } else {
-                "same content; consolidation already has this pair"
+                _ => "same content; consolidation already has this pair",
             };
             core.store
-                .set_link_state(
-                    &link.a_id,
-                    &link.b_id,
-                    LinkState::Related,
-                    Some(reason),
-                    revs,
-                )
-                .await?;
+                .set_link_state(x, y, LinkState::Related, Some(reason), revs)
+                .await
+        }
+        LinkKind::Contradicts => {
+            if passages == 0 {
+                core.store
+                    .record_pair_with_detail(x, y, 0.0, "link")
+                    .await?;
+            }
+            core.store
+                .set_link_kind(x, y, LinkState::Related, Some(kind), None, revs)
+                .await
+        }
+        LinkKind::Unrelated => {
+            core.store
+                .set_link_kind(x, y, LinkState::Unrelated, Some(kind), None, revs)
+                .await
+        }
+        _ => {
+            let first = first_is_a.filter(|_| kind.directional());
+            core.store
+                .set_link_kind(x, y, LinkState::Related, Some(kind), first, revs)
+                .await
         }
     }
-    Ok(())
+}
+
+async fn artifact(core: &Core, id: &str) -> Result<Option<Chunk>> {
+    match core.store.get_artifact(id).await {
+        Ok(c) => Ok(Some(c)),
+        Err(Error::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// What `link_kind`'s answers do to a link.
+pub struct LinkApplier;
+
+#[async_trait]
+impl Applier for LinkApplier {
+    fn question_id(&self) -> &'static str {
+        "link_kind"
+    }
+
+    fn label(&self) -> &'static str {
+        "Related how?"
+    }
+
+    fn job(&self) -> Option<Job> {
+        None
+    }
+
+    async fn buttons(&self, _: &Core, _: &Logged) -> Result<Vec<(String, String)>> {
+        Ok([
+            ("continues", "Next step"),
+            ("example", "Example"),
+            ("alternative", "Alternative"),
+            ("background", "Background"),
+            ("contradicts", "Contradicts"),
+            ("duplicate", "Duplicate"),
+            ("unrelated", "Unrelated"),
+        ]
+        .into_iter()
+        .map(|(p, l)| (p.to_string(), l.to_string()))
+        .collect())
+    }
+
+    async fn subjects(&self, core: &Core, d: &Logged) -> Result<Vec<(String, String)>> {
+        let mut out = Vec::new();
+        for id in [Some(&d.subject_a), d.subject_b.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Some(c) = artifact(core, id).await? {
+                out.push((c.id.clone(), crate::web::ui::row_label(&c).text));
+            }
+        }
+        Ok(out)
+    }
+
+    async fn unchanged(&self, core: &Core, d: &Logged) -> Result<bool> {
+        let Some(b_id) = d.subject_b.as_deref() else {
+            return Ok(false);
+        };
+        if core.store.get_link(&d.subject_a, b_id).await?.is_none() {
+            return Ok(false);
+        }
+        for (id, rev) in [(d.subject_a.as_str(), d.rev_a), (b_id, d.rev_b)] {
+            let Some(c) = artifact(core, id).await? else {
+                return Ok(false);
+            };
+            if !c.in_results() || Some(c.embed_rev) != rev {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn apply(
+        &self,
+        core: &Core,
+        d: &Logged,
+        pick: &str,
+        _: DecidedBy,
+    ) -> Result<Vec<String>> {
+        let kind = LinkKind::parse(pick)
+            .ok_or_else(|| Error::Validation(format!("no link kind is called {pick:?}")))?;
+        let Some(b_id) = d.subject_b.as_deref() else {
+            return Ok(vec![]);
+        };
+        let Some(link) = core.store.get_link(&d.subject_a, b_id).await? else {
+            return Ok(vec![]);
+        };
+        // Settled since it was asked, by a person's dismissal or a sibling: nothing is left to do.
+        if link.state != LinkState::Learning {
+            return Ok(vec![]);
+        }
+        let (Some(a), Some(b)) = (
+            artifact(core, &link.a_id).await?,
+            artifact(core, &link.b_id).await?,
+        ) else {
+            return Ok(vec![]);
+        };
+        // The revisions read: a text changed since reopens the link at the next sweep.
+        let revs = d.rev_a.zip(d.rev_b);
+        carry_out(core, &link, &a, &b, kind, first_is_a(d), revs).await?;
+        Ok(vec![])
+    }
+
+    async fn reopen(&self, core: &Core, d: &Logged) -> Result<()> {
+        let Some(b_id) = d.subject_b.as_deref() else {
+            return Ok(());
+        };
+        // A person's dismissal since stays: asking again is not taking it back.
+        match core.store.get_link(&d.subject_a, b_id).await? {
+            Some(l) if l.state != LinkState::Dismissed => {
+                core.store
+                    .set_link_kind(&d.subject_a, b_id, LinkState::Learning, None, None, None)
+                    .await
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::judging::band::Band;
     use crate::core::test_support::test_core;
+    use crate::infer::decide::{Answer, Answers, Kind as QKind};
+    use crate::infer::fake::RuleDecider;
     use crate::store::artifacts::NewArtifact;
+    use crate::store::decision_log::State;
     use crate::store::feedback::{Door, NewCandidate, NewEvent, Verdict};
     use crate::store::links::LinkState;
+    use std::sync::Arc;
 
     async fn seed(core: &Core, n: usize) -> Vec<String> {
         let mut ids = Vec::new();
@@ -984,33 +1178,361 @@ mod tests {
         assert_eq!(JUDGED_AFTER, "associate.judged_after");
     }
 
-    #[tokio::test]
-    async fn a_queued_unit_spends_no_call_once_search_recording_is_switched_off() {
-        let mut core = test_core().await;
-        on(&mut core).await;
-        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"relation":"related","reason":"should never be read"}"#.into(),
-        ]));
-        core.link_judge = Some(scripted.clone());
-        let ids = seed(&core, 2).await;
+    /// How the decider reads a link: the kind and how sure, whether the kind's reversed read names
+    /// another, which note comes first given the state, and whether the direction's reversed read
+    /// names the other note.
+    #[derive(Clone, Copy)]
+    struct Says {
+        kind: &'static str,
+        top: f64,
+        kind_twin: Option<&'static str>,
+        first: fn(&str) -> &'static str,
+        torn_direction: bool,
+    }
+
+    /// Always the note labelled A: the pull the exchanged read exists to catch.
+    fn the_label(_: &str) -> &'static str {
+        "a_first"
+    }
+
+    /// The note titled t0 comes first, whichever label it carries.
+    fn the_text(state: &str) -> &'static str {
+        if state.starts_with("A: t0") {
+            "a_first"
+        } else {
+            "b_first"
+        }
+    }
+
+    fn says(kind: &'static str) -> Says {
+        Says {
+            kind,
+            top: 0.95,
+            kind_twin: None,
+            first: the_text,
+            torn_direction: false,
+        }
+    }
+
+    fn deciding(core: &mut Core, s: Says) -> Arc<RuleDecider> {
+        let d = Arc::new(RuleDecider::new(move |state, qs| {
+            let mut answers = std::collections::HashMap::new();
+            for q in qs {
+                let QKind::Choice { options } = &q.kind else {
+                    return Err(Error::Validation("a choice only".into()));
+                };
+                let direction = options.iter().any(|(n, _)| n == "a_first");
+                let (favoured, top) = if direction {
+                    ((s.first)(state), 0.95)
+                } else {
+                    (s.kind, s.top)
+                };
+                let twin = q.key.ends_with('r');
+                let said = match (direction, twin) {
+                    (true, true) if s.torn_direction => {
+                        if favoured == "a_first" {
+                            "b_first"
+                        } else {
+                            "a_first"
+                        }
+                    }
+                    (false, true) => s.kind_twin.unwrap_or(favoured),
+                    _ => favoured,
+                };
+                let rest = (1.0 - top) / (options.len() - 1) as f64;
+                answers.insert(
+                    q.key.clone(),
+                    Answer::Choice {
+                        pick: said.into(),
+                        probabilities: options
+                            .iter()
+                            .map(|(n, _)| if n == favoured { top } else { rest })
+                            .collect(),
+                        confidence: top,
+                    },
+                );
+            }
+            Ok(Answers {
+                answers,
+                model: "rule-decider".into(),
+                input_tokens: 0,
+            })
+        }));
+        core.decider = d.clone();
+        d
+    }
+
+    /// Two artifacts from different documents, bound by one search.
+    async fn bound(core: &Core) -> Vec<String> {
+        let ids = seed(core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
             .await
             .unwrap();
+        ids
+    }
+
+    /// The line a reader of `from` sees beside the other note.
+    async fn line_from(core: &Core, from: &str) -> Option<String> {
+        let got = core
+            .store
+            .links_from(
+                &[from.to_string()],
+                &[LinkState::Related],
+                30.0,
+                crate::store::now(),
+                0.0,
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        got[0].reason.clone()
+    }
+
+    async fn link_of(core: &Core, ids: &[String]) -> crate::store::links::Link {
+        core.store
+            .get_link(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    fn link_era(core: &Core) -> String {
+        crate::core::judging::band::era(
+            core.decider.model(),
+            crate::core::judging::catalogue::link_kind().version,
+        )
+    }
+
+    async fn decision(core: &Core, ids: &[String]) -> crate::store::decision_log::Logged {
+        let (a, b) = crate::store::links::canonical(&ids[0], &ids[1]);
+        core.store
+            .last_logged("link_kind", a, Some(b), &link_era(core))
+            .await
+            .unwrap()
+            .expect("the link was asked")
+    }
+
+    async fn to_judge(core: &Core) -> Vec<crate::store::links::Link> {
+        core.store
+            .links_to_judge(&link_era(core), 4.0, 1, 30.0, crate::store::now(), 10)
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn each_kind_renders_a_line_for_each_side() {
+        use crate::store::links::{LinkKind, link_line};
+        // A is first; read from A (`from_a`), then from B.
+        let both = |k| {
+            (
+                link_line(k, Some(true), true),
+                link_line(k, Some(true), false),
+            )
+        };
+        assert_eq!(
+            both(LinkKind::Continues),
+            (
+                Some("The next step after this"),
+                Some("The step before this")
+            )
+        );
+        assert_eq!(
+            both(LinkKind::Example),
+            (
+                Some("An example of this"),
+                Some("What this is an example of")
+            )
+        );
+        assert_eq!(
+            both(LinkKind::Background),
+            (
+                Some("Uses what this explains"),
+                Some("Explains what this uses")
+            )
+        );
+        // B first: the lines trade sides.
+        assert_eq!(
+            link_line(LinkKind::Continues, Some(false), true),
+            Some("The step before this")
+        );
+        for side in [true, false] {
+            assert_eq!(
+                link_line(LinkKind::Alternative, None, side),
+                Some("Another way to do this")
+            );
+            assert_eq!(
+                link_line(LinkKind::Contradicts, None, side),
+                Some("States this differently")
+            );
+            assert_eq!(link_line(LinkKind::Unrelated, None, side), None);
+            assert_eq!(link_line(LinkKind::Duplicate, None, side), None);
+            for k in [LinkKind::Continues, LinkKind::Example, LinkKind::Background] {
+                assert_eq!(link_line(k, None, side), Some("Related to this"));
+            }
+        }
+        for k in [
+            LinkKind::Continues,
+            LinkKind::Example,
+            LinkKind::Alternative,
+            LinkKind::Background,
+            LinkKind::Contradicts,
+            LinkKind::Duplicate,
+            LinkKind::Unrelated,
+        ] {
+            assert_eq!(LinkKind::parse(k.as_str()), Some(k));
+        }
+        assert_eq!(LinkKind::parse("related"), None);
+    }
+
+    #[tokio::test]
+    async fn a_sure_kind_is_stored_and_shown_as_its_line() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(&mut core, says("example"));
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.kind, Some(crate::store::links::LinkKind::Example));
+        let (a, _) = crate::store::links::canonical(&ids[0], &ids[1]);
+        assert_eq!(l.first_is_a, Some(a == ids[0]), "t0 is the general one");
+        assert_eq!(l.reason, None, "no text of the model's is stored");
+        assert_eq!(l.judged_rev_a, Some(0));
+        // t0 is the description, t1 the instance.
+        assert_eq!(
+            line_from(&core, &ids[0]).await.as_deref(),
+            Some("An example of this")
+        );
+        assert_eq!(
+            line_from(&core, &ids[1]).await.as_deref(),
+            Some("What this is an example of")
+        );
+        assert_eq!(decider.calls(), 2, "the request, then the exchanged one");
+        let d = decision(&core, &ids).await;
+        assert_eq!((d.pick.as_str(), d.band), ("example", Band::Act));
+        let answer: serde_json::Value = serde_json::from_str(&d.answer).unwrap();
+        assert!(answer.get("direction").is_some(), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_directional_kind_whose_direction_is_torn_shows_the_neutral_line() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(
+            &mut core,
+            Says {
+                torn_direction: true,
+                ..says("continues")
+            },
+        );
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.kind, Some(crate::store::links::LinkKind::Continues));
+        assert_eq!(l.first_is_a, None);
+        for id in &ids {
+            assert_eq!(
+                line_from(&core, id).await.as_deref(),
+                Some("Related to this")
+            );
+        }
+        assert_eq!(decider.calls(), 1, "a torn direction is not asked again");
+    }
+
+    #[tokio::test]
+    async fn a_direction_that_follows_the_label_under_exchange_is_stored_undirected() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(
+            &mut core,
+            Says {
+                first: the_label,
+                ..says("continues")
+            },
+        );
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.kind, Some(crate::store::links::LinkKind::Continues));
+        assert_eq!(l.first_is_a, None, "A was named first both ways round");
+        for id in &ids {
+            assert_eq!(
+                line_from(&core, id).await.as_deref(),
+                Some("Related to this")
+            );
+        }
+        assert_eq!(decider.calls(), 2);
+        let exchanged = &decider.requests()[1];
+        assert!(exchanged.0.starts_with("A: t1"), "{}", exchanged.0);
+        assert!(
+            exchanged.1.iter().all(|q| q.instructions
+                == crate::core::judging::catalogue::link_direction()
+                    .question
+                    .instructions),
+            "the exchanged request asks only the direction"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direction_that_follows_the_text_under_exchange_is_stored_with_first() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, says("continues"));
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let l = link_of(&core, &ids).await;
+        let (a, _) = crate::store::links::canonical(&ids[0], &ids[1]);
+        assert_eq!(l.first_is_a, Some(a == ids[0]));
+        assert_eq!(
+            line_from(&core, &ids[0]).await.as_deref(),
+            Some("The next step after this")
+        );
+        assert_eq!(
+            line_from(&core, &ids[1]).await.as_deref(),
+            Some("The step before this")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_kind_with_no_direction_spends_no_exchanged_request() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(&mut core, says("alternative"));
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(decider.calls(), 1);
+        assert_eq!(
+            line_from(&core, &ids[1]).await.as_deref(),
+            Some("Another way to do this")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queued_unit_spends_no_call_once_search_recording_is_switched_off() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(&mut core, says("alternative"));
+        let ids = bound(&core).await;
         core.learn.enabled = false;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
-        assert_eq!(scripted.calls(), 0);
-        assert_eq!(
-            core.store
-                .get_link(&ids[0], &ids[1])
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            LinkState::Learning
-        );
+        assert_eq!(decider.calls(), 0);
+        assert_eq!(link_of(&core, &ids).await.state, LinkState::Learning);
     }
 
     #[test]
@@ -1039,25 +1561,17 @@ mod tests {
     async fn a_related_verdict_names_the_relation_and_stops_the_decay() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some(r#"{"relation":"related","reason":"the config and its errors"}"#.into()),
-        }));
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
+        deciding(&mut core, says("alternative"));
+        let ids = bound(&core).await;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
-        let l = core
-            .store
-            .get_link(&ids[0], &ids[1])
-            .await
-            .unwrap()
-            .unwrap();
+        let l = link_of(&core, &ids).await;
         assert_eq!(l.state, LinkState::Related);
-        assert_eq!(l.reason.as_deref(), Some("the config and its errors"));
+        assert_eq!(
+            line_from(&core, &ids[0]).await.as_deref(),
+            Some("Another way to do this")
+        );
         assert_eq!(l.judged_rev_a, Some(0));
     }
 
@@ -1065,23 +1579,12 @@ mod tests {
     async fn a_verdict_with_no_line_stores_no_reason_rather_than_an_empty_one() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some(r#"{"relation":"related"}"#.into()),
-        }));
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
+        deciding(&mut core, says("alternative"));
+        let ids = bound(&core).await;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
-        let l = core
-            .store
-            .get_link(&ids[0], &ids[1])
-            .await
-            .unwrap()
-            .unwrap();
+        let l = link_of(&core, &ids).await;
         assert_eq!(l.state, LinkState::Related);
         assert_eq!(l.reason, None, "an empty reason was stored as Some(\"\")");
     }
@@ -1090,26 +1593,14 @@ mod tests {
     async fn an_unrelated_verdict_is_stored_so_it_is_not_asked_again() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some(r#"{"relation":"unrelated","reason":"a coincidence of retrieval"}"#.into()),
-        }));
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
+        deciding(&mut core, says("unrelated"));
+        let ids = bound(&core).await;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
-        assert_eq!(
-            core.store
-                .get_link(&ids[0], &ids[1])
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            LinkState::Unrelated
-        );
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Unrelated);
+        assert_eq!(l.reason, None);
         run(&core).await.unwrap();
         assert!(
             !core
@@ -1124,17 +1615,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_torn_link_is_an_unsure_row_and_stays_learning() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(
+            &mut core,
+            Says {
+                kind_twin: Some("unrelated"),
+                ..says("alternative")
+            },
+        );
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let d = decision(&core, &ids).await;
+        assert_eq!(d.band, Band::Ask);
+        assert_eq!(d.state, State::Open, "the row is seated");
+        assert_eq!(d.subject_kind, "link");
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Learning);
+        assert_eq!(l.kind, None);
+    }
+
+    #[tokio::test]
+    async fn a_person_picking_a_kind_sets_it_and_can_ask_again() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(
+            &mut core,
+            Says {
+                kind_twin: Some("alternative"),
+                ..says("unrelated")
+            },
+        );
+        let ids = bound(&core).await;
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+        let d = decision(&core, &ids).await;
+        assert_eq!(d.state, State::Open);
+        let applier = core.appliers.get("link_kind").expect("registered");
+        assert_eq!(applier.label(), "Related how?");
+        assert!(applier.job().is_none());
+
+        crate::core::judging::answer(&core, &d.id, Some("alternative"))
+            .await
+            .unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.kind, Some(crate::store::links::LinkKind::Alternative));
+        assert_eq!(
+            line_from(&core, &ids[0]).await.as_deref(),
+            Some("Another way to do this")
+        );
+        assert!(to_judge(&core).await.is_empty());
+
+        crate::core::judging::ask_again(&core, &d.id).await.unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Learning);
+        assert_eq!((l.kind, l.first_is_a), (None, None));
+        assert_eq!(to_judge(&core).await.len(), 1, "asked again means asked");
+    }
+
+    #[tokio::test]
+    async fn a_contradiction_between_linked_notes_is_handed_to_consolidation() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, says("contradicts"));
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pair_state_between(&ids[0], &ids[1])
+                .await
+                .unwrap(),
+            Some(crate::store::pairs::PairState::Pending),
+            "consolidation was never told"
+        );
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.kind, Some(crate::store::links::LinkKind::Contradicts));
+        for id in &ids {
+            assert_eq!(
+                line_from(&core, id).await.as_deref(),
+                Some("States this differently")
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_disguised_duplicate_is_handed_to_consolidation_and_still_shown() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some(r#"{"relation":"duplicate","reason":"the same procedure twice"}"#.into()),
-        }));
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
+        deciding(&mut core, says("duplicate"));
+        let ids = bound(&core).await;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
@@ -1145,14 +1722,13 @@ mod tests {
             .unwrap()
             .expect("consolidation was never told");
         assert_eq!(pair, crate::store::pairs::PairState::Pending);
-        let l = core
-            .store
-            .get_link(&ids[0], &ids[1])
-            .await
-            .unwrap()
-            .unwrap();
+        let l = link_of(&core, &ids).await;
         assert_eq!(l.state, LinkState::Related);
         assert!(l.reason.as_deref().unwrap().contains("consolidation"));
+        assert_eq!(
+            line_from(&core, &ids[0]).await.as_deref(),
+            Some("same content; handed to consolidation")
+        );
     }
 
     async fn seed_passages(core: &Core, n: usize) -> Vec<String> {
@@ -1186,9 +1762,7 @@ mod tests {
     async fn a_duplicate_verdict_over_passages_is_not_handed_to_consolidation() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some(r#"{"relation":"duplicate","reason":"the same definition twice"}"#.into()),
-        }));
+        deciding(&mut core, says("duplicate"));
         let ids = seed_passages(&core, 2).await;
         core.store
             .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
@@ -1205,12 +1779,7 @@ mod tests {
             None,
             "a passage is substrate on this path too"
         );
-        let l = core
-            .store
-            .get_link(&ids[0], &ids[1])
-            .await
-            .unwrap()
-            .unwrap();
+        let l = link_of(&core, &ids).await;
         assert_eq!(
             l.state,
             LinkState::Related,
@@ -1224,12 +1793,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_contradiction_over_passages_is_shown_and_not_handed_over() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, says("contradicts"));
+        let ids = seed_passages(&core, 2).await;
+        core.store
+            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
+            .await
+            .unwrap();
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(
+            core.store
+                .pair_state_between(&ids[0], &ids[1])
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(link_of(&core, &ids).await.state, LinkState::Related);
+    }
+
+    #[tokio::test]
     async fn a_duplicate_over_one_passage_does_not_call_the_other_one_source_text() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some(r#"{"relation":"duplicate","reason":"the same definition twice"}"#.into()),
-        }));
+        deciding(&mut core, says("duplicate"));
         let passage = seed_passages(&core, 1).await.remove(0);
         let captured = seed(&core, 1).await.remove(0);
         core.store
@@ -1270,56 +1860,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn three_unreadable_replies_shelve_the_link_rather_than_asking_forever() {
-        let mut core = test_core().await;
-        on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some("no idea, sorry".into()),
-        }));
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
-        let target = link_target(&ids[0], &ids[1]);
-
-        for _ in 0..2 {
-            assert!(
-                judge(&core, &target).await.is_err(),
-                "an unreadable reply is an error"
-            );
-            assert_eq!(
-                core.store
-                    .get_link(&ids[0], &ids[1])
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .state,
-                LinkState::Learning,
-                "the link stays visible while it is still being asked about"
-            );
-        }
-        judge(&core, &target).await.unwrap();
-
-        let l = core
-            .store
-            .get_link(&ids[0], &ids[1])
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(l.state, LinkState::Unrelated);
-        assert_eq!(l.reason.as_deref(), Some("unreadable"));
-    }
-
-    #[tokio::test]
     async fn a_link_that_has_already_been_answered_costs_no_call() {
         let mut core = test_core().await;
         on(&mut core).await;
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
+        let decider = deciding(&mut core, says("alternative"));
+        let ids = bound(&core).await;
         core.store
             .set_link_state(&ids[0], &ids[1], LinkState::Dismissed, None, None)
             .await
@@ -1327,48 +1872,131 @@ mod tests {
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
-        assert_eq!(
-            core.store
-                .get_link(&ids[0], &ids[1])
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
-            LinkState::Dismissed
-        );
+        assert_eq!(link_of(&core, &ids).await.state, LinkState::Dismissed);
+        assert_eq!(decider.calls(), 0);
     }
 
     #[tokio::test]
     async fn a_unit_already_queued_when_the_feature_is_switched_off_spends_no_call() {
         let mut core = test_core().await;
         on(&mut core).await;
-        let scripted = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"relation":"related","reason":"should never be read"}"#.into(),
-        ]));
-        core.link_judge = Some(scripted.clone());
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
+        let decider = deciding(&mut core, says("alternative"));
+        let ids = bound(&core).await;
         core.learn.enabled = false;
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
         assert_eq!(
-            scripted.calls(),
+            decider.calls(),
             0,
             "a call was spent after the feature was off"
         );
         assert_eq!(
-            core.store
-                .get_link(&ids[0], &ids[1])
-                .await
-                .unwrap()
-                .unwrap()
-                .state,
+            link_of(&core, &ids).await.state,
             LinkState::Learning,
             "an unjudged link stays visible as learning"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_link_is_asked_once_per_era_and_again_when_a_text_changes() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(
+            &mut core,
+            Says {
+                kind_twin: Some("unrelated"),
+                ..says("alternative")
+            },
+        );
+        let ids = bound(&core).await;
+        assert_eq!(to_judge(&core).await.len(), 1);
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+        assert_eq!(link_of(&core, &ids).await.state, LinkState::Learning);
+        assert!(to_judge(&core).await.is_empty(), "asked in this era");
+        // A second unit for the same link asks nothing.
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+        assert_eq!(decider.calls(), 1);
+
+        core.store
+            .update_artifact_text(&ids[0], "rewritten")
+            .await
+            .unwrap();
+        assert_eq!(to_judge(&core).await.len(), 1, "the text it read is gone");
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+        assert_eq!(decider.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_link_judged_before_this_change_keeps_its_written_reason() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = bound(&core).await;
+        core.store
+            .set_link_state(
+                &ids[0],
+                &ids[1],
+                LinkState::Related,
+                Some("the tool and the error it prints"),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.kind, None);
+        for id in &ids {
+            assert_eq!(
+                line_from(&core, id).await.as_deref(),
+                Some("the tool and the error it prints")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_searches_that_bound_them_are_in_the_state() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(&mut core, says("alternative"));
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let (state, questions) = &decider.requests()[0];
+        assert!(
+            state.contains("Found together by these searches: q"),
+            "{state}"
+        );
+        // Both questions, each with its reversed twin, in the one request.
+        assert_eq!(questions.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn links_are_armed_inside_the_judging_budget() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let ids = seed(&core, 2).await;
+        for q in ["one", "two", "three", "four", "five"] {
+            core.store
+                .bump_link(&ids[0], &ids[1], 1.0, Some(q), 30.0, crate::store::now())
+                .await
+                .unwrap();
+        }
+        core.decide_cfg.max_per_tick = 0;
+
+        let r = run(&core).await.unwrap();
+
+        assert_eq!(r.armed, 0);
+        assert!(
+            !core
+                .store
+                .live_job(
+                    crate::store::jobs::Stage::LinkJudge,
+                    &link_target(&ids[0], &ids[1])
+                )
+                .await
+                .unwrap()
         );
     }
 
@@ -1445,14 +2073,8 @@ mod tests {
     async fn a_duplicate_verdict_claims_no_handoff_when_the_pair_is_already_settled() {
         let mut core = test_core().await;
         on(&mut core).await;
-        core.link_judge = Some(std::sync::Arc::new(crate::infer::fake::FakeCompleter {
-            reply: Some(r#"{"relation":"duplicate","reason":"same thing"}"#.into()),
-        }));
-        let ids = seed(&core, 2).await;
-        core.store
-            .bump_link(&ids[0], &ids[1], 5.0, Some("q"), 30.0, crate::store::now())
-            .await
-            .unwrap();
+        deciding(&mut core, says("duplicate"));
+        let ids = bound(&core).await;
         core.store
             .record_pair(&ids[0], &ids[1], 0.91)
             .await
@@ -1464,12 +2086,7 @@ mod tests {
 
         judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
 
-        let l = core
-            .store
-            .get_link(&ids[0], &ids[1])
-            .await
-            .unwrap()
-            .unwrap();
+        let l = link_of(&core, &ids).await;
         assert_eq!(l.state, LinkState::Related);
         assert!(
             !l.reason

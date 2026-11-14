@@ -313,7 +313,7 @@ impl Default for AssociateConfig {
             show_min: 2.0,
             judge_min: 4.0,
             judge_min_queries: 3,
-            judge_per_sweep: 10,
+            judge_per_sweep: 30,
             spread_from: 3,
             spread_max: default_spread_max(),
             prime_margin: 0.5,

@@ -43,6 +43,79 @@ impl LinkState {
     }
 }
 
+/// How two linked notes relate, as the decision model named it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    Continues,
+    Example,
+    Alternative,
+    Background,
+    Contradicts,
+    Duplicate,
+    Unrelated,
+}
+
+impl LinkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkKind::Continues => "continues",
+            LinkKind::Example => "example",
+            LinkKind::Alternative => "alternative",
+            LinkKind::Background => "background",
+            LinkKind::Contradicts => "contradicts",
+            LinkKind::Duplicate => "duplicate",
+            LinkKind::Unrelated => "unrelated",
+        }
+    }
+    pub fn parse(s: &str) -> Option<LinkKind> {
+        Some(match s {
+            "continues" => LinkKind::Continues,
+            "example" => LinkKind::Example,
+            "alternative" => LinkKind::Alternative,
+            "background" => LinkKind::Background,
+            "contradicts" => LinkKind::Contradicts,
+            "duplicate" => LinkKind::Duplicate,
+            "unrelated" => LinkKind::Unrelated,
+            _ => return None,
+        })
+    }
+    /// One note of the two comes first: the earlier step, the general description, the explanation.
+    pub fn directional(self) -> bool {
+        matches!(
+            self,
+            LinkKind::Continues | LinkKind::Example | LinkKind::Background
+        )
+    }
+}
+
+/// The line a reader sees beside a link, from the side of `from_a`; None for kinds that show none.
+/// It describes the other note, seen from the one being read.
+pub fn link_line(kind: LinkKind, first_is_a: Option<bool>, from_a: bool) -> Option<&'static str> {
+    let reading_first = first_is_a.map(|f| f == from_a);
+    Some(match (kind, reading_first) {
+        (LinkKind::Continues | LinkKind::Example | LinkKind::Background, None) => "Related to this",
+        (LinkKind::Continues, Some(true)) => "The next step after this",
+        (LinkKind::Continues, Some(false)) => "The step before this",
+        (LinkKind::Example, Some(true)) => "An example of this",
+        (LinkKind::Example, Some(false)) => "What this is an example of",
+        (LinkKind::Background, Some(true)) => "Uses what this explains",
+        (LinkKind::Background, Some(false)) => "Explains what this uses",
+        (LinkKind::Alternative, _) => "Another way to do this",
+        (LinkKind::Contradicts, _) => "States this differently",
+        // A duplicate shows its fixed hand-over line, from `reason`; an unrelated one is not shown.
+        (LinkKind::Duplicate | LinkKind::Unrelated, _) => return None,
+    })
+}
+
+/// `first` as stored: `a` | `b`.
+fn first_of(s: Option<&str>) -> Option<bool> {
+    match s {
+        Some("a") => Some(true),
+        Some("b") => Some(false),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cue {
     pub q: String,
@@ -59,11 +132,15 @@ pub struct Link {
     pub queries: i64,
     pub cues: Vec<Cue>,
     pub state: LinkState,
+    /// Only for a link judged before kinds, or a fixed hand-over line; never the model's text.
     pub reason: Option<String>,
     pub judged_rev_a: Option<i64>,
     pub judged_rev_b: Option<i64>,
     pub judge_attempts: i64,
     pub created_at: i64,
+    pub kind: Option<LinkKind>,
+    /// For a directional kind: whether `a_id` comes first. None when the direction did not hold.
+    pub first_is_a: Option<bool>,
 }
 
 impl Store {
@@ -113,6 +190,10 @@ impl Store {
                             THEN artifact_links.state ELSE 'related' END,
                reason = CASE WHEN artifact_links.state = 'dismissed'
                              THEN artifact_links.reason ELSE excluded.reason END,
+               kind = CASE WHEN artifact_links.state = 'dismissed'
+                           THEN artifact_links.kind ELSE NULL END,
+               first = CASE WHEN artifact_links.state = 'dismissed'
+                            THEN artifact_links.first ELSE NULL END,
                judged_rev_a = CASE WHEN artifact_links.state = 'dismissed'
                                    THEN artifact_links.judged_rev_a
                                    ELSE excluded.judged_rev_a END,
@@ -201,6 +282,8 @@ pub(crate) struct LinkRow {
     pub judged_rev_b: Option<i64>,
     pub judge_attempts: i64,
     pub created_at: i64,
+    pub kind: Option<String>,
+    pub first: Option<String>,
 }
 
 pub(crate) fn row_to_link(r: LinkRow) -> Link {
@@ -217,6 +300,8 @@ pub(crate) fn row_to_link(r: LinkRow) -> Link {
         judged_rev_b: r.judged_rev_b,
         judge_attempts: r.judge_attempts,
         created_at: r.created_at,
+        kind: r.kind.as_deref().and_then(LinkKind::parse),
+        first_is_a: first_of(r.first.as_deref()),
     }
 }
 
@@ -244,6 +329,7 @@ pub struct LinkedTo {
     /// Already decayed to the caller's clock. There is no stale number here.
     pub weight: f64,
     pub state: LinkState,
+    /// The rendered line when the link has a kind, else the stored reason.
     pub reason: Option<String>,
     pub cues: Vec<Cue>,
     /// A merge belongs to no document and always counts as differing.
@@ -472,7 +558,8 @@ impl Store {
                 sqlx::query!(
                     "UPDATE artifact_links
                         SET weight = ?, bumped_at = ?, queries = ?, cues = ?, state = ?,
-                            reason = NULL, judged_rev_a = NULL, judged_rev_b = NULL
+                            reason = NULL, kind = NULL, first = NULL,
+                            judged_rev_a = NULL, judged_rev_b = NULL
                       WHERE a_id = ? AND b_id = ?",
                     weight,
                     at,
@@ -542,7 +629,7 @@ impl Store {
             let rows = sqlx::query!(
                 "SELECT l.a_id AS a_id, l.b_id AS b_id, l.weight AS weight,
                         l.bumped_at AS bumped_at, l.state AS state, l.reason AS reason,
-                        l.cues AS cues,
+                        l.cues AS cues, l.kind AS kind, l.first AS first,
                         a.corpus_id AS a_corpus, b.corpus_id AS b_corpus
                    FROM artifact_links l
                    JOIN artifacts a ON a.id = l.a_id
@@ -572,7 +659,13 @@ impl Store {
                 }
                 let a_id: String = r.a_id;
                 let b_id: String = r.b_id;
-                let other = if &a_id == anchor { b_id } else { a_id };
+                let from_a = &a_id == anchor;
+                let line = r
+                    .kind
+                    .as_deref()
+                    .and_then(LinkKind::parse)
+                    .and_then(|k| link_line(k, first_of(r.first.as_deref()), from_a));
+                let other = if from_a { b_id } else { a_id };
                 let a_corpus: Option<String> = r.a_corpus;
                 let b_corpus: Option<String> = r.b_corpus;
                 out.push(LinkedTo {
@@ -580,7 +673,7 @@ impl Store {
                     other,
                     weight,
                     state,
-                    reason: r.reason,
+                    reason: line.map(str::to_string).or(r.reason),
                     cues: serde_json::from_str(&r.cues).unwrap_or_default(),
                     // Merges are decided below through origins.
                     cross_corpus: match (a_corpus, b_corpus) {
@@ -607,8 +700,10 @@ impl Store {
     }
 
     /// Cross-corpus is decided over origins in Rust: a merge belongs to every corpus it drew from.
+    /// A link asked about in `era` is not listed again until a text changes or it is asked again.
     pub async fn links_to_judge(
         &self,
+        era: &str,
         min_weight: f64,
         min_queries: i64,
         half_life_days: f64,
@@ -626,9 +721,16 @@ impl Store {
                 AND l.weight >= ? AND l.queries >= ?
                 AND a.status = 'active' AND a.superseded_by IS NULL
                 AND b.status = 'active' AND b.superseded_by IS NULL
+                AND NOT EXISTS (
+                    SELECT 1 FROM decisions d
+                     WHERE d.question_id = 'link_kind' AND d.subject_kind = 'link'
+                       AND d.subject_a = l.a_id AND d.subject_b = l.b_id AND d.era = ?
+                       AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
+                       AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
               ORDER BY l.weight DESC LIMIT ?",
             min_weight,
             min_queries,
+            era,
             cap
         )
         .fetch_all(&self.pool)
@@ -702,10 +804,9 @@ impl Store {
 
     /// The judge read text that no longer exists.
     pub async fn reopen_stale_judged_links(&self, limit: i64) -> Result<u64> {
-        // `judge_attempts` is kept: a re-embed gets one more call, not a fresh three.
         Ok(sqlx::query!(
             "UPDATE artifact_links
-                SET state = 'learning', reason = NULL,
+                SET state = 'learning', reason = NULL, kind = NULL, first = NULL,
                     judged_rev_a = NULL, judged_rev_b = NULL
               WHERE (a_id, b_id) IN (
                 SELECT l.a_id, l.b_id FROM artifact_links l
@@ -722,7 +823,8 @@ impl Store {
         .rows_affected())
     }
 
-    /// `judged_revs` is what `reopen_stale_judged_links` compares against later.
+    /// `judged_revs` is what `reopen_stale_judged_links` compares against later. A written line
+    /// replaces any kind: the reader sees `reason`.
     pub async fn set_link_state(
         &self,
         a: &str,
@@ -738,10 +840,48 @@ impl Store {
         };
         sqlx::query!(
             "UPDATE artifact_links
-                SET state = ?, reason = ?, judged_rev_a = ?, judged_rev_b = ?
+                SET state = ?, reason = ?, kind = NULL, first = NULL,
+                    judged_rev_a = ?, judged_rev_b = ?
               WHERE a_id = ? AND b_id = ?",
             state.as_str(),
             reason,
+            rev_a,
+            rev_b,
+            a,
+            b
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A judged kind, and for a directional one which end comes first (`first_is_a` names `a` as
+    /// given here). No reason is kept: the reader's line is rendered from the kind.
+    pub async fn set_link_kind(
+        &self,
+        a: &str,
+        b: &str,
+        state: LinkState,
+        kind: Option<LinkKind>,
+        first_is_a: Option<bool>,
+        judged_revs: Option<(i64, i64)>,
+    ) -> Result<()> {
+        let flipped = canonical(a, b).0 != a;
+        let (a, b) = canonical(a, b);
+        let first = first_is_a.map(|f| if f != flipped { "a" } else { "b" });
+        let kind = kind.map(LinkKind::as_str);
+        let (rev_a, rev_b) = match judged_revs {
+            Some((x, y)) => (Some(x), Some(y)),
+            None => (None, None),
+        };
+        sqlx::query!(
+            "UPDATE artifact_links
+                SET state = ?, reason = NULL, kind = ?, first = ?,
+                    judged_rev_a = ?, judged_rev_b = ?
+              WHERE a_id = ? AND b_id = ?",
+            state.as_str(),
+            kind,
+            first,
             rev_a,
             rev_b,
             a,
@@ -764,20 +904,6 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    /// Counted only for an unreadable reply: an outage says nothing about the link.
-    pub async fn record_link_judge_attempt(&self, a: &str, b: &str) -> Result<i64> {
-        let (a, b) = canonical(a, b);
-        Ok(sqlx::query_scalar!(
-            "UPDATE artifact_links SET judge_attempts = judge_attempts + 1
-              WHERE a_id = ? AND b_id = ? RETURNING judge_attempts",
-            a,
-            b
-        )
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(0))
     }
 
     /// `created_at` gives the baseline's age, which `activated_at` does not. One statement for
@@ -1217,7 +1343,10 @@ mod tests {
             }
         }
 
-        let armed = store.links_to_judge(4.0, 3, 30.0, 0, 10).await.unwrap();
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
+            .await
+            .unwrap();
         assert_eq!(armed.len(), 1, "got {armed:?}");
         assert_eq!(
             canonical(&cross_a, &cross_b),
@@ -1237,7 +1366,7 @@ mod tests {
         }
         assert!(
             store
-                .links_to_judge(4.0, 3, 30.0, 0, 10)
+                .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1460,15 +1589,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_judge_attempt_is_counted_and_reported_back() {
+    async fn a_kind_set_from_either_end_names_the_same_note_first() {
         let store = Store::memory().await.unwrap();
         let (a, b) = two(&store).await;
         store
-            .bump_link(&a, &b, 1.0, Some("q"), 30.0, 0)
+            .bump_link(&a, &b, 9.0, Some("q"), 30.0, 0)
             .await
             .unwrap();
-        assert_eq!(store.record_link_judge_attempt(&a, &b).await.unwrap(), 1);
-        assert_eq!(store.record_link_judge_attempt(&b, &a).await.unwrap(), 2);
+        let (ca, cb) = canonical(&a, &b);
+        let (ca, cb) = (ca.to_string(), cb.to_string());
+        // Named the other way round, with that end first.
+        store
+            .set_link_kind(
+                &cb,
+                &ca,
+                LinkState::Related,
+                Some(LinkKind::Continues),
+                Some(true),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.kind, Some(LinkKind::Continues));
+        assert_eq!(l.first_is_a, Some(false), "{cb} is first and is stored b");
+        let seen = |from: &str| {
+            let from = from.to_string();
+            let store = &store;
+            async move {
+                store
+                    .links_from(&[from], &[LinkState::Related], 30.0, 0, 0.0, 10)
+                    .await
+                    .unwrap()[0]
+                    .reason
+                    .clone()
+            }
+        };
+        assert_eq!(seen(&cb).await.as_deref(), Some("The next step after this"));
+        assert_eq!(seen(&ca).await.as_deref(), Some("The step before this"));
+
+        // A reason written before is overwritten: no text survives a kind.
+        store
+            .set_link_state(&a, &b, LinkState::Related, Some("old line"), Some((0, 0)))
+            .await
+            .unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(
+            (l.kind, l.first_is_a),
+            (None, None),
+            "a written line clears the kind"
+        );
+        store
+            .set_link_kind(
+                &a,
+                &b,
+                LinkState::Related,
+                Some(LinkKind::Alternative),
+                None,
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.get_link(&a, &b).await.unwrap().unwrap().reason, None);
+    }
+
+    #[tokio::test]
+    async fn a_reopened_link_forgets_its_kind() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two(&store).await;
+        store
+            .bump_link(&a, &b, 9.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        store
+            .set_link_kind(
+                &a,
+                &b,
+                LinkState::Related,
+                Some(LinkKind::Example),
+                Some(true),
+                Some((-1, -1)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.reopen_stale_judged_links(10).await.unwrap(), 1);
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.state, LinkState::Learning);
+        assert_eq!((l.kind, l.first_is_a), (None, None));
     }
 
     #[tokio::test]
@@ -1664,7 +1871,10 @@ mod tests {
         let cross = out.iter().find(|l| l.other == far).unwrap();
         assert!(!same.cross_corpus, "a merge of corpus-1 roots is corpus 1");
         assert!(cross.cross_corpus);
-        let armed = store.links_to_judge(4.0, 3, 30.0, 0, 10).await.unwrap();
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
+            .await
+            .unwrap();
         assert_eq!(armed.len(), 1, "{armed:?}");
         assert!(armed[0].a_id == far || armed[0].b_id == far);
     }
