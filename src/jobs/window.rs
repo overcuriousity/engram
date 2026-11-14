@@ -208,6 +208,8 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         chunks = within_allowance(chunks, &text, allowance);
     }
 
+    let chunks = faithful(core, target, &text, chunks).await;
+
     // Kept beside the chunks: `corpus_lines` is the model's claim, the span is what became of it.
     let body: String = text.clone();
     let spans: Vec<CorpusSpan> = chunks
@@ -315,6 +317,52 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
         tracing::warn!(corpus_id, error = %e, "the shown neighbours could not be asked about");
     }
     settled
+}
+
+/// After the literal checks, each proposed artifact against its window: one that adds what the window
+/// does not state is dropped, and the window's passages stay. A failed check never holds the capture:
+/// the rest stand on the literal checks alone.
+async fn faithful(
+    core: &Core,
+    target: &str,
+    window: &str,
+    chunks: Vec<crate::infer::ProposedArtifact>,
+) -> Vec<crate::infer::ProposedArtifact> {
+    use crate::core::judging::check::{Checked, Which, check};
+    let original = [state::Note {
+        title: None,
+        day: None,
+        text: window,
+    }];
+    let mut kept = Vec::with_capacity(chunks.len());
+    let mut asking = true;
+    for c in chunks {
+        if asking {
+            let rewrite = state::Note {
+                title: c.title.as_deref(),
+                day: None,
+                text: &c.text,
+            };
+            match check(core, target, &original, &rewrite, Which::AddsNothingOnly).await {
+                Ok(Checked::Refused { question, yes }) => {
+                    tracing::info!(
+                        target,
+                        question,
+                        yes,
+                        "the check dropped a proposed artifact"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(target, error = %e, "the check failed; the rest stand on the literal checks");
+                    asking = false;
+                }
+            }
+        }
+        kept.push(c);
+    }
+    kept
 }
 
 /// Whether this window is synthesized with the judged schema.
@@ -917,6 +965,107 @@ mod tests {
         }
     }
 
+    /// The check refuses any proposed artifact holding `marker`; every other request is answered 0.
+    fn refusing(marker: &'static str) -> std::sync::Arc<crate::infer::fake::RuleDecider> {
+        use crate::core::judging::check::test_support::answering;
+        std::sync::Arc::new(crate::infer::fake::RuleDecider::new(move |state, qs| {
+            let (_, rewrite) = state.rsplit_once("Rewrite: ").unwrap_or_default();
+            let a = if rewrite.contains(marker) { 0.04 } else { 0.9 };
+            Ok(
+                answering(qs, 0.9, a).unwrap_or_else(|| crate::infer::decide::Answers {
+                    answers: qs
+                        .iter()
+                        .map(|q| {
+                            (
+                                q.key.clone(),
+                                crate::infer::decide::Answer::Noul { yes: 0.0 },
+                            )
+                        })
+                        .collect(),
+                    model: "rule-decider".into(),
+                    input_tokens: 0,
+                }),
+            )
+        }))
+    }
+
+    async fn written_and_passages(
+        core: &Core,
+        corpus_id: &str,
+    ) -> (
+        Vec<crate::store::artifacts::Chunk>,
+        Vec<crate::store::artifacts::Chunk>,
+    ) {
+        core.store
+            .artifacts_for_segment(corpus_id, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.in_results())
+            .partition(|c| c.provenance != crate::store::artifacts::Provenance::Passage)
+    }
+
+    #[tokio::test]
+    async fn a_synthesized_artifact_that_adds_a_fact_is_dropped_and_the_passages_remain() {
+        let mut core = test_core().await;
+        let dec = refusing("bravo");
+        core.decider = dec.clone();
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let checks: Vec<_> = dec
+            .requests()
+            .into_iter()
+            .filter(|(_, qs)| crate::core::judging::check::test_support::is_check(qs))
+            .collect();
+        assert_eq!(checks.len(), 2, "one check per proposed artifact");
+        for (_, qs) in &checks {
+            let keys: Vec<&str> = qs.iter().map(|q| q.key.as_str()).collect();
+            assert_eq!(keys, ["adds_nothing"]);
+        }
+        let (written, passages) = written_and_passages(&core, &out.id).await;
+        let texts: Vec<&str> = written.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["alpha line"], "one written");
+        assert!(
+            passages.iter().any(|c| c.text.contains("bravo line")),
+            "the window's passage went with the dropped artifact"
+        );
+        assert_eq!(
+            core.store.segment_state(&out.id, 0).await.unwrap(),
+            Some(SegmentState::Done)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_that_errs_never_holds_the_capture() {
+        let mut core = test_core().await;
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::Inference {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let (written, _) = written_and_passages(&core, &out.id).await;
+        assert_eq!(written.len(), 2, "both stand on the literal checks alone");
+        assert_eq!(
+            core.store.segment_state(&out.id, 0).await.unwrap(),
+            Some(SegmentState::Done)
+        );
+    }
+
     #[tokio::test]
     async fn a_rerun_replaces_a_window_unless_it_was_sent_back_for_missed_lines() {
         let core = test_core().await;
@@ -1392,7 +1541,7 @@ mod tests {
             )
             .await;
             assert_eq!(judged, [true]);
-            assert_eq!(dec.calls(), 0);
+            assert_eq!(pre_reads(&dec).len(), 0);
         }
 
         #[tokio::test]
@@ -1425,7 +1574,7 @@ mod tests {
             let (id, judged) =
                 synthesized(&mut core, "The proxy listens on port 8080.", None).await;
             assert_eq!(judged, [true]);
-            assert_eq!(dec.calls(), 1);
+            assert_eq!(pre_reads(&dec).len(), 1);
             assert_eq!(
                 core.store.segment_state(&id, 0).await.unwrap(),
                 Some(SegmentState::Done),
@@ -1445,7 +1594,7 @@ mod tests {
             let (id, judged) = synthesized(&mut core, &body, None).await;
             assert!(core.store.segments_for_corpus(&id).await.unwrap().len() > 1);
             assert_eq!(judged, [false]);
-            assert_eq!(dec.calls(), 0);
+            assert_eq!(pre_reads(&dec).len(), 0);
         }
 
         #[tokio::test]

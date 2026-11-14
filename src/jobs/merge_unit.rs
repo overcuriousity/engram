@@ -15,6 +15,9 @@ use crate::store::pairs::{ArtifactPair, DecidedBy, MAX_UNREADABLE_JUDGEMENTS};
 pub(crate) const LOSS_REFUSED: &str =
     "every draft dropped a value one of them states; both stay as they are";
 
+/// The after-write check refused the draft.
+pub(crate) const UNFAITHFUL: &str = "a check found the draft unfaithful; both stay as they are";
+
 /// Who asked and the decision the ask came from, when there is one.
 struct Ask {
     by: DecidedBy,
@@ -137,9 +140,51 @@ async fn write(core: &Core, p: &ArtifactPair, members: Vec<Chunk>, ask: &Ask) ->
         leave_both(core, p, LOSS_REFUSED).await?;
         return ask.refused(core).await;
     }
+    if faithless(core, p, &members, &draft).await? {
+        leave_both(core, p, UNFAITHFUL).await?;
+        return ask.refused(core).await;
+    }
 
     let sources: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
     write_merge(core, p, &sources, &draft, ask).await
+}
+
+/// After the loss check: whether the decision model refuses the draft against the members. A failed
+/// check is an outage of this unit; a draft too long to judge rests on the loss check alone.
+async fn faithless(
+    core: &Core,
+    p: &ArtifactPair,
+    members: &[Chunk],
+    draft: &MergedDraft,
+) -> Result<bool> {
+    use crate::core::judging::check::{Checked, Which, check, outage};
+    use crate::core::judging::state::Note;
+    let originals: Vec<Note> = members
+        .iter()
+        .map(|m| Note {
+            title: prompt_name(m),
+            day: None,
+            text: &m.text,
+        })
+        .collect();
+    let rewrite = Note {
+        title: draft.title.as_deref(),
+        day: None,
+        text: &draft.text,
+    };
+    let got = check(core, &p.id.to_string(), &originals, &rewrite, Which::Both)
+        .await
+        .map_err(outage)?;
+    if let Checked::Refused { question, yes } = got {
+        tracing::warn!(
+            pair = p.id,
+            question,
+            yes,
+            "the check refused the merge draft"
+        );
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// The loss check is the caller's.
@@ -221,6 +266,7 @@ fn prompt_name(c: &Chunk) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::config::Autonomy;
+    use crate::core::judging::check::test_support::{judge, not_checks};
     use crate::core::test_support::test_core;
     use crate::infer::fake::ScriptedCompleter;
     use crate::jobs::consolidate::tests::seed_titled;
@@ -490,6 +536,116 @@ mod tests {
         assert_eq!(dec.calls(), 0, "the writer unit asked a question");
     }
 
+    #[tokio::test]
+    async fn a_merge_that_fails_the_check_is_not_written_and_both_stay() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.95);
+        let (ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        let check = Arc::new(judge(0.03, 0.9));
+        core.decider = check.clone();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(check.calls(), 1, "the draft was checked");
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none(), "an unfaithful draft was written");
+        assert_eq!(p.state, PairState::NoConflict);
+        assert_eq!(p.detail.as_deref(), Some(UNFAITHFUL));
+        assert!(!p.synthesis_asked);
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+        assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
+        assert_eq!(decision(&core, pair).await.outcome, Some(Outcome::Refused));
+    }
+
+    #[tokio::test]
+    async fn a_merge_a_person_asked_for_that_fails_the_check_leaves_their_answer_standing() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        let (_ids, pair) = pool_pair(&core).await;
+        a_person_picks_duplicate(&mut core, pair).await;
+        core.decider = Arc::new(judge(0.9, 0.04));
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none());
+        assert_eq!(p.state, PairState::NoConflict);
+        assert_eq!(
+            decision(&core, pair).await.outcome,
+            Some(Outcome::Confirmed)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_literal_is_still_caught_before_the_model_is_asked() {
+        let mut core = test_core().await;
+        writing(&mut core, &[DROPS_RW]);
+        deciding(&mut core, "duplicate", 0.95);
+        let ids = disagreeing_commands(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        let check = Arc::new(judge(0.9, 0.9));
+        core.decider = check.clone();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(check.calls(), 0, "the check was asked about a lost literal");
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.detail.as_deref(), Some(LOSS_REFUSED));
+    }
+
+    #[tokio::test]
+    async fn a_check_that_errs_fails_the_unit_for_a_retry_and_writes_nothing() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.95);
+        let (_ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "400".into(),
+            })
+        }));
+
+        let err = run(&core, &pair.to_string()).await.unwrap_err();
+
+        assert!(err.retryable(), "{err}");
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none());
+        assert!(p.synthesis_asked, "the ask waits for the retry");
+        assert_eq!(decision(&core, pair).await.outcome, None);
+    }
+
+    #[tokio::test]
+    async fn too_long_falls_back_to_the_literal_checks_alone() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.95);
+        let (_ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        let check = Arc::new(judge(0.01, 0.01));
+        check.set_context_tokens(200);
+        core.decider = check.clone();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(check.calls(), 0);
+        assert!(
+            core.store
+                .get_pair(pair)
+                .await
+                .unwrap()
+                .merged_into
+                .is_some(),
+            "a draft that passed the literal checks was not written"
+        );
+    }
+
     // ---- moved from `dedupe` with their assertions ----
 
     #[tokio::test]
@@ -700,7 +856,7 @@ mod tests {
 
         run(&core, &pair.to_string()).await.unwrap();
 
-        assert_eq!(dec.calls(), 0);
+        assert_eq!(not_checks(&dec), 0);
         let p = core.store.get_pair(pair).await.unwrap();
         let merged = p.merged_into.expect("a merged artifact answered the pair");
         let m = core.store.get_artifact(&merged).await.unwrap();

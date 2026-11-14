@@ -4,6 +4,8 @@
 
 use super::reap::{live_neighbours, min_age_secs, reap_era, step_aside};
 use crate::core::Core;
+use crate::core::judging::check::{Checked, Which, check, outage};
+use crate::core::judging::state::Note;
 use crate::error::{Error, Result};
 use crate::store::artifacts::Chunk;
 use crate::store::decision_log::Outcome;
@@ -114,6 +116,29 @@ async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
         .await;
     permit.finished();
     let g = crate::infer::prompt::parse_generation(&reply?)?;
+    // A failed check is an outage, retried; a refusal stands the note down as any failed rescue.
+    let originals: Vec<Note> = excerpts
+        .iter()
+        .map(|(title, text)| Note {
+            title: Some(title),
+            day: None,
+            text,
+        })
+        .collect();
+    let rewrite = Note {
+        title: Some(&g.title),
+        day: None,
+        text: &g.text,
+    };
+    if let Checked::Refused { question, yes } =
+        check(core, &c.id, &originals, &rewrite, Which::Both)
+            .await
+            .map_err(outage)?
+    {
+        return Err(Error::Validation(format!(
+            "the check refused the rewrite ({question} at {yes})"
+        )));
+    }
     let made = core
         .store
         .insert_synthesized_artifact(
@@ -290,7 +315,8 @@ mod tests {
         // A rescue must restamp, or the candidate is back before the judge next interval, and must
         // wipe nothing.
         let mut core = test_core().await;
-        scripted(&mut core, &[SURE_YES, SURE_NO]);
+        // The rescue's after-write check takes the second answer.
+        scripted(&mut core, &[SURE_YES, SURE_YES, SURE_NO]);
         writing(&mut core, &[RESCUE_REPLY]);
         let ids = seed(&core, &["the admin port is 8443"]).await;
         crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
@@ -380,5 +406,62 @@ mod tests {
             d.outcome,
             Some(crate::store::decision_log::Outcome::Refused)
         );
+    }
+
+    #[tokio::test]
+    async fn a_rescue_that_fails_the_check_is_not_stored() {
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_YES);
+        let w = writing(&mut core, &[RESCUE_REPLY]);
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        crate::jobs::reap::run(&core).await.unwrap();
+        let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+        let check = Arc::new(crate::core::judging::check::test_support::judge(0.9, 0.04));
+        core.decider = check.clone();
+
+        run(&core, &ids[0]).await.unwrap();
+
+        assert_eq!((w.calls(), check.calls()), (1, 1));
+        let old = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert!(
+            old.superseded_by.is_none(),
+            "an unfaithful rescue was stored"
+        );
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(old.retired_at > before, "the note is stood down");
+        let d = crate::jobs::reap::test_support::decision(&core, &ids[0], None).await;
+        assert_eq!(
+            d.outcome,
+            Some(crate::store::decision_log::Outcome::Refused)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rescue_whose_check_errs_is_retried_and_not_stood_down() {
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_YES);
+        writing(&mut core, &[RESCUE_REPLY]);
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        crate::jobs::reap::run(&core).await.unwrap();
+        let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "400".into(),
+            })
+        }));
+
+        assert!(run(&core, &ids[0]).await.unwrap_err().retryable());
+        let old = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert_eq!(old.retired_at, before);
+        assert!(old.superseded_by.is_none());
     }
 }

@@ -145,6 +145,9 @@ context_tokens = 8192
 # settled_at = 0.80
 # The share of bearing against the verdict that makes it split.
 # split_at = 0.34
+# After a writer call, a rewrite whose `complete` or `adds_nothing` is below this is not stored.
+# A refusal line, not a pass line; the literal checks run first.
+# refuse_below = 0.25
 # Open questions to a person, at most (at least 1).
 # ask_open_max = 20
 # Days an unanswered question stays open.

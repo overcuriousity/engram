@@ -615,6 +615,10 @@ pub(crate) mod tests {
     ) -> impl Fn(&str, &[Question]) -> Result<Answers> + Send + Sync + 'static {
         let (pick, reversed) = (pick.to_string(), reversed.map(str::to_string));
         move |_, qs| {
+            // An after-write check passes; any other noul is not this decider's.
+            if let Some(a) = crate::core::judging::check::test_support::answering(qs, 0.9, 0.9) {
+                return Ok(a);
+            }
             let mut answers = std::collections::HashMap::new();
             for q in qs {
                 let QKind::Choice { options } = &q.kind else {

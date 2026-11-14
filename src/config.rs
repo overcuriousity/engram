@@ -212,6 +212,8 @@ pub struct DecideConfig {
     pub max_per_tick: usize,
     /// Minutes between ticks.
     pub tick_mins: u32,
+    /// A rewrite whose `complete` or `adds_nothing` is below this is not stored. A refusal line, not a pass line.
+    pub refuse_below: f64,
 }
 
 /// Probability thresholds: from `act_at` the judge acts, from `ask_at` it asks a person.
@@ -280,6 +282,7 @@ impl Default for DecideConfig {
             ask_lapse_days: 30,
             max_per_tick: 60,
             tick_mins: 15,
+            refuse_below: 0.25,
         }
     }
 }
@@ -2021,6 +2024,7 @@ impl Config {
             ("decide.bears_min", dc.bears_min),
             ("decide.settled_at", dc.settled_at),
             ("decide.split_at", dc.split_at),
+            ("decide.refuse_below", dc.refuse_below),
         ] {
             if !(0.0..=1.0).contains(&v) {
                 return Err(ConfigError::Invalid(format!(
@@ -3327,6 +3331,7 @@ mode = "off"
             (d.joint_tokens, d.bears_min, d.settled_at, d.split_at),
             (2500, 0.5, 0.80, 0.34)
         );
+        assert_eq!(d.refuse_below, 0.25);
     }
 
     #[test]
@@ -3425,6 +3430,8 @@ mode = "off"
             ("settled_at = 1.2", "decide.settled_at"),
             ("bears_min = -0.1", "decide.bears_min"),
             ("split_at = 2.0", "decide.split_at"),
+            ("refuse_below = 1.5", "decide.refuse_below"),
+            ("refuse_below = -0.1", "decide.refuse_below"),
             ("joint_tokens = 100", "decide.joint_tokens"),
         ] {
             let body = format!("{MINIMAL}\n[decide]\n{line}\n");

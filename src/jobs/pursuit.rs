@@ -3,10 +3,15 @@
 //! Local decides, the model only writes: `run` groups and scores, `generate` makes the one call.
 
 use crate::core::Core;
+use crate::core::judging::check::{Checked, Which, check, outage};
+use crate::core::judging::state::Note;
 use crate::error::Result;
 use crate::infer::prompt;
 use crate::store::artifacts::NewSynthesized;
 use crate::store::jobs::Stage;
+
+/// The after-write check refused the draft.
+const UNFAITHFUL: &str = "a check found the draft unfaithful";
 
 /// One call, superseding nothing. Idempotent: a retry after a crash between insert and update must
 /// not write twice.
@@ -128,6 +133,44 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Drift is flagged, not prevented: a literal no source carries is marked for the reader.
+    let missing = crate::infer::verify::missing_literals(&g.text, &g.caveats, &source_text);
+    // Then the check, before anything is stored. A failed check is an outage, retried.
+    let originals: Vec<Note> = sources
+        .iter()
+        .map(|c| Note {
+            title: c.title.as_deref(),
+            day: None,
+            text: &c.text,
+        })
+        .collect();
+    let rewrite = Note {
+        title: Some(&g.title),
+        day: None,
+        text: &g.text,
+    };
+    if let Checked::Refused { question, yes } = check(
+        core,
+        pursuit_id,
+        &originals,
+        &rewrite,
+        Which::AddsNothingOnly,
+    )
+    .await
+    .map_err(outage)?
+    {
+        core.store
+            .close_pursuit(pursuit_id, "unsatisfied", UNFAITHFUL, now)
+            .await?;
+        tracing::info!(
+            pursuit = pursuit_id,
+            question,
+            yes,
+            "the check refused the generation"
+        );
+        return Ok(());
+    }
+
     let ids: Vec<String> = sources.iter().map(|c| c.id.clone()).collect();
     let made = core
         .store
@@ -143,8 +186,6 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
             &ids,
         )
         .await?;
-    // Drift is flagged, not prevented: a literal no source carries is marked for the reader.
-    let missing = crate::infer::verify::missing_literals(&made.text, &made.caveats, &source_text);
     if let Some(first) = missing.first() {
         core.store
             .set_artifact_flags(
@@ -943,6 +984,74 @@ mod tests {
                 .all(|g| g.gap.kind != crate::store::gaps::GapKind::Pursuit),
             "the paste is still on the capture page as a hole in the base: {:?}",
             open.gaps.iter().map(|g| &g.gap).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_generated_artifact_that_adds_a_fact_is_not_stored_and_the_pursuit_closes() {
+        let mut core = test_core().await;
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"artifact":{"title":"Reading a journal","text":"Mount with `mount -o ro,loop`, then read /var/log/journal.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+            ]),
+        ));
+        let check =
+            std::sync::Arc::new(crate::core::judging::check::test_support::judge(0.01, 0.04));
+        core.decider = check.clone();
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["how do I read the journal".into()], &ids, None)
+            .await
+            .unwrap();
+
+        generate(&core, &pid).await.unwrap();
+
+        let reqs = check.requests();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].1.len(), 1, "adds_nothing only");
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an artifact that adds a fact was stored"
+        );
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert_eq!(p.reason.as_deref(), Some(UNFAITHFUL));
+        assert!(p.artifact_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_generation_whose_check_errs_is_retried() {
+        let mut core = test_core().await;
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+            ]),
+        ));
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::InferenceRejected {
+                role: "decide",
+                detail: "400".into(),
+            })
+        }));
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["q".into()], &ids, None)
+            .await
+            .unwrap();
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 
