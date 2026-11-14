@@ -335,6 +335,8 @@ pub(crate) struct ArtifactRow {
     pub trashed_at: Option<i64>,
     #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
     pub trashed_from: Option<String>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub category_by: Option<String>,
 }
 
 impl From<ArtifactRow> for Chunk {
@@ -904,6 +906,39 @@ impl Store {
             .execute(&self.pool)
             .await?,
         )
+    }
+
+    /// `by`: `person`, `reading` or `writer`, so a reading can tell whose category it would replace.
+    pub async fn update_artifact_category_by(
+        &self,
+        id: &str,
+        category: Option<&str>,
+        by: &str,
+    ) -> Result<()> {
+        self.expect_updated(
+            sqlx::query!(
+                "UPDATE artifacts SET category = ?, category_by = ? WHERE id = ?",
+                category,
+                by,
+                id
+            )
+            .execute(&self.pool)
+            .await?,
+        )
+    }
+
+    /// A reading's category, written only where there is none and no person cleared it. Whether it
+    /// landed: one statement, so a person's edit in between wins.
+    pub async fn fill_category(&self, id: &str, category: &str) -> Result<bool> {
+        let res = sqlx::query!(
+            "UPDATE artifacts SET category = ?, category_by = 'reading'
+              WHERE id = ? AND category IS NULL AND category_by IS NOT 'person'",
+            category,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// An empty list is a clear.

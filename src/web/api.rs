@@ -1583,7 +1583,7 @@ async fn patch_artifact(
         tenant
             .core
             .store
-            .update_artifact_category(&cid, c.as_deref())
+            .update_artifact_category_by(&cid, c.as_deref(), "person")
             .await?;
     }
     if let Some(t) = &tags {
@@ -1602,22 +1602,7 @@ async fn patch_artifact(
         tenant
             .core
             .vectors
-            .set_payload(&crate::vector::VectorPayload {
-                artifact_id: chunk.id.clone(),
-                corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
-                text: chunk.text.clone(),
-                title: chunk.title.clone(),
-                category: chunk.category.clone(),
-                tags: chunk.tags.clone(),
-                created_at: chunk.created_at,
-                last_seen_at: None,
-                hit_count: None,
-                status: None,
-                last_verified_at: None,
-                superseded_by: None,
-                origin_corpora: vec![],
-                provenance: None,
-            })
+            .set_payload(&crate::vector::VectorPayload::edited(&chunk))
             .await?;
     }
     Ok(Json(chunk))
@@ -5106,6 +5091,28 @@ mod patch_tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(core.store.get_artifact(&cid).await.unwrap().category, None);
+    }
+
+    #[tokio::test]
+    async fn a_category_set_or_cleared_by_patch_is_a_persons() {
+        let (app, token, core, cid) = one_artifact().await;
+        for category in [serde_json::json!("procedure"), serde_json::Value::Null] {
+            let res = app
+                .clone()
+                .oneshot(patch_json(
+                    &format!("/api/v1/artifacts/{cid}"),
+                    &token,
+                    serde_json::json!({ "category": category }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let by = sqlx::query_scalar!("SELECT category_by FROM artifacts WHERE id = ?", cid)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+            assert_eq!(by.as_deref(), Some("person"), "{category}");
+        }
     }
 
     #[tokio::test]

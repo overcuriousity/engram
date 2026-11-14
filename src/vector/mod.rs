@@ -43,6 +43,29 @@ pub struct VectorPayload {
     pub provenance: Option<String>,
 }
 
+impl VectorPayload {
+    /// A payload write after an edit that changes nothing the embedder saw: the lifecycle and
+    /// usage fields are left unset, so the stored ones stand.
+    pub fn edited(chunk: &crate::store::artifacts::Chunk) -> Self {
+        Self {
+            artifact_id: chunk.id.clone(),
+            corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
+            text: chunk.text.clone(),
+            title: chunk.title.clone(),
+            category: chunk.category.clone(),
+            tags: chunk.tags.clone(),
+            created_at: chunk.created_at,
+            last_seen_at: None,
+            hit_count: None,
+            status: None,
+            last_verified_at: None,
+            superseded_by: None,
+            origin_corpora: vec![],
+            provenance: None,
+        }
+    }
+}
+
 /// Test-only: in production a field added later must break every call site until someone answers for it.
 #[cfg(test)]
 impl Default for VectorPayload {

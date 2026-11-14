@@ -1573,7 +1573,7 @@ pub(crate) mod tests {
         .await;
 
         sweep_and_dedupe(&core).await;
-        assert_eq!(completer.calls(), 1, "the budget was ignored");
+        assert_eq!(pair_calls(&completer), 1, "the budget was ignored");
     }
 
     #[tokio::test]
@@ -1763,7 +1763,15 @@ pub(crate) mod tests {
         assert_eq!(armed, 1);
 
         while crate::jobs::run_one(&core).await.unwrap() {}
-        assert_eq!(completer.calls(), 1);
+        assert_eq!(pair_calls(&completer), 1);
+    }
+
+    /// The calls that were not a note's reading (a swapped read keys its questions `q0`, `q0r`).
+    fn pair_calls(d: &crate::infer::fake::RuleDecider) -> usize {
+        d.requests()
+            .iter()
+            .filter(|(_, qs)| !qs.iter().any(|q| q.key == "category"))
+            .count()
     }
 
     #[tokio::test]

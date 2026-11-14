@@ -22,6 +22,7 @@ pub mod moments;
 pub mod observations;
 pub mod pairs;
 pub mod pursuits;
+pub mod readings;
 pub mod rehearsals;
 pub mod segments;
 pub mod shingle;
@@ -100,7 +101,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 25] = [
+        const ADDITIVE: [(&str, &str, &str); 26] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -229,6 +230,12 @@ impl Store {
                 "artifact_links",
                 "first",
                 "ALTER TABLE artifact_links ADD COLUMN first TEXT",
+            ),
+            // NULL on older rows; a reading fills only a null category.
+            (
+                "artifacts",
+                "category_by",
+                "ALTER TABLE artifacts ADD COLUMN category_by TEXT",
             ),
         ];
         apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;

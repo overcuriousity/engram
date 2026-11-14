@@ -52,11 +52,13 @@ pub enum Stage {
     Merge,
     /// One retired note's rewrite, after a decision or a person found it valuable.
     Rescue,
+    /// One note read by the decision model once embedded: its kind and three flags. No band.
+    Read,
 }
 
 impl Stage {
     /// Written out: a stage missing here is not a compile error, just invisible to the backfill.
-    pub const ALL: [Stage; 24] = [
+    pub const ALL: [Stage; 25] = [
         Stage::Synthesize,
         Stage::SegmentWindow,
         Stage::Title,
@@ -81,6 +83,7 @@ impl Stage {
         Stage::Decisions,
         Stage::Merge,
         Stage::Rescue,
+        Stage::Read,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -109,6 +112,7 @@ impl Stage {
             Stage::Decisions => "decisions",
             Stage::Merge => "merge",
             Stage::Rescue => "rescue",
+            Stage::Read => "read",
         }
     }
     /// In `ALL`'s order.
@@ -149,7 +153,8 @@ impl Stage {
             | Stage::Remind
             | Stage::Probe
             | Stage::Fetch
-            | Stage::Decisions => false,
+            | Stage::Decisions
+            | Stage::Read => false,
         }
     }
 
@@ -180,7 +185,8 @@ impl Stage {
             | Stage::Fetch
             | Stage::Decisions
             | Stage::Merge
-            | Stage::Rescue => 1,
+            | Stage::Rescue
+            | Stage::Read => 1,
         }
     }
 
@@ -211,7 +217,8 @@ impl Stage {
             | Stage::Fetch
             | Stage::Decisions
             | Stage::Merge
-            | Stage::Rescue => false,
+            | Stage::Rescue
+            | Stage::Read => false,
         }
     }
 
@@ -241,6 +248,7 @@ impl Stage {
             "decisions" => Some(Stage::Decisions),
             "merge" => Some(Stage::Merge),
             "rescue" => Some(Stage::Rescue),
+            "read" => Some(Stage::Read),
             _ => None,
         }
     }
@@ -1890,7 +1898,7 @@ mod tests {
 
     #[test]
     fn merge_is_a_background_writer_and_dedupe_no_longer_one() {
-        assert_eq!(Stage::ALL.len(), 24);
+        assert_eq!(Stage::ALL.len(), 25);
         assert_eq!(Stage::Merge.as_str(), "merge");
         assert_eq!(Stage::parse("merge"), Some(Stage::Merge));
         assert!(Stage::GENERATORS.contains(&Stage::Merge));

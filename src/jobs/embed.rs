@@ -257,6 +257,10 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
             "could not arm the neighbour query; the sweep will find its pairs"
         );
     }
+    // Every note is read, passages and merges too.
+    if let Err(e) = crate::jobs::read::arm(core, &chunk.id).await {
+        tracing::warn!(artifact_id = %chunk.id, error = %e, "could not arm the reading");
+    }
     if chunk.provenance != crate::store::artifacts::Provenance::Passage
         && !chunk.cues.is_empty()
         && let Err(e) = crate::jobs::probe::arm(core, &chunk.id).await
@@ -1428,13 +1432,13 @@ mod tests {
             .await
             .unwrap();
 
-        // The exact total pins termination: three batch claims plus one `relate` unit per indexed
-        // artifact.
+        // The exact total pins termination: three batch claims plus one `relate` and one `read`
+        // unit per indexed artifact.
         let mut claims = 0;
         while crate::jobs::run_one(&core).await.unwrap() {
             claims += 1;
             assert!(
-                claims <= 3 + chunks,
+                claims <= 3 + 2 * chunks,
                 "the re-arm never terminated: {claims} claims"
             );
         }
@@ -1449,8 +1453,8 @@ mod tests {
         );
         assert_eq!(
             claims,
-            3 + chunks,
-            "expected one claim per batch, plus one relate unit per artifact"
+            3 + 2 * chunks,
+            "expected one claim per batch, plus one relate and one read unit per artifact"
         );
     }
 

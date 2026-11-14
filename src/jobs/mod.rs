@@ -16,6 +16,7 @@ pub mod passages;
 pub mod probe;
 pub mod promote;
 pub mod pursuit;
+pub mod read;
 pub mod reap;
 pub mod reconcile;
 pub mod refetch;
@@ -137,6 +138,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
         (Stage::Merge, _) => merge_unit::run(core, &job.target_id).await,
         (Stage::Rescue, _) => rescue_unit::run(core, &job.target_id).await,
+        (Stage::Read, _) => read::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Probe, _) => probe::run(core, &job.target_id).await,
         (Stage::Condense, _) => condense::run(core, &job.target_id).await,

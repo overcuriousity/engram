@@ -141,7 +141,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
   reaped_at        INTEGER,
   -- In Trash since then; `trashed_from` is the status it goes back to.
   trashed_at       INTEGER,
-  trashed_from     TEXT
+  trashed_from     TEXT,
+  -- Who set `category`: 'person' | 'reading' | 'writer'; NULL on older rows. A
+  -- reading fills only a null category nobody cleared.
+  category_by      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
@@ -153,6 +156,19 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_status     ON artifacts(status);
 -- be paid for on every lifecycle write and read nothing back.
 CREATE INDEX IF NOT EXISTS idx_artifacts_dirty      ON artifacts(lifecycle_dirty) WHERE lifecycle_dirty = 1;
 CREATE INDEX IF NOT EXISTS idx_artifacts_provenance ON artifacts(provenance);
+
+-- What the decision model read off a note once it was embedded: its kind, a
+-- pin, a shelf life, whether it stands alone. The newest answer per question;
+-- a reading is not a decision, so it is never banded or put to a person.
+CREATE TABLE IF NOT EXISTS artifact_readings (
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  question_id TEXT NOT NULL,
+  question_version INTEGER NOT NULL,
+  answer TEXT NOT NULL,
+  model TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (artifact_id, question_id)
+);
 
 -- ── Lineage ──────────────────────────────────────────────────────────────────
 -- What a merged artifact is made of, as resolved captured roots rather than as
