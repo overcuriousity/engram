@@ -179,17 +179,22 @@ impl Core {
             self.confirm_cited(&s.agree).await;
             if let Some(with) = s.agree.first() {
                 for against in s.against.iter().take(MAX_QUEUED_PAIRS) {
-                    if let Err(e) = self
+                    let decide = crate::store::pairs::Net::Decide;
+                    // A pair already pending is restricted too, so it cannot act alone either.
+                    let queued = match self
                         .store
-                        .record_pair_in(
-                            against,
-                            with,
-                            0.0,
-                            Some(crate::store::pairs::Net::Decide),
-                            Some(PAIR_DETAIL),
-                        )
+                        .record_pair_in(against, with, 0.0, Some(decide), Some(PAIR_DETAIL))
                         .await
                     {
+                        Ok(true) => Ok(()),
+                        Ok(false) => {
+                            self.store
+                                .restrict_pending_pair(against, with, decide)
+                                .await
+                        }
+                        Err(e) => Err(e),
+                    };
+                    if let Err(e) = queued {
                         tracing::warn!(decision = id, artifact_id = %against, error = %e, "could not queue a note read against a confirmed answer");
                     }
                 }
@@ -567,6 +572,43 @@ mod tests {
             .expect("C is queued against A");
         assert_eq!(p.net, Some(Net::Decide));
         // The confirmed note, A, is the one the replacement retires.
+        let retire_a = if p.a_id == ids[0] {
+            "b_replaces_a"
+        } else {
+            "a_replaces_b"
+        };
+        crate::jobs::dedupe::tests::deciding(&mut core, retire_a, 0.99);
+
+        crate::jobs::dedupe::run(&core, &p.id.to_string())
+            .await
+            .unwrap();
+
+        let d = crate::jobs::dedupe::tests::decision(&core, p.id).await;
+        assert_eq!(
+            (d.state, d.reason.as_deref()),
+            (State::Open, Some("restricted"))
+        );
+        assert!(core.store.get_artifact(&ids[0]).await.unwrap().in_results());
+    }
+
+    #[tokio::test]
+    async fn a_plain_pair_filed_before_the_verdict_is_restricted_by_it() {
+        let mut core = test_core().await;
+        let (ids, id) = keep_or_switch(&core).await;
+        core.store
+            .record_pair(&ids[2], &ids[0], 0.91)
+            .await
+            .unwrap();
+        core.judge_decision(&id, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        let p = core
+            .store
+            .pair_between(&ids[2], &ids[0])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.net, Some(Net::Decide));
         let retire_a = if p.a_id == ids[0] {
             "b_replaces_a"
         } else {

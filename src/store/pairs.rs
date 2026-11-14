@@ -273,6 +273,22 @@ impl Store {
         self.record_pair_in(a, b, score, None, Some(detail)).await
     }
 
+    /// A verdict queueing a pair that is already pending restricts it; never loosens a net.
+    pub async fn restrict_pending_pair(&self, a: &str, b: &str, net: Net) -> Result<()> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let net = net.as_str();
+        sqlx::query!(
+            "UPDATE artifact_pairs SET net = ?
+              WHERE a_id = ? AND b_id = ? AND state = 'pending' AND net IS NULL",
+            net,
+            a,
+            b
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// `record_pair` with the net that filed it. A row already there keeps its net, as it keeps
     /// its state.
     pub async fn record_pair_in(
@@ -1064,7 +1080,7 @@ impl Store {
 
     /// Pending pairs with no decision in this era on their members as they are now.
     /// A decision a person or the sweep asked again (`asked_again`, `changed`) does not count.
-    /// A pair awaiting its writer is the merge unit's. Least-attempted first, then score.
+    /// A pair awaiting its writer is the merge unit's. Order: a verdict's pairs, links, then fewest tries.
     pub async fn pairs_to_judge(&self, era: &str, limit: i64) -> Result<Vec<ArtifactPair>> {
         let rows = sqlx::query_as!(
             crate::store::pairs::PairRow,
@@ -1081,7 +1097,8 @@ impl Store {
                          AND d.subject_a = CAST(p.id AS TEXT) AND d.era = ?
                          AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
                          AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
-                ORDER BY p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?"#,
+                ORDER BY COALESCE(p.net = 'decide', 0) DESC, p.score = 0 DESC,
+                         p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?"#,
             era,
             limit
         )
@@ -1244,6 +1261,59 @@ mod tests {
                 acted: 1,
                 undone: 0
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_a_person_or_a_link_queued_is_asked_before_the_wide_net() {
+        let s = Store::memory().await.unwrap();
+        let (wa, wb) = two_artifacts(&s).await;
+        s.record_pair_in(&wa, &wb, 0.80, Some(Net::Wide), None)
+            .await
+            .unwrap();
+        let (la, lb) = two_artifacts(&s).await;
+        s.record_pair_with_detail(&la, &lb, 0.0, "link")
+            .await
+            .unwrap();
+        let (da, db) = two_artifacts(&s).await;
+        s.record_pair_in(&da, &db, 0.0, Some(Net::Decide), Some("decide"))
+            .await
+            .unwrap();
+        let mut want = Vec::new();
+        for (a, b) in [(&da, &db), (&la, &lb), (&wa, &wb)] {
+            want.push(s.pair_between(a, b).await.unwrap().unwrap().id);
+        }
+
+        let got: Vec<i64> = s
+            .pairs_to_judge("era", 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn a_pending_plain_pair_a_verdict_queues_becomes_restricted_and_never_less() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        s.restrict_pending_pair(&a, &b, Net::Decide).await.unwrap();
+        assert_eq!(
+            s.pair_between(&a, &b).await.unwrap().unwrap().net,
+            Some(Net::Decide)
+        );
+
+        let (c, d) = two_artifacts(&s).await;
+        s.record_pair_in(&c, &d, 0.75, Some(Net::Wide), None)
+            .await
+            .unwrap();
+        s.restrict_pending_pair(&c, &d, Net::Decide).await.unwrap();
+        assert_eq!(
+            s.pair_between(&c, &d).await.unwrap().unwrap().net,
+            Some(Net::Wide),
+            "a wide row is already restricted"
         );
     }
 

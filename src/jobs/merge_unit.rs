@@ -2,7 +2,7 @@
 //! rows link to the pair's decision as they are written; a draft that cannot be written faithfully
 //! leaves both notes, and a model's ask is then recorded `refused` on its decision.
 
-use super::dedupe::{Members, action, leave_both, members_of, pair_era};
+use super::dedupe::{Members, action, leave_both, members_of, pair_era, restricted_now};
 use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::infer::prompt::{MergedDraft, SYNTHESIZE_SYSTEM, parse_synthesis};
@@ -63,14 +63,24 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         );
         return Ok(());
     }
-    let Some(Members { members, .. }) = members_of(core, &p).await? else {
-        return Ok(());
-    };
     let decision = core
         .store
         .last_logged("pair_relation", &p.id.to_string(), None, &pair_era(core))
         .await?
         .map(|d| d.id);
+    // The model asked while the pair sat above the line, or before it was restricted: a person's
+    // now. The ask is dropped and the pair asked again, where it becomes an ask row.
+    if by == DecidedBy::Model && restricted_now(core, &p) {
+        tracing::warn!(pair = id, "refused a model's merge on a restricted pair");
+        core.store.clear_pair_synthesis(p.id).await?;
+        if let Some(d) = &decision {
+            core.store.set_decision_reason(d, "changed").await?;
+        }
+        return Ok(());
+    }
+    let Some(Members { members, .. }) = members_of(core, &p).await? else {
+        return Ok(());
+    };
     write(core, &p, members, &Ask { by, decision }).await
 }
 
@@ -511,6 +521,64 @@ mod tests {
         assert!(p.merged_into.is_none(), "it wrote past the cap");
         assert!(p.synthesis_asked, "the ask is kept for the next window");
         assert_eq!(w.calls(), 0);
+    }
+
+    fn raise_the_line(core: &Core, to: f32) {
+        core.ranking
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .review_min = to;
+    }
+
+    #[tokio::test]
+    async fn a_merge_the_model_asked_for_is_not_written_once_its_pair_is_restricted() {
+        let mut core = test_core().await;
+        let w = writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.95);
+        let (ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        assert!(core.store.get_pair(pair).await.unwrap().synthesis_asked);
+        raise_the_line(&core, 0.92);
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none(), "a restricted pair was merged");
+        assert!(!p.synthesis_asked, "the model's ask still stands");
+        assert_eq!(p.state, PairState::Pending);
+        assert_eq!(w.calls(), 0);
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+        // Asked again, where it lands as an ask row.
+        assert_eq!(
+            core.store
+                .pairs_to_judge(&dedupe::pair_era(&core), 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_a_person_asked_for_is_written_on_a_restricted_pair() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        let (_ids, pair) = pool_pair(&core).await;
+        a_person_picks_duplicate(&mut core, pair).await;
+        raise_the_line(&core, 0.92);
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert!(
+            core.store
+                .get_pair(pair)
+                .await
+                .unwrap()
+                .merged_into
+                .is_some()
+        );
     }
 
     #[tokio::test]

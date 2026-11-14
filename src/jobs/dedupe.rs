@@ -179,7 +179,7 @@ pub(crate) fn restricted(pair: &ArtifactPair, live_review_min: f32) -> bool {
 }
 
 /// `restricted`, against the review line in force, which the tuner moves.
-fn restricted_now(core: &Core, pair: &ArtifactPair) -> bool {
+pub(crate) fn restricted_now(core: &Core, pair: &ArtifactPair) -> bool {
     let live = core
         .ranking
         .read()

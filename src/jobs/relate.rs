@@ -514,6 +514,7 @@ mod tests {
             .pairs_by_state(PairState::Pending, 10)
             .await
             .unwrap();
+        assert!(!pending.is_empty(), "the wide net filed nothing");
         assert!(
             pending.iter().all(|p| p.net == Some(Net::Wide)),
             "{pending:?}"
