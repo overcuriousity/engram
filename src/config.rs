@@ -1,3 +1,4 @@
+use crate::core::judging::band::Thresholds;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -201,6 +202,52 @@ pub struct DecideConfig {
     pub settled_at: f64,
     /// The share of bearing held by passages against the verdict that splits it.
     pub split_at: f64,
+    /// When background judgement acts, asks or leaves; `[decide.bands.<id>]` overrides one question.
+    pub bands: Bands,
+    /// Open questions to a person, at most, before the judge stops asking.
+    pub ask_open_max: usize,
+    /// Days an unanswered question stays open before it lapses.
+    pub ask_lapse_days: u32,
+    /// Judgements per tick, at most.
+    pub max_per_tick: usize,
+    /// Minutes between ticks.
+    pub tick_mins: u32,
+}
+
+/// Probability thresholds: from `act_at` the judge acts, from `ask_at` it asks a person.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct Bands {
+    pub act_at: f64,
+    pub ask_at: f64,
+    #[serde(flatten)]
+    pub per: HashMap<String, BandOverride>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct BandOverride {
+    pub act_at: Option<f64>,
+    pub ask_at: Option<f64>,
+}
+
+impl Default for Bands {
+    fn default() -> Self {
+        Self {
+            act_at: 0.90,
+            ask_at: 0.60,
+            per: Default::default(),
+        }
+    }
+}
+
+impl Bands {
+    pub fn of(&self, question_id: &str) -> Thresholds {
+        let o = self.per.get(question_id);
+        Thresholds {
+            act_at: o.and_then(|o| o.act_at).unwrap_or(self.act_at),
+            ask_at: o.and_then(|o| o.ask_at).unwrap_or(self.ask_at),
+        }
+    }
 }
 
 impl Default for DecideConfig {
@@ -210,6 +257,11 @@ impl Default for DecideConfig {
             bears_min: 0.5,
             settled_at: 0.80,
             split_at: 0.34,
+            bands: Bands::default(),
+            ask_open_max: 20,
+            ask_lapse_days: 30,
+            max_per_tick: 60,
+            tick_mins: 15,
         }
     }
 }
@@ -1963,6 +2015,32 @@ impl Config {
                 dc.joint_tokens
             )));
         }
+        let mut bands = vec![("decide.bands".to_string(), dc.bands.of(""))];
+        bands.extend(
+            dc.bands
+                .per
+                .keys()
+                .map(|k| (format!("decide.bands.{k}"), dc.bands.of(k))),
+        );
+        for (key, t) in bands {
+            if !(0.0..=1.0).contains(&t.act_at) || !(0.0..=1.0).contains(&t.ask_at) {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} act_at ({}) and ask_at ({}) must be between 0 and 1: they are compared with a probability",
+                    t.act_at, t.ask_at
+                )));
+            }
+            if t.ask_at >= t.act_at {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} ask_at ({}) must be below act_at ({}): else nothing would be asked",
+                    t.ask_at, t.act_at
+                )));
+            }
+        }
+        if dc.ask_open_max < 1 || dc.tick_mins < 1 {
+            return Err(ConfigError::Invalid(
+                "decide.ask_open_max and decide.tick_mins must be at least 1".into(),
+            ));
+        }
         let tz = self.time.default_tz.trim();
         if !tz.is_empty() && tz.parse::<chrono_tz::Tz>().is_err() {
             return Err(ConfigError::Invalid(format!(
@@ -3227,6 +3305,60 @@ mode = "off"
         assert_eq!(
             (d.joint_tokens, d.bears_min, d.settled_at, d.split_at),
             (2500, 0.5, 0.80, 0.34)
+        );
+    }
+
+    #[test]
+    fn bands_default_and_take_a_per_question_override() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        let base = Thresholds {
+            act_at: 0.90,
+            ask_at: 0.60,
+        };
+        assert_eq!(d.bands.of("x"), base);
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nact_at = 0.97\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!(
+            d.bands.of("reap_worth"),
+            Thresholds {
+                act_at: 0.97,
+                ask_at: 0.60
+            }
+        );
+        assert_eq!(d.bands.of("x"), base);
+    }
+
+    #[test]
+    fn a_band_out_of_order_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for body in [
+            format!("{MINIMAL}\n[decide.bands]\nask_at = 0.95\n"),
+            format!("{MINIMAL}\n[decide.bands]\nact_at = 1.2\n"),
+            format!("{MINIMAL}\n[decide.bands.q]\nask_at = 0.95\n"),
+        ] {
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => assert!(m.contains("decide.bands"), "{m}"),
+                other => panic!("expected Invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_caps_default_to_the_spec() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        assert_eq!(
+            (
+                d.ask_open_max,
+                d.ask_lapse_days,
+                d.max_per_tick,
+                d.tick_mins
+            ),
+            (20, 30, 60, 15)
         );
     }
 

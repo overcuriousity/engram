@@ -145,6 +145,21 @@ context_tokens = 8192
 # settled_at = 0.80
 # The share of bearing against the verdict that makes it split.
 # split_at = 0.34
+# Open questions to a person, at most (at least 1).
+# ask_open_max = 20
+# Days an unanswered question stays open.
+# ask_lapse_days = 30
+# Judgements per tick, at most.
+# max_per_tick = 60
+# Minutes between ticks (at least 1).
+# tick_mins = 15
+# Background judgement: from act_at it acts, from ask_at it asks a person, below it leaves.
+# [decide.bands]
+# act_at = 0.90
+# ask_at = 0.60
+# One question's own bands, by its id:
+# [decide.bands.reap_worth]
+# act_at = 0.97
 
 # Optional reranker; style is "tei", "cohere" or "vllm".
 # [infer.rerank]
