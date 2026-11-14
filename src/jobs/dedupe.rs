@@ -6,7 +6,6 @@ use crate::core::Core;
 use crate::core::judging::band::{Band, era};
 use crate::core::judging::{self, Applier, Subjects, catalogue, state};
 use crate::error::{Error, Result};
-use crate::infer::prompt::MergedDraft;
 use crate::store::actions::{Job, Kind, NewAction};
 use crate::store::artifacts::{Chunk, Provenance};
 use crate::store::decision_log::Logged;
@@ -14,7 +13,7 @@ use crate::store::jobs::Stage;
 use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
 use async_trait::async_trait;
 
-fn action(
+pub(crate) fn action(
     kind: Kind,
     pair: &ArtifactPair,
     subject: &str,
@@ -53,9 +52,6 @@ async fn taken_back_before(core: &Core, kind: Kind, subjects: &[&str]) -> Result
     Ok(false)
 }
 
-/// The draft, not the notes, was at fault, so both stay as they are.
-const LOSS_REFUSED: &str = "every draft dropped a value one of them states; both stay as they are";
-
 const TAKEN_BACK: &str =
     "This was done to one of these before and taken back, so both stay as they are.";
 
@@ -65,14 +61,14 @@ pub(crate) const TAKEN_BACK_OLD: &str =
     "This was done to one of these before and taken back. Resolve by hand.";
 
 /// A pair's members in letter order, the roots of each, and those roots.
-struct Members {
-    members: Vec<Chunk>,
+pub(crate) struct Members {
+    pub(crate) members: Vec<Chunk>,
     root_map: std::collections::BTreeMap<String, Vec<String>>,
     roots: Vec<Chunk>,
 }
 
 /// `None` when the pair was settled here because no answer about it could be carried out.
-async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<Members>> {
+pub(crate) async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<Members>> {
     // Pairs cascade on artifact delete, so a missing artifact is a store failure, not a deletion.
     let a = core.store.get_artifact(&p.a_id).await?;
     let b = core.store.get_artifact(&p.b_id).await?;
@@ -160,7 +156,7 @@ fn note(c: &Chunk) -> state::Note<'_> {
     }
 }
 
-fn pair_era(core: &Core) -> String {
+pub(crate) fn pair_era(core: &Core) -> String {
     era(core.decider.model(), catalogue::pair_relation().version)
 }
 
@@ -236,37 +232,6 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
     };
     judging::settle(core, d).await?;
     Ok(())
-}
-
-/// `Stage::Merge`: write the merge a decision or a person asked for. The writing moves to its own
-/// file with decision linking next; the early-outs are those the dedupe unit had for an ask.
-pub async fn merge(core: &Core, pair_id: &str) -> Result<()> {
-    let id: i64 = pair_id.parse().map_err(|_| Error::NotFound)?;
-    let p = core.store.get_pair(id).await?;
-    if !p.synthesis_asked {
-        return Ok(());
-    }
-    if p.merged_into.is_some() {
-        // Already written; re-running would merge the pair twice.
-        core.store.clear_pair_synthesis(p.id).await?;
-        return Ok(());
-    }
-    // The pair outlived its ask: writing would take the ask as the verdict without re-reading.
-    if !crate::store::pairs::AWAITING_REVIEW.contains(&p.state) {
-        core.store.clear_pair_synthesis(p.id).await?;
-        return Ok(());
-    }
-    if !core.may_act(Job::Dedupe).await? {
-        tracing::info!(
-            pair = id,
-            "budget spent; the merge waits for the window to move"
-        );
-        return Ok(());
-    }
-    let Some(m) = members_of(core, &p).await? else {
-        return Ok(());
-    };
-    synthesize_asked_pair(core, &p, m.members).await
 }
 
 /// What a pick does to a pair, guards included. Returns the journal rows written.
@@ -513,141 +478,6 @@ impl Applier for PairApplier {
     }
 }
 
-/// Answers an ask for writing, a decision's or a person's; the tail is `write_merge` so both kinds
-/// of merge leave the base in one shape.
-async fn synthesize_asked_pair(core: &Core, p: &ArtifactPair, members: Vec<Chunk>) -> Result<()> {
-    let Some(writer) = core.pair_synthesizer.clone() else {
-        // The flag stays set, so the next run with a writer picks it up.
-        return Ok(());
-    };
-    // No context block to trim here, so the two bodies fit or no model can write the pair.
-    let user = synthesis_prompt(&members);
-    let counter = crate::infer::budget::TokenCounter::default();
-    let cost = counter.count(crate::infer::prompt::SYNTHESIZE_SYSTEM) + counter.count(&user);
-    if crate::infer::budget::checked_ceiling_for_prompt(
-        writer.context_tokens(),
-        cost,
-        writer.max_output_tokens(),
-    )
-    .is_none()
-    {
-        tracing::warn!(
-            pair = p.id,
-            "these two artifacts do not fit one call; the synthesis is refused"
-        );
-        return leave_both(
-            core,
-            p,
-            "these two do not fit one call; both stay as they are",
-        )
-        .await;
-    }
-
-    core.store.record_judge_attempt(p.id).await?;
-    let permit = core.gate.background().await;
-    let reply = writer
-        .complete(crate::infer::prompt::SYNTHESIZE_SYSTEM, &user)
-        .await;
-    permit.finished();
-    let reply = reply?;
-    let draft = match crate::infer::prompt::parse_synthesis(&reply) {
-        Ok(d) => d,
-        // Without the count this re-arms every tick on a reply that will not parse.
-        Err(e) => {
-            core.store.record_unreadable_judgement(p.id).await?;
-            tracing::warn!(
-                pair = p.id,
-                reply_len = reply.len(),
-                error = %e,
-                "synthesis reply unreadable; the pair keeps its ask and waits"
-            );
-            return Err(e);
-        }
-    };
-
-    // `merge::write` validates nothing, so the loss check is the caller's. Against the members, not
-    // their roots: roots would freeze a lineage on a value an earlier merge dropped.
-    let lost = crate::jobs::merge::losses(&members, &draft);
-    if !lost.is_empty() {
-        tracing::warn!(
-            pair = p.id,
-            lost = lost.join(", "),
-            "refused a synthesis that would have dropped these"
-        );
-        return leave_both(core, p, LOSS_REFUSED).await;
-    }
-
-    let sources: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
-    // An ask from before `synthesis_by` was a person's press.
-    let by = p.synthesis_by.unwrap_or(DecidedBy::Operator);
-    write_merge(core, p, &sources, &draft, by).await
-}
-
-/// The loss check is the caller's.
-async fn write_merge(
-    core: &Core,
-    p: &ArtifactPair,
-    sources: &[String],
-    draft: &MergedDraft,
-    by: DecidedBy,
-) -> Result<()> {
-    match crate::jobs::merge::write(core, draft, sources).await {
-        Ok(m) => {
-            let act = format!("merged into {} from {} sources", m.id, sources.len());
-            for source in sources {
-                let mut row = action(Kind::Merge, p, source, Some(&m.id), Some(act.as_str()));
-                // `Store::band_record` reads this job's rows as verdicts; a press is not one.
-                if by == DecidedBy::Operator
-                    && let Some(evidence) = row.evidence.as_object_mut()
-                {
-                    evidence.insert("asked_by".into(), serde_json::json!("operator"));
-                }
-                core.store.record_action(&row).await?;
-            }
-            let why = match by {
-                DecidedBy::Operator => "synthesized at an operator's request",
-                _ => "the judge read both as one, and nothing either states was lost",
-            };
-            core.store.set_pair_merged(p.id, &m.id, Some(why), by).await
-        }
-        // `leave_both` clears any ask with it.
-        Err(Error::Validation(why)) => {
-            tracing::warn!(pair = p.id, reason = %why, "the merge path refused a merge");
-            leave_both(
-                core,
-                p,
-                "These could not be written as one because of what one of them is made of; \
-                 both stay as they are.",
-            )
-            .await
-        }
-        Err(e) => Err(e),
-    }
-}
-
-/// Unlettered and without sources: this call writes, it does not decide.
-fn synthesis_prompt(members: &[Chunk]) -> String {
-    let mut s = String::new();
-    for m in members {
-        s.push_str("----- ARTIFACT -----\n");
-        // A passage has no name; `row_label` would repeat its opening as a title.
-        if let Some(name) = prompt_name(m) {
-            s.push_str(&format!("Title: {name}\n"));
-        }
-        s.push_str(&format!("\n{}\n", m.text));
-    }
-    s.push_str("----- END -----");
-    s
-}
-
-/// A passage or note heading names a section, not the artifact.
-fn prompt_name(c: &Chunk) -> Option<&str> {
-    if !c.provenance.names_its_own_text() {
-        return None;
-    }
-    c.title.as_deref().map(str::trim).filter(|t| !t.is_empty())
-}
-
 /// For two artifacts that state nothing. `by` is a parameter so a person's press is not recorded as
 /// the model's. The journal rows name `decision_id`; returns them.
 pub(crate) async fn discard_both(
@@ -736,7 +566,7 @@ pub(crate) async fn discard_both(
 }
 
 /// Close the question with both sides as they are; the reason is kept on the row.
-async fn leave_both(core: &Core, p: &ArtifactPair, why: &str) -> Result<()> {
+pub(crate) async fn leave_both(core: &Core, p: &ArtifactPair, why: &str) -> Result<()> {
     if p.synthesis_asked {
         core.store.clear_pair_synthesis(p.id).await?;
     }
@@ -770,6 +600,7 @@ pub(crate) mod tests {
     use crate::core::test_support::test_core;
     use crate::infer::decide::{Answer, Answers, Kind as QKind, Question};
     use crate::infer::fake::{RuleDecider, ScriptedCompleter};
+    use crate::infer::prompt::MergedDraft;
     use crate::jobs::consolidate::tests::{seed, seed_titled};
     use crate::store::artifacts::ArtifactStatus;
     use crate::store::decision_log::{Logged, Outcome, State};
@@ -832,7 +663,7 @@ pub(crate) mod tests {
         era(core.decider.model(), pair_relation().version)
     }
 
-    async fn decision(core: &Core, pair: i64) -> Logged {
+    pub(crate) async fn decision(core: &Core, pair: i64) -> Logged {
         core.store
             .last_logged("pair_relation", &pair.to_string(), None, &pair_era(core))
             .await
@@ -840,7 +671,7 @@ pub(crate) mod tests {
             .expect("the pair was asked")
     }
 
-    async fn queue_pair(core: &Core, a: &str, b: &str) -> i64 {
+    pub(crate) async fn queue_pair(core: &Core, a: &str, b: &str) -> i64 {
         core.store.record_pair(a, b, 0.91).await.unwrap();
         core.store
             .pairs_by_state(PairState::Pending, 100)
@@ -892,7 +723,7 @@ pub(crate) mod tests {
         (passage, synth)
     }
 
-    async fn disagreeing(core: &Core) -> Vec<String> {
+    pub(crate) async fn disagreeing(core: &Core) -> Vec<String> {
         seed(
             core,
             &[
@@ -903,7 +734,7 @@ pub(crate) mod tests {
         .await
     }
 
-    async fn disagreeing_commands(core: &Core) -> Vec<String> {
+    pub(crate) async fn disagreeing_commands(core: &Core) -> Vec<String> {
         seed(
             core,
             &[
@@ -920,7 +751,12 @@ pub(crate) mod tests {
         .await
     }
 
-    async fn merged_from(core: &Core, title: &str, text: &str, sources: &[String]) -> String {
+    pub(crate) async fn merged_from(
+        core: &Core,
+        title: &str,
+        text: &str,
+        sources: &[String],
+    ) -> String {
         let m = crate::jobs::merge::write(
             core,
             &MergedDraft {
@@ -937,7 +773,7 @@ pub(crate) mod tests {
         m.id
     }
 
-    async fn superseded_by(core: &Core, id: &str) -> Option<String> {
+    pub(crate) async fn superseded_by(core: &Core, id: &str) -> Option<String> {
         core.store.get_artifact(id).await.unwrap().superseded_by
     }
 
@@ -2460,29 +2296,7 @@ pub(crate) mod tests {
         );
     }
 
-    // ---- the operator's synthesis path (Stage::Merge) ----
-
-    #[tokio::test]
-    async fn a_synthesis_asked_for_a_pair_answered_since_writes_nothing() {
-        let core = test_core().await;
-        let ids = disagreeing(&core).await;
-        let pair_id = queue_pair(&core, &ids[0], &ids[1]).await;
-        assert!(core.store.ask_pair_synthesis(pair_id).await.unwrap());
-        core.store
-            .set_pair_state(pair_id, PairState::Dismissed, None, DecidedBy::Operator)
-            .await
-            .unwrap();
-
-        merge(&core, &pair_id.to_string()).await.unwrap();
-
-        let p = core.store.get_pair(pair_id).await.unwrap();
-        assert!(p.merged_into.is_none(), "a dismissed pair was merged");
-        assert!(!p.synthesis_asked, "the card still promises a synthesis");
-        assert_eq!(p.state, PairState::Dismissed);
-        for id in &ids {
-            assert!(core.store.get_artifact(id).await.unwrap().in_results());
-        }
-    }
+    // ---- the writer (Stage::Merge) is `merge_unit`'s; only the hand-off is the unit's ----
 
     #[tokio::test]
     async fn a_pair_awaiting_its_writer_is_not_the_decision_units_business() {
@@ -2498,511 +2312,5 @@ pub(crate) mod tests {
         let p = core.store.get_pair(pair).await.unwrap();
         assert!(p.synthesis_asked);
         assert_eq!(p.state, PairState::Pending);
-    }
-
-    #[tokio::test]
-    async fn a_merge_that_would_lose_a_literal_says_so_without_naming_the_tokens() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Mount","text":"Mount the image with `mount -o rw /dev/loop0 /mnt/case`.","category":"procedure","caveats":[]}}"#
-                .into(),
-        ])));
-        deciding(&mut core, "duplicate", 0.95);
-        let ids = disagreeing_commands(&core).await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let found = core
-            .store
-            .pairs_by_state(PairState::NoConflict, 10)
-            .await
-            .unwrap();
-        assert_eq!(found.len(), 1);
-        let detail = found[0].detail.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("dropped"),
-            "the row says nothing about why it was closed: {detail:?}"
-        );
-        assert!(
-            !detail.contains("ro /dev"),
-            "the lost tokens are evidence too thin to act on: {detail:?}"
-        );
-        for id in &ids {
-            assert!(superseded_by(&core, id).await.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn a_merge_that_would_lose_a_value_leaves_both_and_closes_the_pair() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Mount","text":"Mount the image with `mount -o ro /dev/loop0 /mnt/case`.","category":"procedure","caveats":[]}}"#
-                .into(),
-        ])));
-        deciding(&mut core, "duplicate", 0.95);
-        let ids = disagreeing_commands(&core).await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert_eq!(
-            p.state,
-            PairState::NoConflict,
-            "a refused draft is not a disagreement between the notes"
-        );
-        assert_eq!(p.detail.as_deref(), Some(LOSS_REFUSED));
-        assert!(
-            core.store
-                .open_contradictions(&ids)
-                .await
-                .unwrap()
-                .is_empty(),
-            "search would say two agreeing notes disagree"
-        );
-        assert!(
-            p.merged_into.is_none(),
-            "a merge that drops a value was written"
-        );
-        assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
-        assert!(
-            core.store
-                .open_actions(&[Kind::Merge], 10)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        for id in &ids {
-            assert!(core.store.get_artifact(id).await.unwrap().in_results());
-        }
-    }
-
-    #[tokio::test]
-    async fn a_value_lost_by_an_earlier_merge_does_not_block_the_next_one() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Pool","text":"the pool holds sixteen connections","category":"reference","caveats":[]}}"#
-                .into(),
-        ])));
-        deciding(&mut core, "duplicate", 0.95);
-        let ids = seed_titled(
-            &core,
-            &[
-                (
-                    "Pool sizing",
-                    "max_connections is 16 and the timeout is 30s",
-                    [1.0, 0.0],
-                ),
-                ("Pool notes", "raise it for batch jobs", [0.99, 0.05]),
-                ("Connections", "sixteen connections", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        // This merge already dropped "30s".
-        let m = merged_from(
-            &core,
-            "Pool",
-            "the pool holds sixteen",
-            &[ids[0].clone(), ids[1].clone()],
-        )
-        .await;
-        let pair = queue_pair(&core, &m, &ids[2]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        assert!(
-            core.store
-                .pairs_by_state(PairState::Contradiction, 10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "the merge was blamed for a value an earlier one had dropped"
-        );
-        assert!(
-            core.store
-                .get_pair(pair)
-                .await
-                .unwrap()
-                .merged_into
-                .is_some(),
-            "the merge was not written"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_duplicate_verdict_writes_the_merge_and_journals_it() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Pool","text":"the pool holds sixteen connections","category":"reference","caveats":[]}}"#
-                .into(),
-        ])));
-        deciding(&mut core, "duplicate", 0.95);
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Pool sizing", "sixteen connections", [1.0, 0.0]),
-                ("Connections", "sixteen connections", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-
-        run(&core, &pair.to_string()).await.unwrap();
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert!(p.merged_into.is_some(), "the merge was written");
-        assert_eq!(p.decided_by, Some(DecidedBy::Model));
-        let journal = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
-        assert_eq!(journal.len(), 2, "one row per source");
-        assert!(journal.iter().all(|a| {
-            let evidence: serde_json::Value = serde_json::from_str(&a.evidence_json).unwrap();
-            evidence.get("asked_by").is_none()
-        }));
-    }
-
-    #[tokio::test]
-    async fn a_pair_a_person_asked_about_is_written_without_being_judged_again() {
-        let mut core = test_core().await;
-        let dec = deciding(&mut core, "distinct", 0.95);
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Tierarztpraxis Dr. Brinkmann","text":"Kleintierpraxis in Bad Aibling. Sprechzeiten Mo-Fr 08:00-12:00.","category":"reference","caveats":[]}}"#
-                .into(),
-        ])));
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
-                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        assert_eq!(dec.calls(), 0);
-        let p = core.store.get_pair(pair).await.unwrap();
-        let merged = p.merged_into.expect("a merged artifact answered the pair");
-        let m = core.store.get_artifact(&merged).await.unwrap();
-        assert_eq!(m.provenance, Provenance::Merged);
-        assert_eq!(
-            p.decided_by,
-            Some(DecidedBy::Operator),
-            "the press is what settled this, not the model"
-        );
-        // `merge::finish` hides the sources only when the embed lands.
-        let roots = core
-            .store
-            .roots_of(std::slice::from_ref(&merged))
-            .await
-            .unwrap();
-        assert_eq!(
-            roots[&merged].len(),
-            2,
-            "the synthesis records both originals as its roots"
-        );
-        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
-        assert_eq!(rows.len(), 2, "one row per original, as any merge journals");
-    }
-
-    #[tokio::test]
-    async fn a_settled_duplicate_is_written_when_a_person_presses_synthese() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Tierarztpraxis","text":"Kleintierpraxis in Bad Aibling. Sprechzeiten Mo-Fr 08:00-12:00.","category":"reference","caveats":[]}}"#
-                .into(),
-        ])));
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
-                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.store
-            .set_pair_state(
-                pair,
-                PairState::Duplicate,
-                Some("these two cover the same ground"),
-                DecidedBy::Model,
-            )
-            .await
-            .unwrap();
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert!(
-            p.merged_into.is_some(),
-            "the press on a settled duplicate wrote nothing: {p:?}"
-        );
-        assert_eq!(p.decided_by, Some(DecidedBy::Operator));
-    }
-
-    #[tokio::test]
-    async fn a_settled_pair_nobody_pressed_is_still_left_alone() {
-        let mut core = test_core().await;
-        // Empty scripts: any call errors and the `unwrap` fails.
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
-        let dec = deciding(&mut core, "distinct", 0.95);
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
-                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.store
-            .set_pair_state(pair, PairState::Duplicate, None, DecidedBy::Model)
-            .await
-            .unwrap();
-
-        run(&core, &pair.to_string()).await.unwrap();
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        assert_eq!(dec.calls(), 0);
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert!(p.merged_into.is_none(), "nothing was pressed");
-        assert_eq!(p.state, PairState::Duplicate, "and nothing was resettled");
-    }
-
-    #[tokio::test]
-    async fn a_synthesis_that_would_drop_a_literal_is_refused_and_both_stay() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Loop mounts","text":"Mount the image read-only with `mount -o ro image.dd /mnt`.","category":"reference","caveats":[]}}"#
-                .into(),
-        ])));
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Read-only", "use `mount -o ro image.dd /mnt`", [1.0, 0.0]),
-                ("Writable", "use `mount -o rw image.dd /mnt`", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert!(
-            p.merged_into.is_none(),
-            "a draft that drops a command was written anyway"
-        );
-        assert_eq!(
-            p.state,
-            PairState::NoConflict,
-            "closed with both left as they are, not handed to a person"
-        );
-        assert!(!p.synthesis_asked, "the ask is cleared");
-        for id in &ids {
-            assert!(
-                core.store.get_artifact(id).await.unwrap().in_results(),
-                "both sides stay readable"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn an_unreadable_synthesis_reply_is_counted_against_the_pair() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            "not json at all".into(),
-        ])));
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
-                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-
-        merge(&core, &pair.to_string())
-            .await
-            .expect_err("an unreadable reply is an error");
-
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert_eq!(p.judge_unreadable, 1, "the pair carries the cost");
-        assert!(p.synthesis_asked, "the press is not lost to one bad reply");
-    }
-
-    #[tokio::test]
-    async fn a_pair_whose_replies_never_parse_leaves_the_synthesis_queue() {
-        let core = test_core().await;
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Praxis", "Kleintierpraxis in Bad Aibling", [1.0, 0.0]),
-                ("Leistungen", "Sprechzeiten Mo-Fr 08:00-12:00", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-        assert_eq!(
-            core.store.pairs_awaiting_synthesis(10).await.unwrap().len(),
-            1
-        );
-        for _ in 0..crate::store::pairs::MAX_UNREADABLE_JUDGEMENTS {
-            core.store.record_unreadable_judgement(pair).await.unwrap();
-        }
-        assert!(
-            core.store
-                .pairs_awaiting_synthesis(10)
-                .await
-                .unwrap()
-                .is_empty(),
-            "a pair nothing can write must stop buying model calls"
-        );
-    }
-
-    #[tokio::test]
-    async fn a_refused_synthesis_clears_the_ask() {
-        let core = test_core().await;
-        let src = core
-            .store
-            .insert_corpus("skript", "web", None)
-            .await
-            .unwrap();
-        let raw: Vec<crate::store::artifacts::NewArtifact> =
-            ["Spuren sind materiell.", "Spuren sind Veraenderungen."]
-                .iter()
-                .enumerate()
-                .map(|(i, t)| crate::store::artifacts::NewArtifact {
-                    ordinal: i as i64,
-                    text: (*t).to_string(),
-                    segment_idx: Some(0),
-                    ..Default::default()
-                })
-                .collect();
-        let passages: Vec<String> = core
-            .store
-            .insert_artifacts_with_provenance(&src.id, &raw, Provenance::Passage)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|c| c.id)
-            .collect();
-        let pair = queue_pair(&core, &passages[0], &passages[1]).await;
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let p = core.store.get_pair(pair).await.unwrap();
-        assert!(p.merged_into.is_none(), "nothing was written");
-        assert!(
-            !p.synthesis_asked,
-            "the card stops promising what will not come"
-        );
-        assert_eq!(p.state, PairState::NoConflict, "both stay as they are");
-    }
-
-    #[tokio::test]
-    async fn a_merge_action_records_the_act_and_not_a_verdict() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Pool","text":"the pool holds sixteen connections","category":"reference","caveats":[]}}"#
-                .into(),
-        ])));
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Pool sizing", "sixteen connections", [1.0, 0.0]),
-                ("Connections", "sixteen connections", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let merged = core
-            .store
-            .get_pair(pair)
-            .await
-            .unwrap()
-            .merged_into
-            .expect("the pair names its merge");
-        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
-        assert_eq!(rows.len(), 2, "one row per original");
-        assert!(
-            rows.iter()
-                .all(|r| r.survivor_id.as_deref() == Some(merged.as_str()))
-        );
-        let subjects: std::collections::HashSet<String> =
-            rows.iter().map(|r| r.subject_id.clone()).collect();
-        assert_eq!(subjects, ids.iter().cloned().collect());
-        for r in &rows {
-            let d = r.detail.clone().unwrap_or_default();
-            assert!(
-                d.contains("merged into"),
-                "the action says what happened, got {d:?}"
-            );
-        }
-        assert!(rows[0].pair_score.is_some());
-    }
-
-    #[tokio::test]
-    async fn a_merge_of_a_merge_names_every_original_behind_it() {
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![
-            r#"{"merged":{"title":"Pool","text":"max_connections is 16, raise it for batch jobs, sixteen connections","category":"reference","caveats":[]}}"#
-                .into(),
-        ])));
-        let ids = seed_titled(
-            &core,
-            &[
-                ("Pool sizing", "max_connections is 16", [1.0, 0.0]),
-                ("Pool notes", "raise it for batch jobs", [0.99, 0.05]),
-                ("Connections", "sixteen connections", [0.93, 0.37]),
-            ],
-        )
-        .await;
-        let m1 = merged_from(
-            &core,
-            "Pool",
-            "max_connections is 16, raise it for batch jobs",
-            &[ids[0].clone(), ids[1].clone()],
-        )
-        .await;
-        let pair = queue_pair(&core, &m1, &ids[2]).await;
-        core.store.ask_pair_synthesis(pair).await.unwrap();
-
-        merge(&core, &pair.to_string()).await.unwrap();
-
-        let settled = core.store.get_pair(pair).await.unwrap();
-        let m2 = settled
-            .merged_into
-            .expect("the second merge was never written");
-        let roots = core.store.roots_of(&[m2]).await.unwrap();
-        let roots: Vec<&String> = roots.values().flatten().collect();
-        assert_eq!(
-            roots.len(),
-            3,
-            "the merge of a merge did not inherit both lineages"
-        );
-        for id in &ids {
-            assert!(
-                roots.contains(&id),
-                "an original is missing from the lineage"
-            );
-        }
     }
 }

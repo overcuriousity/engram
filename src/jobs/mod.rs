@@ -10,6 +10,7 @@ pub mod extract;
 pub mod gaps;
 pub mod judgement;
 pub mod merge;
+pub mod merge_unit;
 pub mod observe;
 pub mod passages;
 pub mod probe;
@@ -133,7 +134,7 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
-        (Stage::Merge, _) => dedupe::merge(core, &job.target_id).await,
+        (Stage::Merge, _) => merge_unit::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Probe, _) => probe::run(core, &job.target_id).await,
         (Stage::Condense, _) => condense::run(core, &job.target_id).await,
