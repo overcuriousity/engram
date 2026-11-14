@@ -2015,24 +2015,29 @@ mod tests {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
 
-        let stop = js
-            .split_once("function stop() {")
-            .expect("the driver has no stop()")
-            .1;
-        let stop = &stop[..stop.find("\n    }").expect("stop() does not end")];
-        assert!(
-            stop.contains("setBusy(false)"),
-            "stop() does not give the surface back: {stop}"
-        );
+        // Ask's and Decide's: the ones that close a stream.
+        let stops: Vec<&str> = js
+            .split("function stop() {")
+            .skip(1)
+            .map(|s| &s[..s.find("\n    }").expect("stop() does not end")])
+            .filter(|s| s.contains("source.close()"))
+            .collect();
+        assert_eq!(stops.len(), 2, "a driver has no stop()");
+        for stop in &stops {
+            assert!(
+                stop.contains("boxBusy(form, false)"),
+                "stop() does not give the surface back: {stop}"
+            );
+        }
 
         let busy = js
-            .split_once("function setBusy(")
-            .expect("the driver has no setBusy()")
+            .split_once("function boxBusy(")
+            .expect("the drivers have no boxBusy()")
             .1;
-        let busy = &busy[..busy.find("\n    }").expect("setBusy() does not end")];
+        let busy = &busy[..busy.find("\n  }").expect("boxBusy() does not end")];
         assert!(
             busy.contains("box.readOnly"),
-            "setBusy does not silence the box, so typing still searches: {busy}"
+            "boxBusy does not silence the box, so typing still searches: {busy}"
         );
         assert!(
             !busy.contains("box.disabled"),
@@ -2041,24 +2046,24 @@ mod tests {
         );
 
         assert_eq!(
-            js.matches("setBusy(false)").count(),
-            1,
-            "setBusy(false) is called from more than one place"
+            js.matches("boxBusy(form, false)").count(),
+            stops.len(),
+            "the surface is given back from somewhere other than stop()"
         );
     }
 
     #[test]
-    fn the_two_verbs_are_reachable_from_the_keys() {
+    fn the_three_verbs_are_reachable_from_the_keys() {
         let js = crate::web::assets::Assets::get("app.js").expect("app.js is embedded");
         let js = String::from_utf8(js.data.into_owned()).unwrap();
 
         let chord = js
-            .split_once("if (e.key !== 'Enter'")
+            .split_once("box.addEventListener('keydown', function (e) {")
             .expect("nothing commits the box from the keyboard")
             .1;
         let chord = &chord[..chord.find("\n    });").expect("the handler does not end")];
         assert!(
-            chord.contains("e.shiftKey ? 'capture' : 'ask'"),
+            chord.contains("e.shiftKey ? 'capture' : 'ask'") && chord.contains("'decide'"),
             "the chord does not pick a verb: {chord}"
         );
         assert!(
