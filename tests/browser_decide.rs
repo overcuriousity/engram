@@ -74,3 +74,125 @@ fn one_decision_opens_one_stream_and_leaves_none_open() {
     assert_eq!(r["formBusy"], false, "{r}");
     no_errors(r);
 }
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn a_second_decision_supersedes_the_first() {
+    let out = drive("double");
+    let r = &out["report"];
+    assert_eq!(out["parkRequests"], 2, "{out}");
+    assert_eq!(out["streamRequests"], 2, "{out}");
+    let events: Vec<&str> = out["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    let at = |e: &str| events.iter().position(|x| *x == e);
+    assert!(
+        at("close 1").is_some() && at("close 1") < at("open 2"),
+        "the first stream was still open when the second began: {events:?}"
+    );
+    assert_eq!(out["openStreams"], 0, "a stream was left open: {out}");
+    // The first stream's `done` was due after the second began; none of it shows.
+    let result = r["resultHtml"].as_str().unwrap();
+    assert!(
+        result.contains("(2)") && !result.contains("(1)"),
+        "{result}"
+    );
+    assert_eq!(r["railRows"], 2, "{r}");
+    assert_eq!(r["formBusy"], false, "{r}");
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn a_row_that_cannot_be_sent_posts_nothing_and_says_why() {
+    let out = drive("invalid");
+    let r = &out["report"];
+    assert_eq!(out["parkRequests"], 0, "{out}");
+    assert_eq!(r["problemText"], "Name at least two options", "{r}");
+    assert_eq!(r["formBusy"], false, "{r}");
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn the_whole_row_works_from_the_keyboard() {
+    let out = drive("keyboard");
+    let r = &out["report"];
+    assert_eq!(
+        r["openedByChord"], true,
+        "Alt+Enter did not open the row: {r}"
+    );
+    assert_eq!(r["focusAfterOpen"], "decide-kind", "{r}");
+    assert_eq!(r["kindAfterArrow"], "choice", "{r}");
+    assert_eq!(r["optionsShown"], true, "{r}");
+    let tabs: Vec<&str> = r["tabs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tabs.iter().filter(|t| **t == "decide-option").count(),
+        2,
+        "Tab did not reach both names: {tabs:?}"
+    );
+    assert_eq!(tabs.last(), Some(&"add-option"), "{tabs:?}");
+    assert_eq!(r["focusBeforeEnter"], "decide-option", "{r}");
+    assert_eq!(
+        out["parkRequests"], 1,
+        "Enter in a name did not run it: {out}"
+    );
+    assert_eq!(
+        out["bodies"][0]["body"],
+        r#"{"q":"Which one?","questions":{"verdict":{"type":"choice","criteria":{"keep":"","switch":""}}}}"#,
+        "{out}"
+    );
+    assert_eq!(r["statusAfterEnter"], "The decision is ready.", "{r}");
+    assert_eq!(r["closedByEscape"], true, "{r}");
+    assert_eq!(
+        r["focusAfterEscape"], "q",
+        "focus did not go back to the box: {r}"
+    );
+    assert_eq!(r["reopened"], true, "{r}");
+    assert_eq!(r["optionsAfterReopen"][0], "keep", "{r}");
+    assert_eq!(r["optionsAfterReopen"][1], "switch", "{r}");
+    assert_eq!(r["optionsShownAfterReopen"], true, "{r}");
+    assert_eq!(out["openStreams"], 0, "{out}");
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn nothing_runs_off_a_phone() {
+    let out = drive("narrow");
+    let r = &out["report"];
+    assert_eq!(r["optionCount"], 8, "{r}");
+    assert_eq!(
+        r["addDisabled"], true,
+        "the add button outlived the limit: {r}"
+    );
+    for at in ["rowOpen", "result"] {
+        let m = &r[at];
+        assert!(
+            m["scrollWidth"].as_u64() <= m["clientWidth"].as_u64(),
+            "{at}: the page scrolls sideways at 390 px: {m}"
+        );
+        assert_eq!(
+            m["small"].as_array().unwrap().len(),
+            0,
+            "{at}: targets under 44 px: {m}"
+        );
+    }
+    assert_eq!(r["railRows"], 8, "{r}");
+    assert!(
+        r["resultHtml"]
+            .as_str()
+            .unwrap()
+            .contains("option 8 with a name forty characters"),
+        "{r}"
+    );
+    no_errors(r);
+}

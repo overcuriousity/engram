@@ -72,6 +72,10 @@
   .decide-option, .decide-level { display: flex; flex-basis: 100%; }
   .decide-option details, .decide-option details .oc-input { width: 100%; }
   .decide-option .oc-input, .decide-level .oc-input { flex: 1 1 auto; min-height: 44px; }
+  /* Thumb-sized; the summary stays a list item, or it loses its disclosure mark. */
+  .decide-row .chip > span { display: flex; align-items: center; min-height: 44px; }
+  .decide-option summary { line-height: 44px; }
+  .decide-list .oc-btn--icon { min-width: 44px; min-height: 44px; }
   .regions-rail-focus-source .region-bar .box { max-height: 40vh; }
 
   /* Clear of both bars; the shell's 5.5rem clears only the tab bar. */

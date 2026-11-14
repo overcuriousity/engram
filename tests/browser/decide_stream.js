@@ -26,6 +26,8 @@ let parkRequests = 0;
 let streamRequests = 0;
 let openStreams = 0;
 const bodies = [];
+// Opens and closes of streams, in the order the server saw them.
+const events = [];
 let report = null;
 let child = null;
 
@@ -42,6 +44,45 @@ const SCENARIOS = {
       document.activeElement === radio;
     press();
     later(4500, function () { send({ rowOpenAfterFirstPress: opened }); });
+  `,
+  // The second press lands while the first stream is reading. The button
+  // disables itself while busy, which is the page's own guard and not the one
+  // under test, so it is re-enabled here.
+  double: `
+    q('Should I keep it?');
+    press();
+    press();
+    later(150, function () {
+      document.querySelector('[data-verb="decide"]').disabled = false;
+      press();
+    });
+    later(4500, function () { send({}); });
+  `,
+  invalid: `
+    q('Which one?');
+    press();
+    kind('choice');
+    document.querySelector('[name="decide-option"]').value = 'keep';
+    press();
+    later(500, function () { send({}); });
+  `,
+  // 390 px: eight options of forty characters, then a result naming them with eight rail rows.
+  narrow: `
+    q('Which of these eight should I keep for the winter?');
+    press();
+    kind('choice');
+    var add = document.querySelector('[data-decide-add="option"]');
+    for (var i = 0; i < 6; i++) add.click();
+    var names = document.querySelectorAll('[name="decide-option"]');
+    for (var j = 0; j < names.length; j++) {
+      names[j].value = ('option ' + (j + 1) + ' with a name forty characters long').slice(0, 40);
+    }
+    var row = measure();
+    var addDisabled = add.disabled;
+    press();
+    later(4500, function () {
+      send({ optionCount: names.length, addDisabled: addDisabled, rowOpen: row, result: measure() });
+    });
   `,
 };
 
@@ -62,6 +103,24 @@ const HARNESS = `
       box.dispatchEvent(new Event('input', { bubbles: true }));
     }
     function press() { document.querySelector('[data-verb="decide"]').click(); }
+    function kind(v) {
+      var r = document.querySelector('input[name="decide-kind"][value="' + v + '"]');
+      r.click();
+    }
+    // Whether the document scrolls sideways, and every touch target in the row under 44 px.
+    function measure() {
+      var de = document.documentElement;
+      var small = [];
+      var targets = document.querySelectorAll('#decide-row input, #decide-row button, #decide-row summary');
+      for (var i = 0; i < targets.length; i++) {
+        var el = targets[i];
+        // A radio is drawn by its chip; the chip is what the thumb hits.
+        if (el.type === 'radio') el = el.closest('label');
+        var h = el.getBoundingClientRect().height;
+        if (el.offsetParent !== null && h < 44) small.push((el.name || el.getAttribute('aria-label') || el.textContent.trim()) + ' ' + h);
+      }
+      return { scrollWidth: de.scrollWidth, clientWidth: de.clientWidth, small: small };
+    }
     function later(ms, f) { setTimeout(f, ms); }
     function send(extra) {
       var out = {
@@ -151,26 +210,42 @@ function decision(q, labels) {
     'hx-target="#decide-verdict" hx-swap="outerHTML">Right</button></div></section>';
 }
 
+// What was asked, so the result names what the page sent.
+function labelsOf(n) {
+  const v = (JSON.parse(bodies[n - 1].body).questions || {}).verdict;
+  if (!v) return ['yes', 'no'];
+  return v.type === 'choice' ? Object.keys(v.criteria) : v.criteria;
+}
+
 function stream(req, res, n) {
   streamRequests++;
   openStreams++;
-  req.on('close', () => openStreams--);
+  events.push('open ' + n);
+  req.on('close', () => { openStreams--; events.push('close ' + n); });
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
   const send = (name, data) =>
     res.write('event: ' + name + '\ndata: ' + JSON.stringify(data) + '\n\n');
-  const at = (ms, f) => setTimeout(() => { if (!res.writableEnded) f(); }, ms);
-  const labels = ['yes', 'no'];
+  // The superseded one is slow, so its `done` would land after the second began.
+  const pace = SCENARIO === 'double' && n === 1 ? 3 : 1;
+  const at = (ms, f) => setTimeout(() => { if (!res.writableEnded) f(); }, ms * pace);
+  const labels = labelsOf(n);
   at(0, () => send('retrieved', { passages: 3 }));
   [true, true, false].forEach((bearing, i) =>
     at(60 * (i + 1), () => send('read', {
-      rank: i + 1, of: 3, bearing, row: railRow(i + 1, 'note ' + (i + 1) + ' of ' + n, bearing ? 'yes' : 'does not bear')
+      rank: i + 1, of: 3, bearing, row: railRow(i + 1, 'note ' + (i + 1) + ' of ' + n, bearing ? labels[0] : 'does not bear')
     })));
+  const rows = SCENARIO === 'narrow' ? 8 : 2;
+  let rail = '';
+  for (let i = 1; i <= rows; i++) {
+    const title = SCENARIO === 'narrow' ? 'a note whose title runs well past the width of any phone, ' + i : 'note ' + i;
+    rail += railRow(i, title + ' of ' + n, labels[(i - 1) % labels.length]);
+  }
   // Left open: closing it is the page's job.
   at(300, () => send('done', {
-    event_id: 'ev1',
+    event_id: 'ev' + n,
     html: decision('Should I keep it? (' + n + ')', labels),
-    rail: railRow(1, 'note 1', 'yes') + railRow(2, 'note 2', 'yes') + '<p class="muted rail-rest">1 more did not bear on it</p>',
-    rail_head: 'Decided from 2 of 3'
+    rail: rail + '<p class="muted rail-rest">1 more did not bear on it</p>',
+    rail_head: 'Decided from ' + rows + ' of ' + (rows + 1)
   }));
 }
 
@@ -217,18 +292,112 @@ const server = http.createServer((req, res) => {
 function finish() {
   if (child) child.kill();
   server.close();
-  console.log(JSON.stringify({ scenario: SCENARIO, parkRequests, streamRequests, openStreams, bodies, report }));
+  console.log(JSON.stringify({ scenario: SCENARIO, parkRequests, streamRequests, openStreams, events, bodies, report }));
   process.exit(0);
+}
+
+// Real key presses need the DevTools protocol: a synthetic Tab moves no focus.
+const KEYS = {
+  Enter: { code: 'Enter', vk: 13, text: '\r' }, Tab: { code: 'Tab', vk: 9 },
+  Escape: { code: 'Escape', vk: 27 }, ArrowRight: { code: 'ArrowRight', vk: 39 }
+};
+const ALT = 1;
+const SHIFT = 8;
+
+async function keyboard(url) {
+  const ws = await new Promise((resolve) => {
+    let buf = '';
+    child.stderr.on('data', (d) => {
+      const m = (buf += d).match(/DevTools listening on ws:\/\/([^/]+)\//);
+      if (m) resolve(m[1]);
+    });
+  });
+  const pages = await (await fetch('http:' + '//' + ws + '/json/list')).json();
+  const sock = new WebSocket(pages.find((t) => t.type === 'page').webSocketDebuggerUrl);
+  await new Promise((r) => sock.addEventListener('open', r));
+  let id = 0;
+  const pending = new Map();
+  sock.addEventListener('message', (e) => {
+    const m = JSON.parse(e.data);
+    if (pending.has(m.id)) { pending.get(m.id)(m.result); pending.delete(m.id); }
+  });
+  const cmd = (method, params) => new Promise((r) => {
+    pending.set(++id, r);
+    sock.send(JSON.stringify({ id, method, params: params || {} }));
+  });
+  const js = async (expr) => (await cmd('Runtime.evaluate', { expression: expr, returnByValue: true })).result.value;
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const key = async (name, modifiers) => {
+    const k = KEYS[name];
+    const base = { key: name, code: k.code, windowsVirtualKeyCode: k.vk, modifiers: modifiers || 0 };
+    await cmd('Input.dispatchKeyEvent', Object.assign({ type: 'keyDown', text: k.text }, base));
+    await cmd('Input.dispatchKeyEvent', Object.assign({ type: 'keyUp' }, base));
+    await wait(30);
+  };
+  const type = (text) => cmd('Input.insertText', { text });
+  // What has focus, by the name a test can read.
+  const focus = () => js(`(function (el) {
+    return el.getAttribute('data-decide-add') ? 'add-' + el.getAttribute('data-decide-add')
+      : el.tagName === 'SUMMARY' ? 'summary' : el.name || el.tagName.toLowerCase();
+  })(document.activeElement)`);
+  const rowOpen = () => js(`!document.getElementById('decide-row').hidden`);
+
+  await cmd('Page.navigate', { url });
+  while (!(await js(`!!window.engramDecide && document.readyState !== 'loading'`))) await wait(50);
+  await wait(100);
+  const out = {};
+  await js(`document.querySelector('textarea[name="q"]').focus()`);
+  await type('Which one?');
+  await key('Enter', ALT);
+  out.openedByChord = await rowOpen();
+  out.focusAfterOpen = await focus();
+  await key('ArrowRight');
+  out.kindAfterArrow = await js(`document.querySelector('input[name="decide-kind"]:checked').value`);
+  out.optionsShown = await js(`!document.getElementById('decide-options').hidden`);
+  out.tabs = [];
+  const names = ['keep', 'switch'];
+  for (let i = 0; i < 5; i++) {
+    await key('Tab');
+    const f = await focus();
+    out.tabs.push(f);
+    if (f === 'decide-option') await type(names.shift() || '');
+  }
+  // Back from the add button to the second name, and run it from there.
+  await key('Tab', SHIFT);
+  await key('Tab', SHIFT);
+  out.focusBeforeEnter = await focus();
+  await key('Enter');
+  await wait(1000);
+  out.statusAfterEnter = await js(`document.getElementById('ask-status').textContent`);
+  await key('Escape');
+  out.closedByEscape = !(await rowOpen());
+  out.focusAfterEscape = await focus();
+  await key('Enter', ALT);
+  out.reopened = await rowOpen();
+  out.optionsAfterReopen = await js(`Array.prototype.map.call(
+    document.querySelectorAll('[name="decide-option"]'), function (i) { return i.value; })`);
+  out.optionsShownAfterReopen = await js(`!document.getElementById('decide-options').hidden`);
+  out.errors = (await js(`window.__errors || []`));
+  report = out;
+  sock.close();
+  setTimeout(finish, 200);
 }
 
 server.listen(0, '127.0.0.1', () => {
   const port = server.address().port;
-  child = spawn(CHROME, [
-    '--no-sandbox', '--disable-gpu', '--dump-dom',
-    '--window-size=1280,900',
-    '--user-data-dir=' + fs.mkdtempSync(os.tmpdir() + '/engram-chrome-'),
-    'http:' + '//127.0.0.1:' + port + '/ui'
-  ], { stdio: 'ignore' });
+  const url = 'http:' + '//127.0.0.1:' + port + '/ui';
+  const profile = '--user-data-dir=' + fs.mkdtempSync(os.tmpdir() + '/engram-chrome-');
+  const width = '--window-size=' + (SCENARIO === 'narrow' ? '390,900' : '1280,900');
+  if (SCENARIO === 'keyboard') {
+    child = spawn(CHROME, ['--no-sandbox', '--disable-gpu', '--remote-debugging-port=0', width, profile, 'about:blank'],
+      { stdio: ['ignore', 'ignore', 'pipe'] });
+    keyboard(url).catch((e) => {
+      console.log(JSON.stringify({ scenario: SCENARIO, error: String(e) }));
+      finish();
+    });
+  } else {
+    child = spawn(CHROME, ['--no-sandbox', '--disable-gpu', '--dump-dom', width, profile, url], { stdio: 'ignore' });
+  }
   setTimeout(() => {
     console.log(JSON.stringify({ scenario: SCENARIO, error: 'the page never reported back' }));
     finish();
