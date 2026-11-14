@@ -20,6 +20,7 @@ pub mod reconcile;
 pub mod refetch;
 pub mod relate;
 pub mod remind;
+pub mod replay;
 pub mod retention;
 pub mod retract;
 pub mod sleep;

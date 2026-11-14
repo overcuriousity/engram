@@ -2,7 +2,7 @@
 
 use crate::infer::decide::{Answer, Kind, Question};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 pub struct Thresholds {
     pub act_at: f64,
     pub ask_at: f64,

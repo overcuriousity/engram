@@ -816,6 +816,22 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Searches a person answered by naming the note they wanted, newest first:
+    /// (event, query, expected artifact, created_at). A `dwell` verdict nobody gave is left out.
+    pub async fn named_hits(&self) -> Result<Vec<(String, String, String, i64)>> {
+        Ok(sqlx::query!(
+            r#"SELECT id AS "id!", query AS "query!", expect_id AS "expect_id!", created_at AS "created_at!"
+                 FROM search_events
+                WHERE verdict = 'hit' AND expect_id IS NOT NULL AND judged_by IS NOT 'dwell'
+                ORDER BY created_at DESC, id DESC"#
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.query, r.expect_id, r.created_at))
+        .collect())
+    }
+
     pub async fn judged_since(&self, since: i64) -> Result<i64> {
         Ok(sqlx::query_scalar!(
             "SELECT count(*) FROM search_events WHERE judged_at >= ?",

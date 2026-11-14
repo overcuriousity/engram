@@ -372,6 +372,21 @@ async fn bump_one(
 }
 
 impl Store {
+    /// Links a judge ruled on and a person may have dismissed since, newest first; what the
+    /// replay compares with. Synthesized links (no searches) are no judge's verdict.
+    pub async fn judged_links(&self) -> Result<Vec<Link>> {
+        let rows = sqlx::query_as!(
+            crate::store::links::LinkRow,
+            "SELECT * FROM artifact_links
+              WHERE state IN ('related', 'unrelated', 'dismissed')
+                AND judged_rev_a IS NOT NULL AND queries > 0
+              ORDER BY created_at DESC, a_id DESC, b_id DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_link).collect())
+    }
+
     pub async fn links_touching(&self, id: &str) -> Result<Vec<Link>> {
         let rows = sqlx::query_as!(
             crate::store::links::LinkRow,

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO graveyard (id, title, text, meta_json, reaped_at) VALUES (?, NULL, ?, '{}', 1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f4cfc116658655cde308a36d9524779fa044ec82fcc83cd88935c9fd9c877eb6"
+}
