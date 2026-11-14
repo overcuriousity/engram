@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decide_events SET model = 'fake-decider'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "42e69e30d7c1cbe993b1f62f3639e2fac85ec46e3871988b71797b8b3a7df172"
+}

@@ -105,34 +105,41 @@ pub async fn run(core: &Core) -> Result<Report> {
     Ok(r)
 }
 
-/// Recorded searches the model has not labelled, oldest first: a quarter of what the tick has left
-/// after the pair judge, a search counting as its candidates. One already queued holds its share,
-/// and the oldest that does not fit waits for a tick with room rather than being passed over.
+/// Searches looked at per sweep for labelling.
+const LABEL_LOOKAHEAD: i64 = 64;
+
+/// Unlabelled searches, oldest first, in a quarter of the tick's budget, each costing its live
+/// candidates. The first may overrun it when no label unit is in flight; one queued holds its
+/// share, and the oldest that does not fit waits rather than being passed.
 async fn label(core: &Core) -> Result<u64> {
     let mut left = core.judging_budget().await? / 4;
     if left == 0 {
         return Ok(0);
     }
     let version = crate::core::judging::catalogue::answers_query("").version;
-    let mut armed = 0;
+    let (mut armed, mut held) = (0, false);
     for id in core
         .store
-        .unlabelled_searches(
-            version,
-            core.decider.model(),
-            i64::try_from(left).unwrap_or(i64::MAX),
-        )
+        .unlabelled_searches(version, core.decider.model(), LABEL_LOOKAHEAD)
         .await?
     {
         let Some((_, candidates)) = core.store.search_to_label(&id).await? else {
             continue;
         };
-        let cost = candidates.len().max(1);
-        if cost > left {
+        let live = core
+            .store
+            .artifacts_by_ids(&candidates)
+            .await?
+            .iter()
+            .filter(|c| c.in_results())
+            .count();
+        let cost = live.max(1);
+        if cost > left && (armed > 0 || held) {
             break;
         }
-        left -= cost;
+        left = left.saturating_sub(cost);
         if core.store.live_job(Stage::Label, &id).await? {
+            held = true;
             continue;
         }
         crate::jobs::label::arm(core, &id).await?;

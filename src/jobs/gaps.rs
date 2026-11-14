@@ -5,7 +5,7 @@
 use crate::core::Core;
 use crate::core::gaps::{MIN_CLUSTER, cluster, cluster_key, terms_label};
 use crate::error::Result;
-use crate::store::gaps::{GapCluster, GapKind};
+use crate::store::gaps::{CoveredBy, GapCluster, GapKind};
 
 /// Small enough that captures never load the vector store, large enough that the wait is the
 /// slowest query.
@@ -20,6 +20,9 @@ static COVER_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
 /// queries of the store the search box uses. Taken newest-first, so older gaps go unchecked by this
 /// capture.
 const COVER_MAX_GAPS: usize = 200;
+
+/// Model calls one capture may make to cover gaps: one light call each, outside the tick's budget.
+pub const COVER_ASK_MAX: usize = 8;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
@@ -171,65 +174,60 @@ pub async fn cover_answering(
         }
     }
     let mut closed = 0;
-    let relevant_at = crate::jobs::label::relevant_at(core).await?;
+    // The linked gaps first, before anything that can fail: they need no model.
+    let mut found = Vec::new();
     for (g, hit) in open.gaps.iter().zip(best) {
-        let typed = typed_from.matches(g);
         // `gap_coverage` names the answering artifact, so even the linked gap needs a hit.
         let Some(hit) = hit else { continue };
-        // A hit above the weak line is found; whether it covers is the model's to say, the note
-        // alone against the gap's question. `None` is "no opinion" and finds nothing. On the linked
-        // gap the score is recorded, not read, and nothing is asked.
-        if !typed {
-            let Some(sim) = hit.similarity else { continue };
-            if sim < core.weak_below() {
-                continue;
-            }
-            let answered = match core.store.get_artifact(&hit.payload.artifact_id).await {
-                Ok(note) if note.in_results() => {
-                    crate::jobs::label::answers(core, &g.gap.text, &note).await
-                }
-                Ok(_) => continue,
-                Err(e) => Err(e),
-            };
-            match answered {
-                Ok(Some(yes)) if yes >= relevant_at => {}
-                Ok(Some(_)) => continue,
-                Ok(None) => {
-                    tracing::info!(gap_id = %g.gap.id, artifact_id = %hit.payload.artifact_id, "the note is too long to ask about whole; the gap stays open");
-                    continue;
-                }
-                // Never closed on an error; reported once every answered gap is written.
-                Err(e) => {
-                    tracing::warn!(gap_id = %g.gap.id, error = %e, "could not ask whether a capture answers a gap");
-                    failure.get_or_insert(e);
-                    continue;
-                }
-            }
+        // On the linked gap the score is recorded, not read, and nothing is asked.
+        if typed_from.matches(g) {
+            closed += record(core, corpus_id, g, &hit, CoveredBy::Capture, &mut failure).await;
+            continue;
         }
-        let sim = hit.similarity.unwrap_or_default();
-        let by = if typed {
-            crate::store::gaps::CoveredBy::Capture
-        } else {
-            crate::store::gaps::CoveredBy::Model
-        };
-        // Skipped, not returned: the vector store can name an artifact SQLite no longer has, and
-        // `cover` runs only once.
-        match core
-            .store
-            .cover_gap(
-                g.gap.kind,
-                &g.gap.id,
-                corpus_id,
-                &hit.payload.artifact_id,
-                sim,
-                by,
-            )
-            .await
-        {
-            Ok(()) => closed += 1,
+        // A hit above the weak line is found; `None` is "no opinion" and finds nothing.
+        if let Some(sim) = hit.similarity.filter(|s| *s >= core.weak_below()) {
+            found.push((g, hit, sim));
+        }
+    }
+    // Whether a found note covers is the model's to say, the note alone against the gap's
+    // question; the best found are asked, and the rest wait for a later capture.
+    found.sort_by(|a, b| b.2.total_cmp(&a.2));
+    found.truncate(COVER_ASK_MAX);
+    if !found.is_empty() {
+        match crate::jobs::label::relevant_at(core).await {
             Err(e) => {
-                tracing::warn!(gap_id = %g.gap.id, error = %e, "could not record that a capture answered a gap");
                 failure.get_or_insert(e);
+            }
+            Ok(relevant_at) => {
+                for (g, hit, _) in found {
+                    let note = match core.store.get_artifact(&hit.payload.artifact_id).await {
+                        Ok(note) if note.in_results() => note,
+                        Ok(_) => continue,
+                        // The vector store can name an artifact SQLite no longer has: not the
+                        // model's failure, so the others are still asked.
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                            continue;
+                        }
+                    };
+                    match crate::jobs::label::answers(core, &g.gap.text, &note).await {
+                        Ok(Some(yes)) if yes >= relevant_at => {
+                            closed +=
+                                record(core, corpus_id, g, &hit, CoveredBy::Model, &mut failure)
+                                    .await;
+                        }
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            tracing::info!(gap_id = %g.gap.id, artifact_id = %note.id, "the note is too long to ask about whole; the gap stays open");
+                        }
+                        // Never closed on an error, and a model that is down is asked no more.
+                        Err(e) => {
+                            tracing::warn!(gap_id = %g.gap.id, error = %e, "could not ask whether a capture answers a gap");
+                            failure.get_or_insert(e);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -241,6 +239,39 @@ pub async fn cover_answering(
         return Err(e);
     }
     Ok(closed)
+}
+
+/// Writes one coverage row; a failure is a warning, kept for the caller to report.
+async fn record(
+    core: &Core,
+    corpus_id: &str,
+    g: &crate::store::gaps::GapVec,
+    hit: &crate::vector::SearchHit,
+    by: CoveredBy,
+    failure: &mut Option<crate::error::Error>,
+) -> usize {
+    let sim = hit.similarity.unwrap_or_default();
+    // Skipped, not returned: the vector store can name an artifact SQLite no longer has, and
+    // `cover` runs only once.
+    match core
+        .store
+        .cover_gap(
+            g.gap.kind,
+            &g.gap.id,
+            corpus_id,
+            &hit.payload.artifact_id,
+            sim,
+            by,
+        )
+        .await
+    {
+        Ok(()) => 1,
+        Err(e) => {
+            tracing::warn!(gap_id = %g.gap.id, error = %e, "could not record that a capture answered a gap");
+            failure.get_or_insert(e);
+            0
+        }
+    }
 }
 
 pub async fn sweep(core: &Core) -> Result<SweepReport> {
@@ -750,6 +781,121 @@ mod tests {
                 .gaps
                 .iter()
                 .any(|g| g.gap.id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_asks_about_its_best_eight_gaps_and_no_more() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let vecs: Vec<Vec<f32>> = (0..12)
+            .map(|i| vec![1.0, i as f32 * 0.3, (12 - i) as f32 * 0.05, 0.0])
+            .collect();
+        for (i, v) in vecs.iter().enumerate() {
+            gap_search(&core, &format!("gap number {i}"), v.clone()).await;
+        }
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        let mut sims = Vec::new();
+        for (i, v) in vecs.iter().enumerate() {
+            sims.push((best_similarity(&core, v, &corpus).await, i));
+        }
+        let floor = sims.iter().map(|s| s.0).fold(f32::MAX, f32::min);
+        core.set_weak_below(floor - 0.01);
+        let dec = saying(0.2);
+        core.decider = dec.clone();
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+
+        let asked: Vec<f32> = dec
+            .requests()
+            .iter()
+            .map(|(_, qs)| {
+                let i = (0..12)
+                    .find(|i| qs[0].instructions.contains(&format!("«gap number {i}»")))
+                    .unwrap();
+                sims.iter().find(|s| s.1 == i).unwrap().0
+            })
+            .collect();
+        assert_eq!(asked.len(), COVER_ASK_MAX);
+        assert!(
+            asked.windows(2).all(|w| w[0] >= w[1]),
+            "best first: {asked:?}"
+        );
+        sims.sort_by(|a, b| b.0.total_cmp(&a.0));
+        assert!(
+            asked.last().unwrap() >= &sims[COVER_ASK_MAX - 1].0,
+            "{asked:?} {sims:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_call_that_fails_asks_no_more_and_closes_nothing() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        for i in 0..3 {
+            gap_search(
+                &core,
+                &format!("how do I mount an E01, take {i}"),
+                v.clone(),
+            )
+            .await;
+        }
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01);
+        let dec = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Internal(
+                "the decision model is down".into(),
+            ))
+        }));
+        core.decider = dec.clone();
+
+        assert!(cover(&core, &corpus).await.is_err());
+        assert_eq!(dec.calls(), 1);
+        assert!(
+            core.store
+                .gaps_covered_by(&corpus)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_linked_gap_is_covered_while_the_model_is_down() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        gap_search(&core, "how do I mount an E01", v.clone()).await;
+        let typed = unmatched_search(&core, "the ID photo is on Wednesday", v.clone()).await;
+        core.set_weak_below(0.0);
+        let dec = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Internal(
+                "the decision model is down".into(),
+            ))
+        }));
+        core.decider = dec.clone();
+        let src = core
+            .ingest_capture(
+                crate::core::ingest::Capture::new("The ID photo is on Wednesday at 09:00.", "web")
+                    .with_search(&typed),
+            )
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        core.background.wait_idle().await;
+
+        let covered = core.store.gaps_covered_by(&src.id).await.unwrap();
+        assert_eq!(
+            covered.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            [typed.as_str()],
+            "the link closes its gap; the other waits for a model"
+        );
+        assert!(
+            asked_about(&dec, "how do I mount an E01") >= 1,
+            "the other gap was found and its call failed"
         );
     }
 

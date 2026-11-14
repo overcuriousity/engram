@@ -1,5 +1,6 @@
 //! What the decision model said of each candidate of a recorded search, and how far that agrees
-//! with the person. A label is never a verdict: nothing here writes `search_events`.
+//! with the person. A label is never a verdict: nothing here writes `search_events`. A row with
+//! `artifact_id = ''` marks a search that stepped aside (`label::step_aside`); no figure reads it.
 
 use super::{Store, now};
 use crate::error::Result;
@@ -161,9 +162,10 @@ impl Store {
             r#"SELECT x.yes AS "expect_yes!: f64",
                       (SELECT COUNT(*) FROM search_labels l
                         WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
-                          AND l.yes >= ?) AS "relevant!: i64",
+                          AND l.yes >= ? AND l.artifact_id <> '') AS "relevant!: i64",
                       (SELECT COUNT(*) FROM search_labels l
-                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?) AS "labelled!: i64"
+                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                          AND l.artifact_id <> '') AS "labelled!: i64"
                  FROM search_events e
                  JOIN search_labels x ON x.event_id = e.id AND x.artifact_id = e.expect_id
                 WHERE e.verdict = 'hit' AND x.question_version = ? AND x.model = ?"#,
@@ -241,7 +243,7 @@ impl Store {
         Ok(sqlx::query_scalar!(
             r#"SELECT l.artifact_id AS "artifact_id!" FROM search_labels l
                  JOIN search_events e ON e.id = l.event_id
-                WHERE l.event_id = ? AND e.judged_at IS NULL AND l.yes >= ?
+                WHERE l.event_id = ? AND e.judged_at IS NULL AND l.yes >= ? AND l.artifact_id <> ''
                 ORDER BY l.yes DESC,
                          (SELECT MIN(c.rank) FROM search_candidates c
                            WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id) ASC
@@ -305,7 +307,7 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::store::feedback::{Door, Labeller, NewCandidate, NewEvent};
 
@@ -559,7 +561,12 @@ mod tests {
         );
     }
 
-    async fn decided(store: &Store, verdict: crate::store::asks::AskVerdict, reads: &[&str]) {
+    /// A held decision of model `M` judged `verdict`, one bearing note per pick in `reads`.
+    pub(crate) async fn decided(
+        store: &Store,
+        verdict: crate::store::asks::AskVerdict,
+        reads: &[&str],
+    ) {
         use crate::core::decide::wire;
         use crate::infer::decide::{Answer, Kind, Question};
         use crate::store::decisions::{NewDecision, NewEvidence};

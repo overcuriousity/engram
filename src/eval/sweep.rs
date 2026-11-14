@@ -946,7 +946,7 @@ mod tests {
         core: &crate::core::Core,
         order: &[String],
         expect: Option<usize>,
-        relevant: usize,
+        relevant: &[usize],
     ) -> String {
         use crate::store::feedback::NewCandidate;
         let candidates = &order[..5];
@@ -981,7 +981,7 @@ mod tests {
         let rows: Vec<(String, f64)> = candidates
             .iter()
             .enumerate()
-            .map(|(i, a)| (a.clone(), if i == relevant { 0.95 } else { 0.1 }))
+            .map(|(i, a)| (a.clone(), if relevant.contains(&i) { 0.95 } else { 0.1 }))
             .collect();
         core.store
             .put_search_labels(
@@ -1009,12 +1009,12 @@ mod tests {
             let (core, order) = seeded().await;
             let generation = a_generation(&core).await;
             for _ in 0..hits {
-                labelled_search(&core, &order, Some(0), 0).await;
+                labelled_search(&core, &order, Some(0), &[0]).await;
             }
             for _ in 0..misses {
-                labelled_search(&core, &order, Some(1), 0).await;
+                labelled_search(&core, &order, Some(1), &[0]).await;
             }
-            labelled_search(&core, &order, None, 2).await;
+            labelled_search(&core, &order, None, &[2]).await;
             assert_eq!(
                 core.labels_count().await.unwrap(),
                 counts,
@@ -1034,6 +1034,30 @@ mod tests {
                 .count();
             assert_eq!(model_pair, usize::from(counts));
         }
+    }
+
+    #[tokio::test]
+    async fn a_model_that_calls_everything_relevant_steers_no_sweep() {
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        let all = [0, 1, 2, 3, 4];
+        for _ in 0..30 {
+            labelled_search(&core, &order, Some(0), &all).await;
+        }
+        labelled_search(&core, &order, None, &all).await;
+        let g = core
+            .store
+            .label_agreement(
+                crate::jobs::label::relevant_at(&core).await.unwrap(),
+                crate::core::judging::catalogue::answers_query("").version,
+                core.decider.model(),
+            )
+            .await
+            .unwrap();
+        assert_eq!((g.judged, g.hit_rate, g.selectivity), (30, 1.0, 1.0));
+        assert!(!core.labels_count().await.unwrap());
+        let (pairs, _) = evidence_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), 30, "the unjudged search adds no pair");
     }
 
     #[tokio::test]

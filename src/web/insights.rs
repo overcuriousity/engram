@@ -29,22 +29,23 @@ fn searches(n: usize) -> String {
     format!("{n} search{}", if n == 1 { "" } else { "es" })
 }
 
-/// The lines under the person's figures; a line with nothing to say is left out.
+/// The lines under the person's figures; a line with nothing to say is left out. The bearing record
+/// is decide's and shows without any label.
 fn model_lines(f: &crate::jobs::label::Figures) -> Vec<String> {
     let mut out = Vec::new();
     let r = &f.retrieval;
-    if r.searches + r.left_out == 0 {
-        return out;
+    let labelled = r.searches + r.left_out > 0;
+    if labelled {
+        out.push(match r.searches {
+            0 => format!("by the model: {} left out", searches(r.left_out)),
+            _ => format!(
+                "by the model: recall@10 {:.2} · MRR {:.2} · {} left out",
+                r.recall_at_10,
+                r.mrr,
+                searches(r.left_out)
+            ),
+        });
     }
-    out.push(match r.searches {
-        0 => format!("by the model: {} left out", searches(r.left_out)),
-        _ => format!(
-            "by the model: recall@10 {:.2} · MRR {:.2} · {} left out",
-            r.recall_at_10,
-            r.mrr,
-            searches(r.left_out)
-        ),
-    });
     let g = &f.agreement;
     if g.judged > 0 {
         out.push(format!(
@@ -61,13 +62,15 @@ fn model_lines(f: &crate::jobs::label::Figures) -> Vec<String> {
             f.bears.held_up, f.bears.ruled_on
         ));
     }
-    out.push(
-        match f.counts {
-            true => "model labels count toward sweeps",
-            false => "model labels are shown only",
-        }
-        .into(),
-    );
+    if labelled {
+        out.push(
+            match f.counts {
+                true => "model labels count toward sweeps",
+                false => "model labels are shown only",
+            }
+            .into(),
+        );
+    }
     out
 }
 
@@ -1434,6 +1437,27 @@ mod tests {
             !html.contains("bears held up"),
             "nothing ruled on yet: {html}"
         );
+    }
+
+    #[tokio::test]
+    async fn the_bearing_record_shows_before_any_search_is_labelled() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        core.ingest("alpha line", "web", None).await.unwrap();
+        crate::store::search_labels::tests::decided(
+            &core.store,
+            crate::store::asks::AskVerdict::Right,
+            &["keep", "drop"],
+        )
+        .await;
+        // The decision's model is the store test's; the page reads the live decider's.
+        sqlx::query!("UPDATE decide_events SET model = 'fake-decider'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let html = insights(core).await;
+        assert!(html.contains("bears held up: 1 of 2"), "{html}");
+        assert!(!html.contains("by the model"), "{html}");
     }
 
     #[tokio::test]

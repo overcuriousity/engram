@@ -1,0 +1,40 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT x.yes AS \"expect_yes!: f64\",\n                      (SELECT COUNT(*) FROM search_labels l\n                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?\n                          AND l.yes >= ? AND l.artifact_id <> '') AS \"relevant!: i64\",\n                      (SELECT COUNT(*) FROM search_labels l\n                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?\n                          AND l.artifact_id <> '') AS \"labelled!: i64\"\n                 FROM search_events e\n                 JOIN search_labels x ON x.event_id = e.id AND x.artifact_id = e.expect_id\n                WHERE e.verdict = 'hit' AND x.question_version = ? AND x.model = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "expect_yes!: f64",
+        "ordinal": 0,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "search_labels",
+            "name": "yes"
+          }
+        }
+      },
+      {
+        "name": "relevant!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "labelled!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "fd66422578c32fa8fcd5b49958a44d95f2662f00a2857918bb8d9d75c8b8d012"
+}

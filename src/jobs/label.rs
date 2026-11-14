@@ -61,20 +61,37 @@ pub async fn run(core: &Core, event_id: &str) -> Result<()> {
         return Ok(());
     };
     let notes = core.store.artifacts_by_ids(&candidates).await?;
-    let mut rows = Vec::new();
+    let (mut rows, mut live) = (Vec::new(), false);
     for id in &candidates {
         let Some(note) = notes.iter().find(|c| &c.id == id && c.in_results()) else {
             continue;
         };
+        live = true;
         match answers(core, &query, note).await? {
             Some(yes) => rows.push((id.clone(), yes)),
             None => tracing::info!(event_id, artifact_id = %id, "no room to label this candidate"),
         }
     }
+    if live && rows.is_empty() {
+        return step_aside(core, event_id).await;
+    }
     core.store
         .put_search_labels(
             event_id,
             &rows,
+            answers_query("").version,
+            core.decider.model(),
+        )
+        .await
+}
+
+/// Marks a search this model cannot label as labelled, so it leaves the queue: one marker row,
+/// `artifact_id = ''`, that no figure reads.
+pub async fn step_aside(core: &Core, event_id: &str) -> Result<()> {
+    core.store
+        .put_search_labels(
+            event_id,
+            &[(String::new(), 0.0)],
             answers_query("").version,
             core.decider.model(),
         )
@@ -350,6 +367,131 @@ mod tests {
         // The two still queued hold their share: nothing more is armed.
         let again = crate::jobs::decisions::run(&core).await.unwrap();
         assert_eq!(again.labelled, 0);
+    }
+
+    /// `n` searches of `k` fresh notes each, recorded long ago so the base is quiet; oldest first.
+    async fn old_searches(core: &Core, n: usize, k: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        for s in 0..n {
+            let mut c = Vec::new();
+            for i in 0..k {
+                c.push(note(core, &format!("s{s} n{i}")).await);
+            }
+            let id = search(core, &format!("search {s}"), &c).await;
+            let at = 1_000 + s as i64;
+            sqlx::query!(
+                "UPDATE search_events SET created_at = ? WHERE id = ?",
+                at,
+                &id
+            )
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+            out.push(id);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn at_the_defaults_one_whole_search_is_labelled_per_tick() {
+        let core = test_core().await;
+        assert_eq!(core.decide_cfg.max_per_tick, 60);
+        let ids = old_searches(&core, 2, 20).await;
+        // A retired candidate is never asked, so it costs nothing.
+        core.deprecate(&note(&core, "spare").await).await.unwrap();
+
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(r.labelled, 1, "the first search may overrun the quarter");
+        assert!(core.store.live_job(Stage::Label, &ids[0]).await.unwrap());
+        assert!(!core.store.live_job(Stage::Label, &ids[1]).await.unwrap());
+
+        let again = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(again.labelled, 0, "while it is pending, nothing more");
+    }
+
+    async fn long_note(core: &Core) -> String {
+        let text: String = (0..2000).map(|i| format!("word{i} ")).collect();
+        let src = core.store.insert_corpus(&text, "web", None).await.unwrap();
+        core.store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: text.trim().into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id
+    }
+
+    #[tokio::test]
+    async fn a_search_whose_candidates_do_not_fit_steps_aside_and_no_figure_reads_it() {
+        let mut core = test_core().await;
+        let dec = labeller(0.95);
+        dec.set_context_tokens(1024);
+        core.decider = dec.clone();
+        let long = long_note(&core).await;
+        let id = search(&core, "mount loop", std::slice::from_ref(&long)).await;
+        core.store
+            .judge_hit(&id, &long, Labeller::Confirm)
+            .await
+            .unwrap();
+
+        run(&core, &id).await.unwrap();
+
+        assert_eq!(dec.calls(), 0, "a cut text is not judged");
+        assert!(
+            core.store
+                .unlabelled_searches(version(), "rule-decider", 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "it steps aside"
+        );
+        let s = &core.store;
+        assert_eq!(
+            s.model_retrieval(0.0, version(), "rule-decider")
+                .await
+                .unwrap(),
+            Default::default()
+        );
+        assert_eq!(
+            s.label_agreement(0.0, version(), "rule-decider")
+                .await
+                .unwrap(),
+            Default::default()
+        );
+        core.store.unjudge(&id, Labeller::Confirm).await.unwrap();
+        assert_eq!(s.model_expected(&id, 0.0).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn a_search_the_model_keeps_refusing_steps_aside_and_is_not_armed_again() {
+        let mut core = test_core().await;
+        core.decider = Arc::new(RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "no".into(),
+            })
+        }));
+        let ids = old_searches(&core, 1, 2).await;
+        arm(&core, &ids[0]).await.unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+
+        assert!(!core.store.live_job(Stage::Label, &ids[0]).await.unwrap());
+        assert!(
+            core.store
+                .unlabelled_searches(version(), "rule-decider", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            crate::jobs::decisions::run(&core).await.unwrap().labelled,
+            0
+        );
     }
 
     #[test]
