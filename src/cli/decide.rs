@@ -599,4 +599,170 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1, "a CLI decision is recorded under the cli door");
     }
+
+    /// Keep 0.81 on the joint read, 0.9 on each passage's own, so a door that showed a passage's numbers would fail.
+    fn keep_on_the_joint_read(
+        state: &str,
+        qs: &[crate::infer::decide::Question],
+    ) -> Result<crate::infer::decide::Answers> {
+        use crate::infer::decide::{Answer, Answers, Kind};
+        let keep = if state.contains("Excerpt 1") {
+            0.81
+        } else {
+            0.9
+        };
+        let answers = qs
+            .iter()
+            .map(|q| {
+                let a = match &q.kind {
+                    _ if q.key == "bears" => Answer::Noul {
+                        yes: if state.contains("zebracrossing") {
+                            0.95
+                        } else {
+                            0.02
+                        },
+                    },
+                    Kind::Choice { options } => Answer::Choice {
+                        pick: "keep".into(),
+                        probabilities: options
+                            .iter()
+                            .map(|(n, _)| if n == "keep" { keep } else { 1.0 - keep })
+                            .collect(),
+                        confidence: keep,
+                    },
+                    _ => Answer::Noul { yes: keep },
+                };
+                (q.key.clone(), a)
+            })
+            .collect();
+        Ok(Answers {
+            answers,
+            model: "rule".into(),
+            input_tokens: 0,
+        })
+    }
+
+    #[tokio::test]
+    async fn the_same_question_is_the_same_decision_through_every_door() {
+        let mut core = seeded().await;
+        crate::core::decide::tests::deciding(&mut core, keep_on_the_joint_read);
+        let (url, token) = crate::cli::test_support::serve(core.clone()).await;
+        let e = Endpoint { url, token };
+        let (q, options) = ("Which embedder?", ["keep", "switch"]);
+        let kind = DecideKind::Choice(
+            options
+                .iter()
+                .map(|n| (n.to_string(), String::new()))
+                .collect(),
+        );
+        let weights = |v: &Value| -> Vec<(String, u8)> {
+            v["answers"]["verdict"]["probabilities"]
+                .as_object()
+                .expect("a choice's probabilities by name")
+                .iter()
+                .map(|(k, p)| (k.clone(), weight(p.as_f64().unwrap())))
+                .collect()
+        };
+        let evidence = |v: &Value| -> Vec<(String, String)> {
+            v["evidence"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    (
+                        e["artifact_id"].as_str().unwrap().to_string(),
+                        e["title"].as_str().unwrap_or_default().to_string(),
+                    )
+                })
+                .collect()
+        };
+        let want = vec![("keep".to_string(), 81), ("switch".to_string(), 19)];
+
+        let rest: Value = reqwest::Client::new()
+            .post(format!("{}/api/v1/decide", e.url))
+            .bearer_auth(&e.token)
+            .json(
+                &serde_json::from_str::<Value>(&body(q, &kind, None, &Default::default())).unwrap(),
+            )
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(weights(&rest), want, "REST: {rest}");
+        assert_eq!(rest["standing"]["verdict"], "settled", "REST: {rest}");
+        let ev = evidence(&rest);
+        assert_eq!(ev.len(), 2, "the two marked notes bear: {rest}");
+
+        let (text, code) = json(&e, body(q, &kind, None, &Default::default()))
+            .await
+            .unwrap();
+        let cli: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(code, 0);
+        assert_eq!(weights(&cli), want, "CLI: {text}");
+        assert_eq!(cli["standing"], rest["standing"], "CLI: {text}");
+        assert_eq!(evidence(&cli), ev, "CLI: {text}");
+        let printed = render(&cli, true);
+        assert!(
+            printed.contains(" 81\n") && printed.contains(" 19\n") && printed.contains("Settled."),
+            "{printed}"
+        );
+
+        use rmcp::handler::server::wrapper::Parameters;
+        let mcp = crate::mcp::PkdbTools::over(core.clone())
+            .decide(Parameters(crate::mcp::DecideParams {
+                q: q.into(),
+                options: Some(
+                    options
+                        .iter()
+                        .map(|n| crate::mcp::DecideOption {
+                            name: n.to_string(),
+                            description: None,
+                        })
+                        .collect(),
+                ),
+                levels: None,
+                situation: None,
+            }))
+            .await;
+        assert!(
+            mcp.contains("- keep: 81\n") && mcp.contains("- switch: 19\n"),
+            "{mcp}"
+        );
+        assert!(mcp.contains("Settled."), "{mcp}");
+        let at: Vec<usize> = ev
+            .iter()
+            .map(|(_, t)| {
+                mcp.find(&format!(". {t}"))
+                    .unwrap_or_else(|| panic!("{t}: {mcp}"))
+            })
+            .collect();
+        assert!(at.is_sorted(), "MCP keeps the evidence order: {mcp}");
+
+        let req = crate::core::decide::DecideRequest {
+            q: q.into(),
+            questions: vec![crate::infer::decide::Question {
+                key: "verdict".into(),
+                kind: crate::infer::decide::Kind::Choice {
+                    options: options
+                        .iter()
+                        .map(|n| (n.to_string(), String::new()))
+                        .collect(),
+                },
+                instructions: String::new(),
+            }],
+            ..Default::default()
+        };
+        let d = core
+            .decide(&req, crate::store::feedback::Door::Ui)
+            .await
+            .unwrap();
+        let ids: Vec<String> = d.evidence.iter().map(|e| e.artifact_id.clone()).collect();
+        assert_eq!(ids, ev.iter().map(|(i, _)| i.clone()).collect::<Vec<_>>());
+        let html = crate::web::decide::decision_fragment(&d, None).unwrap();
+        let (k, s) = (html.find(r#"width="81""#), html.find(r#"width="19""#));
+        assert!(k.is_some() && s.is_some() && k < s, "{html}");
+        assert!(html.contains("Settled."), "{html}");
+    }
 }

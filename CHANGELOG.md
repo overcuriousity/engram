@@ -7,7 +7,7 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 
 ### Added
 - `scripts/probe-decide.sh` measures a decision endpoint.
-- Decide: a typed question answered from the notes that bear on it, with each note's own reading. Judging a decision confirms the notes that agree and sends the ones against to the pair judge. `POST /api/v1/decide`, `/decide/stream`, `/decisions/{id}/verdict`; thresholds under `[decide]`. In the web UI beside Search and Ask (Alt+Enter).
+- Decide: a typed question answered from the notes that bear on it, with each note's own reading. Judging a decision confirms the notes that agree and sends the ones against to the pair judge. `POST /api/v1/decide`, `/decide/stream`, `/decisions/{id}/verdict`; thresholds under `[decide]`. In the web UI beside Search and Ask (Alt+Enter). Also the MCP tool decide and engram -d.
 
 ### Changed
 - **`[infer.decide]` is required.** engram needs a decision model (System One, `POST {base_url}/systemone`); a config without the block is refused at start. Copy it from `config.example.toml`.

@@ -677,7 +677,7 @@ impl PkdbTools {
         name = "decide",
         description = "Decide a typed question from the notes that bear on it: yes or no, one of several options, or a level on a scale. Returns weights, how firmly the notes hold it, and each note's own reading. It answers what the notes support, not what is advisable."
     )]
-    async fn decide(&self, Parameters(p): Parameters<DecideParams>) -> String {
+    pub(crate) async fn decide(&self, Parameters(p): Parameters<DecideParams>) -> String {
         use crate::infer::decide::{Kind, Question};
         let kind = match (p.options, p.levels) {
             (Some(_), Some(_)) => return "Decide failed: give options or levels, not both".into(),
