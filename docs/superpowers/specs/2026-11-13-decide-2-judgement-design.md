@@ -644,6 +644,66 @@ Readings: `asks_reminder` 0.97 on a reminder, 0.00 to 0.01 elsewhere.
 unreliable as worded. `category` with bare option names: right on a
 configuration and a procedure, "other" at low confidence on the rest.
 
-### Replay
+### Replay, 2026-11-14
 
-Empty until stage 2 has run.
+On a copy of the owner's base (4240 live notes, 99 superseded, an empty
+graveyard), against `clef-flash:9b-q8_0-8192`, with
+`engram --replay-decisions`. The live base was not opened. A run over every
+question is about 1500 decisions and took about 15 minutes.
+
+The base holds little past judgement: 2 merges, no burial, 55 filed pairs of
+which one is a usable verdict, 155 judged links, 56 searches the person
+judged. No question reached the 30 cases the suggestion needs, so **no
+threshold below is measured**; each is a starting line chosen with the owner,
+and the tuner moves it.
+
+Because the history is thin, the replay also asks `pair_relation` and
+`reap_worth` over what nobody judged: neighbour pairs at 0.70 cosine or above
+that are not filed, and superseded notes. There is no verdict to agree with
+there; it shows how the answers fall.
+
+| Question | Asked | Result |
+|---|---|---|
+| `pair_relation`, judged | 1 | disagrees: a past merge is called `distinct` at 0.64 |
+| `pair_relation`, unjudged neighbours | 200 of 15105 | distinct 164 · duplicate 29 · b_replaces_a 4 · vacuous 2 · conflict 1; swapped reads disagreed in 10; at 0.90 seven would act, all `distinct`; no `duplicate` above 0.73, including a pair at cosine 0.98 |
+| `link_kind` | 155 | agrees with the past verdict in 112; of 96 past `unrelated` it keeps 95, of 59 past `related` it calls 31 `unrelated`; at 0.80 and above 28 of 35 agree |
+| `link_direction` v1 | 53 | `a_first` 53 of 53, both option orders agreeing |
+| `link_direction` v2 | 53 | `a_first` 51; the same note is named first when the notes are exchanged in 36 |
+| `reap_worth`, unjudged superseded | 99 | no 99 · yes 0; 61 at 0.90 and above; highest yes 0.50 |
+| `category` | 200 | matches the stored category in 82; the rest sit between neighbours: reference and definition, procedure and snippet |
+| `pinned` | 200 | yes at 0.90: 1 |
+| `time_bound` | 200 | yes at 0.5: 4; the highest are a dated offer, a list of served models, payment data with an end date; the lowest are formulas |
+| `self_contained` | 200 | yes at 0.5: 108; the lowest are untitled fragments and numbered parts of a worked example |
+| `asks_reminder` | 200 | yes at 0.3: 11; the highest are the reminders |
+| `has_date` | 200 | yes at 0.3: 6 |
+| `answers_query` | 31 | calls the note the person named relevant in 30; at 0.90 and above 16 of 17 |
+| `complete`, `adds_nothing` | 1 | the one kept merge: 0.75 and 0.55, neither under the refusal line |
+| `answerable` | 0 | the base keeps nothing to replay it over |
+
+What was fixed from it:
+
+- **Wording.** Only `link_direction` changed (version 2): as first worded it
+  named the note labelled A every time, which reversing the options cannot
+  show. The replay now checks a direction by exchanging the two notes.
+  `time_bound` stays as worded: the probe's doubt did not hold on real notes.
+  `link_kind` under-links against the old judge rather than mislinking, and
+  `category` disagrees between kinds that overlap; both keep their wording.
+- **A direction counts only when it holds under exchange.** A link whose
+  direction flips with the labels is stored and shown undirected. One more
+  call per directional link.
+- **Starting lines** (owner's decision, 2026-11-14):
+
+  | Question | act_at | ask_at | Why |
+  |---|---|---|---|
+  | `pair_relation`, `link_kind` | 0.90 | 0.60 | what reaches 0.90 on this base is closing a pair as distinct and shelving a link; anything else still needs the agreeing swapped read, the daily cap, and has its undo |
+  | `answers_query` | 0.90 | 0.60 | 16 of 17 with the person at that line; it labels searches and closes gaps |
+  | `reap_worth` | 0.99 | 0.60 | no burial was ever judged here, and 99 of 99 "no" cannot be told from a lean toward "no": it asks |
+  | `answerable` | 0.99 | 0.60 | nothing to measure it on: it asks |
+
+  Starting every question at 0.99, as stage 2's plan has it for a question
+  without a suggestion, would make the base ask about nearly all of the 15105
+  pairs the wider net finds, twenty rows at a time: the chore list this spec
+  rules out.
+- **For the tuner (stage 9).** A question that starts at 0.99 acts on nothing,
+  so a rule that counts only acted decisions never lowers it. A person's
+  answers to its Unsure rows have to count as its evidence.
