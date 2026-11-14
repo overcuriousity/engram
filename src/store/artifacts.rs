@@ -1471,14 +1471,27 @@ impl Store {
                      AND s.via_id IS NOT NULL
                 )";
 
-    /// Open reminders on the note's active artifacts hold a row back (`kind = 'due'` only).
-    /// Age reads `retired_at` alone. Rules SQLite can state are here, before the `LIMIT`;
-    /// "seen since retired" lives on the vector point (see `jobs::reap::nominees`).
-    pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
+    /// Open reminders on the note's active artifacts hold a row back (`kind = 'due'` only). Rules
+    /// SQLite can state are here, before the `LIMIT`; "seen since retired" is `jobs::reap::nominees`'.
+    /// Asked in `era` is out until changed or put back; found valuable by a person, in any era.
+    pub async fn reap_candidates(
+        &self,
+        min_age_secs: i64,
+        era: &str,
+        limit: i64,
+    ) -> Result<Vec<Chunk>> {
         // runtime: shares the REAPABLE predicate with the graveyard insert.
         let rows = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifacts art
               WHERE {}
+                AND NOT EXISTS (SELECT 1 FROM decisions d
+                                 WHERE d.question_id = 'reap_worth' AND d.subject_a = art.id
+                                   AND d.subject_b IS art.superseded_by
+                                   AND d.rev_a = art.embed_rev
+                                   AND ((d.era = ?
+                                         AND COALESCE(d.reason, '') NOT IN ('asked_again', 'changed'))
+                                        OR (d.answered_pick = 'yes'
+                                            AND COALESCE(d.reason, '') != 'asked_again')))
               ORDER BY art.retired_at ASC
               LIMIT ?",
             Self::REAPABLE
@@ -1486,6 +1499,7 @@ impl Store {
         .bind(now() - min_age_secs)
         .bind(now() - min_age_secs)
         .bind(now() - min_age_secs)
+        .bind(era)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -2774,7 +2788,7 @@ mod tests {
             .unwrap();
         backdate_retired_at(&s, &pair[1].id, 100 * 86_400).await;
 
-        let got = s.reap_candidates(90 * 86_400, 20).await.unwrap();
+        let got = s.reap_candidates(90 * 86_400, "era", 20).await.unwrap();
         let mut ids = got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         let mut want = vec![made[0].id.as_str(), made[2].id.as_str()];
@@ -2836,7 +2850,10 @@ mod tests {
             "the note is one somebody is still being reminded about"
         );
         assert!(
-            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .is_empty(),
             "so nothing of it is nominated"
         );
         assert!(
@@ -2893,7 +2910,10 @@ mod tests {
         backdate_retired_at(&s, &made[0].id, 100 * 86_400).await;
 
         assert!(
-            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .is_empty(),
             "the merge carries the note's text, and the note is one somebody \
              is still being reminded about"
         );
@@ -2963,11 +2983,20 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(&s, &made[1].id, 100 * 86_400).await;
-        assert_eq!(s.reap_candidates(90 * 86_400, 20).await.unwrap().len(), 1);
+        assert_eq!(
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         insert_open_moment(&s, &made[0].id).await;
         assert!(
-            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .is_empty(),
             "the nomination would no longer be made"
         );
         assert!(

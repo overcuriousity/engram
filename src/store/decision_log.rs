@@ -476,6 +476,29 @@ impl Store {
         .await?)
     }
 
+    /// Whether a person answered `reap_worth` "yes" about this note as it is, in any era, and did not
+    /// ask again since: a model's pick never buries it.
+    pub async fn person_found_valuable(
+        &self,
+        id: &str,
+        superseded_by: Option<&str>,
+        rev: i64,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT 1 AS "x!: i64" FROM decisions
+                WHERE question_id = 'reap_worth' AND subject_a = ? AND subject_b IS ?
+                  AND rev_a = ? AND answered_pick = 'yes'
+                  AND COALESCE(reason, '') != 'asked_again'
+                LIMIT 1"#,
+            id,
+            superseded_by,
+            rev
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
     /// Confirmed or corrected with no journal row, newest first; a reason of `asked_again` leaves the list.
     pub async fn answered_without_action(&self, limit: i64) -> Result<Vec<Logged>> {
         self.select_logged(

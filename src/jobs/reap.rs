@@ -53,16 +53,6 @@ pub async fn run(core: &Core) -> Result<Report> {
             step_aside(core, &c.id).await;
             continue;
         }
-        if let Some(d) = asked_already(core, c).await? {
-            // A question still open or waiting, or a rescue still to be written, keeps the row as
-            // it is; anything else answered goes to the back.
-            if !matches!(d.state, State::Waiting | State::Open)
-                && !core.store.live_job(Stage::Rescue, &c.id).await?
-            {
-                step_aside(core, &c.id).await;
-            }
-            continue;
-        }
         let s = state_of(core, c, &asked).await?;
         let subjects = Subjects {
             kind: "artifact",
@@ -106,26 +96,6 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
     }
     Ok(report)
-}
-
-/// Asked in this era about the note as it is now, against the same replacement, since it was last
-/// stamped retired, and not put back since. A rescue restamps it and may name a new replacement, so
-/// the note is asked again an age later, against its rewrite.
-async fn asked_already(core: &Core, c: &Chunk) -> Result<Option<Logged>> {
-    let last = core
-        .store
-        .last_logged(
-            "reap_worth",
-            &c.id,
-            c.superseded_by.as_deref(),
-            &reap_era(core),
-        )
-        .await?;
-    Ok(last.filter(|d| {
-        d.rev_a == Some(c.embed_rev)
-            && d.decided_at >= c.retired_at.unwrap_or(0)
-            && !matches!(d.reason.as_deref(), Some("asked_again" | "changed"))
-    }))
 }
 
 fn note<'a>(title: Option<&'a str>, text: &'a str) -> state::Note<'a> {
@@ -370,6 +340,15 @@ impl Applier for ReapApplier {
                     tracing::info!(artifact_id = %c.id, "a burial taken back before; left alone");
                     return Ok(vec![]);
                 }
+                if by == DecidedBy::Model
+                    && core
+                        .store
+                        .person_found_valuable(&c.id, c.superseded_by.as_deref(), c.embed_rev)
+                        .await?
+                {
+                    tracing::info!(artifact_id = %c.id, "a person found this valuable; left alone");
+                    return Ok(vec![]);
+                }
                 reap_one(core, &c, &d.id, by).await
             }
             "yes" => arm_rescue(core, &c, by).await.map(|()| vec![]),
@@ -405,7 +384,11 @@ pub(crate) async fn nominees(core: &Core) -> Result<(Vec<Chunk>, u64)> {
     let want = core.reap.max_judged_per_run as i64;
     let mut cands = core
         .store
-        .reap_candidates(min_age_secs, want.saturating_mul(OVERFETCH))
+        .reap_candidates(
+            min_age_secs,
+            &reap_era(core),
+            want.saturating_mul(OVERFETCH),
+        )
         .await?;
     if cands.is_empty() {
         return Ok((cands, stamped));
@@ -1276,5 +1259,212 @@ mod tests {
         let (cands, stamped) = nominees(&core).await.unwrap();
         assert_eq!(stamped, 1);
         assert!(cands.is_empty(), "a fresh clock has not run");
+    }
+
+    // ---- asked once per era; a person's "valuable" stands ----
+
+    /// A decider under another model name: a new era for every question.
+    struct NextEra(std::sync::Arc<crate::infer::fake::RuleDecider>);
+
+    #[async_trait::async_trait]
+    impl crate::infer::decide::Decider for NextEra {
+        async fn decide(
+            &self,
+            state: &str,
+            qs: &[crate::infer::decide::Question],
+        ) -> Result<crate::infer::decide::Answers> {
+            self.0.decide(state, qs).await
+        }
+        fn context_tokens(&self) -> usize {
+            self.0.context_tokens()
+        }
+        fn model(&self) -> &str {
+            "rule-decider-next"
+        }
+    }
+
+    async fn bump_rev(core: &Core, id: &str) {
+        sqlx::query!(
+            "UPDATE artifacts SET embed_rev = embed_rev + 1 WHERE id = ?",
+            id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_note_the_model_left_is_not_nominated_again_until_it_changes() {
+        let mut core = test_core().await;
+        let dec = deciding(&mut core, 0.5);
+        let ids = seed(&core, &["a torn fact"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!((d.band, d.state), (Band::Leave, State::Done));
+        let first = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+
+        for _ in 0..3 {
+            let (cands, _) = nominees(&core).await.unwrap();
+            assert!(cands.is_empty(), "a note left in this era was nominated");
+            run(&core).await.unwrap();
+        }
+        assert_eq!(dec.calls(), 1);
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().retired_at,
+            first,
+            "a note left is not stood down to be asked again"
+        );
+
+        bump_rev(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        assert_eq!(dec.calls(), 2, "a note that changed is asked again");
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_row_is_not_asked_again_in_the_era() {
+        let mut core = test_core().await;
+        let dec = deciding(&mut core, 0.3);
+        let ids = seed(&core, &["nobody answered this"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!(d.state, State::Open);
+        // runtime: test-only backdating.
+        sqlx::query("UPDATE decisions SET decided_at = decided_at - ? WHERE id = ?")
+            .bind(31 * 86_400)
+            .bind(&d.id)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(crate::jobs::decisions::run(&core).await.unwrap().lapsed, 1);
+
+        for _ in 0..2 {
+            // However much time passes: the question ages past the note's retirement stamp.
+            // runtime: test-only backdating.
+            sqlx::query("UPDATE decisions SET decided_at = decided_at - ? WHERE id = ?")
+                .bind(400 * 86_400)
+                .bind(&d.id)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+            backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
+            run(&core).await.unwrap();
+        }
+        assert_eq!(dec.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn questions_waiting_at_the_head_do_not_take_the_next_notes_slots() {
+        let mut core = test_core().await;
+        core.reap.max_judged_per_run = 2;
+        core.decide_cfg.ask_open_max = 1;
+        let dec = deciding(&mut core, 0.7);
+        let ids = seed(&core, &["oldest", "older", "next in line"]).await;
+        for (i, id) in ids.iter().enumerate() {
+            core.store
+                .set_artifact_status(id, ArtifactStatus::Deprecated)
+                .await
+                .unwrap();
+            backdate_retired_at(&core, id, (300 - i as i64) * 86_400).await;
+        }
+        run(&core).await.unwrap();
+        assert_eq!(dec.calls(), 2);
+        assert_eq!(decision(&core, &ids[0], None).await.state, State::Open);
+        assert_eq!(decision(&core, &ids[1], None).await.state, State::Waiting);
+
+        let (cands, _) = nominees(&core).await.unwrap();
+        assert_eq!(
+            cands.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec![ids[2].as_str()]
+        );
+        run(&core).await.unwrap();
+        assert_eq!(dec.calls(), 3);
+        decision(&core, &ids[2], None).await;
+    }
+
+    #[tokio::test]
+    async fn a_person_s_valuable_is_never_overruled_by_a_later_sure_no() {
+        let mut core = test_core().await;
+        core.generator = None;
+        deciding(&mut core, 0.7);
+        let ids = seed(&core, &["a person keeps this"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        let asked = decision(&core, &ids[0], None).await;
+        crate::core::judging::answer(&core, &asked.id, Some("yes"))
+            .await
+            .unwrap();
+
+        // The same era: not put to the model again.
+        let dec = deciding(&mut core, SURE_NO);
+        backdate_retired_at(&core, &ids[0], 400 * 86_400).await;
+        run(&core).await.unwrap();
+        assert_eq!(dec.calls(), 0);
+
+        // A new era: still not.
+        let next = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, qs| {
+            answers(qs, SURE_NO)
+        }));
+        core.decider = std::sync::Arc::new(NextEra(next.clone()));
+        backdate_retired_at(&core, &ids[0], 400 * 86_400).await;
+        run(&core).await.unwrap();
+        assert_eq!(next.calls(), 0);
+
+        // And a model's sure "no" about it, however it came, buries nothing.
+        let id = core
+            .store
+            .log_decision(&crate::store::decision_log::NewLogged {
+                question_id: "reap_worth".into(),
+                question_version: 1,
+                model: "rule-decider-next".into(),
+                subject_kind: "artifact",
+                subject_a: ids[0].clone(),
+                subject_b: None,
+                rev_a: Some(asked.rev_a.unwrap()),
+                rev_b: None,
+                answer: "{}".into(),
+                top: 0.995,
+                pick: "no".into(),
+                swapped_agree: None,
+                band: Band::Act,
+                reason: None,
+                state: State::Waiting,
+            })
+            .await
+            .unwrap();
+        let d = core.store.logged(&id).await.unwrap().unwrap();
+        backdate_retired_at(&core, &ids[0], 400 * 86_400).await;
+        let rows = ReapApplier
+            .apply(&core, &d, "no", crate::store::pairs::DecidedBy::Model)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().text,
+            "a person keeps this"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_again_on_an_answered_row_puts_the_note_back() {
+        let mut core = test_core().await;
+        core.generator = None;
+        let dec = deciding(&mut core, 0.7);
+        let ids = seed(&core, &["asked again by hand"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        let d = decision(&core, &ids[0], None).await;
+        crate::core::judging::answer(&core, &d.id, Some("yes"))
+            .await
+            .unwrap();
+        crate::core::judging::ask_again(&core, &d.id).await.unwrap();
+
+        // Put back at the end of the queue: asked when its age has run again.
+        backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
+        run(&core).await.unwrap();
+        assert_eq!(dec.calls(), 2);
     }
 }
