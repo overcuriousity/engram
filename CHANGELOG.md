@@ -21,6 +21,9 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 - Revoking a token acts at once, with Undo for 30 days.
 - Purging recorded searches and deleting a source need their name typed.
 - The extension panel takes its palette and fonts from the server's own token file.
+- Duplicates, links and burials are judged by the decision model, not a chat model. A judgement it is sure of is carried out, one it is torn on is asked on Insights under "Unsure", the rest are left. Merges and rescues are still written by the chat model, each as its own unit after a decision asked for it.
+- A link shows its kind ("An example of this", "Another way to do this") instead of a written sentence. Burials are no longer explained by a reason.
+- Defaults raised: `consolidate.max_dedupe_per_tick` 20, `associate.judge_per_sweep` 30, `reap.max_judged_per_run` 50.
 
 ### Removed
 - `auth.oidc.redirect_url`: derived from `server.public_url`. A config that still sets it is refused.

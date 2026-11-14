@@ -278,38 +278,6 @@ use crate::store::links::{Link, LinkKind, LinkState};
 use crate::store::pairs::DecidedBy;
 use async_trait::async_trait;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LinkVerdict {
-    Related,
-    Unrelated,
-    Duplicate,
-}
-
-/// The chat judge's reply, read; nothing judges links with it any more. Goes with its prompt.
-pub fn parse_link(body: &str) -> Result<(LinkVerdict, String)> {
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        relation: String,
-        #[serde(default)]
-        reason: Option<String>,
-    }
-    let r: Raw = serde_json::from_value(crate::infer::prompt::unwrap_verdict(
-        crate::infer::prompt::extract_json(body),
-    )?)
-    .map_err(|e| Error::MalformedLlmOutput(format!("link reply was not the expected JSON: {e}")))?;
-    let verdict = match r.relation.as_str() {
-        "related" => LinkVerdict::Related,
-        "unrelated" => LinkVerdict::Unrelated,
-        "duplicate" => LinkVerdict::Duplicate,
-        other => {
-            return Err(Error::MalformedLlmOutput(format!(
-                "link reply named no relation this understands: {other}"
-            )));
-        }
-    };
-    Ok((verdict, r.reason.unwrap_or_default()))
-}
-
 fn day(at: i64) -> Option<String> {
     chrono::DateTime::from_timestamp(at, 0).map(|d| d.format("%Y-%m-%d").to_string())
 }
@@ -1539,22 +1507,6 @@ mod tests {
     fn a_link_names_itself_the_same_way_round_however_it_is_armed() {
         assert_eq!(link_target("b", "a"), link_target("a", "b"));
         assert_eq!(link_target("a", "b"), "a|b");
-    }
-
-    #[test]
-    fn a_verdict_is_read_out_of_the_reply_and_an_unreadable_one_is_an_error() {
-        let (v, why) =
-            parse_link(r#"{"relation":"related","reason":"both about mounting"}"#).unwrap();
-        assert_eq!(v, LinkVerdict::Related);
-        assert_eq!(why, "both about mounting");
-        assert_eq!(
-            parse_link(r#"{"relation":"duplicate","reason":"same thing"}"#)
-                .unwrap()
-                .0,
-            LinkVerdict::Duplicate
-        );
-        assert!(parse_link("I think they are related!").is_err());
-        assert!(parse_link(r#"{"relation":"maybe","reason":"x"}"#).is_err());
     }
 
     #[tokio::test]

@@ -652,13 +652,6 @@ pub(crate) mod tests {
         d
     }
 
-    /// A chat judge that fails the test if anything calls it.
-    fn no_chat_judge(core: &mut Core) -> Arc<ScriptedCompleter> {
-        let judge = Arc::new(ScriptedCompleter::new(vec![]));
-        core.judge = Some(judge.clone());
-        judge
-    }
-
     fn pair_era(core: &Core) -> String {
         era(core.decider.model(), pair_relation().version)
     }
@@ -1053,7 +1046,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_pair_is_judged_by_the_decider_and_never_by_a_chat_model() {
         let mut core = test_core().await;
-        let judge = no_chat_judge(&mut core);
         let asker = Arc::new(ScriptedCompleter::new(vec![]));
         core.completer = Some(asker.clone());
         let dec = deciding(&mut core, "distinct", 0.95);
@@ -1063,7 +1055,6 @@ pub(crate) mod tests {
         run(&core, &seed_pair.to_string()).await.unwrap();
 
         assert_eq!(dec.calls(), 1, "the decider was not the one asked");
-        assert_eq!(judge.calls(), 0, "a chat judge was called");
         assert_eq!(asker.calls(), 0, "the sweep called the ask model");
     }
 
@@ -2054,7 +2045,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_sure_duplicate_asks_for_the_merge_and_writes_nothing_itself() {
         let mut core = test_core().await;
-        let judge = no_chat_judge(&mut core);
         let writer = Arc::new(ScriptedCompleter::new(vec![]));
         core.pair_synthesizer = Some(writer.clone());
         deciding(&mut core, "duplicate", 0.95);
@@ -2083,7 +2073,6 @@ pub(crate) mod tests {
         assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
         assert!(core.store.recent_actions(10).await.unwrap().is_empty());
         assert_eq!(writer.calls(), 0);
-        assert_eq!(judge.calls(), 0);
         let d = decision(&core, pair).await;
         assert_eq!((d.band, d.state), (Band::Act, State::Done));
         // The pair waits for the writer, not for another decision.
@@ -2099,7 +2088,6 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_duplicate_with_no_writer_becomes_an_unsure_row_with_keep_one_buttons() {
         let mut core = test_core().await;
-        let judge = no_chat_judge(&mut core);
         core.pair_synthesizer = None;
         deciding(&mut core, "duplicate", 0.95);
         let ids = disagreeing(&core).await;
@@ -2120,7 +2108,6 @@ pub(crate) mod tests {
         assert!(buttons.contains(&"Keep A".to_string()), "{buttons:?}");
         assert!(buttons.contains(&"Keep B".to_string()), "{buttons:?}");
         assert!(!buttons.contains(&"Duplicate".to_string()), "{buttons:?}");
-        assert_eq!(judge.calls(), 0);
         assert!(!core.store.get_pair(pair).await.unwrap().synthesis_asked);
     }
 

@@ -1066,20 +1066,6 @@ pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
     )
 }
 
-/// `Replaced` beats `Duplicate` where both apply (a stored original beats a rewrite); merge only when each side adds something.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Relation {
-    Distinct,
-    /// Same subject, a different detail, no way to tell which is current: shown as a disagreement, never merged.
-    Conflict,
-    /// Superseded, with no synthetic text written.
-    Replaced,
-    Duplicate,
-    /// Neither side states anything actionable; both are deprecated (`jobs::dedupe::discard_both`), reversibly.
-    Vacuous,
-}
-
 #[derive(Debug, Clone)]
 pub struct MergedDraft {
     pub title: Option<String>,
@@ -1087,82 +1073,6 @@ pub struct MergedDraft {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub caveats: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Dedupe {
-    pub relation: Relation,
-    pub detail: Option<String>,
-    /// The letter it was shown under; only meaningful for `Replaced`.
-    pub supersedes: Option<char>,
-    /// `Some` if and only if `relation` is `Duplicate`.
-    pub merged: Option<MergedDraft>,
-}
-
-pub const REAP_SYSTEM: &str = r#"You decide whether a retired knowledge-base artifact still states anything the live base does not.
-
-You are given the retired artifact, the replacement that retired it if one was named, and the closest live artifacts. Read the retired text for facts a reader could act on or be wrong about, and check each one against the live texts.
-
-- "worthless" — every such fact is stated by the live texts shown. The retired text will be destroyed; only its metadata survives.
-- "valuable" — it states at least one thing the live texts do not. It will be rewritten into a live artifact.
-
-"worthless" destroys text and nobody confirms it first, so it asks for certainty rather than suspicion: if you can name one fact the live texts lack, the answer is "valuable". When you are unsure, answer "valuable" — a wrong "valuable" costs one rewrite; a wrong "worthless" cannot be taken back.
-
-Reply with JSON only: {"verdict":"worthless"|"valuable","reason":"one line naming the deciding fact"}"#;
-
-pub struct ReapCase<'a> {
-    pub title: &'a str,
-    pub text: &'a str,
-    pub successor: Option<(&'a str, &'a str)>,
-    /// `(title, text)`, nearest first.
-    pub neighbours: Vec<(&'a str, &'a str)>,
-}
-
-pub fn reap_prompt(case: &ReapCase<'_>) -> String {
-    let mut s = String::new();
-    s.push_str(&format!(
-        "----- RETIRED ARTIFACT -----\nTitle: {}\n\n{}\n",
-        case.title, case.text
-    ));
-    if let Some((title, text)) = &case.successor {
-        s.push_str(&format!(
-            "----- ITS NAMED REPLACEMENT -----\nTitle: {title}\n\n{text}\n"
-        ));
-    }
-    if !case.neighbours.is_empty() {
-        s.push_str("----- CLOSEST LIVE ARTIFACTS -----\n");
-        for (i, (title, text)) in case.neighbours.iter().enumerate() {
-            s.push_str(&format!("[{}] Title: {title}\n\n{text}\n\n", i + 1));
-        }
-    }
-    s
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Reap {
-    Worthless { reason: String },
-    Valuable { reason: String },
-}
-
-pub fn parse_reap(body: &str) -> Result<Reap> {
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        verdict: String,
-        #[serde(default)]
-        reason: Option<String>,
-    }
-    let r: Raw = serde_json::from_value(unwrap_verdict(extract_json(body))?).map_err(|e| {
-        Error::MalformedLlmOutput(format!("reap reply was not the expected JSON: {e}"))
-    })?;
-    let reason = r.reason.unwrap_or_default();
-    // An unknown verdict is an error: "worthless" destroys text, so an unreadable reply acts on nothing.
-    match r.verdict.as_str() {
-        "worthless" => Ok(Reap::Worthless { reason }),
-        "valuable" => Ok(Reap::Valuable { reason }),
-        other => Err(Error::MalformedLlmOutput(format!(
-            "reap verdict was neither worthless nor valuable: {other:?}"
-        ))),
-    }
 }
 
 pub const RESCUE_SYSTEM: &str = r#"You rewrite the still-valuable part of a retired knowledge-base artifact into one self-contained live artifact.
@@ -1181,44 +1091,7 @@ Do not add anything. Do not restate the questions.
 
 Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
-pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
-
-First, if NEITHER states anything a reader could act on or be wrong about — a body that is only its own title or file path, a bare link, boilerplate, an outline with nothing under its headings — answer "vacuous" and stop. It must hold for both: one empty artifact beside a real one is not this.
-
-Answering "vacuous" retires both artifacts where it is found; nobody confirms it first. It is the only verdict here that takes two things away and puts nothing in their place, so it asks for certainty rather than suspicion: if you can name one thing either body states, the answer is not "vacuous". When you are unsure, answer "distinct" — two artifacts left in results cost a reader nothing.
-
-Real content merely not summarised is NOT vacuous, however raw or unstructured. A day of notes covering six subjects still states six things. Those are "distinct".
-
-Then decide whether they are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
-
-If the titles name different things — two versions, two variants, two products, two filesystems, two commands — then they are neither duplicates nor in conflict, no matter how far apart their numbers are. Different things have different numbers; that is what makes them different things. Answer "distinct" and stop.
-
-Only when they describe the same subject, choose one of:
-
-- "replaced" — one artifact plainly supersedes another: a deprecated flag, step or default versus its current replacement. Prefer this whenever it applies. It keeps the surviving artifact's original wording, which is always better than rewriting.
-- "duplicate" — they make the same claim, and each carries some detail the others lack. Write one artifact that says everything all of them said.
-- "conflict" — they give a different value for the same detail of the same subject, and you cannot tell which is current. Do not choose a side and do not merge; a person decides this one.
-- "distinct" — different subjects, or one covers something the others simply do not.
-
-These are NOT conflicts:
-- The same fact in different words.
-- Different levels of detail about the same thing.
-- One artifact mentioning something the others do not cover.
-
-When you answer "duplicate", the merged text must contain every number, version, date, path, flag, command and error string that appeared in any input, and must read as one self-contained artifact rather than a list of sources. If you cannot write one that keeps all of them, the answer is "conflict", not "duplicate".
-
-An artifact that was itself written by merging earlier ones is shown with those originals under "SOURCES OF A" or "SOURCES OF B". They are there for one reason: so that a detail an earlier merge dropped can go back into your answer. They are not under judgement. There are exactly two artifacts, A and B — never name a source in `supersedes`, and never treat a source as a third artifact.
-
-Reply with JSON only, no commentary, in exactly this shape:
-
-{"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}}
-
-- relation: one of "duplicate", "replaced", "conflict", "distinct", "vacuous".
-- detail: one short sentence saying why. Always.
-- supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
-- merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
-
-/// Not `DEDUPE_SYSTEM` with the branch forced: a person already decided, and the live judge labels such pairs by coin flip.
+/// A person already decided that these cover the same ground; this only writes the merge.
 /// The merge rules are restated because a merge that drops a number is worse than none.
 pub const SYNTHESIZE_SYSTEM: &str = r#"You are given two knowledge artifacts that a person has already judged to cover the same ground. Whether they do is settled and is not your question. Write one artifact that says everything both of them said.
 
@@ -1290,75 +1163,6 @@ pub fn parse_synthesis(body: &str) -> Result<MergedDraft> {
         tags: Vec::new(),
         caveats: raw.merged.caveats,
     })
-}
-
-/// Exactly two lettered members; their sources are unlettered so no verdict can name them. The title is the subject.
-/// No differing-values prior: whitespace tokens primed the model into false contradictions.
-/// `attempt` defeats the endpoint's exact-prompt cache on retries; zero adds nothing, keeping first asks cacheable.
-pub fn dedupe_prompt(a: &DedupeMember<'_>, b: &DedupeMember<'_>, attempt: i64) -> String {
-    let mut s = String::new();
-    if attempt > 0 {
-        s.push_str(&format!("(attempt {})\n", attempt + 1));
-    }
-    for (letter, m) in [('A', a), ('B', b)] {
-        s.push_str(&format!(
-            "----- ARTIFACT {letter} -----\nTitle: {}\n\n{}\n",
-            m.title, m.text
-        ));
-        if !m.sources.is_empty() {
-            s.push_str(&format!("----- SOURCES OF {letter} -----\n"));
-            for (title, text) in &m.sources {
-                s.push_str(&format!("Title: {title}\n\n{text}\n\n"));
-            }
-        }
-    }
-    s.push_str("----- END -----");
-    s
-}
-
-/// `sources` is unlettered reference so a dropped detail can return without a verdict naming a source.
-pub struct DedupeMember<'a> {
-    pub title: &'a str,
-    pub text: &'a str,
-    /// `(title, text)`, oldest first. Empty for a captured artifact.
-    pub sources: Vec<(&'a str, &'a str)>,
-}
-
-pub const LINK_SYSTEM: &str = r#"Two knowledge artifacts keep being retrieved by the same searches. You say what that means, in one line a reader would find useful.
-
-Choose exactly one:
-
-- "related" — being needed together makes sense: one is the configuration and the other its failure mode, one is the procedure and the other the tool it needs, one explains why the other is done. Say what the relation is, in the reader's own terms, in one sentence.
-- "unrelated" — the searches that returned both were about something else, and there is no connection worth showing. A shared word is not a connection.
-- "duplicate" — they say the same thing in different words. Only this, and not "related", when neither adds anything the other lacks.
-
-Judge the relation between the artifacts, not their similarity. Two texts that share no vocabulary at all can be strongly related; two that read alike can be about different subjects.
-
-Reply with JSON only, no commentary, in exactly this shape:
-
-{"verdict": {"relation": "related", "reason": "..."}}
-
-- relation: one of "related", "unrelated", "duplicate".
-- reason: one sentence. For "related" it is shown to the reader beside the link, so write it for them and not about the task."#;
-
-/// The cues are the evidence: the question is why these two keep being needed at once.
-/// `attempt` is here for the cache reason `dedupe_prompt` gives.
-pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i64) -> String {
-    let mut s = String::new();
-    if attempt > 0 {
-        s.push_str(&format!("(attempt {})\n", attempt + 1));
-    }
-    s.push_str(&format!(
-        "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
-        a.0, a.1, b.0, b.1
-    ));
-    if !cues.is_empty() {
-        s.push_str(&format!(
-            "\n\nBoth were returned by these searches: {}.",
-            cues.join("; ")
-        ));
-    }
-    s
 }
 
 /// One definition for what the model is told and what `abstained` looks for.
@@ -1603,19 +1407,6 @@ pub fn parse_generation(reply: &str) -> Result<Generated> {
     Ok(g)
 }
 
-/// Its own schema: under the dedupe one every reap reply parsed as nothing. Flat at the root, as `REAP_SYSTEM` asks.
-pub fn reap_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": {"type": "string", "enum": ["worthless", "valuable"]},
-            "reason": {"type": "string"}
-        },
-        "required": ["verdict", "reason"],
-        "additionalProperties": false
-    })
-}
-
 pub fn gap_label_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1640,109 +1431,6 @@ pub fn parse_gap_label(reply: &str) -> Result<String> {
         return Err(Error::MalformedLlmOutput("gap label was empty".into()));
     }
     Ok(label)
-}
-
-/// The bare shape is accepted too: `structured_output` can be off.
-pub fn unwrap_verdict(body: &str) -> Result<serde_json::Value> {
-    let v: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| Error::MalformedLlmOutput(format!("judge reply was not JSON at all: {e}")))?;
-    Ok(match v.get("verdict") {
-        Some(inner) if inner.is_object() => inner.clone(),
-        _ => v,
-    })
-}
-
-/// Defaulting either way would flood the queue or close real duplicates; failing retries with a new attempt number.
-pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        relation: String,
-        #[serde(default)]
-        detail: Option<String>,
-        #[serde(default)]
-        supersedes: Option<String>,
-        #[serde(default)]
-        merged: Option<RawMerged>,
-    }
-    #[derive(serde::Deserialize)]
-    struct RawMerged {
-        text: String,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        category: Option<String>,
-        #[serde(default)]
-        caveats: Vec<String>,
-    }
-
-    let r: Raw = serde_json::from_value(unwrap_verdict(extract_json(body))?).map_err(|e| {
-        Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
-    })?;
-
-    // Any single letter: the caller resolves it against the list it showed. A parser pinning the count downgraded
-    // valid directions to conflicts; anything else the model wrote counts as omitted.
-    let side = r.supersedes.as_deref().and_then(|s| {
-        let mut chars = s.trim().chars();
-        match (chars.next(), chars.next()) {
-            (Some(c), None) if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
-            _ => None,
-        }
-    });
-
-    let relation = match r.relation.trim().to_ascii_lowercase().as_str() {
-        "duplicate" => Relation::Duplicate,
-        // Falling back to a conflict stops a supersede picking a side by accident.
-        "replaced" if side.is_some() => Relation::Replaced,
-        "replaced" | "conflict" => Relation::Conflict,
-        "distinct" => Relation::Distinct,
-        "vacuous" => Relation::Vacuous,
-        other => {
-            return Err(Error::MalformedLlmOutput(format!(
-                "dedupe reply named an unknown relation {other:?}"
-            )));
-        }
-    };
-
-    // `merged` belongs to `duplicate` only; a duplicate without text is a merge the write path cannot carry out.
-    match (&relation, &r.merged) {
-        (Relation::Duplicate, None) => {
-            return Err(Error::MalformedLlmOutput(
-                "dedupe reply said duplicate but wrote no merged artifact".into(),
-            ));
-        }
-        (rel, Some(_)) if *rel != Relation::Duplicate => {
-            return Err(Error::MalformedLlmOutput(format!(
-                "dedupe reply carried a merged artifact on a {} verdict",
-                r.relation.trim()
-            )));
-        }
-        _ => {}
-    }
-
-    if let Some(m) = &r.merged
-        && m.text.trim().is_empty()
-    {
-        return Err(Error::MalformedLlmOutput(
-            "dedupe reply said duplicate and wrote an empty artifact".into(),
-        ));
-    }
-
-    Ok(Dedupe {
-        relation,
-        detail: r
-            .detail
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty()),
-        supersedes: side,
-        merged: r.merged.map(|m| MergedDraft {
-            title: m.title,
-            text: m.text,
-            category: m.category.map(|c| normalize_category(&c)),
-            // Nothing writes tags on a caller's behalf; `merge::carried_tags` adds back what the sources had.
-            tags: Vec::new(),
-            caveats: m.caveats,
-        }),
-    })
 }
 
 #[derive(serde::Deserialize)]
@@ -1896,88 +1584,6 @@ pub fn judged_artifacts_schema() -> serde_json::Value {
     });
     schema["required"] = serde_json::json!(["artifacts", "moment", "events", "links"]);
     schema
-}
-
-/// A union per relation makes `merged` writable exactly for `duplicate`; this rests on `additionalProperties: false`.
-/// Nested under `verdict` because strict mode needs an object root. `parse_dedupe` still checks: grammars can be off.
-pub fn dedupe_schema() -> serde_json::Value {
-    let merged = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "text": {"type": "string"},
-            "title": {"type": "string"},
-            "category": {"type": "string", "enum": CATEGORIES},
-            "caveats": {"type": "array", "items": {"type": "string"}}
-        },
-        // Every field required: `strict` rejects listed-but-optional properties.
-        "required": ["text", "title", "category", "caveats"],
-        "additionalProperties": false
-    });
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": {
-                "anyOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "relation": {"type": "string", "enum": ["duplicate"]},
-                            "detail": {"type": "string"},
-                            "merged": merged
-                        },
-                        "required": ["relation", "detail", "merged"],
-                        "additionalProperties": false
-                    },
-                    {
-                        // Required and pattern-bound, or the grammar accepts "the second one" and the verdict downgrades.
-                        "type": "object",
-                        "properties": {
-                            "relation": {"type": "string", "enum": ["replaced"]},
-                            "detail": {"type": "string"},
-                            "supersedes": {"type": "string", "pattern": "^[A-Za-z]$"}
-                        },
-                        "required": ["relation", "detail", "supersedes"],
-                        "additionalProperties": false
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            // One variant because one shape; "vacuous" still retires both artifacts.
-                            "relation": {
-                                "type": "string",
-                                "enum": ["distinct", "conflict", "vacuous"]
-                            },
-                            "detail": {"type": "string"}
-                        },
-                        "required": ["relation", "detail"],
-                        "additionalProperties": false
-                    }
-                ]
-            }
-        },
-        "required": ["verdict"],
-        "additionalProperties": false
-    })
-}
-
-/// Its own schema: under the dedupe grammar a link can only answer with a dedupe verdict.
-pub fn link_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": {
-                "type": "object",
-                "properties": {
-                    "relation": {"type": "string", "enum": ["related", "unrelated", "duplicate"]},
-                    "reason": {"type": "string"}
-                },
-                "required": ["relation", "reason"],
-                "additionalProperties": false
-            }
-        },
-        "required": ["verdict"],
-        "additionalProperties": false
-    })
 }
 
 /// Models wrap JSON in fences and prose regardless of the prompt.
@@ -2364,14 +1970,6 @@ mod tests {
         );
     }
 
-    fn member<'a>(title: &'a str, text: &'a str) -> DedupeMember<'a> {
-        DedupeMember {
-            title,
-            text,
-            sources: vec![],
-        }
-    }
-
     #[test]
     fn the_schema_asks_for_tags_and_a_pin_and_the_judged_one_for_the_moment() {
         // Whether they are honored is per path; see `the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model`.
@@ -2425,24 +2023,6 @@ mod tests {
             .map(|v| v.as_str().unwrap())
             .collect();
         assert_eq!(listed, CATEGORIES);
-    }
-
-    #[test]
-    fn the_link_prompt_carries_both_titles_and_the_questions_that_bound_them() {
-        let p = link_prompt(
-            ("Mounting E01 images", "ewfmount /dev/..."),
-            ("Loop device limits", "max_loop=64"),
-            &["mount forensic image".into()],
-            0,
-        );
-        assert!(p.contains("Mounting E01 images"));
-        assert!(p.contains("max_loop=64"));
-        assert!(p.contains("mount forensic image"));
-        assert!(
-            !p.contains("attempt"),
-            "a first ask must stay cache-identical"
-        );
-        assert!(link_prompt(("a", "b"), ("c", "d"), &[], 2).contains("attempt 3"));
     }
 
     #[test]
@@ -2576,107 +2156,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pair_where_neither_side_carries_a_claim_parses_as_vacuous() {
-        let v = parse_dedupe(
-            r#"{"relation":"vacuous","detail":"both bodies are their own file paths"}"#,
-        )
-        .unwrap();
-        assert_eq!(v.relation, Relation::Vacuous);
-        assert!(
-            v.merged.is_none(),
-            "there is nothing to write from two artifacts that say nothing"
-        );
-    }
-
-    #[test]
-    fn every_relation_the_dedupe_schema_allows_is_one_the_parser_knows() {
-        let schema = dedupe_schema();
-        let variants = schema["properties"]["verdict"]["anyOf"]
-            .as_array()
-            .expect("a union of variants under the envelope");
-        let mut seen = Vec::new();
-
-        for variant in variants {
-            let required: Vec<&str> = variant["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|f| f.as_str().unwrap())
-                .collect();
-
-            for relation in variant["properties"]["relation"]["enum"]
-                .as_array()
-                .unwrap()
-            {
-                let r = relation.as_str().unwrap();
-                seen.push(r.to_string());
-
-                // A grammar from this schema cannot emit less, so the parser must accept it.
-                let mut body = serde_json::json!({ "relation": r });
-                for field in &required {
-                    match *field {
-                        "relation" => {}
-                        "detail" => body["detail"] = serde_json::json!("because"),
-                        "merged" => {
-                            body["merged"] = serde_json::json!({
-                                "text": "merged body",
-                                "title": "t",
-                                "category": "note",
-                                "tags": [],
-                                "caveats": []
-                            })
-                        }
-                        "supersedes" => body["supersedes"] = serde_json::json!("a"),
-                        other => {
-                            panic!("the schema requires {other:?}, which this test cannot build")
-                        }
-                    }
-                }
-                let sent = serde_json::json!({ "verdict": body });
-                assert!(
-                    parse_dedupe(&sent.to_string()).is_ok(),
-                    "the schema lets the model answer {sent}, which the parser rejects"
-                );
-            }
-        }
-
-        seen.sort();
-        assert_eq!(
-            seen,
-            ["conflict", "distinct", "duplicate", "replaced", "vacuous"],
-            "the union must still cover every relation, exactly once"
-        );
-    }
-
-    #[test]
-    fn no_dedupe_variant_permits_a_duplicate_without_a_merge_or_a_distinct_with_one() {
-        let schema = dedupe_schema();
-        for variant in schema["properties"]["verdict"]["anyOf"].as_array().unwrap() {
-            let relations = variant["properties"]["relation"]["enum"]
-                .as_array()
-                .unwrap();
-            let names: Vec<&str> = relations.iter().map(|r| r.as_str().unwrap()).collect();
-            let required = variant["required"].as_array().unwrap();
-            let requires_merged = required.iter().any(|f| f == "merged");
-            let offers_merged = variant["properties"].get("merged").is_some();
-
-            if names.contains(&"duplicate") {
-                assert!(requires_merged, "duplicate may be written without a merge");
-            } else {
-                assert!(
-                    !offers_merged,
-                    "{names:?} may carry a merge, which the parser refuses"
-                );
-            }
-        }
-
-        assert!(parse_dedupe(r#"{"verdict":{"relation":"duplicate"}}"#).is_err());
-        assert!(
-            parse_dedupe(r#"{"verdict":{"relation":"distinct","merged":{"text":"x"}}}"#).is_err()
-        );
-    }
-
-    #[test]
     fn every_judge_schema_object_is_closed_and_rooted_in_an_object() {
         fn closed(v: &serde_json::Value, path: &str) {
             if v["type"] == "object" {
@@ -2709,10 +2188,8 @@ mod tests {
         }
 
         for (name, schema) in [
-            ("dedupe", dedupe_schema()),
-            ("link", link_schema()),
             ("gap_label", gap_label_schema()),
-            ("reap", reap_schema()),
+            ("synthesize", synthesize_schema()),
             ("plan", plan_schema()),
             ("artifacts", artifacts_schema()),
         ] {
@@ -2722,165 +2199,6 @@ mod tests {
             );
             closed(&schema, name);
         }
-    }
-
-    #[test]
-    fn the_supersedes_the_schema_permits_is_a_direction_the_parser_reads() {
-        let schema = dedupe_schema();
-        let replaced = schema["properties"]["verdict"]["anyOf"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["properties"]["relation"]["enum"][0] == "replaced")
-            .expect("a variant for replaced");
-        // Literal: there is no regex engine, and the field is anchored to one letter in either case.
-        assert_eq!(
-            replaced["properties"]["supersedes"]["pattern"].as_str(),
-            Some("^[A-Za-z]$"),
-            "supersedes is not constrained to a direction parse_dedupe reads"
-        );
-
-        let verdict =
-            parse_dedupe(r#"{"verdict":{"relation":"replaced","supersedes":"B"}}"#).unwrap();
-        assert_eq!(verdict.relation, Relation::Replaced);
-        assert_eq!(verdict.supersedes, Some('b'));
-    }
-
-    #[test]
-    fn every_relation_the_link_schema_allows_is_one_its_parser_knows() {
-        let schema = link_schema();
-        let relations = schema["properties"]["verdict"]["properties"]["relation"]["enum"]
-            .as_array()
-            .unwrap();
-        let names: Vec<&str> = relations.iter().map(|r| r.as_str().unwrap()).collect();
-        assert_eq!(names, ["related", "unrelated", "duplicate"]);
-
-        for r in &names {
-            let sent = serde_json::json!({"verdict": {"relation": r, "reason": "because"}});
-            let (_, reason) =
-                crate::jobs::associate::parse_link(&sent.to_string()).unwrap_or_else(|e| {
-                    panic!("the schema allows {sent}, which the parser rejects: {e}")
-                });
-            assert_eq!(reason, "because");
-        }
-
-        for r in ["distinct", "conflict", "replaced"] {
-            assert!(
-                !names.contains(&r),
-                "the link judge may answer {r:?}, which its parser refuses"
-            );
-        }
-    }
-
-    #[test]
-    fn the_dedupe_pass_is_told_what_each_artifact_is_about() {
-        let p = dedupe_prompt(
-            &member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
-            &member("FAT32 Specifications", "32 Bit Clusternummern."),
-            0,
-        );
-        assert!(p.contains("Title: FAT16 Specifications"), "{p}");
-        assert!(p.contains("Title: FAT32 Specifications"), "{p}");
-        assert!(p.contains("Die max. Partitionsgröße: 2 GB."));
-    }
-
-    #[test]
-    fn the_pair_is_lettered_so_a_direction_can_name_one() {
-        let p = dedupe_prompt(&member("one", "a"), &member("two", "b"), 0);
-        assert!(p.contains("ARTIFACT A"), "{p}");
-        assert!(p.contains("ARTIFACT B"), "{p}");
-        assert!(
-            !p.contains("ARTIFACT C"),
-            "a third letter exists to be named: {p}"
-        );
-    }
-
-    #[test]
-    fn a_merged_member_is_shown_with_its_sources_beneath_it() {
-        let a = DedupeMember {
-            title: "Pool sizing",
-            text: "the pool holds sixteen",
-            sources: vec![
-                ("Pool sizing, 2024", "max_connections is 16"),
-                ("Pool notes", "raise it for batch jobs"),
-            ],
-        };
-        let p = dedupe_prompt(&a, &member("Connections", "sixteen connections"), 0);
-
-        assert!(p.contains("ARTIFACT A"), "{p}");
-        assert!(p.contains("ARTIFACT B"), "{p}");
-        assert!(p.contains("the pool holds sixteen"), "{p}");
-        assert!(
-            p.contains("max_connections is 16"),
-            "a source was not shown: {p}"
-        );
-        assert!(p.contains("SOURCES OF A"), "{p}");
-        assert!(
-            !p.contains("SOURCES OF B"),
-            "a captured member was given a sources block: {p}"
-        );
-        assert!(!p.contains("ARTIFACT C"), "a source was lettered: {p}");
-    }
-
-    #[test]
-    fn the_system_prompt_rules_the_sources_out_of_the_verdict() {
-        assert!(DEDUPE_SYSTEM.contains("SOURCES"));
-        assert!(DEDUPE_SYSTEM.contains("never name a source"));
-    }
-
-    #[test]
-    fn no_prior_about_values_is_named_to_the_dedupe_judge() {
-        // One fact written three ways gave different token sets; the prior primed a false contradiction.
-        let p = dedupe_prompt(
-            &member(
-                "USB Device Registry Keys",
-                "0066 = Last Connected (Win8-10)",
-            ),
-            &member("Plug and Play Logs", "0066 für Last Connected (Windows 8-)"),
-            0,
-        );
-        assert!(
-            !p.contains("Decide which."),
-            "the differing-values prior is back in the prompt: {p}"
-        );
-        assert!(
-            !p.contains("not stated the same way"),
-            "the differing-values prior is back in the prompt: {p}"
-        );
-        assert!(p.contains("0066 = Last Connected (Win8-10)"), "{p}");
-        assert!(p.contains("0066 für Last Connected (Windows 8-)"), "{p}");
-    }
-
-    #[test]
-    fn a_retry_does_not_ask_the_endpoint_the_question_it_has_cached() {
-        // The endpoint replays a cached reply for an identical prompt.
-        let a = member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB.");
-        let b = member("FAT32 Specifications", "32 Bit Clusternummern.");
-        let first = dedupe_prompt(&a, &b, 0);
-        let second = dedupe_prompt(&a, &b, 1);
-        assert_ne!(first, second);
-        assert_ne!(second, dedupe_prompt(&a, &b, 2));
-        assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
-    }
-
-    #[test]
-    fn the_dedupe_pass_is_told_what_makes_a_pair_worth_discarding_and_what_does_not() {
-        // Vacuous eats real notes when misapplied; an undistilled study file must come back "distinct".
-        assert!(DEDUPE_SYSTEM.contains(r#""vacuous""#));
-        assert!(DEDUPE_SYSTEM.contains("neither"));
-        assert!(
-            DEDUPE_SYSTEM.contains("not summarised"),
-            "the one thing that is not vacuous is unsaid"
-        );
-    }
-
-    #[test]
-    fn the_dedupe_pass_is_told_that_different_subjects_are_not_a_conflict() {
-        // Sibling sections of one reference differ in every number and must not be merged.
-        assert!(DEDUPE_SYSTEM.contains("same subject"));
-        assert!(DEDUPE_SYSTEM.contains("different things"));
-        assert!(DEDUPE_SYSTEM.contains(r#"Answer "distinct" and stop."#));
-        assert!(DEDUPE_SYSTEM.contains("Prefer this whenever it applies"));
     }
 
     #[test]
@@ -2942,97 +2260,6 @@ mod tests {
         // A segment producing nothing must fail, so it is recorded as missing rather than dropped.
         let prose = r###"{"artifacts":[{"text":"unterminated and "broken, "tags":}]}"###;
         assert!(parse_response(prose).is_err());
-    }
-
-    #[test]
-    fn a_duplicate_verdict_carries_a_merged_draft() {
-        let d = parse_dedupe(
-            r#"{"relation":"duplicate","detail":"same command, more detail",
-                "merged":{"title":"Bind mounts","text":"Use mount --bind.",
-                          "tags":["mount"],"caveats":[],"category":"howto"}}"#,
-        )
-        .unwrap();
-        assert_eq!(d.relation, Relation::Duplicate);
-        let m = d.merged.as_ref().unwrap();
-        assert_eq!(m.text, "Use mount --bind.");
-        assert_eq!(m.title.as_deref(), Some("Bind mounts"));
-        assert!(m.tags.is_empty());
-    }
-
-    #[test]
-    fn a_merged_block_on_a_non_duplicate_verdict_is_unreadable() {
-        for relation in ["conflict", "replaced", "distinct"] {
-            let body = format!(
-                r#"{{"relation":"{relation}","supersedes":"a",
-                     "merged":{{"text":"x","tags":[],"caveats":[]}}}}"#
-            );
-            assert!(
-                matches!(parse_dedupe(&body), Err(Error::MalformedLlmOutput(_))),
-                "a {relation} verdict was allowed to carry a merge"
-            );
-        }
-    }
-
-    #[test]
-    fn a_duplicate_verdict_with_nothing_to_write_is_unreadable() {
-        assert!(matches!(
-            parse_dedupe(r#"{"relation":"duplicate","detail":"x"}"#),
-            Err(Error::MalformedLlmOutput(_))
-        ));
-        assert!(matches!(
-            parse_dedupe(
-                r#"{"relation":"duplicate","merged":{"text":"   ","tags":[],"caveats":[]}}"#
-            ),
-            Err(Error::MalformedLlmOutput(_))
-        ));
-    }
-
-    #[test]
-    fn a_replacement_names_the_obsolete_side() {
-        let d = parse_dedupe(
-            r#"{"relation":"replaced","supersedes":"B","detail":"a uses --old-flag"}"#,
-        )
-        .unwrap();
-        assert_eq!(d.relation, Relation::Replaced);
-        assert_eq!(d.supersedes, Some('b'));
-    }
-
-    #[test]
-    fn a_direction_reaches_as_far_as_the_letters_the_prompt_hands_out() {
-        // `interpret` refuses letters past the end, so this parser need not change with the prompt.
-        for (letter, want) in [("E", 'e'), ("f", 'f'), ("H", 'h')] {
-            let d = parse_dedupe(&format!(
-                r#"{{"relation":"replaced","supersedes":"{letter}","detail":"stale"}}"#
-            ))
-            .unwrap();
-            assert_eq!(
-                d.relation,
-                Relation::Replaced,
-                "{letter} was not a direction"
-            );
-            assert_eq!(d.supersedes, Some(want));
-        }
-    }
-
-    #[test]
-    fn a_replacement_naming_no_side_falls_back_to_a_conflict() {
-        let d = parse_dedupe(r#"{"relation":"replaced","detail":"one of them is old"}"#).unwrap();
-        assert_eq!(d.relation, Relation::Conflict);
-        let d =
-            parse_dedupe(r#"{"relation":"replaced","supersedes":"not sure honestly"}"#).unwrap();
-        assert_eq!(d.relation, Relation::Conflict);
-    }
-
-    #[test]
-    fn a_verdict_wrapped_in_prose_and_fences_still_parses() {
-        let d = parse_dedupe("Sure:\n```json\n{\"relation\": \"distinct\"}\n```").unwrap();
-        assert_eq!(d.relation, Relation::Distinct);
-    }
-
-    #[test]
-    fn an_unparsable_verdict_is_an_error_not_a_default() {
-        assert!(parse_dedupe("I could not decide.").is_err());
-        assert!(parse_dedupe(r#"{"relation":"maybe"}"#).is_err());
     }
 
     #[test]
@@ -3424,57 +2651,5 @@ mod tests {
         let arts = parse_response(body).unwrap();
         assert!(arts[0].tags.is_empty());
         assert!(!arts[0].pinned);
-    }
-
-    #[test]
-    fn every_verdict_the_reap_schema_allows_is_one_the_parser_knows() {
-        let schema = reap_schema();
-        let allowed = schema["properties"]["verdict"]["enum"].as_array().unwrap();
-        assert!(!allowed.is_empty());
-        for v in allowed {
-            let reply = serde_json::json!({"verdict": v, "reason": "why"}).to_string();
-            parse_reap(&reply).unwrap_or_else(|e| {
-                panic!("the schema permits {v}, which the parser refuses: {e}")
-            });
-        }
-    }
-
-    #[test]
-    fn parse_reap_reads_both_verdicts_and_refuses_the_rest() {
-        assert_eq!(
-            parse_reap(r#"{"verdict":"worthless","reason":"covered by [1]"}"#).unwrap(),
-            Reap::Worthless {
-                reason: "covered by [1]".into()
-            }
-        );
-        assert_eq!(
-            parse_reap("```json\n{\"verdict\":\"valuable\",\"reason\":\"names a port\"}\n```")
-                .unwrap(),
-            Reap::Valuable {
-                reason: "names a port".into()
-            }
-        );
-        assert!(parse_reap(r#"{"verdict":"maybe","reason":""}"#).is_err());
-        assert!(parse_reap("no json here").is_err());
-    }
-
-    #[test]
-    fn reap_prompt_carries_candidate_successor_and_numbered_neighbours() {
-        let case = ReapCase {
-            title: "Old flag",
-            text: "use --legacy-peer-deps",
-            successor: Some(("New flag", "use --install-strategy")),
-            neighbours: vec![("N1", "first neighbour"), ("N2", "second neighbour")],
-        };
-        let p = reap_prompt(&case);
-        assert!(p.contains("RETIRED ARTIFACT") && p.contains("--legacy-peer-deps"));
-        assert!(p.contains("NAMED REPLACEMENT") && p.contains("--install-strategy"));
-        assert!(p.contains("[1] Title: N1") && p.contains("[2] Title: N2"));
-        let no_successor = ReapCase {
-            successor: None,
-            neighbours: vec![],
-            ..case
-        };
-        assert!(!reap_prompt(&no_successor).contains("NAMED REPLACEMENT"));
     }
 }

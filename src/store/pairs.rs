@@ -1434,6 +1434,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pairs_and_links_left_mid_judgement_by_an_older_version_are_simply_asked() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+        sqlx::query!(
+            "UPDATE artifact_pairs SET judge_attempts = 3, judge_unreadable = 4 WHERE id = ?",
+            id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        let (c, d) = {
+            let mut ids = Vec::new();
+            for raw in ["raw one", "raw two"] {
+                let src = s.insert_corpus(raw, "web", None).await.unwrap();
+                let made = s
+                    .insert_artifacts(
+                        &src.id,
+                        &[NewArtifact {
+                            text: raw.into(),
+                            ..Default::default()
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                ids.push(made[0].id.clone());
+            }
+            (ids[0].clone(), ids[1].clone())
+        };
+        for q in ["one", "two", "three"] {
+            s.bump_link(&c, &d, 2.0, Some(q), 30.0, 0).await.unwrap();
+        }
+        sqlx::query!("UPDATE artifact_links SET judge_attempts = 2 WHERE state = 'learning'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        let pairs = s.pairs_to_judge("test/v1", 10).await.unwrap();
+        assert_eq!(pairs.len(), 1, "the half-judged pair was lost: {pairs:?}");
+        assert_eq!((pairs[0].judge_attempts, pairs[0].judge_unreadable), (3, 4));
+        let links = s
+            .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1, "the half-judged link was lost: {links:?}");
+        assert_eq!(links[0].judge_attempts, 2);
+    }
+
+    #[tokio::test]
     async fn a_near_identical_pair_is_never_offered_to_the_model() {
         // The >= auto_supersede band is settled free by clustering; it must not reach the judge.
         let s = Store::memory().await.unwrap();

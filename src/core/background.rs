@@ -386,10 +386,6 @@ mod tests {
             "with a period to go with it"
         );
 
-        // The decision model judges; a chat judge is not needed.
-        core.judge = None;
-        assert!(armed(&core).contains(&Stage::ArmDedupe));
-
         core.consolidate.max_dedupe_per_tick = 0;
         assert!(armed(&core).contains(&Stage::Consolidate));
         assert!(!armed(&core).contains(&Stage::ArmDedupe));
@@ -519,11 +515,8 @@ mod tests {
             "the switch arms nothing"
         );
 
-        // The decision model judges; a chat judge is not needed.
         let mut judgeless = crate::core::test_support::test_core().await;
         judgeless.evolve.autonomous = crate::config::Autonomy::Full;
-        judgeless.judge = None;
-        judgeless.reaper = None;
         assert!(
             periodic_units(&judgeless)
                 .iter()

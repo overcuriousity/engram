@@ -926,29 +926,15 @@ impl HttpCompleter {
     }
 
     /// On the synthesize endpoint: background work like segmentation, kept off ask's interactive endpoint.
-    pub fn for_judging(cfg: &SynthesizeRole) -> Self {
-        Self::judging(cfg, ("verdict", prompt::dedupe_schema()))
-    }
-
-    /// Separate from `for_judging` because the struct carries the response format; the dedupe grammar cannot say `related`.
-    pub fn for_link_judging(cfg: &SynthesizeRole) -> Self {
-        Self::judging(cfg, ("link", prompt::link_schema()))
-    }
-
     pub fn for_gap_naming(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("gap_label", prompt::gap_label_schema()))
-    }
-
-    /// Separate because the dedupe grammar cannot express a reap verdict.
-    pub fn for_reaping(cfg: &SynthesizeRole) -> Self {
-        Self::judging(cfg, ("reap", prompt::reap_schema()))
     }
 
     pub fn for_generating(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("artifact", prompt::generate_schema()))
     }
 
-    /// Separate: it asks for a merged artifact, while the dedupe grammar would demand a `relation` a person already decided.
+    /// Separate: it asks for a merged artifact, where the decision was a person's or the decision model's.
     pub fn for_pair_synthesis(cfg: &SynthesizeRole) -> Self {
         Self::judging(cfg, ("synthesis", prompt::synthesize_schema()))
     }
@@ -1507,14 +1493,14 @@ mod tests {
         let judge_server = echoing_server(r#"{"relation":"distinct"}"#).await;
         let mut cfg = synthesize_cfg(judge_server.uri());
         cfg.api_key = None;
-        HttpCompleter::for_judging(&cfg)
+        HttpCompleter::for_pair_synthesis(&cfg)
             .complete("s", "u")
             .await
             .unwrap();
         let body = sent_body(&judge_server).await;
         assert_eq!(
             body["response_format"]["json_schema"]["schema"],
-            prompt::dedupe_schema()
+            prompt::synthesize_schema()
         );
 
         let ask_server = echoing_server("a prose answer").await;
@@ -1919,7 +1905,7 @@ mod tests {
                     structured_output: true,
                     plan_endpoint: None,
                 }),
-                _ => HttpCompleter::for_judging(&synthesize_cfg(server.uri())),
+                _ => HttpCompleter::for_pair_synthesis(&synthesize_cfg(server.uri())),
             };
             completer.complete("s", "u").await.unwrap();
 
@@ -1937,7 +1923,7 @@ mod tests {
         let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
         let mut cfg = synthesize_cfg(server.uri());
         cfg.reasoning_effort = Some("low".into());
-        HttpCompleter::for_judging(&cfg)
+        HttpCompleter::for_pair_synthesis(&cfg)
             .complete("s", "u")
             .await
             .unwrap();
@@ -1957,7 +1943,7 @@ mod tests {
         let mut cfg = synthesize_cfg(server.uri());
         cfg.reasoning_effort = Some("none".into());
         cfg.ceiling_param = Some(CeilingParam::MaxTokens);
-        HttpCompleter::for_judging(&cfg)
+        HttpCompleter::for_pair_synthesis(&cfg)
             .complete("s", "u")
             .await
             .unwrap();
@@ -1978,7 +1964,7 @@ mod tests {
         let mut cfg = synthesize_cfg(server.uri());
         cfg.reasoning_effort = Some("none".into());
         assert!(cfg.ceiling_param.is_none(), "the operator has not said");
-        HttpCompleter::for_judging(&cfg)
+        HttpCompleter::for_pair_synthesis(&cfg)
             .complete("s", "u")
             .await
             .unwrap();
@@ -1997,7 +1983,7 @@ mod tests {
         let cfg = synthesize_cfg(server.uri());
         // About 7000 estimated tokens: 2048 of reply does not fit the 8192 window.
         let user = "x".repeat(7000 * 7 / 2);
-        HttpCompleter::for_judging(&cfg)
+        HttpCompleter::for_pair_synthesis(&cfg)
             .complete("s", &user)
             .await
             .unwrap();
@@ -2038,7 +2024,7 @@ mod tests {
             .await;
 
         // No `reasoning_effort`, so the guess is `max_tokens`, and wrong.
-        let completer = HttpCompleter::for_judging(&synthesize_cfg(server.uri()));
+        let completer = HttpCompleter::for_pair_synthesis(&synthesize_cfg(server.uri()));
         assert_eq!(completer.complete("s", "u").await.unwrap(), "the answer");
 
         let requests = server.received_requests().await.unwrap();
@@ -2078,8 +2064,8 @@ mod tests {
             .await;
 
         let cfg = synthesize_cfg(server.uri());
-        let dedupe = HttpCompleter::for_judging(&cfg);
-        let link = HttpCompleter::for_link_judging(&cfg);
+        let dedupe = HttpCompleter::for_pair_synthesis(&cfg);
+        let link = HttpCompleter::for_gap_naming(&cfg);
 
         dedupe.complete("s", "u").await.unwrap();
         link.complete("s", "u").await.unwrap();
@@ -2088,7 +2074,7 @@ mod tests {
         assert_eq!(
             requests.len(),
             3,
-            "the link judge re-bought a refusal the dedupe judge had already paid for"
+            "a second completer re-bought a refusal the first had already paid for"
         );
         let last: serde_json::Value = serde_json::from_slice(&requests[2].body).unwrap();
         assert_eq!(last["max_completion_tokens"].as_u64(), Some(2048));
@@ -2109,10 +2095,10 @@ mod tests {
 
             let asker = if ask_first {
                 let a = HttpCompleter::new(&ask);
-                let _ = HttpCompleter::for_judging(&synth);
+                let _ = HttpCompleter::for_pair_synthesis(&synth);
                 a
             } else {
-                let _ = HttpCompleter::for_judging(&synth);
+                let _ = HttpCompleter::for_pair_synthesis(&synth);
                 HttpCompleter::new(&ask)
             };
             asker.answer("s", "u", 100).await.unwrap();
@@ -2134,7 +2120,7 @@ mod tests {
         let cfg = synthesize_cfg(server.uri());
         let huge = "x".repeat(cfg.context_tokens * 4);
 
-        let e = HttpCompleter::for_judging(&cfg)
+        let e = HttpCompleter::for_pair_synthesis(&cfg)
             .complete("s", &huge)
             .await
             .expect_err("an unanswerable prompt was sent anyway");
@@ -2159,7 +2145,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let e = HttpCompleter::for_judging(&synthesize_cfg(server.uri()))
+        let e = HttpCompleter::for_pair_synthesis(&synthesize_cfg(server.uri()))
             .complete("s", "u")
             .await
             .unwrap_err();
@@ -2182,7 +2168,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let e = HttpCompleter::for_judging(&synthesize_cfg(server.uri()))
+        let e = HttpCompleter::for_pair_synthesis(&synthesize_cfg(server.uri()))
             .complete("s", "u")
             .await
             .unwrap_err();
@@ -2224,34 +2210,6 @@ mod tests {
                 sent_body(&server).await["max_tokens"].as_u64(),
                 Some(want),
                 "a call asking for {asked} sent the wrong ceiling"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn each_judge_sends_the_schema_of_the_question_it_is_asking() {
-        for (label, schema_name) in [("dedupe", "verdict"), ("link", "link")] {
-            let server = echoing_server(r#"{"verdict":{"relation":"distinct"}}"#).await;
-            let cfg = synthesize_cfg(server.uri());
-            let judge = match label {
-                "dedupe" => HttpCompleter::for_judging(&cfg),
-                _ => HttpCompleter::for_link_judging(&cfg),
-            };
-            judge.complete("s", "u").await.unwrap();
-
-            let sent = sent_body(&server).await;
-            assert_eq!(
-                sent["response_format"]["json_schema"]["name"].as_str(),
-                Some(schema_name),
-                "the {label} judge sent another judge's schema"
-            );
-            let relations =
-                &sent["response_format"]["json_schema"]["schema"]["properties"]["verdict"];
-            let allows_related = relations.to_string().contains("unrelated");
-            assert_eq!(
-                allows_related,
-                label == "link",
-                "the {label} judge's grammar covers the wrong set of relations"
             );
         }
     }
