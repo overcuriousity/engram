@@ -82,6 +82,17 @@ below disagree, this section holds.
 - **The tuner has no record of its own.** Threshold moves get a table.
 - **Names.** Spec 1 owns `/decisions/{id}` for what a person asked; the Unsure
   rows live under `/unsure`.
+- **A pursuit cannot wait for more sources** (found while building, 2026-11-14).
+  Its sources are set once and nothing re-arms it, so an `answerable` between
+  the lines closes the pursuit unsatisfied, as a gap, with its own reason. A
+  later sitting on the same question opens a new pursuit with fresh sources.
+  When not every packed source fits, the gate does not judge and the pursuit is
+  written as before.
+- **Deciding goes on past the daily cap** (2026-11-14). The cap gates every
+  action where a decision is carried out; it no longer stops new decisions
+  from being made, so that sure ones wait and torn ones reach the person.
+- **A retired note a person called valuable is never put to the model again**,
+  in any era, unless it changes or the person asks again.
 
 ## Goals
 
