@@ -57,19 +57,15 @@ pub fn pair(
     tokens: usize,
 ) -> Option<String> {
     // Oldest first across both members; undated sources count as oldest.
-    let mut order: Vec<(bool, &Note)> = sources_a
-        .iter()
-        .map(|n| (true, n))
-        .chain(sources_b.iter().map(|n| (false, n)))
-        .collect();
-    order.sort_by(|x, y| x.1.day.cmp(&y.1.day));
+    let mut order: Vec<&Note> = sources_a.iter().chain(sources_b).collect();
+    order.sort_by(|x, y| x.day.cmp(&y.day));
     fullest(counter, tokens, order.len(), |kept| {
         let live = &order[order.len() - kept..];
         let mut parts = vec![block("A", a), block("B", b)];
         for (is_a, name) in [(true, "A"), (false, "B")] {
             let mine: Vec<String> = [sources_a, sources_b][usize::from(!is_a)]
                 .iter()
-                .filter(|n| live.iter().any(|(_, l)| std::ptr::eq(*l, *n)))
+                .filter(|n| live.iter().any(|l| std::ptr::eq(*l, *n)))
                 .map(|n| plain("- ", n))
                 .collect();
             if !mine.is_empty() {
@@ -171,13 +167,10 @@ pub fn rewrite(
 
 /// The state budget for these questions on this decider (twins counted when swapped).
 pub fn room(core: &Core, asked: &[&Asked]) -> usize {
-    let mut questions: Vec<Question> = asked.iter().map(|a| a.question.clone()).collect();
-    let twins: Vec<Question> = asked
-        .iter()
-        .filter(|a| a.swapped)
-        .map(|a| a.question.clone())
-        .collect();
-    questions.extend(swapped_questions(&twins));
+    let (swapped, plain): (Vec<&Asked>, Vec<&Asked>) = asked.iter().partition(|a| a.swapped);
+    let mut questions: Vec<Question> = plain.iter().map(|a| a.question.clone()).collect();
+    let both: Vec<Question> = swapped.iter().map(|a| a.question.clone()).collect();
+    questions.extend(swapped_questions(&both));
     budget(&core.counter, core.decider.context_tokens(), &questions)
 }
 
@@ -316,5 +309,42 @@ mod tests {
         let core = crate::core::test_support::test_core().await;
         let (p, r) = (pair_relation(), reap_worth());
         assert!(room(&core, &[&p]) < room(&core, &[&r]));
+    }
+
+    #[tokio::test]
+    async fn room_counts_a_swapped_question_once_with_its_twin() {
+        let core = crate::core::test_support::test_core().await;
+        let ctx = core.decider.context_tokens();
+        let (p, r) = (pair_relation(), reap_worth());
+        let only = budget(
+            &core.counter,
+            ctx,
+            &swapped_questions(std::slice::from_ref(&p.question)),
+        );
+        assert_eq!(room(&core, &[&p]), only);
+        let mixed = [r.question.clone(), p.question.clone()];
+        let mut wire = vec![r.question.clone()];
+        wire.extend(swapped_questions(&mixed[1..]));
+        assert_eq!(room(&core, &[&r, &p]), budget(&core.counter, ctx, &wire));
+    }
+
+    #[test]
+    fn the_oldest_source_across_both_members_goes_first() {
+        let a = note(Some("A"), None, "alpha");
+        let b = note(Some("B"), None, "beta");
+        let sa = [
+            note(Some("a1"), Some("2026-01-01"), "x"),
+            note(Some("a2"), Some("2026-04-01"), "x"),
+        ];
+        let sb = [
+            note(Some("b1"), Some("2026-02-01"), "x"),
+            note(Some("b2"), Some("2026-03-01"), "x"),
+        ];
+        let keep3 = pair(&a, &b, &sa[1..], &sb, &c(), 1000).unwrap();
+        let got = pair(&a, &b, &sa, &sb, &c(), c().count(&keep3)).unwrap();
+        assert_eq!(got, keep3);
+        assert!(
+            !got.contains("a1") && got.contains("b1") && got.contains("a2") && got.contains("b2")
+        );
     }
 }
