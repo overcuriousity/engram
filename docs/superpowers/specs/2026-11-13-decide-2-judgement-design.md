@@ -668,7 +668,7 @@ there; it shows how the answers fall.
 | `pair_relation`, unjudged neighbours | 200 of 15105 | distinct 164 · duplicate 29 · b_replaces_a 4 · vacuous 2 · conflict 1; swapped reads disagreed in 10; at 0.90 seven would act, all `distinct`; no `duplicate` above 0.73, including a pair at cosine 0.98 |
 | `link_kind` | 155 | agrees with the past verdict in 112; of 96 past `unrelated` it keeps 95, of 59 past `related` it calls 31 `unrelated`; at 0.80 and above 28 of 35 agree |
 | `link_direction` v1 | 53 | `a_first` 53 of 53, both option orders agreeing |
-| `link_direction` v2 | 53 | `a_first` 51; the same note is named first when the notes are exchanged in 36 |
+| `link_direction` v2 | 53 | `a_first` 51; holds when the notes are exchanged: 36 of 53 |
 | `reap_worth`, unjudged superseded | 99 | no 99 · yes 0; 61 at 0.90 and above; highest yes 0.50 |
 | `category` | 200 | matches the stored category in 82; the rest sit between neighbours: reference and definition, procedure and snippet |
 | `pinned` | 200 | yes at 0.90: 1 |
@@ -688,9 +688,9 @@ What was fixed from it:
   `time_bound` stays as worded: the probe's doubt did not hold on real notes.
   `link_kind` under-links against the old judge rather than mislinking, and
   `category` disagrees between kinds that overlap; both keep their wording.
-- **A direction counts only when it holds under exchange.** A link whose
-  direction flips with the labels is stored and shown undirected. One more
-  call per directional link.
+- **A direction counts only when it holds under exchange** (a rule for stage
+  3). A link whose direction does not hold when the two notes are exchanged
+  is to be stored and shown undirected. One more call per directional link.
 - **Starting lines** (owner's decision, 2026-11-14):
 
   | Question | act_at | ask_at | Why |
