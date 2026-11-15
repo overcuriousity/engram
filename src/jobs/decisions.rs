@@ -109,8 +109,8 @@ pub async fn run(core: &Core) -> Result<Report> {
 const LABEL_LOOKAHEAD: i64 = 64;
 
 /// Unlabelled searches, oldest first, in a quarter of the tick's budget, each costing its live
-/// candidates. The first may overrun it when no label unit is in flight; one queued holds its
-/// share, and the oldest that does not fit waits rather than being passed.
+/// candidates. The first may overrun it when no label unit is in flight; one queued below the retry
+/// ceiling holds its share, and the oldest that does not fit waits rather than being passed.
 async fn label(core: &Core) -> Result<u64> {
     let mut left = core.judging_budget().await? / 4;
     if left == 0 {
@@ -123,6 +123,11 @@ async fn label(core: &Core) -> Result<u64> {
         .unlabelled_searches(version, core.decider.model(), LABEL_LOOKAHEAD)
         .await?
     {
+        // A unit at the retry ceiling stays queued for the queue to retry, and holds nothing.
+        let attempts = core.store.live_job_attempts(Stage::Label, &id).await?;
+        if attempts.is_some_and(|a| a >= crate::store::jobs::MAX_ATTEMPTS) {
+            continue;
+        }
         let Some((_, candidates)) = core.store.search_to_label(&id).await? else {
             continue;
         };
@@ -138,7 +143,7 @@ async fn label(core: &Core) -> Result<u64> {
             break;
         }
         left = left.saturating_sub(cost);
-        if core.store.live_job(Stage::Label, &id).await? {
+        if attempts.is_some() {
             held = true;
             continue;
         }

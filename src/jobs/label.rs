@@ -85,9 +85,9 @@ pub async fn run(core: &Core, event_id: &str) -> Result<()> {
         .await
 }
 
-/// Marks a search this model cannot label as labelled, so it leaves the queue: one marker row,
-/// `artifact_id = ''`, that no figure reads.
-pub async fn step_aside(core: &Core, event_id: &str) -> Result<()> {
+/// Marks a search none of whose live candidates fits one request as labelled, so it leaves the
+/// queue: one marker row, `artifact_id = ''`, that no figure reads. Never written on a failure.
+async fn step_aside(core: &Core, event_id: &str) -> Result<()> {
     core.store
         .put_search_labels(
             event_id,
@@ -467,31 +467,63 @@ mod tests {
         assert_eq!(s.model_expected(&id, 0.0).await.unwrap(), None);
     }
 
+    /// Makes `event_id`'s label unit due and drains the queue once.
+    async fn retry(core: &Core, event_id: &str) {
+        sqlx::query!(
+            "UPDATE jobs SET run_after = 0 WHERE stage = 'label' AND target_id = ?",
+            event_id
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
+        while crate::jobs::run_one(core).await.unwrap() {}
+    }
+
     #[tokio::test]
-    async fn a_search_the_model_keeps_refusing_steps_aside_and_is_not_armed_again() {
+    async fn a_search_the_model_keeps_refusing_is_retried_and_does_not_hold_the_queue() {
         let mut core = test_core().await;
         core.decider = Arc::new(RuleDecider::new(|_, _| {
             Err(Error::InferenceRejected {
                 role: "decide",
-                detail: "no".into(),
+                detail: "HTTP 401".into(),
             })
         }));
-        let ids = old_searches(&core, 1, 2).await;
-        arm(&core, &ids[0]).await.unwrap();
-        while crate::jobs::run_one(&core).await.unwrap() {}
+        let ids = old_searches(&core, 2, 20).await;
+        assert_eq!(
+            crate::jobs::decisions::run(&core).await.unwrap().labelled,
+            1
+        );
+        for _ in 0..crate::store::jobs::MAX_ATTEMPTS {
+            retry(&core, &ids[0]).await;
+        }
 
-        assert!(!core.store.live_job(Stage::Label, &ids[0]).await.unwrap());
-        assert!(
+        // Not marked: no row, still unlabelled, still queued.
+        assert!(labelled(&core, &ids[0]).await.is_empty());
+        assert_eq!(
             core.store
                 .unlabelled_searches(version(), "rule-decider", 10)
                 .await
-                .unwrap()
-                .is_empty()
+                .unwrap(),
+            ids
         );
+        assert!(core.store.live_job(Stage::Label, &ids[0]).await.unwrap());
+        // At its ceiling it no longer holds the tick: the search behind it is armed.
         assert_eq!(
             crate::jobs::decisions::run(&core).await.unwrap().labelled,
-            0
+            1
         );
+        assert!(core.store.live_job(Stage::Label, &ids[1]).await.unwrap());
+
+        // The endpoint recovers: the queue's retry labels it, and the figures read it.
+        core.decider = labeller(0.95);
+        retry(&core, &ids[0]).await;
+        assert_eq!(labelled(&core, &ids[0]).await.len(), 20);
+        let r = core
+            .store
+            .model_retrieval(0.9, version(), "rule-decider")
+            .await
+            .unwrap();
+        assert!(r.searches >= 1, "{r:?}");
     }
 
     #[test]

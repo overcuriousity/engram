@@ -609,6 +609,20 @@ impl Store {
         .is_some())
     }
 
+    /// A queued or running unit's attempts so far; `None` when none is live.
+    pub async fn live_job_attempts(&self, stage: Stage, target_id: &str) -> Result<Option<i64>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT attempts FROM jobs
+              WHERE subject = ? AND stage = ? AND target_id = ?
+                AND state IN ('pending', 'running')",
+            &self.subject,
+            stage.as_str(),
+            target_id
+        )
+        .fetch_optional(&self.control.pool)
+        .await?)
+    }
+
     /// Only for an operator asking for the work again: the surviving row is what lets a
     /// stage give up for good.
     pub async fn delete_job(&self, stage: Stage, target_id: &str) -> Result<()> {

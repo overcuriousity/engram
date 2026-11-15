@@ -199,12 +199,6 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 }
                 // A name is decoration, an unjudged pair stays pending, and a note not rescued
                 // keeps its text; everything else stays queued, as it carries knowledge.
-                // A search the model cannot label steps aside rather than holding the queue.
-                (Stage::Label, _) if exhausted => {
-                    tracing::warn!(error = %e, "could not label this search; leaving it unlabelled");
-                    label::step_aside(core, &job.target_id).await?;
-                    core.store.complete_job(job.id).await?;
-                }
                 (Stage::Dedupe | Stage::Merge | Stage::Rescue | Stage::Title, _) if exhausted => {
                     tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;
@@ -249,10 +243,6 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                 (Stage::Embed, _) => settle_failed_artifact(core, &job, &e).await?,
                 (Stage::Describe | Stage::Extract, _) => {
                     park_failed_if_still_there(core, job.stage, &job.target_id, &e).await?;
-                    core.store.complete_job(job.id).await?;
-                }
-                (Stage::Label, _) => {
-                    label::step_aside(core, &job.target_id).await?;
                     core.store.complete_job(job.id).await?;
                 }
                 // A refusal is the site's answer today, so it is asked again until
