@@ -238,7 +238,7 @@ impl Store {
     }
 
     /// `keep_artifacts`: a wrong read replaces its artifacts; a re-read for missed lines adds to
-    /// them, keeping what an operator may have edited. See `window::write_segment_artifacts`.
+    /// them, keeping what an operator may have edited. See `window::write_window`.
     pub async fn reset_segment(
         &self,
         corpus_id: &str,

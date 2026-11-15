@@ -517,7 +517,12 @@ async fn rescued_by(core: &Core, rescue: &str) -> Result<Vec<String>> {
 /// Burials say no; a rescue said yes. A rescued note later buried counts once, as the burial.
 async fn reaps(core: &Core, base: &Base, failed: &mut usize) -> Result<Vec<Found>> {
     let mut out = Vec::new();
-    for r in base.journal(core).await?.iter().filter(|r| r.kind == Kind::Reap) {
+    for r in base
+        .journal(core)
+        .await?
+        .iter()
+        .filter(|r| r.kind == Kind::Reap)
+    {
         let read = successor_of(core, &r.subject_id).await;
         let Some(successor) = or_skip(read, "reap_worth", &r.subject_id, failed) else {
             continue;
@@ -3154,9 +3159,7 @@ mod tests {
     }
 
     async fn pair_cases(core: &Core) -> HashMap<String, Case> {
-        let (cases, _) = cases(core, &catalogue::pair_relation(), 200)
-            .await
-            .unwrap();
+        let (cases, _) = cases(core, &catalogue::pair_relation(), 200).await.unwrap();
         cases
             .into_iter()
             .map(|c| (key(&c.subjects.0, c.subjects.1.as_deref().unwrap()), c))
@@ -3194,7 +3197,11 @@ mod tests {
         let by = pair_cases(&core).await;
         let c = &by[&key(&p.a_id, &p.b_id)];
         assert_eq!(c.past.as_deref(), Some("vacuous"));
-        assert_eq!(c.person, Some(PersonSaid::Agreed), "the person's own verdict");
+        assert_eq!(
+            c.person,
+            Some(PersonSaid::Agreed),
+            "the person's own verdict"
+        );
     }
 
     #[tokio::test]
@@ -3222,7 +3229,11 @@ mod tests {
             .unwrap();
 
         let by = pair_cases(&core).await;
-        assert_eq!(by.len(), 1, "a pair left alone says nothing of the two: {by:?}");
+        assert_eq!(
+            by.len(),
+            1,
+            "a pair left alone says nothing of the two: {by:?}"
+        );
         let c = &by[&key(&retired.a_id, &retired.b_id)];
         assert_eq!(c.past.as_deref(), Some("vacuous"));
         assert_eq!(c.person, Some(PersonSaid::Agreed));
@@ -3294,12 +3305,12 @@ mod tests {
         }
 
         let by = pair_cases(&core).await;
-        assert!(!by.contains_key(&key(&refused.a_id, &refused.b_id)), "{by:?}");
+        assert!(
+            !by.contains_key(&key(&refused.a_id, &refused.b_id)),
+            "{by:?}"
+        );
         for p in [&kept, &asked] {
-            assert_eq!(
-                by[&key(&p.a_id, &p.b_id)].past.as_deref(),
-                Some("distinct")
-            );
+            assert_eq!(by[&key(&p.a_id, &p.b_id)].past.as_deref(), Some("distinct"));
         }
     }
 
@@ -3466,7 +3477,11 @@ mod tests {
         let r = run(&core, Some("link_direction"), 200).await.unwrap();
         assert_eq!((r[0].asked, r[0].exchanged_holds), (1, Some((0, 1))));
         let states: Vec<String> = decider.requests().into_iter().map(|r| r.0).collect();
-        assert_eq!(states.len(), 3, "the first read, then the exchanged one twice");
+        assert_eq!(
+            states.len(),
+            3,
+            "the first read, then the exchanged one twice"
+        );
         assert_ne!(states[0], states[1]);
         assert_eq!(states[1], states[2]);
     }
@@ -3554,9 +3569,7 @@ mod tests {
             older_than: i64,
             unseen_since: i64,
         ) -> Result<Vec<SearchHit>> {
-            self.inner
-                .resurface(limit, older_than, unseen_since)
-                .await
+            self.inner.resurface(limit, older_than, unseen_since).await
         }
         async fn facets(&self, limit: usize) -> Result<Facets> {
             self.inner.facets(limit).await
@@ -3631,7 +3644,10 @@ mod tests {
         let r = run(&core, Some("reap_worth"), 200).await.unwrap();
         let u = &r[1];
         assert_eq!(u.scope.as_deref(), Some("unjudged retired notes"));
-        assert_eq!((u.asked, u.skipped_failed, u.stopped.as_ref()), (1, 1, None));
+        assert_eq!(
+            (u.asked, u.skipped_failed, u.stopped.as_ref()),
+            (1, 1, None)
+        );
         assert_eq!(u.extremes, [(0.9, "old two".to_string())]);
         assert_eq!(decider.calls(), 1, "never asked without its neighbours");
         let text = render(&r[1..]);
@@ -3660,7 +3676,10 @@ mod tests {
         let r = run(&core, Some("pair_relation"), 200).await.unwrap();
         let u = &r[1];
         assert_eq!(u.scope.as_deref(), Some("unjudged neighbours"));
-        assert_eq!((u.asked, u.skipped_failed, u.stopped.as_ref()), (1, 2, None));
+        assert_eq!(
+            (u.asked, u.skipped_failed, u.stopped.as_ref()),
+            (1, 2, None)
+        );
         let titles: Vec<&str> = u.confident.iter().map(|c| c.title.as_str()).collect();
         assert!(titles == ["c ↔ d"] || titles == ["d ↔ c"], "{titles:?}");
     }
@@ -3684,7 +3703,14 @@ mod tests {
         let (a, b) = crate::store::links::canonical(&ids[0], &ids[1]);
         let (c, d) = crate::store::links::canonical(&ids[2], &ids[3]);
         let (e, f) = crate::store::links::canonical(&ids[4], &ids[5]);
-        for (id, at) in [(a, 600_i64), (b, 500), (c, 300), (d, 400), (e, 100), (f, 200)] {
+        for (id, at) in [
+            (a, 600_i64),
+            (b, 500),
+            (c, 300),
+            (d, 400),
+            (e, 100),
+            (f, 200),
+        ] {
             sqlx::query!("UPDATE artifacts SET created_at = ? WHERE id = ?", at, id)
                 .execute(&core.store.pool)
                 .await

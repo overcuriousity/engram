@@ -418,7 +418,10 @@ mod tests {
         let text = "remind me to call Anna on Friday";
         let whole = c().count(text);
         assert_eq!(window(text, &c(), whole).unwrap(), text);
-        assert!(window(text, &c(), whole - 1).is_none(), "a window is never cut");
+        assert!(
+            window(text, &c(), whole - 1).is_none(),
+            "a window is never cut"
+        );
     }
 
     #[test]

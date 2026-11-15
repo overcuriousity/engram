@@ -238,6 +238,7 @@ near_dupe_min = 0.60
 # Cosine floor for a pair the judge may act on alone; the idle pass moves it.
 review_min = 0.88
 # Cosine down to which pairs are judged, below review_min; nothing under review_min acts without you.
+# 0.70 is also the lowest it may be set to.
 scan_min = 0.70
 # Pairs at or above this are judged first.
 auto_supersede = 0.95

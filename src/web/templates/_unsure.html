@@ -33,7 +33,7 @@
 <p class="muted">{{ unsure.waiting_rows }} more waiting</p>
 {% endif %}
 {% for w in unsure.waiting_acts %}
-<p class="muted">{{ w.0 }} · {{ w.1 }} waiting on the daily pace</p>
+<p class="muted">{{ w.0 }} · {{ w.1 }} sure, not yet carried out</p>
 {% endfor %}
 {% if !unsure.answered.is_empty() %}
 <details class="unsure-answered">

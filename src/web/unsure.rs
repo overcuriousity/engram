@@ -38,7 +38,8 @@ pub struct Unsure {
     pub rows: Vec<UnsureRow>,
     pub waiting_rows: i64,
     pub answered: Vec<Answered>,
-    /// (question label, acts waiting on the daily cap).
+    /// (question label, sure decisions not yet carried out): held by the daily cap, by a switch
+    /// that is off, or by a writer's pacing.
     pub waiting_acts: Vec<(String, i64)>,
     /// What became of a press that came too late; see `late`.
     pub notice: Option<&'static str>,
@@ -528,7 +529,7 @@ mod tests {
         let page = insights(&app, &cookie).await;
         assert!(page.contains("Unsure · 1"), "{page}");
         assert!(page.contains("1 more waiting"), "{page}");
-        assert!(page.contains("2 waiting on the daily pace"), "{page}");
+        assert!(page.contains("2 sure, not yet carried out"), "{page}");
     }
 
     #[tokio::test]
@@ -748,7 +749,7 @@ mod tests {
         )
         .await;
         let page = insights(&app, &cookie).await;
-        assert!(page.contains("1 waiting on the daily pace"), "{page}");
+        assert!(page.contains("1 sure, not yet carried out"), "{page}");
         assert!(page.contains(">Unsure</h2>"), "{page}");
         assert!(!page.contains("Unsure · 0"), "{page}");
     }
