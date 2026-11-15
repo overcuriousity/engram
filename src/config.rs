@@ -2090,9 +2090,14 @@ impl Config {
                 )));
             }
         }
-        if dc.ask_open_max < 1 || dc.tick_mins < 1 {
+        if dc.ask_open_max < 1 {
             return Err(ConfigError::Invalid(
-                "decide.ask_open_max and decide.tick_mins must be at least 1".into(),
+                "decide.ask_open_max is 0: it must be at least 1, or nothing the base is unsure of could ever be asked".into(),
+            ));
+        }
+        if dc.tick_mins < 1 {
+            return Err(ConfigError::Invalid(
+                "decide.tick_mins is 0: it must be at least 1, or a tick would have no length to budget".into(),
             ));
         }
         let tz = self.time.default_tz.trim();
@@ -3487,6 +3492,28 @@ mode = "off"
                 other => panic!("expected Invalid for {key}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_zero_seat_count_or_a_zero_tick_is_refused_naming_its_own_key() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for (line, key, other) in [
+            ("ask_open_max = 0", "decide.ask_open_max", "decide.tick_mins"),
+            ("tick_mins = 0", "decide.tick_mins", "decide.ask_open_max"),
+        ] {
+            let body = format!("{MINIMAL}\n[decide]\n{line}\n");
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => {
+                    assert!(m.contains(key), "{m}");
+                    assert!(!m.contains(other), "the key that is fine is named: {m}");
+                }
+                other => panic!("expected Invalid for {key}, got {other:?}"),
+            }
+        }
+        let body = format!("{MINIMAL}\n[decide]\nask_open_max = 1\ntick_mins = 1\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!((d.ask_open_max, d.tick_mins), (1, 1));
     }
 
     #[test]

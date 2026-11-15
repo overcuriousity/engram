@@ -114,19 +114,37 @@ pub fn reap_worth() -> Asked {
     )
 }
 
+/// Each category with its line, in `CATEGORIES`' order.
+const DESCRIBED: [(&str, &str); 8] = [
+    ("concept", "an idea and how to think about it"),
+    ("procedure", "steps to do something"),
+    ("reference", "facts to look up"),
+    ("snippet", "a piece of code or a command"),
+    ("configuration", "settings and their values"),
+    ("definition", "what a term means"),
+    ("example", "a worked case"),
+    ("other", "none of these"),
+];
+
+// A table that drifts from `CATEGORIES` does not compile: a category the model is never offered,
+// or one stored under a name the base does not know, would otherwise go unnoticed.
+const _: () = {
+    assert!(DESCRIBED.len() == CATEGORIES.len());
+    let mut i = 0;
+    while i < DESCRIBED.len() {
+        let (mine, theirs) = (DESCRIBED[i].0.as_bytes(), CATEGORIES[i].as_bytes());
+        assert!(mine.len() == theirs.len());
+        let mut j = 0;
+        while j < mine.len() {
+            assert!(mine[j] == theirs[j]);
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
 pub fn category() -> Asked {
-    let described = [
-        "an idea and how to think about it",
-        "steps to do something",
-        "facts to look up",
-        "a piece of code or a command",
-        "settings and their values",
-        "what a term means",
-        "a worked case",
-        "none of these",
-    ];
-    let options: Vec<(&str, &str)> = CATEGORIES.iter().copied().zip(described).collect();
-    choice("category", false, "What kind of note is this?", &options)
+    choice("category", false, "What kind of note is this?", &DESCRIBED)
 }
 
 pub fn pinned() -> Asked {

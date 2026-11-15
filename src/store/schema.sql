@@ -666,6 +666,10 @@ CREATE TABLE IF NOT EXISTS artifact_links (
   -- For a directional kind, the end that comes first: 'a' | 'b'. NULL when the
   -- direction did not hold.
   first       TEXT,
+  -- 1 when the row was recorded for a neighbour the writer was shown at
+  -- capture: its question is owed whatever its weight, and a hand-over to
+  -- consolidation from it may not act alone.
+  shown       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (a_id, b_id),
   CHECK (a_id < b_id)
 );
@@ -914,7 +918,8 @@ CREATE TABLE IF NOT EXISTS decisions (
   outcome TEXT,                    -- kept | undone | confirmed | corrected | refused
   outcome_at INTEGER,
   answered_pick TEXT,              -- what a person chose, on an ask row
-  decided_at INTEGER NOT NULL
+  decided_at INTEGER NOT NULL,
+  opened_at INTEGER                -- when an ask row was seated; its lapse runs from here
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_subject ON decisions(question_id, subject_a, subject_b, era);
 CREATE INDEX IF NOT EXISTS idx_decisions_band ON decisions(band, state, top DESC);

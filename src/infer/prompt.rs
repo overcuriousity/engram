@@ -75,7 +75,7 @@ time:
   states none.
 
 The judgement is not an artifact. Never write an artifact that describes the
-note's intent, restates its dates, or names its relation to a neighbor: those
+note's intent or restates its dates: those
 belong in "moment" and "events" alone. A note of one or two sentences
 yields exactly one artifact, in the language the note is written in.
 
@@ -158,8 +158,7 @@ INPUT als Notiz in der Zeit:
   Leer, wenn sie keine nennt.
 
 Das Urteil ist kein Artefakt. Schreibe nie ein Artefakt, das die Absicht der
-Notiz beschreibt, ihre Daten wiederholt oder ihre Beziehung zu einem Nachbarn
-benennt: das gehört allein in "moment" und "events". Eine Notiz von
+Notiz beschreibt oder ihre Daten wiederholt: das gehört allein in "moment" und "events". Eine Notiz von
 ein oder zwei Sätzen ergibt genau ein Artefakt, in der Sprache der Notiz.
 
 Ohne JUDGE-Block antworte allein mit "artifacts"."#;
@@ -242,7 +241,7 @@ el tiempo:
   Vacío cuando no indica ninguna.
 
 El juicio no es un artefacto. Nunca escribas un artefacto que describa la
-intención de la nota, repita sus fechas o nombre su relación con un vecino:
+intención de la nota o repita sus fechas:
 eso va solo en "moment" y "events". Una nota de una o dos frases
 produce exactamente un artefacto, en el idioma de la nota.
 
@@ -326,7 +325,7 @@ note dans le temps :
   quand elle n'en énonce aucune.
 
 Le jugement n'est pas un artefact. N'écris jamais un artefact qui décrit
-l'intention de la note, répète ses dates ou nomme sa relation à un voisin :
+l'intention de la note ou répète ses dates :
 cela relève uniquement de "moment" et "events". Une note d'une ou
 deux phrases donne exactement un artefact, dans la langue de la note.
 
@@ -409,8 +408,7 @@ una nota nel tempo:
   non ne indica nessuna.
 
 Il giudizio non è un artefatto. Non scrivere mai un artefatto che descriva
-l'intento della nota, ne ripeta le date o ne nomini la relazione con un
-vicino: questo spetta solo a "moment" e "events". Una nota di una o
+l'intento della nota o ne ripeta le date: questo spetta solo a "moment" e "events". Una nota di una o
 due frasi produce esattamente un artefatto, nella lingua della nota.
 
 Senza blocco JUDGE, rispondi con "artifacts" da solo."#;
@@ -492,7 +490,7 @@ notitie in de tijd:
   ze er geen noemt.
 
 Het oordeel is geen artefact. Schrijf nooit een artefact dat de bedoeling van
-de notitie beschrijft, haar data herhaalt of haar relatie tot een buur noemt:
+de notitie beschrijft of haar data herhaalt:
 dat hoort alleen in "moment" en "events". Een notitie van één of
 twee zinnen levert precies één artefact op, in de taal van de notitie.
 
@@ -572,7 +570,7 @@ poziomu — „moment", „events" — oceniając INPUT jako notatkę w czasie:
   żadnej nie podaje.
 
 Ocena nie jest artefaktem. Nigdy nie pisz artefaktu opisującego intencję
-notatki, powtarzającego jej daty ani nazywającego jej związek z sąsiadem: to
+notatki ani powtarzającego jej daty: to
 należy wyłącznie do "moment" i "events". Notatka z jednego lub dwóch
 zdań daje dokładnie jeden artefakt, w języku notatki.
 
@@ -655,7 +653,7 @@ tempo:
   quando não indica nenhuma.
 
 O julgamento não é um artefato. Nunca escreva um artefato que descreva a
-intenção da nota, repita as suas datas ou nomeie a sua relação com um vizinho:
+intenção da nota ou repita as suas datas:
 isso pertence apenas a "moment" e "events". Uma nota de uma ou duas
 frases produz exatamente um artefato, na língua da nota.
 
@@ -737,7 +735,7 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
   называет ни одной.
 
 Суждение — не артефакт. Никогда не пиши артефакт, который описывает намерение
-заметки, повторяет её даты или называет её связь с соседом: это место только
+заметки или повторяет её даты: это место только
 для "moment" и "events". Заметка из одного-двух предложений даёт
 ровно один артефакт, на языке заметки.
 
@@ -814,8 +812,8 @@ değerlendir:
   ISO-8601 tarih-saat olarak ("sürüm ayın 12'sinde" → o tarih). Hiçbirini
   belirtmiyorsa boş.
 
-Yargı bir artefakt değildir. Notun niyetini anlatan, tarihlerini yineleyen ya
-da bir komşuyla ilişkisini adlandıran bir artefakt asla yazma: bunlar yalnızca
+Yargı bir artefakt değildir. Notun niyetini anlatan ya da tarihlerini yineleyen
+bir artefakt asla yazma: bunlar yalnızca
 "moment" ve "events" içindir. Bir ya da iki cümlelik bir not, notun
 dilinde tam olarak bir artefakt verir.
 
@@ -1989,6 +1987,36 @@ mod tests {
                 assert!(
                     !p.contains(field),
                     "the {} prompt still asks for {field}",
+                    lang.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_language_still_sends_a_relation_to_a_neighbour_to_the_judgement() {
+        use crate::infer::lang::Lang;
+        // The word each translation used for it; none has another use in its prompt.
+        const RELATION: &[&str] = &[
+            "relation to",
+            "Beziehung",
+            "relación",
+            "relation à",
+            "relazione",
+            "relatie tot",
+            "związek",
+            "relação",
+            "связь",
+            "ilişkisini",
+        ];
+        assert_eq!(RELATION.len(), Lang::ALL.len());
+        let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        for lang in Lang::ALL {
+            let p = flat(synthesizer_system(lang));
+            for word in RELATION {
+                assert!(
+                    !p.contains(word),
+                    "the {} prompt still names a relation to a neighbour (`{word}`)",
                     lang.tag()
                 );
             }

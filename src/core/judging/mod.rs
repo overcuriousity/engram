@@ -57,8 +57,21 @@ pub trait Applier: Send + Sync {
         pick: &str,
         by: DecidedBy,
     ) -> Result<Vec<String>>;
-    /// Put the subject back to be asked again.
+    /// Put the subject back to be asked again. Must leave alone a subject a person has settled
+    /// since: the sweep calls this for every decision whose subject is no longer `unchanged`.
     async fn reopen(&self, core: &Core, d: &Logged) -> Result<()>;
+    /// Whether a person's `pick` says what the model's pick said. The buttons do not always offer
+    /// the model's pick by name (a duplicate nothing can write is offered as "keep one"), and an
+    /// answer that agrees must not be counted as a correction.
+    fn agrees(&self, d: &Logged, pick: &str) -> bool {
+        pick == d.pick
+    }
+    /// Whether the base may carry out this question's acts on its own as it is configured now.
+    /// False leaves a sure decision waiting, whatever the daily cap says; a person's answer is
+    /// never held by it.
+    fn armed(&self, _core: &Core) -> bool {
+        true
+    }
 }
 
 #[derive(Default)]
@@ -299,6 +312,9 @@ pub(crate) async fn settle_counted(core: &Core, d: Logged) -> Result<(Logged, bo
             let Some(applier) = core.appliers.get(&d.question_id) else {
                 return Ok((logged(core, &d.id).await?, false));
             };
+            if !applier.armed(core) {
+                return Ok((logged(core, &d.id).await?, false));
+            }
             if let Some(job) = applier.job()
                 && !core.may_act(job).await?
             {
@@ -378,7 +394,7 @@ pub async fn answer(core: &Core, id: &str, pick: Option<&str>) -> Result<Logged>
             return Err(e);
         }
     }
-    let outcome = if pick == d.pick {
+    let outcome = if applier.agrees(&d, pick) {
         Outcome::Confirmed
     } else {
         Outcome::Corrected

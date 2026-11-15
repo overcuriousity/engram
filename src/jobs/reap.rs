@@ -53,7 +53,14 @@ pub async fn run(core: &Core) -> Result<Report> {
             step_aside(core, &c.id).await;
             continue;
         }
-        let s = state_of(core, c, &asked).await?;
+        let s = match state_of(core, c, &asked).await {
+            Ok(s) => s,
+            // One note's neighbours unread is not the sweep's failure: it waits, the rest go on.
+            Err(e) => {
+                tracing::warn!(artifact_id = %c.id, error = %e, "could not read a candidate's neighbours; it waits");
+                continue;
+            }
+        };
         let subjects = Subjects {
             kind: "artifact",
             a: c.id.clone(),
@@ -161,9 +168,11 @@ pub(crate) async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String
     Ok(out)
 }
 
-/// Row before point, marker before delete: a failed delete leaves `lifecycle_dirty` for the repair
-/// pass. Under `lifecycle_lock` so no restore lands between copy and wipe. The journal row is linked
-/// to `decision_id` as it is written; a row that stopped being a candidate journals nothing.
+/// Row before point, marker before delete: a failed delete leaves `lifecycle_dirty` for
+/// `repair_lifecycle_drift`. Under `lifecycle_lock` so no restore lands between copy and wipe. The
+/// journal row is linked to `decision_id` as it is written; a row that stopped being a candidate
+/// journals nothing. Once `bury` has committed nothing here is an error: the burial stands, and an
+/// `Err` would put its decision back to wait on a note that is no longer a candidate.
 pub(crate) async fn reap_one(
     core: &Core,
     c: &Chunk,
@@ -228,16 +237,32 @@ pub(crate) async fn reap_one(
         }
         Err(e) => return Err(e),
     };
-    // Linked as written: a failure after this must not leave the burial without its decision.
-    core.store
+    // Linked as written, and again by the caller from what is returned.
+    if let Err(e) = core
+        .store
         .link_decision_actions(decision_id, std::slice::from_ref(&row))
-        .await?;
-    core.vectors
+        .await
+    {
+        tracing::warn!(artifact_id = %c.id, error = %e, "could not link a burial to its decision yet");
+    }
+    match core
+        .vectors
         .delete_artifacts(std::slice::from_ref(&c.id))
-        .await?;
-    core.store
-        .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
-        .await?;
+        .await
+    {
+        Ok(()) => {
+            if let Err(e) = core
+                .store
+                .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
+                .await
+            {
+                tracing::warn!(artifact_id = %c.id, error = %e, "could not clear a buried note's marker; the repair pass deletes its point again");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(artifact_id = %c.id, error = %e, "buried, but its point is still in the vector store; the repair pass deletes it")
+        }
+    }
     tracing::info!(artifact_id = %c.id, "reaped a retired artifact");
     Ok(vec![row])
 }

@@ -4,7 +4,9 @@
 
 use crate::core::Core;
 use crate::core::judging::catalogue::answerable;
-use crate::core::judging::check::{Checked, Which, check, outage};
+use crate::core::judging::check::{
+    Checked, FLAG_UNCHECKED, Which, check, outage, unchecked_detail,
+};
 use crate::core::judging::state::{self, Note};
 use crate::error::Result;
 use crate::infer::prompt;
@@ -117,7 +119,8 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         .join("\n\n");
 
     // Before the writer: do these sources hold the answer? Judged only when every packed source
-    // fits; otherwise written as before. A failed gate is an outage, retried, never a writer call.
+    // fits; otherwise written as before. A failed gate is the unit's error under its own name,
+    // never a writer call.
     let gate = answerable_gate(core, pursuit_id, &p.queries, &sources)
         .await
         .map_err(outage)?;
@@ -164,7 +167,7 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
 
     // Drift is flagged, not prevented: a literal no source carries is marked for the reader.
     let missing = crate::infer::verify::missing_literals(&g.text, &g.caveats, &source_text);
-    // Then the check, before anything is stored. A failed check is an outage, retried.
+    // Then the check, before anything is stored. A check that failed is the queue's to retry.
     let originals: Vec<Note> = sources
         .iter()
         .map(|c| Note {
@@ -178,7 +181,7 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         day: None,
         text: &g.text,
     };
-    if let Checked::Refused { question, yes } = check(
+    let checked = check(
         core,
         pursuit_id,
         &originals,
@@ -186,19 +189,27 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         Which::AddsNothingOnly,
     )
     .await
-    .map_err(outage)?
-    {
-        core.store
-            .close_pursuit(pursuit_id, "unsatisfied", UNFAITHFUL, now)
-            .await?;
-        tracing::info!(
-            pursuit = pursuit_id,
-            question,
-            yes,
-            "the check refused the generation"
-        );
-        return Ok(());
-    }
+    .map_err(outage)?;
+    let unchecked = match checked {
+        Checked::Refused { question, yes } => {
+            core.store
+                .close_pursuit(pursuit_id, "unsatisfied", UNFAITHFUL, now)
+                .await?;
+            tracing::info!(
+                pursuit = pursuit_id,
+                question,
+                yes,
+                "the check refused the generation"
+            );
+            return Ok(());
+        }
+        // Stored and flagged: a retry is told the same, and the draft is not thrown away unread.
+        Checked::Unjudged { detail } => {
+            tracing::warn!(pursuit = pursuit_id, detail, "the check could not be put");
+            Some(detail)
+        }
+        Checked::Passed | Checked::TooLong => None,
+    };
 
     let ids: Vec<String> = sources.iter().map(|c| c.id.clone()).collect();
     let made = core
@@ -215,13 +226,19 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
             &ids,
         )
         .await?;
+    let mut flags = Vec::new();
+    let mut detail = Vec::new();
     if let Some(first) = missing.first() {
+        flags.push(crate::infer::verify::FLAG_LITERALS.to_string());
+        detail.push(format!("missing literal: {first}"));
+    }
+    if let Some(why) = &unchecked {
+        flags.push(FLAG_UNCHECKED.to_string());
+        detail.push(unchecked_detail(why));
+    }
+    if !flags.is_empty() {
         core.store
-            .set_artifact_flags(
-                &made.id,
-                &[crate::infer::verify::FLAG_LITERALS.to_string()],
-                Some(&format!("missing literal: {first}")),
-            )
+            .set_artifact_flags(&made.id, &flags, Some(&detail.join("; ")))
             .await?;
     }
     core.store

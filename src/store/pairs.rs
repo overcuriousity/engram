@@ -97,6 +97,8 @@ pub enum Net {
     Wide,
     /// A judged decision queued it.
     Decide,
+    /// A neighbour shown at capture was judged a duplicate or a contradiction of the new note.
+    Shown,
 }
 
 impl Net {
@@ -104,6 +106,7 @@ impl Net {
         match self {
             Net::Wide => "wide",
             Net::Decide => "decide",
+            Net::Shown => "shown",
         }
     }
 
@@ -111,6 +114,7 @@ impl Net {
     fn parse(s: &str) -> Self {
         match s {
             "decide" => Net::Decide,
+            "shown" => Net::Shown,
             _ => Net::Wide,
         }
     }

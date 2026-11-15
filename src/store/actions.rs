@@ -311,7 +311,9 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        // The ones this call stamped: this subject and kind, undone at `at`.
+        // The ones this call stamped: this subject and kind, undone at `at`. `at` is in seconds, so
+        // rows of this subject and kind undone earlier in the same second match too; their
+        // decision is already `undone` and the outcome guard leaves it alone.
         sqlx::query!(
             "UPDATE decisions SET outcome = 'undone', outcome_at = ?
               WHERE (outcome IS NULL OR outcome = 'kept')
@@ -350,6 +352,7 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
+        // As in `undo_action_on`: matched by the second, guarded by the outcome.
         sqlx::query!(
             "UPDATE decisions SET outcome = 'undone', outcome_at = ?
               WHERE (outcome IS NULL OR outcome = 'kept')
