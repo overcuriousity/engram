@@ -308,7 +308,9 @@ mod tests {
         let now = crate::store::now();
         let rows = serde_json::json!([
             { "title": "Send the invoice", "moment": { "at": now - 3_600 } },
-            { "title": "Call the bank", "moment": { "at": now + 7_200 } },
+            // Half an hour of slack: `ago_or_ahead` floors against its own clock, so exactly two
+            // hours reads "in 1 h" when a second passes on the way.
+            { "title": "Call the bank", "moment": { "at": now + 9_000 } },
             { "title": "Something, sometime", "moment": { "at": null } },
         ]);
         let out = render_due(&face(), &rows);

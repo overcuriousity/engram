@@ -51,6 +51,9 @@ password_hash = "{hash}"
         .current_dir(dir.path())
         .env("NOTIFY_SOCKET", &sock)
         .env_remove("WATCHDOG_USEC")
+        // As a unit gets it. With no verb, a piped stdin is read to its end as a capture, and a
+        // test run whose stdin is a pipe nobody closes would wait on it instead of listening.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::fs::File::create(dir.path().join("stderr.log")).unwrap())
         .spawn()
