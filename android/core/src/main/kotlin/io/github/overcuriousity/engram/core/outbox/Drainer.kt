@@ -110,7 +110,9 @@ internal class Drainer(
                 // `verify` went with the other answers the base now gives
                 // itself — a good answer confirms the notes it drew on — and
                 // is retired unsent for the same reason they are.
-                if (op == "verify") outbox.delete(row.id)
+                // `deprecate` went when Delete became the one way out of
+                // results by hand; a row an older build queued goes the same way.
+                if (op == "verify" || op == "deprecate") outbox.delete(row.id)
                 else settle(row, transport.artifactOp(artifact, op), goneIsSettled = true)
             }
             // Deleted on the web while this phone was offline is deleted.

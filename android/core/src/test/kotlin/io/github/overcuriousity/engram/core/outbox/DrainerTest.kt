@@ -157,18 +157,16 @@ class DrainerTest {
     }
 
     @Test fun eachDecisionGoesToItsOwnRoute() = runTest {
-        box.enqueueArtifactOp("art-b", ArtifactOp.deprecate); now += 1
         box.enqueueArtifactOp("art-b", ArtifactOp.reactivate); now += 1
         box.enqueueArtifactOp("art-d", ArtifactOp.unsupersede); now += 1
         box.enqueueMergeUndo("merge-1"); now += 1
         box.enqueueArtifactDelete("art-c")
-        repeat(5) { server.enqueue(MockResponse(code = 204)) }
+        repeat(4) { server.enqueue(MockResponse(code = 204)) }
 
         assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
-        val sent = (1..5).map { server.takeRequest() }
+        val sent = (1..4).map { server.takeRequest() }
         assertEquals(
             listOf(
-                "/api/v1/artifacts/art-b/deprecate",
                 "/api/v1/artifacts/art-b/reactivate",
                 "/api/v1/artifacts/art-d/unsupersede",
                 "/api/v1/merges/merge-1/undo",
@@ -176,14 +174,14 @@ class DrainerTest {
             ),
             sent.map { it.target },
         )
-        assertEquals(listOf("POST", "POST", "POST", "POST", "DELETE"), sent.map { it.method })
+        assertEquals(listOf("POST", "POST", "POST", "DELETE"), sent.map { it.method })
         assertEquals("{}", sent[0].body?.utf8())
         assertTrue(box.rows.first().all { it.state == State.sent })
     }
 
     /**
-     * A pair, gap or parked-capture answer an older build queued, and a
-     * still-accurate one. The base settles all of them itself now and the
+     * A pair, gap or parked-capture answer an older build queued, a
+     * still-accurate one and a hide. The base settles all of them itself now and the
      * server has no route for any, so each goes unsent — not held as a failure
      * that a retry can only send into the same refusal — and what is queued
      * behind them still goes.
@@ -199,15 +197,16 @@ class DrainerTest {
             Kind.gap_forget to """{"members":[{"kind":"ask","id":"g1"}]}""",
             Kind.corpus_resolve to """{"corpus":"cor-1","action":"discard"}""",
             Kind.artifact_op to """{"artifact":"art-a","op":"verify"}""",
+            Kind.artifact_op to """{"artifact":"art-a","op":"deprecate"}""",
         ).forEachIndexed { i, (kind, payload) ->
             dao.insert(OutboxRow("old-$i", kind, payload, now, nextAt = now)); now += 1
         }
-        box.enqueueArtifactOp("art-b", ArtifactOp.deprecate)
+        box.enqueueArtifactOp("art-b", ArtifactOp.reactivate)
         server.enqueue(MockResponse(code = 204))
 
         assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
         assertEquals("only the decision the server still takes was sent", 1, server.requestCount)
-        assertEquals("/api/v1/artifacts/art-b/deprecate", server.takeRequest().target)
+        assertEquals("/api/v1/artifacts/art-b/reactivate", server.takeRequest().target)
         val left = box.rows.first().single()
         assertEquals(Kind.artifact_op, left.kind)
         assertEquals(State.sent, left.state)
@@ -255,16 +254,16 @@ class DrainerTest {
     @Test fun aDecisionWhoseSubjectIsGoneElsewhereIsSettled() = runTest {
         // Two doors onto one base: an artifact deleted on the web while the
         // phone was offline is not work still owed, and not a failure to show.
-        box.enqueueArtifactOp("art-gone", ArtifactOp.deprecate)
+        box.enqueueArtifactOp("art-gone", ArtifactOp.reactivate)
         server.enqueue(MockResponse(code = 404, body = """{"error":"no such artifact"}"""))
         assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
         assertEquals(State.sent, box.rows.first().single().state)
     }
 
     @Test fun aDecisionRowWithNoSubjectIsHeldAndTheRestGo() = runTest {
-        box.enqueueArtifactOp("art-b", ArtifactOp.deprecate); now += 1; box.enqueueText("good", null, null)
+        box.enqueueArtifactOp("art-b", ArtifactOp.reactivate); now += 1; box.enqueueText("good", null, null)
         val bad = box.rows.first().minBy { it.createdAt }.id
-        db.outboxDao().let { dao -> dao.update(dao.get(bad)!!.copy(payload = """{"op":"deprecate"}""")) }
+        db.outboxDao().let { dao -> dao.update(dao.get(bad)!!.copy(payload = """{"op":"reactivate"}""")) }
         server.enqueue(MockResponse(code = 201, body = "{}"))
         assertEquals(Drainer.Outcome.Done, drainer.drainOnce())
         val rows = box.rows.first().sortedBy { it.createdAt }

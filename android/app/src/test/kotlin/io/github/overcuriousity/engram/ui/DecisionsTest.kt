@@ -18,27 +18,25 @@ class DecisionsTest {
     @get:Rule val compose = createComposeRule()
 
     @Test fun whichAnswersAnArtifactAdmitsDependsOnWhetherItIsInResults() {
-        assertEquals(listOf(ArtifactAnswer.Hide, ArtifactAnswer.Delete), answersFor("active", null))
+        assertEquals(listOf(ArtifactAnswer.Delete), answersFor("active", null))
         assertEquals(listOf(ArtifactAnswer.Reactivate, ArtifactAnswer.Delete), answersFor("deprecated", null))
         assertEquals(listOf(ArtifactAnswer.Reactivate, ArtifactAnswer.Delete), answersFor("active", "winner"))
     }
 
     @Test fun everyAnswerActsAtOnce() {
-        var hidden = 0
         var deleted = 0
         compose.setContent {
             EngramTheme {
                 Decisions(
                     chunk = Chunk(id = "a", text = "t", status = "active"),
                     decided = null,
-                    onHide = { hidden++ }, onReactivate = {}, onDelete = { deleted++ },
+                    onReactivate = {}, onDelete = { deleted++ },
                     onUndo = {}, onWinner = {},
                 )
             }
         }
         compose.onNodeWithText("Still accurate").assertDoesNotExist()
-        compose.onNodeWithText("Hide from results").performClick()
-        assertEquals(1, hidden)
+        compose.onNodeWithText("Hide from results").assertDoesNotExist()
         compose.onNodeWithText("Delete").performClick()
         assertEquals(1, deleted)
     }
@@ -50,7 +48,7 @@ class DecisionsTest {
                 Decisions(
                     chunk = Chunk(id = "a", text = "t", status = "active"),
                     decided = Decision(ArtifactAnswer.Delete, row = "row-2"),
-                    onHide = {}, onReactivate = {}, onDelete = {}, onUndo = { undone = it }, onWinner = {},
+                    onReactivate = {}, onDelete = {}, onUndo = { undone = it }, onWinner = {},
                 )
             }
         }
@@ -64,7 +62,7 @@ class DecisionsTest {
             EngramTheme {
                 Decisions(
                     chunk = Chunk(id = "a", text = "t", status = "active", supersededBy = "w"),
-                    decided = null, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
+                    decided = null, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
                 )
             }
         }
@@ -80,13 +78,13 @@ class DecisionsTest {
             EngramTheme {
                 Decisions(
                     chunk = Chunk(id = "a", text = "t", status = "active"),
-                    decided = Decision(ArtifactAnswer.Hide, row = "row-1"),
-                    onHide = {}, onReactivate = {}, onDelete = {}, onUndo = { undone = it }, onWinner = {},
+                    decided = Decision(ArtifactAnswer.Reactivate, row = "row-1"),
+                    onReactivate = {}, onDelete = {}, onUndo = { undone = it }, onWinner = {},
                 )
             }
         }
-        compose.onNodeWithText("✓ Hidden from results · the artifact is kept").assertExists()
-        compose.onNodeWithText("Hide from results").assertDoesNotExist()
+        compose.onNodeWithText("✓ Back in results").assertExists()
+        compose.onNodeWithText("Reactivate").assertDoesNotExist()
         compose.onNodeWithText("Undo").performClick()
         assertEquals("row-1", undone)
     }

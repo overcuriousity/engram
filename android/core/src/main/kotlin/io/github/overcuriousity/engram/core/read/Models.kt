@@ -616,7 +616,7 @@ data class SetAside(
 )
 
 /** An answer a set-aside row admits. Each is a route; none of them is a rendering. */
-enum class SetAsideAction { Deprecate, Reactivate, UndoMerge }
+enum class SetAsideAction { Delete, Reactivate, UndoMerge }
 
 /**
  * Which answers a row admits, from its `kind` and nothing else — no reading of
@@ -634,7 +634,7 @@ enum class SetAsideAction { Deprecate, Reactivate, UndoMerge }
  */
 fun actionsFor(kind: String): List<SetAsideAction> = when (kind) {
     "merged" -> listOf(SetAsideAction.UndoMerge)
-    "generated" -> listOf(SetAsideAction.Deprecate)
+    "generated" -> listOf(SetAsideAction.Delete)
     "hidden", "buried" -> listOf(SetAsideAction.Reactivate)
     else -> emptyList()
 }

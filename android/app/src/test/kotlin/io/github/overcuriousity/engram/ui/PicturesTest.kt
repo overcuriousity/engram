@@ -70,7 +70,7 @@ class PicturesTest {
                 Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.background)) {
                     Decisions(
                         chunk = io.github.overcuriousity.engram.core.read.Chunk(id = "a", text = "", status = "active"),
-                        decided = null, onHide = {}, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
+                        decided = null, onReactivate = {}, onDelete = {}, onUndo = {}, onWinner = {},
                     )
                     Markdown(
                         "## Öffnungszeiten Wertstoffhof Bad Aibling\n\n**Adresse:** Thürhamer Straße 21a, 83043 Bad Aibling\n\n" +

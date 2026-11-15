@@ -242,7 +242,7 @@ class ModelsTest {
         assertEquals(listOf(SetAsideAction.Reactivate), actionsFor("hidden"))
         assertEquals(listOf(SetAsideAction.Reactivate), actionsFor("buried"))
         assertEquals(listOf(SetAsideAction.UndoMerge), actionsFor("merged"))
-        assertEquals(listOf(SetAsideAction.Deprecate), actionsFor("generated"))
+        assertEquals(listOf(SetAsideAction.Delete), actionsFor("generated"))
         // An older server's questions: the base answers both itself now, and
         // the routes that answered them are gone, so a row of either kind is
         // shown and offers nothing to press.

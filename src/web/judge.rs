@@ -126,7 +126,6 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/insights", get(insights))
         .route("/insights/set-aside", get(set_aside))
-        .route("/artifacts/{id}/deprecate", post(deprecate))
         .route("/artifacts/{id}/reactivate", post(reactivate))
         .route("/artifacts/{id}/unsupersede", post(unsupersede))
         .route("/merges/{id}/undo", post(undo_merge))
@@ -179,11 +178,6 @@ async fn answer_unsure(
 
 async fn ask_unsure_again(tenant: Tenant, Path(id): Path<String>) -> Result<StatusCode> {
     crate::core::judging::ask_again(&tenant.core, &id).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn deprecate(tenant: Tenant, Path(aid): Path<String>) -> Result<StatusCode> {
-    tenant.core.deprecate(&aid).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -406,11 +400,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deprecating_and_reactivating_an_artifact_round_trips() {
+    async fn reactivating_a_deprecated_artifact_returns_it_to_results_and_hiding_by_hand_is_gone() {
         let (app, cookie, core) = app_session_and_core().await;
         let ids = artifacts(&core, &["a note"]).await;
+        core.deprecate(&ids[0]).await.unwrap();
 
-        for (path, expect_in_results) in [("deprecate", false), ("reactivate", true)] {
+        for (path, status, in_results) in [
+            ("reactivate", StatusCode::NO_CONTENT, true),
+            // Delete, into Trash, is the one way out of results by hand.
+            ("deprecate", StatusCode::NOT_FOUND, true),
+        ] {
             let res = app
                 .clone()
                 .oneshot(post(
@@ -420,10 +419,10 @@ mod tests {
                 ))
                 .await
                 .unwrap();
-            assert_eq!(res.status(), StatusCode::NO_CONTENT, "{path}");
+            assert_eq!(res.status(), status, "{path}");
             assert_eq!(
                 core.store.get_artifact(&ids[0]).await.unwrap().in_results(),
-                expect_in_results,
+                in_results,
                 "after {path}"
             );
         }

@@ -12,6 +12,7 @@ import io.github.overcuriousity.engram.core.contained.Started
 import io.github.overcuriousity.engram.core.db.State
 import io.github.overcuriousity.engram.core.outbox.Drainer
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -124,6 +125,21 @@ class EngramModesTest {
     private fun install(role: Role) = ModelManifest.defaultFor(role)!!.let { m ->
         File(app.filesDir, "contained/models").apply { mkdirs() }.resolve(m.file)
             .also { f -> java.io.RandomAccessFile(f, "rw").use { it.setLength(m.bytes) } }
+    }
+
+    @Test fun aSwitchFinishesThoughTheScreenThatAskedIsGone() = runTest {
+        choose(Mode.contained)
+        val old = Engram.get(app)
+        assertEquals(Mode.contained, old.mode)
+        val asked = launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { Engram.switch(app, Mode.server) }
+        // Stopping the core takes Settings off the display, and its scope with it.
+        asked.cancel()
+        asked.join()
+        val now = Engram.current.value!!
+        open += now
+        assertNotSame(old, now)
+        assertEquals(Mode.server, now.mode)
+        assertSame(now, Engram.get(app))
     }
 
     @Test fun aModelThatArrivesIsNamedAfterARestart() = runTest {

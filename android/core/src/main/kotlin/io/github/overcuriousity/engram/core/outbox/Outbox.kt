@@ -20,7 +20,7 @@ import java.util.UUID
 class Incoming(val name: String, val mime: String, val open: () -> InputStream)
 
 /** The three answers an artifact admits that have an undo. Each is a route of its own. */
-enum class ArtifactOp { deprecate, reactivate, unsupersede }
+enum class ArtifactOp { reactivate, unsupersede }
 
 /**
  * The load-bearing idea. A share is copied out of the sender's URI into our
@@ -60,7 +60,7 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
     }
 
     // ── Decisions ────────────────────────────────────────────────────────────
-    // What a person still decides about the base — hiding a note, bringing one
+    // What a person still decides about the base — bringing a hidden note
     // back, taking back something the base did — is a row here rather than a
     // call from the screen. A decision made on a train is a decision; the
     // queue is the one place that knows what is owed, and the one place an
@@ -70,10 +70,8 @@ class Outbox(private val db: Db, private val dir: File, private val clock: () ->
         insert(Kind.artifact_op, buildJsonObject { put("artifact", artifactId); put("op", op.name) })
 
     /**
-     * Delete for good. Not an [ArtifactOp]: those three are answers with an
-     * undo, and this is the one that has none — which is why the screen asks
-     * before it is enqueued, and why the queue is the last place it can be
-     * taken back from.
+     * Into Trash, where the server keeps it for 30 days. Not an [ArtifactOp]:
+     * it is a `DELETE`, and its way back once delivered is the restore route.
      */
     suspend fun enqueueArtifactDelete(artifactId: String) =
         insert(Kind.artifact_delete, buildJsonObject { put("artifact", artifactId) })

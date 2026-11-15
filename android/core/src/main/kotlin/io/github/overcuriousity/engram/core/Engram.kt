@@ -25,6 +25,8 @@ import io.github.overcuriousity.engram.core.read.ServerReader
 import io.github.overcuriousity.engram.core.sync.Sync
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -227,14 +229,18 @@ class Engram internal constructor(
         // Pairing is a server's. A contained instance is switched away from first: see Nav.
         check(contained == null) { "contained" }
         val c = Pairing.claim(uri, deviceName, userAgent)
-        store.set(c)
-        refused.value = false
-        pinMismatch.value = null
-        outbox.requeueRefused()
-        // A registration that fails to reach the new server is retried by the
-        // push worker; it must not fail the pairing.
-        runCatching { push.resend() }
-        Sync.kick(app)
+        // The first pairing takes the Pair screen off the display, and its
+        // scope with it: what follows the connection must still happen.
+        withContext(NonCancellable) {
+            store.set(c)
+            refused.value = false
+            pinMismatch.value = null
+            outbox.requeueRefused()
+            // A registration that fails to reach the new server is retried by the
+            // push worker; it must not fail the pairing.
+            runCatching { push.resend() }
+            Sync.kick(app)
+        }
     }
 
     suspend fun unpair() {
@@ -270,13 +276,17 @@ class Engram internal constructor(
          * nothing, so there is nothing to carry over: the old instance is shut
          * and a new one reads the new mode, as a fresh process would.
          */
-        suspend fun switch(context: Context, mode: Mode): Engram {
+        suspend fun switch(context: Context, mode: Mode): Engram = withContext(NonCancellable) {
+            // Not cancellable: the press comes from a screen that stopping the
+            // core takes off the display, and its scope goes with it. Stopped
+            // halfway, the mode was stored and the old instance carried on
+            // until the app was started again.
             val old = get(context)
-            if (old.mode == mode && old.modes.chosen == mode) return old
+            if (old.mode == mode && old.modes.chosen == mode) return@withContext old
             Sync.cancel(context)
             old.modes.chosen = mode
             old.shutdown()
-            return synchronized(this) { build(context.applicationContext).also { instance = it; _current.value = it } }
+            synchronized(this@Companion) { build(context.applicationContext).also { instance = it; _current.value = it } }
         }
     }
 }

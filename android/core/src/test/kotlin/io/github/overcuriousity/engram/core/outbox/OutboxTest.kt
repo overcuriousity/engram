@@ -112,23 +112,23 @@ class OutboxTest {
     }
 
     @Test fun everyDecisionIsARowAndNotACall() = runTest {
-        box.enqueueArtifactOp("art-b", ArtifactOp.deprecate)
+        box.enqueueArtifactOp("art-b", ArtifactOp.reactivate)
         box.enqueueMergeUndo("merge-1")
         box.enqueueArtifactDelete("art-c")
         val byKind = box.rows.first().associateBy { it.kind }
         assertEquals(3, byKind.size)
         assertTrue(byKind[Kind.artifact_op]!!.payload.contains("\"artifact\":\"art-b\""))
-        assertTrue(byKind[Kind.artifact_op]!!.payload.contains("\"op\":\"deprecate\""))
+        assertTrue(byKind[Kind.artifact_op]!!.payload.contains("\"op\":\"reactivate\""))
         assertTrue(byKind[Kind.merge_undo]!!.payload.contains("\"merge\":\"merge-1\""))
         assertTrue(byKind[Kind.artifact_delete]!!.payload.contains("\"artifact\":\"art-c\""))
         assertTrue(box.rows.first().all { it.state == State.queued })
     }
 
     @Test fun anAnswerIsTakenBackWhileItIsStillQueuedAndNotAfter() = runTest {
-        val id = box.enqueueArtifactOp("art-a", ArtifactOp.deprecate)
+        val id = box.enqueueArtifactOp("art-a", ArtifactOp.reactivate)
         assertTrue(box.undo(id))
         assertTrue(box.rows.first().isEmpty())
-        val sent = box.enqueueArtifactOp("art-b", ArtifactOp.deprecate)
+        val sent = box.enqueueArtifactOp("art-b", ArtifactOp.reactivate)
         box.sent(sent, 204, "")
         assertFalse("what the server already has is not ours to take back", box.undo(sent))
         assertEquals(1, box.rows.first().size)

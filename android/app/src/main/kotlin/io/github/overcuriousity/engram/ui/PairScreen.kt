@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
 private const val MIN_SERVER = "0.1.0"
 
 @Composable
-fun PairScreen(engram: Engram, initialText: String?, knownOrigin: String? = null) {
+fun PairScreen(engram: Engram, initialText: String?, knownOrigin: String? = null, onPaired: () -> Unit = {}) {
     val scope = rememberCoroutineScope()
     var text by remember { mutableStateOf(initialText ?: "") }
     var busy by remember { mutableStateOf<String?>(null) }
@@ -43,6 +43,9 @@ fun PairScreen(engram: Engram, initialText: String?, knownOrigin: String? = null
         scope.launch {
             try {
                 engram.pair(uri)
+                // A phone that was already paired stays on this screen, and
+                // its scanner would read the same, now spent, code again.
+                onPaired()
             } catch (e: ClaimRefused) {
                 error = "Code expired or used · press the button again"
             } catch (e: Exception) {

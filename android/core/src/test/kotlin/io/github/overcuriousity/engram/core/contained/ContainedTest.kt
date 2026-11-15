@@ -2,6 +2,8 @@ package io.github.overcuriousity.engram.core.contained
 
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.*
 import org.junit.Test
@@ -55,6 +57,17 @@ class ContainedTest {
         val c = Contained(dir, { Setup() }, "a phone", { _, _ -> throw UnsatisfiedLinkError("no engram_android") })
         assertNull(c.ensure())
         assertTrue(c.state.value is CoreState.Unavailable)
+    }
+
+    @Test fun aRestartFinishesThoughTheScreenThatAskedIsGone() = runTest {
+        val c = Contained(dir, { Setup() }, "a phone", { _, _ -> Started(3, "t") }, { Thread.sleep(20) })
+        c.ensure()!!
+        val asked = launch { c.restart() }
+        // What the app does: the connection drops, and the screen that asked leaves with its scope.
+        launch { c.connected.first { it == null }; asked.cancel() }
+        asked.join()
+        assertNotNull(c.connected.value)
+        assertTrue(c.state.value is CoreState.Running)
     }
 
     @Test fun aRestartIsANewCoreOverWhatIsThereNow() = runTest {

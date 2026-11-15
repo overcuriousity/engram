@@ -208,7 +208,7 @@ fun JournalScreen(engram: Engram, onArtifact: (String) -> Unit, onCorpus: (Strin
                 capped = s.capped,
                 onAction = { row, a ->
                     when (a) {
-                        SetAsideAction.Deprecate -> engram.outbox.enqueueArtifactOp(row.subjectId, ArtifactOp.deprecate)
+                        SetAsideAction.Delete -> engram.outbox.enqueueArtifactDelete(row.subjectId)
                         SetAsideAction.Reactivate -> engram.outbox.enqueueArtifactOp(row.subjectId, ArtifactOp.reactivate)
                         SetAsideAction.UndoMerge -> engram.outbox.enqueueMergeUndo(row.subjectId)
                     }
@@ -224,7 +224,7 @@ fun JournalScreen(engram: Engram, onArtifact: (String) -> Unit, onCorpus: (Strin
 
 /** What a journal row's button says. The answer is the server's; the words are ours. */
 fun setAsideWords(a: SetAsideAction): String = when (a) {
-    SetAsideAction.Deprecate -> "Hide"
+    SetAsideAction.Delete -> "Delete"
     SetAsideAction.Reactivate -> "Return to results"
     SetAsideAction.UndoMerge -> "Undo the merge"
 }
