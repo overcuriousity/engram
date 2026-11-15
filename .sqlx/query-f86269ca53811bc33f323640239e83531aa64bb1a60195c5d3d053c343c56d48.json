@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id AS \"id!\" FROM decide_events\n                WHERE model = ? AND not_held = 0 AND verdict IN ('right', 'nothing_here')",
+  "query": "SELECT id AS \"id!\" FROM decide_events\n                WHERE decider = ? AND not_held = 0 AND verdict IN ('right', 'nothing_here')",
   "describe": {
     "columns": [
       {
@@ -22,5 +22,5 @@
       true
     ]
   },
-  "hash": "d625de5420aacf3fca2d70e90ed110b5833fa1cc7707d7ba13179a59266deb83"
+  "hash": "f86269ca53811bc33f323640239e83531aa64bb1a60195c5d3d053c343c56d48"
 }

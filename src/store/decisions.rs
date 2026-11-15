@@ -31,7 +31,10 @@ pub struct NewDecision {
     pub prior: String,
     pub standing: String,
     pub not_held: bool,
+    /// As the server named itself.
     pub model: String,
+    /// The configured decision model.
+    pub decider: String,
     pub read: usize,
     pub dropped: usize,
     pub query_vec: Vec<f32>,
@@ -78,8 +81,8 @@ impl Store {
         sqlx::query!(
             "INSERT INTO decide_events
                (id, question, questions, situation, scope, filters, answers, prior, standing,
-                not_held, model, read, dropped, query_vec, vec_dim, embed_model, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                not_held, model, decider, read, dropped, query_vec, vec_dim, embed_model, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &id,
             &d.question,
             &d.questions,
@@ -91,6 +94,7 @@ impl Store {
             &d.standing,
             d.not_held as i64,
             &d.model,
+            &d.decider,
             d.read as i64,
             d.dropped as i64,
             vec_to_blob(&d.query_vec),
@@ -303,7 +307,9 @@ impl Store {
         model: &str,
     ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
         let era = crate::core::decide::settled_era(model);
-        let since = self.moved_at(crate::core::decide::SETTLED_ID, &era).await?;
+        let since = self
+            .moved_at(crate::core::decide::SETTLED_ID, &era, false)
+            .await?;
         self.decides_since(model, since).await
     }
 
@@ -315,7 +321,7 @@ impl Store {
     ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
         let rows = sqlx::query!(
             r#"SELECT questions, standing, not_held AS "not_held!: i64", verdict FROM decide_events
-                WHERE model = ? AND created_at > ?"#,
+                WHERE decider = ? AND created_at > ?"#,
             model,
             since
         )
@@ -350,10 +356,11 @@ pub(crate) mod test_support {
     use super::*;
     use crate::store::Store;
 
-    /// A judged decision of `model` on one noul, `verdict`, whose standing is `standing`.
+    /// A judged decision made under the configured `decider` on one noul, `verdict`, whose standing
+    /// is `standing`; the server named itself otherwise.
     pub(crate) async fn judged(
         store: &Store,
-        model: &str,
+        decider: &str,
         standing: &str,
         not_held: bool,
         verdict: AskVerdict,
@@ -370,7 +377,8 @@ pub(crate) mod test_support {
                 prior: "{}".into(),
                 standing: serde_json::json!({ "verdict": standing }).to_string(),
                 not_held,
-                model: model.into(),
+                model: "as-reported".into(),
+                decider: decider.into(),
                 read: 0,
                 dropped: 0,
                 query_vec: vec![1.0],
@@ -415,6 +423,7 @@ mod tests {
             standing: r#"{"c":"settled"}"#.into(),
             not_held: false,
             model: "clef".into(),
+            decider: "clef".into(),
             read: 3,
             dropped: 1,
             query_vec: vec![0.1, 0.2, 0.3],

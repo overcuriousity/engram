@@ -102,7 +102,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 27] = [
+        const ADDITIVE: [(&str, &str, &str); 30] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -243,6 +243,23 @@ impl Store {
                 "artifact_pairs",
                 "net",
                 "ALTER TABLE artifact_pairs ADD COLUMN net TEXT",
+            ),
+            // NULL: a decision from before counts toward no tuned line, like a new era.
+            (
+                "decide_events",
+                "decider",
+                "ALTER TABLE decide_events ADD COLUMN decider TEXT",
+            ),
+            // A row from before moved both lines as far as anyone can tell.
+            (
+                "decision_thresholds",
+                "act_moved",
+                "ALTER TABLE decision_thresholds ADD COLUMN act_moved INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
+                "decision_thresholds",
+                "ask_moved",
+                "ALTER TABLE decision_thresholds ADD COLUMN ask_moved INTEGER NOT NULL DEFAULT 1",
             ),
         ];
         apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;

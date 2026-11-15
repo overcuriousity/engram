@@ -1509,8 +1509,8 @@ mod tests {
             &["keep", "drop"],
         )
         .await;
-        // The decision's model is the store test's; the page reads the live decider's.
-        sqlx::query!("UPDATE decide_events SET model = 'fake-decider'")
+        // The decision's decider is the store test's; the page reads the live decider's.
+        sqlx::query!("UPDATE decide_events SET decider = 'fake-decider'")
             .execute(&core.store.pool)
             .await
             .unwrap();

@@ -757,24 +757,24 @@ pub fn next_act_at(
         return None;
     }
     let share = r.undone as f64 / r.acted as f64;
-    if share > undo_target {
-        Some(two_places(current + STEP)).filter(|&n| n <= hi + 1e-9)
-    } else if share < undo_target / 2.0 && r.asks_open > 0 {
-        Some(two_places(current - STEP)).filter(|&n| n >= lo - 1e-9)
+    // A step that would cross a bound stops at it; at the bound, nothing moves.
+    if share > undo_target && current < hi - 1e-9 {
+        Some(two_places(current + STEP).min(hi))
+    } else if share < undo_target / 2.0 && r.asks_open > 0 && current > lo + 1e-9 {
+        Some(two_places(current - STEP).max(lo))
     } else {
         None
     }
 }
 
-/// A step up when a row lapsed since the last move; a step down when every row was answered and
-/// decisions wait for a seat. Never under 0.50 by its own move, never within a step of `act_at`.
+/// A step up when a row lapsed since the ask line last moved; a step down when, since then, none
+/// lapsed, some were answered and rows wait. Never under 0.50 by its own move, never within a step
+/// of `act_at`.
 pub fn next_ask_at(current: f64, act_at: f64, r: AskRecord) -> Option<f64> {
     let want = if r.lapsed_since_move > 0 {
         two_places(current + STEP)
-    } else if cleared(r) {
-        Some(two_places(current - STEP))
-            .filter(|&n| n >= ASK_FLOOR - 1e-9)
-            .unwrap_or(current)
+    } else if keeping_up(r) && current > ASK_FLOOR + 1e-9 {
+        two_places(current - STEP).max(ASK_FLOOR)
     } else {
         current
     };
@@ -789,9 +789,9 @@ fn acted_reason(r: ActRecord) -> String {
     )
 }
 
-/// Every row answered since the last move, none open, and decisions waiting for a seat.
-fn cleared(r: AskRecord) -> bool {
-    r.open == 0 && r.answered_since_move > 0 && r.waiting > 0
+/// Since the ask line last moved: none lapsed, some answered, and rows wait for a seat.
+fn keeping_up(r: AskRecord) -> bool {
+    r.lapsed_since_move == 0 && r.answered_since_move > 0 && r.waiting > 0
 }
 
 /// `None` when the ask line moved only to stay a step under the act line.
@@ -799,7 +799,10 @@ fn ask_reason(r: AskRecord) -> Option<String> {
     match r.lapsed_since_move {
         1 => Some("a row lapsed unanswered".into()),
         n if n > 1 => Some(format!("{n} rows lapsed unanswered")),
-        _ if cleared(r) => Some(format!("every row answered, {} waiting", r.waiting)),
+        _ if keeping_up(r) => Some(format!(
+            "{} answered and none lapsed, {} waiting",
+            r.answered_since_move, r.waiting
+        )),
         _ => None,
     }
 }
@@ -836,7 +839,7 @@ pub async fn tune_questions(core: &Core) -> Result<usize> {
             act_at,
             ask_at: ask.unwrap_or(t.ask_at),
         };
-        core.store.move_thresholds(a.id, &era, to, &reason).await?;
+        core.store.move_lines(a.id, &era, t, to, &reason).await?;
         tracing::info!(question = a.id, %era, act_at = to.act_at, ask_at = to.ask_at, %reason, "a judgement line moved");
         moved += 1;
     }
@@ -2317,6 +2320,11 @@ mod question_tests {
         );
         assert_eq!(next_act_at(0.90, act(100, 5, 3), 30, 0.05, LO, HI), None);
         assert_eq!(next_act_at(0.99, act(100, 6, 0), 30, 0.05, LO, HI), None);
+        // A step past the bound stops at it.
+        assert_eq!(
+            next_act_at(0.98, act(100, 6, 0), 30, 0.05, LO, HI),
+            Some(0.99)
+        );
     }
 
     #[test]
@@ -2326,6 +2334,10 @@ mod question_tests {
             Some(0.88)
         );
         assert_eq!(next_act_at(0.80, act(60, 1, 3), 30, 0.05, LO, HI), None);
+        assert_eq!(
+            next_act_at(0.81, act(60, 1, 3), 30, 0.05, LO, HI),
+            Some(0.80)
+        );
     }
 
     #[test]
@@ -2339,8 +2351,9 @@ mod question_tests {
         assert_eq!(next_ask_at(0.60, 0.90, ask(1, 0, 5, 0)), Some(0.62));
         assert_eq!(next_ask_at(0.60, 0.90, ask(1, 4, 0, 3)), Some(0.62));
         assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 0, 3)), Some(0.58));
-        // Rows still open, nothing waiting, or nothing answered: it stays.
-        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 1, 3)), None);
+        // Rows still open do not keep it up: answered, none lapsed and rows waiting brings it down.
+        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 20, 3)), Some(0.58));
+        // Nothing waiting, or nothing answered: it stays.
         assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 0, 0)), None);
         assert_eq!(next_ask_at(0.60, 0.90, ask(0, 0, 0, 3)), None);
     }
@@ -2351,7 +2364,8 @@ mod question_tests {
         // A lowered act line takes the ask line with it.
         assert_eq!(next_ask_at(0.88, 0.88, AskRecord::default()), Some(0.86));
         assert_eq!(next_ask_at(0.50, 0.90, ask(0, 4, 0, 3)), None);
-        assert_eq!(next_ask_at(0.51, 0.90, ask(0, 4, 0, 3)), None);
+        assert_eq!(next_ask_at(0.51, 0.90, ask(0, 4, 20, 3)), Some(0.50));
+        assert_eq!(next_ask_at(0.89, 0.92, ask(1, 0, 20, 0)), Some(0.90));
     }
 
     #[tokio::test]
@@ -2402,11 +2416,11 @@ mod question_tests {
             (moves[0].question_id.as_str(), moves[0].era.as_str()),
             ("reap_worth", "rule-decider/v1")
         );
-        // The row asked above waits and every other was answered: the ask line comes down too.
+        // The row asked above waits, none lapsed: the ask line comes down too.
         assert_eq!((moves[0].act_at, moves[0].ask_at), (0.97, 0.58));
         assert_eq!(
             moves[0].reason,
-            "0 of 30 acted or answered were undone or corrected; every row answered, 1 waiting"
+            "0 of 30 acted or answered were undone or corrected; 30 answered and none lapsed, 1 waiting"
         );
         let after = crate::core::judging::ask(&core, &reap, subjects("y"), Some("s"))
             .await
@@ -2450,7 +2464,7 @@ mod question_tests {
         )
         .await;
         assert_eq!(tune_questions(&core).await.unwrap(), 2);
-        // Every row answered and two waiting: the ask line comes down a step too.
+        // Answered, none lapsed and two waiting: the ask line comes down a step too.
         assert_eq!(
             core.thresholds(&reap).await.unwrap(),
             Thresholds {
@@ -2480,7 +2494,7 @@ mod question_tests {
         );
         assert_eq!(
             reason("reap_worth"),
-            "0 of 30 acted or answered were undone or corrected; every row answered, 2 waiting"
+            "0 of 30 acted or answered were undone or corrected; 30 answered and none lapsed, 2 waiting"
         );
     }
 
@@ -2524,5 +2538,68 @@ mod question_tests {
         three_of_41_undone(&core).await;
         pass(&core).await.unwrap();
         assert_eq!(core.store.threshold_moves(10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_ask_only_move_leaves_the_act_lines_evidence() {
+        let core = full().await;
+        let reap = catalogue::reap_worth();
+        let back = |secs: i64| {
+            let store = core.store.clone();
+            async move {
+                // runtime: test-only backdating.
+                sqlx::query(
+                    "UPDATE decisions SET decided_at = ?, outcome_at = COALESCE(outcome_at, ?)",
+                )
+                .bind(crate::store::now() - secs)
+                .bind(crate::store::now() - secs)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+            }
+        };
+        seed(
+            &core,
+            &reap,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            25,
+        )
+        .await;
+        seed(&core, &reap, Band::Ask, State::Lapsed, None, 1).await;
+        // runtime: test-only stamp: the row lapsed now.
+        sqlx::query("UPDATE decisions SET outcome_at = ? WHERE state = 'lapsed'")
+            .bind(crate::store::now())
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        back(100).await;
+        assert_eq!(tune_questions(&core).await.unwrap(), 1);
+        assert_eq!(
+            core.thresholds(&reap).await.unwrap(),
+            Thresholds {
+                act_at: 0.99,
+                ask_at: 0.62
+            }
+        );
+        // runtime: test-only backdating of that move.
+        sqlx::query("UPDATE decision_thresholds SET moved_at = ?")
+            .bind(crate::store::now() - 50)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        seed(
+            &core,
+            &reap,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            5,
+        )
+        .await;
+        seed(&core, &reap, Band::Ask, State::Waiting, None, 1).await;
+        assert_eq!(tune_questions(&core).await.unwrap(), 1);
+        assert_eq!(core.thresholds(&reap).await.unwrap().act_at, 0.97);
     }
 }

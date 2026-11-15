@@ -607,6 +607,7 @@ impl Store {
         }))
     }
 
+    /// Both lines, as set by hand or by a test.
     pub async fn move_thresholds(
         &self,
         question_id: &str,
@@ -614,15 +615,47 @@ impl Store {
         t: Thresholds,
         reason: &str,
     ) -> Result<()> {
+        self.record_move(question_id, era, t, (true, true), reason)
+            .await
+    }
+
+    /// The tuner's move from `from` to `to`; each line that changed starts its evidence over.
+    pub async fn move_lines(
+        &self,
+        question_id: &str,
+        era: &str,
+        from: Thresholds,
+        to: Thresholds,
+        reason: &str,
+    ) -> Result<()> {
+        let changed = |a: f64, b: f64| (a - b).abs() > 1e-9;
+        let moved = (
+            changed(from.act_at, to.act_at),
+            changed(from.ask_at, to.ask_at),
+        );
+        self.record_move(question_id, era, to, moved, reason).await
+    }
+
+    async fn record_move(
+        &self,
+        question_id: &str,
+        era: &str,
+        t: Thresholds,
+        (act_moved, ask_moved): (bool, bool),
+        reason: &str,
+    ) -> Result<()> {
         sqlx::query!(
-            "INSERT INTO decision_thresholds (question_id, era, act_at, ask_at, reason, moved_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO decision_thresholds
+               (question_id, era, act_at, ask_at, reason, moved_at, act_moved, ask_moved)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             question_id,
             era,
             t.act_at,
             t.ask_at,
             reason,
-            now()
+            now(),
+            act_moved,
+            ask_moved
         )
         .execute(&self.pool)
         .await?;
@@ -646,19 +679,26 @@ impl Store {
         .await?)
     }
 
-    /// When the line last moved, else 0: what was decided before stands for the line before.
-    pub(crate) async fn moved_at(&self, question_id: &str, era: &str) -> Result<i64> {
-        Ok(self
-            .last_threshold_move(question_id, era)
-            .await?
-            .map_or(0, |m| m.moved_at))
+    /// When the act line (`ask` false) or the ask line last moved, else 0: what was decided before
+    /// stands for the line before.
+    pub(crate) async fn moved_at(&self, question_id: &str, era: &str, ask: bool) -> Result<i64> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT COALESCE(MAX(moved_at), 0) AS "at!: i64" FROM decision_thresholds
+                WHERE question_id = ? AND era = ?
+                  AND CASE WHEN ? THEN ask_moved ELSE act_moved END = 1"#,
+            question_id,
+            era,
+            ask
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
-    /// Decided after the last move: model acts kept or undone, and answered Unsure rows (`corrected`
+    /// Decided after the act line last moved: model acts kept or undone, and answered Unsure rows (`corrected`
     /// as undone). Not a refused act (no journal row, or `refused`), a check or the pursuit gate.
     /// An undone merge is one decision however many rows it wrote.
     pub async fn act_record(&self, question_id: &str, era: &str) -> Result<ActRecord> {
-        let since = self.moved_at(question_id, era).await?;
+        let since = self.moved_at(question_id, era, false).await?;
         let r = sqlx::query!(
             r#"SELECT COUNT(*) AS "acted!: i64",
                       COALESCE(SUM(outcome IN ('undone', 'corrected')), 0) AS "undone!: i64"
@@ -689,10 +729,10 @@ impl Store {
         })
     }
 
-    /// Lapses and answers since the last move (by `outcome_at`, which a lapse stamps), and the
+    /// Lapses and answers since the ask line last moved (by `outcome_at`, which a lapse stamps), and the
     /// rows open and waiting now.
     pub async fn ask_record(&self, question_id: &str, era: &str) -> Result<AskRecord> {
-        let since = self.moved_at(question_id, era).await?;
+        let since = self.moved_at(question_id, era, true).await?;
         let r = sqlx::query!(
             r#"SELECT
                  COALESCE(SUM(state = 'lapsed' AND outcome_at > ?1), 0) AS "lapsed!: i64",
@@ -1401,6 +1441,86 @@ mod tests {
                 open: 1,
                 waiting: 4
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn the_act_line_keeps_its_evidence_across_an_ask_only_move() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        let t = |act_at, ask_at| Thresholds { act_at, ask_at };
+        let early = logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            25,
+        )
+        .await;
+        for id in &early {
+            age(&store, id, now() - 100).await;
+            // runtime: test-only backdating.
+            sqlx::query("UPDATE decisions SET outcome_at = ? WHERE id = ?")
+                .bind(now() - 100)
+                .bind(id)
+                .execute(&store.pool)
+                .await
+                .unwrap();
+        }
+        store
+            .move_lines(
+                q,
+                "m/v1",
+                t(0.9, 0.6),
+                t(0.9, 0.62),
+                "a row lapsed unanswered",
+            )
+            .await
+            .unwrap();
+        // runtime: test-only backdating.
+        sqlx::query("UPDATE decision_thresholds SET moved_at = ?")
+            .bind(now() - 50)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            5,
+        )
+        .await;
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().acted, 30);
+        assert_eq!(
+            store
+                .ask_record(q, "m/v1")
+                .await
+                .unwrap()
+                .answered_since_move,
+            5
+        );
+        // An act-only move starts the act line over and leaves the ask line's evidence.
+        store
+            .move_lines(q, "m/v1", t(0.9, 0.62), t(0.88, 0.62), "moved")
+            .await
+            .unwrap();
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().acted, 0);
+        assert_eq!(
+            store
+                .ask_record(q, "m/v1")
+                .await
+                .unwrap()
+                .answered_since_move,
+            5
+        );
+        assert_eq!(
+            store.thresholds_in_force(q, "m/v1").await.unwrap(),
+            Some(t(0.88, 0.62))
         );
     }
 }

@@ -194,14 +194,14 @@ impl Store {
         })
     }
 
-    /// Over this model's held decisions judged `right` or `nothing_here`: every bearing note was
+    /// Over the held decisions made under this configured model judged `right` or `nothing_here`: every bearing note was
     /// ruled on; one held up when its verdict was `right` and its own reading picked the same.
     pub async fn bears_record(&self, model: &str) -> Result<BearsRecord> {
         use crate::core::decide::{standing::pick, wire};
         use crate::store::asks::AskVerdict;
         let ids = sqlx::query_scalar!(
             r#"SELECT id AS "id!" FROM decide_events
-                WHERE model = ? AND not_held = 0 AND verdict IN ('right', 'nothing_here')"#,
+                WHERE decider = ? AND not_held = 0 AND verdict IN ('right', 'nothing_here')"#,
             model
         )
         .fetch_all(&self.pool)
@@ -628,7 +628,8 @@ pub(crate) mod tests {
                 prior: "{}".into(),
                 standing: "{}".into(),
                 not_held: false,
-                model: M.into(),
+                model: "as-reported".into(),
+                decider: M.into(),
                 read: reads.len() + 1,
                 dropped: 0,
                 query_vec: vec![1.0],

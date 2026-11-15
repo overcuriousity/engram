@@ -552,7 +552,10 @@ CREATE TABLE IF NOT EXISTS decide_events (
   -- {key: standing}
   standing     TEXT NOT NULL,
   not_held     INTEGER NOT NULL,
+  -- As the server named itself.
   model        TEXT NOT NULL,
+  -- The configured decision model, which the tuner and the figures read; NULL before it was kept.
+  decider      TEXT,
   read         INTEGER NOT NULL,
   dropped      INTEGER NOT NULL,
   query_vec    BLOB NOT NULL,
@@ -928,7 +931,10 @@ CREATE TABLE IF NOT EXISTS decision_thresholds (
   act_at REAL NOT NULL,
   ask_at REAL NOT NULL,
   reason TEXT NOT NULL,
-  moved_at INTEGER NOT NULL
+  moved_at INTEGER NOT NULL,
+  -- Which line this row moved: each line's evidence is counted from its own last move.
+  act_moved INTEGER NOT NULL DEFAULT 1,
+  ask_moved INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_corpus_actions_open
   ON corpus_actions(kind, at) WHERE undone_at IS NULL;

@@ -1818,6 +1818,7 @@ mod tests {
                 standing: r#"{"verdict":"not_held"}"#.into(),
                 not_held: true,
                 model: "clef".into(),
+                decider: "clef".into(),
                 read: 0,
                 dropped: 0,
                 query_vec: vec,

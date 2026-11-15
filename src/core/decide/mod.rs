@@ -518,6 +518,7 @@ impl Core {
             standing: wire::standing_text(d),
             not_held: !held,
             model: d.model.clone(),
+            decider: self.decider.model().to_string(),
             read: d.read,
             dropped: d.dropped,
             query_vec,
@@ -1581,32 +1582,81 @@ pub(crate) mod tests {
         assert_eq!(decide_gaps(&core).await.len(), 1);
     }
 
-    /// 30 held `settled` decisions of the core's model, 3 judged wrong; and the judgements that
-    /// would tell about `split_at` and `bears_min`, which no tuner reads.
-    async fn judged_thirty(core: &Core, wrong: usize) {
+    /// 30 held `settled` decisions made through `Core::decide` and judged by the person, `wrong` of
+    /// them wrong; and the judgements that would tell about `split_at` and `bears_min`.
+    async fn judged_thirty(core: &mut Core, wrong: usize) {
         use crate::store::asks::AskVerdict;
         use crate::store::decisions::test_support::judged;
-        let model = core.decider.model().to_string();
+        core.learn.enabled = true;
         for i in 0..30 {
             let v = if i < wrong {
                 AskVerdict::Wrong
             } else {
                 AskVerdict::Right
             };
-            judged(&core.store, &model, "settled", false, v).await;
+            let d = core.decide(&req("Keep bge-m3?"), Door::Ui).await.unwrap();
+            assert_eq!(d.standing, vec![("verdict".to_string(), Standing::Settled)]);
+            core.judge_decision(&d.event_id.unwrap(), v, None)
+                .await
+                .unwrap();
         }
+        let decider = core.decider.model().to_string();
         for _ in 0..30 {
-            judged(&core.store, &model, "split", false, AskVerdict::Wrong).await;
+            judged(&core.store, &decider, "split", false, AskVerdict::Wrong).await;
             judged(
                 &core.store,
-                &model,
+                &decider,
                 "leaning",
                 false,
                 AskVerdict::NothingHere,
             )
             .await;
-            judged(&core.store, &model, "not_held", true, AskVerdict::Wrong).await;
+            judged(&core.store, &decider, "not_held", true, AskVerdict::Wrong).await;
         }
+    }
+
+    #[tokio::test]
+    async fn a_decision_counts_under_the_configured_model_whatever_the_server_reports() {
+        use crate::store::asks::AskVerdict;
+        let mut core = three_base().await;
+        core.learn.enabled = true;
+        deciding(&mut core, marked(0.81));
+        let wrong = core.decide(&req("Keep bge-m3?"), Door::Ui).await.unwrap();
+        let right = core.decide(&req("Keep bge-m3?"), Door::Ui).await.unwrap();
+        // The server calls itself "rule"; it is configured as "rule-decider".
+        assert_eq!(
+            (wrong.model.as_str(), core.decider.model()),
+            ("rule", "rule-decider")
+        );
+        core.judge_decision(wrong.event_id.as_ref().unwrap(), AskVerdict::Wrong, None)
+            .await
+            .unwrap();
+        core.judge_decision(right.event_id.as_ref().unwrap(), AskVerdict::Right, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.settled_record("rule-decider").await.unwrap(),
+            (2, 1)
+        );
+        assert_eq!(core.store.settled_record("rule").await.unwrap(), (0, 0));
+        assert_eq!(
+            core.store
+                .bears_record("rule-decider")
+                .await
+                .unwrap()
+                .ruled_on,
+            2
+        );
+        assert_eq!(
+            core.store.decide_shares("rule-decider").await.unwrap().held,
+            (2, 0)
+        );
+        // What the server reported is still what is stored and shown.
+        let stored = sqlx::query_scalar!("SELECT model FROM decide_events LIMIT 1")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "rule");
     }
 
     #[tokio::test]
@@ -1614,9 +1664,7 @@ pub(crate) mod tests {
         let mut core = three_base().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         deciding(&mut core, marked(0.81));
-        let d = core.decide(&req("Keep bge-m3?"), Door::Api).await.unwrap();
-        assert_eq!(d.standing, vec![("verdict".to_string(), Standing::Settled)]);
-        judged_thirty(&core, 3).await;
+        judged_thirty(&mut core, 3).await;
 
         assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 1);
         assert_eq!(core.settled_at().await, 0.82);
@@ -1639,7 +1687,7 @@ pub(crate) mod tests {
         core.evolve.autonomous = crate::config::Autonomy::Full;
         deciding(&mut core, marked(0.81));
         // Every settled verdict right, every split wrong, every held one "nothing here".
-        judged_thirty(&core, 0).await;
+        judged_thirty(&mut core, 0).await;
         crate::jobs::tune::tune_questions(&core).await.unwrap();
         let moves = core.store.threshold_moves(10).await.unwrap();
         assert!(

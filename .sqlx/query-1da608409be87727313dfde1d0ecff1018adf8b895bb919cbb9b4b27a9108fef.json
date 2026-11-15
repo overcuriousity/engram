@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT questions, standing, not_held AS \"not_held!: i64\", verdict FROM decide_events\n                WHERE model = ? AND created_at > ?",
+  "query": "SELECT questions, standing, not_held AS \"not_held!: i64\", verdict FROM decide_events\n                WHERE decider = ? AND created_at > ?",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       true
     ]
   },
-  "hash": "cc1cf820ef92a295c1c3d3394dea117335af958f4dc0f5a47c2623227d92321a"
+  "hash": "1da608409be87727313dfde1d0ecff1018adf8b895bb919cbb9b4b27a9108fef"
 }

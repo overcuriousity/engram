@@ -479,6 +479,7 @@ mod tests {
                 standing: "{}".into(),
                 not_held: joint.is_none(),
                 model: "rule".into(),
+                decider: "clef".into(),
                 read: reads.len(),
                 dropped: 0,
                 query_vec: vec![0.1, 0.2],
