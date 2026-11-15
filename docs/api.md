@@ -139,7 +139,7 @@ The routes that used to ask for a decision are gone and answer `404`:
 |---|---|
 | `GET /insights` | `{ held, used, retrieval }`. Read-only. `retrieval` carries the person's `judged`, `recall_at_10` and `mrr`, and beside them `by_model` (`searches`, `left_out`, `recall_at_10`, `mrr`), `agreement` (`judged`, `hit_rate`, `selectivity`), `bears` (`held_up`, `ruled_on`) and `labels_count`; a figure with nothing under it is `null`. |
 | `GET /insights/set-aside` | The journal: what the base merged, wrote, hid and buried on its own, each with its undo. |
-| `POST /artifacts/{id}/deprecate` · `/reactivate` · `/unsupersede` | Hide by hand, and the undos a journal row admits. `204`. |
+| `POST /artifacts/{id}/deprecate` · `/reactivate` · `/unsupersede` | Hide by hand (the web UI no longer offers it; it deletes into Trash), and the undos a journal row admits. `204`. |
 | `DELETE /artifacts/{id}` | Into Trash: out of every read, deleted for good after 30 days. `204`. |
 | `POST /artifacts/{id}/restore` | Out of Trash, with the status it had. `204`; `404` when it is not in Trash. |
 | `POST /merges/{id}/undo` | Take a merge back: its sources return, the merge is retired. `204`. |

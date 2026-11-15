@@ -3539,12 +3539,14 @@ mod tests {
     fn the_artifact_actions_carry_labels() {
         // Asserted against the template source: building an `ArtifactDetail` by hand is thirty lines for three words.
         let tpl = include_str!("templates/_artifact_detail.html");
-        for word in ["Hide from results", "Delete"] {
-            assert!(
-                tpl.contains(&format!("<span>{word}</span>")),
-                "the {word} control has no label"
-            );
-        }
+        assert!(
+            tpl.contains("<span>Delete</span>"),
+            "the Delete control has no label"
+        );
+        assert!(
+            !tpl.contains("/deprecate"),
+            "the pane offers a second way out of results beside Delete"
+        );
         let rail = include_str!("templates/_results.html");
         assert!(
             !rail.contains("/delete"),
@@ -3576,10 +3578,6 @@ mod tests {
         assert!(
             !html.contains("<span>Still accurate</span>") && !html.contains("/verify"),
             "the pane still asks for a confirmation the verdict already gives"
-        );
-        assert!(
-            html.contains("<span>Hide from results</span>"),
-            "the hide control still says only `Hide`"
         );
         let bar = include_str!("templates/_search_verdict.html");
         assert!(bar.contains("Was this what you were looking for?"));
@@ -3788,7 +3786,7 @@ mod tests {
             "/ui/ops/tokens",
             "/ui/corpora/abc/delete",
             "/ui/corpora/abc/reprocess",
-            "/ui/ops/artifacts/abc/deprecate",
+            "/ui/ops/artifacts/abc/reactivate",
             "/ui/ask",
         ] {
             let res = app

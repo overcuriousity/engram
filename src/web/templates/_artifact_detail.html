@@ -24,16 +24,8 @@
   </div>
   {% endif %}
 
-  {# Delete goes to Trash, so it sits apart from Hide but needs no danger style. #}
+  {# The one way out of results by hand: into Trash, with an undo. Hiding is what the base does, and its notice above takes it back. #}
   <div class="actions pane-header">
-    {% if d.superseded_by.is_none() && d.status.as_str() != "deprecated" %}
-    <form method="post" action="/ui/ops/artifacts/{{ d.id }}/deprecate"
-          hx-post="/ui/ops/artifacts/{{ d.id }}/deprecate?terms={{ d.terms|urlencode }}"
-          hx-target="closest [data-artifact]" hx-swap="outerHTML">
-      <input type="hidden" name="to" value="/ui/artifacts/{{ d.id }}">
-      <button class="oc-btn" type="submit">{{ crate::web::icons::icon("eye-off", 16) }}<span>Hide from results</span></button>
-    </form>
-    {% endif %}
     <form method="post" action="/ui/artifacts/{{ d.id }}/delete"
           hx-post="/ui/artifacts/{{ d.id }}/delete"
           hx-target="closest [data-artifact]" hx-swap="outerHTML">

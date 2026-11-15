@@ -1745,7 +1745,7 @@ mod tests {
         let res = app
             .clone()
             .oneshot(form(
-                &format!("/ui/ops/artifacts/{id}/deprecate"),
+                &format!("/ui/ops/artifacts/{id}/reactivate"),
                 &cookie,
                 &format!("to=/ui/artifacts/{id}"),
             ))
@@ -1781,7 +1781,7 @@ mod tests {
             .to_string();
 
         let mut req = form(
-            &format!("/ui/ops/artifacts/{id}/deprecate"),
+            &format!("/ui/ops/artifacts/{id}/reactivate"),
             &cookie,
             &format!("to=/ui/artifacts/{id}"),
         );
@@ -1816,7 +1816,7 @@ mod tests {
             .to_string();
 
         for hostile in ["https://evil.example/x", "//evil.example/x", "/ui//evil"] {
-            for action in ["deprecate", "reactivate"] {
+            for action in ["unsupersede", "reactivate"] {
                 let res = app
                     .clone()
                     .oneshot(form(
@@ -2391,7 +2391,7 @@ mod tests {
         let ops = get_body(&app, &cookie, "/ui/insights").await;
         assert!(ops.contains(">generated<"), "{ops}");
         assert!(
-            ops.contains(&format!("/ui/ops/artifacts/{}/deprecate", g.id)),
+            ops.contains(&format!(r#"action="/ui/artifacts/{}/delete""#, g.id)),
             "{ops}"
         );
         assert!(ops.contains("of searches went quiet"), "{ops}");
