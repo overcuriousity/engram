@@ -1,0 +1,266 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", question_id, question_version, model, era, subject_kind,\n                      subject_a, subject_b, rev_a, rev_b, answer, top, pick, swapped_agree, band,\n                      reason, state, outcome, outcome_at, answered_pick, decided_at\n                 FROM decisions WHERE band = 'act' AND state = 'waiting' AND reason = 'unsettled' AND decided_at < ?\n             ORDER BY decided_at, id LIMIT 200",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "question_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "question_id"
+          }
+        }
+      },
+      {
+        "name": "question_version",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "question_version"
+          }
+        }
+      },
+      {
+        "name": "model",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "model"
+          }
+        }
+      },
+      {
+        "name": "era",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "era"
+          }
+        }
+      },
+      {
+        "name": "subject_kind",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "subject_kind"
+          }
+        }
+      },
+      {
+        "name": "subject_a",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "subject_a"
+          }
+        }
+      },
+      {
+        "name": "subject_b",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "subject_b"
+          }
+        }
+      },
+      {
+        "name": "rev_a",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "rev_a"
+          }
+        }
+      },
+      {
+        "name": "rev_b",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "rev_b"
+          }
+        }
+      },
+      {
+        "name": "answer",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "answer"
+          }
+        }
+      },
+      {
+        "name": "top",
+        "ordinal": 11,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "top"
+          }
+        }
+      },
+      {
+        "name": "pick",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "pick"
+          }
+        }
+      },
+      {
+        "name": "swapped_agree",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "swapped_agree"
+          }
+        }
+      },
+      {
+        "name": "band",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "band"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 16,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "outcome",
+        "ordinal": 17,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "outcome"
+          }
+        }
+      },
+      {
+        "name": "outcome_at",
+        "ordinal": 18,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "outcome_at"
+          }
+        }
+      },
+      {
+        "name": "answered_pick",
+        "ordinal": 19,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "answered_pick"
+          }
+        }
+      },
+      {
+        "name": "decided_at",
+        "ordinal": 20,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "decided_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "03ac069b09aa8b7452fa3a7dd7cbf255cee514777f8602ea54e4e862da5f98ff"
+}

@@ -209,33 +209,49 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     }
 
     // A re-run that will hand back what is already written is not checked again.
-    if written_already(core, corpus_id, idx).await?.is_none() {
-        chunks = faithful(core, target, &text, chunks).await;
-    }
-
-    // Kept beside the chunks: `corpus_lines` is the model's claim, the span is what became of it.
-    let body: String = text.clone();
-    let spans: Vec<CorpusSpan> = chunks
-        .iter()
-        .map(|c| resolve_span(&c.text, &body, &w, c.corpus_lines))
-        .collect();
+    let mut checked = written_already(core, corpus_id, idx).await?.is_none();
+    let mut batch = if checked {
+        faithful(core, target, &text, chunks).await
+    } else {
+        Batch::unasked(chunks)
+    };
 
     // A verbatim window read by the model is a promotion: its passages are superseded, never
     // deleted.
     let keep = core.store.segment_write_appends(corpus_id, idx).await?;
-    let written =
-        write_segment_artifacts(core, corpus_id, idx, proposed_to_new(idx, chunks, spans)).await?;
-    flag_unverified(core, &written, &text).await?;
+    let body: String = text.clone();
+    let (written, fresh) = loop {
+        // Kept beside the chunks: `corpus_lines` is the model's claim, the span is what became of
+        // it.
+        let spans: Vec<CorpusSpan> = batch
+            .kept
+            .iter()
+            .map(|c| resolve_span(&c.text, &body, &w, c.corpus_lines))
+            .collect();
+        let new = proposed_to_new(idx, batch.kept.clone(), spans);
+        match write_window(core, corpus_id, idx, new, checked, batch.dropped).await? {
+            Written::New(rows) => break (rows, true),
+            Written::Already(rows) => break (rows, false),
+            // What the first probe would have handed back is gone since: checked after all.
+            Written::Unchecked => {
+                batch = faithful(core, target, &text, batch.kept).await;
+                checked = true;
+            }
+        }
+    };
+    // The reasons lie beside the batch, so they name rows only where the batch was inserted.
+    let unchecked: &[Option<String>] = if fresh { &batch.unchecked } else { &[] };
+    flag_unverified(core, &written, &text, unchecked).await?;
     // `embed_written`'s result, not `written`: an oversize artifact is replaced by siblings.
     let mut live = written;
-    if keep {
+    // A replacing write that kept the passages for a dropped artifact swaps as a promotion does.
+    if keep || batch.dropped {
         // Embedded inline so the swap is a swap: the replacements must be searchable before the
         // passages stop being. On refusal the window goes back to `failed`; nothing re-runs a
         // `done` window.
         match embed_written(core, &live).await {
             Ok(embedded) => {
-                // A second locked step; `write_segment_artifacts` took and released the corpus
-                // lock.
+                // A second locked step; `write_window` took and released the corpus lock.
                 {
                     let _corpus = core.corpus_lock(corpus_id).await;
                     let n = crate::jobs::promote::supersede_covered(
@@ -315,11 +331,30 @@ pub async fn run(core: &Core, target: &str) -> Result<()> {
     // After the capture is stored and settled: a link question that fails costs no capture.
     if let Some(anchor) = &anchor
         && !shown_ids.is_empty()
-        && let Err(e) = crate::core::judging::link_shown(core, anchor, &shown_ids).await
+        && let Err(e) = crate::jobs::associate::link_shown(core, anchor, &shown_ids).await
     {
         tracing::warn!(corpus_id, error = %e, "the shown neighbours could not be asked about");
     }
     settled
+}
+
+/// What the check left of a proposed batch.
+struct Batch {
+    kept: Vec<crate::infer::ProposedArtifact>,
+    /// Beside `kept`: why one the decision model would not judge stands unchecked.
+    unchecked: Vec<Option<String>>,
+    /// Whether the check dropped any: the window's passages are then all that holds their lines.
+    dropped: bool,
+}
+
+impl Batch {
+    fn unasked(kept: Vec<crate::infer::ProposedArtifact>) -> Self {
+        Batch {
+            unchecked: vec![None; kept.len()],
+            kept,
+            dropped: false,
+        }
+    }
 }
 
 /// After the literal checks, each proposed artifact against its window: one that adds what the window
@@ -330,16 +365,21 @@ async fn faithful(
     target: &str,
     window: &str,
     chunks: Vec<crate::infer::ProposedArtifact>,
-) -> Vec<crate::infer::ProposedArtifact> {
+) -> Batch {
     use crate::core::judging::check::{Checked, Which, check};
     let original = [state::Note {
         title: None,
         day: None,
         text: window,
     }];
-    let mut kept = Vec::with_capacity(chunks.len());
+    let mut batch = Batch::unasked(Vec::with_capacity(chunks.len()));
     let mut asking = true;
+    // One rejection may be about its text; a second is taken to be about the endpoint, and the
+    // rest of the batch is flagged without a call that would be told the same.
+    let mut rejected: Option<String> = None;
+    let mut unasked: Option<String> = None;
     for (n, c) in chunks.into_iter().enumerate() {
+        let mut unchecked = unasked.clone();
         if asking {
             let rewrite = state::Note {
                 title: c.title.as_deref(),
@@ -356,21 +396,34 @@ async fn faithful(
                         yes,
                         "the check dropped a proposed artifact"
                     );
+                    batch.dropped = true;
                     continue;
                 }
-                Ok(_) => {}
+                // Kept and flagged: a retry is told the same, and its lines are not thrown away.
+                Ok(Checked::Unjudged { detail }) => {
+                    tracing::warn!(target, detail, "the check could not be put; kept, flagged");
+                    if rejected.is_some() {
+                        asking = false;
+                        unasked = Some(detail.clone());
+                    }
+                    rejected = Some(detail.clone());
+                    unchecked = Some(detail);
+                }
+                Ok(Checked::Passed | Checked::TooLong) => {}
                 Err(e) => {
                     tracing::warn!(target, error = %e, "the check failed; the rest stand on the literal checks");
                     asking = false;
                 }
             }
         }
-        kept.push(c);
+        batch.kept.push(c);
+        batch.unchecked.push(unchecked);
     }
-    kept
+    batch
 }
 
-/// Whether this window is synthesized with the judged schema.
+/// Whether this window is synthesized with the judged schema. Every case is kept with the capture
+/// as `pre_read`: what was decided, why, and the answers where the questions were put.
 pub(crate) async fn wants_judged(
     core: &Core,
     corpus_id: &str,
@@ -378,18 +431,36 @@ pub(crate) async fn wants_judged(
     forced_intent: Option<&str>,
     single_window: bool,
 ) -> Result<bool> {
+    let not_asked = |judged: bool, why: &str| serde_json::json!({"judged": judged, "why": why});
     if !single_window {
+        keep_pre_read(core, corpus_id, not_asked(false, "several_windows")).await;
         return Ok(false);
     }
     if forced_intent.is_some() {
+        keep_pre_read(core, corpus_id, not_asked(true, "forced_intent")).await;
         return Ok(true);
     }
     let asked = [asks_reminder(), has_date()];
     let refs: Vec<&Asked> = asked.iter().collect();
     // Not asked on cut text: the cut-off part may hold the reminder.
     let Some(shown) = state::window(text, &core.counter, state::room(core, &refs)) else {
+        keep_pre_read(core, corpus_id, not_asked(true, "too_long")).await;
         return Ok(true);
     };
+    // What the answers are answers about: this text, this model, these wordings.
+    let of = {
+        use sha2::{Digest, Sha256};
+        serde_json::json!({
+            "text": hex::encode(&Sha256::digest(text.as_bytes())[..8]),
+            "model": core.decider.model(),
+            "versions": [asked[0].version, asked[1].version],
+        })
+    };
+    // A retry of the same window is not asked again; the kept answers meet the line as it is now.
+    let recorded = core.store.get_corpus(corpus_id).await?.metadata;
+    if let Some(yes) = recorded_pre_read(&recorded, &of) {
+        return Ok(yes.iter().any(|y| *y >= PRE_READ_LINE));
+    }
     let questions: Vec<_> = asked.iter().map(|a| a.question.clone()).collect();
     // The unit holds no permit here; the writer's turn is taken after this one is given back.
     let permit = core.gate.background_light().await;
@@ -409,25 +480,56 @@ pub(crate) async fn wants_judged(
     });
     let yes = match yes {
         Ok(yes) => yes,
-        // When in doubt, the judged schema: a missed reminder is worse than a wasted schema.
+        // When in doubt, the judged schema: a missed reminder is worse than a wasted schema. Kept
+        // as a failure, so a retry asks again.
         Err(e) => {
             tracing::warn!(corpus_id, error = %e, "the pre-read failed; asking for the judged schema");
+            let failed = serde_json::json!({
+                "judged": true, "why": "failed", "error": e.client_message(),
+            });
+            keep_pre_read(core, corpus_id, failed).await;
             return Ok(true);
         }
     };
-    // Read fresh, as `record_intent`: another writer of this column may have run since.
+    let judged = yes.iter().any(|y| *y >= PRE_READ_LINE);
+    let answered = serde_json::json!({
+        "judged": judged, "why": "asked",
+        "asks_reminder": yes[0], "has_date": yes[1], "of": of,
+    });
+    keep_pre_read(core, corpus_id, answered).await;
+    Ok(judged)
+}
+
+/// The two answers kept for exactly `of`, where the pre-read was put and answered.
+fn recorded_pre_read(meta: &serde_json::Value, of: &serde_json::Value) -> Option<[f64; 2]> {
+    let kept = meta.get("pre_read")?;
+    if kept.get("why")?.as_str()? != "asked" || kept.get("of")? != of {
+        return None;
+    }
+    Some([
+        kept.get("asks_reminder")?.as_f64()?,
+        kept.get("has_date")?.as_f64()?,
+    ])
+}
+
+/// Read fresh, as `record_intent`: another writer of this column may have run since. Not being
+/// able to keep it costs a repeat of the question, never the capture.
+async fn keep_pre_read(core: &Core, corpus_id: &str, record: serde_json::Value) {
     let kept = async {
         let mut meta = core.store.get_corpus(corpus_id).await?.metadata;
         if !meta.is_object() {
             meta = serde_json::json!({});
         }
-        meta["pre_read"] = serde_json::json!({"asks_reminder": yes[0], "has_date": yes[1]});
+        // Every window of a long capture records the same; written once.
+        if meta.get("pre_read") == Some(&record) {
+            return Ok(());
+        }
+        meta["pre_read"] = record;
         core.store.set_corpus_metadata(corpus_id, &meta).await
     };
     if let Err(e) = kept.await {
-        tracing::warn!(corpus_id, error = %e, "the pre-read's answers could not be kept");
+        tracing::warn!(corpus_id, error = %e, "the pre-read could not be kept");
     }
-    Ok(yes.iter().any(|y| *y >= PRE_READ_LINE))
 }
 
 /// Only a promotion needs this, since it hides existing text on the strength of new text. Returns
@@ -643,14 +745,43 @@ pub(crate) fn resolve_span(
     }
 }
 
-/// Replaces the window's chunks, so a re-run after a crash does not write them twice. Under
-/// `keep_artifacts` it appends; `set_segment_state` spends that mark only on `done`.
+/// `write_window` for a checked batch whose passages go with a replacing write.
+#[cfg(test)]
 pub(crate) async fn write_segment_artifacts(
     core: &Core,
     corpus_id: &str,
     segment_idx: i64,
     new: Vec<NewArtifact>,
 ) -> Result<Vec<crate::store::artifacts::Chunk>> {
+    Ok(
+        match write_window(core, corpus_id, segment_idx, new, true, false).await? {
+            Written::New(rows) | Written::Already(rows) => rows,
+            Written::Unchecked => Vec::new(),
+        },
+    )
+}
+
+/// What a window's write came to.
+enum Written {
+    /// Inserted now, in the order proposed.
+    New(Vec<crate::store::artifacts::Chunk>),
+    /// A promotion re-run: the rows an earlier run wrote, handed back.
+    Already(Vec<crate::store::artifacts::Chunk>),
+    /// Nothing: the batch was not checked, and no earlier rows stand in for it any more.
+    Unchecked,
+}
+
+/// Replaces the window's chunks, or appends under `keep_artifacts`. A batch that skipped its check
+/// on the strength of `written_already` is asked again under the lock the write holds, so nothing
+/// parts the two. `passages_stay`: a replacing write leaves the passages and frees the hidden ones.
+async fn write_window(
+    core: &Core,
+    corpus_id: &str,
+    segment_idx: i64,
+    new: Vec<NewArtifact>,
+    checked: bool,
+    passages_stay: bool,
+) -> Result<Written> {
     let _corpus = core.corpus_lock(corpus_id).await;
     if let Some(have) = written_already(core, corpus_id, segment_idx).await? {
         tracing::info!(
@@ -658,7 +789,10 @@ pub(crate) async fn write_segment_artifacts(
             window = segment_idx,
             "window already written under keep_artifacts; not writing again"
         );
-        return Ok(have);
+        return Ok(Written::Already(have));
+    }
+    if !checked {
+        return Ok(Written::Unchecked);
     }
     // The mark or a verbatim state, as `run` asks it.
     let keep = core
@@ -666,18 +800,36 @@ pub(crate) async fn write_segment_artifacts(
         .segment_write_appends(corpus_id, segment_idx)
         .await?;
     if !keep {
-        let old = core
+        let mut old = core
             .store
             .artifact_ids_for_segment(corpus_id, segment_idx)
             .await?;
+        if passages_stay {
+            let passages: Vec<String> = core
+                .store
+                .artifacts_by_ids(&old)
+                .await?
+                .into_iter()
+                .filter(|c| c.provenance == crate::store::artifacts::Provenance::Passage)
+                .map(|c| c.id)
+                .collect();
+            old.retain(|id| !passages.contains(id));
+        }
         if !old.is_empty() {
             core.vectors.delete_artifacts(&old).await?;
             for id in &old {
                 core.store.delete_artifact(id).await?;
             }
         }
+        if passages_stay {
+            // A passage one of the deleted artifacts was hiding is in results again.
+            core.heal_dangling_supersessions().await?;
+        }
     }
-    core.store.insert_artifacts(corpus_id, &new).await
+    core.store
+        .insert_artifacts(corpus_id, &new)
+        .await
+        .map(Written::New)
 }
 
 /// A promotion re-run under append: the earlier non-passage rows, which the write returns instead
@@ -755,28 +907,35 @@ pub(crate) fn paraphrased(chunks: &[crate::infer::ProposedArtifact], window: &st
         .any(|c| !crate::infer::verify::missing_literals(&c.text, &[], window).is_empty())
 }
 
-/// The chunk is kept: a visible warning beats a chapter missing from the base.
+/// The chunk is kept: a visible warning beats a chapter missing from the base. `unchecked` lies
+/// beside `written`: why a row's check could not be put, where one could not.
 pub(crate) async fn flag_unverified(
     core: &Core,
     written: &[crate::store::artifacts::Chunk],
     segment_body: &str,
+    unchecked: &[Option<String>],
 ) -> Result<()> {
+    use crate::core::judging::check::{FLAG_UNCHECKED, unchecked_detail};
     use crate::infer::verify;
 
-    for c in written {
+    for (i, c) in written.iter().enumerate() {
         let mut flags = Vec::new();
-        let mut detail: Option<String> = None;
+        let mut detail: Vec<String> = Vec::new();
 
         let missing = verify::missing_literals(&c.text, &c.caveats, segment_body);
         if let Some(first) = missing.first() {
             flags.push(verify::FLAG_LITERALS.to_string());
-            detail = Some(format!("missing literal: {first}"));
+            detail.push(format!("missing literal: {first}"));
             tracing::warn!(artifact_id = %c.id, literal = %first, "literal not found in source window");
+        }
+        if let Some(Some(why)) = unchecked.get(i) {
+            flags.push(FLAG_UNCHECKED.to_string());
+            detail.push(unchecked_detail(why));
         }
 
         if !flags.is_empty() {
             core.store
-                .set_artifact_flags(&c.id, &flags, detail.as_deref())
+                .set_artifact_flags(&c.id, &flags, Some(&detail.join("; ")))
                 .await?;
         }
     }
@@ -1136,6 +1295,179 @@ mod tests {
             core.store.segment_state(&out.id, 0).await.unwrap(),
             Some(SegmentState::Done)
         );
+    }
+
+    /// The endpoint rejects the check of any proposed artifact holding `marker`; the rest pass.
+    fn rejecting(marker: &'static str) -> std::sync::Arc<crate::infer::fake::RuleDecider> {
+        use crate::core::judging::check::test_support::{answering, is_check};
+        std::sync::Arc::new(crate::infer::fake::RuleDecider::new(move |state, qs| {
+            let (_, rewrite) = state.rsplit_once("Rewrite: ").unwrap_or_default();
+            if is_check(qs) && rewrite.contains(marker) {
+                return Err(Error::InferenceRejected {
+                    role: "decide",
+                    detail: "HTTP 400".into(),
+                });
+            }
+            Ok(
+                answering(qs, 0.9, 0.9).unwrap_or_else(|| crate::infer::decide::Answers {
+                    answers: qs
+                        .iter()
+                        .map(|q| {
+                            (
+                                q.key.clone(),
+                                crate::infer::decide::Answer::Noul { yes: 0.0 },
+                            )
+                        })
+                        .collect(),
+                    model: "rule-decider".into(),
+                    input_tokens: 0,
+                }),
+            )
+        }))
+    }
+
+    #[tokio::test]
+    async fn an_artifact_whose_check_is_rejected_is_kept_flagged_and_the_unit_settles() {
+        let mut core = test_core().await;
+        let dec = rejecting("bravo");
+        core.decider = dec.clone();
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        run(&core, &unit_target(&out.id, 0))
+            .await
+            .expect("a rejection is not the queue's to retry");
+
+        let checks = dec
+            .requests()
+            .into_iter()
+            .filter(|(_, qs)| crate::core::judging::check::test_support::is_check(qs))
+            .count();
+        assert_eq!(checks, 2, "each asked once");
+        let (written, _) = written_and_passages(&core, &out.id).await;
+        let alpha = written.iter().find(|c| c.text == "alpha line").unwrap();
+        assert!(alpha.flags.is_empty(), "{:?}", alpha.flags);
+        let bravo = written
+            .iter()
+            .find(|c| c.text == "bravo line")
+            .expect("the unjudged artifact was dropped");
+        assert_eq!(
+            bravo.flags,
+            [crate::core::judging::check::FLAG_UNCHECKED.to_string()]
+        );
+        assert_eq!(bravo.flag_detail.as_deref(), Some("not checked: HTTP 400"));
+        assert_eq!(
+            core.store.segment_state(&out.id, 0).await.unwrap(),
+            Some(SegmentState::Done)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_that_rejects_every_check_is_asked_twice_and_the_batch_is_kept_flagged() {
+        let mut core = test_core().await;
+        let dec = rejecting("line");
+        core.decider = dec.clone();
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let checks = dec
+            .requests()
+            .into_iter()
+            .filter(|(_, qs)| crate::core::judging::check::test_support::is_check(qs))
+            .count();
+        assert_eq!(checks, 2, "a third would be told the same");
+        let (written, _) = written_and_passages(&core, &out.id).await;
+        assert_eq!(written.len(), 3);
+        for c in &written {
+            assert_eq!(
+                c.flags,
+                [crate::core::judging::check::FLAG_UNCHECKED.to_string()],
+                "{}",
+                c.text
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_replacing_rerun_that_drops_an_artifact_keeps_the_windows_passages() {
+        let mut core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        let (first, _) = written_and_passages(&core, &out.id).await;
+        assert!(
+            first.iter().any(|c| c.text == "bravo line"),
+            "the fixture's first read wrote it"
+        );
+
+        // The mark is spent, so this re-run replaces; its check drops one.
+        core.decider = refusing("bravo");
+        core.store.reset_segment(&out.id, 0, false).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let (written, passages) = written_and_passages(&core, &out.id).await;
+        let texts: Vec<&str> = written.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["alpha line"]);
+        assert!(
+            written.iter().all(|c| first.iter().all(|f| f.id != c.id)),
+            "the first read's artifacts were not replaced"
+        );
+        assert!(
+            passages.iter().any(|c| c.text.contains("bravo line")),
+            "the dropped artifact's lines are in no row a search returns"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unchecked_batch_is_not_written_once_the_rows_it_stood_on_are_gone() {
+        let core = test_core().await;
+        let out = core
+            .ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+        core.store.reset_segment(&out.id, 0, true).await.unwrap();
+        assert!(
+            written_already(&core, &out.id, 0).await.unwrap().is_some(),
+            "the fixture is a re-run that would skip its check"
+        );
+        // After the probe and before the write, every written artifact goes to Trash.
+        let (written, _) = written_and_passages(&core, &out.id).await;
+        for c in &written {
+            core.trash_artifact(&c.id).await.unwrap();
+        }
+
+        let new = vec![NewArtifact {
+            text: "never checked".into(),
+            segment_idx: Some(0),
+            ..Default::default()
+        }];
+        let got = write_window(&core, &out.id, 0, new.clone(), false, false)
+            .await
+            .unwrap();
+        assert!(matches!(got, Written::Unchecked));
+        let rows = core.store.artifacts_for_segment(&out.id, 0).await.unwrap();
+        assert!(
+            rows.iter().all(|c| c.text != "never checked"),
+            "an unchecked batch was written"
+        );
+
+        let got = write_window(&core, &out.id, 0, new, true, false)
+            .await
+            .unwrap();
+        assert!(matches!(got, Written::New(rows) if rows.len() == 1));
     }
 
     #[tokio::test]
@@ -1586,9 +1918,73 @@ mod tests {
         #[tokio::test]
         async fn the_line_itself_is_judged() {
             let mut core = test_core().await;
-            core.decider = pre_reader(PRE_READ_LINE, 0.0);
+            // The number, not the constant: a moved line fails here or at 0.29 below.
+            core.decider = pre_reader(0.3, 0.0);
             let (_, judged) = synthesized(&mut core, "Maybe ping Anna.", None).await;
             assert_eq!(judged, [true]);
+        }
+
+        async fn kept(core: &Core, id: &str) -> serde_json::Value {
+            core.store.get_corpus(id).await.unwrap().metadata["pre_read"].clone()
+        }
+
+        #[test]
+        fn kept_answers_stand_only_for_what_they_were_asked_about() {
+            use serde_json::json;
+            let of = json!({"text": "aa", "model": "m", "versions": [1, 1]});
+            let asked = json!({"pre_read": {
+                "judged": true, "why": "asked", "asks_reminder": 0.9, "has_date": 0.1, "of": of,
+            }});
+            assert_eq!(recorded_pre_read(&asked, &of), Some([0.9, 0.1]));
+            let edited = json!({"text": "bb", "model": "m", "versions": [1, 1]});
+            assert_eq!(recorded_pre_read(&asked, &edited), None);
+            let reworded = json!({"text": "aa", "model": "m", "versions": [1, 2]});
+            assert_eq!(recorded_pre_read(&asked, &reworded), None);
+            let failed = json!({"pre_read": {"judged": true, "why": "failed"}});
+            assert_eq!(recorded_pre_read(&failed, &of), None);
+            assert_eq!(recorded_pre_read(&json!({}), &of), None);
+        }
+
+        #[tokio::test]
+        async fn a_retried_window_reuses_the_pre_read_it_kept() {
+            let mut core = test_core().await;
+            let dec = pre_reader(0.29, 0.29);
+            core.decider = dec.clone();
+            let (id, judged) =
+                synthesized(&mut core, "The proxy listens on port 8080.", None).await;
+            assert_eq!(judged, [false]);
+
+            let again = Arc::new(RecordingSynthesizer::new(FAKE_BUDGET));
+            core.synthesizer = Some(again.clone());
+            core.store.reset_segment(&id, 0, true).await.unwrap();
+            run(&core, &unit_target(&id, 0)).await.unwrap();
+            assert_eq!(pre_reads(&dec).len(), 1, "the retry asked again");
+            assert_eq!(
+                again.judged(),
+                [false],
+                "the kept answers did not choose the schema"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_pre_read_that_failed_is_asked_again_on_the_retry() {
+            let mut core = test_core().await;
+            let dec = Arc::new(RuleDecider::new(|_, _| {
+                Err(crate::error::Error::Inference {
+                    role: "decide",
+                    detail: "down".into(),
+                })
+            }));
+            core.decider = dec.clone();
+            let (id, _) = synthesized(&mut core, "The proxy listens on port 8080.", None).await;
+            let failed = kept(&core, &id).await;
+            assert_eq!(failed["why"], "failed");
+            assert_eq!(failed["judged"], true);
+            assert!(failed["error"].as_str().is_some_and(|e| e.contains("down")));
+
+            core.store.reset_segment(&id, 0, true).await.unwrap();
+            run(&core, &unit_target(&id, 0)).await.unwrap();
+            assert_eq!(pre_reads(&dec).len(), 2, "a failure stood in for an answer");
         }
 
         #[tokio::test]
@@ -1606,7 +2002,7 @@ mod tests {
             let mut core = test_core().await;
             let dec = pre_reader(0.0, 0.0);
             core.decider = dec.clone();
-            let (_, judged) = synthesized(
+            let (id, judged) = synthesized(
                 &mut core,
                 "The proxy listens on port 8080.",
                 Some(Intent::Remind),
@@ -1614,6 +2010,11 @@ mod tests {
             .await;
             assert_eq!(judged, [true]);
             assert_eq!(pre_reads(&dec).len(), 0);
+            assert_eq!(
+                kept(&core, &id).await,
+                serde_json::json!({"judged": true, "why": "forced_intent"}),
+                "not asked, and nothing says why"
+            );
         }
 
         #[tokio::test]
@@ -1631,6 +2032,10 @@ mod tests {
             );
             assert_eq!(judged, [true]);
             assert_eq!(dec.calls(), 0);
+            assert_eq!(
+                kept(&core, &id).await,
+                serde_json::json!({"judged": true, "why": "too_long"})
+            );
         }
 
         #[tokio::test]
@@ -1667,6 +2072,10 @@ mod tests {
             assert!(core.store.segments_for_corpus(&id).await.unwrap().len() > 1);
             assert_eq!(judged, [false]);
             assert_eq!(pre_reads(&dec).len(), 0);
+            assert_eq!(
+                kept(&core, &id).await,
+                serde_json::json!({"judged": false, "why": "several_windows"})
+            );
         }
 
         #[tokio::test]
@@ -1674,11 +2083,12 @@ mod tests {
             let mut core = test_core().await;
             core.decider = pre_reader(0.97, 0.25);
             let (id, _) = synthesized(&mut core, "Remind me to call the dentist.", None).await;
-            let meta = core.store.get_corpus(&id).await.unwrap().metadata;
-            assert_eq!(
-                meta["pre_read"],
-                serde_json::json!({"asks_reminder": 0.97, "has_date": 0.25})
-            );
+            let read = kept(&core, &id).await;
+            assert_eq!(read["asks_reminder"], 0.97);
+            assert_eq!(read["has_date"], 0.25);
+            assert_eq!(read["why"], "asked");
+            assert_eq!(read["judged"], true);
+            assert_eq!(read["of"]["model"], "rule-decider");
         }
     }
 }

@@ -1558,6 +1558,46 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_pair_settled_or_asked_for_writing_is_never_armed_for_a_decision() {
+        use crate::store::pairs::DecidedBy;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [0.9, 0.1]),
+                ("three", [0.8, 0.2]),
+                ("four", [0.7, 0.3]),
+            ],
+        )
+        .await;
+        let mut pairs = Vec::new();
+        for w in ids.chunks(2) {
+            core.store.record_pair(&w[0], &w[1], 0.91).await.unwrap();
+            let p = core.store.pair_between(&w[0], &w[1]).await.unwrap();
+            pairs.push(p.unwrap().id);
+        }
+        assert!(core.store.ask_pair_synthesis(pairs[0]).await.unwrap());
+        core.store
+            .set_pair_state(pairs[1], PairState::NoConflict, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0);
+
+        for id in pairs {
+            assert!(
+                !core
+                    .store
+                    .live_job(Stage::Dedupe, &id.to_string())
+                    .await
+                    .unwrap(),
+                "a pair that is no longer a question was armed for one"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_dedupe_pass_stops_at_its_budget() {
         let mut core = test_core().await;
         core.consolidate.max_dedupe_per_tick = 1;
@@ -2013,7 +2053,7 @@ pub(crate) mod tests {
         for id in &ids {
             assert!(
                 core.store.get_artifact(id).await.unwrap().in_results(),
-                "it acted"
+                "a note left results though the day was spent"
             );
         }
         // Asked once: the waiting decision keeps it off the queue, not re-armed for ever.

@@ -8,7 +8,7 @@ use crate::core::judging::{self, Applier, Subjects, catalogue, state};
 use crate::error::{Error, Result};
 use crate::store::actions::{Job, Kind, NewAction};
 use crate::store::artifacts::{Chunk, Provenance};
-use crate::store::decision_log::Logged;
+use crate::store::decision_log::{Logged, Outcome};
 use crate::store::jobs::Stage;
 use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
 use async_trait::async_trait;
@@ -32,9 +32,11 @@ pub(crate) fn action(
 }
 
 /// A row a decision wrote names it; a person's is marked theirs, as `Store::band_record` reads.
-fn decided(mut row: NewAction, by: DecidedBy, decision_id: &str) -> NewAction {
+pub(crate) fn decided(mut row: NewAction, by: DecidedBy, decision_id: Option<&str>) -> NewAction {
     if let Some(evidence) = row.evidence.as_object_mut() {
-        evidence.insert("decision".into(), serde_json::json!(decision_id));
+        if let Some(d) = decision_id {
+            evidence.insert("decision".into(), serde_json::json!(d));
+        }
         if by == DecidedBy::Operator {
             evidence.insert("asked_by".into(), serde_json::json!("operator"));
         }
@@ -67,8 +69,13 @@ pub(crate) struct Members {
     roots: Vec<Chunk>,
 }
 
-/// `None` when the pair was settled here because no answer about it could be carried out.
-pub(crate) async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<Members>> {
+/// `None` when the pair was settled here because no answer about it could be carried out. `by`:
+/// whose answer came to that, so a person's can be asked again.
+pub(crate) async fn members_of(
+    core: &Core,
+    p: &ArtifactPair,
+    by: DecidedBy,
+) -> Result<Option<Members>> {
     // Pairs cascade on artifact delete, so a missing artifact is a store failure, not a deletion.
     let a = core.store.get_artifact(&p.a_id).await?;
     let b = core.store.get_artifact(&p.b_id).await?;
@@ -100,6 +107,7 @@ pub(crate) async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<M
             core,
             p,
             "a merged member has lost its sources; both stay as they are",
+            by,
         )
         .await?;
         return Ok(None);
@@ -133,6 +141,7 @@ pub(crate) async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<M
             p,
             "These cannot be written as one: what one of them is made of is stored source \
              text, which a merge must not rewrite, so both stay as they are.",
+            by,
         )
         .await?;
         return Ok(None);
@@ -205,7 +214,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         members,
         root_map,
         roots,
-    }) = members_of(core, &p).await?
+    }) = members_of(core, &p, DecidedBy::Model).await?
     else {
         return Ok(());
     };
@@ -306,7 +315,7 @@ pub(crate) async fn carry_out(
         // The writer writes, checks for losses and journals; this only asks it to.
         "duplicate" => {
             if model && taken_back_before(core, Kind::Merge, &[&pair.a_id, &pair.b_id]).await? {
-                leave_both(core, pair, TAKEN_BACK).await?;
+                leave_both(core, pair, TAKEN_BACK, by).await?;
                 return Ok(vec![]);
             }
             // Again on a retry: the ask is idempotent while the pair is open.
@@ -372,7 +381,7 @@ async fn replace(
         return Ok(vec![]);
     }
     if by == DecidedBy::Model && taken_back_before(core, Kind::Supersede, &[obsolete]).await? {
-        leave_both(core, pair, TAKEN_BACK).await?;
+        leave_both(core, pair, TAKEN_BACK, by).await?;
         return Ok(vec![]);
     }
     // Side effect first: a pair settled first would never be applied.
@@ -383,7 +392,7 @@ async fn replace(
             Some(decided(
                 action(Kind::Supersede, pair, obsolete, Some(winner), None),
                 by,
-                decision_id,
+                Some(decision_id),
             )),
         )
         .await?;
@@ -462,6 +471,10 @@ impl Applier for PairApplier {
         let Some(p) = pair_of(core, d).await? else {
             return Ok(false);
         };
+        // Settled since, or asked for writing: the merge unit's, no longer this decision's.
+        if p.state != PairState::Pending || p.synthesis_asked {
+            return Ok(false);
+        }
         for (id, rev) in [(&p.a_id, d.rev_a), (&p.b_id, d.rev_b)] {
             let c = match core.store.get_artifact(id).await {
                 Ok(c) => c,
@@ -485,8 +498,13 @@ impl Applier for PairApplier {
         let Some(p) = pair_of(core, d).await? else {
             return Ok(vec![]);
         };
-        // Settled since it was asked, by a person or the sweep: nothing is left to do.
+        // Settled since it was asked, by a person or the sweep: nothing is left to do. `settle`
+        // comes here straight from `ask`, without `unchanged`.
         if p.state != PairState::Pending {
+            return Ok(vec![]);
+        }
+        // Asked for writing since: the model may only repeat that ask, as a retry does.
+        if by == DecidedBy::Model && p.synthesis_asked && pick != "duplicate" {
             return Ok(vec![]);
         }
         // `run` demotes these before `settle`; nothing else may act on them as the model either.
@@ -508,11 +526,74 @@ impl Applier for PairApplier {
         let Some(p) = pair_of(core, d).await? else {
             return Ok(());
         };
-        // Asked again means asked, not written: a standing ask would keep it from the question.
+        if p.state != PairState::Pending {
+            // Settled since. Only what a person's answer on this very row settled is taken back.
+            if settled_by_answer(d, &p) {
+                core.store.reopen_pair(p.id).await?;
+            }
+            return Ok(());
+        }
         if p.synthesis_asked {
+            // Someone else's ask is the merge unit's. This row's own means asked, not written.
+            if p.synthesis_by == Some(DecidedBy::Model) || !answered_with(d, "duplicate") {
+                return Ok(());
+            }
             core.store.clear_pair_synthesis(p.id).await?;
         }
-        core.store.reopen_pair(p.id).await
+        core.store.requeue_pending_pair(p.id).await?;
+        Ok(())
+    }
+
+    fn agrees(&self, d: &Logged, pick: &str) -> bool {
+        does_the_same(&d.pick, pick)
+    }
+}
+
+/// Whether a person answered `d` with `pick`.
+fn answered_with(d: &Logged, pick: &str) -> bool {
+    matches!(d.outcome, Some(Outcome::Confirmed | Outcome::Corrected))
+        && d.answered_pick.as_deref() == Some(pick)
+}
+
+/// Whether this ask for a merge came from `d`: the model's own sure `duplicate`, or the Unsure row
+/// a person answered with it. A press on the pair itself came from no decision.
+pub(crate) fn asked_for_merge(d: &Logged, by: DecidedBy) -> bool {
+    match by {
+        DecidedBy::Model => d.band == Band::Act && d.pick == "duplicate",
+        // By the pick alone: the merge can run before the answer's outcome is written.
+        DecidedBy::Operator => {
+            d.band == Band::Ask && d.answered_pick.as_deref() == Some("duplicate")
+        }
+        DecidedBy::Evidence => false,
+    }
+}
+
+/// Whether the pair still stands as a person's answer on `d` left it with nothing journaled: a
+/// settlement made since by anything else, a merge above all, is not this row's to take back.
+fn settled_by_answer(d: &Logged, p: &ArtifactPair) -> bool {
+    let answered = matches!(d.outcome, Some(Outcome::Confirmed | Outcome::Corrected));
+    if !answered || p.decided_by != Some(DecidedBy::Operator) || p.merged_into.is_some() {
+        return false;
+    }
+    match d.answered_pick.as_deref() {
+        Some("conflict") => p.state == PairState::Contradiction,
+        // `duplicate`: the writer refused the merge and both were left.
+        Some("distinct" | "duplicate") => p.state == PairState::NoConflict,
+        // A replacement without a journal row was settled by a member leaving results.
+        _ => false,
+    }
+}
+
+/// Whether a person's `answer` does what the model's `pick` would have. "Keep one" stands for a
+/// duplicate nothing can write, and does what the replacement that way does; no answer retires
+/// both, so none agrees with `vacuous`.
+fn does_the_same(pick: &str, answer: &str) -> bool {
+    match pick {
+        "duplicate" => matches!(answer, "duplicate" | "keep_a" | "keep_b"),
+        "a_replaces_b" => matches!(answer, "a_replaces_b" | "keep_a"),
+        "b_replaces_a" => matches!(answer, "b_replaces_a" | "keep_b"),
+        "conflict" | "distinct" => answer == pick,
+        _ => false,
     }
 }
 
@@ -541,7 +622,7 @@ pub(crate) async fn discard_both(
         )
         .await?
     {
-        leave_both(core, pair, TAKEN_BACK).await?;
+        leave_both(core, pair, TAKEN_BACK, by).await?;
         return Ok(vec![]);
     }
     // A supersession winner is not this pass's to retire: `A -> W` would leave both ends out of
@@ -557,15 +638,7 @@ pub(crate) async fn discard_both(
             );
             let why = "One of these is the current version of another artifact, so retiring \
                        both would leave that one pointing at nothing; both stay as they are.";
-            match by {
-                DecidedBy::Model => leave_both(core, pair, why).await?,
-                _ => {
-                    if pair.synthesis_asked {
-                        core.store.clear_pair_synthesis(pair.id).await?;
-                    }
-                    settle_as(core, pair, PairState::NoConflict, Some(why), by).await?
-                }
-            }
+            leave_both(core, pair, why, by).await?;
             return Ok(vec![]);
         }
     }
@@ -574,11 +647,11 @@ pub(crate) async fn discard_both(
     for id in &retire {
         // The journal is what the base did to itself; a person's press is not journaled.
         let journal = (by == DecidedBy::Model).then(|| {
-            let row = action(Kind::Discard, pair, id, None, detail);
-            match decision_id {
-                Some(d) => decided(row, by, d),
-                None => row,
-            }
+            decided(
+                action(Kind::Discard, pair, id, None, detail),
+                by,
+                decision_id,
+            )
         });
         let row = core.deprecate_with(id, journal).await?;
         // Linked as written, so a failure on the second side leaves the first one undoable.
@@ -603,12 +676,18 @@ pub(crate) async fn discard_both(
     Ok(rows)
 }
 
-/// Close the question with both sides as they are; the reason is kept on the row.
-pub(crate) async fn leave_both(core: &Core, p: &ArtifactPair, why: &str) -> Result<()> {
+/// Close the question with both sides as they are; the reason is kept on the row. `by` is whose
+/// ask or answer came to this, so a person's is not recorded as the model's.
+pub(crate) async fn leave_both(
+    core: &Core,
+    p: &ArtifactPair,
+    why: &str,
+    by: DecidedBy,
+) -> Result<()> {
     if p.synthesis_asked {
         core.store.clear_pair_synthesis(p.id).await?;
     }
-    settle(core, p, PairState::NoConflict, Some(why)).await
+    settle_as(core, p, PairState::NoConflict, Some(why), by).await
 }
 
 async fn settle(
@@ -2063,7 +2142,7 @@ pub(crate) mod tests {
         );
         assert!(
             superseded_by(&core, &ids[0]).await.is_none(),
-            "it acted past the cap"
+            "a note was superseded though the day was spent"
         );
         assert_eq!(core.store.open_ask_count().await.unwrap(), 0);
         run(&core, &pair.to_string()).await.unwrap();
@@ -2203,7 +2282,81 @@ pub(crate) mod tests {
         assert!(core.store.get_artifact(&p.a_id).await.unwrap().in_results());
         let settled = core.store.get_pair(pair).await.unwrap();
         assert_eq!(settled.decided_by, Some(DecidedBy::Operator));
-        assert_eq!(d.outcome, Some(Outcome::Corrected));
+        assert_eq!(
+            d.outcome,
+            Some(Outcome::Confirmed),
+            "keeping one of a duplicate was counted as correcting the model"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_answer_agrees_only_when_it_does_what_the_models_pick_would_have() {
+        let mut core = test_core().await;
+        deciding(&mut core, "duplicate", 0.7);
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        let mut d = decision(&core, pair).await;
+        let agreeing: [(&str, &[&str]); 6] = [
+            ("duplicate", &["duplicate", "keep_a", "keep_b"]),
+            ("a_replaces_b", &["a_replaces_b", "keep_a"]),
+            ("b_replaces_a", &["b_replaces_a", "keep_b"]),
+            ("conflict", &["conflict"]),
+            ("distinct", &["distinct"]),
+            // Nothing a person can press retires both.
+            ("vacuous", &[]),
+        ];
+        let mut offered = std::collections::BTreeSet::new();
+        for writer in [false, true] {
+            core.pair_synthesizer = None;
+            if writer {
+                core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
+            }
+            for (button, _) in PairApplier.buttons(&core, &d).await.unwrap() {
+                for (pick, same) in agreeing {
+                    d.pick = pick.to_string();
+                    assert_eq!(
+                        PairApplier.agrees(&d, &button),
+                        same.contains(&button.as_str()),
+                        "the model said {pick}, the person pressed {button}"
+                    );
+                }
+                offered.insert(button);
+            }
+        }
+        // Every answer `buttons` can offer was covered, with and without a writer.
+        let all = [
+            "a_replaces_b",
+            "b_replaces_a",
+            "conflict",
+            "distinct",
+            "duplicate",
+            "keep_a",
+            "keep_b",
+        ];
+        assert_eq!(offered.iter().map(String::as_str).collect::<Vec<_>>(), all);
+    }
+
+    #[tokio::test]
+    async fn leaving_both_records_whoever_it_was_done_for() {
+        let core = test_core().await;
+        let ids = seed(&core, &[("a", [1.0, 0.0]), ("b", [0.93, 0.37])]).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+        let row = core.store.get_pair(pair).await.unwrap();
+
+        leave_both(&core, &row, "both stay", DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.state, PairState::NoConflict);
+        assert!(!p.synthesis_asked);
+        assert_eq!(
+            p.decided_by,
+            Some(DecidedBy::Operator),
+            "what a person's press came to was recorded as the model's decision"
+        );
     }
 
     #[tokio::test]
@@ -2572,38 +2725,206 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn the_model_never_acts_on_a_restricted_pair_through_the_applier() {
-        // Defence in depth: whatever reaches `apply` as the model's, a restricted pair is not acted on.
-        let mut core = test_core().await;
-        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
-        deciding(&mut core, "b_replaces_a", 0.95);
-        let ids = disagreeing(&core).await;
-        let pair = queue_wide(&core, &ids[0], &ids[1]).await;
-        run(&core, &pair.to_string()).await.unwrap();
-        let d = asked_restricted(&core, pair).await;
-
-        for pick in [
-            "b_replaces_a",
-            "a_replaces_b",
-            "keep_a",
-            "vacuous",
-            "duplicate",
-        ] {
-            let rows = PairApplier
-                .apply(&core, &d, pick, DecidedBy::Model)
+        // Defence in depth: an act that waited while its pair became restricted is not carried out.
+        for pick in ["b_replaces_a", "a_replaces_b", "vacuous", "duplicate"] {
+            let mut core = test_core().await;
+            core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
+            deciding(&mut core, pick, 0.95);
+            core.evolve.autonomous = crate::config::Autonomy::Full;
+            core.evolve.max_actions_per_day = 0;
+            let ids = disagreeing(&core).await;
+            let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+            run(&core, &pair.to_string()).await.unwrap();
+            let d = decision(&core, pair).await;
+            assert_eq!((d.band, d.state), (Band::Act, State::Waiting), "{pick}");
+            core.store
+                .restrict_pending_pair(&ids[0], &ids[1], Net::Decide)
                 .await
                 .unwrap();
-            assert!(rows.is_empty(), "{pick}");
+            core.evolve.max_actions_per_day = 20;
+
+            let d = crate::core::judging::settle(&core, d).await.unwrap();
+
+            assert_eq!(
+                (d.state, d.reason.as_deref()),
+                (State::Done, Some("changed")),
+                "{pick}"
+            );
+            let p = core.store.get_pair(pair).await.unwrap();
+            assert_eq!(p.state, PairState::Pending, "{pick}");
+            assert!(!p.synthesis_asked, "{pick}");
+            for id in &ids {
+                let c = core.store.get_artifact(id).await.unwrap();
+                assert!(c.in_results() && c.superseded_by.is_none(), "{pick}");
+            }
+            assert!(
+                core.store.recent_actions(10).await.unwrap().is_empty(),
+                "{pick}"
+            );
+            // Put back to be asked again, where it lands as an ask row.
+            assert_eq!(
+                core.store
+                    .pairs_to_judge(&pair_era(&core), 10)
+                    .await
+                    .unwrap()
+                    .len(),
+                1,
+                "{pick}"
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn the_model_does_not_act_on_a_pair_asked_for_writing_since() {
+        let mut core = test_core().await;
+        deciding(&mut core, "b_replaces_a", 0.95);
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_day = 0;
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        let d = decision(&core, pair).await;
+        assert!(core.store.ask_pair_synthesis(pair).await.unwrap());
+
+        let rows = PairApplier
+            .apply(&core, &d, "b_replaces_a", DecidedBy::Model)
+            .await
+            .unwrap();
+
+        assert!(rows.is_empty());
+        for id in &ids {
+            assert!(
+                superseded_by(&core, id).await.is_none(),
+                "a note was retired under a merge a person asked for"
+            );
+        }
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.synthesis_asked, "the person's ask was lost");
+        assert_eq!(p.state, PairState::Pending);
+    }
+
+    // ---- what a decision may still do to a pair that moved on without it ----
+
+    /// A sure `b_replaces_a` held by the daily cap: the pair is pending and the act waits.
+    async fn a_waiting_act(core: &mut Core) -> (Vec<String>, i64, Logged) {
+        deciding(core, "b_replaces_a", 0.95);
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        core.evolve.max_actions_per_day = 0;
+        let ids = disagreeing(core).await;
+        let pair = queue_pair(core, &ids[0], &ids[1]).await;
+        run(core, &pair.to_string()).await.unwrap();
+        let d = decision(core, pair).await;
+        assert_eq!((d.band, d.state), (Band::Act, State::Waiting));
+        (ids, pair, d)
+    }
+
+    #[tokio::test]
+    async fn a_pair_settled_or_asked_for_writing_since_is_no_longer_what_was_asked_about() {
+        let mut core = test_core().await;
+        let (_ids, pair, d) = a_waiting_act(&mut core).await;
+        assert!(PairApplier.unchanged(&core, &d).await.unwrap());
+
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+        assert!(
+            !PairApplier.unchanged(&core, &d).await.unwrap(),
+            "a pair asked for writing is still this decision's to carry out"
+        );
+        core.store.clear_pair_synthesis(pair).await.unwrap();
+        assert!(PairApplier.unchanged(&core, &d).await.unwrap());
+
+        core.store
+            .set_pair_state(pair, PairState::NoConflict, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        assert!(
+            !PairApplier.unchanged(&core, &d).await.unwrap(),
+            "a pair a person settled is still this decision's to carry out"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_waiting_act_leaves_a_pair_a_person_merged_since_exactly_as_it_is() {
+        let mut core = test_core().await;
+        let (ids, pair, d) = a_waiting_act(&mut core).await;
+        // A person asked for the merge meanwhile and it was written.
+        let merged = merged_from(&core, "Rust", "engram needs Rust 1.30.0 to build.", &ids).await;
+        core.store
+            .set_pair_merged(pair, &merged, Some("theirs"), DecidedBy::Operator)
+            .await
+            .unwrap();
+        core.evolve.max_actions_per_day = 20;
+
+        crate::jobs::decisions::run(&core).await.unwrap();
+        PairApplier.reopen(&core, &d).await.unwrap();
 
         let p = core.store.get_pair(pair).await.unwrap();
-        assert_eq!(p.state, PairState::Pending);
-        assert!(!p.synthesis_asked);
+        assert_eq!(
+            p.state,
+            PairState::NoConflict,
+            "a settled pair was reopened"
+        );
+        assert_eq!(
+            p.merged_into.as_deref(),
+            Some(merged.as_str()),
+            "undoing the merge would no longer find its pair"
+        );
+        assert_eq!(p.decided_by, Some(DecidedBy::Operator));
+        assert_eq!(p.detail.as_deref(), Some("theirs"));
+        assert!(
+            core.store
+                .pairs_to_judge(&pair_era(&core), 10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a pair a person merged went back to the model"
+        );
         for id in &ids {
-            let c = core.store.get_artifact(id).await.unwrap();
-            assert!(c.in_results() && c.superseded_by.is_none());
+            assert!(superseded_by(&core, id).await.is_none());
         }
-        assert!(core.store.recent_actions(10).await.unwrap().is_empty());
-        // Put back to be asked again, where it lands as an ask row.
+    }
+
+    #[tokio::test]
+    async fn a_pending_pair_is_put_back_fresh_and_someone_elses_ask_is_left_standing() {
+        let mut core = test_core().await;
+        let (_ids, pair, d) = a_waiting_act(&mut core).await;
+        core.store.record_unreadable_judgement(pair).await.unwrap();
+
+        PairApplier.reopen(&core, &d).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(
+            (p.state, p.judge_attempts, p.judge_unreadable),
+            (PairState::Pending, 0, 0),
+            "a pair asked again does not start from nothing"
+        );
+
+        // A person asks for the merge; the decision that never asked for it may not drop that.
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+        PairApplier.reopen(&core, &d).await.unwrap();
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.synthesis_asked, "a person's ask was dropped");
+        assert_eq!(p.synthesis_by, Some(DecidedBy::Operator));
+    }
+
+    #[tokio::test]
+    async fn asking_again_after_answering_duplicate_drops_the_ask_that_answer_made() {
+        let mut core = test_core().await;
+        core.pair_synthesizer = Some(Arc::new(ScriptedCompleter::new(vec![])));
+        deciding(&mut core, "duplicate", 0.7);
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        let d = decision(&core, pair).await;
+        crate::core::judging::answer(&core, &d.id, Some("duplicate"))
+            .await
+            .unwrap();
+        assert!(core.store.get_pair(pair).await.unwrap().synthesis_asked);
+
+        crate::core::judging::ask_again(&core, &d.id).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(!p.synthesis_asked, "asked again, and still to be written");
+        assert_eq!(p.state, PairState::Pending);
         assert_eq!(
             core.store
                 .pairs_to_judge(&pair_era(&core), 10)
@@ -2612,5 +2933,34 @@ pub(crate) mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn asking_again_leaves_a_pair_something_else_has_settled_since_the_answer() {
+        let mut core = test_core().await;
+        deciding(&mut core, "duplicate", 0.7);
+        let ids = disagreeing(&core).await;
+        let pair = queue_pair(&core, &ids[0], &ids[1]).await;
+        run(&core, &pair.to_string()).await.unwrap();
+        let d = decision(&core, pair).await;
+        crate::core::judging::answer(&core, &d.id, Some("conflict"))
+            .await
+            .unwrap();
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Contradiction
+        );
+        // The person then had the two written as one, on the pair itself.
+        let merged = merged_from(&core, "Rust", "engram needs Rust 1.30.0 to build.", &ids).await;
+        core.store
+            .set_pair_merged(pair, &merged, Some("theirs"), DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        crate::core::judging::ask_again(&core, &d.id).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.state, PairState::NoConflict, "a merged pair was reopened");
+        assert_eq!(p.merged_into.as_deref(), Some(merged.as_str()));
     }
 }

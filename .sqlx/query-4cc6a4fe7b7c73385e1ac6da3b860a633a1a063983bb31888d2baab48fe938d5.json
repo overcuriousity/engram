@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM decisions\n                WHERE question_id = ? AND era = ? AND band = 'ask' AND state IN ('waiting', 'open')\n                  AND subject_kind NOT IN ('write', 'pursuit')\n                  AND COALESCE(reason, '') NOT IN ('restricted', 'no_writer', 'rescue_refused')",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4cc6a4fe7b7c73385e1ac6da3b860a633a1a063983bb31888d2baab48fe938d5"
+}

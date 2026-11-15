@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT act_at, ask_at FROM decision_thresholds\n              WHERE question_id = ? AND era = ? AND held = 0 ORDER BY id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "act_at",
+        "ordinal": 0,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "act_at"
+          }
+        }
+      },
+      {
+        "name": "ask_at",
+        "ordinal": 1,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "ask_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "72646ec119ea4b3667e9b2f57ed3fb696e682586ce055a0d9801c16800041a81"
+}

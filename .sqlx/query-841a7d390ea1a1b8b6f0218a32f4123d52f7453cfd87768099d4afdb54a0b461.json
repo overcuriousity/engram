@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET outcome = 'undone',\n                    outcome_at = CASE WHEN outcome = 'confirmed' THEN outcome_at ELSE ? END\n              WHERE (outcome IS NULL OR outcome IN ('kept', 'confirmed'))\n                AND id IN (SELECT da.decision_id FROM decision_actions da\n                             JOIN corpus_actions ca ON ca.id = da.action_id\n                            WHERE ca.survivor_id = ? AND ca.kind = 'merge' AND ca.undone_at = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "841a7d390ea1a1b8b6f0218a32f4123d52f7453cfd87768099d4afdb54a0b461"
+}

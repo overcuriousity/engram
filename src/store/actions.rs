@@ -265,10 +265,12 @@ impl Store {
     }
 
     /// Undone or not. Counted per job: a shared count let one job's actions spend another's budget.
+    /// Only what the base did on its own: a row a person asked for (`asked_by`) spends nothing.
     pub async fn actions_since(&self, job: Job, at: i64) -> Result<i64> {
         Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM corpus_actions
-              WHERE at > ? AND job = ? AND kind != 'moment'",
+              WHERE at > ? AND job = ? AND kind != 'moment'
+                AND json_extract(evidence_json, '$.asked_by') IS NULL",
             at,
             job.as_str()
         )
@@ -311,10 +313,13 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
-        // The ones this call stamped: this subject and kind, undone at `at`.
+        // The ones this call stamped: this subject and kind, undone at `at`. `at` is in seconds, so
+        // rows of this subject and kind undone earlier in the same second match too; their
+        // decision is already `undone` and the outcome guard leaves it alone.
         sqlx::query!(
-            "UPDATE decisions SET outcome = 'undone', outcome_at = ?
-              WHERE (outcome IS NULL OR outcome = 'kept')
+            "UPDATE decisions SET outcome = 'undone',
+                    outcome_at = CASE WHEN outcome = 'confirmed' THEN outcome_at ELSE ? END
+              WHERE (outcome IS NULL OR outcome IN ('kept', 'confirmed'))
                 AND id IN (SELECT da.decision_id FROM decision_actions da
                              JOIN corpus_actions ca ON ca.id = da.action_id
                             WHERE ca.subject_id = ? AND ca.kind = ? AND ca.undone_at = ?)",
@@ -350,9 +355,11 @@ impl Store {
         .execute(&mut *tx)
         .await?
         .rows_affected();
+        // As in `undo_action_on`: matched by the second, guarded by the outcome.
         sqlx::query!(
-            "UPDATE decisions SET outcome = 'undone', outcome_at = ?
-              WHERE (outcome IS NULL OR outcome = 'kept')
+            "UPDATE decisions SET outcome = 'undone',
+                    outcome_at = CASE WHEN outcome = 'confirmed' THEN outcome_at ELSE ? END
+              WHERE (outcome IS NULL OR outcome IN ('kept', 'confirmed'))
                 AND id IN (SELECT da.decision_id FROM decision_actions da
                              JOIN corpus_actions ca ON ca.id = da.action_id
                             WHERE ca.survivor_id = ? AND ca.kind = 'merge' AND ca.undone_at = ?)",
@@ -438,6 +445,25 @@ mod tests {
                 "{job:?} was charged for somebody else's work"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_action_a_person_asked_for_does_not_spend_the_job_s_day() {
+        let store = Store::memory().await.unwrap();
+        store.record_action(&merge_of("a", "m")).await.unwrap();
+        store
+            .record_action(&NewAction {
+                kind: Kind::Supersede,
+                evidence: serde_json::json!({ "pair_id": 7, "asked_by": "operator" }),
+                ..merge_of("b", "w")
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            store.actions_since(Job::Dedupe, 0).await.unwrap(),
+            1,
+            "a person's supersede was charged to the base's day"
+        );
     }
 
     fn condense_of(subject: &str) -> NewAction {

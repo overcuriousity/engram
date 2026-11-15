@@ -51,6 +51,8 @@ pub struct Working {
     /// Held here so a transient `Core` (`background::open_for_pass`) shares its measurement with
     /// the serving one.
     pub line: Arc<std::sync::atomic::AtomicU32>,
+    /// Held here so a transient `Core` spends the same tick as the serving one.
+    pub calls: Arc<crate::core::judging::Meter>,
 }
 
 impl Default for Working {
@@ -59,6 +61,7 @@ impl Default for Working {
             sittings: Arc::new(Default::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            calls: Arc::new(Default::default()),
         }
     }
 }
@@ -110,8 +113,10 @@ pub struct Core {
     /// passages.
     pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
-    /// Always there: `[infer.decide]` is required.
+    /// Always there: `[infer.decide]` is required. Built behind `judging::Metered`.
     pub decider: Arc<dyn Decider>,
+    /// The judging calls this tick that the decision log does not hold; lives on `Working`.
+    pub calls: Arc<crate::core::judging::Meter>,
     /// What each question's answers do, by question id; empty until a stage registers.
     pub appliers: Arc<crate::core::judging::Appliers>,
     /// `false` where the decider stands for nothing: the contained build, whose role points at a
@@ -401,7 +406,11 @@ impl Core {
                 ) as Arc<dyn Synthesizer>
             }),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
-            decider: Arc::new(HttpDecider::new(&cfg.infer.decide).with_counter(counter.clone())),
+            decider: Arc::new(crate::core::judging::Metered::new(
+                Arc::new(HttpDecider::new(&cfg.infer.decide).with_counter(counter.clone())),
+                working.calls.clone(),
+            )),
+            calls: working.calls,
             decides: true,
             reranker: cfg
                 .infer
@@ -713,6 +722,8 @@ pub mod test_support {
             synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             decider: Arc::new(FakeDecider::default()),
+            // Unmetered, so a test counts only what it meters itself (`judging::test_support::metered`).
+            calls: Arc::new(Default::default()),
             decides: true,
             reranker,
             rerank_apply: vec![

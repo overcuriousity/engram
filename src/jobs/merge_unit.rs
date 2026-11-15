@@ -1,8 +1,10 @@
 //! `Stage::Merge`: writes the merge a decision or a person asked for (`synthesis_asked`). The journal
-//! rows link to the pair's decision as they are written; a draft that cannot be written faithfully
-//! leaves both notes, and a model's ask is then recorded `refused` on its decision.
+//! rows link to the decision that asked as they are written; a draft that cannot be written
+//! faithfully leaves both notes, and a model's ask is then recorded `refused` on its decision.
 
-use super::dedupe::{Members, action, leave_both, members_of, pair_era, restricted_now};
+use super::dedupe::{
+    Members, action, asked_for_merge, decided, leave_both, members_of, pair_era, restricted_now,
+};
 use crate::core::Core;
 use crate::error::{Error, Result};
 use crate::infer::prompt::{MergedDraft, SYNTHESIZE_SYSTEM, parse_synthesis};
@@ -17,6 +19,10 @@ pub(crate) const LOSS_REFUSED: &str =
 
 /// The after-write check refused the draft.
 pub(crate) const UNFAITHFUL: &str = "a check found the draft unfaithful; both stay as they are";
+
+/// The decision model would not answer the after-write check, and a retry is told the same. A
+/// merge replaces two notes, so a draft nothing checked is not written.
+pub(crate) const UNCHECKED: &str = "the draft could not be checked; both stay as they are";
 
 /// Who asked and the decision the ask came from, when there is one.
 struct Ask {
@@ -63,10 +69,13 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         );
         return Ok(());
     }
+    // Only the decision that asked for this merge; a press on the pair itself came from none,
+    // whatever was logged about the pair last.
     let decision = core
         .store
         .last_logged("pair_relation", &p.id.to_string(), None, &pair_era(core))
         .await?
+        .filter(|d| asked_for_merge(d, by))
         .map(|d| d.id);
     // The model asked while the pair sat above the line, or before it was restricted: a person's
     // now. The ask is dropped and the pair asked again, where it becomes an ask row.
@@ -78,7 +87,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         }
         return Ok(());
     }
-    let Some(Members { members, .. }) = members_of(core, &p).await? else {
+    let Some(Members { members, .. }) = members_of(core, &p, by).await? else {
         return Ok(());
     };
     write(core, &p, members, &Ask { by, decision }).await
@@ -86,6 +95,12 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
 
 /// The tail is `write_merge`, so a model's and a person's merge leave the base in one shape.
 async fn write(core: &Core, p: &ArtifactPair, members: Vec<Chunk>, ask: &Ask) -> Result<()> {
+    let sources: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
+    // A run that failed after the write left its merge behind: that one is recorded, never a
+    // second written.
+    if let Some(merged) = core.store.merge_written_from(&p.a_id, &p.b_id).await? {
+        return record(core, p, &sources, &merged, ask).await;
+    }
     let Some(writer) = core.pair_synthesizer.clone() else {
         // The flag stays set, so the next run with a writer picks it up.
         return Ok(());
@@ -109,6 +124,7 @@ async fn write(core: &Core, p: &ArtifactPair, members: Vec<Chunk>, ask: &Ask) ->
             core,
             p,
             "these two do not fit one call; both stay as they are",
+            ask.by,
         )
         .await?;
         return ask.refused(core).await;
@@ -124,14 +140,18 @@ async fn write(core: &Core, p: &ArtifactPair, members: Vec<Chunk>, ask: &Ask) ->
         // Without the count this re-arms every tick on a reply that will not parse.
         Err(e) => {
             core.store.record_unreadable_judgement(p.id).await?;
+            let spent = p.judge_unreadable + 1 >= MAX_UNREADABLE_JUDGEMENTS;
             tracing::warn!(
                 pair = p.id,
                 reply_len = reply.len(),
                 error = %e,
-                "synthesis reply unreadable; the pair keeps its ask and waits"
+                spent,
+                "synthesis reply unreadable"
             );
-            // Past the ceiling nothing re-arms it: `pairs_awaiting_synthesis` holds it back.
-            if p.judge_unreadable + 1 >= MAX_UNREADABLE_JUDGEMENTS {
+            // Past the ceiling nothing re-arms it (`pairs_awaiting_synthesis`), so the ask goes
+            // too: the card promises nothing and the pair stays pending for a person.
+            if spent {
+                core.store.clear_pair_synthesis(p.id).await?;
                 ask.refused(core).await?;
             }
             return Err(e);
@@ -147,26 +167,26 @@ async fn write(core: &Core, p: &ArtifactPair, members: Vec<Chunk>, ask: &Ask) ->
             lost = lost.join(", "),
             "refused a synthesis that would have dropped these"
         );
-        leave_both(core, p, LOSS_REFUSED).await?;
+        leave_both(core, p, LOSS_REFUSED, ask.by).await?;
         return ask.refused(core).await;
     }
-    if faithless(core, p, &members, &draft).await? {
-        leave_both(core, p, UNFAITHFUL).await?;
+    if let Some(why) = faithless(core, p, &members, &draft).await? {
+        leave_both(core, p, why, ask.by).await?;
         return ask.refused(core).await;
     }
 
-    let sources: Vec<String> = members.iter().map(|m| m.id.clone()).collect();
     write_merge(core, p, &sources, &draft, ask).await
 }
 
-/// After the loss check: whether the decision model refuses the draft against the members. A failed
-/// check is an outage of this unit; a draft too long to judge rests on the loss check alone.
+/// After the loss check: why the draft is not written, when the decision model refuses it against
+/// the members or will not judge it. A failed check is an outage of this unit; a draft too long to
+/// judge rests on the loss check alone.
 async fn faithless(
     core: &Core,
     p: &ArtifactPair,
     members: &[Chunk],
     draft: &MergedDraft,
-) -> Result<bool> {
+) -> Result<Option<&'static str>> {
     use crate::core::judging::check::{Checked, Which, check, outage};
     use crate::core::judging::state::Note;
     let originals: Vec<Note> = members
@@ -185,16 +205,22 @@ async fn faithless(
     let got = check(core, &p.id.to_string(), &originals, &rewrite, Which::Both)
         .await
         .map_err(outage)?;
-    if let Checked::Refused { question, yes } = got {
-        tracing::warn!(
-            pair = p.id,
-            question,
-            yes,
-            "the check refused the merge draft"
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(match got {
+        Checked::Refused { question, yes } => {
+            tracing::warn!(
+                pair = p.id,
+                question,
+                yes,
+                "the check refused the merge draft"
+            );
+            Some(UNFAITHFUL)
+        }
+        Checked::Unjudged { detail } => {
+            tracing::warn!(pair = p.id, %detail, "the merge draft could not be checked");
+            Some(UNCHECKED)
+        }
+        Checked::Passed | Checked::TooLong => None,
+    })
 }
 
 /// The loss check is the caller's.
@@ -206,33 +232,7 @@ async fn write_merge(
     ask: &Ask,
 ) -> Result<()> {
     match crate::jobs::merge::write(core, draft, sources).await {
-        Ok(m) => {
-            let act = format!("merged into {} from {} sources", m.id, sources.len());
-            for source in sources {
-                let mut row = action(Kind::Merge, p, source, Some(&m.id), Some(act.as_str()));
-                if let Some(evidence) = row.evidence.as_object_mut() {
-                    if let Some(d) = &ask.decision {
-                        evidence.insert("decision".into(), serde_json::json!(d));
-                    }
-                    // `Store::band_record` reads this job's rows as verdicts; a person's is not one.
-                    if ask.by == DecidedBy::Operator {
-                        evidence.insert("asked_by".into(), serde_json::json!("operator"));
-                    }
-                }
-                let written = core.store.record_action(&row).await?;
-                // Linked as written: a failure on the next row must not leave this one unlinked.
-                if let Some(d) = &ask.decision {
-                    core.store.link_decision_actions(d, &[written]).await?;
-                }
-            }
-            let why = match ask.by {
-                DecidedBy::Operator => "synthesized at an operator's request",
-                _ => "the judge read both as one, and nothing either states was lost",
-            };
-            core.store
-                .set_pair_merged(p.id, &m.id, Some(why), ask.by)
-                .await
-        }
+        Ok(m) => record(core, p, sources, &m.id, ask).await,
         // `leave_both` clears any ask with it.
         Err(Error::Validation(why)) => {
             tracing::warn!(pair = p.id, reason = %why, "the merge path refused a merge");
@@ -241,12 +241,46 @@ async fn write_merge(
                 p,
                 "These could not be written as one because of what one of them is made of; \
                  both stay as they are.",
+                ask.by,
             )
             .await?;
             ask.refused(core).await
         }
         Err(e) => Err(e),
     }
+}
+
+/// One journal row per source, each linked as it is written, then the pair. Run again after a
+/// failure, it writes only the rows that are missing.
+async fn record(
+    core: &Core,
+    p: &ArtifactPair,
+    sources: &[String],
+    merged: &str,
+    ask: &Ask,
+) -> Result<()> {
+    let act = format!("merged into {merged} from {} sources", sources.len());
+    for source in sources {
+        let written = match core.store.open_action_on(source, Kind::Merge).await? {
+            Some(row) if row.survivor_id.as_deref() == Some(merged) => row.id,
+            _ => {
+                let row = action(Kind::Merge, p, source, Some(merged), Some(act.as_str()));
+                let row = decided(row, ask.by, ask.decision.as_deref());
+                core.store.record_action(&row).await?
+            }
+        };
+        // Linked as written: a failure on the next row must not leave this one unlinked.
+        if let Some(d) = &ask.decision {
+            core.store.link_decision_actions(d, &[written]).await?;
+        }
+    }
+    let why = match ask.by {
+        DecidedBy::Operator => "synthesized at an operator's request",
+        _ => "the judge read both as one, and nothing either states was lost",
+    };
+    core.store
+        .set_pair_merged(p.id, merged, Some(why), ask.by)
+        .await
 }
 
 /// Unlettered and without sources: this call writes, it does not decide.
@@ -434,6 +468,158 @@ mod tests {
 
         assert_eq!(decision(&core, pair).await.outcome, Some(Outcome::Refused));
         assert!(core.store.merged_artifacts(10).await.unwrap().is_empty());
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(
+            !p.synthesis_asked,
+            "an ask nothing serves any more still promises a synthesis"
+        );
+        assert_eq!(p.state, PairState::Pending, "it stays for a person");
+    }
+
+    #[tokio::test]
+    async fn a_draft_unreadable_to_the_end_drops_the_ask_whoever_asked() {
+        for by in [DecidedBy::Model, DecidedBy::Operator] {
+            let mut core = test_core().await;
+            writing(&mut core, &["not json"]);
+            let (_ids, pair) = pool_pair(&core).await;
+            core.store.ask_pair_synthesis_by(pair, by).await.unwrap();
+            for _ in 0..MAX_UNREADABLE_JUDGEMENTS - 1 {
+                core.store.record_unreadable_judgement(pair).await.unwrap();
+            }
+
+            run(&core, &pair.to_string()).await.unwrap_err();
+
+            let p = core.store.get_pair(pair).await.unwrap();
+            assert!(!p.synthesis_asked, "{by:?}: the ask is in neither queue");
+            assert_eq!(p.state, PairState::Pending, "{by:?}");
+            assert!(p.merged_into.is_none(), "{by:?}");
+            // The retry the queue makes of the failed unit finds nothing left to do.
+            run(&core, &pair.to_string()).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_count_a_judge_left_does_not_shelve_a_first_merge() {
+        let mut core = test_core().await;
+        writing(&mut core, &["not json", POOL]);
+        let (_ids, pair) = pool_pair(&core).await;
+        // What the chat judge left on the row, one short of the ceiling.
+        for _ in 0..MAX_UNREADABLE_JUDGEMENTS - 1 {
+            core.store.record_unreadable_judgement(pair).await.unwrap();
+        }
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap_err();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(
+            p.synthesis_asked,
+            "the writer's first unreadable draft was its last"
+        );
+        assert_eq!(p.judge_unreadable, 1, "the count is the writer's own");
+        run(&core, &pair.to_string()).await.unwrap();
+        assert!(
+            core.store
+                .get_pair(pair)
+                .await
+                .unwrap()
+                .merged_into
+                .is_some(),
+            "the merge was not written on the next try"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_a_person_pressed_for_links_to_no_decision_that_asked_something_else() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "conflict", 0.95);
+        let (_ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        assert_eq!(
+            core.store.get_pair(pair).await.unwrap().state,
+            PairState::Contradiction
+        );
+        // Pressed on the pair itself, not an answer to the row.
+        assert!(core.store.ask_pair_synthesis(pair).await.unwrap());
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_some(), "the merge was not written");
+        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        for r in &rows {
+            let e: serde_json::Value = serde_json::from_str(&r.evidence_json).unwrap();
+            assert!(e.get("decision").is_none(), "{e}");
+            assert_eq!(asked_by(r).as_deref(), Some("operator"));
+        }
+        let d = decision(&core, pair).await;
+        assert!(
+            core.store
+                .decision_action_ids(&d.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a person's merge was linked to the model's conflict"
+        );
+        // So neither the merge standing nor its undo says anything about that act.
+        core.store
+            .close_outcome_windows(crate::store::now() + 10)
+            .await
+            .unwrap();
+        assert_eq!(decision(&core, pair).await.outcome, None);
+    }
+
+    /// Makes every journal write fail, as a crash after the merge is written would.
+    async fn fail_the_journal(core: &Core, on: bool) {
+        let sql = if on {
+            "CREATE TRIGGER journal_fails BEFORE INSERT ON corpus_actions
+             BEGIN SELECT RAISE(ABORT, 'injected'); END"
+        } else {
+            "DROP TRIGGER journal_fails"
+        };
+        // runtime: a test-only trigger, the seam for a failure after the merge is written.
+        sqlx::query(sql).execute(&core.store.pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_merge_whose_journal_failed_is_finished_by_the_retry_and_not_written_twice() {
+        let mut core = test_core().await;
+        let w = writing(&mut core, &[POOL, POOL]);
+        deciding(&mut core, "duplicate", 0.95);
+        let (_ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        fail_the_journal(&core, true).await;
+
+        run(&core, &pair.to_string()).await.unwrap_err();
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.synthesis_asked && p.merged_into.is_none());
+        fail_the_journal(&core, false).await;
+        run(&core, &pair.to_string()).await.unwrap();
+
+        assert_eq!(w.calls(), 1, "the retry had the merge written again");
+        let merged = core.store.merged_artifacts(10).await.unwrap();
+        assert_eq!(merged.len(), 1, "a second merge was written");
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert_eq!(p.merged_into.as_deref(), Some(merged[0].id.as_str()));
+        let rows = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
+        assert_eq!(rows.len(), 2, "one row per source");
+        let d = decision(&core, pair).await;
+        assert_eq!(
+            core.store.decision_action_ids(&d.id).await.unwrap().len(),
+            2
+        );
+        // A third run, as a queue retry would make, journals nothing more.
+        run(&core, &pair.to_string()).await.unwrap();
+        assert_eq!(
+            core.store
+                .open_actions(&[Kind::Merge], 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -476,8 +662,51 @@ mod tests {
         assert_eq!(p.state, PairState::NoConflict);
         assert!(p.merged_into.is_none());
         assert_eq!(
+            p.decided_by,
+            Some(DecidedBy::Operator),
+            "what a person's answer came to was recorded as the model's decision"
+        );
+        assert_eq!(
             decision(&core, pair).await.outcome,
             Some(Outcome::Confirmed)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_running_before_the_answers_outcome_is_written_still_finds_its_decision() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.7);
+        let (_ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        let d = decision(&core, pair).await;
+        assert_eq!(d.state, State::Open);
+        // As `answer` leaves the row while the pick is carried out: claimed, the pick on it, no
+        // outcome yet. The merge it arms may be taken by an idle worker right here.
+        assert!(
+            core.store
+                .set_decision_state(&d.id, State::Open, State::Done)
+                .await
+                .unwrap()
+        );
+        core.store
+            .set_answered_pick(&d.id, Some("duplicate"))
+            .await
+            .unwrap();
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_some(), "the merge was not written");
+        assert!(
+            !core
+                .store
+                .decision_action_ids(&d.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the merge was journaled without the decision that asked for it"
         );
     }
 
@@ -543,8 +772,11 @@ mod tests {
         run(&core, &pair.to_string()).await.unwrap();
 
         let p = core.store.get_pair(pair).await.unwrap();
-        assert!(p.merged_into.is_none(), "a restricted pair was merged");
-        assert!(!p.synthesis_asked, "the model's ask still stands");
+        assert!(
+            p.merged_into.is_none(),
+            "a restricted pair must not be merged on the model's word"
+        );
+        assert!(!p.synthesis_asked, "the model's ask must be dropped");
         assert_eq!(p.state, PairState::Pending);
         assert_eq!(w.calls(), 0);
         for id in &ids {
@@ -674,9 +906,9 @@ mod tests {
         let (_ids, pair) = pool_pair(&core).await;
         dedupe::run(&core, &pair.to_string()).await.unwrap();
         core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
-            Err(Error::InferenceRejected {
+            Err(Error::Inference {
                 role: "decide",
-                detail: "400".into(),
+                detail: "down".into(),
             })
         }));
 
@@ -687,6 +919,31 @@ mod tests {
         assert!(p.merged_into.is_none());
         assert!(p.synthesis_asked, "the ask waits for the retry");
         assert_eq!(decision(&core, pair).await.outcome, None);
+    }
+
+    #[tokio::test]
+    async fn a_draft_the_check_will_not_judge_is_not_written_and_not_retried() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.95);
+        let (ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "400".into(),
+            })
+        }));
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none());
+        assert_eq!(p.detail.as_deref(), Some(UNCHECKED));
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+        assert_eq!(decision(&core, pair).await.outcome, Some(Outcome::Refused));
     }
 
     #[tokio::test]
@@ -893,7 +1150,7 @@ mod tests {
         run(&core, &pair.to_string()).await.unwrap();
 
         let p = core.store.get_pair(pair).await.unwrap();
-        assert!(p.merged_into.is_some(), "the merge was written");
+        assert!(p.merged_into.is_some(), "the merge was not written");
         assert_eq!(p.decided_by, Some(DecidedBy::Model));
         let journal = core.store.open_actions(&[Kind::Merge], 10).await.unwrap();
         assert_eq!(journal.len(), 2, "one row per source");
@@ -1149,6 +1406,11 @@ mod tests {
             "the card stops promising what will not come"
         );
         assert_eq!(p.state, PairState::NoConflict, "both stay as they are");
+        assert_eq!(
+            p.decided_by,
+            Some(DecidedBy::Operator),
+            "what a person's press came to was recorded as the model's decision"
+        );
     }
 
     #[tokio::test]

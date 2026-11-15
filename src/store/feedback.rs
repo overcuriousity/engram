@@ -816,6 +816,18 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// A capture is someone at the base too. Apart from `activity_since`, whose callers include
+    /// the passes that take a new capture in and must not wait for it to grow old.
+    pub async fn captured_since(&self, since: i64) -> Result<bool> {
+        let n: i64 = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64" FROM corpora WHERE created_at > ?"#,
+            since
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
+    }
+
     /// Searches a person answered by naming the note they wanted, newest first:
     /// (event, query, expected artifact, created_at). A `dwell` verdict nobody gave is left out.
     pub async fn named_hits(&self) -> Result<Vec<(String, String, String, i64)>> {
@@ -1309,6 +1321,25 @@ mod tests {
                 .await
                 .unwrap(),
             "nothing has happened in the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_after_the_moment_asked_about_is_seen_and_is_not_a_search_or_a_question() {
+        let store = Store::memory().await.unwrap();
+        let before = crate::store::now() - 10;
+        assert!(!store.captured_since(before).await.unwrap());
+        store.insert_corpus("a note", "ui", None).await.unwrap();
+        assert!(store.captured_since(before).await.unwrap());
+        assert!(
+            !store
+                .captured_since(crate::store::now() + 10)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store.activity_since(before).await.unwrap(),
+            "the passes that take a capture in would wait for it to grow old"
         );
     }
 

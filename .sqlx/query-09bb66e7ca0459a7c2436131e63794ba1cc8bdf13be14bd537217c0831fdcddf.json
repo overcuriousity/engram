@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE corpora SET created_at = 1000 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "09bb66e7ca0459a7c2436131e63794ba1cc8bdf13be14bd537217c0831fdcddf"
+}

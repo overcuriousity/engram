@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.id AS \"id!\" FROM artifacts m\n                WHERE m.provenance = 'merged' AND m.status = 'active' AND m.superseded_by IS NULL\n                  AND EXISTS (SELECT 1 FROM artifact_sources s\n                               WHERE s.child_id = m.id AND s.via_id = ?1 AND s.restored = 0)\n                  AND EXISTS (SELECT 1 FROM artifact_sources s\n                               WHERE s.child_id = m.id AND s.via_id = ?2 AND s.restored = 0)\n                  AND NOT EXISTS (SELECT 1 FROM artifact_sources s\n                                   WHERE s.child_id = m.id AND s.via_id NOT IN (?1, ?2))\n                ORDER BY m.created_at DESC, m.id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "723b4316f9452b057027e4c2a85a442fc063ad4899b453d361fcde2c650a5c5d"
+}

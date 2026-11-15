@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM jobs\n              WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')\n                AND attempts < ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "93bbf7e5a35cba8f8ce783383aee1df06a5ac4349cc583f75857e223112644a6"
+}

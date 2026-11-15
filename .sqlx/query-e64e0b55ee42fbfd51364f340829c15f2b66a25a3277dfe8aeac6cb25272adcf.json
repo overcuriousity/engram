@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO decide_events\n               (id, question, questions, situation, scope, filters, answers, prior, standing,\n                not_held, model, decider, read, dropped, query_vec, vec_dim, embed_model, created_at,\n                bears_version)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 19
+    },
+    "nullable": []
+  },
+  "hash": "e64e0b55ee42fbfd51364f340829c15f2b66a25a3277dfe8aeac6cb25272adcf"
+}

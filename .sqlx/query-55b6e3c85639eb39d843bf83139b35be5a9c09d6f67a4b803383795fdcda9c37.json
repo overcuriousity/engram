@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET state = 'lapsed', outcome_at = ?\n              WHERE state = 'open' AND COALESCE(opened_at, decided_at) < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "55b6e3c85639eb39d843bf83139b35be5a9c09d6f67a4b803383795fdcda9c37"
+}

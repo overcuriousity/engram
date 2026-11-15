@@ -38,8 +38,11 @@ pub struct Unsure {
     pub rows: Vec<UnsureRow>,
     pub waiting_rows: i64,
     pub answered: Vec<Answered>,
-    /// (question label, acts waiting on the daily cap).
+    /// (question label, sure decisions not yet carried out): held by the daily cap, by a switch
+    /// that is off, or by a writer's pacing.
     pub waiting_acts: Vec<(String, i64)>,
+    /// What became of a press that came too late; see `late`.
+    pub notice: Option<&'static str>,
 }
 
 impl Unsure {
@@ -48,6 +51,55 @@ impl Unsure {
             && self.waiting_rows == 0
             && self.answered.is_empty()
             && self.waiting_acts.is_empty()
+            && self.notice.is_none()
+    }
+
+    /// With the sentence for `/ui/insights?unsure=<code>`, where a late press lands.
+    pub(crate) fn saying(mut self, said: &Said) -> Self {
+        self.notice = said.unsure.as_deref().and_then(notice);
+        self
+    }
+}
+
+/// The query a late press comes back to Insights with.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct Said {
+    pub unsure: Option<String>,
+}
+
+/// (code in the address, what `judging` said, what the page says).
+const LATE: [(&str, &str, &str); 3] = [
+    (
+        "answered",
+        judging::ALREADY_ANSWERED,
+        "That was already answered.",
+    ),
+    (
+        "changed",
+        judging::CHANGED_SINCE_ASKED,
+        "That changed since it was asked. It will be asked again.",
+    ),
+    (
+        "asked",
+        judging::NOT_ASKED_AGAIN,
+        "That is already being asked again.",
+    ),
+];
+
+fn notice(code: &str) -> Option<&'static str> {
+    LATE.iter().find(|l| l.0 == code).map(|l| l.2)
+}
+
+/// A press on a row that is no longer open is not a mistake to show an error page for: back to
+/// Insights, which says what became of it. Anything else is the error it was.
+fn late(e: crate::error::Error) -> UiResult<Response> {
+    let code = match &e {
+        crate::error::Error::Validation(m) => LATE.iter().find(|l| l.1 == m).map(|l| l.0),
+        _ => None,
+    };
+    match code {
+        Some(code) => Ok(Redirect::to(&format!("/ui/insights?unsure={code}")).into_response()),
+        None => Err(e.into()),
     }
 }
 
@@ -60,28 +112,49 @@ pub(crate) struct Open {
     pub buttons: Vec<(String, String)>,
 }
 
-/// The stored answer's probabilities as whole numbers, largest first.
+/// The stored answer's probabilities as whole numbers, largest first. Only its numbers: a read
+/// kept beside them (a link's `direction`) is an object, not a weight.
 fn weights(d: &Logged) -> Vec<(String, u8)> {
     let map: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&d.answer).unwrap_or_default();
     let mut w: Vec<(String, u8)> = map
         .into_iter()
-        .map(|(k, v)| {
-            let n = (v.as_f64().unwrap_or(0.0) * 100.0)
-                .round()
-                .clamp(0.0, 100.0) as u8;
-            (k, n)
+        .filter_map(|(k, v)| {
+            let n = (v.as_f64()? * 100.0).round().clamp(0.0, 100.0) as u8;
+            Some((k, n))
         })
         .collect();
     w.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     w
 }
 
+/// Every id an applier names is an artifact row it has just read (`PairApplier`, `LinkApplier`
+/// and `ReapApplier` all answer with `get_artifact`'s own id and leave out what is gone), and the
+/// artifact page opens any row, hidden or buried: so each subject links to its page.
 fn href(subjects: Vec<(String, String)>) -> Vec<(String, String)> {
     subjects
         .into_iter()
         .map(|(id, title)| (format!("/ui/artifacts/{id}"), title))
         .collect()
+}
+
+/// The subjects and buttons of one row, or `None` when they cannot be read: that row is left
+/// out and logged, and the rest of the page stands.
+async fn drawn(
+    core: &Core,
+    a: &dyn judging::Applier,
+    d: &Logged,
+) -> Option<(Vec<(String, String)>, Vec<(String, String)>)> {
+    let read = async {
+        Ok::<_, crate::error::Error>((a.subjects(core, d).await?, a.buttons(core, d).await?))
+    };
+    match read.await {
+        Ok(row) => Some(row),
+        Err(e) => {
+            tracing::warn!(decision = %d.id, error = %e, "could not draw an Unsure row; left out");
+            None
+        }
+    }
 }
 
 /// A decision whose question has no applier here has no label or buttons, so it is skipped.
@@ -92,15 +165,24 @@ pub(crate) async fn open_rows(core: &Core) -> Result<Vec<Open>> {
         let Some(a) = core.appliers.get(&d.question_id) else {
             continue;
         };
+        let Some((subjects, buttons)) = drawn(core, a.as_ref(), &d).await else {
+            continue;
+        };
         out.push(Open {
             label: a.label(),
-            subjects: a.subjects(core, &d).await?,
+            subjects,
             weights: weights(&d),
-            buttons: a.buttons(core, &d).await?,
+            buttons,
             id: d.id,
         });
     }
     Ok(out)
+}
+
+/// What `/status` counts as unsure: the open rows of the questions `open_rows` can list. One
+/// count: `/status` is polled, and drawing every row to count them reads each row's subjects.
+pub(crate) async fn open_count(core: &Core) -> Result<i64> {
+    core.store.open_ask_count_of(&core.appliers.ids()).await
 }
 
 pub(crate) async fn unsure(tenant: &Tenant) -> Result<Unsure> {
@@ -121,16 +203,17 @@ pub(crate) async fn unsure(tenant: &Tenant) -> Result<Unsure> {
         let Some(a) = core.appliers.get(&d.question_id) else {
             continue;
         };
+        let Some((subjects, buttons)) = drawn(core, a.as_ref(), &d).await else {
+            continue;
+        };
         let pick = d.answered_pick.clone().unwrap_or_default();
-        let said = a
-            .buttons(core, &d)
-            .await?
+        let said = buttons
             .into_iter()
             .find(|(p, _)| *p == pick)
             .map_or(pick, |(_, l)| l);
         answered.push(Answered {
             label: a.label(),
-            subjects: href(a.subjects(core, &d).await?),
+            subjects: href(subjects),
             said,
             id: d.id,
         });
@@ -147,6 +230,7 @@ pub(crate) async fn unsure(tenant: &Tenant) -> Result<Unsure> {
         waiting_rows: core.store.waiting_ask_count().await?,
         answered,
         waiting_acts,
+        notice: None,
     })
 }
 
@@ -162,13 +246,17 @@ async fn answer_ui(
     Form(p): Form<Pick>,
 ) -> UiResult<Response> {
     let pick = Some(p.pick.as_str()).filter(|p| *p != "leave");
-    judging::answer(&tenant.core, &id, pick).await?;
-    Ok(Redirect::to("/ui/insights").into_response())
+    match judging::answer(&tenant.core, &id, pick).await {
+        Ok(_) => Ok(Redirect::to("/ui/insights").into_response()),
+        Err(e) => late(e),
+    }
 }
 
 async fn again_ui(tenant: Tenant, Path(id): Path<String>) -> UiResult<Response> {
-    judging::ask_again(&tenant.core, &id).await?;
-    Ok(Redirect::to("/ui/insights").into_response())
+    match judging::ask_again(&tenant.core, &id).await {
+        Ok(()) => Ok(Redirect::to("/ui/insights").into_response()),
+        Err(e) => late(e),
+    }
 }
 
 pub(crate) fn routes() -> Router<AppState> {
@@ -351,15 +439,76 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_row_already_answered_says_so_in_one_sentence() {
+    async fn a_second_press_on_an_answered_row_goes_back_to_insights_which_says_so() {
         let (app, cookie, _, ap, id) = open_one().await;
         let uri = format!("/ui/ops/unsure/{id}/answer");
         press(&app, &cookie, &uri, "pick=same").await;
-        let res = press(&app, &cookie, &uri, "pick=different").await;
+        for pick in ["pick=different", "pick=leave"] {
+            let res = press(&app, &cookie, &uri, pick).await;
+            assert_eq!(res.status(), StatusCode::SEE_OTHER, "{pick}");
+            assert_eq!(
+                res.headers()["location"],
+                "/ui/insights?unsure=answered",
+                "{pick}"
+            );
+        }
+        assert_eq!(ap.applied().len(), 1, "the second press did something");
+        let page = get_body(&app, &cookie, "/ui/insights?unsure=answered").await;
+        assert!(page.contains("That was already answered."), "{page}");
+        // Only the codes a late press comes back with are said.
+        let page = get_body(&app, &cookie, "/ui/insights?unsure=nope").await;
+        assert!(!page.contains("Unsure"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_press_on_a_row_that_changed_and_a_second_ask_again_go_back_with_their_notice() {
+        let (app, cookie, core, ap, id) = open_one().await;
+        ap.set_changed(true);
+        let res = press(
+            &app,
+            &cookie,
+            &format!("/ui/ops/unsure/{id}/answer"),
+            "pick=same",
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()["location"], "/ui/insights?unsure=changed");
+        assert!(ap.applied().is_empty());
+        assert_eq!(ap.reopened(), vec![id]);
+
+        ap.set_changed(false);
+        ap.set_journals(false);
+        let other = seeded(&core, CHOICE, "b", torn(), Band::Ask).await.id;
+        press(
+            &app,
+            &cookie,
+            &format!("/ui/ops/unsure/{other}/answer"),
+            "pick=same",
+        )
+        .await;
+        let again = format!("/ui/ops/unsure/{other}/again");
+        redirected_home(&press(&app, &cookie, &again, "").await);
+        let res = press(&app, &cookie, &again, "").await;
+        assert_eq!(res.status(), StatusCode::SEE_OTHER);
+        assert_eq!(res.headers()["location"], "/ui/insights?unsure=asked");
+        assert_eq!(ap.reopened().len(), 2, "the second press did something");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_row_is_still_a_404_and_an_unknown_answer_still_a_400() {
+        let (app, cookie, _, _, id) = open_one().await;
+        let res = press(&app, &cookie, "/ui/ops/unsure/nope/answer", "pick=same").await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        let res = press(
+            &app,
+            &cookie,
+            &format!("/ui/ops/unsure/{id}/answer"),
+            "pick=sideways",
+        )
+        .await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let body = body_of(res).await;
-        assert!(body.contains("this was already answered"), "{body}");
-        assert_eq!(ap.applied().len(), 1, "the second press did something");
+        assert!(body.contains("that is not one of the answers"), "{body}");
     }
 
     #[tokio::test]
@@ -383,7 +532,7 @@ mod tests {
         let page = insights(&app, &cookie).await;
         assert!(page.contains("Unsure · 1"), "{page}");
         assert!(page.contains("1 more waiting"), "{page}");
-        assert!(page.contains("2 waiting on the daily pace"), "{page}");
+        assert!(page.contains("2 sure, not yet carried out"), "{page}");
     }
 
     #[tokio::test]
@@ -479,5 +628,195 @@ mod tests {
         )
         .await;
         assert_eq!(body["unsure"], 1, "{body}");
+    }
+
+    async fn status_and_list(app: &axum::Router, cookie: &str) -> (serde_json::Value, usize) {
+        let status = json_of(
+            app.clone()
+                .oneshot(json_get("/api/v1/status", Some(cookie)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let list = json_of(
+            app.clone()
+                .oneshot(json_get("/api/v1/unsure", Some(cookie)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let listed = list["items"].as_array().unwrap().len();
+        (status["unsure"].clone(), listed)
+    }
+
+    #[tokio::test]
+    async fn status_counts_what_is_listed_not_a_row_nothing_here_can_show() {
+        let (app, cookie, core, _, _) = open_one().await;
+        // Open, of a question no applier answers: it has no label and no buttons.
+        let id = core
+            .store
+            .log_decision(&crate::store::decision_log::NewLogged {
+                question_id: "gone_question".into(),
+                question_version: 1,
+                model: "m".into(),
+                subject_kind: "pair",
+                subject_a: "x".into(),
+                subject_b: None,
+                rev_a: None,
+                rev_b: None,
+                answer: "{}".into(),
+                top: 0.7,
+                pick: "yes".into(),
+                swapped_agree: None,
+                band: Band::Ask,
+                reason: None,
+                state: State::Waiting,
+            })
+            .await
+            .unwrap();
+        assert!(core.store.seat_ask(&id, 20).await.unwrap());
+        assert_eq!(core.store.open_ask_count().await.unwrap(), 2);
+        let (count, listed) = status_and_list(&app, &cookie).await;
+        assert_eq!(listed, 1);
+        assert_eq!(count, 1, "the count and the list disagree");
+    }
+
+    #[tokio::test]
+    async fn a_row_whose_subjects_cannot_be_read_is_left_out_and_the_page_stands() {
+        let (app, cookie, core, ap, _) = open_one().await;
+        seeded(&core, CHOICE, "b", torn(), Band::Ask).await;
+        ap.set_unreadable("a");
+        let page = insights(&app, &cookie).await;
+        assert!(page.contains("Unsure · 1"), "{page}");
+        assert!(page.contains("Title b"), "{page}");
+        assert!(!page.contains("Title a<"), "{page}");
+        let (count, listed) = status_and_list(&app, &cookie).await;
+        assert_eq!(listed, 1);
+        // Counted by its question without drawing it: the row is open, and will show again.
+        assert_eq!(count, 2);
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_cannot_be_read_is_left_out_of_the_answered_list() {
+        let (app, cookie, _, ap, id) = open_one().await;
+        ap.set_journals(false);
+        press(
+            &app,
+            &cookie,
+            &format!("/ui/ops/unsure/{id}/answer"),
+            "pick=same",
+        )
+        .await;
+        ap.set_unreadable("a");
+        let page = insights(&app, &cookie).await;
+        assert!(!page.contains("answered ("), "{page}");
+    }
+
+    #[tokio::test]
+    async fn a_read_kept_beside_the_weights_is_not_shown_as_a_weight() {
+        let (app, cookie, core, _) = app().await;
+        let mut answer = torn();
+        answer["direction"] = serde_json::json!({
+            "pick": "a_first", "top": 0.9, "agree": true, "exchanged": "b_first"
+        });
+        let d = seeded(&core, CHOICE, "a", answer, Band::Ask).await;
+        assert_eq!(d.state, State::Open);
+        let page = insights(&app, &cookie).await;
+        // The span ends after the last weight: no "direction 0" follows.
+        assert!(
+            page.contains("duplicate 48 · distinct 41 · replaced 11</span>"),
+            "{page}"
+        );
+        let body = json_of(
+            app.clone()
+                .oneshot(json_get("/api/v1/unsure", Some(&cookie)))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            body["items"][0]["weights"],
+            serde_json::json!({"duplicate": 48, "distinct": 41, "replaced": 11}),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_heading_gives_no_count_when_no_row_is_open() {
+        let (app, cookie, core, _) = app().await;
+        seeded(
+            &core,
+            CHOICE,
+            "c",
+            serde_json::json!({"same": 0.95, "different": 0.05}),
+            Band::Act,
+        )
+        .await;
+        let page = insights(&app, &cookie).await;
+        assert!(page.contains("1 sure, not yet carried out"), "{page}");
+        assert!(page.contains(">Unsure</h2>"), "{page}");
+        assert!(!page.contains("Unsure · 0"), "{page}");
+    }
+
+    #[tokio::test]
+    async fn every_subject_a_built_in_question_names_is_an_artifact_that_opens() {
+        let core = crate::core::test_support::test_core().await;
+        let a = crate::core::test_support::seed_artifact(&core, "first").await;
+        let b = crate::core::test_support::seed_artifact(&core, "second").await;
+        core.store.record_pair(&a, &b, 0.9).await.unwrap();
+        let pair = core
+            .store
+            .pair_between(&a, &b)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+            .to_string();
+        let (app, cookie) = app_with_cookie(core.clone()).await;
+        for (question, kind, first, second, named) in [
+            ("pair_relation", "pair", pair, None, 2),
+            ("link_kind", "link", a.clone(), Some(b.clone()), 2),
+            ("reap_worth", "artifact", a.clone(), None, 1),
+            // What is gone is named by nothing, so no link leads nowhere.
+            ("pair_relation", "pair", "999999".to_string(), None, 0),
+            (
+                "link_kind",
+                "link",
+                "gone".to_string(),
+                Some("too".to_string()),
+                0,
+            ),
+            ("reap_worth", "artifact", "gone".to_string(), None, 0),
+        ] {
+            let id = core
+                .store
+                .log_decision(&crate::store::decision_log::NewLogged {
+                    question_id: question.into(),
+                    question_version: 1,
+                    model: "m".into(),
+                    subject_kind: kind,
+                    subject_a: first,
+                    subject_b: second,
+                    rev_a: None,
+                    rev_b: None,
+                    answer: "{}".into(),
+                    top: 0.7,
+                    pick: String::new(),
+                    swapped_agree: None,
+                    band: Band::Ask,
+                    reason: None,
+                    state: State::Open,
+                })
+                .await
+                .unwrap();
+            let d = core.store.logged(&id).await.unwrap().unwrap();
+            let applier = core.appliers.get(question).unwrap();
+            let subjects = applier.subjects(&core, &d).await.unwrap();
+            assert_eq!(subjects.len(), named, "{question}: {subjects:?}");
+            for (href, _) in super::href(subjects) {
+                // `get_body` asserts the page answers 200.
+                get_body(&app, &cookie, &href).await;
+            }
+        }
     }
 }

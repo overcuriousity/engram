@@ -8,7 +8,8 @@ use crate::core::judging::state;
 use crate::error::{Error, Result};
 use crate::infer::decide::Answer;
 use crate::store::artifacts::Chunk;
-use crate::store::jobs::Stage;
+use crate::store::jobs::{MAX_ATTEMPTS, Stage, backoff_secs};
+use crate::store::search_labels::LABEL_GIVE_UP;
 
 /// Idle-only, as `read::arm`: a queued label keeps its attempts.
 pub async fn arm(core: &Core, event_id: &str) -> Result<()> {
@@ -54,9 +55,58 @@ pub async fn answers(core: &Core, query: &str, note: &Chunk) -> Result<Option<f6
     }
 }
 
-/// Each candidate still in results is asked alone; one that is gone or does not fit is skipped. A
-/// call that fails stores nothing, and the unit is retried.
+/// Labels the search. A failure stores no label and is remembered, so the sweep passes the search
+/// by until it is due; the queue retries the unit. Only a refusal, which a retry repeats, is
+/// counted: from `LABEL_GIVE_UP` of them the search is given up for this era and the unit ends.
 pub async fn run(core: &Core, event_id: &str) -> Result<()> {
+    let Err(e) = label(core, event_id).await else {
+        return Ok(());
+    };
+    // The search is gone: the queue drops the unit, and there is nothing to remember it on.
+    if matches!(e, Error::NotFound) {
+        return Err(e);
+    }
+    let refused = !e.retryable();
+    // As long as the queue waits (`jobs::run_one`): a refusal from the retry ceiling on, and the
+    // most the spread adds.
+    let attempts = core
+        .store
+        .live_job_attempts(Stage::Label, event_id)
+        .await?
+        .unwrap_or(1);
+    let floor = if refused {
+        attempts.max(MAX_ATTEMPTS)
+    } else {
+        attempts
+    };
+    let retry_at = crate::store::now() + backoff_secs(floor) * 3 / 2;
+    let refusals = match core
+        .store
+        .label_failed(
+            event_id,
+            answers_query("").version,
+            core.decider.model(),
+            refused,
+            retry_at,
+        )
+        .await
+    {
+        Ok(n) => n,
+        Err(unrecorded) => {
+            tracing::warn!(event_id, error = %unrecorded, "could not record a failed label attempt");
+            return Err(e);
+        }
+    };
+    if refusals >= LABEL_GIVE_UP {
+        tracing::warn!(event_id, refusals, error = %e, "the decision model keeps refusing this search; it is not labelled until the question or the model changes");
+        return Ok(());
+    }
+    Err(e)
+}
+
+/// Each candidate still in results is asked alone; one that is gone or does not fit is skipped. A
+/// call that fails stores nothing.
+async fn label(core: &Core, event_id: &str) -> Result<()> {
     let Some((query, candidates)) = core.store.search_to_label(event_id).await? else {
         return Ok(());
     };
@@ -114,11 +164,12 @@ impl Core {
             answers_query("").version,
             self.decider.model(),
         );
+        let agreement = self.store.label_agreement(at, version, model).await?;
         Ok(Figures {
             retrieval: self.store.model_retrieval(at, version, model).await?,
-            agreement: self.store.label_agreement(at, version, model).await?,
+            counts: self.agrees_enough(&agreement),
+            agreement,
             bears: self.store.bears_record(model).await?,
-            counts: self.labels_count().await?,
         })
     }
 
@@ -133,10 +184,15 @@ impl Core {
                 self.decider.model(),
             )
             .await?;
+        Ok(self.agrees_enough(&g))
+    }
+
+    /// `labels_count`'s rule, over an agreement already read.
+    fn agrees_enough(&self, g: &crate::store::search_labels::Agreement) -> bool {
         let c = &self.decide_cfg;
-        Ok(g.judged >= c.label_overlap_min
+        g.judged >= c.label_overlap_min
             && g.hit_rate >= c.label_agree_min
-            && g.selectivity <= c.label_select_max)
+            && g.selectivity <= c.label_select_max
     }
 }
 
@@ -353,6 +409,15 @@ mod tests {
             .unwrap();
             searches.push(id);
         }
+        // Captured long ago and embedded: the scan waits out a capture and reads embedded notes.
+        sqlx::query!("UPDATE corpora SET created_at = 1000")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query!("UPDATE artifacts SET embed_state = 'embedded'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
         let r = crate::jobs::decisions::run(&core).await.unwrap();
         // A quarter of 40 is 10: two searches of four candidates; a third would make 12.
         assert_eq!(r.labelled, 2);
@@ -362,7 +427,8 @@ mod tests {
         }
         assert_eq!(armed, [true, true, false, false, false], "oldest first");
         assert_eq!(r.scanned, 20, "the scan keeps its half");
-        assert_eq!(core.judging_budget().await.unwrap(), 40);
+        // What was armed holds its share from now: twenty readings and two searches of four.
+        assert_eq!(core.judging_budget().await.unwrap(), 12);
 
         // The two still queued hold their share: nothing more is armed.
         let again = crate::jobs::decisions::run(&core).await.unwrap();
@@ -464,7 +530,12 @@ mod tests {
             Default::default()
         );
         core.store.unjudge(&id, Labeller::Confirm).await.unwrap();
-        assert_eq!(s.model_expected(&id, 0.0).await.unwrap(), None);
+        assert_eq!(
+            s.model_expected(&id, 0.0, version(), "rule-decider")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     /// Makes `event_id`'s label unit due and drains the queue once.
@@ -497,17 +568,18 @@ mod tests {
             retry(&core, &ids[0]).await;
         }
 
-        // Not marked: no row, still unlabelled, still queued.
+        // Not marked: no row, still queued. Waiting out its last refusal, it is not offered to the
+        // sweep, which is left the search behind it.
         assert!(labelled(&core, &ids[0]).await.is_empty());
         assert_eq!(
             core.store
                 .unlabelled_searches(version(), "rule-decider", 10)
                 .await
                 .unwrap(),
-            ids
+            ids[1..]
         );
         assert!(core.store.live_job(Stage::Label, &ids[0]).await.unwrap());
-        // At its ceiling it no longer holds the tick: the search behind it is armed.
+        // It holds nothing of the tick: the search behind it is armed.
         assert_eq!(
             crate::jobs::decisions::run(&core).await.unwrap().labelled,
             1
@@ -524,6 +596,96 @@ mod tests {
             .await
             .unwrap();
         assert!(r.searches >= 1, "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_search_the_model_refuses_past_the_bound_is_given_up_and_leaves_the_queue() {
+        let mut core = test_core().await;
+        core.decider = Arc::new(RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "HTTP 400".into(),
+            })
+        }));
+        let ids = old_searches(&core, 1, 2).await;
+        assert_eq!(
+            crate::jobs::decisions::run(&core).await.unwrap().labelled,
+            1
+        );
+        for _ in 0..LABEL_GIVE_UP {
+            assert!(core.store.live_job(Stage::Label, &ids[0]).await.unwrap());
+            retry(&core, &ids[0]).await;
+        }
+
+        // Given up: not marked as labelled, no longer queued, and not offered again in this era
+        // even once its last wait is over.
+        assert!(labelled(&core, &ids[0]).await.is_empty());
+        assert!(!core.store.live_job(Stage::Label, &ids[0]).await.unwrap());
+        sqlx::query!("UPDATE search_label_failures SET retry_at = 0")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        assert!(
+            core.store
+                .unlabelled_searches(version(), "rule-decider", 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            crate::jobs::decisions::run(&core).await.unwrap().labelled,
+            0
+        );
+        // Another model is another era, and tries again.
+        assert_eq!(
+            core.store
+                .unlabelled_searches(version(), "other", 10)
+                .await
+                .unwrap(),
+            ids
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_that_waiting_fixes_gives_no_search_up() {
+        let mut core = test_core().await;
+        core.decider = Arc::new(RuleDecider::new(|_, _| {
+            Err(Error::Inference {
+                role: "decide",
+                detail: "connection refused".into(),
+            })
+        }));
+        let ids = old_searches(&core, 1, 2).await;
+        for _ in 0..LABEL_GIVE_UP + 1 {
+            assert!(run(&core, &ids[0]).await.is_err());
+        }
+
+        // Waiting out the last failure, it is not offered; due again, it is.
+        let due = || {
+            let store = core.store.clone();
+            async move {
+                store
+                    .unlabelled_searches(version(), "rule-decider", 10)
+                    .await
+                    .unwrap()
+            }
+        };
+        assert!(due().await.is_empty());
+        sqlx::query!("UPDATE search_label_failures SET retry_at = 0")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(due().await, ids);
+
+        // The endpoint is back: it is labelled, and nothing of the failures is kept.
+        core.decider = labeller(0.95);
+        run(&core, &ids[0]).await.unwrap();
+        assert_eq!(labelled(&core, &ids[0]).await.len(), 2);
+        let left = sqlx::query_scalar!("SELECT count(*) FROM search_label_failures")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

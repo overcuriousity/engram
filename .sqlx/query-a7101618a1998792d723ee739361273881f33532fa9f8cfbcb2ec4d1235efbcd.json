@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"acted!: i64\",\n                      COALESCE(SUM(outcome IN ('undone', 'corrected')), 0) AS \"undone!: i64\"\n                 FROM decisions\n                WHERE question_id = ? AND era = ? AND decided_at > ?\n                  AND subject_kind NOT IN ('write', 'pursuit')\n                  AND ((band = 'act' AND state = 'done' AND outcome IN ('kept', 'undone'))\n                    OR (band = 'ask' AND state = 'done'\n                        AND outcome IN ('confirmed', 'corrected', 'undone')))",
+  "describe": {
+    "columns": [
+      {
+        "name": "acted!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "undone!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a7101618a1998792d723ee739361273881f33532fa9f8cfbcb2ec4d1235efbcd"
+}

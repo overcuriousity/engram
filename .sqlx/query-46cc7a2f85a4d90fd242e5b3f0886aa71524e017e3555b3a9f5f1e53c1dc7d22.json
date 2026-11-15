@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET query = 'mount an E01 image read-only' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "46cc7a2f85a4d90fd242e5b3f0886aa71524e017e3555b3a9f5f1e53c1dc7d22"
+}

@@ -15,13 +15,20 @@ pub struct ModelRetrieval {
     pub mrr: f64,
 }
 
-/// Over the searches a person judged a hit whose expected note the model labelled.
+/// Over the searches a person judged a hit that the model labelled.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Agreement {
     pub judged: usize,
+    /// Of those, the searches whose expected note the model never labelled: each a miss.
+    pub unlabelled: usize,
     pub hit_rate: f64,
     pub selectivity: f64,
 }
+
+/// Refusals after which a search is given up for its era. The queue backs a refusal off from half
+/// a minute to six hours, so twenty of them span about two days: long enough for a wrong key to be
+/// put right, short of four calls a day for ever.
+pub const LABEL_GIVE_UP: i64 = 20;
 
 /// Of the bearing notes in the decisions a person ruled on, how many held up.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -32,7 +39,8 @@ pub struct BearsRecord {
 
 impl Store {
     /// Searches with a candidate still in results and no label from this model at this version,
-    /// oldest first. A search the person called no search (`discard`) is not labelled.
+    /// oldest first; not one the person called no search (`discard`). Only what can run now: not
+    /// a search waiting out a failed attempt, and not one given up in this era.
     pub async fn unlabelled_searches(
         &self,
         version: u32,
@@ -44,6 +52,9 @@ impl Store {
                 WHERE e.verdict IS NOT 'discard'
                   AND NOT EXISTS (SELECT 1 FROM search_labels l
                                    WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM search_label_failures f
+                                   WHERE f.event_id = e.id AND f.question_version = ? AND f.model = ?
+                                     AND (f.refused >= ? OR f.retry_at > ?))
                   AND EXISTS (SELECT 1 FROM search_candidates c
                                 JOIN artifacts a ON a.id = c.artifact_id
                                WHERE c.event_id = e.id
@@ -51,9 +62,51 @@ impl Store {
                 ORDER BY e.created_at ASC, e.id ASC LIMIT ?"#,
             version,
             model,
+            version,
+            model,
+            LABEL_GIVE_UP,
+            now(),
             limit
         )
         .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// A failed attempt at labelling a search in this era: not due again before `retry_at`, and
+    /// counted when the model `refused` it, which waiting does not fix. An older era's row starts
+    /// over. Returns the refusals so far in this era.
+    pub async fn label_failed(
+        &self,
+        event_id: &str,
+        version: u32,
+        model: &str,
+        refused: bool,
+        retry_at: i64,
+    ) -> Result<i64> {
+        let refused = i64::from(refused);
+        sqlx::query!(
+            "INSERT INTO search_label_failures (event_id, question_version, model, refused, retry_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(event_id) DO UPDATE SET
+               refused = CASE WHEN question_version = excluded.question_version
+                               AND model = excluded.model
+                              THEN refused + excluded.refused ELSE excluded.refused END,
+               question_version = excluded.question_version,
+               model = excluded.model,
+               retry_at = excluded.retry_at",
+            event_id,
+            version,
+            model,
+            refused,
+            retry_at
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(sqlx::query_scalar!(
+            "SELECT refused FROM search_label_failures WHERE event_id = ?",
+            event_id
+        )
+        .fetch_one(&self.pool)
         .await?)
     }
 
@@ -72,7 +125,7 @@ impl Store {
         Ok(Some((query, candidates)))
     }
 
-    /// Replaces the search's labels: one era per search.
+    /// Replaces the search's labels: one era per search. Labelled, its failed attempts are done with.
     pub async fn put_search_labels(
         &self,
         event_id: &str,
@@ -85,6 +138,12 @@ impl Store {
         sqlx::query!("DELETE FROM search_labels WHERE event_id = ?", event_id)
             .execute(&mut *tx)
             .await?;
+        sqlx::query!(
+            "DELETE FROM search_label_failures WHERE event_id = ?",
+            event_id
+        )
+        .execute(&mut *tx)
+        .await?;
         for (artifact_id, yes) in rows {
             sqlx::query!(
                 "INSERT INTO search_labels (event_id, artifact_id, yes, question_version, model, at)
@@ -104,7 +163,8 @@ impl Store {
     }
 
     /// Per labelled search: recall@10 is the share of its relevant candidates in the first ten
-    /// places, MRR the reciprocal place of the first. Places are the recorded pool's, from one.
+    /// places, MRR the reciprocal place of the first. Places are the recorded pool's, from one. A
+    /// search the person has since called no search (`discard`) is neither scored nor left out.
     pub async fn model_retrieval(
         &self,
         relevant_at: f64,
@@ -120,6 +180,8 @@ impl Store {
                 WHERE l.question_version = ? AND l.model = ?
                   AND EXISTS (SELECT 1 FROM search_candidates c
                                WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id)
+                  AND EXISTS (SELECT 1 FROM search_events e
+                               WHERE e.id = l.event_id AND e.verdict IS NOT 'discard')
                 ORDER BY l.event_id, 3"#,
             version,
             model
@@ -149,9 +211,9 @@ impl Store {
         Ok(out)
     }
 
-    /// Over the searches a person judged a hit whose expected note the model labelled: the hit rate
-    /// is the share whose expected note is relevant, the selectivity the mean share of a search's
-    /// labelled candidates that are relevant.
+    /// Over the searches a person judged a hit that the model labelled: the hit rate is the share
+    /// whose expected note is relevant, the selectivity the mean share of a search's labelled
+    /// candidates that are relevant. An expected note the model never labelled is a miss.
     pub async fn label_agreement(
         &self,
         relevant_at: f64,
@@ -159,7 +221,9 @@ impl Store {
         model: &str,
     ) -> Result<Agreement> {
         let rows = sqlx::query!(
-            r#"SELECT x.yes AS "expect_yes!: f64",
+            r#"SELECT (SELECT x.yes FROM search_labels x
+                        WHERE x.event_id = e.id AND x.artifact_id = e.expect_id
+                          AND x.question_version = ? AND x.model = ?) AS "expect_yes?: f64",
                       (SELECT COUNT(*) FROM search_labels l
                         WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
                           AND l.yes >= ? AND l.artifact_id <> '') AS "relevant!: i64",
@@ -167,8 +231,12 @@ impl Store {
                         WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
                           AND l.artifact_id <> '') AS "labelled!: i64"
                  FROM search_events e
-                 JOIN search_labels x ON x.event_id = e.id AND x.artifact_id = e.expect_id
-                WHERE e.verdict = 'hit' AND x.question_version = ? AND x.model = ?"#,
+                WHERE e.verdict = 'hit' AND e.expect_id IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM search_labels l
+                               WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                                 AND l.artifact_id <> '')"#,
+            version,
+            model,
             version,
             model,
             relevant_at,
@@ -185,7 +253,12 @@ impl Store {
         let n = rows.len() as f64;
         Ok(Agreement {
             judged: rows.len(),
-            hit_rate: rows.iter().filter(|r| r.expect_yes >= relevant_at).count() as f64 / n,
+            unlabelled: rows.iter().filter(|r| r.expect_yes.is_none()).count(),
+            hit_rate: rows
+                .iter()
+                .filter(|r| r.expect_yes.is_some_and(|yes| yes >= relevant_at))
+                .count() as f64
+                / n,
             selectivity: rows
                 .iter()
                 .map(|r| r.relevant as f64 / r.labelled as f64)
@@ -194,15 +267,18 @@ impl Store {
         })
     }
 
-    /// Over the held decisions made under this configured model judged `right` or `nothing_here`: every bearing note was
-    /// ruled on; one held up when its verdict was `right` and its own reading picked the same.
+    /// Over the held decisions made under this configured model and the wording of `bears` in
+    /// force, judged `right` or `nothing_here`: every bearing note was ruled on; one held up when
+    /// its verdict was `right` and its own reading picked the same.
     pub async fn bears_record(&self, model: &str) -> Result<BearsRecord> {
         use crate::core::decide::{standing::pick, wire};
         use crate::store::asks::AskVerdict;
         let ids = sqlx::query_scalar!(
             r#"SELECT id AS "id!" FROM decide_events
-                WHERE decider = ? AND not_held = 0 AND verdict IN ('right', 'nothing_here')"#,
-            model
+                WHERE decider = ? AND not_held = 0 AND verdict IN ('right', 'nothing_here')
+                  AND COALESCE(bears_version, 1) = ?"#,
+            model,
+            crate::core::decide::state::BEARS_VERSION
         )
         .fetch_all(&self.pool)
         .await?;
@@ -238,18 +314,28 @@ impl Store {
         Ok(out)
     }
 
-    /// The candidate the model rates highest for a search the person did not judge, if it is relevant.
-    pub async fn model_expected(&self, event_id: &str, relevant_at: f64) -> Result<Option<String>> {
+    /// The candidate this model at this version rates highest for a search the person did not
+    /// judge, if it is relevant.
+    pub async fn model_expected(
+        &self,
+        event_id: &str,
+        relevant_at: f64,
+        version: u32,
+        model: &str,
+    ) -> Result<Option<String>> {
         Ok(sqlx::query_scalar!(
             r#"SELECT l.artifact_id AS "artifact_id!" FROM search_labels l
                  JOIN search_events e ON e.id = l.event_id
                 WHERE l.event_id = ? AND e.judged_at IS NULL AND l.yes >= ? AND l.artifact_id <> ''
+                  AND l.question_version = ? AND l.model = ?
                 ORDER BY l.yes DESC,
                          (SELECT MIN(c.rank) FROM search_candidates c
                            WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id) ASC
                 LIMIT 1"#,
             event_id,
-            relevant_at
+            relevant_at,
+            version,
+            model
         )
         .fetch_optional(&self.pool)
         .await?)
@@ -282,7 +368,10 @@ impl Store {
         .await?;
         let mut out = Vec::new();
         for r in rows {
-            let Some(expect) = self.model_expected(&r.id, relevant_at).await? else {
+            let Some(expect) = self
+                .model_expected(&r.id, relevant_at, version, model)
+                .await?
+            else {
                 continue;
             };
             let served_rank = sqlx::query_scalar!(
@@ -516,13 +605,37 @@ pub(crate) mod tests {
             .await
             .unwrap();
         store.judge_hit(&b, &c[9], Labeller::Confirm).await.unwrap();
-        // Not judged; and judged on a note the model never saw: neither counts.
+        // Not judged, and judged but never labelled: neither counts.
         let u = search(&store, "three", &c).await;
         store
             .put_search_labels(&u, &labels(&c, &[0]), V, M)
             .await
             .unwrap();
-        let f = search(&store, "four", &c).await;
+        let bare = search(&store, "four", &c).await;
+        store
+            .judge_hit(&bare, &c[0], Labeller::Confirm)
+            .await
+            .unwrap();
+
+        let g = store.label_agreement(0.9, V, M).await.unwrap();
+        assert_eq!((g.judged, g.unlabelled), (2, 0));
+        assert!((g.hit_rate - 0.5).abs() < 1e-9, "{g:?}");
+        assert!((g.selectivity - 0.3).abs() < 1e-9, "{g:?}");
+    }
+
+    #[tokio::test]
+    async fn an_expected_note_the_model_never_labelled_is_a_miss_not_a_search_left_out() {
+        let store = Store::memory().await.unwrap();
+        let c = ids("a", 10);
+        // Expected note relevant, 2 of 10 relevant.
+        let a = search(&store, "one", &c).await;
+        store
+            .put_search_labels(&a, &labels(&c, &[0, 1]), V, M)
+            .await
+            .unwrap();
+        store.judge_hit(&a, &c[0], Labeller::Confirm).await.unwrap();
+        // Labelled, 1 of 10 relevant, and the person found the answer in a note the model never saw.
+        let f = search(&store, "two", &c).await;
         store
             .put_search_labels(&f, &labels(&c, &[0]), V, M)
             .await
@@ -531,11 +644,21 @@ pub(crate) mod tests {
             .judge_hit(&f, "found-elsewhere", Labeller::Confirm)
             .await
             .unwrap();
+        // A search that stepped aside carries no label any figure reads.
+        let aside = search(&store, "three", &c).await;
+        store
+            .put_search_labels(&aside, &[(String::new(), 0.0)], V, M)
+            .await
+            .unwrap();
+        store
+            .judge_hit(&aside, &c[0], Labeller::Confirm)
+            .await
+            .unwrap();
 
         let g = store.label_agreement(0.9, V, M).await.unwrap();
-        assert_eq!(g.judged, 2);
+        assert_eq!((g.judged, g.unlabelled), (2, 1));
         assert!((g.hit_rate - 0.5).abs() < 1e-9, "{g:?}");
-        assert!((g.selectivity - 0.3).abs() < 1e-9, "{g:?}");
+        assert!((g.selectivity - 0.15).abs() < 1e-9, "{g:?}");
     }
 
     #[tokio::test]
@@ -555,6 +678,7 @@ pub(crate) mod tests {
             g,
             Agreement {
                 judged: 3,
+                unlabelled: 0,
                 hit_rate: 1.0,
                 selectivity: 1.0
             }
@@ -664,6 +788,27 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn bears_read_under_another_wording_is_not_scored_with_this_one() {
+        use crate::store::asks::AskVerdict;
+        let store = Store::memory().await.unwrap();
+        decided(&store, AskVerdict::Right, &["keep", "keep", "keep"]).await;
+        // What is there so far was read under the next wording.
+        let next = i64::from(crate::core::decide::state::BEARS_VERSION) + 1;
+        sqlx::query!("UPDATE decide_events SET bears_version = ?", next)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        decided(&store, AskVerdict::Right, &["keep", "drop"]).await;
+        assert_eq!(
+            store.bears_record(M).await.unwrap(),
+            BearsRecord {
+                held_up: 1,
+                ruled_on: 2
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_a_search_takes_its_labels() {
         let store = Store::memory().await.unwrap();
         let c = ids("a", 3);
@@ -700,22 +845,162 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(
-            store.model_expected(&id, 0.9).await.unwrap().as_deref(),
+            store
+                .model_expected(&id, 0.9, V, M)
+                .await
+                .unwrap()
+                .as_deref(),
             Some(c[1].as_str())
         );
         assert_eq!(
-            store.model_expected(&id, 0.98).await.unwrap(),
+            store.model_expected(&id, 0.98, V, M).await.unwrap(),
             None,
             "nothing relevant"
+        );
+        assert_eq!(
+            store.model_expected(&id, 0.9, V + 1, M).await.unwrap(),
+            None,
+            "another wording's labels are not this one's"
+        );
+        assert_eq!(
+            store.model_expected(&id, 0.9, V, "other").await.unwrap(),
+            None,
+            "nor another model's"
         );
         store
             .judge_hit(&id, &c[2], Labeller::Confirm)
             .await
             .unwrap();
         assert_eq!(
-            store.model_expected(&id, 0.9).await.unwrap(),
+            store.model_expected(&id, 0.9, V, M).await.unwrap(),
             None,
             "the person's verdict wins"
         );
+    }
+
+    #[tokio::test]
+    async fn a_search_discarded_after_it_was_labelled_is_not_scored() {
+        let store = Store::memory().await.unwrap();
+        let c = ids("a", 4);
+        let kept = search(&store, "loop device", &c).await;
+        let relevant = search(&store, "asdf", &c).await;
+        let nothing = search(&store, "qwer", &c).await;
+        store
+            .put_search_labels(&kept, &labels(&c, &[1]), V, M)
+            .await
+            .unwrap();
+        store
+            .put_search_labels(&relevant, &labels(&c, &[0]), V, M)
+            .await
+            .unwrap();
+        store
+            .put_search_labels(&nothing, &labels(&c, &[]), V, M)
+            .await
+            .unwrap();
+        for id in [&relevant, &nothing] {
+            store
+                .judge(
+                    id,
+                    crate::store::feedback::Verdict::Discard,
+                    Labeller::Confirm,
+                )
+                .await
+                .unwrap();
+        }
+        let r = store.model_retrieval(0.9, V, M).await.unwrap();
+        assert_eq!((r.searches, r.left_out), (1, 0));
+        assert!((r.mrr - 0.5).abs() < 1e-9, "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_search_waiting_out_a_failed_attempt_is_not_offered_and_does_not_hide_the_next() {
+        let store = Store::memory().await.unwrap();
+        let n = notes(&store, 1).await;
+        let mut stuck = Vec::new();
+        for i in 0..64 {
+            let id = search(&store, &format!("stuck {i}"), &n).await;
+            aged(&store, &id, 1_000 + i).await;
+            store
+                .label_failed(&id, V, M, false, now() + 3_600)
+                .await
+                .unwrap();
+            stuck.push(id);
+        }
+        let healthy = search(&store, "healthy", &n).await;
+        aged(&store, &healthy, 2_000).await;
+
+        assert_eq!(
+            store.unlabelled_searches(V, M, 64).await.unwrap(),
+            std::slice::from_ref(&healthy),
+            "the sixty-fifth is the only one that can run"
+        );
+        // Due again, it is offered again, oldest first.
+        sqlx::query!(
+            "UPDATE search_label_failures SET retry_at = 0 WHERE event_id = ?",
+            &stuck[0]
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            store.unlabelled_searches(V, M, 64).await.unwrap(),
+            [stuck[0].clone(), healthy]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_refused_past_the_bound_is_given_up_until_the_era_changes() {
+        let store = Store::memory().await.unwrap();
+        let n = notes(&store, 1).await;
+        let id = search(&store, "refused", &n).await;
+        // A failure that waiting fixes is never counted, however often.
+        for _ in 0..LABEL_GIVE_UP + 1 {
+            assert_eq!(store.label_failed(&id, V, M, false, 0).await.unwrap(), 0);
+        }
+        for i in 1..LABEL_GIVE_UP {
+            assert_eq!(store.label_failed(&id, V, M, true, 0).await.unwrap(), i);
+        }
+        assert_eq!(
+            store.unlabelled_searches(V, M, 10).await.unwrap(),
+            std::slice::from_ref(&id),
+            "one short of the bound and due: still offered"
+        );
+        assert_eq!(
+            store.label_failed(&id, V, M, true, 0).await.unwrap(),
+            LABEL_GIVE_UP
+        );
+        assert!(
+            store
+                .unlabelled_searches(V, M, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.unlabelled_searches(V + 1, M, 10).await.unwrap(),
+            std::slice::from_ref(&id),
+            "a new wording tries again"
+        );
+        assert_eq!(
+            store.unlabelled_searches(V, "other", 10).await.unwrap(),
+            std::slice::from_ref(&id),
+            "so does a new model"
+        );
+        // The new era's first failure starts its own count.
+        assert_eq!(store.label_failed(&id, V + 1, M, true, 0).await.unwrap(), 1);
+        assert_eq!(
+            store.unlabelled_searches(V + 1, M, 10).await.unwrap(),
+            std::slice::from_ref(&id)
+        );
+        // Labelled at last, nothing of the failures is kept.
+        store
+            .put_search_labels(&id, &labels(&n, &[0]), V + 1, M)
+            .await
+            .unwrap();
+        let left = sqlx::query_scalar!("SELECT count(*) FROM search_label_failures")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
     }
 }

@@ -66,11 +66,13 @@ pub fn pair_relation() -> Asked {
     )
 }
 
+/// v2: v1 opened by saying the same searches keep finding the two, which is not true of a
+/// neighbour shown at capture; the wording now says nothing about how they were found.
 pub fn link_kind() -> Asked {
-    choice(
+    let mut a = choice(
         "link_kind",
         true,
-        "These two notes keep being found by the same searches. How are they related?",
+        "Here are two notes. How are they related?",
         &[
             ("continues", "one is the next step after the other"),
             ("example", "one is an instance of what the other describes"),
@@ -83,7 +85,9 @@ pub fn link_kind() -> Asked {
             ("duplicate", "they say the same thing"),
             ("unrelated", "no connection worth showing"),
         ],
-    )
+    );
+    a.version = 2;
+    a
 }
 
 /// v2: v1 picked `a_first` in 53 of 53 real cases; each option now says what the other note does.
@@ -114,19 +118,37 @@ pub fn reap_worth() -> Asked {
     )
 }
 
+/// Each category with its line, in `CATEGORIES`' order.
+const DESCRIBED: [(&str, &str); 8] = [
+    ("concept", "an idea and how to think about it"),
+    ("procedure", "steps to do something"),
+    ("reference", "facts to look up"),
+    ("snippet", "a piece of code or a command"),
+    ("configuration", "settings and their values"),
+    ("definition", "what a term means"),
+    ("example", "a worked case"),
+    ("other", "none of these"),
+];
+
+// A table that drifts from `CATEGORIES` does not compile: a category the model is never offered,
+// or one stored under a name the base does not know, would otherwise go unnoticed.
+const _: () = {
+    assert!(DESCRIBED.len() == CATEGORIES.len());
+    let mut i = 0;
+    while i < DESCRIBED.len() {
+        let (mine, theirs) = (DESCRIBED[i].0.as_bytes(), CATEGORIES[i].as_bytes());
+        assert!(mine.len() == theirs.len());
+        let mut j = 0;
+        while j < mine.len() {
+            assert!(mine[j] == theirs[j]);
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
 pub fn category() -> Asked {
-    let described = [
-        "an idea and how to think about it",
-        "steps to do something",
-        "facts to look up",
-        "a piece of code or a command",
-        "settings and their values",
-        "what a term means",
-        "a worked case",
-        "none of these",
-    ];
-    let options: Vec<(&str, &str)> = CATEGORIES.iter().copied().zip(described).collect();
-    choice("category", false, "What kind of note is this?", &options)
+    choice("category", false, "What kind of note is this?", &DESCRIBED)
 }
 
 pub fn pinned() -> Asked {
@@ -234,7 +256,11 @@ mod tests {
             validate(std::slice::from_ref(&a.question)).unwrap();
             assert_eq!(a.question.key, a.id);
             assert!(a.version >= 1, "{}", a.id);
-            let want = if a.id == "link_direction" { 2 } else { 1 };
+            let want = if matches!(a.id, "link_kind" | "link_direction") {
+                2
+            } else {
+                1
+            };
             assert_eq!(a.version, want, "{}", a.id);
         }
     }
@@ -295,6 +321,18 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn link_kind_v2_says_nothing_about_how_the_notes_were_found() {
+        let a = link_kind();
+        assert!(a.swapped);
+        assert_eq!(a.version, 2);
+        assert_eq!(
+            a.question.instructions,
+            "Here are two notes. How are they related?"
+        );
+        assert!(!a.question.instructions.contains("search"));
     }
 
     #[test]

@@ -29,7 +29,7 @@ pub struct ProposedArtifact {
     pub caveats: Vec<String>,
 }
 
-/// Context for the writer; afterwards each shown id is asked `link_kind` (`judging::link_shown`).
+/// Context for the writer; afterwards each shown id is asked `link_kind` (`associate::link_shown`).
 #[derive(Debug, Clone)]
 pub struct Neighbor {
     pub id: String,

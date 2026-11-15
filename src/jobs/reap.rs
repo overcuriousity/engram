@@ -53,7 +53,14 @@ pub async fn run(core: &Core) -> Result<Report> {
             step_aside(core, &c.id).await;
             continue;
         }
-        let s = state_of(core, c, &asked).await?;
+        let s = match state_of(core, c, &asked).await {
+            Ok(s) => s,
+            // One note's neighbours unread is not the sweep's failure: it waits, the rest go on.
+            Err(e) => {
+                tracing::warn!(artifact_id = %c.id, error = %e, "could not read a candidate's neighbours; it waits");
+                continue;
+            }
+        };
         let subjects = Subjects {
             kind: "artifact",
             a: c.id.clone(),
@@ -161,9 +168,9 @@ pub(crate) async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String
     Ok(out)
 }
 
-/// Row before point, marker before delete: a failed delete leaves `lifecycle_dirty` for the repair
-/// pass. Under `lifecycle_lock` so no restore lands between copy and wipe. The journal row is linked
-/// to `decision_id` as it is written; a row that stopped being a candidate journals nothing.
+/// Row before point, marker before delete: a failed delete leaves `lifecycle_dirty` for
+/// `repair_lifecycle_drift`. Under `lifecycle_lock` so no restore lands between copy and wipe.
+/// Nothing after `bury` commits is an error: an `Err` would put a burial that stands back to wait.
 pub(crate) async fn reap_one(
     core: &Core,
     c: &Chunk,
@@ -228,39 +235,70 @@ pub(crate) async fn reap_one(
         }
         Err(e) => return Err(e),
     };
-    // Linked as written: a failure after this must not leave the burial without its decision.
-    core.store
+    // Linked as written, and again by the caller from what is returned.
+    if let Err(e) = core
+        .store
         .link_decision_actions(decision_id, std::slice::from_ref(&row))
-        .await?;
-    core.vectors
+        .await
+    {
+        tracing::warn!(artifact_id = %c.id, error = %e, "could not link a burial to its decision yet");
+    }
+    match core
+        .vectors
         .delete_artifacts(std::slice::from_ref(&c.id))
-        .await?;
-    core.store
-        .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
-        .await?;
+        .await
+    {
+        Ok(()) => {
+            if let Err(e) = core
+                .store
+                .clear_lifecycle_dirty(std::slice::from_ref(&c.id))
+                .await
+            {
+                tracing::warn!(artifact_id = %c.id, error = %e, "could not clear a buried note's marker; the repair pass deletes its point again");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(artifact_id = %c.id, error = %e, "buried, but its point is still in the vector store; the repair pass deletes it")
+        }
+    }
     tracing::info!(artifact_id = %c.id, "reaped a retired artifact");
     Ok(vec![row])
 }
 
-/// Asks `Stage::Rescue` to write. The model's asks are paced by `max_rescues_per_run` in flight;
-/// one over waits as its decision does. A person's is not paced.
-async fn arm_rescue(core: &Core, c: &Chunk, by: DecidedBy) -> Result<()> {
+/// Whether the base may carry out a reap decision on its own: the switches `periodic_units` arms
+/// the sweep on, read again at each act because a decision can wait across a change of them.
+fn acts_alone(core: &Core) -> bool {
+    core.reap.enabled && core.evolve.autonomous.acts_on_corpus()
+}
+
+/// Gives back the claim `settle` took and journals nothing: the model's act waits for the next
+/// tick. A wait is not a failure, so it is not an `Err`.
+async fn wait(core: &Core, d: &Logged) -> Result<Vec<String>> {
+    core.store
+        .set_decision_state(&d.id, State::Done, State::Waiting)
+        .await?;
+    Ok(vec![])
+}
+
+/// The model's rescues are paced by `max_rescues_per_run` in flight; one already armed for this
+/// note takes no new room. A person's is not paced.
+async fn rescue_has_room(core: &Core, id: &str) -> Result<bool> {
+    if core.store.live_job(Stage::Rescue, id).await? {
+        return Ok(true);
+    }
+    let live = core
+        .store
+        .control
+        .live_count(&core.store.subject, Stage::Rescue)
+        .await?;
+    Ok(live < i64::try_from(core.reap.max_rescues_per_run).unwrap_or(i64::MAX))
+}
+
+/// Asks `Stage::Rescue` to write.
+async fn arm_rescue(core: &Core, c: &Chunk) -> Result<()> {
     if core.generator.is_none() {
         tracing::info!(artifact_id = %c.id, "valuable, but no generator model to rewrite it with; nothing is armed");
         return Ok(());
-    }
-    if by == DecidedBy::Model
-        && !core.store.live_job(Stage::Rescue, &c.id).await?
-        && core
-            .store
-            .control
-            .live_count(&core.store.subject, Stage::Rescue)
-            .await?
-            >= i64::try_from(core.reap.max_rescues_per_run).unwrap_or(i64::MAX)
-    {
-        return Err(Error::Validation(
-            "as many rescues are armed as a run may write; this one waits".into(),
-        ));
     }
     // Behind capture work, as the merge is.
     core.store
@@ -332,6 +370,11 @@ impl Applier for ReapApplier {
         let Some(c) = note_of(core, d).await? else {
             return Ok(vec![]);
         };
+        // Again here, as `settle` reads `armed`. A person's answer is never held.
+        if by == DecidedBy::Model && !acts_alone(core) {
+            tracing::debug!(artifact_id = %c.id, "the reap is off or the base may not act alone; the decision waits");
+            return wait(core, d).await;
+        }
         match pick {
             "no" => {
                 // Again here: a waiting burial can outlive a restore. A person's verdict wins.
@@ -351,15 +394,32 @@ impl Applier for ReapApplier {
                 }
                 reap_one(core, &c, &d.id, by).await
             }
-            "yes" => arm_rescue(core, &c, by).await.map(|()| vec![]),
+            "yes" => {
+                // With no generator nothing is armed, so nothing is held.
+                if by == DecidedBy::Model
+                    && core.generator.is_some()
+                    && !rescue_has_room(core, &c.id).await?
+                {
+                    tracing::debug!(artifact_id = %c.id, "as many rescues are armed as a run may write; this one waits");
+                    return wait(core, d).await;
+                }
+                arm_rescue(core, &c).await.map(|()| vec![])
+            }
             other => Err(Error::Validation(format!(
                 "\"{other}\" is not an answer about a retired note"
             ))),
         }
     }
 
-    async fn reopen(&self, core: &Core, d: &Logged) -> Result<()> {
-        core.store.restamp_retired(&d.subject_a).await
+    /// Nothing to put back: the reason the caller stamps (`asked_again`, `changed`) is what lets
+    /// `reap_candidates` nominate the note again, in its own place. A restamp would silence the
+    /// question for `min_age_days`; a note buried, restored or rescued since is left as it is.
+    async fn reopen(&self, _: &Core, _: &Logged) -> Result<()> {
+        Ok(())
+    }
+
+    fn armed(&self, core: &Core) -> bool {
+        acts_alone(core)
     }
 }
 
@@ -606,6 +666,8 @@ mod tests {
             .await
             .unwrap();
         let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+        // Read back, not computed again: the clock is in seconds and may tick during the run.
+        let waiting = core.store.get_artifact(&ids[1]).await.unwrap().retired_at;
 
         run(&core).await.unwrap();
 
@@ -616,7 +678,7 @@ mod tests {
         );
         assert_eq!(
             core.store.get_artifact(&ids[1]).await.unwrap().retired_at,
-            Some(crate::store::now() - 100 * 86_400),
+            waiting,
             "a candidate the endpoint never answered for was stood down too"
         );
     }
@@ -1330,8 +1392,8 @@ mod tests {
         run(&core).await.unwrap();
         let d = decision(&core, &ids[0], None).await;
         assert_eq!(d.state, State::Open);
-        // runtime: test-only backdating.
-        sqlx::query("UPDATE decisions SET decided_at = decided_at - ? WHERE id = ?")
+        // runtime: test-only backdating of when the row was seated.
+        sqlx::query("UPDATE decisions SET opened_at = opened_at - ? WHERE id = ?")
             .bind(31 * 86_400)
             .bind(&d.id)
             .execute(&core.store.pool)
@@ -1460,11 +1522,420 @@ mod tests {
         crate::core::judging::answer(&core, &d.id, Some("yes"))
             .await
             .unwrap();
+        let retired = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
         crate::core::judging::ask_again(&core, &d.id).await.unwrap();
 
-        // Put back at the end of the queue: asked when its age has run again.
-        backdate_retired_at(&core, &ids[0], 100 * 86_400).await;
+        // In its own place in the queue: asking again does not restart the note's age.
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().retired_at,
+            retired
+        );
+        let (cands, _) = nominees(&core).await.unwrap();
+        assert_eq!(
+            cands.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec![ids[0].as_str()]
+        );
         run(&core).await.unwrap();
         assert_eq!(dec.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn reopening_a_decision_about_a_buried_note_changes_nothing() {
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_NO);
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        assert_eq!(run(&core).await.unwrap().reaped, 1);
+        let d = decision(&core, &ids[0], None).await;
+        let before = core.store.get_artifact(&ids[0]).await.unwrap();
+
+        ReapApplier.reopen(&core, &d).await.unwrap();
+
+        let after = core.store.get_artifact(&ids[0]).await.unwrap();
+        assert_eq!(
+            (after.retired_at, after.reaped_at, after.text.as_str()),
+            (before.retired_at, before.reaped_at, "")
+        );
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+        assert!(nominees(&core).await.unwrap().0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_burial_is_held_while_the_reap_is_off_or_the_base_may_not_act_alone() {
+        use crate::config::Autonomy;
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_NO);
+        core.evolve.max_actions_per_day = 0;
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!((d.band, d.state), (Band::Act, State::Waiting));
+        core.evolve.max_actions_per_day = 20;
+
+        core.reap.enabled = false;
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(r.applied, 0, "the switch did not hold a waiting burial");
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+        core.reap.enabled = true;
+
+        // Below full no daily cap holds anything, so only the switch can.
+        for level in [Autonomy::Off, Autonomy::Ranking] {
+            core.evolve.autonomous = level;
+            let r = crate::jobs::decisions::run(&core).await.unwrap();
+            assert_eq!(r.applied, 0, "{level:?}");
+            assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+            assert_eq!(decision(&core, &ids[0], None).await.state, State::Waiting);
+        }
+
+        core.evolve.autonomous = Autonomy::Full;
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(r.applied, 1);
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+        assert_eq!(decision(&core, &ids[0], None).await.state, State::Done);
+    }
+
+    #[tokio::test]
+    async fn the_act_itself_holds_a_model_s_burial_while_the_reap_is_off_and_not_a_person_s() {
+        let mut core = test_core().await;
+        deciding(&mut core, 0.3);
+        let ids = seed(&core, &["a fact a person reads"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        run(&core).await.unwrap();
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!((d.pick.as_str(), d.state), ("no", State::Open));
+        core.reap.enabled = false;
+
+        let rows = ReapApplier
+            .apply(&core, &d, "no", DecidedBy::Model)
+            .await
+            .unwrap();
+        assert!(rows.is_empty());
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+
+        crate::core::judging::answer(&core, &d.id, Some("no"))
+            .await
+            .unwrap();
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_rescue_held_by_the_pacing_waits_without_failing_and_is_armed_when_there_is_room() {
+        let mut core = test_core().await;
+        core.reap.max_rescues_per_run = 1;
+        deciding(&mut core, SURE_YES);
+        let ids = seed(&core, &["first fact", "second fact"]).await;
+        for (i, id) in ids.iter().enumerate() {
+            core.store
+                .set_artifact_status(id, ArtifactStatus::Deprecated)
+                .await
+                .unwrap();
+            backdate_retired_at(&core, id, (300 - i as i64) * 86_400).await;
+        }
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.rescued), (2, 1));
+        assert!(core.store.live_job(Stage::Rescue, &ids[0]).await.unwrap());
+        let held = decision(&core, &ids[1], None).await;
+        assert_eq!((held.band, held.state), (Band::Act, State::Waiting));
+
+        // A wait, not a failed apply: no error comes back and the decision is as it was.
+        let again = crate::core::judging::settle(&core, held.clone())
+            .await
+            .unwrap();
+        assert_eq!(again.state, State::Waiting);
+        crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(decision(&core, &ids[1], None).await.state, State::Waiting);
+        assert!(!core.store.live_job(Stage::Rescue, &ids[1]).await.unwrap());
+
+        core.reap.max_rescues_per_run = 2;
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(r.applied, 1);
+        assert_eq!(decision(&core, &ids[1], None).await.state, State::Done);
+        assert!(core.store.live_job(Stage::Rescue, &ids[1]).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn more_questions_than_a_page_at_the_head_still_let_the_next_note_through() {
+        let core = test_core().await;
+        // One more than `nominees` reads in a page at the configured cap.
+        let page = core.reap.max_judged_per_run as i64 * OVERFETCH;
+        let texts: Vec<String> = (0..=page).map(|i| format!("asked about {i}")).collect();
+        let texts: Vec<&str> = texts.iter().map(String::as_str).collect();
+        for id in &seed(&core, &texts).await {
+            core.store
+                .set_artifact_status(id, ArtifactStatus::Deprecated)
+                .await
+                .unwrap();
+            backdate_retired_at(&core, id, 300 * 86_400).await;
+        }
+        let asked = catalogue::reap_worth();
+        let head = core
+            .store
+            .reap_candidates(min_age_secs(&core), &reap_era(&core), i64::MAX)
+            .await
+            .unwrap();
+        assert_eq!(head.len() as i64, page + 1);
+        // Each with its question waiting for a seat, as a run leaves it.
+        for c in &head {
+            core.store
+                .log_decision(&crate::store::decision_log::NewLogged {
+                    question_id: asked.id.into(),
+                    question_version: asked.version,
+                    model: core.decider.model().into(),
+                    subject_kind: "artifact",
+                    subject_a: c.id.clone(),
+                    subject_b: None,
+                    rev_a: Some(c.embed_rev),
+                    rev_b: None,
+                    answer: "{}".into(),
+                    top: 0.7,
+                    pick: "yes".into(),
+                    swapped_agree: None,
+                    band: Band::Ask,
+                    reason: None,
+                    state: State::Waiting,
+                })
+                .await
+                .unwrap();
+        }
+        let next = seed(&core, &["next in line"]).await;
+        core.store
+            .set_artifact_status(&next[0], ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        backdate_retired_at(&core, &next[0], 200 * 86_400).await;
+
+        let (cands, _) = nominees(&core).await.unwrap();
+        assert_eq!(
+            cands.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec![next[0].as_str()],
+            "the questions at the head filled the page"
+        );
+    }
+
+    use crate::vector::{
+        Facets, LifecycleRow, SearchFilter, SearchHit, StoredLifecycle, Touch, VectorPayload,
+        VectorPoint, VectorStore, sparse::SparseVector,
+    };
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    /// The store beneath, except where a test says it fails.
+    struct Faulty {
+        inner: Arc<dyn VectorStore>,
+        no_delete: bool,
+        /// The note whose neighbours cannot be read.
+        no_neighbours_of: Option<String>,
+    }
+
+    fn down() -> Error {
+        Error::Vector("connection refused".into())
+    }
+
+    #[async_trait::async_trait]
+    impl VectorStore for Faulty {
+        async fn ensure_collection(&self, dim: usize) -> Result<()> {
+            self.inner.ensure_collection(dim).await
+        }
+        async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()> {
+            self.inner.upsert(points).await
+        }
+        async fn set_payload(&self, payload: &VectorPayload) -> Result<()> {
+            self.inner.set_payload(payload).await
+        }
+        async fn set_lifecycle(
+            &self,
+            artifact_id: &str,
+            status: ArtifactStatus,
+            superseded_by: Option<&str>,
+        ) -> Result<()> {
+            self.inner
+                .set_lifecycle(artifact_id, status, superseded_by)
+                .await
+        }
+        async fn set_last_verified_at(
+            &self,
+            artifact_id: &str,
+            at: i64,
+            reset_hits: bool,
+        ) -> Result<()> {
+            self.inner
+                .set_last_verified_at(artifact_id, at, reset_hits)
+                .await
+        }
+        async fn stale_candidates(
+            &self,
+            older_than: i64,
+            max_hits: i64,
+            limit: usize,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner
+                .stale_candidates(older_than, max_hits, limit)
+                .await
+        }
+        async fn search(
+            &self,
+            vector: &[f32],
+            sparse: &SparseVector,
+            limit: usize,
+            filter: &SearchFilter,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.search(vector, sparse, limit, filter).await
+        }
+        async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()> {
+            self.inner.touch(targets, seen_at).await
+        }
+        async fn apply_lifecycle(&self, rows: &[LifecycleRow]) -> Result<()> {
+            self.inner.apply_lifecycle(rows).await
+        }
+        async fn lifecycle_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, StoredLifecycle>> {
+            self.inner.lifecycle_of(artifact_ids).await
+        }
+        async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+            self.inner.all_artifact_ids().await
+        }
+        async fn payloads_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, VectorPayload>> {
+            self.inner.payloads_of(artifact_ids).await
+        }
+        async fn resurface(
+            &self,
+            limit: usize,
+            older_than: i64,
+            unseen_since: i64,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.resurface(limit, older_than, unseen_since).await
+        }
+        async fn facets(&self, limit: usize) -> Result<Facets> {
+            self.inner.facets(limit).await
+        }
+        async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>> {
+            if self.no_neighbours_of.as_deref() == Some(artifact_id) {
+                return Err(down());
+            }
+            self.inner.neighbours(artifact_id, limit).await
+        }
+        async fn set_context_vectors(
+            &self,
+            artifact_id: &str,
+            vectors: Vec<Vec<f32>>,
+        ) -> Result<()> {
+            self.inner.set_context_vectors(artifact_id, vectors).await
+        }
+        async fn context_query(
+            &self,
+            vector: &[f32],
+            limit: usize,
+            filter: &SearchFilter,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.context_query(vector, limit, filter).await
+        }
+        async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
+            if self.no_delete {
+                return Err(down());
+            }
+            self.inner.delete_artifacts(artifact_ids).await
+        }
+        async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
+            self.inner.delete_by_corpus(corpus_id).await
+        }
+        async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+            self.inner.sample(limit).await
+        }
+        async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
+            self.inner.dense_of(artifact_id).await
+        }
+        async fn count(&self) -> Result<u64> {
+            self.inner.count().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_burial_whose_point_delete_fails_stands_and_the_repair_pass_finishes_it() {
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_NO);
+        let ids = seed(&core, &["stale duplicate fact"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        let inner = core.vectors.clone();
+        core.vectors = Arc::new(Faulty {
+            inner: inner.clone(),
+            no_delete: true,
+            no_neighbours_of: None,
+        });
+
+        let report = run(&core).await.unwrap();
+        assert_eq!(report.reaped, 1);
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+        let d = decision(&core, &ids[0], None).await;
+        assert_eq!((d.state, d.reason.as_deref()), (State::Done, None));
+        assert_eq!(
+            core.store.decision_action_ids(&d.id).await.unwrap().len(),
+            1
+        );
+        // The next sweep finds a decision that acted, not a subject that changed.
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!((r.applied, r.reasked), (0, 0));
+        assert_eq!(decision(&core, &ids[0], None).await.reason, None);
+        assert_eq!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "the marker must stay for the repair pass"
+        );
+        assert!(!inner.payloads_of(&ids).await.unwrap().is_empty());
+
+        core.vectors = inner;
+        assert_eq!(
+            crate::jobs::consolidate::repair_lifecycle_drift(&core)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(core.vectors.payloads_of(&ids).await.unwrap().is_empty());
+        assert!(
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_note_whose_neighbours_cannot_be_read_does_not_stop_the_sweep() {
+        let mut core = test_core().await;
+        let dec = deciding(&mut core, SURE_NO);
+        let ids = seed(&core, &["its neighbours cannot be read", "behind it"]).await;
+        for (i, id) in ids.iter().enumerate() {
+            crate::jobs::embed::run(&core, id).await.unwrap();
+            core.store
+                .set_artifact_status(id, ArtifactStatus::Deprecated)
+                .await
+                .unwrap();
+            backdate_retired_at(&core, id, (300 - i as i64) * 86_400).await;
+        }
+        core.vectors = Arc::new(Faulty {
+            inner: core.vectors.clone(),
+            no_delete: false,
+            no_neighbours_of: Some(ids[0].clone()),
+        });
+
+        let report = run(&core).await.unwrap();
+        assert_eq!((report.judged, report.reaped), (1, 1));
+        assert_eq!(dec.calls(), 1);
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+        assert!(core.store.graveyard_row(&ids[1]).await.unwrap().is_some());
     }
 }

@@ -156,6 +156,17 @@
             "name": "first"
           }
         }
+      },
+      {
+        "name": "shown",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "shown"
+          }
+        }
       }
     ],
     "parameters": {
@@ -175,7 +186,8 @@
       false,
       false,
       true,
-      true
+      true,
+      false
     ]
   },
   "hash": "4dbb2f592d5af8614045599964a2b87edb3ce397a5303b933e506be6340b37d2"

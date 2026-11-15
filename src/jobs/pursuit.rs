@@ -4,7 +4,9 @@
 
 use crate::core::Core;
 use crate::core::judging::catalogue::answerable;
-use crate::core::judging::check::{Checked, Which, check, outage};
+use crate::core::judging::check::{
+    Checked, FLAG_UNCHECKED, Which, check, outage, unchecked_detail,
+};
 use crate::core::judging::state::{self, Note};
 use crate::error::Result;
 use crate::infer::prompt;
@@ -117,7 +119,8 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         .join("\n\n");
 
     // Before the writer: do these sources hold the answer? Judged only when every packed source
-    // fits; otherwise written as before. A failed gate is an outage, retried, never a writer call.
+    // fits; otherwise written as before. A failed gate is the unit's error under its own name,
+    // never a writer call.
     let gate = answerable_gate(core, pursuit_id, &p.queries, &sources)
         .await
         .map_err(outage)?;
@@ -164,7 +167,7 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
 
     // Drift is flagged, not prevented: a literal no source carries is marked for the reader.
     let missing = crate::infer::verify::missing_literals(&g.text, &g.caveats, &source_text);
-    // Then the check, before anything is stored. A failed check is an outage, retried.
+    // Then the check, before anything is stored. A check that failed is the queue's to retry.
     let originals: Vec<Note> = sources
         .iter()
         .map(|c| Note {
@@ -178,7 +181,7 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         day: None,
         text: &g.text,
     };
-    if let Checked::Refused { question, yes } = check(
+    let checked = check(
         core,
         pursuit_id,
         &originals,
@@ -186,19 +189,27 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         Which::AddsNothingOnly,
     )
     .await
-    .map_err(outage)?
-    {
-        core.store
-            .close_pursuit(pursuit_id, "unsatisfied", UNFAITHFUL, now)
-            .await?;
-        tracing::info!(
-            pursuit = pursuit_id,
-            question,
-            yes,
-            "the check refused the generation"
-        );
-        return Ok(());
-    }
+    .map_err(outage)?;
+    let unchecked = match checked {
+        Checked::Refused { question, yes } => {
+            core.store
+                .close_pursuit(pursuit_id, "unsatisfied", UNFAITHFUL, now)
+                .await?;
+            tracing::info!(
+                pursuit = pursuit_id,
+                question,
+                yes,
+                "the check refused the generation"
+            );
+            return Ok(());
+        }
+        // Stored and flagged: a retry is told the same, and the draft is not thrown away unread.
+        Checked::Unjudged { detail } => {
+            tracing::warn!(pursuit = pursuit_id, detail, "the check could not be put");
+            Some(detail)
+        }
+        Checked::Passed | Checked::TooLong => None,
+    };
 
     let ids: Vec<String> = sources.iter().map(|c| c.id.clone()).collect();
     let made = core
@@ -215,13 +226,19 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
             &ids,
         )
         .await?;
+    let mut flags = Vec::new();
+    let mut detail = Vec::new();
     if let Some(first) = missing.first() {
+        flags.push(crate::infer::verify::FLAG_LITERALS.to_string());
+        detail.push(format!("missing literal: {first}"));
+    }
+    if let Some(why) = &unchecked {
+        flags.push(FLAG_UNCHECKED.to_string());
+        detail.push(unchecked_detail(why));
+    }
+    if !flags.is_empty() {
         core.store
-            .set_artifact_flags(
-                &made.id,
-                &[crate::infer::verify::FLAG_LITERALS.to_string()],
-                Some(&format!("missing literal: {first}")),
-            )
+            .set_artifact_flags(&made.id, &flags, Some(&detail.join("; ")))
             .await?;
     }
     core.store
@@ -240,16 +257,28 @@ enum Gate {
     Close,
 }
 
-/// `answerable` over the questions and every packed source, logged as kind "pursuit", state `done`:
-/// no Unsure row; in between it is `leave`, reason `unsure`. The packed sources are the second
-/// subject, so a retry after a writer outage is not asked again.
+impl Gate {
+    /// The band and reason it is logged with: no Unsure row, so in between is `leave`, `unsure`.
+    fn logged_as(&self) -> (crate::core::judging::band::Band, Option<&'static str>) {
+        use crate::core::judging::band::Band;
+        match self {
+            Gate::Write => (Band::Act, None),
+            Gate::Unsure => (Band::Leave, Some("unsure")),
+            Gate::Close => (Band::Leave, None),
+        }
+    }
+}
+
+/// `answerable` over the questions and every packed source, logged as kind "pursuit", state `done`.
+/// The packed sources are the second subject, so a retry after a writer outage is not asked again;
+/// its stored answer is banded at the lines in force now, and logged again where they moved.
 async fn answerable_gate(
     core: &Core,
     pursuit_id: &str,
     queries: &[String],
     sources: &[crate::store::artifacts::Chunk],
 ) -> Result<Gate> {
-    use crate::core::judging::band::{Band, era, pick_and_top};
+    use crate::core::judging::band::{era, pick_and_top};
     use crate::infer::decide::Answer;
     let a = answerable();
     let excerpts: Vec<Note> = sources
@@ -271,23 +300,50 @@ async fn answerable_gate(
         .map(|c| c.id.as_str())
         .collect::<Vec<_>>()
         .join(" ");
+    let in_era = era(core.decider.model(), a.version);
     let prior = core
         .store
-        .last_logged(
-            a.id,
-            pursuit_id,
-            Some(&packed),
-            &era(core.decider.model(), a.version),
-        )
+        .last_logged(a.id, pursuit_id, Some(&packed), &in_era)
         .await?;
     let known = prior.and_then(|r| {
-        serde_json::from_str::<serde_json::Value>(&r.answer)
+        let yes = serde_json::from_str::<serde_json::Value>(&r.answer)
             .ok()?
             .get("yes")?
-            .as_f64()
+            .as_f64()?;
+        Some((r, yes))
     });
-    if let Some(yes) = known {
-        return Ok(gate_at(yes, t));
+    if let Some((r, yes)) = known {
+        let gate = gate_at(yes, t);
+        let (band, reason) = gate.logged_as();
+        let moved = core
+            .store
+            .last_threshold_move(a.id, &in_era)
+            .await?
+            .is_some_and(|m| m.moved_at > r.decided_at);
+        // The answer stands; the line it is read against does not. A row of its own says which
+        // band this reading was given.
+        if moved || band != r.band || reason != r.reason.as_deref() {
+            core.store
+                .log_decision(&NewLogged {
+                    question_id: a.id.into(),
+                    question_version: a.version,
+                    model: core.decider.model().into(),
+                    subject_kind: "pursuit",
+                    subject_a: pursuit_id.into(),
+                    subject_b: Some(packed),
+                    rev_a: None,
+                    rev_b: None,
+                    answer: r.answer,
+                    top: r.top,
+                    pick: r.pick,
+                    swapped_agree: None,
+                    band,
+                    reason: reason.map(Into::into),
+                    state: State::Done,
+                })
+                .await?;
+        }
+        return Ok(gate);
     }
     let permit = core.gate.background_light().await;
     let got = core
@@ -306,6 +362,7 @@ async fn answerable_gate(
     };
     let answer = Answer::Noul { yes };
     let gate = gate_at(yes, t);
+    let (band, reason) = gate.logged_as();
     let (pick, top) = pick_and_top(&a.question, &answer);
     core.store
         .log_decision(&NewLogged {
@@ -321,12 +378,8 @@ async fn answerable_gate(
             top,
             pick,
             swapped_agree: None,
-            band: if matches!(gate, Gate::Write) {
-                Band::Act
-            } else {
-                Band::Leave
-            },
-            reason: matches!(gate, Gate::Unsure).then(|| "unsure".into()),
+            band,
+            reason: reason.map(Into::into),
             state: State::Done,
         })
         .await?;
@@ -1262,21 +1315,19 @@ mod tests {
         assert!(p.artifact_id.is_none());
     }
 
-    #[tokio::test]
-    async fn a_generation_whose_check_errs_is_retried() {
+    /// A pursuit whose gate says yes and whose after-write check ends in `failure`.
+    async fn check_failing_with(
+        failure: fn() -> crate::error::Error,
+    ) -> (crate::core::Core, String) {
         let mut core = test_core().await;
         core.generator = Some(std::sync::Arc::new(
             crate::infer::fake::ScriptedCompleter::new(vec![
                 r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
             ]),
         ));
-        // The gate before the writer answers; the check after it errs.
-        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, qs| {
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(move |_, qs| {
             if crate::core::judging::check::test_support::is_check(qs) {
-                return Err(crate::error::Error::InferenceRejected {
-                    role: "decide",
-                    detail: "400".into(),
-                });
+                return Err(failure());
             }
             Ok(yes_to(qs, 0.9))
         }));
@@ -1286,7 +1337,21 @@ mod tests {
             .insert_pursuit(100, &["q".into()], &ids, None)
             .await
             .unwrap();
-        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        (core, pid)
+    }
+
+    #[tokio::test]
+    async fn a_generation_whose_check_is_down_is_retried() {
+        let (core, pid) = check_failing_with(|| crate::error::Error::Inference {
+            role: "decide",
+            detail: "down".into(),
+        })
+        .await;
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Inference { .. }),
+            "{err}"
+        );
         assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
         assert!(
             core.store
@@ -1294,6 +1359,32 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_generation_whose_check_is_rejected_is_stored_flagged_and_not_retried() {
+        let (core, pid) = check_failing_with(|| crate::error::Error::InferenceRejected {
+            role: "decide",
+            detail: "400".into(),
+        })
+        .await;
+        generate(&core, &pid)
+            .await
+            .expect("a rejection is not the queue's to retry");
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "generated", "{p:?}");
+        let made = core.store.synthesized_artifacts(10).await.unwrap();
+        assert_eq!(made.len(), 1, "the draft was dropped unread");
+        assert_eq!(made[0].flags, [FLAG_UNCHECKED.to_string()]);
+        assert_eq!(
+            core.store
+                .get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .flag_detail
+                .as_deref(),
+            Some("not checked: 400")
         );
     }
 
@@ -1465,6 +1556,11 @@ mod tests {
             core.store.get_pursuit(&pid).await.unwrap().state,
             "generated"
         );
+        assert_eq!(
+            gate_rows(&core, &pid).await,
+            1,
+            "a reuse under unmoved lines logged a row"
+        );
     }
 
     #[tokio::test]
@@ -1556,7 +1652,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_gate_that_errs_is_retried_and_calls_no_writer() {
+    async fn a_gate_that_is_down_is_retried_and_calls_no_writer() {
+        let (mut core, _, _, writer, pid) = gated(0.9).await;
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Inference {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        assert_eq!(writer.calls(), 0);
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_is_rejected_is_not_retried_as_an_outage_and_calls_no_writer() {
         let (mut core, _, _, writer, pid) = gated(0.9).await;
         core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
             Err(crate::error::Error::InferenceRejected {
@@ -1564,9 +1674,94 @@ mod tests {
                 detail: "400".into(),
             })
         }));
-        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InferenceRejected { .. }),
+            "{err}"
+        );
+        assert!(!err.retryable());
         assert_eq!(writer.calls(), 0);
         assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+    }
+
+    #[tokio::test]
+    async fn a_gate_the_store_fails_under_is_a_store_error() {
+        let (core, d, _, writer, pid) = gated(0.9).await;
+        // runtime: test-only trigger; the gate's row cannot be written.
+        sqlx::query(
+            "CREATE TRIGGER gate_fails BEFORE INSERT ON decisions
+             BEGIN SELECT RAISE(ABORT, 'refused by the test'); END",
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Store(_)),
+            "a store error named as the endpoint's: {err}"
+        );
+        assert_eq!(gate_asks(&d), 1);
+        assert_eq!(writer.calls(), 0);
+    }
+
+    async fn gate_rows(core: &crate::core::Core, pid: &str) -> i64 {
+        sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM decisions WHERE subject_kind = 'pursuit' AND subject_a = ?",
+            pid
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_stored_answer_read_against_moved_lines_is_logged_again() {
+        use crate::core::judging::band::{Band, Thresholds, era};
+        let (mut core, d, _, _, pid) = gated(0.9).await;
+        // The gate says yes, then the writer is out: the answer is stored and the unit retried.
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![]),
+        ));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        let first = gate_row(&core, &pid).await;
+        assert_eq!(first.band, Band::Act);
+
+        // The act line moves above the stored answer before the retry.
+        let a = answerable();
+        core.store
+            .move_thresholds(
+                a.id,
+                &era(core.decider.model(), a.version),
+                Thresholds {
+                    act_at: 0.95,
+                    ask_at: 0.6,
+                },
+                "test",
+            )
+            .await
+            .unwrap();
+        let writer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+        ]));
+        core.generator = Some(writer.clone());
+        generate(&core, &pid).await.unwrap();
+
+        assert_eq!(gate_asks(&d), 1, "the stored answer was asked for again");
+        assert_eq!(
+            writer.calls(),
+            0,
+            "written under a line the answer is below"
+        );
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.reason.as_deref(), Some(UNSURE), "{p:?}");
+        assert_eq!(gate_rows(&core, &pid).await, 2, "the reuse left no row");
+        let again = gate_row(&core, &pid).await;
+        assert_ne!(again.id, first.id);
+        assert_eq!(again.answer, first.answer, "the same answer");
+        assert_eq!(again.band, Band::Leave);
+        assert_eq!(again.reason.as_deref(), Some("unsure"));
+        let kept = core.store.logged(&first.id).await.unwrap().unwrap();
+        assert_eq!(kept.band, Band::Act, "the first reading was rewritten");
     }
 
     #[tokio::test]

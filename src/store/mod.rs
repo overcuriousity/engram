@@ -102,7 +102,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 30] = [
+        const ADDITIVE: [(&str, &str, &str); 34] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -232,6 +232,12 @@ impl Store {
                 "first",
                 "ALTER TABLE artifact_links ADD COLUMN first TEXT",
             ),
+            // 0: every link from before was bound by searches or made by an answer.
+            (
+                "artifact_links",
+                "shown",
+                "ALTER TABLE artifact_links ADD COLUMN shown INTEGER NOT NULL DEFAULT 0",
+            ),
             // NULL on older rows; a reading fills only a null category.
             (
                 "artifacts",
@@ -260,6 +266,24 @@ impl Store {
                 "decision_thresholds",
                 "ask_moved",
                 "ALTER TABLE decision_thresholds ADD COLUMN ask_moved INTEGER NOT NULL DEFAULT 1",
+            ),
+            // 0: every row from before was a move.
+            (
+                "decision_thresholds",
+                "held",
+                "ALTER TABLE decision_thresholds ADD COLUMN held INTEGER NOT NULL DEFAULT 0",
+            ),
+            // NULL: read under the first wording of `bears`, the only one there was.
+            (
+                "decide_events",
+                "bears_version",
+                "ALTER TABLE decide_events ADD COLUMN bears_version INTEGER",
+            ),
+            // NULL: a row seated before lapses from when it was decided, as it did.
+            (
+                "decisions",
+                "opened_at",
+                "ALTER TABLE decisions ADD COLUMN opened_at INTEGER",
             ),
         ];
         apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;

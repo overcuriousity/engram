@@ -1,0 +1,45 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.event_id AS \"event_id!\", l.yes AS \"yes!: f64\",\n                      (SELECT MIN(c.rank) FROM search_candidates c\n                        WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id) AS \"rank!: i64\"\n                 FROM search_labels l\n                WHERE l.question_version = ? AND l.model = ?\n                  AND EXISTS (SELECT 1 FROM search_candidates c\n                               WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id)\n                  AND EXISTS (SELECT 1 FROM search_events e\n                               WHERE e.id = l.event_id AND e.verdict IS NOT 'discard')\n                ORDER BY l.event_id, 3",
+  "describe": {
+    "columns": [
+      {
+        "name": "event_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_labels",
+            "name": "event_id"
+          }
+        }
+      },
+      {
+        "name": "yes!: f64",
+        "ordinal": 1,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "search_labels",
+            "name": "yes"
+          }
+        }
+      },
+      {
+        "name": "rank!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "d0236abc1141ee166e04e5d65cf0baedada2aa91d4831887871daac8d452c49c"
+}

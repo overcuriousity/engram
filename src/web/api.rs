@@ -1597,13 +1597,10 @@ async fn patch_artifact(
             .store
             .enqueue(Stage::Embed, "artifact", &cid)
             .await?;
-    } else if chunk.embed_state == crate::store::artifacts::EmbedState::Embedded {
-        // Only when the chunk has a point: a pending embed job writes the whole payload anyway.
-        tenant
-            .core
-            .vectors
-            .set_payload(&crate::vector::VectorPayload::edited(&chunk))
-            .await?;
+    } else {
+        // From the row as stored, looking again after the write: a reading that fills the category
+        // meanwhile is not overwritten. A pending embed writes the whole payload itself.
+        crate::jobs::read::sync_payload(&tenant.core, &cid).await?;
     }
     Ok(Json(chunk))
 }
@@ -1699,7 +1696,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
                 &crate::store::jobs::Stage::GENERATORS,
             )
             .await?,
-        unsure: tenant.core.store.open_ask_count().await?,
+        unsure: crate::web::unsure::open_count(&tenant.core).await?,
         held: HeldBrief {
             corpora: held_corpora,
             artifacts: held_artifacts,

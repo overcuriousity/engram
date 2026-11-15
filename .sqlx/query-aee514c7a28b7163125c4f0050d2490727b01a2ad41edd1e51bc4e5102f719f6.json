@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET reason = 'asked_again'\n              WHERE id = ? AND outcome IN ('confirmed', 'corrected')\n                AND reason IS NOT 'asked_again'\n                AND NOT EXISTS (SELECT 1 FROM decision_actions WHERE decision_id = decisions.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "aee514c7a28b7163125c4f0050d2490727b01a2ad41edd1e51bc4e5102f719f6"
+}

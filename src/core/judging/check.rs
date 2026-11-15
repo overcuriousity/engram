@@ -13,8 +13,24 @@ use crate::store::decision_log::{NewLogged, Outcome, State};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Checked {
     Passed,
-    Refused { question: &'static str, yes: f64 },
+    Refused {
+        question: &'static str,
+        yes: f64,
+    },
     TooLong,
+    /// The decision model would not answer, and a retry is told the same: the rewrite rests on the
+    /// literal checks, and the caller flags what it stores.
+    Unjudged {
+        detail: String,
+    },
+}
+
+/// On an artifact stored though its check could not be put; the detail says why.
+pub const FLAG_UNCHECKED: &str = "unchecked";
+
+/// The flag's detail, in one spelling for every writer.
+pub fn unchecked_detail(why: &str) -> String {
+    format!("not checked: {why}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,65 +62,71 @@ pub async fn check(
     let permit = core.gate.background_light().await;
     let got = core.decider.decide(&shown, &questions).await;
     permit.finished();
-    let answers = got?.answers;
-    let read = asked
-        .iter()
-        .map(|a| match answers.get(&a.question.key) {
-            Some(answer @ Answer::Noul { yes }) => Ok((a, answer, *yes)),
-            _ => Err(Error::InferenceRejected {
-                role: "decide",
-                detail: format!("the answer has no noul for \"{}\"", a.id),
-            }),
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // A rejection is the endpoint's answer about this request: asking again spends the unit's
+    // attempts on the same reply.
+    let answers = match got {
+        Ok(a) => a.answers,
+        Err(Error::InferenceRejected { detail, .. }) => return Ok(Checked::Unjudged { detail }),
+        Err(e) => return Err(e),
+    };
+    let mut read = Vec::with_capacity(asked.len());
+    for a in &asked {
+        match answers.get(&a.question.key) {
+            Some(answer @ Answer::Noul { yes }) => read.push((a, answer, *yes)),
+            _ => {
+                return Ok(Checked::Unjudged {
+                    detail: format!("the answer has no noul for \"{}\"", a.id),
+                });
+            }
+        }
+    }
     let line = core.decide_cfg.refuse_below;
     let mut out = Checked::Passed;
     for (a, answer, yes) in read {
         let refused = yes < line;
         let (pick, top) = pick_and_top(&a.question, answer);
-        let id = core
-            .store
-            .log_decision(&NewLogged {
-                question_id: a.id.into(),
-                question_version: a.version,
-                model: core.decider.model().into(),
-                subject_kind: "write",
-                subject_a: subject.into(),
-                subject_b: None,
-                rev_a: None,
-                rev_b: None,
-                answer: super::weights(&a.question, answer).to_string(),
-                top,
-                pick,
-                swapped_agree: None,
-                band: if refused { Band::Leave } else { Band::Act },
-                reason: None,
-                state: State::Done,
-            })
+        let row = NewLogged {
+            question_id: a.id.into(),
+            question_version: a.version,
+            model: core.decider.model().into(),
+            subject_kind: "write",
+            subject_a: subject.into(),
+            subject_b: None,
+            rev_a: None,
+            rev_b: None,
+            answer: super::weights(&a.question, answer).to_string(),
+            top,
+            pick,
+            swapped_agree: None,
+            band: if refused { Band::Leave } else { Band::Act },
+            reason: None,
+            state: State::Done,
+        };
+        if !refused {
+            core.store.log_decision(&row).await?;
+            continue;
+        }
+        // In the row's own statement: a crash leaves no refusal without its outcome.
+        core.store
+            .log_decision_with_outcome(&row, Outcome::Refused)
             .await?;
-        if refused {
-            core.store
-                .set_decision_outcome(&id, Outcome::Refused, None)
-                .await?;
-            if out == Checked::Passed {
-                out = Checked::Refused {
-                    question: a.id,
-                    yes,
-                };
-            }
+        if out == Checked::Passed {
+            out = Checked::Refused {
+                question: a.id,
+                yes,
+            };
         }
     }
     Ok(out)
 }
 
-/// A check that failed is the writer unit's outage: retried by the queue, never taken as a refusal.
+/// A check that failed, under the name of what failed: an endpoint outage and a store error are
+/// each the queue's to retry as themselves, and a rejection is not retried as an outage.
 pub fn outage(e: Error) -> Error {
     match e {
-        Error::Inference { .. } | Error::InferenceBusy { .. } => e,
-        other => Error::Inference {
-            role: "decide",
-            detail: other.to_string(),
-        },
+        // A row the check read is gone; alone it would tell the queue the unit's target is.
+        Error::NotFound => Error::Store("a row the check read is gone".into()),
+        other => other,
     }
 }
 
@@ -301,7 +323,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_answer_without_the_question_is_an_error() {
+    async fn an_answer_without_the_question_is_not_a_judgement_and_not_an_outage() {
         let mut core = test_core().await;
         core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
             Ok(crate::infer::decide::Answers {
@@ -310,9 +332,119 @@ mod tests {
                 input_tokens: 0,
             })
         }));
-        let got = check(&core, "s1", &[note("O", "x")], &note("W", "x"), Which::Both).await;
-        assert!(got.is_err());
-        assert!(outage(got.unwrap_err()).retryable(), "the unit is retried");
+        let got = check(&core, "s1", &[note("O", "x")], &note("W", "x"), Which::Both)
+            .await
+            .expect("nothing for the queue to retry");
+        assert!(matches!(got, Checked::Unjudged { .. }), "{got:?}");
+        assert!(row(&core, "complete", "s1").await.is_none());
+        assert!(row(&core, "adds_nothing", "s1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_rejection_is_told_apart_from_an_outage() {
+        let mut core = test_core().await;
+        let rejecting = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "HTTP 400".into(),
+            })
+        }));
+        core.decider = rejecting.clone();
+        let got = check(&core, "s1", &[note("O", "x")], &note("W", "x"), Which::Both)
+            .await
+            .expect("a rejection spends no attempt");
+        assert_eq!(
+            got,
+            Checked::Unjudged {
+                detail: "HTTP 400".into()
+            }
+        );
+        assert_eq!(rejecting.calls(), 1, "asked once");
+
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::Inference {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        let err = check(&core, "s1", &[note("O", "x")], &note("W", "x"), Which::Both)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(outage(err), Error::Inference { .. }),
+            "an outage is the queue's to retry"
+        );
+    }
+
+    #[test]
+    fn a_failed_check_keeps_the_name_of_what_failed() {
+        assert!(matches!(
+            outage(Error::Store("database is locked".into())),
+            Error::Store(_)
+        ));
+        assert!(matches!(
+            outage(Error::Vector("down".into())),
+            Error::Vector(_)
+        ));
+        assert!(matches!(
+            outage(Error::InferenceBusy {
+                role: "decide",
+                detail: "429".into()
+            }),
+            Error::InferenceBusy { .. }
+        ));
+        let rejected = outage(Error::InferenceRejected {
+            role: "decide",
+            detail: "400".into(),
+        });
+        assert!(!rejected.retryable(), "retried as if it were an outage");
+        // Not the unit's target: `run_one` drops a unit whose error is `NotFound`.
+        assert!(matches!(outage(Error::NotFound), Error::Store(_)));
+    }
+
+    /// Any statement the trigger names on `decisions` fails from here on.
+    async fn failing(core: &Core, on: &str) {
+        // runtime: test-only trigger, its event assembled from the argument.
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE TRIGGER check_fails BEFORE {on} ON decisions
+             BEGIN SELECT RAISE(ABORT, 'refused by the test'); END"
+        )))
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refusal_and_its_outcome_are_one_statement() {
+        let mut core = test_core().await;
+        core.decider = Arc::new(judge(0.03, 0.9));
+        // A second statement setting the outcome would fail here, as a crash before it would.
+        failing(&core, "UPDATE").await;
+        let got = check(&core, "s1", &[note("O", "x")], &note("W", "y"), Which::Both)
+            .await
+            .unwrap();
+        assert!(matches!(got, Checked::Refused { .. }), "{got:?}");
+        let r = row(&core, "complete", "s1").await.unwrap();
+        assert_eq!(r.outcome, Some(Outcome::Refused));
+        assert!(r.outcome_at.is_some());
+        assert_eq!(r.band, Band::Leave);
+        let passed = row(&core, "adds_nothing", "s1").await.unwrap();
+        assert_eq!(passed.outcome, None);
+        assert_eq!(passed.outcome_at, None);
+    }
+
+    #[tokio::test]
+    async fn a_store_error_in_a_check_is_a_store_error() {
+        let mut core = test_core().await;
+        core.decider = Arc::new(judge(0.9, 0.9));
+        failing(&core, "INSERT").await;
+        let err = check(&core, "s1", &[note("O", "x")], &note("W", "x"), Which::Both)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(outage(err), Error::Store(_)),
+            "a store error named as the endpoint's"
+        );
     }
 
     #[tokio::test]
@@ -330,6 +462,11 @@ mod tests {
             full,
             "a check is not armed judging"
         );
+        // The checks' decider answers a check only.
+        let mut core = core;
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(
+            crate::core::judging::test_support::by_state,
+        ));
         crate::core::judging::ask(
             &core,
             &crate::core::judging::catalogue::reap_worth(),
@@ -340,7 +477,7 @@ mod tests {
                 rev_a: None,
                 rev_b: None,
             },
-            None,
+            Some("0.3"),
         )
         .await
         .unwrap();

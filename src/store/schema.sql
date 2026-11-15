@@ -170,6 +170,26 @@ CREATE TABLE IF NOT EXISTS artifact_readings (
   PRIMARY KEY (artifact_id, question_id)
 );
 
+-- The reader's last visit to a note: the text it saw, what it asked, how it
+-- went. Readings of that text stand through a re-embed; a note that could not
+-- be read is left alone until its text, the questions or — for 'rejected' —
+-- the hour changes.
+CREATE TABLE IF NOT EXISTS artifact_reads (
+  artifact_id TEXT NOT NULL PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- Of the title and the text, the two things a reading is of.
+  text_hash   TEXT NOT NULL,
+  -- Question id to version, as JSON: a new version is a new visit.
+  asked       TEXT NOT NULL,
+  -- The tokens the note had to fit in. 'no_room' stands while this is the same.
+  room        INTEGER NOT NULL,
+  -- 'read' | 'no_room' | 'rejected'
+  visit       TEXT NOT NULL,
+  -- Rejected visits in a row; the wait doubles with each.
+  tries       INTEGER NOT NULL DEFAULT 0,
+  retry_at    INTEGER NOT NULL DEFAULT 0,
+  at          INTEGER NOT NULL
+);
+
 -- ── Lineage ──────────────────────────────────────────────────────────────────
 -- What a merged artifact is made of, as resolved captured roots rather than as
 -- parent edges. `root_id` always names source text — `captured` or `note`, the
@@ -430,6 +450,18 @@ CREATE TABLE IF NOT EXISTS search_labels (
   PRIMARY KEY (event_id, artifact_id)
 );
 
+-- A search the decision model failed to label, under the newest era that
+-- tried: when it may be tried again, and how often the model refused it. From
+-- `LABEL_GIVE_UP` refusals on it is given up until the question or the model
+-- changes; a failure that waiting fixes is never counted. Gone once labelled.
+CREATE TABLE IF NOT EXISTS search_label_failures (
+  event_id TEXT PRIMARY KEY REFERENCES search_events(id) ON DELETE CASCADE,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  refused INTEGER NOT NULL,
+  retry_at INTEGER NOT NULL
+);
+
 -- ── Idle passes ──────────────────────────────────────────────────────────────
 -- One row per idle pass over the evidence: what the running configuration
 -- scored, the best the ladder found, and the pairs that moved between them.
@@ -566,7 +598,9 @@ CREATE TABLE IF NOT EXISTS decide_events (
   verdict      TEXT,
   -- {key: answer}, the right answer when known.
   correct      TEXT,
-  dismissed_at INTEGER
+  dismissed_at INTEGER,
+  -- The wording of `bears` it was read under; NULL before it was kept, when there was only 1.
+  bears_version INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_decides_created ON decide_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_decides_open ON decide_events(not_held, verdict, dismissed_at);
@@ -631,6 +665,27 @@ CREATE TABLE IF NOT EXISTS gap_coverage (
 );
 CREATE INDEX IF NOT EXISTS idx_gap_coverage_corpus ON gap_coverage(corpus_id);
 
+-- What the decision model said of a note put to a gap's question, when that
+-- did not close the gap: the same note is not put to the same question about
+-- the same gap again until the note, the question's words or the era changes.
+-- One row per gap and note, the newest asking kept. `kind` and `gap_id` are as
+-- in `gap_coverage`, and `trim_gap_coverage` collects the rows of a gap that
+-- is gone.
+CREATE TABLE IF NOT EXISTS gap_rejections (
+  kind        TEXT NOT NULL,
+  gap_id      TEXT NOT NULL,
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- The note's `embed_rev` when it was asked about.
+  rev         INTEGER NOT NULL,
+  -- The gap's question as it was put.
+  question    TEXT NOT NULL,
+  -- The model and the wording of `answers_query`.
+  era         TEXT NOT NULL,
+  yes         REAL NOT NULL,
+  at          INTEGER NOT NULL,
+  PRIMARY KEY (kind, gap_id, artifact_id)
+);
+
 -- ── Association ──────────────────────────────────────────────────────────────
 -- Two artifacts that keep being retrieved by the same searches. The other half
 -- of relatedness: `artifact_pairs` is about two texts saying the same thing,
@@ -661,11 +716,16 @@ CREATE TABLE IF NOT EXISTS artifact_links (
   judge_attempts INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
   -- `link_kind`'s pick: 'continues' | 'example' | 'alternative' | 'background'
-  -- | 'contradicts' | 'unrelated'. NULL for a link judged before kinds.
+  -- | 'contradicts' | 'unrelated'. NULL for a link judged before kinds, and
+  -- for a duplicate, whose hand-over line is in `reason`.
   kind        TEXT,
   -- For a directional kind, the end that comes first: 'a' | 'b'. NULL when the
   -- direction did not hold.
   first       TEXT,
+  -- 1 when the row was recorded for a neighbour the writer was shown at
+  -- capture: its question is owed whatever its weight, and a hand-over to
+  -- consolidation from it may not act alone.
+  shown       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (a_id, b_id),
   CHECK (a_id < b_id)
 );
@@ -914,7 +974,8 @@ CREATE TABLE IF NOT EXISTS decisions (
   outcome TEXT,                    -- kept | undone | confirmed | corrected | refused
   outcome_at INTEGER,
   answered_pick TEXT,              -- what a person chose, on an ask row
-  decided_at INTEGER NOT NULL
+  decided_at INTEGER NOT NULL,
+  opened_at INTEGER                -- when an ask row was seated; its lapse runs from here
 );
 CREATE INDEX IF NOT EXISTS idx_decisions_subject ON decisions(question_id, subject_a, subject_b, era);
 CREATE INDEX IF NOT EXISTS idx_decisions_band ON decisions(band, state, top DESC);
@@ -934,7 +995,10 @@ CREATE TABLE IF NOT EXISTS decision_thresholds (
   moved_at INTEGER NOT NULL,
   -- Which line this row moved: each line's evidence is counted from its own last move.
   act_moved INTEGER NOT NULL DEFAULT 1,
-  ask_moved INTEGER NOT NULL DEFAULT 1
+  ask_moved INTEGER NOT NULL DEFAULT 1,
+  -- 1: no line moved. Rows lapsed while the ask line was already a step under the act line, and
+  -- its evidence starts over here all the same (`ask_moved` is 1); no list of moves shows the row.
+  held INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_corpus_actions_open
   ON corpus_actions(kind, at) WHERE undone_at IS NULL;

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT refused FROM search_label_failures WHERE event_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "refused",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_label_failures",
+            "name": "refused"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "8b095aa50c4ec19d6d0355417a7700a3d19de402a79501a9b5e25a067f87472c"
+}

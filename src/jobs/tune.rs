@@ -767,18 +767,19 @@ pub fn next_act_at(
     }
 }
 
-/// A step up when a row lapsed since the ask line last moved; a step down when, since then, none
-/// lapsed, some were answered and rows wait. Never under 0.50 by its own move, never within a step
-/// of `act_at`.
-pub fn next_ask_at(current: f64, act_at: f64, r: AskRecord) -> Option<f64> {
-    let want = if r.lapsed_since_move > 0 {
-        two_places(current + STEP)
+/// A step up when a row lapsed since the ask line last moved; a step down when none lapsed, some
+/// were answered and rows wait. Never under 0.50 by its own move; a rise stops a step under
+/// `act_at`, and an act line that came down this pass (`act_moved`) takes it along.
+pub fn next_ask_at(current: f64, act_at: f64, act_moved: bool, r: AskRecord) -> Option<f64> {
+    let ceiling = two_places(act_at - STEP);
+    let own = if r.lapsed_since_move > 0 {
+        two_places(current + STEP).min(ceiling).max(current)
     } else if keeping_up(r) && current > ASK_FLOOR + 1e-9 {
         two_places(current - STEP).max(ASK_FLOOR)
     } else {
         current
     };
-    let next = want.min(two_places(act_at - STEP));
+    let next = if act_moved { own.min(ceiling) } else { own };
     ((next - current).abs() > 1e-9).then_some(next)
 }
 
@@ -794,16 +795,44 @@ fn keeping_up(r: AskRecord) -> bool {
     r.lapsed_since_move == 0 && r.answered_since_move > 0 && r.waiting > 0
 }
 
-/// `None` when the ask line moved only to stay a step under the act line.
+fn lapsed_reason(lapsed: usize) -> String {
+    match lapsed {
+        1 => "a row lapsed unanswered".into(),
+        n => format!("{n} rows lapsed unanswered"),
+    }
+}
+
+/// What the ask line's own evidence says, worded to stand alone or after the act line's reason;
+/// `None` when it has none.
 fn ask_reason(r: AskRecord) -> Option<String> {
     match r.lapsed_since_move {
-        1 => Some("a row lapsed unanswered".into()),
-        n if n > 1 => Some(format!("{n} rows lapsed unanswered")),
-        _ if keeping_up(r) => Some(format!(
-            "{} answered and none lapsed, {} waiting",
+        0 if keeping_up(r) => Some(format!(
+            "{} answered with none lapsed and {} waiting",
             r.answered_since_move, r.waiting
         )),
-        _ => None,
+        0 => None,
+        n => Some(lapsed_reason(n)),
+    }
+}
+
+/// One line for one pass: the act line's reason, then the ask line's where its own evidence
+/// moved it. `None` when neither line moved; an ask line the act line took down says nothing of
+/// its own.
+fn move_reason(
+    t: crate::core::judging::band::Thresholds,
+    act: Option<f64>,
+    ask: Option<f64>,
+    acted: ActRecord,
+    asked: AskRecord,
+) -> Option<String> {
+    let act_at = act.unwrap_or(t.act_at);
+    let own = ask.is_some() && ask == next_ask_at(t.ask_at, act_at, false, asked);
+    let why = if own { ask_reason(asked) } else { None };
+    match (act, ask, why) {
+        (None, None, _) => None,
+        (Some(_), _, Some(why)) => Some(format!("{}, and {why}", acted_reason(acted))),
+        (Some(_), _, None) => Some(acted_reason(acted)),
+        (None, Some(_), why) => why,
     }
 }
 
@@ -827,21 +856,26 @@ pub async fn tune_questions(core: &Core) -> Result<usize> {
         let act = next_act_at(t.act_at, acted, min, target, ACT_BOUNDS.0, ACT_BOUNDS.1);
         let act_at = act.unwrap_or(t.act_at);
         let asked = core.store.ask_record(a.id, &era).await?;
-        let ask = next_ask_at(t.ask_at, act_at, asked);
-        let reason = match (act, ask, ask_reason(asked)) {
-            (None, None, _) => continue,
-            (Some(_), Some(_), Some(why)) => format!("{}; {why}", acted_reason(acted)),
-            // An ask line pushed down by the act line alone says nothing of its own.
-            (Some(_), _, _) => acted_reason(acted),
-            (None, Some(_), why) => why.unwrap_or_else(|| "kept a step under the act line".into()),
-        };
+        let ask = next_ask_at(t.ask_at, act_at, act.is_some(), asked);
         let to = Thresholds {
             act_at,
             ask_at: ask.unwrap_or(t.ask_at),
         };
-        core.store.move_lines(a.id, &era, t, to, &reason).await?;
-        tracing::info!(question = a.id, %era, act_at = to.act_at, ask_at = to.ask_at, %reason, "a judgement line moved");
-        moved += 1;
+        if let Some(reason) = move_reason(t, act, ask, acted, asked) {
+            core.store.move_lines(a.id, &era, t, to, &reason).await?;
+            tracing::info!(question = a.id, %era, act_at = to.act_at, ask_at = to.ask_at, %reason, "a judgement line moved");
+            moved += 1;
+        }
+        // Lapses the ask line could not rise on stand for the line as it is: left counted, they
+        // would keep it from ever coming down. Its evidence starts over; nothing moved.
+        if ask.is_none() && asked.lapsed_since_move > 0 {
+            let reason = format!(
+                "{}, the ask line already a step under the act line",
+                lapsed_reason(asked.lapsed_since_move)
+            );
+            core.store.hold_ask_line(a.id, &era, to, &reason).await?;
+            tracing::info!(question = a.id, %era, ask_at = to.ask_at, %reason, "the ask line was held");
+        }
     }
 
     // Decide's line: a settled verdict judged wrong is its undo, one judged right is kept; held
@@ -2348,24 +2382,76 @@ mod question_tests {
 
     #[test]
     fn a_lapsed_row_raises_ask_at_and_a_cleared_table_with_rows_waiting_lowers_it() {
-        assert_eq!(next_ask_at(0.60, 0.90, ask(1, 0, 5, 0)), Some(0.62));
-        assert_eq!(next_ask_at(0.60, 0.90, ask(1, 4, 0, 3)), Some(0.62));
-        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 0, 3)), Some(0.58));
+        assert_eq!(next_ask_at(0.60, 0.90, false, ask(1, 0, 5, 0)), Some(0.62));
+        assert_eq!(next_ask_at(0.60, 0.90, false, ask(1, 4, 0, 3)), Some(0.62));
+        assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 4, 0, 3)), Some(0.58));
         // Rows still open do not keep it up: answered, none lapsed and rows waiting brings it down.
-        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 20, 3)), Some(0.58));
+        assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 4, 20, 3)), Some(0.58));
         // Nothing waiting, or nothing answered: it stays.
-        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 0, 0)), None);
-        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 0, 0, 3)), None);
+        assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 4, 0, 0)), None);
+        assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 0, 0, 3)), None);
     }
 
     #[test]
     fn ask_at_stays_under_act_at_and_above_a_half() {
-        assert_eq!(next_ask_at(0.88, 0.90, ask(1, 0, 0, 0)), None);
-        // A lowered act line takes the ask line with it.
-        assert_eq!(next_ask_at(0.88, 0.88, AskRecord::default()), Some(0.86));
-        assert_eq!(next_ask_at(0.50, 0.90, ask(0, 4, 0, 3)), None);
-        assert_eq!(next_ask_at(0.51, 0.90, ask(0, 4, 20, 3)), Some(0.50));
-        assert_eq!(next_ask_at(0.89, 0.92, ask(1, 0, 20, 0)), Some(0.90));
+        assert_eq!(next_ask_at(0.88, 0.90, false, ask(1, 0, 0, 0)), None);
+        // A lowered act line takes the ask line with it, whatever the ask band did.
+        assert_eq!(
+            next_ask_at(0.88, 0.88, true, AskRecord::default()),
+            Some(0.86)
+        );
+        assert_eq!(next_ask_at(0.88, 0.88, true, ask(1, 0, 0, 0)), Some(0.86));
+        assert_eq!(next_ask_at(0.50, 0.90, false, ask(0, 4, 0, 3)), None);
+        assert_eq!(next_ask_at(0.51, 0.90, false, ask(0, 4, 20, 3)), Some(0.50));
+        assert_eq!(next_ask_at(0.89, 0.92, true, ask(1, 0, 20, 0)), Some(0.90));
+    }
+
+    #[test]
+    fn an_ask_line_nearer_than_a_step_stays_until_evidence_or_the_act_line_moves_it() {
+        // Put a hundredth under the act line and nothing happened: nothing moves.
+        assert_eq!(next_ask_at(0.89, 0.90, false, AskRecord::default()), None);
+        // A lapse cannot raise it and never lowers it.
+        assert_eq!(next_ask_at(0.89, 0.90, false, ask(1, 0, 0, 0)), None);
+        // Its own evidence brings it down a whole step.
+        assert_eq!(next_ask_at(0.89, 0.90, false, ask(0, 4, 0, 3)), Some(0.87));
+        // An act line that came down takes it a step under.
+        assert_eq!(
+            next_ask_at(0.89, 0.88, true, AskRecord::default()),
+            Some(0.86)
+        );
+    }
+
+    #[test]
+    fn one_pass_that_moves_both_lines_gives_one_reason() {
+        let t = Thresholds {
+            act_at: 0.90,
+            ask_at: 0.60,
+        };
+        let acted = act(41, 3, 0);
+        assert_eq!(
+            move_reason(t, Some(0.92), Some(0.62), acted, ask(2, 0, 0, 0)).as_deref(),
+            Some(
+                "3 of 41 acted or answered were undone or corrected, and 2 rows lapsed unanswered"
+            )
+        );
+        assert_eq!(
+            move_reason(t, None, Some(0.62), acted, ask(1, 0, 0, 0)).as_deref(),
+            Some("a row lapsed unanswered")
+        );
+        assert_eq!(
+            move_reason(t, None, Some(0.58), acted, ask(0, 4, 0, 3)).as_deref(),
+            Some("4 answered with none lapsed and 3 waiting")
+        );
+        // An ask line the act line took down says nothing of its own, lapses or not.
+        let near = Thresholds {
+            act_at: 0.90,
+            ask_at: 0.88,
+        };
+        assert_eq!(
+            move_reason(near, Some(0.88), Some(0.86), acted, ask(1, 0, 0, 0)).as_deref(),
+            Some("3 of 41 acted or answered were undone or corrected")
+        );
+        assert_eq!(move_reason(t, None, None, acted, ask(0, 4, 0, 0)), None);
     }
 
     #[tokio::test]
@@ -2420,7 +2506,7 @@ mod question_tests {
         assert_eq!((moves[0].act_at, moves[0].ask_at), (0.97, 0.58));
         assert_eq!(
             moves[0].reason,
-            "0 of 30 acted or answered were undone or corrected; 30 answered and none lapsed, 1 waiting"
+            "0 of 30 acted or answered were undone or corrected, and 30 answered with none lapsed and 1 waiting"
         );
         let after = crate::core::judging::ask(&core, &reap, subjects("y"), Some("s"))
             .await
@@ -2494,7 +2580,7 @@ mod question_tests {
         );
         assert_eq!(
             reason("reap_worth"),
-            "0 of 30 acted or answered were undone or corrected; 30 answered and none lapsed, 2 waiting"
+            "0 of 30 acted or answered were undone or corrected, and 30 answered with none lapsed and 2 waiting"
         );
     }
 
@@ -2601,5 +2687,102 @@ mod question_tests {
         seed(&core, &reap, Band::Ask, State::Waiting, None, 1).await;
         assert_eq!(tune_questions(&core).await.unwrap(), 1);
         assert_eq!(core.thresholds(&reap).await.unwrap().act_at, 0.97);
+    }
+
+    /// `reap_worth` configured to act from `act_at` and ask from `ask_at`.
+    async fn reap_lines(act_at: f64, ask_at: f64) -> Core {
+        let mut core = full().await;
+        core.decide_cfg.bands.per.insert(
+            "reap_worth".into(),
+            crate::config::BandOverride {
+                act_at: Some(act_at),
+                ask_at: Some(ask_at),
+            },
+        );
+        core
+    }
+
+    /// Every row the tuner wrote, moves and holds alike.
+    async fn threshold_rows(core: &Core) -> i64 {
+        sqlx::query_scalar!("SELECT COUNT(*) FROM decision_thresholds")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn lapses_at_the_ceiling_start_the_ask_lines_evidence_over_so_it_can_come_down_later() {
+        let core = reap_lines(0.90, 0.88).await;
+        let reap = catalogue::reap_worth();
+        let at = |act_at, ask_at| Thresholds { act_at, ask_at };
+        seed(&core, &reap, Band::Ask, State::Lapsed, None, 2).await;
+        // runtime: test-only stamp: the rows lapsed a while ago.
+        sqlx::query("UPDATE decisions SET outcome_at = ? WHERE state = 'lapsed'")
+            .bind(crate::store::now() - 100)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        // The line cannot rise: nothing moves, and the lapses are held against it once.
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+        assert_eq!(core.thresholds(&reap).await.unwrap(), at(0.90, 0.88));
+        assert!(core.store.threshold_moves(10).await.unwrap().is_empty());
+        assert_eq!(threshold_rows(&core).await, 1);
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+        assert_eq!(threshold_rows(&core).await, 1, "not on every pass");
+        // runtime: test-only backdating of the hold.
+        sqlx::query("UPDATE decision_thresholds SET moved_at = ?")
+            .bind(crate::store::now() - 50)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        seed(
+            &core,
+            &reap,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            5,
+        )
+        .await;
+        seed(&core, &reap, Band::Ask, State::Waiting, None, 1).await;
+        // Answers since, none lapsed, a row waiting: the line comes down.
+        assert_eq!(tune_questions(&core).await.unwrap(), 1);
+        assert_eq!(core.thresholds(&reap).await.unwrap(), at(0.90, 0.86));
+        assert_eq!(
+            core.store.threshold_moves(10).await.unwrap()[0].reason,
+            "5 answered with none lapsed and 1 waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_is_recorded_at_the_ceiling_when_nothing_lapsed() {
+        let core = reap_lines(0.90, 0.88).await;
+        let reap = catalogue::reap_worth();
+        seed(
+            &core,
+            &reap,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            5,
+        )
+        .await;
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+        assert_eq!(threshold_rows(&core).await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_ask_line_configured_nearer_than_a_step_is_not_moved_without_evidence() {
+        let core = reap_lines(0.90, 0.89).await;
+        let reap = catalogue::reap_worth();
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+        assert_eq!(threshold_rows(&core).await, 0);
+        assert_eq!(
+            core.thresholds(&reap).await.unwrap(),
+            Thresholds {
+                act_at: 0.90,
+                ask_at: 0.89
+            }
+        );
     }
 }

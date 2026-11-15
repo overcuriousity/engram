@@ -278,6 +278,17 @@ impl Bands {
                 .unwrap_or(self.ask_at),
         }
     }
+
+    /// Every question with a line of its own, each once and in order: a `[decide.bands.<id>]` in
+    /// the file and the built-in entry for the same id are one line, and a refusal names the same
+    /// one on every start.
+    fn ids(&self) -> std::collections::BTreeSet<&str> {
+        self.per
+            .keys()
+            .map(String::as_str)
+            .chain(DEFAULTS.iter().map(|d| d.0))
+            .collect()
+    }
 }
 
 impl Default for DecideConfig {
@@ -2027,6 +2038,15 @@ impl Config {
                 c.scan_min, c.review_min
             )));
         }
+        // The wide net reaches down to here and no further: at 0 every neighbour is a pair to ask.
+        const SCAN_MIN_FLOOR: f32 = 0.70;
+        if c.scan_min.is_nan() || c.scan_min < SCAN_MIN_FLOOR {
+            return Err(ConfigError::Invalid(format!(
+                "consolidate.scan_min ({}) must be at least {SCAN_MIN_FLOOR:.2}: below it \
+                 neighbours that merely share a subject are filed as pairs to ask about",
+                c.scan_min
+            )));
+        }
         self.infer
             .embed
             .templates()
@@ -2070,10 +2090,8 @@ impl Config {
         let mut bands = vec![("decide.bands".to_string(), dc.bands.of(""))];
         bands.extend(
             dc.bands
-                .per
-                .keys()
-                .map(String::as_str)
-                .chain(DEFAULTS.iter().map(|d| d.0))
+                .ids()
+                .into_iter()
                 .map(|k| (format!("decide.bands.{k}"), dc.bands.of(k))),
         );
         for (key, t) in bands {
@@ -2090,9 +2108,14 @@ impl Config {
                 )));
             }
         }
-        if dc.ask_open_max < 1 || dc.tick_mins < 1 {
+        if dc.ask_open_max < 1 {
             return Err(ConfigError::Invalid(
-                "decide.ask_open_max and decide.tick_mins must be at least 1".into(),
+                "decide.ask_open_max is 0: it must be at least 1, or nothing the base is unsure of could ever be asked".into(),
+            ));
+        }
+        if dc.tick_mins < 1 {
+            return Err(ConfigError::Invalid(
+                "decide.tick_mins is 0: it must be at least 1, or a tick would have no length to budget".into(),
             ));
         }
         let tz = self.time.default_tz.trim();
@@ -3274,6 +3297,30 @@ mode = "off"
     }
 
     #[test]
+    fn scan_min_below_the_wide_nets_floor_is_refused_by_name() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0.0", "0.5", "0.69", "-1.0"] {
+            let p = write(
+                &dir,
+                &format!("{MINIMAL}\n[consolidate]\nscan_min = {bad}\n"),
+            );
+            match Config::load(Some(&p)) {
+                Err(ConfigError::Invalid(why)) => {
+                    assert!(why.contains("consolidate.scan_min"), "{why}")
+                }
+                Err(e) => panic!("scan_min {bad}: {e}"),
+                Ok(_) => panic!("scan_min {bad} was accepted"),
+            }
+        }
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[consolidate]\nscan_min = 0.70\n"),
+        );
+        assert_eq!(Config::load(Some(&p)).unwrap().consolidate.scan_min, 0.70);
+    }
+
+    #[test]
     fn a_fingerprint_that_is_not_32_bytes_is_refused_at_startup() {
         // A typo here is a phone that refuses every connection with nothing saying why.
         let _guard = env_guard();
@@ -3454,6 +3501,33 @@ mode = "off"
     }
 
     #[test]
+    fn a_question_named_in_the_file_and_built_in_is_validated_once() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL}\n[decide.bands.reap_worth]\nact_at = 0.97\n\n[decide.bands.q]\nact_at = 0.95\n"
+        );
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        let ids: Vec<&str> = d.bands.ids().into_iter().collect();
+        assert_eq!(
+            ids.len(),
+            DEFAULTS.len() + 1,
+            "the file's reap_worth and the built-in one are one line: {ids:?}"
+        );
+        for id in ["q", "reap_worth"] {
+            assert_eq!(ids.iter().filter(|i| **i == id).count(), 1, "{id}");
+        }
+        // An id no built-in line knows is refused in one sentence that names it once.
+        let body = format!("{MINIMAL}\n[decide.bands.q]\nask_at = 0.95\n");
+        match Config::load(Some(&write(&dir, &body))) {
+            Err(ConfigError::Invalid(m)) => {
+                assert_eq!(m.matches("decide.bands.q").count(), 1, "{m}")
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn the_caps_default_to_the_spec() {
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
@@ -3487,6 +3561,32 @@ mode = "off"
                 other => panic!("expected Invalid for {key}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_zero_seat_count_or_a_zero_tick_is_refused_naming_its_own_key() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for (line, key, other) in [
+            (
+                "ask_open_max = 0",
+                "decide.ask_open_max",
+                "decide.tick_mins",
+            ),
+            ("tick_mins = 0", "decide.tick_mins", "decide.ask_open_max"),
+        ] {
+            let body = format!("{MINIMAL}\n[decide]\n{line}\n");
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => {
+                    assert!(m.contains(key), "{m}");
+                    assert!(!m.contains(other), "the key that is fine is named: {m}");
+                }
+                other => panic!("expected Invalid for {key}, got {other:?}"),
+            }
+        }
+        let body = format!("{MINIMAL}\n[decide]\nask_open_max = 1\ntick_mins = 1\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!((d.ask_open_max, d.tick_mins), (1, 1));
     }
 
     #[test]

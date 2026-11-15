@@ -11,10 +11,10 @@ use crate::infer::decide::{Kind as QKind, decide_swapped};
 use crate::infer::retry::transiently;
 use crate::jobs::consolidate::NEAR_IDENTICAL;
 use crate::store::actions::{Action, Kind, UndoneBy};
-use crate::store::artifacts::ArtifactStatus;
-use crate::store::links::LinkState;
+use crate::store::artifacts::{ArtifactStatus, Chunk};
+use crate::store::links::{Link, LinkState};
 use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PersonSaid {
@@ -49,6 +49,8 @@ pub struct QuestionReport {
     pub asked: usize,
     pub skipped_too_long: usize,
     pub skipped_no_text: usize,
+    /// Cases a read failed for, or the endpoint refused: said in the log, not counted as asked.
+    pub skipped_failed: usize,
     pub left_out: usize,
     pub agrees_with_past: Option<(usize, usize)>,
     pub agrees_with_person: Option<(usize, usize)>,
@@ -76,6 +78,9 @@ pub struct QuestionReport {
     pub exchanged_holds: Option<(usize, usize)>,
     /// Judged choices: the ten most confident answers that disagree with the past verdict.
     pub disagreements: Vec<Miss>,
+    /// Why the run ended at this question: the endpoint stopped answering, and what is here is
+    /// what was asked until then.
+    pub stopped: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -127,7 +132,8 @@ pub struct Confident {
 /// Old link verdict `related`: any of the new kinds that show a link.
 const RELATED: &str = "continues|example|alternative|background";
 
-/// Pair details that close a pair without the judge's verdict standing: refusals and guards.
+/// Pair details that close a pair without the judge's verdict standing: refusals and guards. Read
+/// only for a pair no decision was logged for: its row has no column that tells the two apart.
 const NOT_A_VERDICT: [&str; 4] = [
     "stay as they are",
     "esolve by hand",
@@ -184,6 +190,54 @@ async fn text_of(core: &Core, id: &str) -> Result<Option<Text>> {
     }))
 }
 
+/// What a run reads once, whichever questions and cases need it.
+#[derive(Default)]
+struct Base {
+    journal: tokio::sync::OnceCell<Vec<Action>>,
+    /// The graveyard's vectors by note, read when the first buried note needs its neighbours.
+    graves: tokio::sync::OnceCell<HashMap<String, Vec<f32>>>,
+}
+
+impl Base {
+    async fn journal(&self, core: &Core) -> Result<&[Action]> {
+        let rows = self
+            .journal
+            .get_or_try_init(|| core.store.recent_actions(i64::MAX as usize))
+            .await?;
+        Ok(rows.as_slice())
+    }
+
+    async fn grave_vector(&self, core: &Core, id: &str) -> Result<Option<&[f32]>> {
+        let all = self
+            .graves
+            .get_or_try_init(|| async {
+                let model = core.embedder.model().to_string();
+                let all: HashMap<String, Vec<f32>> = core
+                    .store
+                    .graveyard_vectors(&model)
+                    .await?
+                    .into_iter()
+                    .collect();
+                Ok::<_, Error>(all)
+            })
+            .await?;
+        Ok(all.get(id).map(Vec::as_slice))
+    }
+}
+
+/// One case's read. A failure is said in the log and counted, and the run goes on: one case must
+/// not cost the report of every other.
+fn or_skip<T>(read: Result<T>, question: &str, case: &str, failed: &mut usize) -> Option<T> {
+    match read {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(question, case, error = %e, "could not read a case; it is skipped");
+            *failed += 1;
+            None
+        }
+    }
+}
+
 /// A past verdict found in the base, before its text is read.
 struct Found {
     at: i64,
@@ -232,9 +286,44 @@ fn evidence(r: &Action) -> serde_json::Value {
     serde_json::from_str(&r.evidence_json).unwrap_or_default()
 }
 
+/// What the last decision about a pair carried out: the pick, and whether a person chose it.
+type Carried = (String, bool);
+
+/// Per pair id, what its last `pair_relation` decision carried out. A decision that only asked,
+/// was left, or was closed with a reason carried out nothing and is not here.
+async fn pair_decisions(core: &Core) -> Result<HashMap<i64, Carried>> {
+    let rows = sqlx::query!(
+        r#"SELECT subject_a AS "pair!", pick AS "pick!", band AS "band!", state AS "state!",
+                  reason AS "reason?", answered_pick AS "answered?"
+             FROM decisions
+            WHERE question_id = 'pair_relation' AND subject_kind = 'pair'
+            ORDER BY decided_at, rowid"#
+    )
+    .fetch_all(&core.store.pool)
+    .await?;
+    let mut out = HashMap::new();
+    for r in rows {
+        let Ok(id) = r.pair.parse::<i64>() else {
+            continue;
+        };
+        let acted = r.band == "act" && r.state == "done" && r.reason.is_none();
+        match r.answered {
+            Some(pick) => out.insert(id, (pick, true)),
+            None if acted => out.insert(id, (r.pick, false)),
+            None => None,
+        };
+    }
+    Ok(out)
+}
+
 /// The plan's mapping of a settled pair onto `pair_relation`; `None` leaves it out.
-fn pair_past(p: &ArtifactPair, rows: &[&Action]) -> Option<&'static str> {
+fn pair_past(
+    p: &ArtifactPair,
+    rows: &[&Action],
+    carried: Option<&Carried>,
+) -> Option<&'static str> {
     // The base took it back, or consolidate closed it on similarity alone: no judgement either way.
+    // Consolidate's close is known by the constant it writes; the row has no column for it.
     if p.decided_by == Some(DecidedBy::Evidence)
         || p.detail
             .as_deref()
@@ -253,30 +342,55 @@ fn pair_past(p: &ArtifactPair, rows: &[&Action]) -> Option<&'static str> {
             _ => None,
         };
     }
+    let picked = carried.map(|c| c.0.as_str());
     if !rows.is_empty() {
+        // One row where the other side was retired already: the decision says it was both.
         let gone: HashSet<&str> = of(Kind::Discard).map(|r| r.subject_id.as_str()).collect();
-        return (gone.contains(p.a_id.as_str()) && gone.contains(p.b_id.as_str()))
-            .then_some("vacuous");
+        return (picked == Some("vacuous")
+            || (gone.contains(p.a_id.as_str()) && gone.contains(p.b_id.as_str())))
+        .then_some("vacuous");
     }
-    let refused = |d: &str| NOT_A_VERDICT.iter().any(|n| d.contains(n));
     match p.state {
         PairState::Contradiction => Some("conflict"),
-        PairState::NoConflict
-            if p.decided_by == Some(DecidedBy::Model)
-                && !p.detail.as_deref().is_some_and(refused) =>
-        {
-            Some("distinct")
-        }
+        PairState::NoConflict => match picked {
+            // Both stayed after another pick: a guard refused it, and that verdict did not stand.
+            Some(pick) => (pick == "distinct").then_some("distinct"),
+            // No decision was logged: closed before the log, drained from an older state, or
+            // refused before it could be asked. Only the detail tells a verdict from a refusal.
+            None => {
+                let refused = |d: &str| NOT_A_VERDICT.iter().any(|n| d.contains(n));
+                (p.decided_by == Some(DecidedBy::Model)
+                    && !p.detail.as_deref().is_some_and(refused))
+                .then_some("distinct")
+            }
+        },
+        // A person's press is not journaled, and a pick that found both already retired wrote
+        // nothing: the decision is the record that neither was found to state anything.
+        PairState::Dismissed if picked == Some("vacuous") => Some("vacuous"),
         _ => None,
     }
 }
 
-async fn journal(core: &Core) -> Result<Vec<Action>> {
-    core.store.recent_actions(i64::MAX as usize).await
+/// Whether both members stand retired by hand, neither behind the other. A base from before the
+/// decision log keeps a person's "neither says anything" as a dismissed pair like any other they
+/// dismissed, with no journal row: only where the two stand now tells it from one left alone.
+async fn both_retired(core: &Core, p: &ArtifactPair) -> Result<bool> {
+    for id in [&p.a_id, &p.b_id] {
+        let c = match core.store.get_artifact(id).await {
+            Ok(c) => c,
+            Err(Error::NotFound) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if c.status != ArtifactStatus::Deprecated || c.superseded_by.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
-async fn pairs(core: &Core) -> Result<Vec<Found>> {
-    let journal = journal(core).await?;
+async fn pairs(core: &Core, base: &Base, failed: &mut usize) -> Result<Vec<Found>> {
+    let journal = base.journal(core).await?;
+    let carried = pair_decisions(core).await?;
     let mut by_pair: BTreeMap<i64, Vec<&Action>> = BTreeMap::new();
     for r in journal
         .iter()
@@ -294,12 +408,26 @@ async fn pairs(core: &Core) -> Result<Vec<Found>> {
     ] {
         for p in core.store.pairs_by_state(s, i64::MAX).await? {
             let rows = by_pair.get(&p.id).map(Vec::as_slice).unwrap_or_default();
-            let Some(past) = pair_past(&p, rows) else {
-                continue;
+            let said = carried.get(&p.id);
+            let unrecorded = said.is_none()
+                && rows.is_empty()
+                && p.state == PairState::Dismissed
+                && p.decided_by == Some(DecidedBy::Operator);
+            let past = match pair_past(&p, rows, said) {
+                Some(past) => past,
+                None if unrecorded => {
+                    let read = both_retired(core, &p).await;
+                    match or_skip(read, "pair_relation", &p.a_id, failed) {
+                        Some(true) => "vacuous",
+                        _ => continue,
+                    }
+                }
+                None => continue,
             };
-            let asked = rows
-                .iter()
-                .any(|r| evidence(r).get("asked_by").and_then(|v| v.as_str()) == Some("operator"));
+            let asked = said.is_some_and(|c| c.1)
+                || rows.iter().any(|r| {
+                    evidence(r).get("asked_by").and_then(|v| v.as_str()) == Some("operator")
+                });
             let mut f = Found::new(p.created_at, &p.a_id, Some(&p.b_id), Some(past));
             f.person = person_of(rows, asked || p.decided_by == Some(DecidedBy::Operator));
             out.push(f);
@@ -308,66 +436,104 @@ async fn pairs(core: &Core) -> Result<Vec<Found>> {
     Ok(out)
 }
 
-/// `directional`: the links `link_direction` would be asked of, with no past order to compare.
+/// A judged link's past verdict as `link_kind`'s picks: its kind, where the judge named one. A
+/// link judged before kinds has only its line, and no column says more: the hand-over line means
+/// `duplicate`, any other link that was shown is the old `related`.
+fn link_past(l: &Link) -> Option<&'static str> {
+    if let Some(kind) = l.kind {
+        return Some(kind.as_str());
+    }
+    let reason = l.reason.as_deref();
+    match l.state {
+        LinkState::Related | LinkState::Dismissed => {
+            Some(if reason.is_some_and(|r| r.starts_with("same content")) {
+                "duplicate"
+            } else {
+                RELATED
+            })
+        }
+        LinkState::Unrelated if reason != Some("unreadable") => Some("unrelated"),
+        _ => None,
+    }
+}
+
+/// `directional`: the links `link_direction` would be asked of, compared with the order the base
+/// stored where one held.
 async fn links(core: &Core, directional: bool) -> Result<Vec<Found>> {
     let mut out = Vec::new();
     for l in core.store.judged_links().await? {
-        let shown = if l
-            .reason
-            .as_deref()
-            .is_some_and(|r| r.starts_with("same content"))
-        {
-            "duplicate"
-        } else {
-            RELATED
-        };
-        let (past, person) = match l.state {
-            LinkState::Related => (shown, None),
-            LinkState::Unrelated if l.reason.as_deref() != Some("unreadable") => {
-                ("unrelated", None)
-            }
-            // Only a shown link can be dismissed, and a person dismissed it.
-            LinkState::Dismissed => (shown, Some(PersonSaid::Disagreed)),
-            _ => continue,
-        };
-        if directional && (past != RELATED || person.is_some()) {
+        let Some(past) = link_past(&l) else {
             continue;
-        }
-        let mut f = Found::new(
-            l.created_at,
-            &l.a_id,
-            Some(&l.b_id),
-            (!directional).then_some(past),
-        );
-        f.person = person.filter(|_| !directional);
+        };
+        // Only a shown link can be dismissed, and a person dismissed it.
+        let person = (l.state == LinkState::Dismissed && past != "unrelated")
+            .then_some(PersonSaid::Disagreed);
+        let (past, person) = if directional {
+            // A kind with an order, or the old `related`, which may have had one.
+            let ordered = l.kind.map_or(past == RELATED, |k| k.directional());
+            if !ordered || person.is_some() {
+                continue;
+            }
+            let first = l.first_is_a.map(|a| if a { "a_first" } else { "b_first" });
+            (first, None)
+        } else {
+            (Some(past), person)
+        };
+        let mut f = Found::new(l.created_at, &l.a_id, Some(&l.b_id), past);
+        f.person = person;
         f.words = l.cues.iter().map(|c| c.q.clone()).collect();
         out.push(f);
     }
     Ok(out)
 }
 
-/// Burials say no; a rescue said yes. A rescued note later buried counts once, as the burial.
-async fn reaps(core: &Core) -> Result<Vec<Found>> {
+/// The rewrites a rescue wrote: "reap rescue" now; "reap rescue: <reason>" on rows written before.
+async fn rescues(core: &Core) -> Result<Vec<Chunk>> {
+    let mut all = core.store.synthesized_artifacts(i64::MAX).await?;
+    all.retain(|s| s.cues.iter().any(|c| c.starts_with("reap rescue")));
+    Ok(all)
+}
+
+/// What a buried note was replaced by, if anything.
+async fn successor_of(core: &Core, id: &str) -> Result<Option<String>> {
+    match core.store.get_artifact(id).await {
+        Ok(c) => Ok(c.superseded_by),
+        Err(Error::NotFound) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The notes a rescue replaced that were not buried since.
+async fn rescued_by(core: &Core, rescue: &str) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    for r in journal(core).await?.iter().filter(|r| r.kind == Kind::Reap) {
-        let successor = match core.store.get_artifact(&r.subject_id).await {
-            Ok(c) => c.superseded_by,
-            Err(Error::NotFound) => None,
-            Err(e) => return Err(e),
+    for id in core.store.artifacts_superseded_by(rescue).await? {
+        if core.store.get_artifact(&id).await?.reaped_at.is_none() {
+            out.push(id);
+        }
+    }
+    Ok(out)
+}
+
+/// Burials say no; a rescue said yes. A rescued note later buried counts once, as the burial.
+async fn reaps(core: &Core, base: &Base, failed: &mut usize) -> Result<Vec<Found>> {
+    let mut out = Vec::new();
+    for r in base
+        .journal(core)
+        .await?
+        .iter()
+        .filter(|r| r.kind == Kind::Reap)
+    {
+        let read = successor_of(core, &r.subject_id).await;
+        let Some(successor) = or_skip(read, "reap_worth", &r.subject_id, failed) else {
+            continue;
         };
         let mut f = Found::new(r.at, &r.subject_id, successor.as_deref(), Some("no"));
         f.person = person_of(&[r], false);
         out.push(f);
     }
-    for s in core.store.synthesized_artifacts(i64::MAX).await? {
-        // "reap rescue" now; "reap rescue: <reason>" on rows written before.
-        if !s.cues.iter().any(|c| c.starts_with("reap rescue")) {
-            continue;
-        }
-        for id in core.store.artifacts_superseded_by(&s.id).await? {
-            if core.store.get_artifact(&id).await?.reaped_at.is_some() {
-                continue;
-            }
+    for s in rescues(core).await? {
+        let read = rescued_by(core, &s.id).await;
+        for id in or_skip(read, "reap_worth", &s.id, failed).unwrap_or_default() {
             // Its successor now is the rescue; shown, it would argue against the rescue.
             let mut f = Found::new(s.created_at, &id, None, Some("yes"));
             f.not = Some(s.id.clone());
@@ -393,9 +559,60 @@ async fn live(core: &Core, category: bool) -> Result<Vec<Found>> {
     Ok(out)
 }
 
+/// One past merge: its sources as they read now, then what the merge wrote.
+async fn merge_case(core: &Core, merged: &str, rows: &[&Action]) -> Result<Found> {
+    let mut f = Found::new(
+        rows.iter().map(|r| r.at).max().unwrap_or(0),
+        merged,
+        None,
+        Some("yes"),
+    );
+    f.person = person_of(rows, false);
+    let mut subjects: Vec<&str> = rows.iter().map(|r| r.subject_id.as_str()).collect();
+    subjects.sort();
+    subjects.dedup();
+    for s in subjects {
+        f.texts.push(text_of(core, s).await?);
+    }
+    // A merge condensed since: its first version is what the merge wrote.
+    let first = core.store.versions_of(merged).await?.into_iter().next();
+    f.texts.push(match first {
+        Some(v) => Some(Text {
+            title: v.title,
+            day: None,
+            text: v.text,
+        }),
+        None => text_of(core, merged).await?,
+    });
+    Ok(f)
+}
+
+/// One past condensation: the version it retired, then what it wrote. `None` when that version
+/// is no longer kept.
+async fn condense_case(core: &Core, r: &Action) -> Result<Option<Found>> {
+    let versions = core.store.versions_of(&r.subject_id).await?;
+    let Some(v) = versions.iter().find(|v| v.action_id == r.id) else {
+        return Ok(None);
+    };
+    let mut f = Found::new(r.at, &r.subject_id, None, Some("yes"));
+    f.person = person_of(&[r], false);
+    let as_text = |v: &crate::store::versions::Version| Text {
+        title: v.title.clone(),
+        day: None,
+        text: v.text.clone(),
+    };
+    f.texts.push(Some(as_text(v)));
+    f.texts
+        .push(match versions.iter().find(|w| w.n == v.n + 1) {
+            Some(next) => Some(as_text(next)),
+            None => text_of(core, &r.subject_id).await?,
+        });
+    Ok(Some(f))
+}
+
 /// Past merges and condensations: kept, they passed; a person taking one back disagreed.
-async fn rewrites(core: &Core) -> Result<Vec<Found>> {
-    let journal = journal(core).await?;
+async fn rewrites(core: &Core, base: &Base, id: &str, failed: &mut usize) -> Result<Vec<Found>> {
+    let journal = base.journal(core).await?;
     let mut merges: BTreeMap<&str, Vec<&Action>> = BTreeMap::new();
     for r in journal.iter().filter(|r| r.kind == Kind::Merge) {
         if let Some(m) = r.survivor_id.as_deref() {
@@ -409,53 +626,15 @@ async fn rewrites(core: &Core) -> Result<Vec<Found>> {
         if rows.iter().any(by_evidence) {
             continue;
         }
-        let mut f = Found::new(
-            rows.iter().map(|r| r.at).max().unwrap_or(0),
-            merged,
-            None,
-            Some("yes"),
-        );
-        f.person = person_of(&rows, false);
-        let mut subjects: Vec<&str> = rows.iter().map(|r| r.subject_id.as_str()).collect();
-        subjects.sort();
-        subjects.dedup();
-        for s in subjects {
-            f.texts.push(text_of(core, s).await?);
-        }
-        // A merge condensed since: its first version is what the merge wrote.
-        let first = core.store.versions_of(merged).await?.into_iter().next();
-        f.texts.push(match first {
-            Some(v) => Some(Text {
-                title: v.title,
-                day: None,
-                text: v.text,
-            }),
-            None => text_of(core, merged).await?,
-        });
-        out.push(f);
+        let read = merge_case(core, merged, &rows).await;
+        out.extend(or_skip(read, id, merged, failed));
     }
     for r in journal.iter().filter(|r| r.kind == Kind::Condense) {
         if by_evidence(&r) {
             continue;
         }
-        let versions = core.store.versions_of(&r.subject_id).await?;
-        let Some(v) = versions.iter().find(|v| v.action_id == r.id) else {
-            continue;
-        };
-        let mut f = Found::new(r.at, &r.subject_id, None, Some("yes"));
-        f.person = person_of(&[r], false);
-        let as_text = |v: &crate::store::versions::Version| Text {
-            title: v.title.clone(),
-            day: None,
-            text: v.text.clone(),
-        };
-        f.texts.push(Some(as_text(v)));
-        f.texts
-            .push(match versions.iter().find(|w| w.n == v.n + 1) {
-                Some(next) => Some(as_text(next)),
-                None => text_of(core, &r.subject_id).await?,
-            });
-        out.push(f);
+        let read = condense_case(core, r).await;
+        out.extend(or_skip(read, id, &r.subject_id, failed).flatten());
     }
     Ok(out)
 }
@@ -477,50 +656,39 @@ async fn searches(core: &Core) -> Result<Vec<Found>> {
 }
 
 /// What this base holds to ask a question about. A question the base has nothing for finds none.
-async fn found(core: &Core, id: &str) -> Result<Vec<Found>> {
+async fn found(core: &Core, base: &Base, id: &str, failed: &mut usize) -> Result<Vec<Found>> {
     match id {
-        "pair_relation" => pairs(core).await,
+        "pair_relation" => pairs(core, base, failed).await,
         "link_kind" => links(core, false).await,
         "link_direction" => links(core, true).await,
-        "reap_worth" => reaps(core).await,
+        "reap_worth" => reaps(core, base, failed).await,
         "category" => live(core, true).await,
         "pinned" | "time_bound" | "self_contained" | "asks_reminder" | "has_date" => {
             live(core, false).await
         }
-        "complete" | "adds_nothing" => rewrites(core).await,
+        "complete" | "adds_nothing" => rewrites(core, base, id, failed).await,
         "answers_query" => searches(core).await,
         // `answerable`: the base keeps no record of what a pursuit was given to write from.
         _ => Ok(vec![]),
     }
 }
 
-/// Up to five live notes near `id`, from its graveyard vector once buried. A failed read is no
-/// neighbours, said in the log: one case must not stop the run.
-async fn neighbours(core: &Core, id: &str, not: Option<&str>) -> Result<Vec<Text>> {
+/// Up to five live notes near `id`, from its graveyard vector once buried. A failed read is the
+/// caller's to skip the case on: asked without its neighbours, a note would look worth keeping.
+async fn neighbours(core: &Core, base: &Base, id: &str, not: Option<&str>) -> Result<Vec<Text>> {
     let buried = core.store.get_artifact(id).await?.reaped_at.is_some();
     let hits = if buried {
-        let model = core.embedder.model().to_string();
-        let vec = core
-            .store
-            .graveyard_vectors(&model)
-            .await?
-            .into_iter()
-            .find(|(g, _)| g == id);
-        match vec {
-            Some((_, v)) => {
+        match base.grave_vector(core, id).await? {
+            Some(v) => {
                 core.vectors
-                    .search(&v, &Default::default(), 8, &Default::default())
-                    .await
+                    .search(v, &Default::default(), 8, &Default::default())
+                    .await?
             }
-            None => Ok(vec![]),
+            None => vec![],
         }
     } else {
-        core.vectors.neighbours(id, 8).await
+        core.vectors.neighbours(id, 8).await?
     };
-    let hits = hits.unwrap_or_else(|e| {
-        tracing::warn!(artifact_id = id, error = %e, "no neighbours for a reap case");
-        vec![]
-    });
     let mut out = Vec::new();
     for h in hits {
         let hid = h.payload.artifact_id.as_str();
@@ -561,7 +729,12 @@ async fn sources(core: &Core, id: &str) -> Result<Vec<Text>> {
 }
 
 /// The state and the title, or `None` when a subject has no text anywhere.
-async fn shown(core: &Core, a: &Asked, f: &Found) -> Result<Option<(Option<String>, String)>> {
+async fn shown(
+    core: &Core,
+    base: &Base,
+    a: &Asked,
+    f: &Found,
+) -> Result<Option<(Option<String>, String)>> {
     let room = state::room(core, &[a]);
     let c = &core.counter;
     let title = |t: &Text| t.title.clone().unwrap_or_else(|| "untitled".into());
@@ -592,7 +765,7 @@ async fn shown(core: &Core, a: &Asked, f: &Found) -> Result<Option<(Option<Strin
             let Some(x) = text_of(core, &f.a).await? else {
                 return Ok(None);
             };
-            let near = neighbours(core, &f.a, f.not.as_deref()).await?;
+            let near = neighbours(core, base, &f.a, f.not.as_deref()).await?;
             let near: Vec<Note> = near.iter().map(Text::note).collect();
             let successor = other.as_ref().map(Text::note);
             let s = state::reap(&x.note(), successor.as_ref(), &near, c, room);
@@ -661,50 +834,76 @@ struct Gathered {
     items: Vec<Item>,
     left_out: usize,
     no_text: usize,
+    /// Cases a read failed for, while they were found or while they were laid out.
+    failed: usize,
 }
 
-async fn gather(core: &Core, a: &Asked, limit: usize) -> Result<Gathered> {
-    gather_from(core, a, found(core, a.id).await?, limit).await
+async fn gather(core: &Core, base: &Base, a: &Asked, limit: usize) -> Result<Gathered> {
+    let mut failed = 0;
+    let all = found(core, base, a.id, &mut failed).await?;
+    gather_from(core, base, a, all, failed, limit).await
 }
 
-/// Live notes newest first, each with its nearest live neighbours at `consolidate.scan_min` or above, as the
-/// relate stage reads them; a pair already filed in any state is not unjudged.
-async fn neighbour_pairs(core: &Core) -> Result<Vec<Found>> {
+/// One live note with its nearest live neighbours at `consolidate.scan_min` or above; a pair
+/// already filed in any state is not unjudged.
+async fn near_pairs(
+    core: &Core,
+    c: &Chunk,
+    seen: &mut HashSet<(String, String)>,
+) -> Result<Vec<Found>> {
+    let mut out = Vec::new();
+    for h in core
+        .vectors
+        .neighbours(&c.id, core.consolidate.per_point)
+        .await?
+    {
+        let other = h.payload.artifact_id.as_str();
+        let Some(sim) = h.similarity.filter(|s| *s >= core.consolidate.scan_min) else {
+            continue;
+        };
+        let (a, b) = crate::store::links::canonical(&c.id, other);
+        if a == b || !seen.insert((a.to_string(), b.to_string())) {
+            continue;
+        }
+        if core.store.pair_state_between(a, b).await?.is_some()
+            || core.store.artifact_in_results(other).await? != Some(true)
+        {
+            continue;
+        }
+        let mut f = Found::new(c.created_at, a, Some(b), None);
+        f.sim = Some(sim);
+        out.push(f);
+    }
+    Ok(out)
+}
+
+/// Live notes newest first, each with its neighbours as the relate stage reads them. A note whose
+/// neighbours cannot be read is counted and the rest go on.
+async fn neighbour_pairs(core: &Core, failed: &mut usize) -> Result<Vec<Found>> {
     let (mut seen, mut out) = (HashSet::new(), Vec::new());
     for c in core
         .store
         .artifacts_by_status(ArtifactStatus::Active, i64::MAX)
         .await?
     {
-        for h in core
-            .vectors
-            .neighbours(&c.id, core.consolidate.per_point)
-            .await?
-        {
-            let other = h.payload.artifact_id.as_str();
-            let Some(sim) = h.similarity.filter(|s| *s >= core.consolidate.scan_min) else {
-                continue;
-            };
-            let (a, b) = crate::store::links::canonical(&c.id, other);
-            if a == b || !seen.insert((a.to_string(), b.to_string())) {
-                continue;
-            }
-            if core.store.pair_state_between(a, b).await?.is_some()
-                || core.store.artifact_in_results(other).await? != Some(true)
-            {
-                continue;
-            }
-            let mut f = Found::new(c.created_at, a, Some(b), None);
-            f.sim = Some(sim);
-            out.push(f);
-        }
+        let read = near_pairs(core, &c, &mut seen).await;
+        out.extend(or_skip(read, "pair_relation", &c.id, failed).unwrap_or_default());
     }
     Ok(out)
 }
 
 /// Superseded notes no burial or rescue judged, newest retirement first, with what replaced them.
-async fn retired(core: &Core) -> Result<Vec<Found>> {
-    let judged: HashSet<String> = reaps(core).await?.into_iter().map(|f| f.a).collect();
+/// A note in the Trash is not asked about: a person threw it away.
+async fn retired(core: &Core, base: &Base) -> Result<Vec<Found>> {
+    let journal = base.journal(core).await?;
+    let mut judged: HashSet<String> = journal
+        .iter()
+        .filter(|r| r.kind == Kind::Reap)
+        .map(|r| r.subject_id.clone())
+        .collect();
+    for s in rescues(core).await? {
+        judged.extend(core.store.artifacts_superseded_by(&s.id).await?);
+    }
     Ok(core
         .store
         .superseded_artifacts(i64::MAX)
@@ -722,28 +921,59 @@ async fn retired(core: &Core) -> Result<Vec<Found>> {
         .collect())
 }
 
-/// The unjudged section a question has, if any: its scope and its cases.
-async fn unjudged(core: &Core, id: &str) -> Result<Option<(&'static str, Vec<Found>)>> {
+/// The unjudged section a question has, if any: its scope, its cases, and how many could not be
+/// read.
+async fn unjudged(
+    core: &Core,
+    base: &Base,
+    id: &str,
+) -> Result<Option<(&'static str, Vec<Found>, usize)>> {
     Ok(match id {
-        "pair_relation" => Some(("unjudged neighbours", neighbour_pairs(core).await?)),
-        "reap_worth" => Some(("unjudged retired notes", retired(core).await?)),
+        "pair_relation" => {
+            let mut failed = 0;
+            let all = neighbour_pairs(core, &mut failed).await?;
+            Some(("unjudged neighbours", all, failed))
+        }
+        "reap_worth" => Some(("unjudged retired notes", retired(core, base).await?, 0)),
         _ => None,
     })
 }
 
 /// The unjudged cases for `pair_relation` or `reap_worth`, newest first, and how many `limit` left out.
 pub async fn unjudged_cases(core: &Core, a: &Asked, limit: usize) -> Result<(Vec<Case>, usize)> {
-    let Some((_, all)) = unjudged(core, a.id).await? else {
+    let base = Base::default();
+    let Some((_, all, failed)) = unjudged(core, &base, a.id).await? else {
         return Ok((vec![], 0));
     };
-    let g = gather_from(core, a, all, limit).await?;
+    let g = gather_from(core, &base, a, all, failed, limit).await?;
     Ok((g.items.into_iter().map(|i| i.case).collect(), g.left_out))
+}
+
+/// One case as it is asked: its state, its title and, for `link_direction`, the state with the
+/// notes exchanged. `None` when a subject has no text anywhere.
+async fn laid_out(
+    core: &Core,
+    base: &Base,
+    asked: &Asked,
+    f: &Found,
+) -> Result<Option<(Option<String>, String, Option<String>)>> {
+    let Some((state, title)) = shown(core, base, asked, f).await? else {
+        return Ok(None);
+    };
+    let ex = if asked.id == "link_direction" && state.is_some() {
+        exchanged(core, asked, f).await?
+    } else {
+        None
+    };
+    Ok(Some((state, title, ex)))
 }
 
 async fn gather_from(
     core: &Core,
+    base: &Base,
     a: &Asked,
     mut all: Vec<Found>,
+    mut failed: usize,
     limit: usize,
 ) -> Result<Gathered> {
     all.sort_by(|x, y| (y.at, &y.a, &y.b).cmp(&(x.at, &x.a, &x.b)));
@@ -756,14 +986,13 @@ async fn gather_from(
             Some(q) if a.id == "answers_query" => catalogue::answers_query(q),
             _ => a.clone(),
         };
-        let Some((state, title)) = shown(core, &asked, &f).await? else {
-            no_text += 1;
+        let read = laid_out(core, base, &asked, &f).await;
+        let Some(read) = or_skip(read, a.id, &f.a, &mut failed) else {
             continue;
         };
-        let ex = if a.id == "link_direction" && state.is_some() {
-            exchanged(core, &asked, &f).await?
-        } else {
-            None
+        let Some((state, title, ex)) = read else {
+            no_text += 1;
+            continue;
         };
         items.push(Item {
             case: Case {
@@ -782,16 +1011,17 @@ async fn gather_from(
         items,
         left_out,
         no_text,
+        failed,
     })
 }
 
 /// The cases for one question, newest first, and how many `limit` left out.
 pub async fn cases(core: &Core, a: &Asked, limit: usize) -> Result<(Vec<Case>, usize)> {
-    let g = gather(core, a, limit).await?;
+    let g = gather(core, &Base::default(), a, limit).await?;
     Ok((g.items.into_iter().map(|i| i.case).collect(), g.left_out))
 }
 
-/// How long one call may wait out a busy or failing endpoint before the run ends with its error.
+/// How long one call may wait out an endpoint that is up and busy before the run ends there.
 const RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Straight to the decider, swapped where the question is: no gate, no log.
@@ -814,6 +1044,39 @@ async fn put(core: &Core, a: &Asked, state: &str) -> Result<(String, f64, Option
         })?;
     let (pick, top) = pick_and_top(&a.question, answer);
     Ok((pick, top, agree))
+}
+
+/// `put`, waiting out an endpoint that is up and busy. Any other failure comes back at once: the
+/// client has already spent its own retries on it.
+async fn put_waiting(core: &Core, a: &Asked, state: &str) -> Result<(String, f64, Option<bool>)> {
+    transiently(RETRY_BUDGET, || async move {
+        match put(core, a, state).await {
+            Err(e @ Error::InferenceBusy { .. }) => Err(e),
+            other => Ok(other),
+        }
+    })
+    .await?
+}
+
+/// One case's answer and, for `link_direction`, its pick with the notes exchanged. Each read is
+/// its own request with its own waiting: the second failing does not ask the first again.
+async fn answer(
+    core: &Core,
+    item: &Item,
+    state: &str,
+) -> Result<(String, f64, Option<bool>, Option<String>)> {
+    let (pick, top, agree) = put_waiting(core, &item.asked, state).await?;
+    let again = match &item.exchanged {
+        Some(ex) => Some(put_waiting(core, &item.asked, ex).await?.0),
+        None => None,
+    };
+    Ok((pick, top, agree, again))
+}
+
+/// The endpoint is not answering: unreachable or failing after the client's retries, or still busy
+/// after `RETRY_BUDGET`. Every remaining call would wait as long and fail the same way.
+fn not_answering(e: &Error) -> bool {
+    matches!(e, Error::Inference { .. } | Error::InferenceBusy { .. })
 }
 
 fn agrees(past: &str, pick: &str) -> bool {
@@ -911,6 +1174,9 @@ fn summarize(
         asked: rows.len(),
         skipped_too_long,
         skipped_no_text,
+        // The run fills these two: `summarize` sees only what was asked.
+        skipped_failed: 0,
+        stopped: None,
         left_out,
         suggested: agrees_with_past.and_then(|_| suggest(&by_top)),
         agrees_with_past,
@@ -990,11 +1256,13 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
         None => catalogue::all(),
     };
     // Each question's judged section, then its unjudged one where it has one.
+    let base = Base::default();
     let mut gathered = Vec::new();
     for a in &asked {
-        gathered.push((a, None, gather(core, a, limit).await?));
-        if let Some((scope, all)) = unjudged(core, a.id).await? {
-            gathered.push((a, Some(scope), gather_from(core, a, all, limit).await?));
+        gathered.push((a, None, gather(core, &base, a, limit).await?));
+        if let Some((scope, all, failed)) = unjudged(core, &base, a.id).await? {
+            let g = gather_from(core, &base, a, all, failed, limit).await?;
+            gathered.push((a, Some(scope), g));
         }
     }
     let n: usize = gathered
@@ -1009,16 +1277,35 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
         let at = core.decide_cfg.bands.of(a.id);
         let (mut rows, mut titles, mut sims, mut too_long) =
             (Vec::new(), Vec::new(), Vec::new(), 0);
+        let (mut failed, mut stopped) = (g.failed, None);
         for item in g.items {
             let Some(state) = &item.case.state else {
                 too_long += 1;
                 continue;
             };
-            let (pick, top, agree) =
-                transiently(RETRY_BUDGET, || put(core, &item.asked, state)).await?;
-            if let Some(ex) = &item.exchanged {
-                let (again, _, _) =
-                    transiently(RETRY_BUDGET, || put(core, &item.asked, ex)).await?;
+            let (pick, top, agree, again) = match answer(core, &item, state).await {
+                Ok(read) => read,
+                Err(e) if not_answering(&e) => {
+                    stopped = Some(format!(
+                        "the decision endpoint did not answer ({e}); the rest of this question \
+                         and every question after it were not asked"
+                    ));
+                    break;
+                }
+                // The endpoint answered and refused this one: the next case is another request.
+                Err(e) => {
+                    let case = item.case.subjects.0.as_str();
+                    tracing::warn!(
+                        question = a.id,
+                        case,
+                        error = %e,
+                        "a case was refused; it is skipped"
+                    );
+                    failed += 1;
+                    continue;
+                }
+            };
+            if let Some(again) = again {
                 exchanged_n += 1;
                 holds += usize::from(again != pick && (again == "a_first" || again == "b_first"));
             }
@@ -1038,13 +1325,21 @@ pub async fn run(core: &Core, question: Option<&str>, limit: usize) -> Result<Ve
         if a.id == "link_direction" && scope.is_none() {
             r.exchanged_holds = Some((holds, exchanged_n));
         }
+        r.skipped_failed = failed;
+        r.stopped = stopped;
         eprintln!(
             "{}{}: {} asked",
             r.id,
             scope.map(|s| format!(" ({s})")).unwrap_or_default(),
             r.asked
         );
+        // What was asked until now is the report: every further call would wait and fail alike.
+        let ended = r.stopped.clone();
         out.push(r);
+        if let Some(why) = ended {
+            eprintln!("stopped: {why}");
+            break;
+        }
     }
     Ok(out)
 }
@@ -1085,11 +1380,19 @@ fn render_one(r: &QuestionReport) -> String {
         .as_deref()
         .map(|s| format!(" · {s}"))
         .unwrap_or_default();
+    // Named only when there are some: a run with every case read keeps the line the plan draws.
+    let failed = match r.skipped_failed {
+        0 => String::new(),
+        n => format!(" · {n} failed"),
+    };
     let mut s = format!(
-        "{} v{}{scope} · {} asked · {} too long · {} without text · {} left out\n",
+        "{} v{}{scope} · {} asked · {} too long · {} without text{failed} · {} left out\n",
         r.id, r.version, r.asked, r.skipped_too_long, r.skipped_no_text, r.left_out
     );
-    if r.asked + r.skipped_too_long + r.skipped_no_text + r.left_out == 0 {
+    if let Some(why) = &r.stopped {
+        s += &format!("  stopped: {why}\n");
+    } else if r.asked + r.skipped_too_long + r.skipped_no_text + r.skipped_failed + r.left_out == 0
+    {
         s.push_str(if r.id == "answerable" {
             "  not asked: the base keeps nothing this question can be replayed over\n"
         } else {
@@ -1215,10 +1518,16 @@ mod tests {
     use crate::infer::fake::RuleDecider;
     use crate::jobs::consolidate::tests::{seed, seed_titled};
     use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
-    use crate::store::links::LinkState;
+    use crate::store::decision_log::{NewLogged, Outcome, State};
+    use crate::store::links::{LinkKind, LinkState};
     use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
+    use crate::vector::{
+        Facets, LifecycleRow, SearchFilter, SearchHit, StoredLifecycle, Touch, VectorPayload,
+        VectorPoint, VectorStore, sparse::SparseVector,
+    };
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn rule(f: impl Fn(&str, &Question) -> Answer + Send + Sync + 'static) -> Arc<RuleDecider> {
         Arc::new(RuleDecider::new(move |state, qs| {
@@ -1744,7 +2053,7 @@ mod tests {
         )
         .await;
         core.store
-            .update_artifact_category(&ids[0], Some("procedure"))
+            .update_artifact_category_by(&ids[0], Some("procedure"), "writer")
             .await
             .unwrap();
 
@@ -1822,10 +2131,12 @@ mod tests {
             r[..1],
             [QuestionReport {
                 id: "pair_relation".into(),
-                version: 1,
+                version: catalogue::pair_relation().version,
                 asked: 3,
                 skipped_too_long: 0,
                 skipped_no_text: 0,
+                skipped_failed: 0,
+                stopped: None,
                 left_out: 0,
                 agrees_with_past: Some((2, 3)),
                 agrees_with_person: None,
@@ -1916,7 +2227,7 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .update_artifact_category(&ids[2], Some("procedure"))
+            .update_artifact_category_by(&ids[2], Some("procedure"), "writer")
             .await
             .unwrap();
         bury(&core, &ids[3], Some("buried")).await;
@@ -2011,6 +2322,8 @@ mod tests {
             reading: None,
             exchanged_holds: None,
             disagreements: vec![],
+            skipped_failed: 0,
+            stopped: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2054,6 +2367,8 @@ mod tests {
             reading: Some((0.5, 1)),
             exchanged_holds: None,
             disagreements: vec![],
+            skipped_failed: 0,
+            stopped: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2138,6 +2453,8 @@ mod tests {
             reading: None,
             exchanged_holds: None,
             disagreements: vec![],
+            skipped_failed: 0,
+            stopped: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2202,6 +2519,8 @@ mod tests {
             reading: None,
             exchanged_holds: None,
             disagreements: vec![],
+            skipped_failed: 0,
+            stopped: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2517,6 +2836,8 @@ mod tests {
             reading: None,
             exchanged_holds: None,
             disagreements: vec![],
+            skipped_failed: 0,
+            stopped: None,
             bands_at: Thresholds {
                 act_at: 0.90,
                 ask_at: 0.60,
@@ -2811,5 +3132,724 @@ mod tests {
             .await
             .unwrap();
         assert!(cases.is_empty(), "{cases:?}");
+    }
+
+    /// A `pair_relation` decision about `p` as the log keeps it once it is done.
+    async fn decided(core: &Core, p: &ArtifactPair, pick: &str, band: Band) -> String {
+        core.store
+            .log_decision(&NewLogged {
+                question_id: "pair_relation".into(),
+                question_version: catalogue::pair_relation().version,
+                model: "rule-decider".into(),
+                subject_kind: "pair",
+                subject_a: p.id.to_string(),
+                subject_b: None,
+                rev_a: None,
+                rev_b: None,
+                answer: "{}".into(),
+                top: 0.9,
+                pick: pick.into(),
+                swapped_agree: Some(true),
+                band,
+                reason: None,
+                state: State::Done,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn pair_cases(core: &Core) -> HashMap<String, Case> {
+        let (cases, _) = cases(core, &catalogue::pair_relation(), 200).await.unwrap();
+        cases
+            .into_iter()
+            .map(|c| (key(&c.subjects.0, c.subjects.1.as_deref().unwrap()), c))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_persons_vacuous_answer_is_their_verdict_though_nothing_was_journaled() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("newer", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        let p = pair(&core, &ids[0], &ids[1]).await;
+        // One side is behind another note already, so only the decision says what was answered.
+        core.store
+            .set_superseded_by(&p.a_id, Some(&ids[2]))
+            .await
+            .unwrap();
+        let d = decided(&core, &p, "distinct", Band::Ask).await;
+        crate::jobs::dedupe::carry_out(&core, &p, "vacuous", DecidedBy::Operator, &d)
+            .await
+            .unwrap();
+        core.store
+            .set_decision_outcome(&d, Outcome::Corrected, Some("vacuous"))
+            .await
+            .unwrap();
+        assert!(core.store.recent_actions(10).await.unwrap().is_empty());
+
+        let by = pair_cases(&core).await;
+        let c = &by[&key(&p.a_id, &p.b_id)];
+        assert_eq!(c.past.as_deref(), Some("vacuous"));
+        assert_eq!(
+            c.person,
+            Some(PersonSaid::Agreed),
+            "the person's own verdict"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_a_person_dismissed_is_vacuous_only_where_both_notes_were_retired() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("three", [1.0, 0.0]),
+                ("four", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        // As a base from before the decision log holds the two presses: no decision, no row.
+        let retired = pair(&core, &ids[0], &ids[1]).await;
+        crate::jobs::dedupe::discard_both(&core, &retired, None, DecidedBy::Operator, None)
+            .await
+            .unwrap();
+        let left = pair(&core, &ids[2], &ids[3]).await;
+        core.store
+            .set_pair_state(left.id, PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        let by = pair_cases(&core).await;
+        assert_eq!(
+            by.len(),
+            1,
+            "a pair left alone says nothing of the two: {by:?}"
+        );
+        let c = &by[&key(&retired.a_id, &retired.b_id)];
+        assert_eq!(c.past.as_deref(), Some("vacuous"));
+        assert_eq!(c.person, Some(PersonSaid::Agreed));
+    }
+
+    #[tokio::test]
+    async fn a_vacuous_pick_that_retired_one_note_is_vacuous_by_its_decision() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("newer", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        let p = pair(&core, &ids[0], &ids[1]).await;
+        // One side went behind another note while the decision waited: only the other is retired.
+        core.store
+            .set_superseded_by(&p.a_id, Some(&ids[2]))
+            .await
+            .unwrap();
+        let d = decided(&core, &p, "vacuous", Band::Act).await;
+        let rows = crate::jobs::dedupe::carry_out(&core, &p, "vacuous", DecidedBy::Model, &d)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+
+        let by = pair_cases(&core).await;
+        let c = &by[&key(&p.a_id, &p.b_id)];
+        assert_eq!(c.past.as_deref(), Some("vacuous"));
+        assert_eq!(c.person, None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_known_by_the_decision_it_left_not_by_its_wording() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("three", [1.0, 0.0]),
+                ("four", [1.0, 0.0]),
+                ("five", [1.0, 0.0]),
+                ("six", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        // A guard no phrase names closed a sure `duplicate` with both kept.
+        let refused = pair(&core, &ids[0], &ids[1]).await;
+        decided(&core, &refused, "duplicate", Band::Act).await;
+        let kept = pair(&core, &ids[2], &ids[3]).await;
+        decided(&core, &kept, "distinct", Band::Act).await;
+        // Only asked, and closed elsewhere: the decision carried out nothing.
+        let asked = pair(&core, &ids[4], &ids[5]).await;
+        decided(&core, &asked, "duplicate", Band::Ask).await;
+        for p in [&refused, &kept, &asked] {
+            core.store
+                .set_pair_state(
+                    p.id,
+                    PairState::NoConflict,
+                    Some("kept apart"),
+                    DecidedBy::Model,
+                )
+                .await
+                .unwrap();
+        }
+
+        let by = pair_cases(&core).await;
+        assert!(
+            !by.contains_key(&key(&refused.a_id, &refused.b_id)),
+            "{by:?}"
+        );
+        for p in [&kept, &asked] {
+            assert_eq!(by[&key(&p.a_id, &p.b_id)].past.as_deref(), Some("distinct"));
+        }
+    }
+
+    /// Give a buried note the vector its point carried.
+    async fn grave_vector(core: &Core, id: &str, v: &[f32]) {
+        let (blob, model) = (
+            crate::store::feedback::vec_to_blob(v),
+            core.embedder.model().to_string(),
+        );
+        sqlx::query!(
+            "UPDATE graveyard SET vec = ?, embed_model = ? WHERE id = ?",
+            blob,
+            model,
+            id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_reads_the_journal_and_the_graveyard_vectors_once() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("still here", [1.0, 0.0]),
+                ("first buried", [1.0, 0.0]),
+                ("second buried", [1.0, 0.0]),
+                ("buried without a vector", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        for id in &ids[1..] {
+            bury(&core, id, Some("buried words")).await;
+        }
+        for id in &ids[1..3] {
+            grave_vector(&core, id, &[1.0, 0.0]).await;
+        }
+        let base = Base::default();
+        let near = neighbours(&core, &base, &ids[1], None).await.unwrap();
+        assert_eq!(near.len(), 1, "the one live note");
+        assert_eq!(near[0].text, "still here");
+        assert!(base.journal(&core).await.unwrap().is_empty());
+
+        sqlx::query!("UPDATE graveyard SET vec = NULL")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store
+            .record_action(&crate::jobs::reap::test_support::row(&ids[1]))
+            .await
+            .unwrap();
+        let near = neighbours(&core, &base, &ids[2], None).await.unwrap();
+        assert_eq!(near.len(), 1, "from the vectors read for the first");
+        let none = neighbours(&core, &base, &ids[3], None).await.unwrap();
+        assert!(none.is_empty(), "no vector was kept for it");
+        assert!(
+            base.journal(&core).await.unwrap().is_empty(),
+            "every question reads the journal as the first one found it"
+        );
+    }
+
+    /// Yes at 0.9 to the first `ok` calls, then an endpoint that is gone.
+    fn gone_after(ok: usize) -> Arc<RuleDecider> {
+        let calls = AtomicUsize::new(0);
+        Arc::new(RuleDecider::new(move |_, qs| {
+            if calls.fetch_add(1, Ordering::SeqCst) >= ok {
+                return Err(Error::Inference {
+                    role: "decide",
+                    detail: "connection refused".into(),
+                });
+            }
+            crate::jobs::reap::test_support::answers(qs, 0.9)
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_dead_endpoint_ends_the_run_at_its_first_failed_call_with_what_was_asked() {
+        let decider = gone_after(1);
+        let core = core_with(decider.clone()).await;
+        seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [0.0, 1.0]),
+                ("three", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+
+        let r = run(&core, None, 200).await.unwrap();
+        assert_eq!(decider.calls(), 2, "the failed call is the last one made");
+        let (last, before) = r.split_last().unwrap();
+        assert_eq!(last.id, "pinned", "the first question with a note to ask");
+        assert_eq!((last.asked, last.skipped_failed), (1, 0));
+        let why = last.stopped.as_deref().unwrap();
+        assert!(why.contains("connection refused"), "{why}");
+        assert!(before.iter().all(|q| q.stopped.is_none() && q.asked == 0));
+        let text = render(&r);
+        assert!(
+            text.contains(" · 1 asked · ")
+                && text.contains("\n  stopped: the decision endpoint did not answer"),
+            "{text}"
+        );
+        assert!(!text.contains("time_bound"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_case_the_endpoint_refuses_is_counted_and_the_next_is_asked() {
+        let decider = Arc::new(RuleDecider::new(|state, qs| {
+            if state.contains("poison") {
+                return Err(Error::InferenceRejected {
+                    role: "decide",
+                    detail: "HTTP 400".into(),
+                });
+            }
+            crate::jobs::reap::test_support::answers(qs, 0.9)
+        }));
+        let core = core_with(decider.clone()).await;
+        seed(
+            &core,
+            &[
+                ("fine", [1.0, 0.0]),
+                ("poison", [0.0, 1.0]),
+                ("fine too", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+
+        let r = run(&core, Some("pinned"), 200).await.unwrap();
+        assert_eq!((r[0].asked, r[0].skipped_failed), (2, 1));
+        assert_eq!(r[0].stopped, None);
+        assert_eq!(decider.calls(), 3);
+        let text = render(&r);
+        assert!(
+            text.contains(" · 2 asked · 0 too long · 0 without text · 1 failed · 0 left out\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_exchanged_read_waits_on_its_own_and_the_first_is_not_asked_again() {
+        let calls = AtomicUsize::new(0);
+        let decider = Arc::new(RuleDecider::new(move |_, qs| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(Error::InferenceBusy {
+                    role: "decide",
+                    detail: "HTTP 429 Too Many Requests".into(),
+                });
+            }
+            Ok(Answers {
+                answers: qs
+                    .iter()
+                    .map(|q| (q.key.clone(), pick(q, "a_first", 0.8)))
+                    .collect(),
+                model: "rule-decider".into(),
+                input_tokens: 0,
+            })
+        }));
+        let core = core_with(decider.clone()).await;
+        a_related_link(&core).await;
+
+        let r = run(&core, Some("link_direction"), 200).await.unwrap();
+        assert_eq!((r[0].asked, r[0].exchanged_holds), (1, Some((0, 1))));
+        let states: Vec<String> = decider.requests().into_iter().map(|r| r.0).collect();
+        assert_eq!(
+            states.len(),
+            3,
+            "the first read, then the exchanged one twice"
+        );
+        assert_ne!(states[0], states[1]);
+        assert_eq!(states[1], states[2]);
+    }
+
+    /// The store beneath, except that these notes' neighbours cannot be read.
+    struct NoNeighbours {
+        inner: Arc<dyn VectorStore>,
+        of: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl VectorStore for NoNeighbours {
+        async fn ensure_collection(&self, dim: usize) -> Result<()> {
+            self.inner.ensure_collection(dim).await
+        }
+        async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()> {
+            self.inner.upsert(points).await
+        }
+        async fn set_payload(&self, payload: &VectorPayload) -> Result<()> {
+            self.inner.set_payload(payload).await
+        }
+        async fn set_lifecycle(
+            &self,
+            artifact_id: &str,
+            status: ArtifactStatus,
+            superseded_by: Option<&str>,
+        ) -> Result<()> {
+            self.inner
+                .set_lifecycle(artifact_id, status, superseded_by)
+                .await
+        }
+        async fn set_last_verified_at(
+            &self,
+            artifact_id: &str,
+            at: i64,
+            reset_hits: bool,
+        ) -> Result<()> {
+            self.inner
+                .set_last_verified_at(artifact_id, at, reset_hits)
+                .await
+        }
+        async fn stale_candidates(
+            &self,
+            older_than: i64,
+            max_hits: i64,
+            limit: usize,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner
+                .stale_candidates(older_than, max_hits, limit)
+                .await
+        }
+        async fn search(
+            &self,
+            vector: &[f32],
+            sparse: &SparseVector,
+            limit: usize,
+            filter: &SearchFilter,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.search(vector, sparse, limit, filter).await
+        }
+        async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()> {
+            self.inner.touch(targets, seen_at).await
+        }
+        async fn apply_lifecycle(&self, rows: &[LifecycleRow]) -> Result<()> {
+            self.inner.apply_lifecycle(rows).await
+        }
+        async fn lifecycle_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, StoredLifecycle>> {
+            self.inner.lifecycle_of(artifact_ids).await
+        }
+        async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+            self.inner.all_artifact_ids().await
+        }
+        async fn payloads_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, VectorPayload>> {
+            self.inner.payloads_of(artifact_ids).await
+        }
+        async fn resurface(
+            &self,
+            limit: usize,
+            older_than: i64,
+            unseen_since: i64,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.resurface(limit, older_than, unseen_since).await
+        }
+        async fn facets(&self, limit: usize) -> Result<Facets> {
+            self.inner.facets(limit).await
+        }
+        async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>> {
+            if self.of.iter().any(|id| id == artifact_id) {
+                return Err(Error::Vector("connection refused".into()));
+            }
+            self.inner.neighbours(artifact_id, limit).await
+        }
+        async fn set_context_vectors(
+            &self,
+            artifact_id: &str,
+            vectors: Vec<Vec<f32>>,
+        ) -> Result<()> {
+            self.inner.set_context_vectors(artifact_id, vectors).await
+        }
+        async fn context_query(
+            &self,
+            vector: &[f32],
+            limit: usize,
+            filter: &SearchFilter,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.context_query(vector, limit, filter).await
+        }
+        async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
+            self.inner.delete_artifacts(artifact_ids).await
+        }
+        async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
+            self.inner.delete_by_corpus(corpus_id).await
+        }
+        async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+            self.inner.sample(limit).await
+        }
+        async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
+            self.inner.dense_of(artifact_id).await
+        }
+        async fn count(&self) -> Result<u64> {
+            self.inner.count().await
+        }
+    }
+
+    fn without_neighbours_of(core: &mut Core, ids: &[&String]) {
+        core.vectors = Arc::new(NoNeighbours {
+            inner: core.vectors.clone(),
+            of: ids.iter().map(|id| (*id).clone()).collect(),
+        });
+    }
+
+    #[tokio::test]
+    async fn a_retired_note_whose_neighbours_cannot_be_read_is_counted_and_the_rest_are_asked() {
+        let decider = anything();
+        let mut core = core_with(decider.clone()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("old one", [1.0, 0.0]),
+                ("new one", [1.0, 0.0]),
+                ("old two", [0.0, 1.0]),
+                ("new two", [0.0, 1.0]),
+            ],
+        )
+        .await;
+        for (old, new) in [(0, 1), (2, 3)] {
+            core.store
+                .set_superseded_by(&ids[old], Some(&ids[new]))
+                .await
+                .unwrap();
+        }
+        without_neighbours_of(&mut core, &[&ids[0]]);
+
+        let r = run(&core, Some("reap_worth"), 200).await.unwrap();
+        let u = &r[1];
+        assert_eq!(u.scope.as_deref(), Some("unjudged retired notes"));
+        assert_eq!(
+            (u.asked, u.skipped_failed, u.stopped.as_ref()),
+            (1, 1, None)
+        );
+        assert_eq!(u.extremes, [(0.9, "old two".to_string())]);
+        assert_eq!(decider.calls(), 1, "never asked without its neighbours");
+        let text = render(&r[1..]);
+        assert!(
+            text.contains(" · 1 asked · 0 too long · 0 without text · 1 failed · 0 left out\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_note_whose_neighbours_cannot_be_read_is_counted_and_the_other_pairs_are_asked()
+    {
+        let mut core = core_with(anything()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("a", [1.0, 0.0]),
+                ("b", [1.0, 0.0]),
+                ("c", [0.0, 1.0]),
+                ("d", [0.0, 1.0]),
+            ],
+        )
+        .await;
+        without_neighbours_of(&mut core, &[&ids[0], &ids[1]]);
+
+        let r = run(&core, Some("pair_relation"), 200).await.unwrap();
+        let u = &r[1];
+        assert_eq!(u.scope.as_deref(), Some("unjudged neighbours"));
+        assert_eq!(
+            (u.asked, u.skipped_failed, u.stopped.as_ref()),
+            (1, 2, None)
+        );
+        let titles: Vec<&str> = u.confident.iter().map(|c| c.title.as_str()).collect();
+        assert!(titles == ["c ↔ d"] || titles == ["d ↔ c"], "{titles:?}");
+    }
+
+    #[tokio::test]
+    async fn a_filed_pair_is_not_unjudged_whichever_of_its_notes_is_met_first() {
+        let core = core_with(anything()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("a", [1.0, 0.0]),
+                ("b", [1.0, 0.0]),
+                ("c", [0.0, 1.0]),
+                ("d", [0.0, 1.0]),
+                ("e", [-1.0, 0.0]),
+                ("f", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+        // Newest first: one filed pair is met from its first note, the others from their second.
+        let (a, b) = crate::store::links::canonical(&ids[0], &ids[1]);
+        let (c, d) = crate::store::links::canonical(&ids[2], &ids[3]);
+        let (e, f) = crate::store::links::canonical(&ids[4], &ids[5]);
+        for (id, at) in [
+            (a, 600_i64),
+            (b, 500),
+            (c, 300),
+            (d, 400),
+            (e, 100),
+            (f, 200),
+        ] {
+            sqlx::query!("UPDATE artifacts SET created_at = ? WHERE id = ?", at, id)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+        }
+        core.store.record_pair(a, b, 0.99).await.unwrap();
+        core.store.record_pair(d, c, 0.99).await.unwrap();
+
+        let (cases, left_out) = unjudged_cases(&core, &catalogue::pair_relation(), 200)
+            .await
+            .unwrap();
+        let got: Vec<(String, Option<String>)> = cases.into_iter().map(|c| c.subjects).collect();
+        assert_eq!(
+            got,
+            [(e.to_string(), Some(f.to_string()))],
+            "the unfiled pair once, in the order a filed pair has"
+        );
+        assert_eq!(left_out, 0);
+    }
+
+    #[tokio::test]
+    async fn a_reading_exactly_at_its_line_counts_as_yes() {
+        let core = core_with(rule(|state, _| {
+            let n: f64 = state
+                .split_whitespace()
+                .last()
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(0.0);
+            Answer::Noul { yes: n / 100.0 }
+        }))
+        .await;
+        seed(
+            &core,
+            &[
+                ("note 29", [1.0, 0.0]),
+                ("note 30", [0.0, 1.0]),
+                ("note 31", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+        for id in ["asks_reminder", "has_date"] {
+            let r = run(&core, Some(id), 200).await.unwrap();
+            assert_eq!(r[0].reading, Some((0.3, 2)), "{id}: 0.30 and 0.31");
+            let text = render(&r);
+            assert!(text.contains("\n  at 0.30   yes 2 of 3\n"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_judged_with_a_kind_is_compared_by_that_kind_and_its_stored_order() {
+        let decider = anything();
+        let core = core_with(decider.clone()).await;
+        let texts: Vec<String> = (0..14).map(|i| format!("note {i}")).collect();
+        let rows: Vec<(&str, [f32; 2])> = texts.iter().map(|t| (t.as_str(), [1.0, 0.0])).collect();
+        let ids = seed(&core, &rows).await;
+        let now = crate::store::now();
+        let judged = [
+            (Some(LinkKind::Continues), Some(true), LinkState::Related),
+            (Some(LinkKind::Example), Some(false), LinkState::Related),
+            (Some(LinkKind::Background), None, LinkState::Related),
+            (Some(LinkKind::Alternative), None, LinkState::Related),
+            (Some(LinkKind::Contradicts), None, LinkState::Related),
+            (Some(LinkKind::Unrelated), None, LinkState::Unrelated),
+            // A duplicate keeps no kind: its hand-over line is the record.
+            (None, None, LinkState::Related),
+        ];
+        let mut keys = Vec::new();
+        for (i, (kind, first, state)) in judged.into_iter().enumerate() {
+            let (a, b) = crate::store::links::canonical(&ids[2 * i], &ids[2 * i + 1]);
+            core.store
+                .bump_link(a, b, 1.0, Some("mount loop"), 30.0, now)
+                .await
+                .unwrap();
+            match kind {
+                Some(_) => core
+                    .store
+                    .set_link_kind(a, b, state, kind, first, Some((0, 0)))
+                    .await
+                    .unwrap(),
+                None => core
+                    .store
+                    .set_link_state(
+                        a,
+                        b,
+                        state,
+                        Some("same content; handed to consolidation"),
+                        Some((0, 0)),
+                    )
+                    .await
+                    .unwrap(),
+            }
+            keys.push(key(a, b));
+        }
+        let (a, b) = keys[3].split_once('|').unwrap();
+        core.store.dismiss_link(a, b).await.unwrap();
+
+        let (kinds, _) = cases(&core, &catalogue::link_kind(), 200).await.unwrap();
+        let by: HashMap<String, &Case> = kinds
+            .iter()
+            .map(|c| (key(&c.subjects.0, c.subjects.1.as_deref().unwrap()), c))
+            .collect();
+        let want_kinds = [
+            "continues",
+            "example",
+            "background",
+            "alternative",
+            "contradicts",
+            "unrelated",
+            "duplicate",
+        ];
+        for (k, past) in keys.iter().zip(want_kinds) {
+            assert_eq!(by[k].past.as_deref(), Some(past));
+        }
+        assert_eq!(by[&keys[3]].person, Some(PersonSaid::Disagreed));
+        assert_eq!(by[&keys[0]].person, None);
+
+        let (directions, _) = cases(&core, &catalogue::link_direction(), 200)
+            .await
+            .unwrap();
+        let got: HashMap<String, Option<String>> = directions
+            .into_iter()
+            .map(|c| (key(&c.subjects.0, &c.subjects.1.unwrap()), c.past))
+            .collect();
+        let want: HashMap<String, Option<String>> = [
+            (keys[0].clone(), Some("a_first".to_string())),
+            (keys[1].clone(), Some("b_first".to_string())),
+            (keys[2].clone(), None),
+        ]
+        .into();
+        assert_eq!(got, want, "only a kind with an order is asked for one");
+
+        let r = run(&core, Some("link_kind"), 200).await.unwrap();
+        let asked = catalogue::link_kind();
+        assert_eq!((r[0].asked, r[0].version), (7, asked.version));
+        let pasts: Vec<&str> = r[0].past_picks.iter().map(|p| p.0.as_str()).collect();
+        let mut named = want_kinds.to_vec();
+        named.sort();
+        assert_eq!(pasts, named, "each kind by its own name, none as `related`");
+        let sent = &decider.requests()[0].1[0];
+        assert_eq!(sent.instructions, asked.question.instructions);
     }
 }

@@ -895,20 +895,8 @@ impl Store {
         Ok(())
     }
 
-    /// Leaves `embed_state`: the embedder never sees a category.
-    pub async fn update_artifact_category(&self, id: &str, category: Option<&str>) -> Result<()> {
-        self.expect_updated(
-            sqlx::query!(
-                "UPDATE artifacts SET category = ? WHERE id = ?",
-                category,
-                id
-            )
-            .execute(&self.pool)
-            .await?,
-        )
-    }
-
     /// `by`: `person`, `reading` or `writer`, so a reading can tell whose category it would replace.
+    /// Leaves `embed_state`: the embedder never sees a category.
     pub async fn update_artifact_category_by(
         &self,
         id: &str,
@@ -1554,7 +1542,8 @@ impl Store {
         Ok(res.rows_affected())
     }
 
-    /// Only a rescue restarts the clock; otherwise the rescued row is judged every run.
+    /// Restarts the clock: after a rescue, or the rescued row is judged every run, and for a row
+    /// the sweep stands down. Never to ask again: that would silence the question for an age.
     pub async fn restamp_retired(&self, id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL",

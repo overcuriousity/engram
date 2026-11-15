@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_reads (artifact_id, text_hash, asked, room, visit, tries, retry_at, at)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n             ON CONFLICT (artifact_id) DO UPDATE SET\n               text_hash = excluded.text_hash, asked = excluded.asked, room = excluded.room,\n               visit = excluded.visit, tries = excluded.tries, retry_at = excluded.retry_at,\n               at = excluded.at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "e6c770de528d8c62b57bfe695258be7d58262e6480854f1076b2cf8c8bacd1a7"
+}

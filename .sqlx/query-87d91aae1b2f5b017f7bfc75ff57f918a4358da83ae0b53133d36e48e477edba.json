@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_links\n                   (a_id, b_id, weight, bumped_at, queries, cues, state, shown, created_at)\n             VALUES (?, ?, ?, ?, 0, '[]', 'learning', 1, ?)\n             ON CONFLICT(a_id, b_id) DO UPDATE SET\n               weight = excluded.weight, bumped_at = excluded.bumped_at, shown = 1\n             WHERE artifact_links.state = 'learning'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "87d91aae1b2f5b017f7bfc75ff57f918a4358da83ae0b53133d36e48e477edba"
+}

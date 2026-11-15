@@ -118,7 +118,6 @@ pub struct Logged {
     pub decided_at: i64,
 }
 
-#[derive(sqlx::FromRow)]
 struct Row {
     id: String,
     question_id: String,
@@ -192,9 +191,10 @@ pub struct ThresholdMove {
 pub struct ActRecord {
     /// Model acts whose window closed or that were undone, and Unsure rows a person answered.
     pub acted: usize,
-    /// Of those, undone acts and corrected answers.
+    /// Of those, undone acts, corrected answers, and answers whose action was undone since.
     pub undone: usize,
-    /// Ask rows waiting or open now: the band a lower line would act on.
+    /// Ask rows waiting or open now: the band a lower line would act on. Not an act demoted to
+    /// an ask, which was over the line already.
     pub asks_open: usize,
 }
 
@@ -207,36 +207,26 @@ pub struct AskRecord {
     pub waiting: usize,
 }
 
-// runtime: one column list shared by every read of a whole row; the tails differ.
-const SELECT: &str =
-    "SELECT id, question_id, question_version, model, era, subject_kind, subject_a,
-    subject_b, rev_a, rev_b, answer, top, pick, swapped_agree, band, reason, state, outcome,
-    outcome_at, answered_pick, decided_at FROM decisions";
+/// One column list for every read of a whole row, checked at compile time: `tail` is a literal.
+macro_rules! logged_rows {
+    ($tail:tt $(, $arg:expr)* $(,)?) => {
+        sqlx::query_as!(
+            Row,
+            r#"SELECT id AS "id!", question_id, question_version, model, era, subject_kind,
+                      subject_a, subject_b, rev_a, rev_b, answer, top, pick, swapped_agree, band,
+                      reason, state, outcome, outcome_at, answered_pick, decided_at
+                 FROM decisions "#
+                + $tail,
+            $($arg),*
+        )
+    };
+}
+
+fn read_all(rows: Vec<Row>) -> Result<Vec<Logged>> {
+    rows.into_iter().map(Row::read).collect()
+}
 
 impl Store {
-    /// `tail` follows the shared SELECT; `text` binds first, then `int`.
-    async fn select_logged(
-        &self,
-        tail: &str,
-        text: &[&str],
-        int: Option<i64>,
-    ) -> Result<Vec<Logged>> {
-        let sql = sqlx::AssertSqlSafe(format!("{SELECT} {tail}"));
-        // runtime: the column list is shared by every whole-row read.
-        let mut q = sqlx::query_as::<_, Row>(sql);
-        for t in text {
-            q = q.bind(*t);
-        }
-        if let Some(i) = int {
-            q = q.bind(i);
-        }
-        q.fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(Row::read)
-            .collect()
-    }
-
     pub async fn log_decision(&self, d: &NewLogged) -> Result<String> {
         let id = new_id();
         let era = era(&d.model, d.question_version);
@@ -270,7 +260,11 @@ impl Store {
     }
 
     pub async fn logged(&self, id: &str) -> Result<Option<Logged>> {
-        Ok(self.select_logged("WHERE id = ?", &[id], None).await?.pop())
+        logged_rows!("WHERE id = ?", id)
+            .fetch_optional(&self.pool)
+            .await?
+            .map(Row::read)
+            .transpose()
     }
 
     /// The newest decision on these subjects in this era, if any.
@@ -282,19 +276,18 @@ impl Store {
         era: &str,
     ) -> Result<Option<Logged>> {
         // `IS` so that a missing second subject matches a missing one.
-        let sql = sqlx::AssertSqlSafe(format!(
-            "{SELECT} WHERE question_id = ? AND subject_a = ? AND subject_b IS ? AND era = ?
-              ORDER BY decided_at DESC, id DESC LIMIT 1"
-        ));
-        // runtime: the column list is shared by every whole-row read.
-        let row = sqlx::query_as::<_, Row>(sql)
-            .bind(question_id)
-            .bind(subject_a)
-            .bind(subject_b)
-            .bind(era)
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(Row::read).transpose()
+        logged_rows!(
+            "WHERE question_id = ? AND subject_a = ? AND subject_b IS ? AND era = ?
+              ORDER BY decided_at DESC, id DESC LIMIT 1",
+            question_id,
+            subject_a,
+            subject_b,
+            era
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(Row::read)
+        .transpose()
     }
 
     /// False: it was no longer `from`.
@@ -323,6 +316,19 @@ impl Store {
             outcome.as_str(),
             now(),
             answered_pick,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A person's pick, on the row before it is carried out: what carrying it out arms (a merge)
+    /// may run before the outcome is written, and must find whose ask it is. `None` takes it back.
+    pub async fn set_answered_pick(&self, id: &str, pick: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            "UPDATE decisions SET answered_pick = ? WHERE id = ?",
+            pick,
             id
         )
         .execute(&self.pool)
@@ -387,9 +393,10 @@ impl Store {
     /// workers cannot both take the last. False: no seat, or it was no longer waiting.
     pub async fn seat_ask(&self, id: &str, max: i64) -> Result<bool> {
         Ok(sqlx::query!(
-            "UPDATE decisions SET state = 'open'
+            "UPDATE decisions SET state = 'open', opened_at = ?
               WHERE id = ? AND band = 'ask' AND state = 'waiting'
                 AND (SELECT COUNT(*) FROM decisions WHERE state = 'open') < ?",
+            now(),
             id,
             max
         )
@@ -427,13 +434,12 @@ impl Store {
 
     /// Acts no stage settled or demoted before `older_than`: the stage died in between.
     pub async fn unsettled_acts(&self, older_than: i64) -> Result<Vec<Logged>> {
-        self.select_logged(
-            "WHERE band = 'act' AND state = 'waiting' AND reason = 'unsettled' AND decided_at < ?
-             ORDER BY decided_at, id LIMIT 200",
-            &[],
-            Some(older_than),
+        read_all(
+            logged_rows!("WHERE band = 'act' AND state = 'waiting' AND reason = 'unsettled' AND decided_at < ?
+             ORDER BY decided_at, id LIMIT 200", older_than)
+                .fetch_all(&self.pool)
+                .await?,
         )
-        .await
     }
 
     /// An orphaned unsettled act to done with reason `changed`. False: someone settled it.
@@ -449,34 +455,88 @@ impl Store {
             == 1)
     }
 
+    /// `close_unsettled` taken back when the subject could not be put back, in one statement: the
+    /// row is never waiting without `unsettled`, so no worker can claim it in between.
+    pub async fn restore_unsettled(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET state = 'waiting', reason = 'unsettled'
+              WHERE id = ? AND state = 'done' AND band = 'act' AND reason = 'changed'",
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// A waiting act nothing here can carry out or ask again, settled or not: done, with `reason`.
+    pub async fn close_waiting_act(&self, id: &str, reason: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET state = 'done', reason = ?
+              WHERE id = ? AND state = 'waiting' AND band = 'act'",
+            reason,
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// An ask row, seated or waiting for a seat, whose subject is no longer what was asked about:
+    /// done with reason `changed` and no outcome, so it counts as neither answered nor lapsed.
+    pub async fn close_changed_ask(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET state = 'done', reason = 'changed'
+              WHERE id = ? AND band = 'ask' AND state IN ('open', 'waiting')",
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
     /// Band act, waiting and settled, highest top first.
     pub async fn waiting_acts(&self, limit: i64) -> Result<Vec<Logged>> {
-        self.select_logged(
-            "WHERE band = 'act' AND state = 'waiting' AND reason IS NOT 'unsettled'
+        self.waiting_acts_but(&[], limit).await
+    }
+
+    /// `waiting_acts` without the questions in `held`: acts nothing may carry out now would
+    /// otherwise fill the window ahead of the ones that can be.
+    pub async fn waiting_acts_but(&self, held: &[&str], limit: i64) -> Result<Vec<Logged>> {
+        let held = serde_json::json!(held).to_string();
+        read_all(
+            logged_rows!(
+                "WHERE band = 'act' AND state = 'waiting' AND reason IS NOT 'unsettled'
+                   AND question_id NOT IN (SELECT value FROM json_each(?))
              ORDER BY top DESC, id LIMIT ?",
-            &[],
-            Some(limit),
+                held,
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await?,
         )
-        .await
     }
 
     /// Band ask, waiting for a seat, highest top first.
     pub async fn waiting_asks(&self, limit: i64) -> Result<Vec<Logged>> {
-        self.select_logged(
-            "WHERE band = 'ask' AND state = 'waiting' ORDER BY top DESC, id LIMIT ?",
-            &[],
-            Some(limit),
+        read_all(
+            logged_rows!(
+                "WHERE band = 'ask' AND state = 'waiting' ORDER BY top DESC, id LIMIT ?",
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await?,
         )
-        .await
     }
 
     pub async fn open_asks(&self, limit: i64) -> Result<Vec<Logged>> {
-        self.select_logged(
-            "WHERE state = 'open' ORDER BY top DESC, id LIMIT ?",
-            &[],
-            Some(limit),
+        read_all(
+            logged_rows!("WHERE state = 'open' ORDER BY top DESC, id LIMIT ?", limit)
+                .fetch_all(&self.pool)
+                .await?,
         )
-        .await
     }
 
     pub async fn open_ask_count(&self) -> Result<i64> {
@@ -485,6 +545,19 @@ impl Store {
                 .fetch_one(&self.pool)
                 .await?,
         )
+    }
+
+    /// Open rows of the questions in `shown`: what a count may promise the list will show, without
+    /// drawing the list.
+    pub async fn open_ask_count_of(&self, shown: &[&str]) -> Result<i64> {
+        let shown = serde_json::json!(shown).to_string();
+        Ok(sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64" FROM decisions
+                WHERE state = 'open' AND question_id IN (SELECT value FROM json_each(?))"#,
+            shown
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Asks with no seat yet.
@@ -521,23 +594,109 @@ impl Store {
 
     /// Confirmed or corrected with no journal row, newest first; a reason of `asked_again` leaves the list.
     pub async fn answered_without_action(&self, limit: i64) -> Result<Vec<Logged>> {
-        self.select_logged(
-            "WHERE outcome IN ('confirmed', 'corrected')
+        read_all(
+            logged_rows!(
+                "WHERE outcome IN ('confirmed', 'corrected')
                AND reason IS NOT 'asked_again'
                AND NOT EXISTS (SELECT 1 FROM decision_actions WHERE decision_id = decisions.id)
              ORDER BY outcome_at DESC, id DESC LIMIT ?",
-            &[],
-            Some(limit),
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await?,
         )
-        .await
+    }
+
+    /// Takes a row off `answered_without_action`'s list, by that list's own predicate, for the one
+    /// caller that asks it again. False: it is not listed (any more), so a second press does nothing.
+    pub async fn claim_ask_again(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET reason = 'asked_again'
+              WHERE id = ? AND outcome IN ('confirmed', 'corrected')
+                AND reason IS NOT 'asked_again'
+                AND NOT EXISTS (SELECT 1 FROM decision_actions WHERE decision_id = decisions.id)",
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// `claim_ask_again` taken back when the subject could not be put back: listed again, with the
+    /// reason it had.
+    pub async fn release_ask_again(&self, id: &str, reason: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            "UPDATE decisions SET reason = ? WHERE id = ? AND reason = 'asked_again'",
+            reason,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// `close_changed_ask` taken back when the subject could not be put back: the row is seated or
+    /// waiting as it was, with the reason it had, and the next sweep tries again.
+    pub async fn restore_changed_ask(
+        &self,
+        id: &str,
+        to: State,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query!(
+            "UPDATE decisions SET state = ?, reason = ?
+              WHERE id = ? AND band = 'ask' AND state = 'done' AND reason = 'changed'",
+            to.as_str(),
+            reason,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Queued or running units of `stage` the queue will still run: one at the retry ceiling waits
+    /// out its backoff and holds no share of the tick.
+    pub async fn queued_units(&self, stage: crate::store::jobs::Stage) -> Result<i64> {
+        Ok(sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM jobs
+              WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')
+                AND attempts < ?",
+            &self.subject,
+            stage.as_str(),
+            crate::store::jobs::MAX_ATTEMPTS
+        )
+        .fetch_one(&self.control.pool)
+        .await?)
+    }
+
+    /// The targets `queued_units` counts, oldest first.
+    pub async fn queued_unit_targets(
+        &self,
+        stage: crate::store::jobs::Stage,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT target_id AS "target_id!" FROM jobs
+                WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')
+                  AND attempts < ?
+                ORDER BY id LIMIT ?"#,
+            &self.subject,
+            stage.as_str(),
+            crate::store::jobs::MAX_ATTEMPTS,
+            limit
+        )
+        .fetch_all(&self.control.pool)
+        .await?)
     }
 
     /// Open to lapsed, stamped in `outcome_at` (the outcome stays empty) so the tuner can tell
-    /// when.
+    /// when. The days run from when the row was seated: one that waited for a seat was not shown.
     pub async fn lapse_asks(&self, older_than: i64) -> Result<u64> {
         Ok(sqlx::query!(
             "UPDATE decisions SET state = 'lapsed', outcome_at = ?
-              WHERE state = 'open' AND decided_at < ?",
+              WHERE state = 'open' AND COALESCE(opened_at, decided_at) < ?",
             now(),
             older_than
         )
@@ -564,11 +723,13 @@ impl Store {
     }
 
     /// Armed judging only: an after-write check (`subject_kind = 'write'`) and the gate before a
-    /// pursuit is written (`'pursuit'`) ride on a writer unit, which the queue already paces.
+    /// pursuit is written (`'pursuit'`) ride on a writer unit, which the queue already paces. A
+    /// `too_long` leave and a rescue handed to a person made no call and are not counted.
     pub async fn decided_since(&self, at: i64) -> Result<i64> {
         Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM decisions
-              WHERE decided_at >= ? AND subject_kind NOT IN ('write', 'pursuit')",
+              WHERE decided_at >= ? AND subject_kind NOT IN ('write', 'pursuit')
+                AND COALESCE(reason, '') NOT IN ('too_long', 'rescue_refused')",
             at
         )
         .fetch_one(&self.pool)
@@ -588,6 +749,8 @@ impl Store {
         .collect())
     }
 
+    /// The tuner's newest line. A hold moved nothing and is not one: where no line ever moved,
+    /// the file's stays in force.
     pub async fn thresholds_in_force(
         &self,
         question_id: &str,
@@ -595,7 +758,7 @@ impl Store {
     ) -> Result<Option<Thresholds>> {
         Ok(sqlx::query!(
             "SELECT act_at, ask_at FROM decision_thresholds
-              WHERE question_id = ? AND era = ? ORDER BY id DESC LIMIT 1",
+              WHERE question_id = ? AND era = ? AND held = 0 ORDER BY id DESC LIMIT 1",
             question_id,
             era
         )
@@ -615,7 +778,20 @@ impl Store {
         t: Thresholds,
         reason: &str,
     ) -> Result<()> {
-        self.record_move(question_id, era, t, (true, true), reason)
+        self.record_move(question_id, era, t, (true, true), false, reason)
+            .await
+    }
+
+    /// The ask line stays at `t`, which lapses could not raise, and its evidence starts over all
+    /// the same: counted again, the same lapses would keep it from ever coming down. Not a move.
+    pub async fn hold_ask_line(
+        &self,
+        question_id: &str,
+        era: &str,
+        t: Thresholds,
+        reason: &str,
+    ) -> Result<()> {
+        self.record_move(question_id, era, t, (false, true), true, reason)
             .await
     }
 
@@ -633,21 +809,25 @@ impl Store {
             changed(from.act_at, to.act_at),
             changed(from.ask_at, to.ask_at),
         );
-        self.record_move(question_id, era, to, moved, reason).await
+        self.record_move(question_id, era, to, moved, false, reason)
+            .await
     }
 
+    /// `act_moved` and `ask_moved` say whose evidence starts over at this row; `held` that no
+    /// line moved.
     async fn record_move(
         &self,
         question_id: &str,
         era: &str,
         t: Thresholds,
         (act_moved, ask_moved): (bool, bool),
+        held: bool,
         reason: &str,
     ) -> Result<()> {
         sqlx::query!(
             "INSERT INTO decision_thresholds
-               (question_id, era, act_at, ask_at, reason, moved_at, act_moved, ask_moved)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+               (question_id, era, act_at, ask_at, reason, moved_at, act_moved, ask_moved, held)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             question_id,
             era,
             t.act_at,
@@ -655,14 +835,16 @@ impl Store {
             reason,
             now(),
             act_moved,
-            ask_moved
+            ask_moved,
+            held
         )
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// The newest move of a question's line in this era.
+    /// The newest move of a question's line in this era; a row that only held the ask line is
+    /// not one.
     pub async fn last_threshold_move(
         &self,
         question_id: &str,
@@ -671,7 +853,7 @@ impl Store {
         Ok(sqlx::query_as!(
             ThresholdMove,
             "SELECT question_id, era, act_at, ask_at, reason, moved_at FROM decision_thresholds
-              WHERE question_id = ? AND era = ? ORDER BY id DESC LIMIT 1",
+              WHERE question_id = ? AND era = ? AND held = 0 ORDER BY id DESC LIMIT 1",
             question_id,
             era
         )
@@ -679,8 +861,8 @@ impl Store {
         .await?)
     }
 
-    /// When the act line (`ask` false) or the ask line last moved, else 0: what was decided before
-    /// stands for the line before.
+    /// When the act line (`ask` false) or the ask line last moved, or the ask line was last held
+    /// (`hold_ask_line`), else 0: what was decided before stands for the line before.
     pub(crate) async fn moved_at(&self, question_id: &str, era: &str, ask: bool) -> Result<i64> {
         Ok(sqlx::query_scalar!(
             r#"SELECT COALESCE(MAX(moved_at), 0) AS "at!: i64" FROM decision_thresholds
@@ -694,9 +876,9 @@ impl Store {
         .await?)
     }
 
-    /// Decided after the act line last moved: model acts kept or undone, and answered Unsure rows (`corrected`
-    /// as undone). Not a refused act (no journal row, or `refused`), a check or the pursuit gate.
-    /// An undone merge is one decision however many rows it wrote.
+    /// Since the act line last moved: model acts kept or undone and answered Unsure rows, a
+    /// correction or a later undo counting as undone, a merge once however many rows it wrote. No
+    /// refused act, check or pursuit gate. `asks_open` leaves out acts that were put to a person.
     pub async fn act_record(&self, question_id: &str, era: &str) -> Result<ActRecord> {
         let since = self.moved_at(question_id, era, false).await?;
         let r = sqlx::query!(
@@ -706,7 +888,8 @@ impl Store {
                 WHERE question_id = ? AND era = ? AND decided_at > ?
                   AND subject_kind NOT IN ('write', 'pursuit')
                   AND ((band = 'act' AND state = 'done' AND outcome IN ('kept', 'undone'))
-                    OR (band = 'ask' AND state = 'done' AND outcome IN ('confirmed', 'corrected')))"#,
+                    OR (band = 'ask' AND state = 'done'
+                        AND outcome IN ('confirmed', 'corrected', 'undone')))"#,
             question_id,
             era,
             since
@@ -716,7 +899,8 @@ impl Store {
         let asks_open = sqlx::query_scalar!(
             r#"SELECT COUNT(*) AS "n!: i64" FROM decisions
                 WHERE question_id = ? AND era = ? AND band = 'ask' AND state IN ('waiting', 'open')
-                  AND subject_kind NOT IN ('write', 'pursuit')"#,
+                  AND subject_kind NOT IN ('write', 'pursuit')
+                  AND COALESCE(reason, '') NOT IN ('restricted', 'no_writer', 'rescue_refused')"#,
             question_id,
             era
         )
@@ -729,14 +913,14 @@ impl Store {
         })
     }
 
-    /// Lapses and answers since the ask line last moved (by `outcome_at`, which a lapse stamps), and the
-    /// rows open and waiting now.
+    /// Lapses and answers since the ask line last moved or was held (by `outcome_at`, which a lapse
+    /// stamps and an undo of a confirmed answer's action leaves), and the rows open and waiting now.
     pub async fn ask_record(&self, question_id: &str, era: &str) -> Result<AskRecord> {
         let since = self.moved_at(question_id, era, true).await?;
         let r = sqlx::query!(
             r#"SELECT
                  COALESCE(SUM(state = 'lapsed' AND outcome_at > ?1), 0) AS "lapsed!: i64",
-                 COALESCE(SUM(band = 'ask' AND outcome IN ('confirmed', 'corrected')
+                 COALESCE(SUM(band = 'ask' AND outcome IN ('confirmed', 'corrected', 'undone')
                               AND outcome_at > ?1), 0) AS "answered!: i64",
                  COALESCE(SUM(state = 'open'), 0) AS "open!: i64",
                  COALESCE(SUM(band = 'ask' AND state = 'waiting'), 0) AS "waiting!: i64"
@@ -757,15 +941,58 @@ impl Store {
         })
     }
 
+    /// Newest first; a row that only held the ask line is not a move.
     pub async fn threshold_moves(&self, limit: i64) -> Result<Vec<ThresholdMove>> {
         Ok(sqlx::query_as!(
             ThresholdMove,
             "SELECT question_id, era, act_at, ask_at, reason, moved_at FROM decision_thresholds
-              ORDER BY id DESC LIMIT ?",
+              WHERE held = 0 ORDER BY id DESC LIMIT ?",
             limit
         )
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// `log_decision` for a decision whose outcome is known as it is logged, in one statement: a
+    /// crash leaves no such row without its outcome.
+    pub async fn log_decision_with_outcome(
+        &self,
+        d: &NewLogged,
+        outcome: Outcome,
+    ) -> Result<String> {
+        let id = new_id();
+        let era = era(&d.model, d.question_version);
+        let at = now();
+        sqlx::query!(
+            "INSERT INTO decisions
+               (id, question_id, question_version, model, era, subject_kind, subject_a, subject_b,
+                rev_a, rev_b, answer, top, pick, swapped_agree, band, reason, state, decided_at,
+                outcome, outcome_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            id,
+            d.question_id,
+            d.question_version,
+            d.model,
+            era,
+            d.subject_kind,
+            d.subject_a,
+            d.subject_b,
+            d.rev_a,
+            d.rev_b,
+            d.answer,
+            d.top,
+            d.pick,
+            d.swapped_agree,
+            d.band.as_str(),
+            d.reason,
+            d.state.as_str(),
+            at,
+            outcome.as_str(),
+            at
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(id)
     }
 }
 
@@ -955,6 +1182,189 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn waiting_acts_of_a_held_question_are_left_out() {
+        let store = Store::memory().await.unwrap();
+        let held = store
+            .log_decision(&sample(Band::Act, State::Waiting, 0.99))
+            .await
+            .unwrap();
+        let mut other = sample(Band::Act, State::Waiting, 0.91);
+        other.question_id = "reap_worth".into();
+        let free = store.log_decision(&other).await.unwrap();
+        let ids = |rows: Vec<Logged>| rows.into_iter().map(|l| l.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store.waiting_acts_but(&["same_note"], 1).await.unwrap()),
+            std::slice::from_ref(&free)
+        );
+        assert_eq!(
+            ids(store.waiting_acts(10).await.unwrap()),
+            [held, free],
+            "none held: highest top first"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ask_that_waited_for_a_seat_lapses_from_when_it_was_seated() {
+        let store = Store::memory().await.unwrap();
+        let id = store
+            .log_decision(&sample(Band::Ask, State::Waiting, 0.8))
+            .await
+            .unwrap();
+        age(&store, &id, now() - 100).await;
+        assert!(store.seat_ask(&id, 20).await.unwrap());
+        // Decided long ago, shown only now.
+        assert_eq!(store.lapse_asks(now() - 50).await.unwrap(), 0);
+        assert_eq!(store.lapse_asks(now() + 1).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_orphan_put_back_is_unsettled_again_and_cannot_be_claimed() {
+        let store = Store::memory().await.unwrap();
+        let mut d = sample(Band::Act, State::Waiting, 0.97);
+        d.reason = Some("unsettled".into());
+        let id = store.log_decision(&d).await.unwrap();
+        assert!(store.close_unsettled(&id).await.unwrap());
+        assert!(store.restore_unsettled(&id).await.unwrap());
+        let l = store.logged(&id).await.unwrap().unwrap();
+        assert_eq!(
+            (l.state, l.reason.as_deref()),
+            (State::Waiting, Some("unsettled"))
+        );
+        assert!(!store.claim_act(&id).await.unwrap());
+        // Only what `close_unsettled` closed: a settled act that was applied stays done.
+        let done = store
+            .log_decision(&sample(Band::Act, State::Done, 0.97))
+            .await
+            .unwrap();
+        assert!(!store.restore_unsettled(&done).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_changed_ask_closes_with_no_outcome_whether_seated_or_waiting() {
+        let store = Store::memory().await.unwrap();
+        let open = store
+            .log_decision(&sample(Band::Ask, State::Open, 0.8))
+            .await
+            .unwrap();
+        let waiting = store
+            .log_decision(&sample(Band::Ask, State::Waiting, 0.8))
+            .await
+            .unwrap();
+        let act = store
+            .log_decision(&sample(Band::Act, State::Waiting, 0.97))
+            .await
+            .unwrap();
+        for id in [&open, &waiting] {
+            assert!(store.close_changed_ask(id).await.unwrap());
+            let l = store.logged(id).await.unwrap().unwrap();
+            assert_eq!(
+                (l.state, l.reason.as_deref(), l.outcome),
+                (State::Done, Some("changed"), None)
+            );
+        }
+        assert!(!store.close_changed_ask(&act).await.unwrap());
+        assert!(!store.close_changed_ask(&open).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_act_nothing_can_carry_out_is_closed_with_its_reason() {
+        let store = Store::memory().await.unwrap();
+        let mut d = sample(Band::Act, State::Waiting, 0.97);
+        d.reason = Some("unsettled".into());
+        let unsettled = store.log_decision(&d).await.unwrap();
+        let settled = store
+            .log_decision(&sample(Band::Act, State::Waiting, 0.97))
+            .await
+            .unwrap();
+        for id in [&unsettled, &settled] {
+            assert!(store.close_waiting_act(id, "no_applier").await.unwrap());
+            let l = store.logged(id).await.unwrap().unwrap();
+            assert_eq!(
+                (l.state, l.reason.as_deref()),
+                (State::Done, Some("no_applier"))
+            );
+        }
+        assert!(store.unsettled_acts(now() + 1).await.unwrap().is_empty());
+        assert!(store.waiting_acts(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_leave_that_made_no_call_does_not_spend_the_tick() {
+        let store = Store::memory().await.unwrap();
+        store
+            .log_decision(&sample(Band::Ask, State::Waiting, 0.8))
+            .await
+            .unwrap();
+        let mut long = sample(Band::Leave, State::Done, 0.0);
+        long.reason = Some("too_long".into());
+        store.log_decision(&long).await.unwrap();
+        // A rescue that came to nothing, put to a person: the row repeats an answer already paid for.
+        let mut handed = sample(Band::Ask, State::Waiting, 0.99);
+        handed.reason = Some("rescue_refused".into());
+        store.log_decision(&handed).await.unwrap();
+        assert_eq!(store.decided_since(now() - 60).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_last_decision_on_one_subject_is_found_when_there_is_no_second() {
+        let store = Store::memory().await.unwrap();
+        let mut one = sample(Band::Ask, State::Waiting, 0.8);
+        one.subject_b = None;
+        let alone = store.log_decision(&one).await.unwrap();
+        // The same first subject with a second is another decision.
+        let paired = store
+            .log_decision(&sample(Band::Ask, State::Waiting, 0.8))
+            .await
+            .unwrap();
+        let find = |b: Option<&'static str>| {
+            let store = store.clone();
+            async move {
+                store
+                    .last_logged("same_note", "a", b, "m/v1")
+                    .await
+                    .unwrap()
+                    .map(|l| l.id)
+            }
+        };
+        assert_eq!(find(None).await, Some(alone));
+        assert_eq!(find(Some("b")).await, Some(paired));
+    }
+
+    #[tokio::test]
+    async fn undo_actions_under_leaves_a_decision_that_only_superseded() {
+        let store = Store::memory().await.unwrap();
+        let id = store
+            .log_decision(&sample(Band::Act, State::Done, 0.97))
+            .await
+            .unwrap();
+        // A supersession whose winner is the merge "m": not a merge row, so not this undo's.
+        let mut a = merge_of("x", "m");
+        a.kind = Kind::Supersede;
+        let row = store.record_action(&a).await.unwrap();
+        store
+            .link_decision_actions(&id, std::slice::from_ref(&row))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .undo_actions_under("m", UndoneBy::Evidence, "gone")
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(store.logged(&id).await.unwrap().unwrap().outcome, None);
+        assert!(
+            store
+                .action(&row)
+                .await
+                .unwrap()
+                .unwrap()
+                .undone_at
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn undoing_any_action_of_a_decision_marks_it_undone_once() {
         let store = Store::memory().await.unwrap();
         let id = merged(&store, &["x", "y"]).await;
@@ -1070,6 +1480,97 @@ mod tests {
         assert_eq!(
             store.logged(&id).await.unwrap().unwrap().outcome,
             Some(Outcome::Undone)
+        );
+    }
+
+    /// An Unsure row a person answered as the model picked, long ago, whose answer wrote one
+    /// merge row.
+    async fn confirmed(store: &Store, source: &str, survivor: &str) -> String {
+        let id = store
+            .log_decision(&sample(Band::Ask, State::Done, 0.8))
+            .await
+            .unwrap();
+        let row = store
+            .record_action(&merge_of(source, survivor))
+            .await
+            .unwrap();
+        store.link_decision_actions(&id, &[row]).await.unwrap();
+        store
+            .set_decision_outcome(&id, Outcome::Confirmed, Some("yes"))
+            .await
+            .unwrap();
+        // runtime: test-only backdating of the answer.
+        sqlx::query("UPDATE decisions SET outcome_at = 1 WHERE id = ?")
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn an_undo_after_a_confirmed_answer_counts_against_the_line() {
+        let store = Store::memory().await.unwrap();
+        let on = confirmed(&store, "x", "m").await;
+        let under = confirmed(&store, "y", "n").await;
+        store
+            .undo_action_on("x", Kind::Merge, UndoneBy::Operator, "no")
+            .await
+            .unwrap();
+        store
+            .undo_actions_under("n", UndoneBy::Evidence, "gone")
+            .await
+            .unwrap();
+        for id in [&on, &under] {
+            let l = store.logged(id).await.unwrap().unwrap();
+            assert_eq!(l.outcome, Some(Outcome::Undone));
+            // Still the person's answer, given when it was given.
+            assert_eq!(
+                (l.answered_pick.as_deref(), l.outcome_at),
+                (Some("yes"), Some(1))
+            );
+        }
+        assert_eq!(
+            store.act_record("same_note", "m/v1").await.unwrap(),
+            ActRecord {
+                acted: 2,
+                undone: 2,
+                asks_open: 0
+            }
+        );
+        assert_eq!(
+            store
+                .ask_record("same_note", "m/v1")
+                .await
+                .unwrap()
+                .answered_since_move,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undo_after_a_corrected_answer_leaves_it_corrected_and_counted_once() {
+        let store = Store::memory().await.unwrap();
+        let id = confirmed(&store, "x", "m").await;
+        store
+            .set_decision_outcome(&id, Outcome::Corrected, Some("no"))
+            .await
+            .unwrap();
+        store
+            .undo_action_on("x", Kind::Merge, UndoneBy::Operator, "no")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.logged(&id).await.unwrap().unwrap().outcome,
+            Some(Outcome::Corrected)
+        );
+        assert_eq!(
+            store.act_record("same_note", "m/v1").await.unwrap(),
+            ActRecord {
+                acted: 1,
+                undone: 1,
+                asks_open: 0
+            }
         );
     }
 
@@ -1350,6 +1851,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_act_demoted_to_an_ask_is_not_a_row_a_lower_line_would_act_on() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        logged_n(&store, q, "pair", Band::Ask, State::Waiting, None, 2).await;
+        for reason in ["restricted", "no_writer"] {
+            for id in logged_n(&store, q, "pair", Band::Act, State::Waiting, None, 1).await {
+                assert!(store.demote_decision(&id, reason).await.unwrap());
+            }
+        }
+        // All four are asked; only the two that were under the line would be acted on by a lower one.
+        assert_eq!(store.waiting_ask_count().await.unwrap(), 4);
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().asks_open, 2);
+    }
+
+    #[tokio::test]
+    async fn a_rescue_put_to_a_person_is_not_a_row_a_lower_line_would_act_on() {
+        let store = Store::memory().await.unwrap();
+        let q = "reap_worth";
+        logged_n(&store, q, "artifact", Band::Ask, State::Waiting, None, 2).await;
+        // The model's yes was over the line and its rescue could not be written: asked, waiting
+        // for a seat or seated.
+        for state in [State::Waiting, State::Open] {
+            for id in logged_n(&store, q, "artifact", Band::Ask, state, None, 1).await {
+                store
+                    .set_decision_reason(&id, "rescue_refused")
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().asks_open, 2);
+    }
+
+    #[tokio::test]
     async fn only_what_was_decided_after_the_last_move_counts() {
         let store = Store::memory().await.unwrap();
         let q = "same_note";
@@ -1522,5 +2056,50 @@ mod tests {
             store.thresholds_in_force(q, "m/v1").await.unwrap(),
             Some(t(0.88, 0.62))
         );
+    }
+
+    #[tokio::test]
+    async fn a_held_ask_line_starts_its_evidence_over_and_is_not_listed_as_a_move() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        let t = Thresholds {
+            act_at: 0.9,
+            ask_at: 0.88,
+        };
+        let old = logged_n(&store, q, "pair", Band::Ask, State::Open, None, 2).await;
+        for id in &old {
+            age(&store, id, now() - 100).await;
+        }
+        assert_eq!(store.lapse_asks(now() - 50).await.unwrap(), 2);
+        assert_eq!(
+            store.ask_record(q, "m/v1").await.unwrap().lapsed_since_move,
+            2
+        );
+        store
+            .hold_ask_line(q, "m/v1", t, "2 rows lapsed unanswered")
+            .await
+            .unwrap();
+        // runtime: test-only stamp, after the lapses above.
+        sqlx::query("UPDATE decision_thresholds SET moved_at = ?")
+            .bind(now() + 1)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.ask_record(q, "m/v1").await.unwrap().lapsed_since_move,
+            0
+        );
+        // The act line's evidence is where it was and nothing reads as a move. A hold is no line
+        // of the tuner's either: the file's stays in force, and an edit to it still counts.
+        assert_eq!(store.moved_at(q, "m/v1", false).await.unwrap(), 0);
+        assert_eq!(store.thresholds_in_force(q, "m/v1").await.unwrap(), None);
+        assert!(
+            store
+                .last_threshold_move(q, "m/v1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.threshold_moves(10).await.unwrap().is_empty());
     }
 }

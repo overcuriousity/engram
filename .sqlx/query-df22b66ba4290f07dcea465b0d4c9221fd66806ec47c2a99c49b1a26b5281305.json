@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET reason = ? WHERE id = ? AND reason = 'asked_again'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "df22b66ba4290f07dcea465b0d4c9221fd66806ec47c2a99c49b1a26b5281305"
+}
