@@ -5,6 +5,7 @@ use crate::core::Core;
 use crate::error::Result;
 use crate::eval::lived::{holds_up, lived, settled};
 use crate::eval::sweep;
+use crate::store::decision_log::{ActRecord, AskRecord};
 use crate::store::generations::{Generation, GenerationParams, NewGeneration};
 
 /// A bound on work, not only the nearest rung: a tie keeps the current value, so a gain two rungs
@@ -115,6 +116,11 @@ async fn quiet(core: &Core) -> Result<bool> {
 pub async fn pass(core: &Core) -> Result<Pass> {
     if !core.evolve.autonomous.moves_ranking() {
         return Ok(Pass::default());
+    }
+    // The judgement lines rest on undos and answers, not on the ranking's evidence: they move
+    // whatever the ranking half decides below.
+    if let Err(e) = tune_questions(core).await {
+        tracing::warn!(error = %e, "could not tune the judgement lines");
     }
     let Some(live) = core.store.live_generation().await? else {
         return Ok(Pass::default());
@@ -721,6 +727,145 @@ async fn adopt(
         reverted: None,
         ..Default::default()
     })
+}
+
+/// One step of a judgement line.
+pub const STEP: f64 = 0.02;
+/// Where an act line may move to.
+const ACT_BOUNDS: (f64, f64) = (0.80, 0.99);
+/// The floor of an ask line; its ceiling is a step under the act line.
+const ASK_FLOOR: f64 = 0.50;
+/// Where Decide's `settled_at` may move to.
+const SETTLED_BOUNDS: (f64, f64) = (0.70, 0.95);
+
+/// Lines are kept to two places, so a step lands on 0.92 and not on 0.9200000000000002.
+fn two_places(x: f64) -> f64 {
+    (x * 100.0).round() / 100.0
+}
+
+/// With `tune_min` acted, an undone share above `undo_target` raises the line a step; under half of
+/// it, with rows in the ask band a lower line would act on, lowers it. Never past `lo` or `hi`.
+pub fn next_act_at(
+    current: f64,
+    r: ActRecord,
+    tune_min: usize,
+    undo_target: f64,
+    lo: f64,
+    hi: f64,
+) -> Option<f64> {
+    if r.acted < tune_min || r.acted == 0 {
+        return None;
+    }
+    let share = r.undone as f64 / r.acted as f64;
+    if share > undo_target {
+        Some(two_places(current + STEP)).filter(|&n| n <= hi + 1e-9)
+    } else if share < undo_target / 2.0 && r.asks_open > 0 {
+        Some(two_places(current - STEP)).filter(|&n| n >= lo - 1e-9)
+    } else {
+        None
+    }
+}
+
+/// A step up when a row lapsed since the last move; a step down when every row was answered and
+/// decisions wait for a seat. Never under 0.50 by its own move, never within a step of `act_at`.
+pub fn next_ask_at(current: f64, act_at: f64, r: AskRecord) -> Option<f64> {
+    let want = if r.lapsed_since_move > 0 {
+        two_places(current + STEP)
+    } else if cleared(r) {
+        Some(two_places(current - STEP))
+            .filter(|&n| n >= ASK_FLOOR - 1e-9)
+            .unwrap_or(current)
+    } else {
+        current
+    };
+    let next = want.min(two_places(act_at - STEP));
+    ((next - current).abs() > 1e-9).then_some(next)
+}
+
+fn acted_reason(r: ActRecord) -> String {
+    format!(
+        "{} of {} acted or answered were undone or corrected",
+        r.undone, r.acted
+    )
+}
+
+/// Every row answered since the last move, none open, and decisions waiting for a seat.
+fn cleared(r: AskRecord) -> bool {
+    r.open == 0 && r.answered_since_move > 0 && r.waiting > 0
+}
+
+/// `None` when the ask line moved only to stay a step under the act line.
+fn ask_reason(r: AskRecord) -> Option<String> {
+    match r.lapsed_since_move {
+        1 => Some("a row lapsed unanswered".into()),
+        n if n > 1 => Some(format!("{n} rows lapsed unanswered")),
+        _ if cleared(r) => Some(format!("every row answered, {} waiting", r.waiting)),
+        _ => None,
+    }
+}
+
+/// Moves each line one step at most, for every question an applier carries out and for Decide's
+/// `settled_at`; nothing while the base may not act on its own. Returns the moves made.
+pub async fn tune_questions(core: &Core) -> Result<usize> {
+    use crate::core::judging::band::{Thresholds, era};
+    if !core.evolve.autonomous.acts_on_corpus() {
+        return Ok(0);
+    }
+    let (min, target) = (core.decide_cfg.tune_min, core.decide_cfg.undo_target);
+    let model = core.decider.model();
+    let mut moved = 0;
+    for a in crate::core::judging::catalogue::all() {
+        if core.appliers.get(a.id).is_none() {
+            continue;
+        }
+        let era = era(model, a.version);
+        let t = core.thresholds(&a).await?;
+        let acted = core.store.act_record(a.id, &era).await?;
+        let act = next_act_at(t.act_at, acted, min, target, ACT_BOUNDS.0, ACT_BOUNDS.1);
+        let act_at = act.unwrap_or(t.act_at);
+        let asked = core.store.ask_record(a.id, &era).await?;
+        let ask = next_ask_at(t.ask_at, act_at, asked);
+        let reason = match (act, ask, ask_reason(asked)) {
+            (None, None, _) => continue,
+            (Some(_), Some(_), Some(why)) => format!("{}; {why}", acted_reason(acted)),
+            // An ask line pushed down by the act line alone says nothing of its own.
+            (Some(_), _, _) => acted_reason(acted),
+            (None, Some(_), why) => why.unwrap_or_else(|| "kept a step under the act line".into()),
+        };
+        let to = Thresholds {
+            act_at,
+            ask_at: ask.unwrap_or(t.ask_at),
+        };
+        core.store.move_thresholds(a.id, &era, to, &reason).await?;
+        tracing::info!(question = a.id, %era, act_at = to.act_at, ask_at = to.ask_at, %reason, "a judgement line moved");
+        moved += 1;
+    }
+
+    // Decide's line: a settled verdict judged wrong is its undo, one judged right is kept; held
+    // decisions that leaned are what a lower line would settle. `split_at` and `bears_min` stay.
+    let era = crate::core::decide::settled_era(model);
+    let (judged, wrong) = core.store.settled_record(model).await?;
+    let leaning = core.store.leaning_record(model).await?;
+    let r = ActRecord {
+        acted: judged,
+        undone: wrong,
+        asks_open: leaning,
+    };
+    let current = core.settled_at().await;
+    if let Some(n) = next_act_at(current, r, min, target, SETTLED_BOUNDS.0, SETTLED_BOUNDS.1) {
+        let reason = format!("{wrong} of {judged} settled were judged wrong");
+        // Decide has no ask line; the column holds the settled line again.
+        let to = Thresholds {
+            act_at: n,
+            ask_at: n,
+        };
+        core.store
+            .move_thresholds(crate::core::decide::SETTLED_ID, &era, to, &reason)
+            .await?;
+        tracing::info!(%era, settled_at = n, %reason, "Decide's settled line moved");
+        moved += 1;
+    }
+    Ok(moved)
 }
 
 #[cfg(test)]
@@ -2077,5 +2222,307 @@ mod tests {
             !body.contains("config_path"),
             "the pass knows where config.toml is"
         );
+    }
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::*;
+    use crate::config::Autonomy;
+    use crate::core::judging::band::{Band, Thresholds};
+    use crate::core::judging::{Asked, Subjects, catalogue};
+    use crate::store::decision_log::{NewLogged, Outcome, State};
+
+    const LO: f64 = 0.80;
+    const HI: f64 = 0.99;
+
+    fn act(acted: usize, undone: usize, asks_open: usize) -> ActRecord {
+        ActRecord {
+            acted,
+            undone,
+            asks_open,
+        }
+    }
+
+    fn ask(lapsed: usize, answered: usize, open: usize, waiting: usize) -> AskRecord {
+        AskRecord {
+            lapsed_since_move: lapsed,
+            answered_since_move: answered,
+            open,
+            waiting,
+        }
+    }
+
+    async fn full() -> Core {
+        let mut core = crate::core::test_support::test_core().await;
+        core.evolve.autonomous = Autonomy::Full;
+        core
+    }
+
+    /// `n` decisions of `q` in the core's era, each given `outcome`.
+    async fn seed(
+        core: &Core,
+        q: &Asked,
+        band: Band,
+        state: State,
+        outcome: Option<Outcome>,
+        n: usize,
+    ) {
+        for i in 0..n {
+            let id = core
+                .store
+                .log_decision(&NewLogged {
+                    question_id: q.id.into(),
+                    question_version: q.version,
+                    model: core.decider.model().into(),
+                    subject_kind: "pair",
+                    subject_a: format!("a{i}"),
+                    subject_b: None,
+                    rev_a: None,
+                    rev_b: None,
+                    answer: "{}".into(),
+                    top: 0.95,
+                    pick: "yes".into(),
+                    swapped_agree: None,
+                    band,
+                    reason: None,
+                    state,
+                })
+                .await
+                .unwrap();
+            if let Some(o) = outcome {
+                core.store.set_decision_outcome(&id, o, None).await.unwrap();
+            }
+        }
+    }
+
+    /// 41 acted pair decisions, 3 undone: a share above the target.
+    async fn three_of_41_undone(core: &Core) {
+        let q = catalogue::pair_relation();
+        seed(core, &q, Band::Act, State::Done, Some(Outcome::Kept), 38).await;
+        seed(core, &q, Band::Act, State::Done, Some(Outcome::Undone), 3).await;
+    }
+
+    #[test]
+    fn too_few_acted_decisions_move_nothing() {
+        assert_eq!(next_act_at(0.90, act(29, 10, 5), 30, 0.05, LO, HI), None);
+        assert_eq!(next_act_at(0.90, act(29, 0, 5), 30, 0.05, LO, HI), None);
+    }
+
+    #[test]
+    fn more_than_five_in_a_hundred_undone_raises_the_line_one_step() {
+        assert_eq!(
+            next_act_at(0.90, act(100, 6, 0), 30, 0.05, LO, HI),
+            Some(0.92)
+        );
+        assert_eq!(next_act_at(0.90, act(100, 5, 3), 30, 0.05, LO, HI), None);
+        assert_eq!(next_act_at(0.99, act(100, 6, 0), 30, 0.05, LO, HI), None);
+    }
+
+    #[test]
+    fn under_half_the_target_with_rows_waiting_lowers_it_one_step() {
+        assert_eq!(
+            next_act_at(0.90, act(60, 1, 3), 30, 0.05, LO, HI),
+            Some(0.88)
+        );
+        assert_eq!(next_act_at(0.80, act(60, 1, 3), 30, 0.05, LO, HI), None);
+    }
+
+    #[test]
+    fn under_half_the_target_with_no_ask_band_stays() {
+        assert_eq!(next_act_at(0.90, act(60, 1, 0), 30, 0.05, LO, HI), None);
+        assert_eq!(next_act_at(0.90, act(60, 0, 0), 30, 0.05, LO, HI), None);
+    }
+
+    #[test]
+    fn a_lapsed_row_raises_ask_at_and_a_cleared_table_with_rows_waiting_lowers_it() {
+        assert_eq!(next_ask_at(0.60, 0.90, ask(1, 0, 5, 0)), Some(0.62));
+        assert_eq!(next_ask_at(0.60, 0.90, ask(1, 4, 0, 3)), Some(0.62));
+        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 0, 3)), Some(0.58));
+        // Rows still open, nothing waiting, or nothing answered: it stays.
+        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 1, 3)), None);
+        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 4, 0, 0)), None);
+        assert_eq!(next_ask_at(0.60, 0.90, ask(0, 0, 0, 3)), None);
+    }
+
+    #[test]
+    fn ask_at_stays_under_act_at_and_above_a_half() {
+        assert_eq!(next_ask_at(0.88, 0.90, ask(1, 0, 0, 0)), None);
+        // A lowered act line takes the ask line with it.
+        assert_eq!(next_ask_at(0.88, 0.88, AskRecord::default()), Some(0.86));
+        assert_eq!(next_ask_at(0.50, 0.90, ask(0, 4, 0, 3)), None);
+        assert_eq!(next_ask_at(0.51, 0.90, ask(0, 4, 0, 3)), None);
+    }
+
+    #[tokio::test]
+    async fn a_move_is_recorded_and_is_in_force_at_the_next_decision() {
+        let mut core = full().await;
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, qs| {
+            Ok(crate::infer::decide::Answers {
+                answers: qs
+                    .iter()
+                    .map(|q| {
+                        (
+                            q.key.clone(),
+                            crate::infer::decide::Answer::Noul { yes: 0.02 },
+                        )
+                    })
+                    .collect(),
+                model: "rule".into(),
+                input_tokens: 0,
+            })
+        }));
+        let reap = catalogue::reap_worth();
+        let subjects = |a: &str| Subjects {
+            kind: "artifact",
+            a: a.into(),
+            b: None,
+            rev_a: Some(1),
+            rev_b: None,
+        };
+        // "no" at 0.98: under the starting line of 0.99, an ask.
+        let before = crate::core::judging::ask(&core, &reap, subjects("x"), Some("s"))
+            .await
+            .unwrap();
+        assert_eq!(before.band, Band::Ask);
+        seed(
+            &core,
+            &reap,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            30,
+        )
+        .await;
+
+        assert_eq!(tune_questions(&core).await.unwrap(), 1);
+        let moves = core.store.threshold_moves(10).await.unwrap();
+        assert_eq!(moves.len(), 1);
+        assert_eq!(
+            (moves[0].question_id.as_str(), moves[0].era.as_str()),
+            ("reap_worth", "rule-decider/v1")
+        );
+        // The row asked above waits and every other was answered: the ask line comes down too.
+        assert_eq!((moves[0].act_at, moves[0].ask_at), (0.97, 0.58));
+        assert_eq!(
+            moves[0].reason,
+            "0 of 30 acted or answered were undone or corrected; every row answered, 1 waiting"
+        );
+        let after = crate::core::judging::ask(&core, &reap, subjects("y"), Some("s"))
+            .await
+            .unwrap();
+        assert_eq!(after.band, Band::Act);
+        // What the move rested on does not move it again.
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_persons_answers_move_a_line_the_model_never_acted_on() {
+        let core = full().await;
+        let reap = catalogue::reap_worth();
+        seed(
+            &core,
+            &reap,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            30,
+        )
+        .await;
+        seed(&core, &reap, Band::Ask, State::Waiting, None, 2).await;
+        let pair = catalogue::pair_relation();
+        seed(
+            &core,
+            &pair,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            26,
+        )
+        .await;
+        seed(
+            &core,
+            &pair,
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Corrected),
+            4,
+        )
+        .await;
+        assert_eq!(tune_questions(&core).await.unwrap(), 2);
+        // Every row answered and two waiting: the ask line comes down a step too.
+        assert_eq!(
+            core.thresholds(&reap).await.unwrap(),
+            Thresholds {
+                act_at: 0.97,
+                ask_at: 0.58
+            }
+        );
+        assert_eq!(
+            core.thresholds(&pair).await.unwrap(),
+            Thresholds {
+                act_at: 0.92,
+                ask_at: 0.60
+            }
+        );
+        let moves = core.store.threshold_moves(10).await.unwrap();
+        let reason = |id: &str| {
+            moves
+                .iter()
+                .find(|m| m.question_id == id)
+                .unwrap()
+                .reason
+                .clone()
+        };
+        assert_eq!(
+            reason("pair_relation"),
+            "4 of 30 acted or answered were undone or corrected"
+        );
+        assert_eq!(
+            reason("reap_worth"),
+            "0 of 30 acted or answered were undone or corrected; every row answered, 2 waiting"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_new_model_starts_from_config_again() {
+        let mut core = full().await;
+        three_of_41_undone(&core).await;
+        assert_eq!(tune_questions(&core).await.unwrap(), 1);
+        let pair = catalogue::pair_relation();
+        let config = core.decide_cfg.bands.of(pair.id);
+        assert_eq!(core.thresholds(&pair).await.unwrap().act_at, 0.92);
+        assert_eq!(
+            core.store.threshold_moves(1).await.unwrap()[0].reason,
+            "3 of 41 acted or answered were undone or corrected"
+        );
+        // A new wording is a new era as well.
+        let mut reworded = pair.clone();
+        reworded.version += 1;
+        assert_eq!(core.thresholds(&reworded).await.unwrap(), config);
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Internal("not asked".into()))
+        }));
+        assert_eq!(core.thresholds(&pair).await.unwrap(), config);
+        // Its record is empty: nothing moves for it.
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn nothing_is_tuned_while_the_base_may_not_act() {
+        let mut core = full().await;
+        three_of_41_undone(&core).await;
+        core.evolve.autonomous = Autonomy::Ranking;
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+        pass(&core).await.unwrap();
+        assert!(core.store.threshold_moves(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_idle_pass_moves_the_lines_under_full() {
+        let core = full().await;
+        three_of_41_undone(&core).await;
+        pass(&core).await.unwrap();
+        assert_eq!(core.store.threshold_moves(10).await.unwrap().len(), 1);
     }
 }

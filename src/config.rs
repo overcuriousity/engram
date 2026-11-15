@@ -220,6 +220,10 @@ pub struct DecideConfig {
     pub label_agree_min: f64,
     /// The mean share of a search's candidates the model calls relevant, at most.
     pub label_select_max: f64,
+    /// Decisions a line needs, acted or answered since it last moved, before the tuner moves it.
+    pub tune_min: usize,
+    /// The undone share a line is held to: above it the line rises a step, under half of it it falls one.
+    pub undo_target: f64,
 }
 
 /// Probability thresholds: from `act_at` the judge acts, from `ask_at` it asks a person.
@@ -292,6 +296,8 @@ impl Default for DecideConfig {
             label_overlap_min: 30,
             label_agree_min: 0.85,
             label_select_max: 0.30,
+            tune_min: 30,
+            undo_target: 0.05,
         }
     }
 }
@@ -2047,6 +2053,7 @@ impl Config {
             ("decide.refuse_below", dc.refuse_below),
             ("decide.label_agree_min", dc.label_agree_min),
             ("decide.label_select_max", dc.label_select_max),
+            ("decide.undo_target", dc.undo_target),
         ] {
             if !(0.0..=1.0).contains(&v) {
                 return Err(ConfigError::Invalid(format!(
@@ -3372,6 +3379,7 @@ mode = "off"
             (2500, 0.5, 0.80, 0.34)
         );
         assert_eq!(d.refuse_below, 0.25);
+        assert_eq!((d.tune_min, d.undo_target), (30, 0.05));
     }
 
     #[test]

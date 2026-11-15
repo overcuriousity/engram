@@ -935,6 +935,62 @@ pub(crate) struct EvolveView {
     actions: Vec<String>,
     /// `None` where the rules have not run yet.
     rules: Option<String>,
+    /// One per line the judge is held to in this era, with when and why it last moved.
+    lines: Vec<String>,
+    /// What would move Decide's `split_at` and `bears_min`, which nothing moves.
+    shares: Vec<String>,
+}
+
+/// `pair_relation · act 0.88 · ask 0.62 · moved 2026-12-02: 3 of 41 acted were undone`.
+async fn judgement_lines(core: &crate::core::Core) -> Result<(Vec<String>, Vec<String>)> {
+    use crate::core::judging::{band::era, catalogue};
+    let model = core.decider.model();
+    let since = |m: Option<crate::store::decision_log::ThresholdMove>| match m {
+        Some(m) => format!(
+            "moved {}: {}",
+            chrono::DateTime::from_timestamp(m.moved_at, 0)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            m.reason
+        ),
+        None => "as configured".into(),
+    };
+    let mut lines = Vec::new();
+    for a in catalogue::all() {
+        if core.appliers.get(a.id).is_none() {
+            continue;
+        }
+        let t = core.thresholds(&a).await?;
+        let m = core
+            .store
+            .last_threshold_move(a.id, &era(model, a.version))
+            .await?;
+        lines.push(format!(
+            "{} · act {:.2} · ask {:.2} · {}",
+            a.id,
+            t.act_at,
+            t.ask_at,
+            since(m)
+        ));
+    }
+    let id = crate::core::decide::SETTLED_ID;
+    let m = core
+        .store
+        .last_threshold_move(id, &crate::core::decide::settled_era(model))
+        .await?;
+    lines.push(format!(
+        "{id} · settled {:.2} · {}",
+        core.settled_at().await,
+        since(m)
+    ));
+    let d = core.store.decide_shares(model).await?;
+    let share = |name: &str, (n, hit): (usize, usize)| format!("{name}: {hit} of {n}");
+    let shares = vec![
+        share("split and right", d.split),
+        share("held and \"nothing here\"", d.held),
+        share("not held and wrong", d.not_held),
+    ];
+    Ok((lines, shares))
 }
 
 fn action_str(a: &crate::store::actions::Action) -> String {
@@ -1115,9 +1171,12 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
         .map(action_str)
         .collect();
     let rules = rules_str(core).await?;
+    let (lines, shares) = judgement_lines(core).await?;
     Ok(Some(EvolveView {
         actions,
         rules,
+        lines,
+        shares,
         suspended,
         mode,
         live: format!(
@@ -1678,6 +1737,59 @@ mod tests {
             super::short(&parent),
             "two ids, two names"
         );
+    }
+
+    #[tokio::test]
+    async fn insights_lists_the_lines_in_force_and_why_they_moved() {
+        use crate::core::judging::band::Thresholds;
+        use crate::store::asks::AskVerdict;
+        use crate::store::decisions::test_support::judged;
+        let (core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let t = |act_at, ask_at| Thresholds { act_at, ask_at };
+        let reason = "3 of 41 acted or answered were undone or corrected";
+        core.store
+            .move_thresholds("pair_relation", "fake-decider/v1", t(0.92, 0.6), reason)
+            .await
+            .unwrap();
+        // Another model's move is not in force here.
+        core.store
+            .move_thresholds("link_kind", "other/v1", t(0.82, 0.6), "elsewhere")
+            .await
+            .unwrap();
+        let m = "fake-decider";
+        judged(&core.store, m, "split", false, AskVerdict::Right).await;
+        judged(&core.store, m, "split", false, AskVerdict::Wrong).await;
+        judged(&core.store, m, "settled", false, AskVerdict::NothingHere).await;
+        judged(&core.store, m, "not_held", true, AskVerdict::Wrong).await;
+
+        let body = insights(core).await;
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        assert!(body.contains("judgement lines (4)"), "{body}");
+        assert!(
+            body.contains(&format!(
+                "pair_relation · act 0.92 · ask 0.60 · moved {today}: {reason}"
+            )),
+            "{body}"
+        );
+        assert!(
+            body.contains("link_kind · act 0.90 · ask 0.60 · as configured"),
+            "{body}"
+        );
+        assert!(
+            body.contains("reap_worth · act 0.99 · ask 0.60 · as configured"),
+            "{body}"
+        );
+        assert!(
+            body.contains("decide_settled · settled 0.80 · as configured"),
+            "{body}"
+        );
+        assert!(!body.contains("elsewhere"), "{body}");
+        assert!(body.contains("split and right: 1 of 2"), "{body}");
+        assert!(
+            body.contains("held and &#34;nothing here&#34;: 1 of 3"),
+            "{body}"
+        );
+        assert!(body.contains("not held and wrong: 1 of 1"), "{body}");
     }
 
     #[tokio::test]

@@ -9,6 +9,8 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 - `scripts/probe-decide.sh` measures a decision endpoint.
 - Insights shows what the base is unsure about, with a button per answer. Nothing produces these rows yet.
 - Decide: a typed question answered from the notes that bear on it, with each note's own reading. Judging a decision confirms the notes that agree and sends the ones against to the pair judge. `POST /api/v1/decide`, `/decide/stream`, `/decisions/{id}/verdict`; thresholds under `[decide]`. In the web UI beside Search and Ask (Alt+Enter). Also the MCP tool decide and engram -d. Not on the Android app, which runs no decision model.
+- The base looks at more of itself: pairs down to 0.70 similarity are judged for contradictions and replacements, and nothing below the review line is acted on without you. Notes from before are read while the base is quiet. Recorded searches are labelled by the decision model, shown beside your own verdicts on Insights.
+- The lines at which the base acts or asks move with what you undo and answer; Insights shows each line and why it moved.
 
 ### Changed
 - **`[infer.decide]` is required.** engram needs a decision model (System One, `POST {base_url}/systemone`); a config without the block is refused at start. Copy it from `config.example.toml`.

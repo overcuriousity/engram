@@ -162,6 +162,11 @@ context_tokens = 8192
 # label_overlap_min = 30
 # label_agree_min = 0.85
 # label_select_max = 0.30
+# The lines below move on their own under autonomy "full": with at least tune_min decisions acted on
+# or answered since a line last moved, more than undo_target of them undone raises it a step of 0.02,
+# under half of it lowers it. settled_at moves the same way from your verdicts on decisions.
+# tune_min = 30
+# undo_target = 0.05
 # Background judgement: from act_at it acts, from ask_at it asks a person, below it leaves.
 # [decide.bands]
 # act_at = 0.90

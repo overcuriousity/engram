@@ -187,6 +187,26 @@ pub struct ThresholdMove {
     pub moved_at: i64,
 }
 
+/// What a question's line rests on since it last moved, in one era.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActRecord {
+    /// Model acts whose window closed or that were undone, and Unsure rows a person answered.
+    pub acted: usize,
+    /// Of those, undone acts and corrected answers.
+    pub undone: usize,
+    /// Ask rows waiting or open now: the band a lower line would act on.
+    pub asks_open: usize,
+}
+
+/// What the ask band did since the line last moved, and what it holds now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AskRecord {
+    pub lapsed_since_move: usize,
+    pub answered_since_move: usize,
+    pub open: usize,
+    pub waiting: usize,
+}
+
 // runtime: one column list shared by every read of a whole row; the tails differ.
 const SELECT: &str =
     "SELECT id, question_id, question_version, model, era, subject_kind, subject_a,
@@ -512,10 +532,13 @@ impl Store {
         .await
     }
 
-    /// Open to lapsed.
+    /// Open to lapsed, stamped in `outcome_at` (the outcome stays empty) so the tuner can tell
+    /// when.
     pub async fn lapse_asks(&self, older_than: i64) -> Result<u64> {
         Ok(sqlx::query!(
-            "UPDATE decisions SET state = 'lapsed' WHERE state = 'open' AND decided_at < ?",
+            "UPDATE decisions SET state = 'lapsed', outcome_at = ?
+              WHERE state = 'open' AND decided_at < ?",
+            now(),
             older_than
         )
         .execute(&self.pool)
@@ -604,6 +627,94 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The newest move of a question's line in this era.
+    pub async fn last_threshold_move(
+        &self,
+        question_id: &str,
+        era: &str,
+    ) -> Result<Option<ThresholdMove>> {
+        Ok(sqlx::query_as!(
+            ThresholdMove,
+            "SELECT question_id, era, act_at, ask_at, reason, moved_at FROM decision_thresholds
+              WHERE question_id = ? AND era = ? ORDER BY id DESC LIMIT 1",
+            question_id,
+            era
+        )
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    /// When the line last moved, else 0: what was decided before stands for the line before.
+    pub(crate) async fn moved_at(&self, question_id: &str, era: &str) -> Result<i64> {
+        Ok(self
+            .last_threshold_move(question_id, era)
+            .await?
+            .map_or(0, |m| m.moved_at))
+    }
+
+    /// Decided after the last move: model acts kept or undone, and answered Unsure rows (`corrected`
+    /// as undone). Not a refused act (no journal row, or `refused`), a check or the pursuit gate.
+    /// An undone merge is one decision however many rows it wrote.
+    pub async fn act_record(&self, question_id: &str, era: &str) -> Result<ActRecord> {
+        let since = self.moved_at(question_id, era).await?;
+        let r = sqlx::query!(
+            r#"SELECT COUNT(*) AS "acted!: i64",
+                      COALESCE(SUM(outcome IN ('undone', 'corrected')), 0) AS "undone!: i64"
+                 FROM decisions
+                WHERE question_id = ? AND era = ? AND decided_at > ?
+                  AND subject_kind NOT IN ('write', 'pursuit')
+                  AND ((band = 'act' AND state = 'done' AND outcome IN ('kept', 'undone'))
+                    OR (band = 'ask' AND state = 'done' AND outcome IN ('confirmed', 'corrected')))"#,
+            question_id,
+            era,
+            since
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let asks_open = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64" FROM decisions
+                WHERE question_id = ? AND era = ? AND band = 'ask' AND state IN ('waiting', 'open')
+                  AND subject_kind NOT IN ('write', 'pursuit')"#,
+            question_id,
+            era
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(ActRecord {
+            acted: r.acted.max(0) as usize,
+            undone: r.undone.max(0) as usize,
+            asks_open: asks_open.max(0) as usize,
+        })
+    }
+
+    /// Lapses and answers since the last move (by `outcome_at`, which a lapse stamps), and the
+    /// rows open and waiting now.
+    pub async fn ask_record(&self, question_id: &str, era: &str) -> Result<AskRecord> {
+        let since = self.moved_at(question_id, era).await?;
+        let r = sqlx::query!(
+            r#"SELECT
+                 COALESCE(SUM(state = 'lapsed' AND outcome_at > ?1), 0) AS "lapsed!: i64",
+                 COALESCE(SUM(band = 'ask' AND outcome IN ('confirmed', 'corrected')
+                              AND outcome_at > ?1), 0) AS "answered!: i64",
+                 COALESCE(SUM(state = 'open'), 0) AS "open!: i64",
+                 COALESCE(SUM(band = 'ask' AND state = 'waiting'), 0) AS "waiting!: i64"
+               FROM decisions
+              WHERE question_id = ?2 AND era = ?3 AND subject_kind NOT IN ('write', 'pursuit')"#,
+            since,
+            question_id,
+            era
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        let n = |v: i64| v.max(0) as usize;
+        Ok(AskRecord {
+            lapsed_since_move: n(r.lapsed),
+            answered_since_move: n(r.answered),
+            open: n(r.open),
+            waiting: n(r.waiting),
+        })
     }
 
     pub async fn threshold_moves(&self, limit: i64) -> Result<Vec<ThresholdMove>> {
@@ -1024,5 +1135,272 @@ mod tests {
         let l = store.logged(&bare).await.unwrap().unwrap();
         assert_eq!(l.answered_pick.as_deref(), Some("no"));
         assert!(l.outcome_at.is_some());
+    }
+
+    /// `n` decisions of `question_id` in era `m/v1`, each with `outcome` once logged.
+    async fn logged_n(
+        store: &Store,
+        question_id: &str,
+        kind: &'static str,
+        band: Band,
+        state: State,
+        outcome: Option<Outcome>,
+        n: usize,
+    ) -> Vec<String> {
+        let mut ids = vec![];
+        for _ in 0..n {
+            let mut d = sample(band, state, 0.95);
+            d.question_id = question_id.into();
+            d.subject_kind = kind;
+            let id = store.log_decision(&d).await.unwrap();
+            if let Some(o) = outcome {
+                store.set_decision_outcome(&id, o, None).await.unwrap();
+            }
+            ids.push(id);
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn an_undone_merge_counts_against_pair_relation_once_however_many_rows_it_wrote() {
+        let store = Store::memory().await.unwrap();
+        let id = merged(&store, &["x", "y", "z"]).await;
+        // runtime: test-only relabel.
+        sqlx::query("UPDATE decisions SET question_id = 'pair_relation' WHERE id = ?")
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        for s in ["x", "y", "z"] {
+            store
+                .undo_action_on(s, Kind::Merge, UndoneBy::Operator, "no")
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            store.act_record("pair_relation", "m/v1").await.unwrap(),
+            ActRecord {
+                acted: 1,
+                undone: 1,
+                asks_open: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decision_whose_window_is_still_open_does_not_count_as_kept() {
+        let store = Store::memory().await.unwrap();
+        let open = merged(&store, &["x"]).await;
+        merged(&store, &["y"]).await;
+        // runtime: test-only backdating.
+        sqlx::query("UPDATE corpus_actions SET at = ? WHERE subject_id = 'y'")
+            .bind(now() - 31 * 86_400)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store
+            .close_outcome_windows(now() - 30 * 86_400)
+            .await
+            .unwrap();
+        assert_eq!(store.logged(&open).await.unwrap().unwrap().outcome, None);
+        assert_eq!(
+            store.act_record("same_note", "m/v1").await.unwrap(),
+            ActRecord {
+                acted: 1,
+                undone: 0,
+                asks_open: 0
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persons_answers_count_and_refusals_checks_and_gates_do_not() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Act,
+            State::Done,
+            Some(Outcome::Kept),
+            2,
+        )
+        .await;
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Act,
+            State::Done,
+            Some(Outcome::Undone),
+            1,
+        )
+        .await;
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            3,
+        )
+        .await;
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Corrected),
+            1,
+        )
+        .await;
+        // Refused at apply time: done, act, `changed`, nothing linked.
+        for id in logged_n(&store, q, "pair", Band::Act, State::Done, None, 2).await {
+            store.set_decision_reason(&id, "changed").await.unwrap();
+        }
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Act,
+            State::Done,
+            Some(Outcome::Refused),
+            2,
+        )
+        .await;
+        logged_n(
+            &store,
+            q,
+            "write",
+            Band::Act,
+            State::Done,
+            Some(Outcome::Kept),
+            2,
+        )
+        .await;
+        logged_n(
+            &store,
+            q,
+            "pursuit",
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Corrected),
+            2,
+        )
+        .await;
+        // The ask band now: waiting and open count, a lapsed one does not.
+        logged_n(&store, q, "pair", Band::Ask, State::Waiting, None, 2).await;
+        logged_n(&store, q, "pair", Band::Ask, State::Open, None, 1).await;
+        logged_n(&store, q, "pair", Band::Ask, State::Lapsed, None, 1).await;
+        assert_eq!(
+            store.act_record(q, "m/v1").await.unwrap(),
+            ActRecord {
+                acted: 7,
+                undone: 2,
+                asks_open: 3
+            }
+        );
+        assert_eq!(
+            store.act_record(q, "n/v1").await.unwrap(),
+            ActRecord::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn only_what_was_decided_after_the_last_move_counts() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        let before = logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Act,
+            State::Done,
+            Some(Outcome::Kept),
+            2,
+        )
+        .await;
+        for id in &before {
+            age(&store, id, now() - 100).await;
+        }
+        let t = Thresholds {
+            act_at: 0.92,
+            ask_at: 0.6,
+        };
+        store.move_thresholds(q, "m/v1", t, "moved").await.unwrap();
+        // runtime: test-only backdating.
+        sqlx::query("UPDATE decision_thresholds SET moved_at = ?")
+            .bind(now() - 50)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Act,
+            State::Done,
+            Some(Outcome::Undone),
+            1,
+        )
+        .await;
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().acted, 1);
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().undone, 1);
+    }
+
+    #[tokio::test]
+    async fn the_ask_record_counts_lapses_and_answers_since_the_last_move() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        let old = logged_n(&store, q, "pair", Band::Ask, State::Open, None, 2).await;
+        for id in &old {
+            age(&store, id, now() - 100).await;
+        }
+        assert_eq!(store.lapse_asks(now() - 50).await.unwrap(), 2);
+        logged_n(
+            &store,
+            q,
+            "pair",
+            Band::Ask,
+            State::Done,
+            Some(Outcome::Confirmed),
+            3,
+        )
+        .await;
+        logged_n(&store, q, "pair", Band::Ask, State::Open, None, 1).await;
+        logged_n(&store, q, "pair", Band::Ask, State::Waiting, None, 4).await;
+        assert_eq!(
+            store.ask_record(q, "m/v1").await.unwrap(),
+            AskRecord {
+                lapsed_since_move: 2,
+                answered_since_move: 3,
+                open: 1,
+                waiting: 4
+            }
+        );
+        // A move in the same second stands for everything before it.
+        let t = Thresholds {
+            act_at: 0.9,
+            ask_at: 0.62,
+        };
+        store.move_thresholds(q, "m/v1", t, "moved").await.unwrap();
+        // runtime: test-only stamp, after every row above.
+        sqlx::query("UPDATE decision_thresholds SET moved_at = ?")
+            .bind(now() + 1)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.ask_record(q, "m/v1").await.unwrap(),
+            AskRecord {
+                lapsed_since_move: 0,
+                answered_since_move: 0,
+                open: 1,
+                waiting: 4
+            }
+        );
     }
 }

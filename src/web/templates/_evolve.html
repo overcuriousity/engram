@@ -23,6 +23,15 @@
   {% if let Some(r) = e.rules %}
   <p class="muted hint">{{ r }}</p>
   {% endif %}
+  <details class="judge-tune-history">
+    <summary class="muted">judgement lines ({{ e.lines.len() }})</summary>
+    <ul class="mono">
+      {% for l in e.lines %}<li>{{ l }}</li>{% endfor %}
+    </ul>
+    <ul class="mono">
+      {% for l in e.shares %}<li>{{ l }}</li>{% endfor %}
+    </ul>
+  </details>
   {% if !e.actions.is_empty() %}
   <details class="judge-tune-history">
     <summary class="muted">what the base did to the corpus ({{ e.actions.len() }})</summary>

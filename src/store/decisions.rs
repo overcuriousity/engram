@@ -239,6 +239,151 @@ impl Store {
     }
 }
 
+/// Of Decide's judged decisions, per standing: how many, and how many came out the way that says
+/// the line is off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecideShares {
+    /// `split`, and of those judged right.
+    pub split: (usize, usize),
+    /// Held, and of those judged "nothing here".
+    pub held: (usize, usize),
+    /// Not held, and of those judged wrong.
+    pub not_held: (usize, usize),
+}
+
+impl Store {
+    /// Held `settled` decisions of `model` made since Decide's line last moved, judged right or
+    /// wrong: (judged, wrong).
+    pub async fn settled_record(&self, model: &str) -> Result<(usize, usize)> {
+        let rows = self.decides_since_move(model).await?;
+        let settled = rows
+            .iter()
+            .filter(|r| r.0 && r.1.as_deref() == Some("settled"));
+        let judged: Vec<_> = settled
+            .filter_map(|r| r.2.filter(|v| *v != AskVerdict::NothingHere))
+            .collect();
+        let wrong = judged.iter().filter(|v| **v == AskVerdict::Wrong).count();
+        Ok((judged.len(), wrong))
+    }
+
+    /// Held decisions of `model` that leaned since Decide's line last moved, judged or not: what a
+    /// lower line would have called settled.
+    pub async fn leaning_record(&self, model: &str) -> Result<usize> {
+        Ok(self
+            .decides_since_move(model)
+            .await?
+            .iter()
+            .filter(|r| r.0 && r.1.as_deref() == Some("leaning"))
+            .count())
+    }
+
+    /// Every judged decision of `model`, for Insights.
+    pub async fn decide_shares(&self, model: &str) -> Result<DecideShares> {
+        let mut out = DecideShares::default();
+        for (held, standing, verdict) in self.decides_since(model, 0).await? {
+            let Some(v) = verdict else { continue };
+            let count = |(n, hit): &mut (usize, usize), yes: bool| {
+                *n += 1;
+                *hit += usize::from(yes);
+            };
+            if held {
+                count(&mut out.held, v == AskVerdict::NothingHere);
+                if standing.as_deref() == Some("split") {
+                    count(&mut out.split, v == AskVerdict::Right);
+                }
+            } else {
+                count(&mut out.not_held, v == AskVerdict::Wrong);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn decides_since_move(
+        &self,
+        model: &str,
+    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+        let era = crate::core::decide::settled_era(model);
+        let since = self.moved_at(crate::core::decide::SETTLED_ID, &era).await?;
+        self.decides_since(model, since).await
+    }
+
+    /// `model`'s decisions made after `since`, as (held, the first question's standing, verdict).
+    async fn decides_since(
+        &self,
+        model: &str,
+        since: i64,
+    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+        let rows = sqlx::query!(
+            r#"SELECT questions, standing, not_held AS "not_held!: i64", verdict FROM decide_events
+                WHERE model = ? AND created_at > ?"#,
+            model,
+            since
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                // A row this binary cannot read has no standing.
+                let first = crate::core::decide::wire::stored_questions(&r.questions)
+                    .ok()
+                    .and_then(|qs| qs.into_iter().next());
+                let standing = first.and_then(|q| {
+                    serde_json::from_str::<serde_json::Value>(&r.standing)
+                        .ok()?
+                        .get(&q.key)?
+                        .as_str()
+                        .map(str::to_string)
+                });
+                (
+                    r.not_held == 0,
+                    standing,
+                    r.verdict.as_deref().and_then(AskVerdict::parse),
+                )
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::store::Store;
+
+    /// A judged decision of `model` on one noul, `verdict`, whose standing is `standing`.
+    pub(crate) async fn judged(
+        store: &Store,
+        model: &str,
+        standing: &str,
+        not_held: bool,
+        verdict: AskVerdict,
+    ) -> String {
+        let q = crate::infer::decide::Question::noul("verdict", "Keep it?");
+        let id = store
+            .record_decision(NewDecision {
+                question: "Keep it?".into(),
+                questions: crate::core::decide::wire::questions_json(std::slice::from_ref(&q)),
+                situation: None,
+                scope: None,
+                filters: "{}".into(),
+                answers: (!not_held).then(|| r#"{"verdict":{"yes":0.9}}"#.into()),
+                prior: "{}".into(),
+                standing: serde_json::json!({ "verdict": standing }).to_string(),
+                not_held,
+                model: model.into(),
+                read: 0,
+                dropped: 0,
+                query_vec: vec![1.0],
+                embed_model: "fake".into(),
+                evidence: vec![],
+            })
+            .await
+            .unwrap();
+        store.judge_decision(&id, verdict, None).await.unwrap();
+        id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
