@@ -2,23 +2,29 @@ pub mod associate;
 pub mod condense;
 pub mod consolidate;
 pub mod context;
+pub mod decisions;
 pub mod dedupe;
 pub mod describe;
 pub mod embed;
 pub mod extract;
 pub mod gaps;
 pub mod judgement;
+pub mod label;
 pub mod merge;
+pub mod merge_unit;
 pub mod observe;
 pub mod passages;
 pub mod probe;
 pub mod promote;
 pub mod pursuit;
+pub mod read;
 pub mod reap;
 pub mod reconcile;
 pub mod refetch;
 pub mod relate;
 pub mod remind;
+pub mod replay;
+pub mod rescue_unit;
 pub mod retention;
 pub mod retract;
 pub mod sleep;
@@ -131,6 +137,10 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
         (Stage::SegmentWindow, _) => window::run(core, &job.target_id).await,
         (Stage::Title, _) => synthesize::run_title(core, &job.target_id).await,
         (Stage::Dedupe, _) => dedupe::run(core, &job.target_id).await,
+        (Stage::Merge, _) => merge_unit::run(core, &job.target_id).await,
+        (Stage::Rescue, _) => rescue_unit::run(core, &job.target_id).await,
+        (Stage::Read, _) => read::run(core, &job.target_id).await,
+        (Stage::Label, _) => label::run(core, &job.target_id).await,
         (Stage::Relate, _) => relate::run(core, &job.target_id).await,
         (Stage::Probe, _) => probe::run(core, &job.target_id).await,
         (Stage::Condense, _) => condense::run(core, &job.target_id).await,
@@ -146,7 +156,8 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
             | Stage::Retention
             | Stage::ArmDedupe
             | Stage::Context
-            | Stage::Reap,
+            | Stage::Reap
+            | Stage::Decisions,
             _,
         ) => run_accounted(core, job.stage).await.map(|w| did_work = w),
         (Stage::Remind, _) => remind::run(core).await,
@@ -186,9 +197,9 @@ async fn run_claimed(core: &Core, job: Job) -> Result<bool> {
                     tracing::warn!(error = %e, "could not record a push after every retry; standing the unit down until the repair pass");
                     core.store.complete_job(job.id).await?;
                 }
-                // A name is decoration, and an unjudged pair stays pending for a later sweep;
-                // everything else stays queued, as it carries knowledge.
-                (Stage::Dedupe | Stage::Title, _) if exhausted => {
+                // A name is decoration, an unjudged pair stays pending, and a note not rescued
+                // keeps its text; everything else stays queued, as it carries knowledge.
+                (Stage::Dedupe | Stage::Merge | Stage::Rescue | Stage::Title, _) if exhausted => {
                     tracing::warn!(error = %e, stage = job.stage.as_str(), "giving up on this unit for now");
                     core.store.complete_job(job.id).await?;
                 }
@@ -272,6 +283,7 @@ async fn run_accounted(core: &Core, stage: Stage) -> Result<bool> {
         Stage::Retention => retention::run(core).await.and_then(detail),
         Stage::Reap => reap::run(core).await.and_then(detail),
         Stage::Context => context::run(core).await.and_then(detail),
+        Stage::Decisions => decisions::run(core).await.and_then(detail),
         Stage::Pursuit => pursuit::run(core)
             .await
             .and_then(|n| detail(serde_json::json!({ "pursuits": n }))),
@@ -330,7 +342,8 @@ async fn rearm_periodic_with(core: &Core, stage: Stage, target: &str, did_work: 
     let Some(period) = crate::core::background::periodic_period(core, stage) else {
         return;
     };
-    let empty = if did_work {
+    // Decisions keep their tick: a freed seat or a new day's cap is nothing `arm_now` hears of.
+    let empty = if did_work || stage == Stage::Decisions {
         0
     } else {
         core.store.empty_runs(stage, target).await.unwrap_or(0) + 1
@@ -900,6 +913,21 @@ mod tests {
     async fn waits_about(core: &Core, stage: Stage, expected: i64) -> bool {
         let (run_after, _) = pending_row(core, stage).await;
         (run_after - crate::store::now()).abs_diff(expected) <= 2
+    }
+
+    #[tokio::test]
+    async fn the_decisions_sweep_keeps_its_pace_when_it_finds_nothing() {
+        let core = sweeping_core().await;
+        let base = crate::core::background::periodic_period(&core, Stage::Decisions)
+            .unwrap()
+            .as_secs() as i64;
+        for run in 1..=3 {
+            sweep_finds(&core, Stage::Decisions, false).await;
+            assert!(
+                waits_about(&core, Stage::Decisions, base).await,
+                "empty run {run} backed off"
+            );
+        }
     }
 
     #[tokio::test]

@@ -148,6 +148,8 @@ pub struct StatusResponse {
     pub recommend: bool,
     /// Units waiting on a generation model; on a phone, what the closed gate holds back.
     pub waiting_generation: i64,
+    /// Open rows of the Unsure block.
+    pub unsure: i64,
     pub held: HeldBrief,
     /// Null on an empty base.
     pub last_kept: Option<LastKept>,
@@ -1581,7 +1583,7 @@ async fn patch_artifact(
         tenant
             .core
             .store
-            .update_artifact_category(&cid, c.as_deref())
+            .update_artifact_category_by(&cid, c.as_deref(), "person")
             .await?;
     }
     if let Some(t) = &tags {
@@ -1595,28 +1597,10 @@ async fn patch_artifact(
             .store
             .enqueue(Stage::Embed, "artifact", &cid)
             .await?;
-    } else if chunk.embed_state == crate::store::artifacts::EmbedState::Embedded {
-        // Only when the chunk has a point: a pending embed job writes the whole payload anyway.
-        tenant
-            .core
-            .vectors
-            .set_payload(&crate::vector::VectorPayload {
-                artifact_id: chunk.id.clone(),
-                corpus_id: chunk.corpus_id.clone().unwrap_or_default(),
-                text: chunk.text.clone(),
-                title: chunk.title.clone(),
-                category: chunk.category.clone(),
-                tags: chunk.tags.clone(),
-                created_at: chunk.created_at,
-                last_seen_at: None,
-                hit_count: None,
-                status: None,
-                last_verified_at: None,
-                superseded_by: None,
-                origin_corpora: vec![],
-                provenance: None,
-            })
-            .await?;
+    } else {
+        // From the row as stored, looking again after the write: a reading that fills the category
+        // meanwhile is not overwritten. A pending embed writes the whole payload itself.
+        crate::jobs::read::sync_payload(&tenant.core, &cid).await?;
     }
     Ok(Json(chunk))
 }
@@ -1677,7 +1661,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
         }),
     };
 
-    let reap = if tenant.core.reap.enabled && tenant.core.judge.is_some() {
+    let reap = if tenant.core.reap.enabled {
         let last = tenant.core.store.last_sweep_run("reap").await?;
         let n = |d: &serde_json::Value, k: &str| d.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
         let detail: serde_json::Value = last
@@ -1712,6 +1696,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
                 &crate::store::jobs::Stage::GENERATORS,
             )
             .await?,
+        unsure: crate::web::unsure::open_count(&tenant.core).await?,
         held: HeldBrief {
             corpora: held_corpora,
             artifacts: held_artifacts,
@@ -3737,6 +3722,9 @@ pub(crate) mod tests {
             ("PATCH", "/api/v1/artifacts/abc"),
             ("DELETE", "/api/v1/artifacts/abc"),
             ("GET", "/api/v1/status"),
+            ("GET", "/api/v1/unsure"),
+            ("POST", "/api/v1/unsure/x/answer"),
+            ("POST", "/api/v1/unsure/x/again"),
         ] {
             let req = Request::builder()
                 .uri(uri)
@@ -5100,6 +5088,28 @@ mod patch_tests {
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(core.store.get_artifact(&cid).await.unwrap().category, None);
+    }
+
+    #[tokio::test]
+    async fn a_category_set_or_cleared_by_patch_is_a_persons() {
+        let (app, token, core, cid) = one_artifact().await;
+        for category in [serde_json::json!("procedure"), serde_json::Value::Null] {
+            let res = app
+                .clone()
+                .oneshot(patch_json(
+                    &format!("/api/v1/artifacts/{cid}"),
+                    &token,
+                    serde_json::json!({ "category": category }),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let by = sqlx::query_scalar!("SELECT category_by FROM artifacts WHERE id = ?", cid)
+                .fetch_one(&core.store.pool)
+                .await
+                .unwrap();
+            assert_eq!(by.as_deref(), Some("person"), "{category}");
+        }
     }
 
     #[tokio::test]

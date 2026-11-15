@@ -32,7 +32,9 @@ pub enum Kind {
     Noul,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// Serialized for `artifact_readings`, which keeps an answer whole.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Answer {
     /// Probabilities in option order.
     Choice {

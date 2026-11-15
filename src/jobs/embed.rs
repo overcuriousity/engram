@@ -244,6 +244,17 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
         );
         return Ok(());
     }
+    // The payload went out from the row as read before the call. What does not bump the revision
+    // (a category, tags) may have changed since, and its writers leave a pending embed alone.
+    match core.store.get_artifact(&chunk.id).await {
+        Ok(now) if VectorPayload::edited(&now) != VectorPayload::edited(chunk) => {
+            if let Err(e) = crate::jobs::read::sync_payload(core, &chunk.id).await {
+                tracing::warn!(artifact_id = %chunk.id, error = %e, "could not bring the payload up to the row");
+            }
+        }
+        Ok(_) | Err(Error::NotFound) => {}
+        Err(e) => return Err(e),
+    }
     // Armed, not run, and not propagated: a failure here must not re-buy the embedding; the sweep
     // backstops both. Passages and merges are never relate anchors (spec §6; a merge files its own
     // next pair). `Merged`, not `is_model_written()`: a synthesis is ordinary dedupe material.
@@ -256,6 +267,10 @@ async fn mark_indexed(core: &Core, chunk: &Chunk) -> Result<()> {
             error = %e,
             "could not arm the neighbour query; the sweep will find its pairs"
         );
+    }
+    // Every note is read, passages and merges too.
+    if let Err(e) = crate::jobs::read::arm(core, &chunk.id).await {
+        tracing::warn!(artifact_id = %chunk.id, error = %e, "could not arm the reading");
     }
     if chunk.provenance != crate::store::artifacts::Provenance::Passage
         && !chunk.cues.is_empty()
@@ -745,6 +760,30 @@ mod tests {
             hits.iter().any(|h| h.payload.artifact_id == ids[0]),
             "a stale embed hid an artifact an operator had restored"
         );
+    }
+
+    #[tokio::test]
+    async fn a_category_set_while_the_embedding_was_out_reaches_the_payload() {
+        // The payload is built from the row read before the call. A category does not bump the
+        // revision, and both of its writers leave a pending embed to write the payload.
+        let core = crate::core::test_support::test_core().await;
+        let (_, ids) = corpus_with_pending_chunks(&core, 1).await;
+        let stale = core.store.get_artifact(&ids[0]).await.unwrap();
+        core.store
+            .update_artifact_category_by(&ids[0], Some("procedure"), "person")
+            .await
+            .unwrap();
+
+        embed_batch(&core, std::slice::from_ref(&stale))
+            .await
+            .unwrap();
+
+        let payloads = core
+            .vectors
+            .payloads_of(std::slice::from_ref(&ids[0]))
+            .await
+            .unwrap();
+        assert_eq!(payloads[&ids[0]].category.as_deref(), Some("procedure"));
     }
 
     #[tokio::test]
@@ -1428,13 +1467,13 @@ mod tests {
             .await
             .unwrap();
 
-        // The exact total pins termination: three batch claims plus one `relate` unit per indexed
-        // artifact.
+        // The exact total pins termination: three batch claims plus one `relate` and one `read`
+        // unit per indexed artifact.
         let mut claims = 0;
         while crate::jobs::run_one(&core).await.unwrap() {
             claims += 1;
             assert!(
-                claims <= 3 + chunks,
+                claims <= 3 + 2 * chunks,
                 "the re-arm never terminated: {claims} claims"
             );
         }
@@ -1449,8 +1488,8 @@ mod tests {
         );
         assert_eq!(
             claims,
-            3 + chunks,
-            "expected one claim per batch, plus one relate unit per artifact"
+            3 + 2 * chunks,
+            "expected one claim per batch, plus one relate and one read unit per artifact"
         );
     }
 

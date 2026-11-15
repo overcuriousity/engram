@@ -66,6 +66,20 @@ struct Args {
     /// Check that the control database, tenant databases and vector store agree, then exit.
     #[arg(long)]
     verify_stores: bool,
+    /// Run the decision questions over what this base already decided, print how they agree, change nothing.
+    #[arg(long, requires = "user")]
+    replay_decisions: bool,
+    /// With --replay-decisions: only this question.
+    #[arg(long, value_name = "ID", requires = "replay_decisions")]
+    question: Option<String>,
+    /// With --replay-decisions: cases per question, newest first. `--json` prints the report as JSON.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 200,
+        requires = "replay_decisions"
+    )]
+    limit: usize,
     /// The client half: `-c`, `-s`, `-a`.
     #[command(flatten)]
     cli: engram::cli::args::CliArgs,
@@ -189,6 +203,17 @@ async fn live_ranking(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Where the logs are written. The replay's report is stdout and is redirected to a file, so its
+/// logs go to stderr; everything else logs to stdout.
+fn log_writer(args: &Args) -> tracing_subscriber::fmt::writer::BoxMakeWriter {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+    if args.replay_decisions {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    }
+}
+
 /// A command that works on the data and exits; read by both `server_lock` and the client split.
 fn data_command(args: &Args) -> bool {
     args.reindex
@@ -198,6 +223,7 @@ fn data_command(args: &Args) -> bool {
         || args.delete_user.is_some()
         || args.restore.is_some()
         || args.verify_stores
+        || args.replay_decisions
 }
 
 /// The data commands that must not run beside a server: its writes during the swap or delete
@@ -318,14 +344,15 @@ async fn run_account_command(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "engram=info,tower_http=info".into()),
         )
+        .with_writer(log_writer(&args))
         .init();
-
-    let args = Args::parse();
 
     if let Some(pw) = &args.hash_password {
         println!("{}", engram::auth::local::hash_password(pw)?);
@@ -452,6 +479,45 @@ async fn main() -> anyhow::Result<()> {
             .await?;
         let target = vectors.reindex(cfg.infer.embed.dim).await?;
         println!("{alias} now serves `{target}`");
+        return Ok(());
+    }
+
+    if args.replay_decisions {
+        // Reads only and logs no decision, so it runs beside the server; a refusal exits 2.
+        let refuse = |why: String| -> ! {
+            eprintln!("{why}");
+            std::process::exit(2);
+        };
+        let user = match require_user(&control, args.user.as_deref()).await {
+            Ok(u) => u,
+            Err(Error::Validation(why)) => refuse(why),
+            Err(e) => return Err(e.into()),
+        };
+        if let Some(q) = args.question.as_deref()
+            && engram::core::judging::catalogue::by_id(q).is_none()
+        {
+            refuse(engram::jobs::replay::unknown_question(q));
+        }
+        let store = tenant_store(&cfg, &control, &user).await?;
+        // The real vectors: `reap_worth` is shown a buried note's live neighbours.
+        let vectors =
+            engram::vector::qdrant::QdrantVectors::connect(&engram::config::VectorConfig {
+                collection: format!("{}_{}", cfg.vector.collection, user.slug),
+                ..cfg.vector.clone()
+            })
+            .await?;
+        let core = Core::from_config(&cfg, Arc::new(vectors), store);
+        let reports =
+            engram::jobs::replay::run(&core, args.question.as_deref(), args.limit).await?;
+        if args.cli.json {
+            println!("{}", serde_json::to_string_pretty(&reports)?);
+        } else {
+            print!("{}", engram::jobs::replay::render(&reports));
+        }
+        // What was asked is printed all the same; a script must still see the run was cut short.
+        if reports.iter().any(|r| r.stopped.is_some()) {
+            std::process::exit(1);
+        }
         return Ok(());
     }
 
@@ -698,6 +764,7 @@ mod startup_tests {
             &["engram", "--merge-orphans"],
             &["engram", "--restore", "/x"],
             &["engram", "--verify-stores"],
+            &["engram", "--replay-decisions", "--user", "sub"],
         ] {
             assert!(
                 server_lock(&Args::parse_from(flags), &cfg)
@@ -722,6 +789,55 @@ mod startup_tests {
             assert!(Args::try_parse_from(["engram", f]).is_err(), "{f}");
             assert!(Args::try_parse_from(["engram", "--restore", "/x", f]).is_ok());
         }
+    }
+
+    // `BoxMakeWriter` prints the type it was built from, which is all it lets a test see.
+    #[test]
+    fn the_replay_logs_to_stderr_and_the_server_to_stdout() {
+        let writer = |argv: &[&str]| format!("{:?}", log_writer(&Args::parse_from(argv)));
+        let replay = writer(&["engram", "--replay-decisions", "--user", "s"]);
+        assert!(
+            replay.contains("stderr") && !replay.contains("stdout"),
+            "{replay}"
+        );
+        for argv in [&["engram"][..], &["engram", "--list-users"]] {
+            let other = writer(argv);
+            assert!(
+                other.contains("stdout") && !other.contains("stderr"),
+                "{argv:?}: {other}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_replay_names_its_user_and_its_flags_mean_nothing_without_it() {
+        assert!(Args::try_parse_from(["engram", "--replay-decisions"]).is_err());
+        let a = Args::try_parse_from([
+            "engram",
+            "--replay-decisions",
+            "--user",
+            "s",
+            "--question",
+            "pair_relation",
+            "--limit",
+            "5",
+            "--json",
+        ])
+        .unwrap();
+        assert!(a.replay_decisions && a.cli.json);
+        assert_eq!((a.question.as_deref(), a.limit), (Some("pair_relation"), 5));
+        assert_eq!(
+            Args::try_parse_from(["engram", "--replay-decisions", "--user", "s"])
+                .unwrap()
+                .limit,
+            200
+        );
+        for f in [&["--question", "x"][..], &["--limit", "5"]] {
+            let mut argv = vec!["engram"];
+            argv.extend_from_slice(f);
+            assert!(Args::try_parse_from(argv).is_err(), "{f:?}");
+        }
+        assert!(Args::try_parse_from(["engram"]).is_ok());
     }
 
     #[test]

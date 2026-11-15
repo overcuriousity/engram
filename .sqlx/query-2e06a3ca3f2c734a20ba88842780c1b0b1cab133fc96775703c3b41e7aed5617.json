@@ -332,6 +332,17 @@
             "name": "trashed_from"
           }
         }
+      },
+      {
+        "name": "category_by",
+        "ordinal": 30,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "category_by"
+          }
+        }
       }
     ],
     "parameters": {
@@ -364,6 +375,7 @@
       false,
       false,
       false,
+      true,
       true,
       true,
       true,

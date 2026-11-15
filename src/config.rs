@@ -1,3 +1,4 @@
+use crate::core::judging::band::Thresholds;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -201,6 +202,93 @@ pub struct DecideConfig {
     pub settled_at: f64,
     /// The share of bearing held by passages against the verdict that splits it.
     pub split_at: f64,
+    /// When background judgement acts, asks or leaves; `[decide.bands.<id>]` overrides one question.
+    pub bands: Bands,
+    /// Open questions to a person, at most, before the judge stops asking.
+    pub ask_open_max: usize,
+    /// Days an unanswered question stays open before it lapses.
+    pub ask_lapse_days: u32,
+    /// Judgements per tick, at most.
+    pub max_per_tick: usize,
+    /// Minutes between ticks.
+    pub tick_mins: u32,
+    /// A rewrite whose `complete` or `adds_nothing` is below this is not stored. A refusal line, not a pass line.
+    pub refuse_below: f64,
+    /// Searches a person judged a hit that the model also labelled, at least, before its labels may steer a sweep.
+    pub label_overlap_min: usize,
+    /// The share of those whose expected note the model called relevant, at least.
+    pub label_agree_min: f64,
+    /// The mean share of a search's candidates the model calls relevant, at most.
+    pub label_select_max: f64,
+    /// Decisions a line needs, acted or answered since it last moved, before the tuner moves it.
+    pub tune_min: usize,
+    /// The undone share a line is held to: above it the line rises a step, under half of it it falls one.
+    pub undo_target: f64,
+}
+
+/// Probability thresholds: from `act_at` the judge acts, from `ask_at` it asks a person.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct Bands {
+    pub act_at: f64,
+    pub ask_at: f64,
+    #[serde(flatten)]
+    pub per: HashMap<String, BandOverride>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct BandOverride {
+    pub act_at: Option<f64>,
+    pub ask_at: Option<f64>,
+}
+
+impl Default for Bands {
+    fn default() -> Self {
+        Self {
+            act_at: 0.90,
+            ask_at: 0.60,
+            per: Default::default(),
+        }
+    }
+}
+
+/// Starting lines per question, fixed from the replay on a real base (2026-11-14); a `[decide.bands.<id>]` in the file wins.
+const DEFAULTS: &[(&str, f64, f64)] = &[
+    // No burial or rescue has ever been judged on the base it was measured on: it asks, it does not act.
+    ("reap_worth", 0.99, 0.60),
+    // The gate before a pursuit is written; it opens no Unsure row, so a high line would switch pursuits off. The owner's line.
+    ("answerable", 0.85, 0.60),
+];
+
+impl Bands {
+    /// Per field: the file's `[decide.bands.<id>]` value, else the question's entry in `DEFAULTS`,
+    /// else the global `act_at` / `ask_at`. A built-in entry therefore outranks a global value set in
+    /// the file: the per-question line is the more specific one.
+    pub fn of(&self, question_id: &str) -> Thresholds {
+        let o = self.per.get(question_id);
+        let d = DEFAULTS.iter().find(|d| d.0 == question_id);
+        Thresholds {
+            act_at: o
+                .and_then(|o| o.act_at)
+                .or(d.map(|d| d.1))
+                .unwrap_or(self.act_at),
+            ask_at: o
+                .and_then(|o| o.ask_at)
+                .or(d.map(|d| d.2))
+                .unwrap_or(self.ask_at),
+        }
+    }
+
+    /// Every question with a line of its own, each once and in order: a `[decide.bands.<id>]` in
+    /// the file and the built-in entry for the same id are one line, and a refusal names the same
+    /// one on every start.
+    fn ids(&self) -> std::collections::BTreeSet<&str> {
+        self.per
+            .keys()
+            .map(String::as_str)
+            .chain(DEFAULTS.iter().map(|d| d.0))
+            .collect()
+    }
 }
 
 impl Default for DecideConfig {
@@ -210,6 +298,17 @@ impl Default for DecideConfig {
             bears_min: 0.5,
             settled_at: 0.80,
             split_at: 0.34,
+            bands: Bands::default(),
+            ask_open_max: 20,
+            ask_lapse_days: 30,
+            max_per_tick: 60,
+            tick_mins: 15,
+            refuse_below: 0.25,
+            label_overlap_min: 30,
+            label_agree_min: 0.85,
+            label_select_max: 0.30,
+            tune_min: 30,
+            undo_target: 0.05,
         }
     }
 }
@@ -243,7 +342,7 @@ impl Default for AssociateConfig {
             show_min: 2.0,
             judge_min: 4.0,
             judge_min_queries: 3,
-            judge_per_sweep: 10,
+            judge_per_sweep: 30,
             spread_from: 3,
             spread_max: default_spread_max(),
             prime_margin: 0.5,
@@ -448,14 +547,14 @@ impl Default for TimeConfig {
 }
 
 /// The reap sweep: bury long-retired artifacts the live base already states, rewrite the rest.
-/// Runs only in a declared `[reap]` block with a judge; see `Config::disable_undeclared_reap`.
+/// Runs only in a declared `[reap]` block; see `Config::disable_undeclared_reap`.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct ReapConfig {
     pub enabled: bool,
     pub interval_mins: u64,
     pub min_age_days: u64,
-    /// Model calls per run: the sweep's whole inference budget.
+    /// Decisions per run, inside the tick's judging budget.
     pub max_judged_per_run: u64,
     /// Rescue rewrites per run, so one bad batch cannot flood the base with model-written text.
     pub max_rescues_per_run: u64,
@@ -467,7 +566,7 @@ impl Default for ReapConfig {
             enabled: true,
             interval_mins: 1440,
             min_age_days: 90,
-            max_judged_per_run: 20,
+            max_judged_per_run: 50,
             max_rescues_per_run: 3,
         }
     }
@@ -597,6 +696,9 @@ pub struct ConsolidateConfig {
     /// real duplicate scored 0.789 and the next pair 0.036 over 3916 corpus pairs.
     pub near_dupe_min: f64,
     pub review_min: f32,
+    /// Cosine down to which neighbours are filed for the pair judge; below `review_min` a pair
+    /// never acts without a person. Must sit below `review_min`.
+    pub scan_min: f32,
     /// Cosine at or above which a pair goes to the dedupe judge first; never a hide on its own,
     /// since embeddings barely see negation. Must exceed `review_min`.
     pub auto_supersede: f32,
@@ -604,7 +706,8 @@ pub struct ConsolidateConfig {
     pub interval_hours: u64,
     /// How often the dedupe ticker arms units, in minutes: the budget is a rate the hardware sets.
     pub dedupe_interval_mins: u64,
-    /// Units armed per tick; zero switches the model off, while pairs are still found and recorded.
+    /// Decisions armed per tick, inside `decide.max_per_tick`; zero switches judging off, while
+    /// pairs are still found and recorded.
     pub max_dedupe_per_tick: usize,
     /// Days unverified (`last_verified_at`) before an active artifact is a deprecation candidate.
     pub stale_after_days: u32,
@@ -618,11 +721,12 @@ impl Default for ConsolidateConfig {
             enabled: true,
             near_dupe_min: 0.60,
             review_min: default_review_min(),
+            scan_min: 0.70,
             auto_supersede: 0.95,
             per_point: 5,
             interval_hours: 24,
             dedupe_interval_mins: 15,
-            max_dedupe_per_tick: 5,
+            max_dedupe_per_tick: 20,
             stale_after_days: 365,
             stale_max_hits: 0,
         }
@@ -1927,6 +2031,22 @@ impl Config {
                 c.auto_supersede, c.review_min
             )));
         }
+        if c.scan_min >= c.review_min {
+            return Err(ConfigError::Invalid(format!(
+                "consolidate.scan_min ({}) must be below consolidate.review_min ({}): \
+                 it is how far below the review line pairs are filed for a person",
+                c.scan_min, c.review_min
+            )));
+        }
+        // The wide net reaches down to here and no further: at 0 every neighbour is a pair to ask.
+        const SCAN_MIN_FLOOR: f32 = 0.70;
+        if c.scan_min.is_nan() || c.scan_min < SCAN_MIN_FLOOR {
+            return Err(ConfigError::Invalid(format!(
+                "consolidate.scan_min ({}) must be at least {SCAN_MIN_FLOOR:.2}: below it \
+                 neighbours that merely share a subject are filed as pairs to ask about",
+                c.scan_min
+            )));
+        }
         self.infer
             .embed
             .templates()
@@ -1950,6 +2070,10 @@ impl Config {
             ("decide.bears_min", dc.bears_min),
             ("decide.settled_at", dc.settled_at),
             ("decide.split_at", dc.split_at),
+            ("decide.refuse_below", dc.refuse_below),
+            ("decide.label_agree_min", dc.label_agree_min),
+            ("decide.label_select_max", dc.label_select_max),
+            ("decide.undo_target", dc.undo_target),
         ] {
             if !(0.0..=1.0).contains(&v) {
                 return Err(ConfigError::Invalid(format!(
@@ -1962,6 +2086,37 @@ impl Config {
                 "decide.joint_tokens ({}) is below 256: no excerpt would fit the joint read",
                 dc.joint_tokens
             )));
+        }
+        let mut bands = vec![("decide.bands".to_string(), dc.bands.of(""))];
+        bands.extend(
+            dc.bands
+                .ids()
+                .into_iter()
+                .map(|k| (format!("decide.bands.{k}"), dc.bands.of(k))),
+        );
+        for (key, t) in bands {
+            if !(0.0..=1.0).contains(&t.act_at) || !(0.0..=1.0).contains(&t.ask_at) {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} act_at ({}) and ask_at ({}) must be between 0 and 1: they are compared with a probability",
+                    t.act_at, t.ask_at
+                )));
+            }
+            if t.ask_at >= t.act_at {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} ask_at ({}) must be below act_at ({}): else nothing would be asked",
+                    t.ask_at, t.act_at
+                )));
+            }
+        }
+        if dc.ask_open_max < 1 {
+            return Err(ConfigError::Invalid(
+                "decide.ask_open_max is 0: it must be at least 1, or nothing the base is unsure of could ever be asked".into(),
+            ));
+        }
+        if dc.tick_mins < 1 {
+            return Err(ConfigError::Invalid(
+                "decide.tick_mins is 0: it must be at least 1, or a tick would have no length to budget".into(),
+            ));
         }
         let tz = self.time.default_tz.trim();
         if !tz.is_empty() && tz.parse::<chrono_tz::Tz>().is_err() {
@@ -3124,6 +3279,48 @@ mode = "off"
     }
 
     #[test]
+    fn scan_min_must_sit_below_review_min() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0.88", "0.90"] {
+            let p = write(
+                &dir,
+                &format!("{MINIMAL}\n[consolidate]\nreview_min = 0.88\nscan_min = {bad}\n"),
+            );
+            assert!(
+                matches!(Config::load(Some(&p)), Err(ConfigError::Invalid(_))),
+                "scan_min {bad}"
+            );
+        }
+        let p = write(&dir, MINIMAL);
+        assert_eq!(Config::load(Some(&p)).unwrap().consolidate.scan_min, 0.70);
+    }
+
+    #[test]
+    fn scan_min_below_the_wide_nets_floor_is_refused_by_name() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0.0", "0.5", "0.69", "-1.0"] {
+            let p = write(
+                &dir,
+                &format!("{MINIMAL}\n[consolidate]\nscan_min = {bad}\n"),
+            );
+            match Config::load(Some(&p)) {
+                Err(ConfigError::Invalid(why)) => {
+                    assert!(why.contains("consolidate.scan_min"), "{why}")
+                }
+                Err(e) => panic!("scan_min {bad}: {e}"),
+                Ok(_) => panic!("scan_min {bad} was accepted"),
+            }
+        }
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[consolidate]\nscan_min = 0.70\n"),
+        );
+        assert_eq!(Config::load(Some(&p)).unwrap().consolidate.scan_min, 0.70);
+    }
+
+    #[test]
     fn a_fingerprint_that_is_not_32_bytes_is_refused_at_startup() {
         // A typo here is a phone that refuses every connection with nothing saying why.
         let _guard = env_guard();
@@ -3228,6 +3425,122 @@ mode = "off"
             (d.joint_tokens, d.bears_min, d.settled_at, d.split_at),
             (2500, 0.5, 0.80, 0.34)
         );
+        assert_eq!(d.refuse_below, 0.25);
+        assert_eq!((d.tune_min, d.undo_target), (30, 0.05));
+    }
+
+    #[test]
+    fn bands_default_and_take_a_per_question_override() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        let base = Thresholds {
+            act_at: 0.90,
+            ask_at: 0.60,
+        };
+        assert_eq!(d.bands.of("x"), base);
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nact_at = 0.97\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!(
+            d.bands.of("reap_worth"),
+            Thresholds {
+                act_at: 0.97,
+                ask_at: 0.60
+            }
+        );
+        assert_eq!(d.bands.of("x"), base);
+    }
+
+    #[test]
+    fn bands_start_per_question_from_the_replay() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let t = |a, k| Thresholds {
+            act_at: a,
+            ask_at: k,
+        };
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        assert_eq!(d.bands.of("reap_worth"), t(0.99, 0.60));
+        assert_eq!(d.bands.of("answerable"), t(0.85, 0.60));
+        for id in ["pair_relation", "link_kind", "answers_query", "unknown"] {
+            assert_eq!(d.bands.of(id), t(0.90, 0.60), "{id}");
+        }
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nact_at = 0.97\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!(d.bands.of("reap_worth"), t(0.97, 0.60));
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nask_at = 0.70\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!(d.bands.of("reap_worth"), t(0.99, 0.70));
+    }
+
+    #[test]
+    fn an_ask_at_above_a_built_in_act_at_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!("{MINIMAL}\n[decide.bands.reap_worth]\nask_at = 0.995\n");
+        match Config::load(Some(&write(&dir, &body))) {
+            Err(ConfigError::Invalid(m)) => assert!(m.contains("decide.bands.reap_worth"), "{m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_band_out_of_order_is_refused() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for body in [
+            format!("{MINIMAL}\n[decide.bands]\nask_at = 0.95\n"),
+            format!("{MINIMAL}\n[decide.bands]\nact_at = 1.2\n"),
+            format!("{MINIMAL}\n[decide.bands.q]\nask_at = 0.95\n"),
+        ] {
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => assert!(m.contains("decide.bands"), "{m}"),
+                other => panic!("expected Invalid, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_question_named_in_the_file_and_built_in_is_validated_once() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL}\n[decide.bands.reap_worth]\nact_at = 0.97\n\n[decide.bands.q]\nact_at = 0.95\n"
+        );
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        let ids: Vec<&str> = d.bands.ids().into_iter().collect();
+        assert_eq!(
+            ids.len(),
+            DEFAULTS.len() + 1,
+            "the file's reap_worth and the built-in one are one line: {ids:?}"
+        );
+        for id in ["q", "reap_worth"] {
+            assert_eq!(ids.iter().filter(|i| **i == id).count(), 1, "{id}");
+        }
+        // An id no built-in line knows is refused in one sentence that names it once.
+        let body = format!("{MINIMAL}\n[decide.bands.q]\nask_at = 0.95\n");
+        match Config::load(Some(&write(&dir, &body))) {
+            Err(ConfigError::Invalid(m)) => {
+                assert_eq!(m.matches("decide.bands.q").count(), 1, "{m}")
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_caps_default_to_the_spec() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let d = Config::load(Some(&write(&dir, MINIMAL))).unwrap().decide;
+        assert_eq!(
+            (
+                d.ask_open_max,
+                d.ask_lapse_days,
+                d.max_per_tick,
+                d.tick_mins
+            ),
+            (20, 30, 60, 15)
+        );
     }
 
     #[test]
@@ -3238,6 +3551,8 @@ mode = "off"
             ("settled_at = 1.2", "decide.settled_at"),
             ("bears_min = -0.1", "decide.bears_min"),
             ("split_at = 2.0", "decide.split_at"),
+            ("refuse_below = 1.5", "decide.refuse_below"),
+            ("refuse_below = -0.1", "decide.refuse_below"),
             ("joint_tokens = 100", "decide.joint_tokens"),
         ] {
             let body = format!("{MINIMAL}\n[decide]\n{line}\n");
@@ -3246,6 +3561,32 @@ mode = "off"
                 other => panic!("expected Invalid for {key}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn a_zero_seat_count_or_a_zero_tick_is_refused_naming_its_own_key() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for (line, key, other) in [
+            (
+                "ask_open_max = 0",
+                "decide.ask_open_max",
+                "decide.tick_mins",
+            ),
+            ("tick_mins = 0", "decide.tick_mins", "decide.ask_open_max"),
+        ] {
+            let body = format!("{MINIMAL}\n[decide]\n{line}\n");
+            match Config::load(Some(&write(&dir, &body))) {
+                Err(ConfigError::Invalid(m)) => {
+                    assert!(m.contains(key), "{m}");
+                    assert!(!m.contains(other), "the key that is fine is named: {m}");
+                }
+                other => panic!("expected Invalid for {key}, got {other:?}"),
+            }
+        }
+        let body = format!("{MINIMAL}\n[decide]\nask_open_max = 1\ntick_mins = 1\n");
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        assert_eq!((d.ask_open_max, d.tick_mins), (1, 1));
     }
 
     #[test]

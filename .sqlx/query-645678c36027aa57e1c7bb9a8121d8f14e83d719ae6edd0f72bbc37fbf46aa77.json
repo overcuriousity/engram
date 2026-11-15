@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT answer FROM artifact_readings\n              WHERE artifact_id = ? AND question_id = ? AND question_version = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "answer",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_readings",
+            "name": "answer"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "645678c36027aa57e1c7bb9a8121d8f14e83d719ae6edd0f72bbc37fbf46aa77"
+}

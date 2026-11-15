@@ -51,6 +51,9 @@ fn keeper(members: &[Chunk]) -> Option<&Chunk> {
     members.iter().max_by_key(|c| (c.created_at, c.id.as_str()))
 }
 
+/// How a pair this pass closed on similarity alone begins its detail; no judge ruled on it.
+pub(crate) const NEAR_IDENTICAL: &str = "near-identical";
+
 /// `known` is false when a member could not be read; closing on that would settle a live pair for
 /// good.
 fn close_filed_pair(
@@ -67,15 +70,17 @@ fn close_filed_pair(
     match (a_live, b_live) {
         // Both still in results: a supersede failed and warned; the pair stays filed.
         (true, true) => None,
-        (true, false) => Some(format!("near-identical; {a_id} kept")),
-        (false, true) => Some(format!("near-identical; {b_id} kept")),
-        (false, false) => Some("near-identical; neither side is in results any more".to_string()),
+        (true, false) => Some(format!("{NEAR_IDENTICAL}; {a_id} kept")),
+        (false, true) => Some(format!("{NEAR_IDENTICAL}; {b_id} kept")),
+        (false, false) => Some(format!(
+            "{NEAR_IDENTICAL}; neither side is in results any more"
+        )),
     }
 }
 
 /// `claim_job` orders by `(state, attempts, seq, id)`, so this puts hygiene behind every capture
 /// window.
-const DEDUPE_SEQ_BASE: i64 = 1_000_000;
+pub(crate) const DEDUPE_SEQ_BASE: i64 = 1_000_000;
 
 pub(crate) fn lifecycle_row_of(c: &Chunk) -> crate::vector::LifecycleRow {
     crate::vector::LifecycleRow {
@@ -309,36 +314,39 @@ async fn follow_supersessions(core: &Core) -> Result<crate::store::pairs::Follow
     Ok(out)
 }
 
-/// `max_dedupe_per_tick` bounds what one tick arms, not units in flight; `live_job` arms a pair
-/// once.
+/// Arms `min(max_dedupe_per_tick, judging_budget())` decisions, not units in flight; `live_job`
+/// arms a pair once. Pairs awaiting their writer are not decisions: their `Stage::Merge` is
+/// re-armed here, outside the budget, when a writer is configured.
 pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
     // Zero is the off switch for the model; `reconcile` drains older bases regardless.
     if core.consolidate.max_dedupe_per_tick == 0 {
         return Ok(0);
     }
-    // Arming nothing when the budget is spent is what lets the empty-run backoff engage.
-    if !core.may_act(crate::store::actions::Job::Dedupe).await? {
-        tracing::info!("budget spent; no pairs armed until the window moves");
-        return Ok(0);
+    // No `may_act` here: a decision is not an action. Past the cap an act waits (`settle`).
+    // An ask whose first run wrote nothing; `pairs_awaiting_synthesis` excludes merged and
+    // unparseable pairs, so it cannot loop.
+    if core.pair_synthesizer.is_some() {
+        for p in core.store.pairs_awaiting_synthesis(200).await? {
+            core.store
+                .rearm_idle_seq(Stage::Merge, "pair", &p.id.to_string(), DEDUPE_SEQ_BASE)
+                .await?;
+        }
     }
-    // Asked pairs lead and are often `Duplicate`, not `Pending`; this re-arms an ask whose first
-    // run wrote nothing. `pairs_awaiting_synthesis` excludes merged and unparseable pairs, so it
-    // cannot loop.
-    let asked = core.store.pairs_awaiting_synthesis(200).await?;
-    let pending = core.store.pairs_to_judge(200).await?;
-    // An asked `Pending` pair is in both lists; dedupe so it takes one budget slot.
-    let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-    let queue: Vec<_> = asked
-        .into_iter()
-        .chain(pending)
-        .filter(|p| seen.insert(p.id))
-        .collect();
+    let era = crate::core::judging::band::era(
+        core.decider.model(),
+        crate::core::judging::catalogue::pair_relation().version,
+    );
+    let queue = core.store.pairs_to_judge(&era, 200).await?;
+    let budget = core
+        .consolidate
+        .max_dedupe_per_tick
+        .min(core.judging_budget().await?);
 
     let mut armed = 0usize;
     for p in queue {
-        if armed >= core.consolidate.max_dedupe_per_tick {
+        if armed >= budget {
             tracing::info!(
-                budget = core.consolidate.max_dedupe_per_tick,
+                budget,
                 "dedupe budget spent; the rest wait for the next tick"
             );
             break;
@@ -355,10 +363,6 @@ pub(crate) async fn arm_dedupe(core: &Core) -> Result<usize> {
 
         // `Core::supersede` would refuse a verdict on a retired member. The unit checks again.
         if !a_live || !b_live {
-            // The card reads a standing flag as "the writing is queued".
-            if p.synthesis_asked {
-                core.store.clear_pair_synthesis(p.id).await?;
-            }
             core.store
                 .set_pair_state(
                     p.id,
@@ -1048,10 +1052,7 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_pair_whose_member_was_since_hidden_never_reaches_the_model() {
-        let mut core = test_core().await;
-        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.judge = Some(completer.clone());
-        // Judge off, so the only call this can count is the second sweep's.
+        let core = test_core().await;
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
         assert_eq!(
@@ -1077,7 +1078,6 @@ pub(crate) mod tests {
             .unwrap();
 
         let out = run(&core).await.unwrap();
-        assert_eq!(completer.calls(), 0, "the judge ruled on a hidden artifact");
         assert_eq!(out.judged, 0);
         assert!(
             core.store
@@ -1092,20 +1092,13 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_pair_whose_member_was_deprecated_never_reaches_the_dedupe_pass() {
         // `Core::supersede` refuses a deprecated side, which never sets `superseded_by`.
-        let mut core = test_core().await;
-        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![]));
-        core.judge = Some(completer.clone());
+        let core = test_core().await;
         let ids = disagreeing(&core).await;
         run(&core).await.unwrap();
 
         core.deprecate(&ids[0]).await.unwrap();
 
         let out = run(&core).await.unwrap();
-        assert_eq!(
-            completer.calls(),
-            0,
-            "the judge ruled on a deprecated artifact"
-        );
         assert_eq!(out.judged, 0);
         assert!(
             core.store
@@ -1565,15 +1558,50 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn a_pair_settled_or_asked_for_writing_is_never_armed_for_a_decision() {
+        use crate::store::pairs::DecidedBy;
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [0.9, 0.1]),
+                ("three", [0.8, 0.2]),
+                ("four", [0.7, 0.3]),
+            ],
+        )
+        .await;
+        let mut pairs = Vec::new();
+        for w in ids.chunks(2) {
+            core.store.record_pair(&w[0], &w[1], 0.91).await.unwrap();
+            let p = core.store.pair_between(&w[0], &w[1]).await.unwrap();
+            pairs.push(p.unwrap().id);
+        }
+        assert!(core.store.ask_pair_synthesis(pairs[0]).await.unwrap());
+        core.store
+            .set_pair_state(pairs[1], PairState::NoConflict, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0);
+
+        for id in pairs {
+            assert!(
+                !core
+                    .store
+                    .live_job(Stage::Dedupe, &id.to_string())
+                    .await
+                    .unwrap(),
+                "a pair that is no longer a question was armed for one"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn the_dedupe_pass_stops_at_its_budget() {
         let mut core = test_core().await;
         core.consolidate.max_dedupe_per_tick = 1;
-        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-        ]));
-        core.judge = Some(completer.clone());
+        let completer = crate::jobs::dedupe::tests::deciding(&mut core, "distinct", 0.95);
         seed_related(
             &core,
             &[
@@ -1585,7 +1613,7 @@ pub(crate) mod tests {
         .await;
 
         sweep_and_dedupe(&core).await;
-        assert_eq!(completer.calls(), 1, "the budget was ignored");
+        assert_eq!(pair_calls(&completer), 1, "the budget was ignored");
     }
 
     #[tokio::test]
@@ -1759,10 +1787,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_sweep_makes_no_inference_call_and_arms_one_unit_per_pair() {
         let mut core = test_core().await;
-        let completer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
-            r#"{"relation":"distinct","detail":"different subjects"}"#.into(),
-        ]));
-        core.judge = Some(completer.clone());
+        let completer = crate::jobs::dedupe::tests::deciding(&mut core, "distinct", 0.95);
         disagreeing(&core).await;
 
         let out = run(&core).await.unwrap();
@@ -1778,16 +1803,28 @@ pub(crate) mod tests {
         assert_eq!(armed, 1);
 
         while crate::jobs::run_one(&core).await.unwrap() {}
-        assert_eq!(completer.calls(), 1);
+        assert_eq!(pair_calls(&completer), 1);
+    }
+
+    /// The calls that were not a note's reading (a swapped read keys its questions `q0`, `q0r`).
+    fn pair_calls(d: &crate::infer::fake::RuleDecider) -> usize {
+        d.requests()
+            .iter()
+            .filter(|(_, qs)| !qs.iter().any(|q| q.key == "category"))
+            .count()
     }
 
     #[tokio::test]
     async fn a_pair_the_model_keeps_failing_on_goes_to_the_back_of_the_queue() {
         let mut core = test_core().await;
         core.consolidate.max_dedupe_per_tick = 1;
-        core.judge = Some(std::sync::Arc::new(
-            crate::infer::fake::ScriptedCompleter::new(vec!["not json".into()]),
-        ));
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::InferenceRejected {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        let era = crate::core::judging::band::era("rule-decider", 1);
         let ids = seed(
             &core,
             &[
@@ -1813,7 +1850,7 @@ pub(crate) mod tests {
         for _ in 0..20 {
             let asked = core
                 .store
-                .pairs_to_judge(10)
+                .pairs_to_judge(&era, 10)
                 .await
                 .unwrap()
                 .iter()
@@ -1828,7 +1865,7 @@ pub(crate) mod tests {
             assert!(crate::jobs::run_one(&core).await.unwrap(), "queue ran dry");
         }
 
-        let pending = core.store.pairs_to_judge(10).await.unwrap();
+        let pending = core.store.pairs_to_judge(&era, 10).await.unwrap();
         assert_eq!(pending.len(), 2, "{pending:?}");
         assert_eq!(pending[0].judge_attempts, 0, "{pending:?}");
         assert_eq!(pending[1].judge_attempts, 1, "{pending:?}");
@@ -1984,21 +2021,43 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn a_spent_day_arms_no_pairs_rather_than_arming_the_same_ones_for_ever() {
+    async fn a_spent_day_still_arms_decisions_that_wait_rather_than_act() {
+        use crate::core::judging::band::Band;
+        use crate::store::decision_log::State;
         let mut core = test_core().await;
+        crate::jobs::dedupe::tests::deciding(&mut core, "b_replaces_a", 0.95);
         core.evolve.autonomous = crate::config::Autonomy::Full;
         core.evolve.max_actions_per_day = 0;
-        disagreeing(&core).await;
-        assert_eq!(arm_dedupe(&core).await.unwrap(), 0, "nothing is armed");
+        let ids = disagreeing(&core).await;
         assert_eq!(
-            core.store
-                .pairs_by_state(PairState::Pending, 10)
-                .await
-                .unwrap()
-                .len(),
+            arm_dedupe(&core).await.unwrap(),
             1,
-            "and the pair waits, exactly as it was"
+            "a decision is not an action"
         );
+        while crate::jobs::run_one(&core).await.unwrap() {}
+
+        let pair = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap();
+        assert_eq!(pair.len(), 1, "and the pair waits, exactly as it was");
+        let era = crate::core::judging::band::era("rule-decider", 1);
+        let d = core
+            .store
+            .last_logged("pair_relation", &pair[0].id.to_string(), None, &era)
+            .await
+            .unwrap()
+            .expect("the pair was asked");
+        assert_eq!((d.band, d.state), (Band::Act, State::Waiting));
+        for id in &ids {
+            assert!(
+                core.store.get_artifact(id).await.unwrap().in_results(),
+                "a note left results though the day was spent"
+            );
+        }
+        // Asked once: the waiting decision keeps it off the queue, not re-armed for ever.
+        assert_eq!(arm_dedupe(&core).await.unwrap(), 0);
     }
 
     #[test]

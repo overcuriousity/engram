@@ -89,6 +89,37 @@ impl PairState {
     }
 }
 
+/// Why a pair was filed when it may not act alone; `None` on a plain pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Net {
+    /// Similarity alone, or corroborated below the review line.
+    Wide,
+    /// A judged decision queued it.
+    Decide,
+    /// A neighbour shown at capture was judged a duplicate or a contradiction of the new note.
+    Shown,
+}
+
+impl Net {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Net::Wide => "wide",
+            Net::Decide => "decide",
+            Net::Shown => "shown",
+        }
+    }
+
+    /// Anything unrecognised reads as `Wide`: an unknown net must not act alone.
+    fn parse(s: &str) -> Self {
+        match s {
+            "decide" => Net::Decide,
+            "shown" => Net::Shown,
+            _ => Net::Wide,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BandRecord {
     pub judged: usize,
@@ -157,12 +188,16 @@ pub struct ArtifactPair {
     pub judge_unreadable: i64,
     /// A column, not a `PairState`: it records a person's decision beside the judge's finding.
     pub synthesis_asked: bool,
+    /// Who asked for the writing; `None` on an older ask, which was a person's.
+    pub synthesis_by: Option<DecidedBy>,
     /// Which artifact the judge named obsolete, when `state` is `Superseded`.
     /// Lets the review UI offer "apply supersede" without asking the model
     /// again.
     pub obsolete_id: Option<String>,
     /// Lets the stranded-merge reap reopen exactly the pairs a never-embedded merge closed.
     pub merged_into: Option<String>,
+    /// `Some` when the pair may not act without a person, whatever its score.
+    pub net: Option<Net>,
 }
 
 /// Two counts: `jobs::did_work` reads this report, and counting only `moved` made the sweep
@@ -201,6 +236,8 @@ pub(crate) struct PairRow {
     pub merged_into: Option<String>,
     pub decided_by: Option<String>,
     pub synthesis_asked: i64,
+    pub synthesis_by: Option<String>,
+    pub net: Option<String>,
 }
 
 pub(crate) fn row_to_pair(r: PairRow) -> ArtifactPair {
@@ -218,24 +255,15 @@ pub(crate) fn row_to_pair(r: PairRow) -> ArtifactPair {
         obsolete_id: r.obsolete_id,
         merged_into: r.merged_into,
         synthesis_asked: r.synthesis_asked != 0,
+        synthesis_by: r.synthesis_by.as_deref().and_then(DecidedBy::parse),
+        net: r.net.as_deref().map(Net::parse),
     }
 }
 
 impl Store {
     /// `INSERT OR IGNORE`, not an upsert: re-arming a dismissed row defeats dismissing.
     pub async fn record_pair(&self, a: &str, b: &str, score: f32) -> Result<bool> {
-        let (a, b) = if a <= b { (a, b) } else { (b, a) };
-        let res = sqlx::query!(
-            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)
-             VALUES (?, ?, ?, 'pending', ?)",
-            a,
-            b,
-            score as f64,
-            now()
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(res.rows_affected() > 0)
+        self.record_pair_in(a, b, score, None, None).await
     }
 
     /// A duplicate found via a link has no cosine: `score` is zero and `detail` explains.
@@ -246,14 +274,45 @@ impl Store {
         score: f32,
         detail: &str,
     ) -> Result<bool> {
+        self.record_pair_in(a, b, score, None, Some(detail)).await
+    }
+
+    /// A verdict queueing a pair that is already pending restricts it; never loosens a net.
+    pub async fn restrict_pending_pair(&self, a: &str, b: &str, net: Net) -> Result<()> {
         let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let net = net.as_str();
+        sqlx::query!(
+            "UPDATE artifact_pairs SET net = ?
+              WHERE a_id = ? AND b_id = ? AND state = 'pending' AND net IS NULL",
+            net,
+            a,
+            b
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// `record_pair` with the net that filed it. A row already there keeps its net, as it keeps
+    /// its state.
+    pub async fn record_pair_in(
+        &self,
+        a: &str,
+        b: &str,
+        score: f32,
+        net: Option<Net>,
+        detail: Option<&str>,
+    ) -> Result<bool> {
+        let (a, b) = if a <= b { (a, b) } else { (b, a) };
+        let net = net.map(|n| n.as_str());
         let res = sqlx::query!(
-            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, detail, created_at)
-             VALUES (?, ?, ?, 'pending', ?, ?)",
+            "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, detail, net, created_at)
+             VALUES (?, ?, ?, 'pending', ?, ?, ?)",
             a,
             b,
             score as f64,
             detail,
+            net,
             now()
         )
         .execute(&self.pool)
@@ -341,7 +400,8 @@ impl Store {
     }
 
     /// All counts are pairs, not journal rows (a merge writes one per original), over one set:
-    /// pairs a verdict settled, or whose verdict led to a journal row. Operator asks excluded.
+    /// pairs a verdict settled, or whose verdict led to a journal row. Operator asks excluded, and
+    /// so is the wide net, which never acts alone.
     pub async fn band_record(&self, lo: f32, hi: f32) -> Result<BandRecord> {
         let r = sqlx::query!(
             "WITH acts AS (
@@ -357,7 +417,7 @@ impl Store {
                     COALESCE(SUM(acts.undone), 0) AS undone
                FROM artifact_pairs p
                LEFT JOIN acts ON acts.pair_id = p.id
-              WHERE p.score >= ? AND p.score < ? AND p.state <> 'pending'
+              WHERE p.score >= ? AND p.score < ? AND p.state <> 'pending' AND p.net IS NULL
                 AND (p.decided_by IN ('model', 'evidence') OR acts.pair_id IS NOT NULL)",
             lo,
             hi
@@ -448,14 +508,25 @@ impl Store {
         Ok(())
     }
 
-    /// The press is the judgement; the dedupe unit then uses the write-only prompt, since the
+    /// The press is the judgement; the merge unit then uses the write-only prompt, since the
     /// judge is unreliable on this class. Only while awaiting review, checked in the statement.
     pub async fn ask_pair_synthesis(&self, id: i64) -> Result<bool> {
+        self.ask_pair_synthesis_by(id, DecidedBy::Operator).await
+    }
+
+    /// `ask_pair_synthesis`, recording who asked: a decision, or a person. A first ask starts the
+    /// writer's count of unreadable drafts: what an earlier judge left on the row is not its own.
+    pub async fn ask_pair_synthesis_by(&self, id: i64, by: DecidedBy) -> Result<bool> {
         let holes = vec!["?"; AWAITING_REVIEW.len()].join(", ");
         // runtime: one placeholder per item in the IN list.
         let mut q = sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE artifact_pairs SET synthesis_asked = 1 WHERE id = ? AND state IN ({holes})"
+            "UPDATE artifact_pairs SET synthesis_by = ?,
+                    judge_unreadable =
+                        CASE WHEN synthesis_asked = 1 THEN judge_unreadable ELSE 0 END,
+                    synthesis_asked = 1
+              WHERE id = ? AND state IN ({holes})"
         )))
+        .bind(by.as_str())
         .bind(id);
         for state in AWAITING_REVIEW {
             q = q.bind(state.as_str());
@@ -467,6 +538,14 @@ impl Store {
     /// the head of every reconcile sweep. `Oversized` is left to `reopen_oversized`.
     pub async fn drain_waiting_pairs(&self) -> Result<DrainCounts> {
         let mut tx = self.pool.begin().await?;
+        // An ask past the writer's ceiling is in no queue: dropped, so the card promises nothing.
+        sqlx::query!(
+            "UPDATE artifact_pairs SET synthesis_asked = 0, synthesis_by = NULL
+              WHERE synthesis_asked = 1 AND merged_into IS NULL AND judge_unreadable >= ?",
+            MAX_UNREADABLE_JUDGEMENTS
+        )
+        .execute(&mut *tx)
+        .await?;
         let rejudged = sqlx::query!(
             "UPDATE artifact_pairs SET state = 'pending', decided_by = NULL
               WHERE (state = 'duplicate' AND merged_into IS NULL AND synthesis_asked = 0)
@@ -493,7 +572,7 @@ impl Store {
     /// Called when the merge path refuses the draft.
     pub async fn clear_pair_synthesis(&self, id: i64) -> Result<()> {
         sqlx::query!(
-            "UPDATE artifact_pairs SET synthesis_asked = 0 WHERE id = ?",
+            "UPDATE artifact_pairs SET synthesis_asked = 0, synthesis_by = NULL WHERE id = ?",
             id
         )
         .execute(&self.pool)
@@ -502,7 +581,7 @@ impl Store {
     }
 
     /// Not by state: `synthesis_asked` says the writing is owed, `merged_into` whether done.
-    /// Held back past `MAX_UNREADABLE_JUDGEMENTS`, like `pairs_to_judge`.
+    /// Held back past `MAX_UNREADABLE_JUDGEMENTS`: the writer's own cap on unreadable replies.
     pub async fn pairs_awaiting_synthesis(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
         let rows = sqlx::query_as!(
             crate::store::pairs::PairRow,
@@ -717,7 +796,7 @@ impl Store {
     }
 
     /// Counters, detail and `decided_by` reset: the question is asked again from nothing.
-    async fn reopen_pair(&self, id: i64) -> Result<()> {
+    pub(crate) async fn reopen_pair(&self, id: i64) -> Result<()> {
         sqlx::query!(
             "UPDATE artifact_pairs
                 SET state = 'pending', detail = NULL, obsolete_id = NULL, merged_into = NULL,
@@ -728,6 +807,39 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// A pending pair nobody asked to have written goes back to the head of its question: only
+    /// the counters reset. False: it was settled or asked for writing meanwhile, and is left.
+    pub(crate) async fn requeue_pending_pair(&self, id: i64) -> Result<bool> {
+        let res = sqlx::query!(
+            "UPDATE artifact_pairs SET judge_attempts = 0, judge_unreadable = 0
+              WHERE id = ? AND state = 'pending' AND synthesis_asked = 0",
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// The live merge written from exactly these two, when a run wrote one and failed before the
+    /// pair named it. A source a person restored out of a merge is no longer in it.
+    pub async fn merge_written_from(&self, a: &str, b: &str) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT m.id AS "id!" FROM artifacts m
+                WHERE m.provenance = 'merged' AND m.status = 'active' AND m.superseded_by IS NULL
+                  AND EXISTS (SELECT 1 FROM artifact_sources s
+                               WHERE s.child_id = m.id AND s.via_id = ?1 AND s.restored = 0)
+                  AND EXISTS (SELECT 1 FROM artifact_sources s
+                               WHERE s.child_id = m.id AND s.via_id = ?2 AND s.restored = 0)
+                  AND NOT EXISTS (SELECT 1 FROM artifact_sources s
+                                   WHERE s.child_id = m.id AND s.via_id NOT IN (?1, ?2))
+                ORDER BY m.created_at DESC, m.id DESC LIMIT 1"#,
+            a,
+            b
+        )
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     /// The still-open states, written once for the three queries that carry, list and repair
@@ -1015,15 +1127,29 @@ impl Store {
         Ok(res.rows_affected())
     }
 
-    /// Least-attempted first, then score, so unreadable pairs do not absorb every budget.
-    /// Past `MAX_UNREADABLE_JUDGEMENTS` held back: they stay on the operator's queue.
-    pub async fn pairs_to_judge(&self, limit: i64) -> Result<Vec<ArtifactPair>> {
+    /// Pending pairs with no decision in this era on their members as they are now; one asked
+    /// again (`asked_again`, `changed`) does not count, and a pair awaiting its writer is the merge
+    /// unit's. Order: a verdict's pairs, then links, while untried; then fewest tries.
+    pub async fn pairs_to_judge(&self, era: &str, limit: i64) -> Result<Vec<ArtifactPair>> {
         let rows = sqlx::query_as!(
             crate::store::pairs::PairRow,
-            "SELECT * FROM artifact_pairs
-              WHERE state = 'pending' AND judge_unreadable < ?
-              ORDER BY judge_attempts ASC, score DESC, created_at DESC LIMIT ?",
-            MAX_UNREADABLE_JUDGEMENTS,
+            r#"SELECT p.id AS "id!", p.a_id, p.b_id, p.score, p.state, p.detail, p.created_at,
+                      p.judge_attempts, p.judge_unreadable, p.obsolete_id, p.merged_into,
+                      p.decided_by, p.synthesis_asked, p.synthesis_by, p.net
+                 FROM artifact_pairs p
+                 JOIN artifacts a ON a.id = p.a_id
+                 JOIN artifacts b ON b.id = p.b_id
+                WHERE p.state = 'pending' AND p.synthesis_asked = 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM decisions d
+                       WHERE d.question_id = 'pair_relation' AND d.subject_kind = 'pair'
+                         AND d.subject_a = CAST(p.id AS TEXT) AND d.era = ?
+                         AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
+                         AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
+                ORDER BY (COALESCE(p.net = 'decide', 0) AND p.judge_attempts = 0) DESC,
+                         (p.score = 0 AND p.judge_attempts = 0) DESC,
+                         p.judge_attempts ASC, p.score DESC, p.created_at DESC LIMIT ?"#,
+            era,
             limit
         )
         .fetch_all(&self.pool)
@@ -1186,6 +1312,117 @@ mod tests {
                 undone: 0
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_pair_a_person_or_a_link_queued_is_asked_before_the_wide_net() {
+        let s = Store::memory().await.unwrap();
+        let (wa, wb) = two_artifacts(&s).await;
+        s.record_pair_in(&wa, &wb, 0.80, Some(Net::Wide), None)
+            .await
+            .unwrap();
+        let (la, lb) = two_artifacts(&s).await;
+        s.record_pair_with_detail(&la, &lb, 0.0, "link")
+            .await
+            .unwrap();
+        let (da, db) = two_artifacts(&s).await;
+        s.record_pair_in(&da, &db, 0.0, Some(Net::Decide), Some("decide"))
+            .await
+            .unwrap();
+        let mut want = Vec::new();
+        for (a, b) in [(&da, &db), (&la, &lb), (&wa, &wb)] {
+            want.push(s.pair_between(a, b).await.unwrap().unwrap().id);
+        }
+
+        let got: Vec<i64> = s
+            .pairs_to_judge("era", 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(got, want);
+    }
+
+    #[tokio::test]
+    async fn a_queued_pair_the_decider_failed_on_falls_behind_the_untried_ones() {
+        let s = Store::memory().await.unwrap();
+        let (wa, wb) = two_artifacts(&s).await;
+        s.record_pair_in(&wa, &wb, 0.80, Some(Net::Wide), None)
+            .await
+            .unwrap();
+        let (la, lb) = two_artifacts(&s).await;
+        s.record_pair_with_detail(&la, &lb, 0.0, "link")
+            .await
+            .unwrap();
+        let (da, db) = two_artifacts(&s).await;
+        s.record_pair_in(&da, &db, 0.0, Some(Net::Decide), Some("decide"))
+            .await
+            .unwrap();
+        let wide = s.pair_between(&wa, &wb).await.unwrap().unwrap().id;
+        let link = s.pair_between(&la, &lb).await.unwrap().unwrap().id;
+        let decide = s.pair_between(&da, &db).await.unwrap().unwrap().id;
+
+        s.record_judge_attempt(decide).await.unwrap();
+        let queue: Vec<i64> = s
+            .pairs_to_judge("era", 10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(
+            queue,
+            [link, wide, decide],
+            "a verdict's pair that cost a call and was not answered still leads"
+        );
+
+        s.record_judge_attempt(link).await.unwrap();
+        let queue = s.pairs_to_judge("era", 10).await.unwrap();
+        assert_eq!(
+            queue[0].id, wide,
+            "a hand-over the decider failed on is still ahead of an untried pair"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pending_plain_pair_a_verdict_queues_becomes_restricted_and_never_less() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        s.restrict_pending_pair(&a, &b, Net::Decide).await.unwrap();
+        assert_eq!(
+            s.pair_between(&a, &b).await.unwrap().unwrap().net,
+            Some(Net::Decide)
+        );
+
+        let (c, d) = two_artifacts(&s).await;
+        s.record_pair_in(&c, &d, 0.75, Some(Net::Wide), None)
+            .await
+            .unwrap();
+        s.restrict_pending_pair(&c, &d, Net::Decide).await.unwrap();
+        assert_eq!(
+            s.pair_between(&c, &d).await.unwrap().unwrap().net,
+            Some(Net::Wide),
+            "a wide row is already restricted"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_band_record_leaves_out_the_pairs_that_may_not_act_alone() {
+        // The tuner moves the line for pairs that may act; a wide-net pair never does alone.
+        let s = Store::memory().await.unwrap();
+        for net in [Net::Wide, Net::Decide, Net::Shown] {
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair_in(&a, &b, 0.90, Some(net), None)
+                .await
+                .unwrap();
+            let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+            s.set_pair_state(id, PairState::NoConflict, None, DecidedBy::Model)
+                .await
+                .unwrap();
+        }
+        assert_eq!(s.band_record(0.88, 1.0).await.unwrap().judged, 0);
     }
 
     #[tokio::test]
@@ -1358,19 +1595,144 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pair_the_judge_can_never_read_stops_costing_calls() {
+    async fn a_first_ask_for_writing_starts_the_writers_count_and_a_repeated_ask_keeps_it() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+        // What a judge left on the row before anyone asked for writing.
+        for _ in 0..MAX_UNREADABLE_JUDGEMENTS - 1 {
+            s.record_unreadable_judgement(id).await.unwrap();
+        }
+
+        assert!(s.ask_pair_synthesis(id).await.unwrap());
+        assert_eq!(
+            s.get_pair(id).await.unwrap().judge_unreadable,
+            0,
+            "a judge's unreadable replies were held against the writer"
+        );
+
+        s.record_unreadable_judgement(id).await.unwrap();
+        assert!(s.ask_pair_synthesis_by(id, DecidedBy::Model).await.unwrap());
+        assert_eq!(
+            s.get_pair(id).await.unwrap().judge_unreadable,
+            1,
+            "asking again forgave the writer's own unreadable draft"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_drain_drops_an_ask_the_writer_can_no_longer_serve() {
+        let s = Store::memory().await.unwrap();
+        let mut ids = Vec::new();
+        for unreadable in [MAX_UNREADABLE_JUDGEMENTS - 1, MAX_UNREADABLE_JUDGEMENTS] {
+            let (a, b) = two_artifacts(&s).await;
+            s.record_pair(&a, &b, 0.91).await.unwrap();
+            let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+            assert!(s.ask_pair_synthesis(id).await.unwrap());
+            for _ in 0..unreadable {
+                s.record_unreadable_judgement(id).await.unwrap();
+            }
+            ids.push(id);
+        }
+
+        s.drain_waiting_pairs().await.unwrap();
+
+        assert!(
+            s.get_pair(ids[0]).await.unwrap().synthesis_asked,
+            "an ask the writer may still serve was dropped"
+        );
+        let stuck = s.get_pair(ids[1]).await.unwrap();
+        assert!(
+            !stuck.synthesis_asked,
+            "an ask in neither queue still promises a synthesis"
+        );
+        assert_eq!(stuck.state, PairState::Pending, "it stays for a person");
+    }
+
+    #[tokio::test]
+    async fn only_a_pending_pair_nobody_asked_to_write_is_put_back_to_be_asked() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+        s.record_judge_attempt(id).await.unwrap();
+        s.record_unreadable_judgement(id).await.unwrap();
+
+        assert!(s.requeue_pending_pair(id).await.unwrap());
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!((p.judge_attempts, p.judge_unreadable), (0, 0));
+
+        s.record_judge_attempt(id).await.unwrap();
+        assert!(s.ask_pair_synthesis(id).await.unwrap());
+        assert!(
+            !s.requeue_pending_pair(id).await.unwrap(),
+            "a pair asked for writing is the merge unit's"
+        );
+        s.clear_pair_synthesis(id).await.unwrap();
+        s.set_pair_state(id, PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+        assert!(
+            !s.requeue_pending_pair(id).await.unwrap(),
+            "a settled pair was put back"
+        );
+        let p = s.get_pair(id).await.unwrap();
+        assert_eq!((p.state, p.judge_attempts), (PairState::Dismissed, 1));
+    }
+
+    #[tokio::test]
+    async fn a_merge_written_from_a_pair_is_found_until_it_is_undone_or_a_source_is_restored() {
+        let s = Store::memory().await.unwrap();
+        let ids = n_artifacts(&s, 5).await;
+        let new = crate::store::artifacts::NewMerged {
+            text: "both of them".into(),
+            ..Default::default()
+        };
+        assert_eq!(s.merge_written_from(&ids[0], &ids[1]).await.unwrap(), None);
+
+        let m = s.insert_merged_artifact(&new, &ids[..2]).await.unwrap().id;
+        // Three sources: not the merge of any one pair among them.
+        s.insert_merged_artifact(&new, &ids[..3]).await.unwrap();
+        assert_eq!(
+            s.merge_written_from(&ids[1], &ids[0]).await.unwrap(),
+            Some(m.clone()),
+            "filed either way round is the same pair"
+        );
+        assert_eq!(s.merge_written_from(&ids[0], &ids[2]).await.unwrap(), None);
+        s.set_artifact_status(&m, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        assert_eq!(
+            s.merge_written_from(&ids[0], &ids[1]).await.unwrap(),
+            None,
+            "an undone merge was taken for the one a retry owes"
+        );
+
+        s.insert_merged_artifact(&new, &ids[3..]).await.unwrap();
+        s.mark_source_restored(&ids[3]).await.unwrap();
+        assert_eq!(
+            s.merge_written_from(&ids[3], &ids[4]).await.unwrap(),
+            None,
+            "a source a person restored was counted as still merged"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pair_the_writer_can_never_read_stops_costing_calls() {
         // The unit closes at `MAX_ATTEMPTS`; without a ceiling each sweep re-arms it for five more.
         let s = Store::memory().await.unwrap();
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
-        let id = s.pairs_to_judge(10).await.unwrap()[0].id;
+        let id = s.pairs_to_judge("test/v1", 10).await.unwrap()[0].id;
+        assert!(s.ask_pair_synthesis(id).await.unwrap());
 
         for _ in 0..MAX_UNREADABLE_JUDGEMENTS - 1 {
             s.record_judge_attempt(id).await.unwrap();
             s.record_unreadable_judgement(id).await.unwrap();
         }
         assert_eq!(
-            s.pairs_to_judge(10).await.unwrap().len(),
+            s.pairs_awaiting_synthesis(10).await.unwrap().len(),
             1,
             "a pair short of the ceiling was already being held back"
         );
@@ -1378,8 +1740,8 @@ mod tests {
         s.record_judge_attempt(id).await.unwrap();
         s.record_unreadable_judgement(id).await.unwrap();
         assert!(
-            s.pairs_to_judge(10).await.unwrap().is_empty(),
-            "a pair the judge has never once been able to read is still being asked about"
+            s.pairs_awaiting_synthesis(10).await.unwrap().is_empty(),
+            "a pair the writer has never once been able to read is still being asked about"
         );
         assert_eq!(
             s.pairs_by_state(PairState::Pending, 10)
@@ -1387,7 +1749,7 @@ mod tests {
                 .unwrap()
                 .len(),
             1,
-            "holding a pair back from the judge took it off the review queue"
+            "holding a pair back from the writer took it off the review queue"
         );
     }
 
@@ -1397,16 +1759,87 @@ mod tests {
         let s = Store::memory().await.unwrap();
         let (a, b) = two_artifacts(&s).await;
         s.record_pair(&a, &b, 0.91).await.unwrap();
-        let id = s.pairs_to_judge(10).await.unwrap()[0].id;
+        let id = s.pairs_to_judge("test/v1", 10).await.unwrap()[0].id;
 
         for _ in 0..MAX_UNREADABLE_JUDGEMENTS * 3 {
             s.record_judge_attempt(id).await.unwrap();
         }
         assert_eq!(
-            s.pairs_to_judge(10).await.unwrap().len(),
+            s.pairs_to_judge("test/v1", 10).await.unwrap().len(),
             1,
             "an endpoint outage put the pair permanently out of the judge's reach"
         );
+    }
+
+    #[tokio::test]
+    async fn pairs_and_links_left_mid_judgement_by_an_older_version_are_simply_asked() {
+        let s = Store::memory().await.unwrap();
+        let (a, b) = two_artifacts(&s).await;
+        s.record_pair(&a, &b, 0.91).await.unwrap();
+        let id = s.pair_between(&a, &b).await.unwrap().unwrap().id;
+        sqlx::query!(
+            "UPDATE artifact_pairs SET judge_attempts = 3, judge_unreadable = 4 WHERE id = ?",
+            id
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+
+        let (c, d) = {
+            let mut ids = Vec::new();
+            for raw in ["raw one", "raw two"] {
+                let src = s.insert_corpus(raw, "web", None).await.unwrap();
+                let made = s
+                    .insert_artifacts(
+                        &src.id,
+                        &[NewArtifact {
+                            text: raw.into(),
+                            ..Default::default()
+                        }],
+                    )
+                    .await
+                    .unwrap();
+                ids.push(made[0].id.clone());
+            }
+            (ids[0].clone(), ids[1].clone())
+        };
+        for q in ["one", "two", "three"] {
+            s.bump_link(&c, &d, 2.0, Some(q), 30.0, 0).await.unwrap();
+        }
+        sqlx::query!("UPDATE artifact_links SET judge_attempts = 2 WHERE state = 'learning'")
+            .execute(&s.pool)
+            .await
+            .unwrap();
+
+        for unreadable in [5, 9] {
+            let ids = n_artifacts(&s, 2).await;
+            s.record_pair(&ids[0], &ids[1], 0.91).await.unwrap();
+            let shelved = s.pair_between(&ids[0], &ids[1]).await.unwrap().unwrap().id;
+            sqlx::query!(
+                "UPDATE artifact_pairs SET judge_unreadable = ? WHERE id = ?",
+                unreadable,
+                shelved
+            )
+            .execute(&s.pool)
+            .await
+            .unwrap();
+        }
+
+        let pairs = s.pairs_to_judge("test/v1", 10).await.unwrap();
+        assert_eq!(
+            pairs.len(),
+            3,
+            "a pair an older version shelved was lost: {pairs:?}"
+        );
+        let mut unreadable: Vec<i64> = pairs.iter().map(|p| p.judge_unreadable).collect();
+        unreadable.sort();
+        assert_eq!(unreadable, [4, 5, 9]);
+        let links = s
+            .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(links.len(), 1, "the half-judged link was lost: {links:?}");
+        assert_eq!(links[0].judge_attempts, 2);
     }
 
     #[tokio::test]
@@ -1418,7 +1851,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(s.pairs_to_judge(10).await.unwrap().is_empty());
+        assert!(s.pairs_to_judge("test/v1", 10).await.unwrap().is_empty());
         assert_eq!(
             s.pairs_by_state(PairState::NearIdentical, 10)
                 .await
@@ -1542,7 +1975,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(s.pairs_to_judge(10).await.unwrap().is_empty());
+        assert!(s.pairs_to_judge("test/v1", 10).await.unwrap().is_empty());
         let found = s.pairs_by_state(PairState::Oversized, 10).await.unwrap();
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].detail.as_deref(), Some("9 roots, cap is 8"));
@@ -1876,11 +2309,11 @@ mod tests {
         );
         s.record_pair(&a, &b, 0.99).await.unwrap();
         s.record_pair(&c, &d, 0.90).await.unwrap();
-        let first = s.pairs_to_judge(10).await.unwrap();
+        let first = s.pairs_to_judge("test/v1", 10).await.unwrap();
         assert_eq!(first[0].score, 0.99);
 
         s.record_judge_attempt(first[0].id).await.unwrap();
-        let next = s.pairs_to_judge(10).await.unwrap();
+        let next = s.pairs_to_judge("test/v1", 10).await.unwrap();
         assert_eq!(
             next[0].score, 0.90,
             "a pair that already cost a call must not lead again"
@@ -2224,7 +2657,7 @@ mod tests {
         assert_eq!(back[0].judge_unreadable, 0);
         assert_eq!(back[0].judge_attempts, 0);
         assert_eq!(
-            s.pairs_to_judge(10).await.unwrap().len(),
+            s.pairs_to_judge("test/v1", 10).await.unwrap().len(),
             1,
             "a reopened pair the judge will never be handed is not reopened"
         );

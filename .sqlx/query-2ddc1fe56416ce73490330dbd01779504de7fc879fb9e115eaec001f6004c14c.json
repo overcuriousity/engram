@@ -145,6 +145,28 @@
             "name": "synthesis_asked"
           }
         }
+      },
+      {
+        "name": "synthesis_by",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_pairs",
+            "name": "synthesis_by"
+          }
+        }
+      },
+      {
+        "name": "net",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_pairs",
+            "name": "net"
+          }
+        }
       }
     ],
     "parameters": {
@@ -163,7 +185,9 @@
       true,
       true,
       true,
-      false
+      false,
+      true,
+      true
     ]
   },
   "hash": "2ddc1fe56416ce73490330dbd01779504de7fc879fb9e115eaec001f6004c14c"

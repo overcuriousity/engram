@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET state = ?, reason = ?\n              WHERE id = ? AND band = 'ask' AND state = 'done' AND reason = 'changed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2107408833d5f40bf47a0a3f6fc919e9bd78a0a87990509ee8c5ddc993112eb2"
+}

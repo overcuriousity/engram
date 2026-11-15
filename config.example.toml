@@ -145,6 +145,41 @@ context_tokens = 8192
 # settled_at = 0.80
 # The share of bearing against the verdict that makes it split.
 # split_at = 0.34
+# After a writer call, a rewrite whose `complete` or `adds_nothing` is below this is not stored.
+# A refusal line, not a pass line; the literal checks run first.
+# refuse_below = 0.25
+# Open questions to a person, at most (at least 1).
+# ask_open_max = 20
+# Days an unanswered question stays open.
+# ask_lapse_days = 30
+# Judgements per tick, at most.
+# max_per_tick = 60
+# Minutes between ticks (at least 1).
+# tick_mins = 15
+# The model's relevance labels steer a sweep only while they agree with you: over at least
+# label_overlap_min searches you judged, a hit rate of label_agree_min and a selectivity of
+# at most label_select_max. Otherwise they are shown only.
+# label_overlap_min = 30
+# label_agree_min = 0.85
+# label_select_max = 0.30
+# The lines below move on their own under autonomy "full": with at least tune_min decisions acted on
+# or answered since a line last moved, more than undo_target of them undone raises it a step of 0.02,
+# under half of it lowers it. settled_at moves the same way from your verdicts on decisions.
+# tune_min = 30
+# undo_target = 0.05
+# Background judgement: from act_at it acts, from ask_at it asks a person, below it leaves.
+# [decide.bands]
+# act_at = 0.90
+# ask_at = 0.60
+# One question's own bands go under [decide.bands.<id>]; they win over everything else. A question
+# with a starting line below outranks the global act_at / ask_at above.
+# Starting lines, from the replay on a real base (2026-11-14). pair_relation, link_kind and
+# answers_query start at the defaults above; reap_worth starts by asking only:
+# [decide.bands.reap_worth]
+# act_at = 0.99
+# answerable gates writing a pursuit and asks no one, so a line it never reaches stops pursuits:
+# [decide.bands.answerable]
+# act_at = 0.85
 
 # Optional reranker; style is "tei", "cohere" or "vllm".
 # [infer.rerank]
@@ -200,16 +235,20 @@ password_hash = "$argon2id$v=19$m=19456,t=2,p=1$REPLACE_ME$REPLACE_ME"
 enabled = true
 # Shingle overlap above which a capture is parked as a near-duplicate (measured: 0.79 vs 0.04).
 near_dupe_min = 0.60
-# Cosine floor for putting a pair to the judge; the idle pass moves it.
+# Cosine floor for a pair the judge may act on alone; the idle pass moves it.
 review_min = 0.88
+# Cosine down to which pairs are judged, below review_min; nothing under review_min acts without you.
+# 0.70 is also the lowest it may be set to.
+scan_min = 0.70
 # Pairs at or above this are judged first.
 auto_supersede = 0.95
 # Neighbours considered per artifact.
 per_point = 5
 interval_hours = 24
-# Model calls per dedupe tick, every interval; max_dedupe_per_tick = 0 turns the model off.
+# Pair decisions per dedupe tick, every interval, inside [decide] max_per_tick;
+# max_dedupe_per_tick = 0 turns judging off.
 dedupe_interval_mins = 15
-max_dedupe_per_tick = 5
+max_dedupe_per_tick = 20
 
 [feedback]
 # Candidates stored per recorded search.
@@ -233,7 +272,7 @@ show_min = 2.0
 judge_min = 4.0
 # Distinct questions a link needs before it is judged.
 judge_min_queries = 3
-judge_per_sweep = 10
+judge_per_sweep = 30
 # Top hits asked for links, and associated hits appended after the list.
 spread_from = 3
 spread_max = 3
@@ -316,8 +355,8 @@ enabled = true
 interval_mins = 1440
 # Days retired before an artifact is judged.
 min_age_days = 90
-# Model calls per run.
-max_judged_per_run = 20
+# Decisions per run.
+max_judged_per_run = 50
 # Rewrites per run.
 max_rescues_per_run = 3
 

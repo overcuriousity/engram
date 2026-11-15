@@ -95,6 +95,11 @@ pub(crate) fn render(face: &Face, e: &Endpoint, s: &serde_json::Value) -> String
         out.push_str(&format!("  jobs       {line}\n"));
     }
 
+    // Only when something waits on a person.
+    if let Some(n) = s["unsure"].as_i64().filter(|n| *n > 0) {
+        out.push_str(&format!("  unsure     {n}\n"));
+    }
+
     // Absent while `[learn]` is off: four zeroes would read like a failure.
     if let Some(l) = s["learning"].as_object() {
         let n = |k: &str| l.get(k).and_then(serde_json::Value::as_i64).unwrap_or(0);
@@ -227,6 +232,17 @@ mod tests {
     }
 
     #[test]
+    fn the_unsure_count_is_said_only_when_there_is_one() {
+        let mut b = body(serde_json::Value::Null);
+        b["unsure"] = serde_json::json!(3);
+        let out = render(&face(), &endpoint(), &b);
+        assert!(out.contains("  unsure     3\n"), "{out}");
+        b["unsure"] = serde_json::json!(0);
+        let out = render(&face(), &endpoint(), &b);
+        assert!(!out.contains("unsure"), "{out}");
+    }
+
+    #[test]
     fn the_learning_half_is_counted_and_named() {
         let out = render(
             &face(),
@@ -292,7 +308,9 @@ mod tests {
         let now = crate::store::now();
         let rows = serde_json::json!([
             { "title": "Send the invoice", "moment": { "at": now - 3_600 } },
-            { "title": "Call the bank", "moment": { "at": now + 7_200 } },
+            // Half an hour of slack: `ago_or_ahead` floors against its own clock, so exactly two
+            // hours reads "in 1 h" when a second passes on the way.
+            { "title": "Call the bank", "moment": { "at": now + 9_000 } },
             { "title": "Something, sometime", "moment": { "at": null } },
         ]);
         let out = render_due(&face(), &rows);

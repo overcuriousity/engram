@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"n!: i64\" FROM json_each(?1) q\n                WHERE NOT EXISTS (SELECT 1 FROM artifact_readings r\n                                    JOIN artifacts a ON a.id = r.artifact_id\n                                   WHERE r.artifact_id = ?2 AND r.question_id = q.key\n                                     AND r.question_version = q.value\n                                     AND r.at >= a.updated_at)",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "5211340c060b06a6a3c0afbeb12b43ac8ecc615d19b8b8a350111d5778c29bcd"
+}

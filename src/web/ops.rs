@@ -287,7 +287,7 @@ mod tests {
             .unwrap()[0]
             .id;
         core.store.ask_pair_synthesis(pair).await.unwrap();
-        crate::jobs::dedupe::run(&core, &pair.to_string())
+        crate::jobs::merge_unit::run(&core, &pair.to_string())
             .await
             .unwrap();
         let merged = core.store.merged_artifacts(10).await.unwrap()[0].id.clone();

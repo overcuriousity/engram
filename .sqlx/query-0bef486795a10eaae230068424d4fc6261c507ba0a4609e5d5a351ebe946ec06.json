@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subject_a AS \"pair!\", pick AS \"pick!\", band AS \"band!\", state AS \"state!\",\n                  reason AS \"reason?\", answered_pick AS \"answered?\"\n             FROM decisions\n            WHERE question_id = 'pair_relation' AND subject_kind = 'pair'\n            ORDER BY decided_at, rowid",
+  "describe": {
+    "columns": [
+      {
+        "name": "pair!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "subject_a"
+          }
+        }
+      },
+      {
+        "name": "pick!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "pick"
+          }
+        }
+      },
+      {
+        "name": "band!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "band"
+          }
+        }
+      },
+      {
+        "name": "state!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "reason?",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "answered?",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "answered_pick"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "0bef486795a10eaae230068424d4fc6261c507ba0a4609e5d5a351ebe946ec06"
+}

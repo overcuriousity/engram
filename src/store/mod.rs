@@ -6,6 +6,7 @@ pub mod auth;
 pub mod context;
 pub mod control;
 pub mod corpora;
+pub mod decision_log;
 pub mod decisions;
 pub mod eval_runs;
 pub mod feedback;
@@ -21,7 +22,9 @@ pub mod moments;
 pub mod observations;
 pub mod pairs;
 pub mod pursuits;
+pub mod readings;
 pub mod rehearsals;
+pub mod search_labels;
 pub mod segments;
 pub mod shingle;
 pub mod sleep_runs;
@@ -99,7 +102,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 22] = [
+        const ADDITIVE: [(&str, &str, &str); 34] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -211,6 +214,76 @@ impl Store {
                 "gap_coverage",
                 "covered_by",
                 "ALTER TABLE gap_coverage ADD COLUMN covered_by TEXT",
+            ),
+            // NULL reads as a person's press: every ask before the column was one.
+            (
+                "artifact_pairs",
+                "synthesis_by",
+                "ALTER TABLE artifact_pairs ADD COLUMN synthesis_by TEXT",
+            ),
+            // NULL: a link judged before kinds keeps its written reason.
+            (
+                "artifact_links",
+                "kind",
+                "ALTER TABLE artifact_links ADD COLUMN kind TEXT",
+            ),
+            (
+                "artifact_links",
+                "first",
+                "ALTER TABLE artifact_links ADD COLUMN first TEXT",
+            ),
+            // 0: every link from before was bound by searches or made by an answer.
+            (
+                "artifact_links",
+                "shown",
+                "ALTER TABLE artifact_links ADD COLUMN shown INTEGER NOT NULL DEFAULT 0",
+            ),
+            // NULL on older rows; a reading fills only a null category.
+            (
+                "artifacts",
+                "category_by",
+                "ALTER TABLE artifacts ADD COLUMN category_by TEXT",
+            ),
+            // NULL: every pair filed before the wide net was a plain one.
+            (
+                "artifact_pairs",
+                "net",
+                "ALTER TABLE artifact_pairs ADD COLUMN net TEXT",
+            ),
+            // NULL: a decision from before counts toward no tuned line, like a new era.
+            (
+                "decide_events",
+                "decider",
+                "ALTER TABLE decide_events ADD COLUMN decider TEXT",
+            ),
+            // A row from before moved both lines as far as anyone can tell.
+            (
+                "decision_thresholds",
+                "act_moved",
+                "ALTER TABLE decision_thresholds ADD COLUMN act_moved INTEGER NOT NULL DEFAULT 1",
+            ),
+            (
+                "decision_thresholds",
+                "ask_moved",
+                "ALTER TABLE decision_thresholds ADD COLUMN ask_moved INTEGER NOT NULL DEFAULT 1",
+            ),
+            // 0: every row from before was a move.
+            (
+                "decision_thresholds",
+                "held",
+                "ALTER TABLE decision_thresholds ADD COLUMN held INTEGER NOT NULL DEFAULT 0",
+            ),
+            // NULL: read under the first wording of `bears`, the only one there was.
+            (
+                "decide_events",
+                "bears_version",
+                "ALTER TABLE decide_events ADD COLUMN bears_version INTEGER",
+            ),
+            // NULL: a row seated before lapses from when it was decided, as it did.
+            (
+                "decisions",
+                "opened_at",
+                "ALTER TABLE decisions ADD COLUMN opened_at INTEGER",
             ),
         ];
         apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;

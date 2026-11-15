@@ -789,7 +789,7 @@ mod tests {
             .id;
 
         core.store.ask_pair_synthesis(dupe).await.unwrap();
-        crate::jobs::dedupe::run(&core, &dupe.to_string())
+        crate::jobs::merge_unit::run(&core, &dupe.to_string())
             .await
             .unwrap();
 
@@ -849,7 +849,7 @@ mod tests {
             .unwrap()[0]
             .id;
         core.store.ask_pair_synthesis(pair).await.unwrap();
-        crate::jobs::dedupe::run(&core, &pair.to_string())
+        crate::jobs::merge_unit::run(&core, &pair.to_string())
             .await
             .unwrap();
         let merged_id = core

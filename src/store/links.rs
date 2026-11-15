@@ -43,6 +43,79 @@ impl LinkState {
     }
 }
 
+/// How two linked notes relate, as the decision model named it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    Continues,
+    Example,
+    Alternative,
+    Background,
+    Contradicts,
+    Duplicate,
+    Unrelated,
+}
+
+impl LinkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkKind::Continues => "continues",
+            LinkKind::Example => "example",
+            LinkKind::Alternative => "alternative",
+            LinkKind::Background => "background",
+            LinkKind::Contradicts => "contradicts",
+            LinkKind::Duplicate => "duplicate",
+            LinkKind::Unrelated => "unrelated",
+        }
+    }
+    pub fn parse(s: &str) -> Option<LinkKind> {
+        Some(match s {
+            "continues" => LinkKind::Continues,
+            "example" => LinkKind::Example,
+            "alternative" => LinkKind::Alternative,
+            "background" => LinkKind::Background,
+            "contradicts" => LinkKind::Contradicts,
+            "duplicate" => LinkKind::Duplicate,
+            "unrelated" => LinkKind::Unrelated,
+            _ => return None,
+        })
+    }
+    /// One note of the two comes first: the earlier step, the general description, the explanation.
+    pub fn directional(self) -> bool {
+        matches!(
+            self,
+            LinkKind::Continues | LinkKind::Example | LinkKind::Background
+        )
+    }
+}
+
+/// The line a reader sees beside a link, from the side of `from_a`; None for kinds that show none.
+/// It describes the other note, seen from the one being read.
+pub fn link_line(kind: LinkKind, first_is_a: Option<bool>, from_a: bool) -> Option<&'static str> {
+    let reading_first = first_is_a.map(|f| f == from_a);
+    Some(match (kind, reading_first) {
+        (LinkKind::Continues | LinkKind::Example | LinkKind::Background, None) => "Related to this",
+        (LinkKind::Continues, Some(true)) => "The next step after this",
+        (LinkKind::Continues, Some(false)) => "The step before this",
+        (LinkKind::Example, Some(true)) => "An example of this",
+        (LinkKind::Example, Some(false)) => "What this is an example of",
+        (LinkKind::Background, Some(true)) => "Uses what this explains",
+        (LinkKind::Background, Some(false)) => "Explains what this uses",
+        (LinkKind::Alternative, _) => "Another way to do this",
+        (LinkKind::Contradicts, _) => "States this differently",
+        // A duplicate shows its fixed hand-over line, from `reason`; an unrelated one is not shown.
+        (LinkKind::Duplicate | LinkKind::Unrelated, _) => return None,
+    })
+}
+
+/// `first` as stored: `a` | `b`.
+fn first_of(s: Option<&str>) -> Option<bool> {
+    match s {
+        Some("a") => Some(true),
+        Some("b") => Some(false),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Cue {
     pub q: String,
@@ -59,77 +132,61 @@ pub struct Link {
     pub queries: i64,
     pub cues: Vec<Cue>,
     pub state: LinkState,
+    /// Only for a link judged before kinds, or a fixed hand-over line; never the model's text.
     pub reason: Option<String>,
     pub judged_rev_a: Option<i64>,
     pub judged_rev_b: Option<i64>,
     pub judge_attempts: i64,
     pub created_at: i64,
+    pub kind: Option<LinkKind>,
+    /// For a directional kind: whether `a_id` comes first. None when the direction did not hold.
+    pub first_is_a: Option<bool>,
+    /// Recorded for a neighbour shown at capture: asked whatever its weight, and what it hands to
+    /// consolidation may not act alone.
+    pub shown: bool,
 }
 
 impl Store {
-    /// Lands `related`; `dismissed` stays unbeatable and keeps its weight. Judged revisions must
-    /// be stamped or `reopen_stale_judged_links` demotes it next sweep. `weight` must clear
-    /// `associate.show_min` with room to decay; the conflict branch folds decay in before max.
-    pub async fn relate_synthesized(
+    /// A neighbour shown at capture, as a link awaiting its kind. A row still learning is marked
+    /// and lifted to `weight`, decay folded in first; one ruled on or dismissed is left as it is.
+    pub async fn record_shown_link(
         &self,
         a: &str,
         b: &str,
-        reason: &str,
         weight: f64,
         half_life_days: f64,
     ) -> Result<()> {
+        // The CHECK would refuse it.
+        if a == b {
+            return Ok(());
+        }
         let (a, b) = canonical(a, b);
         let at = now();
         let mut tx = self.pool.begin_with(IMMEDIATE).await?;
         let existing = sqlx::query!(
-            "SELECT weight, bumped_at, state FROM artifact_links
-                                     WHERE a_id = ? AND b_id = ?",
+            "SELECT weight, bumped_at FROM artifact_links WHERE a_id = ? AND b_id = ?",
             a,
             b
         )
         .fetch_optional(&mut *tx)
         .await?;
         // Read inside the write's transaction, so the decay folds from the number being replaced.
-        let dismissed = existing
-            .as_ref()
-            .is_some_and(|r| LinkState::parse(r.state.as_str()) == LinkState::Dismissed);
         let carried = existing
             .as_ref()
             .map(|r| decayed(r.weight, r.bumped_at, at, half_life_days))
             .unwrap_or(0.0);
+        let weight = weight.max(carried);
         sqlx::query!(
             "INSERT INTO artifact_links
-                   (a_id, b_id, weight, bumped_at, queries, cues, state, reason,
-                    judged_rev_a, judged_rev_b, created_at)
-             VALUES (?, ?, ?, ?, 0, '[]', 'related', ?,
-                     (SELECT embed_rev FROM artifacts WHERE id = ?),
-                     (SELECT embed_rev FROM artifacts WHERE id = ?), ?)
+                   (a_id, b_id, weight, bumped_at, queries, cues, state, shown, created_at)
+             VALUES (?, ?, ?, ?, 0, '[]', 'learning', 1, ?)
              ON CONFLICT(a_id, b_id) DO UPDATE SET
-               weight = CASE WHEN artifact_links.state = 'dismissed'
-                             THEN artifact_links.weight ELSE excluded.weight END,
-               bumped_at = CASE WHEN artifact_links.state = 'dismissed'
-                                THEN artifact_links.bumped_at ELSE excluded.bumped_at END,
-               state = CASE WHEN artifact_links.state = 'dismissed'
-                            THEN artifact_links.state ELSE 'related' END,
-               reason = CASE WHEN artifact_links.state = 'dismissed'
-                             THEN artifact_links.reason ELSE excluded.reason END,
-               judged_rev_a = CASE WHEN artifact_links.state = 'dismissed'
-                                   THEN artifact_links.judged_rev_a
-                                   ELSE excluded.judged_rev_a END,
-               judged_rev_b = CASE WHEN artifact_links.state = 'dismissed'
-                                   THEN artifact_links.judged_rev_b
-                                   ELSE excluded.judged_rev_b END",
+               weight = excluded.weight, bumped_at = excluded.bumped_at, shown = 1
+             WHERE artifact_links.state = 'learning'",
             a,
             b,
-            if dismissed {
-                carried
-            } else {
-                weight.max(carried)
-            },
+            weight,
             at,
-            reason,
-            a,
-            b,
             at
         )
         .execute(&mut *tx)
@@ -201,6 +258,9 @@ pub(crate) struct LinkRow {
     pub judged_rev_b: Option<i64>,
     pub judge_attempts: i64,
     pub created_at: i64,
+    pub kind: Option<String>,
+    pub first: Option<String>,
+    pub shown: i64,
 }
 
 pub(crate) fn row_to_link(r: LinkRow) -> Link {
@@ -217,6 +277,9 @@ pub(crate) fn row_to_link(r: LinkRow) -> Link {
         judged_rev_b: r.judged_rev_b,
         judge_attempts: r.judge_attempts,
         created_at: r.created_at,
+        kind: r.kind.as_deref().and_then(LinkKind::parse),
+        first_is_a: first_of(r.first.as_deref()),
+        shown: r.shown != 0,
     }
 }
 
@@ -244,6 +307,7 @@ pub struct LinkedTo {
     /// Already decayed to the caller's clock. There is no stale number here.
     pub weight: f64,
     pub state: LinkState,
+    /// The rendered line when the link has a kind, else the stored reason.
     pub reason: Option<String>,
     pub cues: Vec<Cue>,
     /// A merge belongs to no document and always counts as differing.
@@ -372,6 +436,21 @@ async fn bump_one(
 }
 
 impl Store {
+    /// Links a judge ruled on and a person may have dismissed since, newest first; what the
+    /// replay compares with. Synthesized links (no searches) are no judge's verdict.
+    pub async fn judged_links(&self) -> Result<Vec<Link>> {
+        let rows = sqlx::query_as!(
+            crate::store::links::LinkRow,
+            "SELECT * FROM artifact_links
+              WHERE state IN ('related', 'unrelated', 'dismissed')
+                AND judged_rev_a IS NOT NULL AND queries > 0
+              ORDER BY created_at DESC, a_id DESC, b_id DESC"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(row_to_link).collect())
+    }
+
     pub async fn links_touching(&self, id: &str) -> Result<Vec<Link>> {
         let rows = sqlx::query_as!(
             crate::store::links::LinkRow,
@@ -457,7 +536,8 @@ impl Store {
                 sqlx::query!(
                     "UPDATE artifact_links
                         SET weight = ?, bumped_at = ?, queries = ?, cues = ?, state = ?,
-                            reason = NULL, judged_rev_a = NULL, judged_rev_b = NULL
+                            reason = NULL, kind = NULL, first = NULL,
+                            judged_rev_a = NULL, judged_rev_b = NULL
                       WHERE a_id = ? AND b_id = ?",
                     weight,
                     at,
@@ -527,7 +607,7 @@ impl Store {
             let rows = sqlx::query!(
                 "SELECT l.a_id AS a_id, l.b_id AS b_id, l.weight AS weight,
                         l.bumped_at AS bumped_at, l.state AS state, l.reason AS reason,
-                        l.cues AS cues,
+                        l.cues AS cues, l.kind AS kind, l.first AS first,
                         a.corpus_id AS a_corpus, b.corpus_id AS b_corpus
                    FROM artifact_links l
                    JOIN artifacts a ON a.id = l.a_id
@@ -557,7 +637,13 @@ impl Store {
                 }
                 let a_id: String = r.a_id;
                 let b_id: String = r.b_id;
-                let other = if &a_id == anchor { b_id } else { a_id };
+                let from_a = &a_id == anchor;
+                let line = r
+                    .kind
+                    .as_deref()
+                    .and_then(LinkKind::parse)
+                    .and_then(|k| link_line(k, first_of(r.first.as_deref()), from_a));
+                let other = if from_a { b_id } else { a_id };
                 let a_corpus: Option<String> = r.a_corpus;
                 let b_corpus: Option<String> = r.b_corpus;
                 out.push(LinkedTo {
@@ -565,7 +651,7 @@ impl Store {
                     other,
                     weight,
                     state,
-                    reason: r.reason,
+                    reason: line.map(str::to_string).or(r.reason),
                     cues: serde_json::from_str(&r.cues).unwrap_or_default(),
                     // Merges are decided below through origins.
                     cross_corpus: match (a_corpus, b_corpus) {
@@ -592,8 +678,11 @@ impl Store {
     }
 
     /// Cross-corpus is decided over origins in Rust: a merge belongs to every corpus it drew from.
+    /// A link asked about in `era` is not listed again until a text changes or it is asked again.
+    /// One recorded for a shown neighbour leads, whatever its weight, searches or documents.
     pub async fn links_to_judge(
         &self,
+        era: &str,
         min_weight: f64,
         min_queries: i64,
         half_life_days: f64,
@@ -608,12 +697,19 @@ impl Store {
                JOIN artifacts a ON a.id = l.a_id
                JOIN artifacts b ON b.id = l.b_id
               WHERE l.state = 'learning'
-                AND l.weight >= ? AND l.queries >= ?
+                AND (l.shown = 1 OR (l.weight >= ? AND l.queries >= ?))
                 AND a.status = 'active' AND a.superseded_by IS NULL
                 AND b.status = 'active' AND b.superseded_by IS NULL
-              ORDER BY l.weight DESC LIMIT ?",
+                AND NOT EXISTS (
+                    SELECT 1 FROM decisions d
+                     WHERE d.question_id = 'link_kind' AND d.subject_kind IN ('link', 'shown')
+                       AND d.subject_a = l.a_id AND d.subject_b = l.b_id AND d.era = ?
+                       AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
+                       AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
+              ORDER BY l.shown DESC, l.weight DESC LIMIT ?",
             min_weight,
             min_queries,
+            era,
             cap
         )
         .fetch_all(&self.pool)
@@ -622,7 +718,7 @@ impl Store {
         let strong: Vec<Link> = rows
             .into_iter()
             .map(row_to_link)
-            .filter(|l| decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
+            .filter(|l| l.shown || decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
             .collect();
         // A same-document link is shown and never judged.
         let mut ids: Vec<String> = strong
@@ -634,7 +730,7 @@ impl Store {
         let origins = self.origins_of(&ids).await?;
         Ok(strong
             .into_iter()
-            .filter(|l| origins_disjoint(&origins, &l.a_id, &l.b_id))
+            .filter(|l| l.shown || origins_disjoint(&origins, &l.a_id, &l.b_id))
             .take(limit.max(0) as usize)
             .collect())
     }
@@ -687,10 +783,9 @@ impl Store {
 
     /// The judge read text that no longer exists.
     pub async fn reopen_stale_judged_links(&self, limit: i64) -> Result<u64> {
-        // `judge_attempts` is kept: a re-embed gets one more call, not a fresh three.
         Ok(sqlx::query!(
             "UPDATE artifact_links
-                SET state = 'learning', reason = NULL,
+                SET state = 'learning', reason = NULL, kind = NULL, first = NULL,
                     judged_rev_a = NULL, judged_rev_b = NULL
               WHERE (a_id, b_id) IN (
                 SELECT l.a_id, l.b_id FROM artifact_links l
@@ -707,7 +802,8 @@ impl Store {
         .rows_affected())
     }
 
-    /// `judged_revs` is what `reopen_stale_judged_links` compares against later.
+    /// `judged_revs` is what `reopen_stale_judged_links` compares against later. A written line
+    /// replaces any kind: the reader sees `reason`.
     pub async fn set_link_state(
         &self,
         a: &str,
@@ -723,10 +819,48 @@ impl Store {
         };
         sqlx::query!(
             "UPDATE artifact_links
-                SET state = ?, reason = ?, judged_rev_a = ?, judged_rev_b = ?
+                SET state = ?, reason = ?, kind = NULL, first = NULL,
+                    judged_rev_a = ?, judged_rev_b = ?
               WHERE a_id = ? AND b_id = ?",
             state.as_str(),
             reason,
+            rev_a,
+            rev_b,
+            a,
+            b
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A judged kind, and for a directional one which end comes first (`first_is_a` names `a` as
+    /// given here). No reason is kept: the reader's line is rendered from the kind.
+    pub async fn set_link_kind(
+        &self,
+        a: &str,
+        b: &str,
+        state: LinkState,
+        kind: Option<LinkKind>,
+        first_is_a: Option<bool>,
+        judged_revs: Option<(i64, i64)>,
+    ) -> Result<()> {
+        let flipped = canonical(a, b).0 != a;
+        let (a, b) = canonical(a, b);
+        let first = first_is_a.map(|f| if f != flipped { "a" } else { "b" });
+        let kind = kind.map(LinkKind::as_str);
+        let (rev_a, rev_b) = match judged_revs {
+            Some((x, y)) => (Some(x), Some(y)),
+            None => (None, None),
+        };
+        sqlx::query!(
+            "UPDATE artifact_links
+                SET state = ?, reason = NULL, kind = ?, first = ?,
+                    judged_rev_a = ?, judged_rev_b = ?
+              WHERE a_id = ? AND b_id = ?",
+            state.as_str(),
+            kind,
+            first,
             rev_a,
             rev_b,
             a,
@@ -749,20 +883,6 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    /// Counted only for an unreadable reply: an outage says nothing about the link.
-    pub async fn record_link_judge_attempt(&self, a: &str, b: &str) -> Result<i64> {
-        let (a, b) = canonical(a, b);
-        Ok(sqlx::query_scalar!(
-            "UPDATE artifact_links SET judge_attempts = judge_attempts + 1
-              WHERE a_id = ? AND b_id = ? RETURNING judge_attempts",
-            a,
-            b
-        )
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(0))
     }
 
     /// `created_at` gives the baseline's age, which `activated_at` does not. One statement for
@@ -1202,7 +1322,10 @@ mod tests {
             }
         }
 
-        let armed = store.links_to_judge(4.0, 3, 30.0, 0, 10).await.unwrap();
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
+            .await
+            .unwrap();
         assert_eq!(armed.len(), 1, "got {armed:?}");
         assert_eq!(
             canonical(&cross_a, &cross_b),
@@ -1222,7 +1345,7 @@ mod tests {
         }
         assert!(
             store
-                .links_to_judge(4.0, 3, 30.0, 0, 10)
+                .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
                 .await
                 .unwrap()
                 .is_empty()
@@ -1291,11 +1414,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_synthesized_relation_is_not_reopened_by_the_next_sweep() {
+    async fn a_decided_relation_is_not_reopened_by_the_next_sweep() {
         let store = Store::memory().await.unwrap();
         let (a, b) = two_corpora(&store).await;
+        // As an answer about a shown neighbour lands: the row, then the kind and the revisions.
+        store.record_shown_link(&b, &a, 4.0, 30.0).await.unwrap();
         store
-            .relate_synthesized(&a, &b, "both describe the same procedure", 4.0, 30.0)
+            .set_link_kind(
+                &b,
+                &a,
+                LinkState::Related,
+                Some(LinkKind::Example),
+                Some(true),
+                Some((0, 0)),
+            )
             .await
             .unwrap();
 
@@ -1306,10 +1438,11 @@ mod tests {
         );
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(l.state, LinkState::Related);
-        assert_eq!(
-            l.reason.as_deref(),
-            Some("both describe the same procedure")
-        );
+        assert_eq!(l.kind, Some(LinkKind::Example));
+        assert_eq!(l.reason, None, "no text of the model's is stored");
+        // `first_is_a` names `b` as given above.
+        let (lo, _) = canonical(&a, &b);
+        assert_eq!(l.first_is_a, Some(lo == b));
         assert_eq!((l.judged_rev_a, l.judged_rev_b), (Some(0), Some(0)));
 
         store
@@ -1328,13 +1461,11 @@ mod tests {
             .await
             .unwrap();
         store.dismiss_link(&a, &b).await.unwrap();
-        store
-            .relate_synthesized(&a, &b, "the model disagrees", 4.0, 30.0)
-            .await
-            .unwrap();
+        store.record_shown_link(&a, &b, 9.0, 30.0).await.unwrap();
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(l.state, LinkState::Dismissed);
-        assert_ne!(l.reason.as_deref(), Some("the model disagrees"));
+        assert_eq!(l.kind, None);
+        assert!(!l.shown, "a dismissal is not marked for the sweep");
         assert_eq!(
             l.weight, 5.0,
             "a dismissal keeps the evidence it was made against"
@@ -1342,17 +1473,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_synthesized_relation_clears_the_floor_it_has_to_be_shown_over() {
+    async fn a_decided_relation_clears_the_floor_it_has_to_be_shown_over() {
         let store = Store::memory().await.unwrap();
         let (a, b) = two_corpora(&store).await;
         let show_min = 2.0;
         store
-            .relate_synthesized(
+            .record_shown_link(&a, &b, show_min * 2.0, 30.0)
+            .await
+            .unwrap();
+        store
+            .set_link_kind(
                 &a,
                 &b,
-                "both describe the same procedure",
-                show_min * 2.0,
-                30.0,
+                LinkState::Related,
+                Some(LinkKind::Alternative),
+                None,
+                Some((0, 0)),
             )
             .await
             .unwrap();
@@ -1398,10 +1534,7 @@ mod tests {
             .bump_link(&a, &b, 9.0, Some("q"), 30.0, now())
             .await
             .unwrap();
-        store
-            .relate_synthesized(&a, &b, "the model agrees", 4.0, 30.0)
-            .await
-            .unwrap();
+        store.record_shown_link(&a, &b, 4.0, 30.0).await.unwrap();
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(
             l.weight, 9.0,
@@ -1414,10 +1547,7 @@ mod tests {
             .bump_link(&c, &d, 9.0, Some("q"), 30.0, now() - 60 * 86_400)
             .await
             .unwrap();
-        store
-            .relate_synthesized(&c, &d, "the model agrees", 4.0, 30.0)
-            .await
-            .unwrap();
+        store.record_shown_link(&c, &d, 4.0, 30.0).await.unwrap();
         let l = store.get_link(&c, &d).await.unwrap().unwrap();
         assert_eq!(l.weight, 4.0, "the decay was not folded in");
     }
@@ -1445,15 +1575,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_judge_attempt_is_counted_and_reported_back() {
+    async fn a_kind_set_from_either_end_names_the_same_note_first() {
         let store = Store::memory().await.unwrap();
         let (a, b) = two(&store).await;
         store
-            .bump_link(&a, &b, 1.0, Some("q"), 30.0, 0)
+            .bump_link(&a, &b, 9.0, Some("q"), 30.0, 0)
             .await
             .unwrap();
-        assert_eq!(store.record_link_judge_attempt(&a, &b).await.unwrap(), 1);
-        assert_eq!(store.record_link_judge_attempt(&b, &a).await.unwrap(), 2);
+        let (ca, cb) = canonical(&a, &b);
+        let (ca, cb) = (ca.to_string(), cb.to_string());
+        // Named the other way round, with that end first.
+        store
+            .set_link_kind(
+                &cb,
+                &ca,
+                LinkState::Related,
+                Some(LinkKind::Continues),
+                Some(true),
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.kind, Some(LinkKind::Continues));
+        assert_eq!(l.first_is_a, Some(false), "{cb} is first and is stored b");
+        let seen = |from: &str| {
+            let from = from.to_string();
+            let store = &store;
+            async move {
+                store
+                    .links_from(&[from], &[LinkState::Related], 30.0, 0, 0.0, 10)
+                    .await
+                    .unwrap()[0]
+                    .reason
+                    .clone()
+            }
+        };
+        assert_eq!(seen(&cb).await.as_deref(), Some("The next step after this"));
+        assert_eq!(seen(&ca).await.as_deref(), Some("The step before this"));
+
+        // A reason written before is overwritten: no text survives a kind.
+        store
+            .set_link_state(&a, &b, LinkState::Related, Some("old line"), Some((0, 0)))
+            .await
+            .unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(
+            (l.kind, l.first_is_a),
+            (None, None),
+            "a written line clears the kind"
+        );
+        store
+            .set_link_kind(
+                &a,
+                &b,
+                LinkState::Related,
+                Some(LinkKind::Alternative),
+                None,
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.get_link(&a, &b).await.unwrap().unwrap().reason, None);
+    }
+
+    #[tokio::test]
+    async fn a_reopened_link_forgets_its_kind() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two(&store).await;
+        store
+            .bump_link(&a, &b, 9.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        store
+            .set_link_kind(
+                &a,
+                &b,
+                LinkState::Related,
+                Some(LinkKind::Example),
+                Some(true),
+                Some((-1, -1)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.reopen_stale_judged_links(10).await.unwrap(), 1);
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.state, LinkState::Learning);
+        assert_eq!((l.kind, l.first_is_a), (None, None));
     }
 
     #[tokio::test]
@@ -1649,8 +1857,101 @@ mod tests {
         let cross = out.iter().find(|l| l.other == far).unwrap();
         assert!(!same.cross_corpus, "a merge of corpus-1 roots is corpus 1");
         assert!(cross.cross_corpus);
-        let armed = store.links_to_judge(4.0, 3, 30.0, 0, 10).await.unwrap();
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, 0, 10)
+            .await
+            .unwrap();
         assert_eq!(armed.len(), 1, "{armed:?}");
         assert!(armed[0].a_id == far || armed[0].b_id == far);
+    }
+
+    #[tokio::test]
+    async fn a_link_recorded_for_a_shown_neighbour_is_offered_whatever_its_weight_and_leads() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        let (c, d) = two_corpora(&store).await;
+        for q in ["one", "two", "three"] {
+            store
+                .bump_link(&c, &d, 2.0, Some(q), 30.0, now())
+                .await
+                .unwrap();
+        }
+        store.record_shown_link(&b, &a, 1.0, 30.0).await.unwrap();
+
+        let l = store.get_link(&a, &b).await.unwrap().expect("the row");
+        assert_eq!(l.state, LinkState::Learning);
+        assert!(l.shown);
+        assert_eq!((l.queries, l.weight), (0, 1.0), "no search bound it");
+        assert!(!store.get_link(&c, &d).await.unwrap().unwrap().shown);
+
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, now(), 10)
+            .await
+            .unwrap();
+        assert_eq!(armed.len(), 2, "{armed:?}");
+        assert_eq!(
+            canonical(&a, &b),
+            (armed[0].a_id.as_str(), armed[0].b_id.as_str()),
+            "the shown neighbour's question is owed first"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shown_neighbour_from_the_same_document_is_still_offered() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two(&store).await;
+        store.record_shown_link(&a, &b, 1.0, 30.0).await.unwrap();
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, now(), 10)
+            .await
+            .unwrap();
+        assert_eq!(armed.len(), 1, "{armed:?}");
+    }
+
+    #[tokio::test]
+    async fn recording_a_shown_neighbour_marks_a_learning_link_and_never_lowers_it() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now())
+            .await
+            .unwrap();
+        store.record_shown_link(&a, &b, 1.0, 30.0).await.unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert!(l.shown);
+        assert_eq!(l.state, LinkState::Learning);
+        assert_eq!(l.queries, 1, "the search that bound it is kept");
+        assert!(l.weight > 4.9, "lowered to {}", l.weight);
+
+        store.record_shown_link(&a, &b, 9.0, 30.0).await.unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.weight, 9.0, "lifted to the weight asked for");
+    }
+
+    #[tokio::test]
+    async fn recording_a_shown_neighbour_leaves_a_ruled_on_link_as_it_is() {
+        let store = Store::memory().await.unwrap();
+        let (c, d) = two_corpora(&store).await;
+        store
+            .bump_link(&c, &d, 5.0, Some("q"), 30.0, 0)
+            .await
+            .unwrap();
+        store
+            .set_link_kind(
+                &c,
+                &d,
+                LinkState::Related,
+                Some(LinkKind::Alternative),
+                None,
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+        store.record_shown_link(&c, &d, 9.0, 30.0).await.unwrap();
+        let l = store.get_link(&c, &d).await.unwrap().unwrap();
+        assert_eq!(
+            (l.state, l.kind, l.weight),
+            (LinkState::Related, Some(LinkKind::Alternative), 5.0)
+        );
     }
 }

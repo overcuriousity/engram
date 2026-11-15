@@ -38,7 +38,7 @@ pub enum Stage {
     Context,
     /// Armed at the next due moment by every write that can move it, never on a period.
     Remind,
-    /// Collection-targeted; model calls bounded by `reap.max_judged_per_run`.
+    /// Collection-targeted; decisions bounded by `reap.max_judged_per_run` and the tick's budget.
     Reap,
     /// Its own failure domain, like `Relate`: a failed cue embed must not fail the artifact's.
     Probe,
@@ -46,11 +46,21 @@ pub enum Stage {
     Condense,
     /// Local, background: a page that stays down is retried at the ceiling, then left.
     Fetch,
+    /// Collection-targeted: applies waiting decisions, seats waiting asks, lapses old ones. No call.
+    Decisions,
+    /// One pair's merge, written after a decision or a person asked for it.
+    Merge,
+    /// One retired note's rewrite, after a decision or a person found it valuable.
+    Rescue,
+    /// One note read by the decision model once embedded: its kind and three flags. No band.
+    Read,
+    /// One recorded search's candidates, each asked `answers_query` alone. No band, no decision.
+    Label,
 }
 
 impl Stage {
     /// Written out: a stage missing here is not a compile error, just invisible to the backfill.
-    pub const ALL: [Stage; 21] = [
+    pub const ALL: [Stage; 26] = [
         Stage::Synthesize,
         Stage::SegmentWindow,
         Stage::Title,
@@ -72,6 +82,11 @@ impl Stage {
         Stage::Probe,
         Stage::Condense,
         Stage::Fetch,
+        Stage::Decisions,
+        Stage::Merge,
+        Stage::Rescue,
+        Stage::Read,
+        Stage::Label,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -97,17 +112,21 @@ impl Stage {
             Stage::Probe => "probe",
             Stage::Condense => "condense",
             Stage::Fetch => "fetch",
+            Stage::Decisions => "decisions",
+            Stage::Merge => "merge",
+            Stage::Rescue => "rescue",
+            Stage::Read => "read",
+            Stage::Label => "label",
         }
     }
     /// In `ALL`'s order.
-    pub const GENERATORS: [Stage; 7] = [
+    pub const GENERATORS: [Stage; 6] = [
         Stage::SegmentWindow,
         Stage::Title,
-        Stage::Dedupe,
-        Stage::LinkJudge,
         Stage::Generate,
-        Stage::Reap,
         Stage::Condense,
+        Stage::Merge,
+        Stage::Rescue,
     ];
 
     /// A base with nothing to generate with passes these over at the claim, unpenalised.
@@ -116,12 +135,15 @@ impl Stage {
         match self {
             Stage::SegmentWindow
             | Stage::Title
-            | Stage::Dedupe
-            | Stage::LinkJudge
             | Stage::Generate
+            | Stage::Condense
+            | Stage::Merge
+            | Stage::Rescue => true,
+            // A decision takes the light turn and no cooldown.
+            Stage::Dedupe
             | Stage::Reap
-            | Stage::Condense => true,
-            Stage::Synthesize
+            | Stage::LinkJudge
+            | Stage::Synthesize
             | Stage::Embed
             | Stage::Consolidate
             | Stage::Relate
@@ -134,7 +156,10 @@ impl Stage {
             | Stage::Context
             | Stage::Remind
             | Stage::Probe
-            | Stage::Fetch => false,
+            | Stage::Fetch
+            | Stage::Decisions
+            | Stage::Read
+            | Stage::Label => false,
         }
     }
 
@@ -162,7 +187,12 @@ impl Stage {
             | Stage::Reap
             | Stage::Probe
             | Stage::Condense
-            | Stage::Fetch => 1,
+            | Stage::Fetch
+            | Stage::Decisions
+            | Stage::Merge
+            | Stage::Rescue
+            | Stage::Read
+            | Stage::Label => 1,
         }
     }
 
@@ -190,7 +220,12 @@ impl Stage {
             | Stage::Reap
             | Stage::Probe
             | Stage::Condense
-            | Stage::Fetch => false,
+            | Stage::Fetch
+            | Stage::Decisions
+            | Stage::Merge
+            | Stage::Rescue
+            | Stage::Read
+            | Stage::Label => false,
         }
     }
 
@@ -217,6 +252,11 @@ impl Stage {
             "probe" => Some(Stage::Probe),
             "condense" => Some(Stage::Condense),
             "fetch" => Some(Stage::Fetch),
+            "decisions" => Some(Stage::Decisions),
+            "merge" => Some(Stage::Merge),
+            "rescue" => Some(Stage::Rescue),
+            "read" => Some(Stage::Read),
+            "label" => Some(Stage::Label),
             _ => None,
         }
     }
@@ -567,6 +607,20 @@ impl Store {
         .fetch_optional(&self.control.pool)
         .await?
         .is_some())
+    }
+
+    /// A queued or running unit's attempts so far; `None` when none is live.
+    pub async fn live_job_attempts(&self, stage: Stage, target_id: &str) -> Result<Option<i64>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT attempts FROM jobs
+              WHERE subject = ? AND stage = ? AND target_id = ?
+                AND state IN ('pending', 'running')",
+            &self.subject,
+            stage.as_str(),
+            target_id
+        )
+        .fetch_optional(&self.control.pool)
+        .await?)
     }
 
     /// Only for an operator asking for the work again: the surviving row is what lets a
@@ -1836,11 +1890,55 @@ mod tests {
     }
 
     #[test]
-    fn the_stages_that_call_a_generator_are_the_seven() {
+    fn the_stages_that_call_a_generator_are_the_six() {
         let named: Vec<_> = Stage::ALL
             .into_iter()
             .filter(|s| s.calls_a_generator())
             .collect();
         assert_eq!(named, Stage::GENERATORS);
+    }
+
+    #[test]
+    fn link_judge_is_a_decision_and_no_longer_a_writer() {
+        assert!(!Stage::GENERATORS.contains(&Stage::LinkJudge));
+        assert!(!Stage::LinkJudge.calls_a_generator());
+        assert_eq!(Stage::LinkJudge.class(), 1);
+    }
+
+    #[test]
+    fn rescue_is_a_background_writer_and_reap_no_longer_one() {
+        assert_eq!(Stage::ALL[23], Stage::Rescue);
+        assert_eq!(Stage::Rescue.as_str(), "rescue");
+        assert_eq!(Stage::parse("rescue"), Some(Stage::Rescue));
+        assert!(Stage::GENERATORS.contains(&Stage::Rescue));
+        assert!(Stage::Rescue.calls_a_generator());
+        assert_eq!(Stage::Rescue.class(), 1);
+        assert!(!Stage::Rescue.reads_a_capture());
+        assert!(!Stage::GENERATORS.contains(&Stage::Reap));
+        assert!(!Stage::Reap.calls_a_generator());
+    }
+
+    #[test]
+    fn merge_is_a_background_writer_and_dedupe_no_longer_one() {
+        assert_eq!(Stage::ALL.len(), 26);
+        assert_eq!(Stage::Merge.as_str(), "merge");
+        assert_eq!(Stage::parse("merge"), Some(Stage::Merge));
+        assert!(Stage::GENERATORS.contains(&Stage::Merge));
+        assert!(Stage::Merge.calls_a_generator());
+        assert_eq!(Stage::Merge.class(), 1);
+        assert!(!Stage::Merge.reads_a_capture());
+        assert!(!Stage::GENERATORS.contains(&Stage::Dedupe));
+        assert!(!Stage::Dedupe.calls_a_generator());
+    }
+
+    #[test]
+    fn decisions_is_the_twenty_second_stage_a_background_sweep_that_calls_no_generator() {
+        assert_eq!(Stage::ALL[21], Stage::Decisions);
+        assert!(Stage::ALL.contains(&Stage::Decisions));
+        assert_eq!(Stage::Decisions.as_str(), "decisions");
+        assert_eq!(Stage::parse("decisions"), Some(Stage::Decisions));
+        assert!(!Stage::GENERATORS.contains(&Stage::Decisions));
+        assert_eq!(Stage::Decisions.class(), 1);
+        assert!(!Stage::Decisions.reads_a_capture());
     }
 }

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM decisions\n              WHERE decided_at >= ? AND subject_kind NOT IN ('write', 'pursuit')\n                AND COALESCE(reason, '') NOT IN ('too_long', 'rescue_refused')",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c03e0c97e046fea3bc5623448c58fd6ee5a853785beaa6f352faa7796fefe77d"
+}

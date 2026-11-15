@@ -350,13 +350,29 @@ async fn pairs_from_verdicts(
     Ok((pairs, skipped))
 }
 
-/// Everything the ladder is scored on: verdicts and positive observations, and how many named a
-/// gone artifact. An open confirmed by a verdict on the same search counts once, as the verdict.
+/// Everything the ladder is scored on: verdicts, the model's labels while they agree with the
+/// person (`Core::labels_count`), and positive observations, and how many named a gone artifact.
+/// An open confirmed by a verdict or a label on the same search counts once, as that.
 pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(Vec<Pair>, i64)> {
-    let verdicts = core
+    let mut verdicts = core
         .store
         .judged_pairs(generation_id, OBSERVATION_LIMIT)
         .await?;
+    // After the person's: an unjudged search adds the note the model expects, and only then.
+    let room = OBSERVATION_LIMIT.saturating_sub(verdicts.len());
+    if room > 0 && core.labels_count().await? {
+        verdicts.extend(
+            core.store
+                .model_judged_pairs(
+                    generation_id,
+                    crate::jobs::label::relevant_at(core).await?,
+                    crate::core::judging::catalogue::answers_query("").version,
+                    core.decider.model(),
+                    room,
+                )
+                .await?,
+        );
+    }
     let confirmed: std::collections::HashSet<(String, String)> = verdicts
         .iter()
         .map(|p| (p.event_id.clone(), p.expect.clone()))
@@ -922,6 +938,126 @@ mod tests {
             pairs.iter().all(|p| p.served_rank.is_none()),
             "no observation is drawn once the verdicts have spent the budget"
         );
+    }
+
+    /// A search of the first five notes the model labelled, relevant only at `relevant`; judged a
+    /// hit on `expect` when one is given.
+    async fn labelled_search(
+        core: &crate::core::Core,
+        order: &[String],
+        expect: Option<usize>,
+        relevant: &[usize],
+    ) -> String {
+        use crate::store::feedback::NewCandidate;
+        let candidates = &order[..5];
+        let id = core
+            .store
+            .record_search(
+                NewEvent {
+                    fold_onto: None,
+                    query: QUERY.into(),
+                    door: Door::Ui,
+                    scope: None,
+                    filters: "{}".into(),
+                    query_vec: core.embedder.embed_query(QUERY).await.unwrap(),
+                    embed_model: "fake".into(),
+                    candidates: candidates
+                        .iter()
+                        .map(|a| NewCandidate {
+                            artifact_id: a.clone(),
+                            score: 0.5,
+                            similarity: Some(0.5),
+                            shown: true,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    answered: false,
+                    context: None,
+                },
+                0,
+            )
+            .await
+            .unwrap();
+        let rows: Vec<(String, f64)> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (a.clone(), if relevant.contains(&i) { 0.95 } else { 0.1 }))
+            .collect();
+        core.store
+            .put_search_labels(
+                &id,
+                &rows,
+                crate::core::judging::catalogue::answers_query("").version,
+                core.decider.model(),
+            )
+            .await
+            .unwrap();
+        if let Some(e) = expect {
+            core.store
+                .judge_hit(&id, &order[e], crate::store::feedback::Labeller::Confirm)
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    #[tokio::test]
+    async fn an_unjudged_search_counts_only_while_the_model_agrees_with_the_person() {
+        // 30 judged searches at hit rate 0.9, selectivity 0.2 -> the unjudged search adds a pair; at
+        // hit rate 0.8 it does not; at 29 judged it does not
+        for (hits, misses, counts) in [(27, 3, true), (24, 6, false), (27, 2, false)] {
+            let (core, order) = seeded().await;
+            let generation = a_generation(&core).await;
+            for _ in 0..hits {
+                labelled_search(&core, &order, Some(0), &[0]).await;
+            }
+            for _ in 0..misses {
+                labelled_search(&core, &order, Some(1), &[0]).await;
+            }
+            labelled_search(&core, &order, None, &[2]).await;
+            assert_eq!(
+                core.labels_count().await.unwrap(),
+                counts,
+                "{hits} and {misses}"
+            );
+
+            let (pairs, _) = evidence_pairs(&core, &generation).await.unwrap();
+            let judged = hits + misses;
+            assert_eq!(
+                pairs.len(),
+                if counts { judged + 1 } else { judged },
+                "{hits} and {misses}"
+            );
+            let model_pair = pairs
+                .iter()
+                .filter(|p| p.satisfies.contains(&order[2]))
+                .count();
+            assert_eq!(model_pair, usize::from(counts));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_model_that_calls_everything_relevant_steers_no_sweep() {
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        let all = [0, 1, 2, 3, 4];
+        for _ in 0..30 {
+            labelled_search(&core, &order, Some(0), &all).await;
+        }
+        labelled_search(&core, &order, None, &all).await;
+        let g = core
+            .store
+            .label_agreement(
+                crate::jobs::label::relevant_at(&core).await.unwrap(),
+                crate::core::judging::catalogue::answers_query("").version,
+                core.decider.model(),
+            )
+            .await
+            .unwrap();
+        assert_eq!((g.judged, g.hit_rate, g.selectivity), (30, 1.0, 1.0));
+        assert!(!core.labels_count().await.unwrap());
+        let (pairs, _) = evidence_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), 30, "the unjudged search adds no pair");
     }
 
     #[tokio::test]

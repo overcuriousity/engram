@@ -48,6 +48,52 @@ Thirteen call sites. What happens to each:
 | `jobs/synthesize.rs:163` title, `jobs/gaps.rs:313` gap label, `jobs/describe.rs:33` image | chat | unchanged |
 | `core/ask/plan.rs:34`, `core/ask/mod.rs:281` | chat, interactive | unchanged, out of scope |
 
+## Corrections from the code (2026-11-13)
+
+Found while planning, on a read of `bafcb1a1`. Where this section and the text
+below disagree, this section holds.
+
+- **There is no pair view.** The pair routes were removed and a test keeps them
+  gone. Contradictions are shown read-only, as "Disagrees with…" on search rows
+  and answers, and stay there. "Ask again" is offered on the Unsure block only.
+- **`pinned` is not stored today.** The synthesizer's flag is parsed and
+  dropped; the only pin that ranks is a tag a person sets. The `pinned` reading
+  is stored and has no effect until the owner decides it should.
+- **A capture artifact that loses a literal is flagged and kept, not dropped.**
+  The new `adds_nothing` check does drop, as written below: an artifact that
+  states what its source does not is worse than one missing a literal, and the
+  passages remain.
+- **Nothing records who set a category.** A column for that is added, so a
+  reading can leave a person's choice alone.
+- **Rescue has no literal check today.** The after-write check is its first.
+- **A bare similarity files no pair today.** `relate` records a pair only when
+  one text contains the other or both come from one document. The wider net
+  therefore also files pairs that only similarity suggests, and all of those
+  are restricted like pairs below `review_min`, whatever their score.
+- **The reap judge's reason is used, not only shown:** in the graveyard, the
+  journal and the rescue prompt. All three lose it; the rescue prompt gets a
+  fixed line.
+- **Reap is scheduled on "is there a pair judge".** That check is rewritten,
+  not deleted.
+- **Decide's reads add one agreement figure, not two.** A note is evidence
+  only when `bears` said yes, so "the model also called it relevant" holds by
+  construction. Insights shows how many bearing notes a person ruled on held
+  up.
+- **The tuner has no record of its own.** Threshold moves get a table.
+- **Names.** Spec 1 owns `/decisions/{id}` for what a person asked; the Unsure
+  rows live under `/unsure`.
+- **A pursuit cannot wait for more sources** (found while building, 2026-11-14).
+  Its sources are set once and nothing re-arms it, so an `answerable` between
+  the lines closes the pursuit unsatisfied, as a gap, with its own reason. A
+  later sitting on the same question opens a new pursuit with fresh sources.
+  When not every packed source fits, the gate does not judge and the pursuit is
+  written as before.
+- **Deciding goes on past the daily cap** (2026-11-14). The cap gates every
+  action where a decision is carried out; it no longer stops new decisions
+  from being made, so that sure ones wait and torn ones reach the person.
+- **A retired note a person called valuable is never put to the model again**,
+  in any era, unless it changes or the person asks again.
+
 ## Goals
 
 - No background judgement is made by a chat model.
@@ -609,6 +655,66 @@ Readings: `asks_reminder` 0.97 on a reminder, 0.00 to 0.01 elsewhere.
 unreliable as worded. `category` with bare option names: right on a
 configuration and a procedure, "other" at low confidence on the rest.
 
-### Replay
+### Replay, 2026-11-14
 
-Empty until stage 2 has run.
+On a copy of the owner's base (4240 live notes, 99 superseded, an empty
+graveyard), against `clef-flash:9b-q8_0-8192`, with
+`engram --replay-decisions`. The live base was not opened. A run over every
+question is about 1500 decisions and took about 15 minutes.
+
+The base holds little past judgement: 2 merges, no burial, 55 filed pairs of
+which one is a usable verdict, 155 judged links, 56 searches the person
+judged. No question reached the 30 cases the suggestion needs, so **no
+threshold below is measured**; each is a starting line chosen with the owner,
+and the tuner moves it.
+
+Because the history is thin, the replay also asks `pair_relation` and
+`reap_worth` over what nobody judged: neighbour pairs at 0.70 cosine or above
+that are not filed, and superseded notes. There is no verdict to agree with
+there; it shows how the answers fall.
+
+| Question | Asked | Result |
+|---|---|---|
+| `pair_relation`, judged | 1 | disagrees: a past merge is called `distinct` at 0.64 |
+| `pair_relation`, unjudged neighbours | 200 of 15105 | distinct 164 · duplicate 29 · b_replaces_a 4 · vacuous 2 · conflict 1; swapped reads disagreed in 10; at 0.90 seven would act, all `distinct`; no `duplicate` above 0.73, including a pair at cosine 0.98 |
+| `link_kind` | 155 | agrees with the past verdict in 112; of 96 past `unrelated` it keeps 95, of 59 past `related` it calls 31 `unrelated`; at 0.80 and above 28 of 35 agree |
+| `link_direction` v1 | 53 | `a_first` 53 of 53, both option orders agreeing |
+| `link_direction` v2 | 53 | `a_first` 51; holds when the notes are exchanged: 36 of 53 |
+| `reap_worth`, unjudged superseded | 99 | no 99 · yes 0; 61 at 0.90 and above; highest yes 0.50 |
+| `category` | 200 | matches the stored category in 82; the rest sit between neighbours: reference and definition, procedure and snippet |
+| `pinned` | 200 | yes at 0.90: 1 |
+| `time_bound` | 200 | yes at 0.5: 4; the highest are a dated offer, a list of served models, payment data with an end date; the lowest are formulas |
+| `self_contained` | 200 | yes at 0.5: 108; the lowest are untitled fragments and numbered parts of a worked example |
+| `asks_reminder` | 200 | yes at 0.3: 11; the highest are the reminders |
+| `has_date` | 200 | yes at 0.3: 6 |
+| `answers_query` | 31 | calls the note the person named relevant in 30; at 0.90 and above 16 of 17 |
+| `complete`, `adds_nothing` | 1 | the one kept merge: 0.75 and 0.55, neither under the refusal line |
+| `answerable` | 0 | the base keeps nothing to replay it over |
+
+What was fixed from it:
+
+- **Wording.** Only `link_direction` changed (version 2): as first worded it
+  named the note labelled A every time, which reversing the options cannot
+  show. The replay now checks a direction by exchanging the two notes.
+  `time_bound` stays as worded: the probe's doubt did not hold on real notes.
+  `link_kind` under-links against the old judge rather than mislinking, and
+  `category` disagrees between kinds that overlap; both keep their wording.
+- **A direction counts only when it holds under exchange** (a rule for stage
+  3). A link whose direction does not hold when the two notes are exchanged
+  is to be stored and shown undirected. One more call per directional link.
+- **Starting lines** (owner's decision, 2026-11-14):
+
+  | Question | act_at | ask_at | Why |
+  |---|---|---|---|
+  | `pair_relation`, `link_kind` | 0.90 | 0.60 | what reaches 0.90 on this base is closing a pair as distinct and shelving a link; anything else still needs the agreeing swapped read, the daily cap, and has its undo |
+  | `answers_query` | 0.90 | 0.60 | 16 of 17 with the person at that line; it labels searches and closes gaps |
+  | `reap_worth` | 0.99 | 0.60 | no burial was ever judged here, and 99 of 99 "no" cannot be told from a lean toward "no": it asks |
+  | `answerable` | 0.85 | 0.60 | nothing to measure it on. It gates a pursuit and opens no Unsure row, so a high line does not ask, it switches pursuits off; the owner wants them written with some freedom, and a written one is still checked against its sources |
+
+  Starting every question at 0.99, as stage 2's plan has it for a question
+  without a suggestion, would make the base ask about nearly all of the 15105
+  pairs the wider net finds, twenty rows at a time: the chore list this spec
+  rules out.
+- **For the tuner (stage 9).** A question that starts at 0.99 acts on nothing,
+  so a rule that counts only acted decisions never lowers it. A person's
+  answers to its Unsure rows have to count as its evidence.

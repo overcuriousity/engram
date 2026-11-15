@@ -38,12 +38,9 @@ own; never `\(…\)` or `\[…\]`.
 
 Reply with JSON only, no commentary, in exactly this shape:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: a short noun phrase naming the artifact.
-- category: exactly one of: concept, procedure, reference, snippet,
-  configuration, definition, example, other. This is what kind of thing the
-  artifact is, never what subject it is about.
 - corpus_lines: the 1-based line range in the input this artifact came from.
 - caveats: 0-3 short sentences for conditions under which this artifact does
   not hold — a prerequisite, a version or platform it is specific to, a
@@ -53,11 +50,9 @@ Reply with JSON only, no commentary, in exactly this shape:
   list when the input states none, which is the common case.
 - tags: 0-3 short lowercase topic words, in the input's language. Empty when
   no topic word is obvious.
-- pinned: true ONLY when the artifact records a decision or commitment the
-  writer made ("we chose X", "I will always Y"). Everything else is false.
 
-When the prompt carries a JUDGE block, add three top-level fields beside
-"artifacts" — "moment", "events", "links" — judging the INPUT as a note in
+When the prompt carries a JUDGE block, add two top-level fields beside
+"artifacts" — "moment", "events" — judging the INPUT as a note in
 time:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
@@ -78,13 +73,10 @@ time:
 - events: dates the note states that are not the reminder itself, as local
   ISO-8601 datetimes ("the release is on the 12th" → its date). Empty when it
   states none.
-- links: relations to entries of the NEIGHBORS block, as
-  {"artifact_id":"...","reason":"..."} using ONLY ids shown there, with a
-  one-line reason. Empty when nothing shown relates.
 
 The judgement is not an artifact. Never write an artifact that describes the
-note's intent, restates its dates, or names its relation to a neighbor: those
-belong in "moment", "events" and "links" alone. A note of one or two sentences
+note's intent or restates its dates: those
+belong in "moment" and "events" alone. A note of one or two sentences
 yields exactly one artifact, in the language the note is written in.
 
 With no JUDGE block, reply with "artifacts" alone."#;
@@ -127,12 +119,9 @@ einer eigenen Zeile; nie `\(…\)` oder `\[…\]`.
 
 Antworte ausschließlich mit JSON, ohne Kommentar, in genau dieser Form:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: eine kurze Nominalphrase, die das Artefakt benennt.
-- category: genau eines von: concept, procedure, reference, snippet,
-  configuration, definition, example, other. Das ist, was für ein Ding das
-  Artefakt ist, nie, worum es inhaltlich geht.
 - corpus_lines: der 1-basierte Zeilenbereich im Input, aus dem dieses Artefakt
   stammt.
 - caveats: 0-3 kurze Sätze für Bedingungen, unter denen dieses Artefakt nicht
@@ -144,12 +133,9 @@ Antworte ausschließlich mit JSON, ohne Kommentar, in genau dieser Form:
   keine nennt — das ist der Normalfall.
 - tags: 0-3 kurze kleingeschriebene Themenwörter. Leer, wenn kein Themenwort
   offensichtlich ist.
-- pinned: true NUR, wenn das Artefakt eine Entscheidung oder Festlegung
-  festhält, die der Schreibende getroffen hat ("wir haben uns für X
-  entschieden", "ich mache künftig immer Y"). Alles andere ist false.
 
-Trägt der Prompt einen JUDGE-Block, füge neben "artifacts" drei weitere Felder
-auf oberster Ebene hinzu — "moment", "events", "links" — und beurteile damit den
+Trägt der Prompt einen JUDGE-Block, füge neben "artifacts" zwei weitere Felder
+auf oberster Ebene hinzu — "moment", "events" — und beurteile damit den
 INPUT als Notiz in der Zeit:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
@@ -170,14 +156,10 @@ INPUT als Notiz in der Zeit:
 - events: Daten, die die Notiz nennt und die nicht die Erinnerung selbst sind,
   als lokale ISO-8601-Zeitpunkte ("das Release ist am 12." → dessen Datum).
   Leer, wenn sie keine nennt.
-- links: Beziehungen zu Einträgen des NEIGHBORS-Blocks, als
-  {"artifact_id":"...","reason":"..."}, AUSSCHLIESSLICH mit den dort gezeigten
-  ids und mit einer einzeiligen Begründung. Leer, wenn nichts Gezeigtes in
-  Beziehung steht.
 
 Das Urteil ist kein Artefakt. Schreibe nie ein Artefakt, das die Absicht der
-Notiz beschreibt, ihre Daten wiederholt oder ihre Beziehung zu einem Nachbarn
-benennt: das gehört allein in "moment", "events" und "links". Eine Notiz von
+Notiz beschreibt oder ihre Daten wiederholt: das gehört allein in "moment" und
+"events". Eine Notiz von
 ein oder zwei Sätzen ergibt genau ein Artefakt, in der Sprache der Notiz.
 
 Ohne JUDGE-Block antworte allein mit "artifacts"."#;
@@ -220,12 +202,9 @@ en su propia línea; nunca `\(…\)` ni `\[…\]`.
 
 Responde solo con JSON, sin comentarios, exactamente con esta forma:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: un sintagma nominal corto que nombre el artefacto.
-- category: exactamente uno de: concept, procedure, reference, snippet,
-  configuration, definition, example, other. Es qué clase de cosa es el
-  artefacto, nunca de qué tema trata.
 - corpus_lines: el rango de líneas (base 1) de la entrada del que procede este
   artefacto.
 - caveats: 0-3 frases cortas con condiciones bajo las cuales este artefacto no
@@ -237,12 +216,9 @@ Responde solo con JSON, sin comentarios, exactamente con esta forma:
   ninguna, que es el caso habitual.
 - tags: 0-3 palabras temáticas cortas en minúsculas. Vacío cuando ninguna
   palabra temática sea evidente.
-- pinned: true SOLO cuando el artefacto registra una decisión o un compromiso
-  que tomó quien escribe ("elegimos X", "siempre haré Y"). Todo lo demás es
-  false.
 
-Cuando el prompt lleve un bloque JUDGE, añade tres campos de primer nivel junto
-a "artifacts" — "moment", "events", "links" — juzgando el INPUT como una nota en
+Cuando el prompt lleve un bloque JUDGE, añade dos campos de primer nivel junto
+a "artifacts" — "moment", "events" — juzgando el INPUT como una nota en
 el tiempo:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
@@ -264,13 +240,10 @@ el tiempo:
 - events: fechas que la nota indica y que no son el propio recordatorio, como
   fechas y horas locales ISO-8601 ("el lanzamiento es el día 12" → su fecha).
   Vacío cuando no indica ninguna.
-- links: relaciones con entradas del bloque NEIGHBORS, como
-  {"artifact_id":"...","reason":"..."}, usando SOLO los ids allí mostrados, con
-  un motivo de una línea. Vacío cuando nada de lo mostrado guarda relación.
 
 El juicio no es un artefacto. Nunca escribas un artefacto que describa la
-intención de la nota, repita sus fechas o nombre su relación con un vecino:
-eso va solo en "moment", "events" y "links". Una nota de una o dos frases
+intención de la nota o repita sus fechas:
+eso va solo en "moment" y "events". Una nota de una o dos frases
 produce exactamente un artefacto, en el idioma de la nota.
 
 Sin bloque JUDGE, responde solo con "artifacts"."#;
@@ -313,12 +286,9 @@ sa propre ligne ; jamais `\(…\)` ni `\[…\]`.
 
 Réponds uniquement en JSON, sans commentaire, exactement sous cette forme :
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title : un syntagme nominal court qui nomme l'artefact.
-- category : exactement l'un de : concept, procedure, reference, snippet,
-  configuration, definition, example, other. C'est le genre de chose qu'est
-  l'artefact, jamais le sujet dont il traite.
 - corpus_lines : la plage de lignes (base 1) de l'entrée d'où vient cet
   artefact.
 - caveats : 0-3 phrases courtes pour les conditions dans lesquelles cet artefact
@@ -330,12 +300,9 @@ Réponds uniquement en JSON, sans commentaire, exactement sous cette forme :
   n'en énonce aucune, ce qui est le cas courant.
 - tags : 0-3 mots-sujets courts en minuscules. Vide quand aucun mot-sujet ne
   s'impose.
-- pinned : true UNIQUEMENT quand l'artefact consigne une décision ou un
-  engagement pris par l'auteur (« nous avons choisi X », « je ferai toujours
-  Y »). Tout le reste est false.
 
-Quand le prompt porte un bloc JUDGE, ajoute trois champs de premier niveau à
-côté de "artifacts" — "moment", "events", "links" — en jugeant l'INPUT comme une
+Quand le prompt porte un bloc JUDGE, ajoute deux champs de premier niveau à
+côté de "artifacts" — "moment", "events" — en jugeant l'INPUT comme une
 note dans le temps :
 
 - moment : {"intent":"remind"|"none","when":...,"rule":...}.
@@ -357,14 +324,10 @@ note dans le temps :
 - events : les dates que la note énonce et qui ne sont pas le rappel lui-même,
   comme dates-heures locales ISO-8601 (« la sortie est le 12 » → sa date). Vide
   quand elle n'en énonce aucune.
-- links : relations avec des entrées du bloc NEIGHBORS, sous la forme
-  {"artifact_id":"...","reason":"..."}, en utilisant UNIQUEMENT les ids qui y
-  figurent, avec une raison d'une ligne. Vide quand rien de ce qui est montré
-  n'est en relation.
 
 Le jugement n'est pas un artefact. N'écris jamais un artefact qui décrit
-l'intention de la note, répète ses dates ou nomme sa relation à un voisin :
-cela relève uniquement de "moment", "events" et "links". Une note d'une ou
+l'intention de la note ou répète ses dates :
+cela relève uniquement de "moment" et "events". Une note d'une ou
 deux phrases donne exactement un artefact, dans la langue de la note.
 
 Sans bloc JUDGE, réponds avec "artifacts" seul."#;
@@ -407,12 +370,9 @@ a sé; mai `\(…\)` né `\[…\]`.
 
 Rispondi solo con JSON, senza commenti, esattamente in questa forma:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: un sintagma nominale breve che nomina l'artefatto.
-- category: esattamente uno fra: concept, procedure, reference, snippet,
-  configuration, definition, example, other. È che genere di cosa è
-  l'artefatto, mai di quale argomento tratta.
 - corpus_lines: l'intervallo di righe (in base 1) dell'input da cui proviene
   questo artefatto.
 - caveats: 0-3 frasi brevi per le condizioni in cui questo artefatto non vale —
@@ -424,11 +384,9 @@ Rispondi solo con JSON, senza commenti, esattamente in questa forma:
   è il caso consueto.
 - tags: 0-3 brevi parole tematiche in minuscolo. Vuoto quando nessuna parola
   tematica è evidente.
-- pinned: true SOLO quando l'artefatto registra una decisione o un impegno preso
-  da chi scrive ("abbiamo scelto X", "farò sempre Y"). Tutto il resto è false.
 
-Quando il prompt porta un blocco JUDGE, aggiungi tre campi di primo livello
-accanto a "artifacts" — "moment", "events", "links" — giudicando l'INPUT come
+Quando il prompt porta un blocco JUDGE, aggiungi due campi di primo livello
+accanto a "artifacts" — "moment", "events" — giudicando l'INPUT come
 una nota nel tempo:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
@@ -449,14 +407,10 @@ una nota nel tempo:
 - events: date che la nota indica e che non sono il promemoria stesso, come
   date-ora locali ISO-8601 ("il rilascio è il 12" → la sua data). Vuoto quando
   non ne indica nessuna.
-- links: relazioni con voci del blocco NEIGHBORS, nella forma
-  {"artifact_id":"...","reason":"..."}, usando SOLO gli id lì mostrati, con una
-  motivazione di una riga. Vuoto quando nulla di ciò che è mostrato è in
-  relazione.
 
 Il giudizio non è un artefatto. Non scrivere mai un artefatto che descriva
-l'intento della nota, ne ripeta le date o ne nomini la relazione con un
-vicino: questo spetta solo a "moment", "events" e "links". Una nota di una o
+l'intento della nota o ne ripeta le date: questo spetta solo a "moment" e
+"events". Una nota di una o
 due frasi produce esattamente un artefatto, nella lingua della nota.
 
 Senza blocco JUDGE, rispondi con "artifacts" da solo."#;
@@ -499,12 +453,9 @@ op een eigen regel; nooit `\(…\)` of `\[…\]`.
 
 Antwoord uitsluitend met JSON, zonder commentaar, in precies deze vorm:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: een korte naamwoordgroep die het artefact benoemt.
-- category: precies één van: concept, procedure, reference, snippet,
-  configuration, definition, example, other. Dit is wat voor soort ding het
-  artefact is, nooit waarover het gaat.
 - corpus_lines: het 1-gebaseerde regelbereik in de invoer waar dit artefact
   vandaan komt.
 - caveats: 0-3 korte zinnen voor voorwaarden waaronder dit artefact niet geldt —
@@ -516,12 +467,9 @@ Antwoord uitsluitend met JSON, zonder commentaar, in precies deze vorm:
   gebruikelijke geval is.
 - tags: 0-3 korte onderwerpswoorden in kleine letters. Leeg als geen
   onderwerpswoord voor de hand ligt.
-- pinned: true ALLEEN als het artefact een beslissing of toezegging vastlegt die
-  de schrijver deed ("we kozen voor X", "ik doe voortaan altijd Y"). Al het
-  andere is false.
 
-Draagt de prompt een JUDGE-blok, voeg dan naast "artifacts" drie velden op het
-hoogste niveau toe — "moment", "events", "links" — en beoordeel de INPUT als een
+Draagt de prompt een JUDGE-blok, voeg dan naast "artifacts" twee velden op het
+hoogste niveau toe — "moment", "events" — en beoordeel de INPUT als een
 notitie in de tijd:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
@@ -542,13 +490,10 @@ notitie in de tijd:
 - events: data die de notitie noemt en die niet de herinnering zelf zijn, als
   lokale ISO-8601-datumtijden ("de release is op de 12e" → die datum). Leeg als
   ze er geen noemt.
-- links: relaties met items uit het NEIGHBORS-blok, als
-  {"artifact_id":"...","reason":"..."}, ALLEEN met de daar getoonde ids, met een
-  reden van één regel. Leeg als niets van het getoonde verband houdt.
 
 Het oordeel is geen artefact. Schrijf nooit een artefact dat de bedoeling van
-de notitie beschrijft, haar data herhaalt of haar relatie tot een buur noemt:
-dat hoort alleen in "moment", "events" en "links". Een notitie van één of
+de notitie beschrijft of haar data herhaalt:
+dat hoort alleen in "moment" en "events". Een notitie van één of
 twee zinnen levert precies één artefact op, in de taal van de notitie.
 
 Zonder JUDGE-blok antwoord je alleen met "artifacts"."#;
@@ -589,12 +534,9 @@ Wzory pisz w LaTeX-u: `$…$` w tekście, `$$…$$` dla wzoru w osobnej linii; n
 
 Odpowiadaj wyłącznie JSON-em, bez komentarza, dokładnie w tej postaci:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: krótka fraza rzeczownikowa nazywająca artefakt.
-- category: dokładnie jedno z: concept, procedure, reference, snippet,
-  configuration, definition, example, other. To rodzaj rzeczy, którą artefakt
-  jest, nigdy temat, którego dotyczy.
 - corpus_lines: zakres wierszy wejścia (liczony od 1), z którego pochodzi ten
   artefakt.
 - caveats: 0-3 krótkie zdania o warunkach, w których ten artefakt nie
@@ -606,12 +548,9 @@ Odpowiadaj wyłącznie JSON-em, bez komentarza, dokładnie w tej postaci:
   to przypadek typowy.
 - tags: 0-3 krótkie słowa tematyczne małymi literami. Puste, gdy żadne słowo
   tematyczne nie narzuca się samo.
-- pinned: true TYLKO wtedy, gdy artefakt zapisuje decyzję lub zobowiązanie
-  podjęte przez piszącego („wybraliśmy X", „zawsze będę robić Y"). Wszystko inne
-  to false.
 
-Gdy prompt niesie blok JUDGE, dodaj obok „artifacts" trzy pola najwyższego
-poziomu — „moment", „events", „links" — oceniając INPUT jako notatkę w czasie:
+Gdy prompt niesie blok JUDGE, dodaj obok „artifacts" dwa pola najwyższego
+poziomu — „moment", „events" — oceniając INPUT jako notatkę w czasie:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
   „remind" tylko wtedy, gdy notatka prosi przyszłe ja o działanie; wszystko
@@ -631,13 +570,10 @@ poziomu — „moment", „events", „links" — oceniając INPUT jako notatkę
 - events: daty podane w notatce, które nie są samym przypomnieniem, jako lokalne
   daty i godziny ISO-8601 („wydanie jest 12." → jego data). Puste, gdy notatka
   żadnej nie podaje.
-- links: relacje do wpisów bloku NEIGHBORS, w postaci
-  {"artifact_id":"...","reason":"..."}, WYŁĄCZNIE z pokazanymi tam id i z
-  jednowierszowym uzasadnieniem. Puste, gdy nic z pokazanego nie jest powiązane.
 
 Ocena nie jest artefaktem. Nigdy nie pisz artefaktu opisującego intencję
-notatki, powtarzającego jej daty ani nazywającego jej związek z sąsiadem: to
-należy wyłącznie do "moment", "events" i "links". Notatka z jednego lub dwóch
+notatki ani powtarzającego jej daty: to
+należy wyłącznie do "moment" i "events". Notatka z jednego lub dwóch
 zdań daje dokładnie jeden artefakt, w języku notatki.
 
 Bez bloku JUDGE odpowiadaj samym „artifacts"."#;
@@ -679,12 +615,9 @@ linha própria; nunca `\(…\)` nem `\[…\]`.
 
 Responde apenas com JSON, sem comentários, exatamente nesta forma:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: um sintagma nominal curto que nomeie o artefacto.
-- category: exatamente um de: concept, procedure, reference, snippet,
-  configuration, definition, example, other. É que género de coisa o artefacto
-  é, nunca o assunto de que trata.
 - corpus_lines: o intervalo de linhas (base 1) da entrada de onde veio este
   artefacto.
 - caveats: 0-3 frases curtas com condições em que este artefacto não se
@@ -696,12 +629,9 @@ Responde apenas com JSON, sem comentários, exatamente nesta forma:
   caso comum.
 - tags: 0-3 palavras temáticas curtas em minúsculas. Vazio quando nenhuma
   palavra temática for evidente.
-- pinned: true SÓ quando o artefacto regista uma decisão ou um compromisso
-  assumido por quem escreve ("escolhemos X", "farei sempre Y"). Tudo o resto é
-  false.
 
-Quando o prompt trouxer um bloco JUDGE, acrescenta três campos de topo ao lado
-de "artifacts" — "moment", "events", "links" — julgando o INPUT como uma nota no
+Quando o prompt trouxer um bloco JUDGE, acrescenta dois campos de topo ao lado
+de "artifacts" — "moment", "events" — julgando o INPUT como uma nota no
 tempo:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
@@ -723,13 +653,10 @@ tempo:
 - events: datas que a nota indica e que não são o próprio lembrete, como
   datas-horas locais ISO-8601 ("o lançamento é no dia 12" → a sua data). Vazio
   quando não indica nenhuma.
-- links: relações com entradas do bloco NEIGHBORS, na forma
-  {"artifact_id":"...","reason":"..."}, usando APENAS os ids ali mostrados, com
-  um motivo de uma linha. Vazio quando nada do que é mostrado se relaciona.
 
 O julgamento não é um artefato. Nunca escreva um artefato que descreva a
-intenção da nota, repita as suas datas ou nomeie a sua relação com um vizinho:
-isso pertence apenas a "moment", "events" e "links". Uma nota de uma ou duas
+intenção da nota ou repita as suas datas:
+isso pertence apenas a "moment" e "events". Uma nota de uma ou duas
 frases produz exatamente um artefato, na língua da nota.
 
 Sem bloco JUDGE, responde apenas com "artifacts"."#;
@@ -772,12 +699,9 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
 
 Отвечай только JSON, без комментариев, ровно в такой форме:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: короткая именная группа, называющая артефакт.
-- category: ровно одно из: concept, procedure, reference, snippet,
-  configuration, definition, example, other. Это то, что артефакт есть по роду,
-  а не то, о каком предмете он.
 - corpus_lines: диапазон строк входа (нумерация с 1), из которого взят этот
   артефакт.
 - caveats: 0-3 коротких предложения об условиях, при которых этот артефакт не
@@ -789,12 +713,9 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
   одной, — это обычный случай.
 - tags: 0-3 коротких тематических слова строчными буквами. Пусто, когда ни одно
   тематическое слово не напрашивается.
-- pinned: true ТОЛЬКО когда артефакт фиксирует решение или обязательство,
-  принятое пишущим («мы выбрали X», «я всегда буду делать Y»). Всё остальное —
-  false.
 
-Когда в промпте есть блок JUDGE, добавь рядом с "artifacts" три поля верхнего
-уровня — "moment", "events", "links" — оценивая INPUT как заметку во времени:
+Когда в промпте есть блок JUDGE, добавь рядом с "artifacts" два поля верхнего
+уровня — "moment", "events" — оценивая INPUT как заметку во времени:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
   "remind" только когда заметка просит будущего себя действовать; всё
@@ -814,13 +735,10 @@ pub const SYNTHESIZER_SYSTEM_RU: &str = r#"Ты превращаешь захв�
 - events: даты, названные в заметке и не являющиеся самим напоминанием, как
   местные ISO-8601 дата-время («релиз 12-го» → его дата). Пусто, когда она не
   называет ни одной.
-- links: связи с записями блока NEIGHBORS в виде
-  {"artifact_id":"...","reason":"..."}, ТОЛЬКО с показанными там id и с
-  однострочным обоснованием. Пусто, когда ничто из показанного не связано.
 
 Суждение — не артефакт. Никогда не пиши артефакт, который описывает намерение
-заметки, повторяет её даты или называет её связь с соседом: это место только
-для "moment", "events" и "links". Заметка из одного-двух предложений даёт
+заметки или повторяет её даты: это место только
+для "moment" и "events". Заметка из одного-двух предложений даёт
 ровно один артефакт, на языке заметки.
 
 Без блока JUDGE отвечай одним лишь "artifacts"."#;
@@ -860,12 +778,9 @@ Formülleri LaTeX ile yaz: metin içinde `$…$`, kendi satırındaki bir formü
 
 Yalnızca JSON ile, yorumsuz, tam olarak şu biçimde yanıtla:
 
-{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}
+{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}
 
 - title: artefaktı adlandıran kısa bir ad öbeği.
-- category: şunlardan tam olarak biri: concept, procedure, reference, snippet,
-  configuration, definition, example, other. Bu, artefaktın ne türden bir şey
-  olduğudur; hangi konuda olduğu değil.
 - corpus_lines: bu artefaktın geldiği, girdideki 1 tabanlı satır aralığı.
 - caveats: bu artefaktın geçerli olmadığı koşullar için 0-3 kısa cümle — bir ön
   koşul, özgü olduğu bir sürüm ya da platform, yıkıcı bir etki, belgelenmiş bir
@@ -875,12 +790,9 @@ Yalnızca JSON ile, yorumsuz, tam olarak şu biçimde yanıtla:
   belirtmiyorsa boş liste kullan; olağan durum budur.
 - tags: 0-3 kısa, küçük harfli konu sözcüğü. Belirgin bir konu sözcüğü yoksa
   boş.
-- pinned: YALNIZCA artefakt, yazanın verdiği bir kararı veya bağlanmayı
-  kaydediyorsa true ("X'i seçtik", "bundan sonra hep Y yapacağım"). Geri kalan
-  her şey false.
 
-Prompt bir JUDGE bloğu taşıyorsa, "artifacts" yanına üç üst düzey alan ekle —
-"moment", "events", "links" — ve INPUT'u zaman içindeki bir not olarak
+Prompt bir JUDGE bloğu taşıyorsa, "artifacts" yanına iki üst düzey alan ekle —
+"moment", "events" — ve INPUT'u zaman içindeki bir not olarak
 değerlendir:
 
 - moment: {"intent":"remind"|"none","when":...,"rule":...}.
@@ -901,14 +813,10 @@ değerlendir:
 - events: notun belirttiği ve anımsatıcının kendisi olmayan tarihler, yerel
   ISO-8601 tarih-saat olarak ("sürüm ayın 12'sinde" → o tarih). Hiçbirini
   belirtmiyorsa boş.
-- links: NEIGHBORS bloğundaki girdilerle ilişkiler,
-  {"artifact_id":"...","reason":"..."} biçiminde, YALNIZCA orada gösterilen
-  id'leri kullanarak ve tek satırlık bir gerekçeyle. Gösterilenlerden hiçbiri
-  ilişkili değilse boş.
 
-Yargı bir artefakt değildir. Notun niyetini anlatan, tarihlerini yineleyen ya
-da bir komşuyla ilişkisini adlandıran bir artefakt asla yazma: bunlar yalnızca
-"moment", "events" ve "links" içindir. Bir ya da iki cümlelik bir not, notun
+Yargı bir artefakt değildir. Notun niyetini anlatan ya da tarihlerini yineleyen
+bir artefakt asla yazma: bunlar yalnızca
+"moment" ve "events" içindir. Bir ya da iki cümlelik bir not, notun
 dilinde tam olarak bir artefakt verir.
 
 JUDGE bloğu yoksa yalnızca "artifacts" ile yanıtla."#;
@@ -1025,7 +933,7 @@ pub fn user_prompt(
     }
     if let Some(j) = judge {
         if !j.neighbors.is_empty() {
-            out.push_str("\n\n----- NEIGHBORS (context only; link targets) -----");
+            out.push_str("\n\n----- NEIGHBORS (context only) -----");
             for n in &j.neighbors {
                 let title = n.title.as_deref().unwrap_or("untitled");
                 out.push_str(&format!("\n[id: {}] {title}\n{}", n.id, n.text));
@@ -1039,7 +947,7 @@ pub fn user_prompt(
         if let Some(f) = &j.forced_intent {
             out.push_str(&format!("The capture door says this is: {f}\n"));
         }
-        out.push_str("Judge this note: moment, events, links.\n----- END JUDGE -----");
+        out.push_str("Judge this note: moment, events.\n----- END JUDGE -----");
     }
     out
 }
@@ -1066,20 +974,6 @@ pub fn title_prompt(text: &str, artifact_titles: &[String]) -> String {
     )
 }
 
-/// `Replaced` beats `Duplicate` where both apply (a stored original beats a rewrite); merge only when each side adds something.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Relation {
-    Distinct,
-    /// Same subject, a different detail, no way to tell which is current: shown as a disagreement, never merged.
-    Conflict,
-    /// Superseded, with no synthetic text written.
-    Replaced,
-    Duplicate,
-    /// Neither side states anything actionable; both are deprecated (`jobs::dedupe::discard_both`), reversibly.
-    Vacuous,
-}
-
 #[derive(Debug, Clone)]
 pub struct MergedDraft {
     pub title: Option<String>,
@@ -1087,82 +981,6 @@ pub struct MergedDraft {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub caveats: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Dedupe {
-    pub relation: Relation,
-    pub detail: Option<String>,
-    /// The letter it was shown under; only meaningful for `Replaced`.
-    pub supersedes: Option<char>,
-    /// `Some` if and only if `relation` is `Duplicate`.
-    pub merged: Option<MergedDraft>,
-}
-
-pub const REAP_SYSTEM: &str = r#"You decide whether a retired knowledge-base artifact still states anything the live base does not.
-
-You are given the retired artifact, the replacement that retired it if one was named, and the closest live artifacts. Read the retired text for facts a reader could act on or be wrong about, and check each one against the live texts.
-
-- "worthless" — every such fact is stated by the live texts shown. The retired text will be destroyed; only its metadata survives.
-- "valuable" — it states at least one thing the live texts do not. It will be rewritten into a live artifact.
-
-"worthless" destroys text and nobody confirms it first, so it asks for certainty rather than suspicion: if you can name one fact the live texts lack, the answer is "valuable". When you are unsure, answer "valuable" — a wrong "valuable" costs one rewrite; a wrong "worthless" cannot be taken back.
-
-Reply with JSON only: {"verdict":"worthless"|"valuable","reason":"one line naming the deciding fact"}"#;
-
-pub struct ReapCase<'a> {
-    pub title: &'a str,
-    pub text: &'a str,
-    pub successor: Option<(&'a str, &'a str)>,
-    /// `(title, text)`, nearest first.
-    pub neighbours: Vec<(&'a str, &'a str)>,
-}
-
-pub fn reap_prompt(case: &ReapCase<'_>) -> String {
-    let mut s = String::new();
-    s.push_str(&format!(
-        "----- RETIRED ARTIFACT -----\nTitle: {}\n\n{}\n",
-        case.title, case.text
-    ));
-    if let Some((title, text)) = &case.successor {
-        s.push_str(&format!(
-            "----- ITS NAMED REPLACEMENT -----\nTitle: {title}\n\n{text}\n"
-        ));
-    }
-    if !case.neighbours.is_empty() {
-        s.push_str("----- CLOSEST LIVE ARTIFACTS -----\n");
-        for (i, (title, text)) in case.neighbours.iter().enumerate() {
-            s.push_str(&format!("[{}] Title: {title}\n\n{text}\n\n", i + 1));
-        }
-    }
-    s
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Reap {
-    Worthless { reason: String },
-    Valuable { reason: String },
-}
-
-pub fn parse_reap(body: &str) -> Result<Reap> {
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        verdict: String,
-        #[serde(default)]
-        reason: Option<String>,
-    }
-    let r: Raw = serde_json::from_value(unwrap_verdict(extract_json(body))?).map_err(|e| {
-        Error::MalformedLlmOutput(format!("reap reply was not the expected JSON: {e}"))
-    })?;
-    let reason = r.reason.unwrap_or_default();
-    // An unknown verdict is an error: "worthless" destroys text, so an unreadable reply acts on nothing.
-    match r.verdict.as_str() {
-        "worthless" => Ok(Reap::Worthless { reason }),
-        "valuable" => Ok(Reap::Valuable { reason }),
-        other => Err(Error::MalformedLlmOutput(format!(
-            "reap verdict was neither worthless nor valuable: {other:?}"
-        ))),
-    }
 }
 
 pub const RESCUE_SYSTEM: &str = r#"You rewrite the still-valuable part of a retired knowledge-base artifact into one self-contained live artifact.
@@ -1181,44 +999,7 @@ Do not add anything. Do not restate the questions.
 
 Reply with JSON only: {"artifact":{"title":"…","text":"…","category":"…","tags":[],"caveats":[]}}"#;
 
-pub const DEDUPE_SYSTEM: &str = r#"You compare knowledge artifacts that may be about the same thing, and decide what should happen to them.
-
-First, if NEITHER states anything a reader could act on or be wrong about — a body that is only its own title or file path, a bare link, boilerplate, an outline with nothing under its headings — answer "vacuous" and stop. It must hold for both: one empty artifact beside a real one is not this.
-
-Answering "vacuous" retires both artifacts where it is found; nobody confirms it first. It is the only verdict here that takes two things away and puts nothing in their place, so it asks for certainty rather than suspicion: if you can name one thing either body states, the answer is not "vacuous". When you are unsure, answer "distinct" — two artifacts left in results cost a reader nothing.
-
-Real content merely not summarised is NOT vacuous, however raw or unstructured. A day of notes covering six subjects still states six things. Those are "distinct".
-
-Then decide whether they are about the same subject. Their titles say what each one is about, and the body may never repeat it — an artifact titled "FAT32 Specifications" can open with "32 Bit Clusternummern" and never name FAT32 again.
-
-If the titles name different things — two versions, two variants, two products, two filesystems, two commands — then they are neither duplicates nor in conflict, no matter how far apart their numbers are. Different things have different numbers; that is what makes them different things. Answer "distinct" and stop.
-
-Only when they describe the same subject, choose one of:
-
-- "replaced" — one artifact plainly supersedes another: a deprecated flag, step or default versus its current replacement. Prefer this whenever it applies. It keeps the surviving artifact's original wording, which is always better than rewriting.
-- "duplicate" — they make the same claim, and each carries some detail the others lack. Write one artifact that says everything all of them said.
-- "conflict" — they give a different value for the same detail of the same subject, and you cannot tell which is current. Do not choose a side and do not merge; a person decides this one.
-- "distinct" — different subjects, or one covers something the others simply do not.
-
-These are NOT conflicts:
-- The same fact in different words.
-- Different levels of detail about the same thing.
-- One artifact mentioning something the others do not cover.
-
-When you answer "duplicate", the merged text must contain every number, version, date, path, flag, command and error string that appeared in any input, and must read as one self-contained artifact rather than a list of sources. If you cannot write one that keeps all of them, the answer is "conflict", not "duplicate".
-
-An artifact that was itself written by merging earlier ones is shown with those originals under "SOURCES OF A" or "SOURCES OF B". They are there for one reason: so that a detail an earlier merge dropped can go back into your answer. They are not under judgement. There are exactly two artifacts, A and B — never name a source in `supersedes`, and never treat a source as a third artifact.
-
-Reply with JSON only, no commentary, in exactly this shape:
-
-{"verdict": {"relation": "duplicate", "detail": "...", "merged": {"title": "...", "text": "...", "category": "...", "caveats": []}}}
-
-- relation: one of "duplicate", "replaced", "conflict", "distinct", "vacuous".
-- detail: one short sentence saying why. Always.
-- supersedes: the letter of the artifact that is obsolete. Only with "replaced"; omit it otherwise.
-- merged: only with "duplicate"; omit it entirely otherwise. `text` must stand on its own without its sources. `caveats` are the conditions under which it does not apply."#;
-
-/// Not `DEDUPE_SYSTEM` with the branch forced: a person already decided, and the live judge labels such pairs by coin flip.
+/// A person already decided that these cover the same ground; this only writes the merge.
 /// The merge rules are restated because a merge that drops a number is worse than none.
 pub const SYNTHESIZE_SYSTEM: &str = r#"You are given two knowledge artifacts that a person has already judged to cover the same ground. Whether they do is settled and is not your question. Write one artifact that says everything both of them said.
 
@@ -1290,75 +1071,6 @@ pub fn parse_synthesis(body: &str) -> Result<MergedDraft> {
         tags: Vec::new(),
         caveats: raw.merged.caveats,
     })
-}
-
-/// Exactly two lettered members; their sources are unlettered so no verdict can name them. The title is the subject.
-/// No differing-values prior: whitespace tokens primed the model into false contradictions.
-/// `attempt` defeats the endpoint's exact-prompt cache on retries; zero adds nothing, keeping first asks cacheable.
-pub fn dedupe_prompt(a: &DedupeMember<'_>, b: &DedupeMember<'_>, attempt: i64) -> String {
-    let mut s = String::new();
-    if attempt > 0 {
-        s.push_str(&format!("(attempt {})\n", attempt + 1));
-    }
-    for (letter, m) in [('A', a), ('B', b)] {
-        s.push_str(&format!(
-            "----- ARTIFACT {letter} -----\nTitle: {}\n\n{}\n",
-            m.title, m.text
-        ));
-        if !m.sources.is_empty() {
-            s.push_str(&format!("----- SOURCES OF {letter} -----\n"));
-            for (title, text) in &m.sources {
-                s.push_str(&format!("Title: {title}\n\n{text}\n\n"));
-            }
-        }
-    }
-    s.push_str("----- END -----");
-    s
-}
-
-/// `sources` is unlettered reference so a dropped detail can return without a verdict naming a source.
-pub struct DedupeMember<'a> {
-    pub title: &'a str,
-    pub text: &'a str,
-    /// `(title, text)`, oldest first. Empty for a captured artifact.
-    pub sources: Vec<(&'a str, &'a str)>,
-}
-
-pub const LINK_SYSTEM: &str = r#"Two knowledge artifacts keep being retrieved by the same searches. You say what that means, in one line a reader would find useful.
-
-Choose exactly one:
-
-- "related" — being needed together makes sense: one is the configuration and the other its failure mode, one is the procedure and the other the tool it needs, one explains why the other is done. Say what the relation is, in the reader's own terms, in one sentence.
-- "unrelated" — the searches that returned both were about something else, and there is no connection worth showing. A shared word is not a connection.
-- "duplicate" — they say the same thing in different words. Only this, and not "related", when neither adds anything the other lacks.
-
-Judge the relation between the artifacts, not their similarity. Two texts that share no vocabulary at all can be strongly related; two that read alike can be about different subjects.
-
-Reply with JSON only, no commentary, in exactly this shape:
-
-{"verdict": {"relation": "related", "reason": "..."}}
-
-- relation: one of "related", "unrelated", "duplicate".
-- reason: one sentence. For "related" it is shown to the reader beside the link, so write it for them and not about the task."#;
-
-/// The cues are the evidence: the question is why these two keep being needed at once.
-/// `attempt` is here for the cache reason `dedupe_prompt` gives.
-pub fn link_prompt(a: (&str, &str), b: (&str, &str), cues: &[String], attempt: i64) -> String {
-    let mut s = String::new();
-    if attempt > 0 {
-        s.push_str(&format!("(attempt {})\n", attempt + 1));
-    }
-    s.push_str(&format!(
-        "----- ARTIFACT A -----\nTitle: {}\n\n{}\n----- ARTIFACT B -----\nTitle: {}\n\n{}\n----- END -----",
-        a.0, a.1, b.0, b.1
-    ));
-    if !cues.is_empty() {
-        s.push_str(&format!(
-            "\n\nBoth were returned by these searches: {}.",
-            cues.join("; ")
-        ));
-    }
-    s
 }
 
 /// One definition for what the model is told and what `abstained` looks for.
@@ -1603,19 +1315,6 @@ pub fn parse_generation(reply: &str) -> Result<Generated> {
     Ok(g)
 }
 
-/// Its own schema: under the dedupe one every reap reply parsed as nothing. Flat at the root, as `REAP_SYSTEM` asks.
-pub fn reap_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": {"type": "string", "enum": ["worthless", "valuable"]},
-            "reason": {"type": "string"}
-        },
-        "required": ["verdict", "reason"],
-        "additionalProperties": false
-    })
-}
-
 pub fn gap_label_schema() -> serde_json::Value {
     serde_json::json!({
         "type": "object",
@@ -1640,109 +1339,6 @@ pub fn parse_gap_label(reply: &str) -> Result<String> {
         return Err(Error::MalformedLlmOutput("gap label was empty".into()));
     }
     Ok(label)
-}
-
-/// The bare shape is accepted too: `structured_output` can be off.
-pub fn unwrap_verdict(body: &str) -> Result<serde_json::Value> {
-    let v: serde_json::Value = serde_json::from_str(body)
-        .map_err(|e| Error::MalformedLlmOutput(format!("judge reply was not JSON at all: {e}")))?;
-    Ok(match v.get("verdict") {
-        Some(inner) if inner.is_object() => inner.clone(),
-        _ => v,
-    })
-}
-
-/// Defaulting either way would flood the queue or close real duplicates; failing retries with a new attempt number.
-pub fn parse_dedupe(body: &str) -> Result<Dedupe> {
-    #[derive(serde::Deserialize)]
-    struct Raw {
-        relation: String,
-        #[serde(default)]
-        detail: Option<String>,
-        #[serde(default)]
-        supersedes: Option<String>,
-        #[serde(default)]
-        merged: Option<RawMerged>,
-    }
-    #[derive(serde::Deserialize)]
-    struct RawMerged {
-        text: String,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        category: Option<String>,
-        #[serde(default)]
-        caveats: Vec<String>,
-    }
-
-    let r: Raw = serde_json::from_value(unwrap_verdict(extract_json(body))?).map_err(|e| {
-        Error::MalformedLlmOutput(format!("dedupe reply was not the expected JSON: {e}"))
-    })?;
-
-    // Any single letter: the caller resolves it against the list it showed. A parser pinning the count downgraded
-    // valid directions to conflicts; anything else the model wrote counts as omitted.
-    let side = r.supersedes.as_deref().and_then(|s| {
-        let mut chars = s.trim().chars();
-        match (chars.next(), chars.next()) {
-            (Some(c), None) if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
-            _ => None,
-        }
-    });
-
-    let relation = match r.relation.trim().to_ascii_lowercase().as_str() {
-        "duplicate" => Relation::Duplicate,
-        // Falling back to a conflict stops a supersede picking a side by accident.
-        "replaced" if side.is_some() => Relation::Replaced,
-        "replaced" | "conflict" => Relation::Conflict,
-        "distinct" => Relation::Distinct,
-        "vacuous" => Relation::Vacuous,
-        other => {
-            return Err(Error::MalformedLlmOutput(format!(
-                "dedupe reply named an unknown relation {other:?}"
-            )));
-        }
-    };
-
-    // `merged` belongs to `duplicate` only; a duplicate without text is a merge the write path cannot carry out.
-    match (&relation, &r.merged) {
-        (Relation::Duplicate, None) => {
-            return Err(Error::MalformedLlmOutput(
-                "dedupe reply said duplicate but wrote no merged artifact".into(),
-            ));
-        }
-        (rel, Some(_)) if *rel != Relation::Duplicate => {
-            return Err(Error::MalformedLlmOutput(format!(
-                "dedupe reply carried a merged artifact on a {} verdict",
-                r.relation.trim()
-            )));
-        }
-        _ => {}
-    }
-
-    if let Some(m) = &r.merged
-        && m.text.trim().is_empty()
-    {
-        return Err(Error::MalformedLlmOutput(
-            "dedupe reply said duplicate and wrote an empty artifact".into(),
-        ));
-    }
-
-    Ok(Dedupe {
-        relation,
-        detail: r
-            .detail
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty()),
-        supersedes: side,
-        merged: r.merged.map(|m| MergedDraft {
-            title: m.title,
-            text: m.text,
-            category: m.category.map(|c| normalize_category(&c)),
-            // Nothing writes tags on a caller's behalf; `merge::carried_tags` adds back what the sources had.
-            tags: Vec::new(),
-            caveats: m.caveats,
-        }),
-    })
 }
 
 #[derive(serde::Deserialize)]
@@ -1770,8 +1366,6 @@ struct JudgedEnvelope {
     moment: Option<RawMoment>,
     #[serde(default, deserialize_with = "lenient")]
     events: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "lenient")]
-    links: Option<Vec<RawLink>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1785,28 +1379,17 @@ struct RawMoment {
 }
 
 #[derive(serde::Deserialize)]
-struct RawLink {
-    artifact_id: String,
-    #[serde(default)]
-    reason: String,
-}
-
-#[derive(serde::Deserialize)]
 struct RawArtifact {
     text: String,
     #[serde(default)]
     title: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
     #[serde(default)]
     corpus_lines: Option<Vec<i64>>,
     #[serde(default)]
     caveats: Vec<String>,
     #[serde(default, deserialize_with = "lenient")]
     tags: Option<Vec<String>>,
-    /// Lenient: a strict flag failed the whole envelope on `"pinned": null`. `None` is not pinned.
-    #[serde(default, deserialize_with = "lenient")]
-    pinned: Option<bool>,
+    // An older reply's `category` and `pinned` are unknown fields, ignored whatever their shape.
 }
 
 /// Form, not subject, and closed: a free string filled the filter row with domains. Unknown words become `other`.
@@ -1832,6 +1415,7 @@ pub fn normalize_category(raw: &str) -> String {
 }
 
 /// Kept beside `RawArtifact`: a drifted schema constrains the model into output the parser rejects.
+/// No category, pin or links: the decision model reads and links what was written.
 /// Every field required, though serde keeps them optional for older replies.
 pub fn artifacts_schema() -> serde_json::Value {
     serde_json::json!({
@@ -1844,7 +1428,6 @@ pub fn artifacts_schema() -> serde_json::Value {
                     "properties": {
                         "text": {"type": "string"},
                         "title": {"type": "string"},
-                        "category": {"type": "string", "enum": CATEGORIES},
                         "corpus_lines": {
                             "type": "array",
                             "items": {"type": "integer"},
@@ -1852,10 +1435,9 @@ pub fn artifacts_schema() -> serde_json::Value {
                             "maxItems": 2
                         },
                         "caveats": {"type": "array", "items": {"type": "string"}},
-                        "tags": {"type": "array", "items": {"type": "string"}},
-                        "pinned": {"type": "boolean"}
+                        "tags": {"type": "array", "items": {"type": "string"}}
                     },
-                    "required": ["text", "title", "category", "corpus_lines", "caveats", "tags", "pinned"],
+                    "required": ["text", "title", "corpus_lines", "caveats", "tags"],
                     "additionalProperties": false
                 }
             }
@@ -1882,102 +1464,8 @@ pub fn judged_artifacts_schema() -> serde_json::Value {
         "type": "array",
         "items": {"type": "string"}
     });
-    schema["properties"]["links"] = serde_json::json!({
-        "type": "array",
-        "items": {
-            "type": "object",
-            "properties": {
-                "artifact_id": {"type": "string"},
-                "reason": {"type": "string"}
-            },
-            "required": ["artifact_id", "reason"],
-            "additionalProperties": false
-        }
-    });
-    schema["required"] = serde_json::json!(["artifacts", "moment", "events", "links"]);
+    schema["required"] = serde_json::json!(["artifacts", "moment", "events"]);
     schema
-}
-
-/// A union per relation makes `merged` writable exactly for `duplicate`; this rests on `additionalProperties: false`.
-/// Nested under `verdict` because strict mode needs an object root. `parse_dedupe` still checks: grammars can be off.
-pub fn dedupe_schema() -> serde_json::Value {
-    let merged = serde_json::json!({
-        "type": "object",
-        "properties": {
-            "text": {"type": "string"},
-            "title": {"type": "string"},
-            "category": {"type": "string", "enum": CATEGORIES},
-            "caveats": {"type": "array", "items": {"type": "string"}}
-        },
-        // Every field required: `strict` rejects listed-but-optional properties.
-        "required": ["text", "title", "category", "caveats"],
-        "additionalProperties": false
-    });
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": {
-                "anyOf": [
-                    {
-                        "type": "object",
-                        "properties": {
-                            "relation": {"type": "string", "enum": ["duplicate"]},
-                            "detail": {"type": "string"},
-                            "merged": merged
-                        },
-                        "required": ["relation", "detail", "merged"],
-                        "additionalProperties": false
-                    },
-                    {
-                        // Required and pattern-bound, or the grammar accepts "the second one" and the verdict downgrades.
-                        "type": "object",
-                        "properties": {
-                            "relation": {"type": "string", "enum": ["replaced"]},
-                            "detail": {"type": "string"},
-                            "supersedes": {"type": "string", "pattern": "^[A-Za-z]$"}
-                        },
-                        "required": ["relation", "detail", "supersedes"],
-                        "additionalProperties": false
-                    },
-                    {
-                        "type": "object",
-                        "properties": {
-                            // One variant because one shape; "vacuous" still retires both artifacts.
-                            "relation": {
-                                "type": "string",
-                                "enum": ["distinct", "conflict", "vacuous"]
-                            },
-                            "detail": {"type": "string"}
-                        },
-                        "required": ["relation", "detail"],
-                        "additionalProperties": false
-                    }
-                ]
-            }
-        },
-        "required": ["verdict"],
-        "additionalProperties": false
-    })
-}
-
-/// Its own schema: under the dedupe grammar a link can only answer with a dedupe verdict.
-pub fn link_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "verdict": {
-                "type": "object",
-                "properties": {
-                    "relation": {"type": "string", "enum": ["related", "unrelated", "duplicate"]},
-                    "reason": {"type": "string"}
-                },
-                "required": ["relation", "reason"],
-                "additionalProperties": false
-            }
-        },
-        "required": ["verdict"],
-        "additionalProperties": false
-    })
 }
 
 /// Models wrap JSON in fences and prose regardless of the prompt.
@@ -2063,7 +1551,7 @@ pub fn parse_response(body: &str) -> Result<Vec<ProposedArtifact>> {
     proposed_from(env.artifacts, false)
 }
 
-/// `judged` gates model tags and the pin: off for promotions, where tags drift and a rewrite must not pin itself.
+/// `judged` gates model tags: off for promotions, where tags drift.
 fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArtifact>> {
     let artifacts: Vec<ProposedArtifact> = raws
         .into_iter()
@@ -2071,11 +1559,6 @@ fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArt
         .map(|c| ProposedArtifact {
             text: c.text.trim().to_string(),
             title: c.title.filter(|t| !t.trim().is_empty()),
-            // Absent stays absent (`other` is a claim); anything answered is held to the list.
-            category: c
-                .category
-                .filter(|t| !t.trim().is_empty())
-                .map(|t| normalize_category(&t)),
             tags: if judged {
                 c.tags
                     .unwrap_or_default()
@@ -2099,7 +1582,6 @@ fn proposed_from(raws: Vec<RawArtifact>, judged: bool) -> Result<Vec<ProposedArt
                 .filter(|c| !c.is_empty())
                 .take(3)
                 .collect(),
-            pinned: judged && c.pinned.unwrap_or(false),
         })
         .collect();
 
@@ -2121,16 +1603,6 @@ pub fn parse_judged_response(body: &str) -> Result<crate::infer::SegmentReply> {
                 when: env.moment.as_ref().and_then(|m| m.when.clone()),
                 rule: env.moment.as_ref().and_then(|m| m.rule.clone()),
                 events: env.events.unwrap_or_default(),
-                links: env
-                    .links
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|l| !l.artifact_id.trim().is_empty())
-                    .map(|l| crate::infer::ProposedLink {
-                        artifact_id: l.artifact_id,
-                        reason: l.reason,
-                    })
-                    .collect(),
             };
             // Empty (or blank-only) artifacts are a real answer here: a reminder-only note leaves nothing the prompt allows
             // writing, so the judgement alone is the reply. Judged by text, since small models send a blank placeholder.
@@ -2364,36 +1836,33 @@ mod tests {
         );
     }
 
-    fn member<'a>(title: &'a str, text: &'a str) -> DedupeMember<'a> {
-        DedupeMember {
-            title,
-            text,
-            sources: vec![],
-        }
-    }
-
     #[test]
-    fn the_schema_asks_for_tags_and_a_pin_and_the_judged_one_for_the_moment() {
-        // Whether they are honored is per path; see `the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model`.
-        let items = &artifacts_schema()["properties"]["artifacts"]["items"];
-        let required: Vec<&str> = items["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert!(required.contains(&"tags"), "{required:?}");
-        assert!(required.contains(&"pinned"), "{required:?}");
-
+    fn the_schemas_ask_for_no_category_no_pin_and_no_links() {
+        let required = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect()
+        };
+        let plain = artifacts_schema();
+        assert_eq!(
+            required(&plain["properties"]["artifacts"]["items"]["required"]),
+            ["text", "title", "corpus_lines", "caveats", "tags"]
+        );
         let judged = judged_artifacts_schema();
-        let top: Vec<&str> = judged["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        for field in ["artifacts", "moment", "events", "links"] {
-            assert!(top.contains(&field), "{top:?}");
+        assert_eq!(
+            required(&judged["required"]),
+            ["artifacts", "moment", "events"]
+        );
+        for schema in [plain, judged] {
+            let text = schema.to_string();
+            for field in ["category", "pinned", "links"] {
+                assert!(
+                    !text.contains(field),
+                    "a schema still asks for {field}: {text}"
+                );
+            }
         }
     }
 
@@ -2412,37 +1881,6 @@ mod tests {
         assert_eq!(normalize_category("Procedure"), "procedure");
         assert_eq!(normalize_category("  snippet "), "snippet");
         assert_eq!(normalize_category("reference"), "reference");
-    }
-
-    #[test]
-    fn the_schema_constrains_the_category_to_the_list() {
-        let schema = artifacts_schema();
-        let cat = &schema["properties"]["artifacts"]["items"]["properties"]["category"];
-        let listed: Vec<&str> = cat["enum"]
-            .as_array()
-            .expect("the category is an enum, not a free string")
-            .iter()
-            .map(|v| v.as_str().unwrap())
-            .collect();
-        assert_eq!(listed, CATEGORIES);
-    }
-
-    #[test]
-    fn the_link_prompt_carries_both_titles_and_the_questions_that_bound_them() {
-        let p = link_prompt(
-            ("Mounting E01 images", "ewfmount /dev/..."),
-            ("Loop device limits", "max_loop=64"),
-            &["mount forensic image".into()],
-            0,
-        );
-        assert!(p.contains("Mounting E01 images"));
-        assert!(p.contains("max_loop=64"));
-        assert!(p.contains("mount forensic image"));
-        assert!(
-            !p.contains("attempt"),
-            "a first ask must stay cache-identical"
-        );
-        assert!(link_prompt(("a", "b"), ("c", "d"), &[], 2).contains("attempt 3"));
     }
 
     #[test]
@@ -2487,21 +1925,16 @@ mod tests {
 
         // Every literal the parser, the schema or `user_prompt` depends on.
         const CONTRACT: &[&str] = &[
-            r#"{"artifacts":[{"text":"...","title":"...","category":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."],"pinned":false}]}"#,
-            "concept, procedure, reference, snippet",
-            "configuration, definition, example, other",
+            r#"{"artifacts":[{"text":"...","title":"...","corpus_lines":[start,end],"caveats":["..."],"tags":["..."]}]}"#,
             "corpus_lines",
             "caveats",
-            "pinned",
             r#"{"intent":"remind"|"none","when":...,"rule":...}"#,
-            r#"{"artifact_id":"...","reason":"..."}"#,
             "context only",
             "INPUT",
             "NEIGHBORS",
             "JUDGE",
             "moment",
             "events",
-            "links",
             "RRULE",
             "FREQ, INTERVAL, BYDAY",
             "BYMONTHDAY, UNTIL, COUNT",
@@ -2522,6 +1955,18 @@ mod tests {
                     lang.tag()
                 );
             }
+            // What the writer no longer answers: the decision model reads and links instead.
+            for gone in [
+                "pinned",
+                r#"{"artifact_id":"...","reason":"..."}"#,
+                "link targets",
+            ] {
+                assert!(
+                    !p.contains(gone),
+                    "the {} prompt still carries `{gone}`",
+                    lang.tag()
+                );
+            }
             assert!(!title_system(lang).is_empty());
         }
 
@@ -2533,6 +1978,74 @@ mod tests {
             Lang::ALL.iter().map(|l| title_system(*l)).collect();
         assert_eq!(titles.len(), Lang::ALL.len());
         assert_eq!(synthesizer_system(Lang::En), SYNTHESIZER_SYSTEM);
+    }
+
+    #[test]
+    fn no_language_still_tells_the_writer_to_categorise_pin_or_link() {
+        use crate::infer::lang::Lang;
+        for lang in Lang::ALL {
+            let p = synthesizer_system(lang);
+            for field in ["\"category\"", "\"pinned\"", "\"links\""] {
+                assert!(
+                    !p.contains(field),
+                    "the {} prompt still asks for {field}",
+                    lang.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_language_still_sends_a_relation_to_a_neighbour_to_the_judgement() {
+        use crate::infer::lang::Lang;
+        // The word each translation used for it; none has another use in its prompt.
+        const RELATION: &[&str] = &[
+            "relation to",
+            "Beziehung",
+            "relación",
+            "relation à",
+            "relazione",
+            "relatie tot",
+            "związek",
+            "relação",
+            "связь",
+            "ilişkisini",
+        ];
+        assert_eq!(RELATION.len(), Lang::ALL.len());
+        let flat = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        for lang in Lang::ALL {
+            let p = flat(synthesizer_system(lang));
+            for word in RELATION {
+                assert!(
+                    !p.contains(word),
+                    "the {} prompt still names a relation to a neighbour (`{word}`)",
+                    lang.tag()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_user_prompt_shows_neighbours_as_context_and_judges_no_links() {
+        let ctx = crate::infer::context::WindowContext::default();
+        let judge = crate::infer::JudgeAsk {
+            now_local: "2026-09-04 09:00 (Friday)".into(),
+            tz: "UTC".into(),
+            forced_intent: None,
+            neighbors: vec![crate::infer::Neighbor {
+                id: "n-1".into(),
+                title: Some("Invoices".into()),
+                text: "the invoice workflow".into(),
+            }],
+        };
+        let p = user_prompt("x", 1, 100, &ctx, Some(&judge));
+        assert!(p.contains("----- NEIGHBORS (context only) -----"), "{p}");
+        assert!(
+            p.contains("the invoice workflow"),
+            "the neighbour stays as context"
+        );
+        assert!(p.contains("Judge this note: moment, events.\n"), "{p}");
+        assert!(!p.contains("link"), "{p}");
     }
 
     #[test]
@@ -2576,107 +2089,6 @@ mod tests {
     }
 
     #[test]
-    fn a_pair_where_neither_side_carries_a_claim_parses_as_vacuous() {
-        let v = parse_dedupe(
-            r#"{"relation":"vacuous","detail":"both bodies are their own file paths"}"#,
-        )
-        .unwrap();
-        assert_eq!(v.relation, Relation::Vacuous);
-        assert!(
-            v.merged.is_none(),
-            "there is nothing to write from two artifacts that say nothing"
-        );
-    }
-
-    #[test]
-    fn every_relation_the_dedupe_schema_allows_is_one_the_parser_knows() {
-        let schema = dedupe_schema();
-        let variants = schema["properties"]["verdict"]["anyOf"]
-            .as_array()
-            .expect("a union of variants under the envelope");
-        let mut seen = Vec::new();
-
-        for variant in variants {
-            let required: Vec<&str> = variant["required"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|f| f.as_str().unwrap())
-                .collect();
-
-            for relation in variant["properties"]["relation"]["enum"]
-                .as_array()
-                .unwrap()
-            {
-                let r = relation.as_str().unwrap();
-                seen.push(r.to_string());
-
-                // A grammar from this schema cannot emit less, so the parser must accept it.
-                let mut body = serde_json::json!({ "relation": r });
-                for field in &required {
-                    match *field {
-                        "relation" => {}
-                        "detail" => body["detail"] = serde_json::json!("because"),
-                        "merged" => {
-                            body["merged"] = serde_json::json!({
-                                "text": "merged body",
-                                "title": "t",
-                                "category": "note",
-                                "tags": [],
-                                "caveats": []
-                            })
-                        }
-                        "supersedes" => body["supersedes"] = serde_json::json!("a"),
-                        other => {
-                            panic!("the schema requires {other:?}, which this test cannot build")
-                        }
-                    }
-                }
-                let sent = serde_json::json!({ "verdict": body });
-                assert!(
-                    parse_dedupe(&sent.to_string()).is_ok(),
-                    "the schema lets the model answer {sent}, which the parser rejects"
-                );
-            }
-        }
-
-        seen.sort();
-        assert_eq!(
-            seen,
-            ["conflict", "distinct", "duplicate", "replaced", "vacuous"],
-            "the union must still cover every relation, exactly once"
-        );
-    }
-
-    #[test]
-    fn no_dedupe_variant_permits_a_duplicate_without_a_merge_or_a_distinct_with_one() {
-        let schema = dedupe_schema();
-        for variant in schema["properties"]["verdict"]["anyOf"].as_array().unwrap() {
-            let relations = variant["properties"]["relation"]["enum"]
-                .as_array()
-                .unwrap();
-            let names: Vec<&str> = relations.iter().map(|r| r.as_str().unwrap()).collect();
-            let required = variant["required"].as_array().unwrap();
-            let requires_merged = required.iter().any(|f| f == "merged");
-            let offers_merged = variant["properties"].get("merged").is_some();
-
-            if names.contains(&"duplicate") {
-                assert!(requires_merged, "duplicate may be written without a merge");
-            } else {
-                assert!(
-                    !offers_merged,
-                    "{names:?} may carry a merge, which the parser refuses"
-                );
-            }
-        }
-
-        assert!(parse_dedupe(r#"{"verdict":{"relation":"duplicate"}}"#).is_err());
-        assert!(
-            parse_dedupe(r#"{"verdict":{"relation":"distinct","merged":{"text":"x"}}}"#).is_err()
-        );
-    }
-
-    #[test]
     fn every_judge_schema_object_is_closed_and_rooted_in_an_object() {
         fn closed(v: &serde_json::Value, path: &str) {
             if v["type"] == "object" {
@@ -2709,10 +2121,8 @@ mod tests {
         }
 
         for (name, schema) in [
-            ("dedupe", dedupe_schema()),
-            ("link", link_schema()),
             ("gap_label", gap_label_schema()),
-            ("reap", reap_schema()),
+            ("synthesize", synthesize_schema()),
             ("plan", plan_schema()),
             ("artifacts", artifacts_schema()),
         ] {
@@ -2722,165 +2132,6 @@ mod tests {
             );
             closed(&schema, name);
         }
-    }
-
-    #[test]
-    fn the_supersedes_the_schema_permits_is_a_direction_the_parser_reads() {
-        let schema = dedupe_schema();
-        let replaced = schema["properties"]["verdict"]["anyOf"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|v| v["properties"]["relation"]["enum"][0] == "replaced")
-            .expect("a variant for replaced");
-        // Literal: there is no regex engine, and the field is anchored to one letter in either case.
-        assert_eq!(
-            replaced["properties"]["supersedes"]["pattern"].as_str(),
-            Some("^[A-Za-z]$"),
-            "supersedes is not constrained to a direction parse_dedupe reads"
-        );
-
-        let verdict =
-            parse_dedupe(r#"{"verdict":{"relation":"replaced","supersedes":"B"}}"#).unwrap();
-        assert_eq!(verdict.relation, Relation::Replaced);
-        assert_eq!(verdict.supersedes, Some('b'));
-    }
-
-    #[test]
-    fn every_relation_the_link_schema_allows_is_one_its_parser_knows() {
-        let schema = link_schema();
-        let relations = schema["properties"]["verdict"]["properties"]["relation"]["enum"]
-            .as_array()
-            .unwrap();
-        let names: Vec<&str> = relations.iter().map(|r| r.as_str().unwrap()).collect();
-        assert_eq!(names, ["related", "unrelated", "duplicate"]);
-
-        for r in &names {
-            let sent = serde_json::json!({"verdict": {"relation": r, "reason": "because"}});
-            let (_, reason) =
-                crate::jobs::associate::parse_link(&sent.to_string()).unwrap_or_else(|e| {
-                    panic!("the schema allows {sent}, which the parser rejects: {e}")
-                });
-            assert_eq!(reason, "because");
-        }
-
-        for r in ["distinct", "conflict", "replaced"] {
-            assert!(
-                !names.contains(&r),
-                "the link judge may answer {r:?}, which its parser refuses"
-            );
-        }
-    }
-
-    #[test]
-    fn the_dedupe_pass_is_told_what_each_artifact_is_about() {
-        let p = dedupe_prompt(
-            &member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB."),
-            &member("FAT32 Specifications", "32 Bit Clusternummern."),
-            0,
-        );
-        assert!(p.contains("Title: FAT16 Specifications"), "{p}");
-        assert!(p.contains("Title: FAT32 Specifications"), "{p}");
-        assert!(p.contains("Die max. Partitionsgröße: 2 GB."));
-    }
-
-    #[test]
-    fn the_pair_is_lettered_so_a_direction_can_name_one() {
-        let p = dedupe_prompt(&member("one", "a"), &member("two", "b"), 0);
-        assert!(p.contains("ARTIFACT A"), "{p}");
-        assert!(p.contains("ARTIFACT B"), "{p}");
-        assert!(
-            !p.contains("ARTIFACT C"),
-            "a third letter exists to be named: {p}"
-        );
-    }
-
-    #[test]
-    fn a_merged_member_is_shown_with_its_sources_beneath_it() {
-        let a = DedupeMember {
-            title: "Pool sizing",
-            text: "the pool holds sixteen",
-            sources: vec![
-                ("Pool sizing, 2024", "max_connections is 16"),
-                ("Pool notes", "raise it for batch jobs"),
-            ],
-        };
-        let p = dedupe_prompt(&a, &member("Connections", "sixteen connections"), 0);
-
-        assert!(p.contains("ARTIFACT A"), "{p}");
-        assert!(p.contains("ARTIFACT B"), "{p}");
-        assert!(p.contains("the pool holds sixteen"), "{p}");
-        assert!(
-            p.contains("max_connections is 16"),
-            "a source was not shown: {p}"
-        );
-        assert!(p.contains("SOURCES OF A"), "{p}");
-        assert!(
-            !p.contains("SOURCES OF B"),
-            "a captured member was given a sources block: {p}"
-        );
-        assert!(!p.contains("ARTIFACT C"), "a source was lettered: {p}");
-    }
-
-    #[test]
-    fn the_system_prompt_rules_the_sources_out_of_the_verdict() {
-        assert!(DEDUPE_SYSTEM.contains("SOURCES"));
-        assert!(DEDUPE_SYSTEM.contains("never name a source"));
-    }
-
-    #[test]
-    fn no_prior_about_values_is_named_to_the_dedupe_judge() {
-        // One fact written three ways gave different token sets; the prior primed a false contradiction.
-        let p = dedupe_prompt(
-            &member(
-                "USB Device Registry Keys",
-                "0066 = Last Connected (Win8-10)",
-            ),
-            &member("Plug and Play Logs", "0066 für Last Connected (Windows 8-)"),
-            0,
-        );
-        assert!(
-            !p.contains("Decide which."),
-            "the differing-values prior is back in the prompt: {p}"
-        );
-        assert!(
-            !p.contains("not stated the same way"),
-            "the differing-values prior is back in the prompt: {p}"
-        );
-        assert!(p.contains("0066 = Last Connected (Win8-10)"), "{p}");
-        assert!(p.contains("0066 für Last Connected (Windows 8-)"), "{p}");
-    }
-
-    #[test]
-    fn a_retry_does_not_ask_the_endpoint_the_question_it_has_cached() {
-        // The endpoint replays a cached reply for an identical prompt.
-        let a = member("FAT16 Specifications", "Die max. Partitionsgröße: 2 GB.");
-        let b = member("FAT32 Specifications", "32 Bit Clusternummern.");
-        let first = dedupe_prompt(&a, &b, 0);
-        let second = dedupe_prompt(&a, &b, 1);
-        assert_ne!(first, second);
-        assert_ne!(second, dedupe_prompt(&a, &b, 2));
-        assert!(first.starts_with("----- ARTIFACT A -----"), "{first}");
-    }
-
-    #[test]
-    fn the_dedupe_pass_is_told_what_makes_a_pair_worth_discarding_and_what_does_not() {
-        // Vacuous eats real notes when misapplied; an undistilled study file must come back "distinct".
-        assert!(DEDUPE_SYSTEM.contains(r#""vacuous""#));
-        assert!(DEDUPE_SYSTEM.contains("neither"));
-        assert!(
-            DEDUPE_SYSTEM.contains("not summarised"),
-            "the one thing that is not vacuous is unsaid"
-        );
-    }
-
-    #[test]
-    fn the_dedupe_pass_is_told_that_different_subjects_are_not_a_conflict() {
-        // Sibling sections of one reference differ in every number and must not be merged.
-        assert!(DEDUPE_SYSTEM.contains("same subject"));
-        assert!(DEDUPE_SYSTEM.contains("different things"));
-        assert!(DEDUPE_SYSTEM.contains(r#"Answer "distinct" and stop."#));
-        assert!(DEDUPE_SYSTEM.contains("Prefer this whenever it applies"));
     }
 
     #[test]
@@ -2942,97 +2193,6 @@ mod tests {
         // A segment producing nothing must fail, so it is recorded as missing rather than dropped.
         let prose = r###"{"artifacts":[{"text":"unterminated and "broken, "tags":}]}"###;
         assert!(parse_response(prose).is_err());
-    }
-
-    #[test]
-    fn a_duplicate_verdict_carries_a_merged_draft() {
-        let d = parse_dedupe(
-            r#"{"relation":"duplicate","detail":"same command, more detail",
-                "merged":{"title":"Bind mounts","text":"Use mount --bind.",
-                          "tags":["mount"],"caveats":[],"category":"howto"}}"#,
-        )
-        .unwrap();
-        assert_eq!(d.relation, Relation::Duplicate);
-        let m = d.merged.as_ref().unwrap();
-        assert_eq!(m.text, "Use mount --bind.");
-        assert_eq!(m.title.as_deref(), Some("Bind mounts"));
-        assert!(m.tags.is_empty());
-    }
-
-    #[test]
-    fn a_merged_block_on_a_non_duplicate_verdict_is_unreadable() {
-        for relation in ["conflict", "replaced", "distinct"] {
-            let body = format!(
-                r#"{{"relation":"{relation}","supersedes":"a",
-                     "merged":{{"text":"x","tags":[],"caveats":[]}}}}"#
-            );
-            assert!(
-                matches!(parse_dedupe(&body), Err(Error::MalformedLlmOutput(_))),
-                "a {relation} verdict was allowed to carry a merge"
-            );
-        }
-    }
-
-    #[test]
-    fn a_duplicate_verdict_with_nothing_to_write_is_unreadable() {
-        assert!(matches!(
-            parse_dedupe(r#"{"relation":"duplicate","detail":"x"}"#),
-            Err(Error::MalformedLlmOutput(_))
-        ));
-        assert!(matches!(
-            parse_dedupe(
-                r#"{"relation":"duplicate","merged":{"text":"   ","tags":[],"caveats":[]}}"#
-            ),
-            Err(Error::MalformedLlmOutput(_))
-        ));
-    }
-
-    #[test]
-    fn a_replacement_names_the_obsolete_side() {
-        let d = parse_dedupe(
-            r#"{"relation":"replaced","supersedes":"B","detail":"a uses --old-flag"}"#,
-        )
-        .unwrap();
-        assert_eq!(d.relation, Relation::Replaced);
-        assert_eq!(d.supersedes, Some('b'));
-    }
-
-    #[test]
-    fn a_direction_reaches_as_far_as_the_letters_the_prompt_hands_out() {
-        // `interpret` refuses letters past the end, so this parser need not change with the prompt.
-        for (letter, want) in [("E", 'e'), ("f", 'f'), ("H", 'h')] {
-            let d = parse_dedupe(&format!(
-                r#"{{"relation":"replaced","supersedes":"{letter}","detail":"stale"}}"#
-            ))
-            .unwrap();
-            assert_eq!(
-                d.relation,
-                Relation::Replaced,
-                "{letter} was not a direction"
-            );
-            assert_eq!(d.supersedes, Some(want));
-        }
-    }
-
-    #[test]
-    fn a_replacement_naming_no_side_falls_back_to_a_conflict() {
-        let d = parse_dedupe(r#"{"relation":"replaced","detail":"one of them is old"}"#).unwrap();
-        assert_eq!(d.relation, Relation::Conflict);
-        let d =
-            parse_dedupe(r#"{"relation":"replaced","supersedes":"not sure honestly"}"#).unwrap();
-        assert_eq!(d.relation, Relation::Conflict);
-    }
-
-    #[test]
-    fn a_verdict_wrapped_in_prose_and_fences_still_parses() {
-        let d = parse_dedupe("Sure:\n```json\n{\"relation\": \"distinct\"}\n```").unwrap();
-        assert_eq!(d.relation, Relation::Distinct);
-    }
-
-    #[test]
-    fn an_unparsable_verdict_is_an_error_not_a_default() {
-        assert!(parse_dedupe("I could not decide.").is_err());
-        assert!(parse_dedupe(r#"{"relation":"maybe"}"#).is_err());
     }
 
     #[test]
@@ -3328,32 +2488,57 @@ mod tests {
             );
             let r = parse_response(&body).unwrap_or_else(|e| panic!("pinned={v}: {e}"));
             assert_eq!(r.len(), 1, "pinned={v}");
-            assert!(!r[0].pinned, "pinned={v}");
             let j = parse_judged_response(&body).unwrap_or_else(|e| panic!("pinned={v}: {e}"));
             assert_eq!(j.artifacts.len(), 1, "pinned={v}");
         }
     }
 
     #[test]
-    fn a_judged_reply_parses_moment_events_links_tags_and_pinned() {
+    fn a_judged_reply_parses_moment_events_and_tags() {
         let body = r#"{"moment":{"intent":"remind","when":"2026-09-04T09:00","rule":null},
             "events":["2026-09-12T00:00"],
-            "links":[{"artifact_id":"a-1","reason":"same migration"}],
-            "artifacts":[{"text":"Send the invoice","title":"Invoice","category":"other",
-                          "corpus_lines":[1,1],"caveats":[],"tags":["Billing "],"pinned":true}]}"#;
+            "artifacts":[{"text":"Send the invoice","title":"Invoice",
+                          "corpus_lines":[1,1],"caveats":[],"tags":["Billing "]}]}"#;
         let r = parse_judged_response(body).unwrap();
         let j = r.judgement.unwrap();
         assert_eq!(j.intent.as_deref(), Some("remind"));
         assert_eq!(j.when.as_deref(), Some("2026-09-04T09:00"));
         assert_eq!(j.rule, None);
         assert_eq!(j.events, vec!["2026-09-12T00:00"]);
-        assert_eq!(j.links[0].artifact_id, "a-1");
-        assert!(r.artifacts[0].pinned);
+        assert_eq!(r.artifacts[0].corpus_lines, Some((1, 1)));
         assert_eq!(
             r.artifacts[0].tags,
             vec!["billing"],
             "trimmed and lowercased"
         );
+    }
+
+    #[test]
+    fn a_reply_that_still_carries_the_old_fields_parses() {
+        // An older or stubborn model answers the shape it was once asked for.
+        let body = r#"{"moment":{"intent":"none","when":null,"rule":null},"events":[],
+            "links":[{"artifact_id":"a-1","reason":"same migration"}],
+            "artifacts":[{"text":"Send the invoice","title":"Invoice","category":"procedure",
+                          "corpus_lines":[1,1],"caveats":[],"tags":["billing"],"pinned":true}]}"#;
+        let r = parse_judged_response(body).unwrap();
+        assert_eq!(r.artifacts.len(), 1);
+        assert_eq!(r.artifacts[0].text, "Send the invoice");
+        assert_eq!(r.artifacts[0].tags, vec!["billing"]);
+        assert_eq!(
+            r.judgement.unwrap(),
+            crate::infer::Judgement {
+                intent: Some("none".into()),
+                ..Default::default()
+            },
+            "the links are not read"
+        );
+        let plain = parse_response(body).unwrap();
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].title.as_deref(), Some("Invoice"));
+        // Fields of the wrong shape cost nothing either.
+        let odd = r#"{"artifacts":[{"text":"x","category":7,"pinned":"yes"}],"links":"none"}"#;
+        assert_eq!(parse_judged_response(odd).unwrap().artifacts.len(), 1);
+        assert_eq!(parse_response(odd).unwrap().len(), 1);
     }
 
     #[test]
@@ -3419,62 +2604,9 @@ mod tests {
     }
 
     #[test]
-    fn the_plain_parse_takes_neither_tags_nor_a_pin_from_the_model() {
-        let body = r#"{"artifacts":[{"text":"x","tags":["topic"],"pinned":true}]}"#;
+    fn the_plain_parse_takes_no_tags_from_the_model() {
+        let body = r#"{"artifacts":[{"text":"x","tags":["topic"]}]}"#;
         let arts = parse_response(body).unwrap();
         assert!(arts[0].tags.is_empty());
-        assert!(!arts[0].pinned);
-    }
-
-    #[test]
-    fn every_verdict_the_reap_schema_allows_is_one_the_parser_knows() {
-        let schema = reap_schema();
-        let allowed = schema["properties"]["verdict"]["enum"].as_array().unwrap();
-        assert!(!allowed.is_empty());
-        for v in allowed {
-            let reply = serde_json::json!({"verdict": v, "reason": "why"}).to_string();
-            parse_reap(&reply).unwrap_or_else(|e| {
-                panic!("the schema permits {v}, which the parser refuses: {e}")
-            });
-        }
-    }
-
-    #[test]
-    fn parse_reap_reads_both_verdicts_and_refuses_the_rest() {
-        assert_eq!(
-            parse_reap(r#"{"verdict":"worthless","reason":"covered by [1]"}"#).unwrap(),
-            Reap::Worthless {
-                reason: "covered by [1]".into()
-            }
-        );
-        assert_eq!(
-            parse_reap("```json\n{\"verdict\":\"valuable\",\"reason\":\"names a port\"}\n```")
-                .unwrap(),
-            Reap::Valuable {
-                reason: "names a port".into()
-            }
-        );
-        assert!(parse_reap(r#"{"verdict":"maybe","reason":""}"#).is_err());
-        assert!(parse_reap("no json here").is_err());
-    }
-
-    #[test]
-    fn reap_prompt_carries_candidate_successor_and_numbered_neighbours() {
-        let case = ReapCase {
-            title: "Old flag",
-            text: "use --legacy-peer-deps",
-            successor: Some(("New flag", "use --install-strategy")),
-            neighbours: vec![("N1", "first neighbour"), ("N2", "second neighbour")],
-        };
-        let p = reap_prompt(&case);
-        assert!(p.contains("RETIRED ARTIFACT") && p.contains("--legacy-peer-deps"));
-        assert!(p.contains("NAMED REPLACEMENT") && p.contains("--install-strategy"));
-        assert!(p.contains("[1] Title: N1") && p.contains("[2] Title: N2"));
-        let no_successor = ReapCase {
-            successor: None,
-            neighbours: vec![],
-            ..case
-        };
-        assert!(!reap_prompt(&no_successor).contains("NAMED REPLACEMENT"));
     }
 }

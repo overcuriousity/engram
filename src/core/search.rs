@@ -1019,19 +1019,35 @@ impl Core {
     /// Candidates for an operator to review; a one-way signal, so it creates no popularity loop.
     pub async fn stale_candidates(&self, limit: usize) -> Result<Vec<SearchResult>> {
         let cutoff = now_secs() - self.consolidate.stale_after_days as i64 * SECONDS_PER_DAY;
+        let limit = limit.clamp(1, MAX_LIMIT);
+        // Most old notes are lasting ones, so many more are drawn than are wanted: one read of the
+        // store's stale end, filtered here, where paging would scan that end again for every page.
+        const DRAWN_PER_KEPT: usize = 32;
+        // A note read as lasting is not stale for being old; one with no reading is as before.
+        let time_bound = crate::core::judging::catalogue::time_bound();
         let hits = self
             .vectors
             .stale_candidates(
                 cutoff,
                 self.consolidate.stale_max_hits,
-                limit.clamp(1, MAX_LIMIT),
+                limit * DRAWN_PER_KEPT,
             )
             .await?;
-        Ok(hits
-            .into_iter()
-            // Drawn, not matched: nothing here is weak.
-            .map(SearchResult::from)
-            .collect())
+        let mut kept = Vec::new();
+        for h in hits {
+            if kept.len() == limit {
+                break;
+            }
+            let yes = self
+                .store
+                .reading_yes(&h.payload.artifact_id, &time_bound)
+                .await?;
+            if yes.is_none_or(|y| y >= crate::jobs::read::TIME_BOUND_AT) {
+                // Drawn, not matched: nothing here is weak.
+                kept.push(SearchResult::from(h));
+            }
+        }
+        Ok(kept)
     }
 
     /// The hot path: one embedding, one vector search, optionally one rerank. No completion, ever.
@@ -3124,6 +3140,101 @@ mod tests {
         assert!(
             core.stale_candidates(10).await.unwrap().is_empty(),
             "an artifact ingested seconds ago is not a deprecation candidate"
+        );
+    }
+
+    /// One old, unused note, with a `time_bound` reading of `yes` when given.
+    async fn old_unused(core: &crate::core::Core, yes: Option<f64>) -> String {
+        seed(core, &[("the build server runs Debian 12", "note", &[])]).await;
+        let id = core.store.list_all_artifact_ids().await.unwrap()[0].clone();
+        core.vectors
+            .set_last_verified_at(&id, 1, false)
+            .await
+            .unwrap();
+        if let Some(yes) = yes {
+            core.store
+                .put_readings(
+                    &id,
+                    &[(
+                        &crate::core::judging::catalogue::time_bound(),
+                        &crate::infer::decide::Answer::Noul { yes },
+                    )],
+                    "m",
+                )
+                .await
+                .unwrap();
+        }
+        id
+    }
+
+    fn ids_of(hits: &[SearchResult]) -> Vec<&str> {
+        hits.iter().map(|h| h.artifact_id.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn an_old_unused_note_that_is_not_time_bound_is_no_longer_a_stale_candidate() {
+        let core = test_core().await;
+        old_unused(&core, Some(0.2)).await;
+        assert!(core.stale_candidates(10).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_old_unused_time_bound_note_is() {
+        let core = test_core().await;
+        let id = old_unused(&core, Some(0.5)).await;
+        assert_eq!(ids_of(&core.stale_candidates(10).await.unwrap()), [id]);
+    }
+
+    #[tokio::test]
+    async fn an_old_unused_note_with_no_reading_is_as_today() {
+        let core = test_core().await;
+        let id = old_unused(&core, None).await;
+        assert_eq!(ids_of(&core.stale_candidates(10).await.unwrap()), [id]);
+    }
+
+    #[tokio::test]
+    async fn lasting_notes_at_the_stale_end_do_not_hide_the_time_bound_ones_behind_them() {
+        let core = test_core().await;
+        // Five lasting notes are staler than the time-bound one: a draw of one would hold none.
+        let src = seed(
+            &core,
+            &[
+                ("the build server runs Debian 12", "note", &[]),
+                ("the office is on the third floor", "note", &[]),
+                ("the team meets on Mondays", "note", &[]),
+                ("the wiki lives on the intranet", "note", &[]),
+                ("the printer is called Gutenberg", "note", &[]),
+                ("the licence runs out in March", "note", &[]),
+                ("the trial ends next week", "note", &[]),
+            ],
+        )
+        .await;
+        let mut notes = core.store.artifacts_for_corpus(&src).await.unwrap();
+        notes.sort_by_key(|c| c.ordinal);
+        let time_bound = crate::core::judging::catalogue::time_bound();
+        for (i, c) in notes.iter().enumerate() {
+            core.vectors
+                .set_last_verified_at(&c.id, 1 + i as i64, false)
+                .await
+                .unwrap();
+            let yes = if i < 5 { 0.1 } else { 0.9 };
+            core.store
+                .put_readings(
+                    &c.id,
+                    &[(&time_bound, &crate::infer::decide::Answer::Noul { yes })],
+                    "m",
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            ids_of(&core.stale_candidates(1).await.unwrap()),
+            [notes[5].id.as_str()]
+        );
+        assert_eq!(
+            ids_of(&core.stale_candidates(10).await.unwrap()),
+            [notes[5].id.as_str(), notes[6].id.as_str()],
+            "the store ran out before the limit was met"
         );
     }
 

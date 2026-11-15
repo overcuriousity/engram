@@ -21,6 +21,57 @@ struct Retrieval {
     mrr: String,
     /// Rendered `|safe`: built here, its only variable part a count.
     note: String,
+    /// Retrieval by the model's labels and how far they agree with the person; empty before any.
+    by_model: Vec<String>,
+}
+
+fn searches(n: usize) -> String {
+    format!("{n} search{}", if n == 1 { "" } else { "es" })
+}
+
+/// The lines under the person's figures; a line with nothing to say is left out. The bearing record
+/// is decide's and shows without any label.
+fn model_lines(f: &crate::jobs::label::Figures) -> Vec<String> {
+    let mut out = Vec::new();
+    let r = &f.retrieval;
+    let labelled = r.searches + r.left_out > 0;
+    if labelled {
+        out.push(match r.searches {
+            0 => format!("by the model: {} left out", searches(r.left_out)),
+            _ => format!(
+                "by the model: recall@10 {:.2} · MRR {:.2} · {} left out",
+                r.recall_at_10,
+                r.mrr,
+                searches(r.left_out)
+            ),
+        });
+    }
+    let g = &f.agreement;
+    if g.judged > 0 {
+        out.push(format!(
+            "agreement: hit rate {:.2} · selectivity {:.2} over {} judged {}",
+            g.hit_rate,
+            g.selectivity,
+            g.judged,
+            if g.judged == 1 { "search" } else { "searches" }
+        ));
+    }
+    if f.bears.ruled_on > 0 {
+        out.push(format!(
+            "bears held up: {} of {}",
+            f.bears.held_up, f.bears.ruled_on
+        ));
+    }
+    if labelled {
+        out.push(
+            match f.counts {
+                true => "model labels count toward sweeps",
+                false => "model labels are shown only",
+            }
+            .into(),
+        );
+    }
+    out
 }
 
 /// Takes an `Identity`: a redirect before the session check tells anonymous callers which paths exist.
@@ -75,7 +126,6 @@ pub struct GraveRow {
     /// Always true: the graveyard keeps the title with no provenance to say whether it was a name.
     pub named: bool,
     pub ago: String,
-    pub reason: Option<String>,
 }
 
 /// One phrase of the last day: "412 links forgotten".
@@ -115,6 +165,8 @@ struct InsightsTemplate {
     artifact_count: i64,
     vector_count: u64,
     retrying: Vec<RetryingRow>,
+    /// What the base is torn on; renders nothing when empty.
+    unsure: crate::web::unsure::Unsure,
     /// What the base did on its own and left an undo for; see [`SetAsideRow`].
     set_aside: Vec<SetAsideRow>,
     /// A cap was hit; said, since a list that stops silently reads as complete.
@@ -329,7 +381,6 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
             title: g.title.unwrap_or_else(|| "(untitled)".to_string()),
             ago: ago(g.reaped_at),
             id: g.id,
-            reason: g.reason,
         })
         .collect();
     let more_reaped = reaped.len() > DEPRECATED_CAP as usize;
@@ -447,16 +498,10 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
             title: g.title,
             subtitle: String::new(),
             kind: "buried",
-            why: match g.reason {
-                Some(r) => format!(
-                    "buried {} · {r} — out of search and out of the index, text kept",
-                    g.ago
-                ),
-                None => format!(
-                    "buried {} — out of search and out of the index, text kept",
-                    g.ago
-                ),
-            },
+            why: format!(
+                "buried {} — out of search and out of the index, text kept",
+                g.ago
+            ),
             beside: Vec::new(),
             caveat: None,
             actions: vec![SetAsideAction::new(
@@ -604,7 +649,10 @@ pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
     })
 }
 
-async fn page(tenant: Tenant) -> UiResult<Response> {
+async fn page(
+    tenant: Tenant,
+    axum::extract::Query(said): axum::extract::Query<crate::web::unsure::Said>,
+) -> UiResult<Response> {
     let artifact_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
         .await?;
@@ -693,6 +741,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         .collect();
 
     Ok(HtmlTemplate(InsightsTemplate {
+        unsure: crate::web::unsure::unsure(&tenant).await?.saying(&said),
         sleep: sleep_view(&tenant.core).await?,
         evolve: evolve_view(&tenant.core).await?,
         held: tenant.core.store.held().await?,
@@ -709,6 +758,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                     .store
                     .feedback_stats(tenant.core.weak_below())
                     .await?;
+                let by_model = model_lines(&tenant.core.label_figures().await?);
                 match f.judged {
                     0 => Retrieval {
                         recall_at_10: "—".into(),
@@ -718,6 +768,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                              <em>Was this what you were looking for?</em> under a result",
                             f.captured
                         ),
+                        by_model,
                     },
                     judged => Retrieval {
                         recall_at_10: format!("{:.2}", f.recall_at_10),
@@ -730,6 +781,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                                 p => format!(", {p} waiting"),
                             }
                         ),
+                        by_model,
                     },
                 }
             }
@@ -737,6 +789,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
                 recall_at_10: "—".into(),
                 mrr: "—".into(),
                 note: "not recording searches, so there is nothing to measure".into(),
+                by_model: Vec::new(),
             },
         },
         retrying,
@@ -885,6 +938,62 @@ pub(crate) struct EvolveView {
     actions: Vec<String>,
     /// `None` where the rules have not run yet.
     rules: Option<String>,
+    /// One per line the judge is held to in this era, with when and why it last moved.
+    lines: Vec<String>,
+    /// What would move Decide's `split_at` and `bears_min`, which nothing moves.
+    shares: Vec<String>,
+}
+
+/// `pair_relation · act 0.88 · ask 0.62 · moved 2026-12-02: 3 of 41 acted were undone`.
+async fn judgement_lines(core: &crate::core::Core) -> Result<(Vec<String>, Vec<String>)> {
+    use crate::core::judging::{band::era, catalogue};
+    let model = core.decider.model();
+    let since = |m: Option<crate::store::decision_log::ThresholdMove>| match m {
+        Some(m) => format!(
+            "moved {}: {}",
+            chrono::DateTime::from_timestamp(m.moved_at, 0)
+                .map(|d| d.format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            m.reason
+        ),
+        None => "as configured".into(),
+    };
+    let mut lines = Vec::new();
+    for a in catalogue::all() {
+        if core.appliers.get(a.id).is_none() {
+            continue;
+        }
+        let t = core.thresholds(&a).await?;
+        let m = core
+            .store
+            .last_threshold_move(a.id, &era(model, a.version))
+            .await?;
+        lines.push(format!(
+            "{} · act {:.2} · ask {:.2} · {}",
+            a.id,
+            t.act_at,
+            t.ask_at,
+            since(m)
+        ));
+    }
+    let id = crate::core::decide::SETTLED_ID;
+    let m = core
+        .store
+        .last_threshold_move(id, &crate::core::decide::settled_era(model))
+        .await?;
+    lines.push(format!(
+        "{id} · settled {:.2} · {}",
+        core.settled_at().await,
+        since(m)
+    ));
+    let d = core.store.decide_shares(model).await?;
+    let share = |name: &str, (n, hit): (usize, usize)| format!("{name}: {hit} of {n}");
+    let shares = vec![
+        share("split and right", d.split),
+        share("held and \"nothing here\"", d.held),
+        share("not held and wrong", d.not_held),
+    ];
+    Ok((lines, shares))
 }
 
 fn action_str(a: &crate::store::actions::Action) -> String {
@@ -1065,9 +1174,12 @@ pub(crate) async fn evolve_view(core: &crate::core::Core) -> Result<Option<Evolv
         .map(action_str)
         .collect();
     let rules = rules_str(core).await?;
+    let (lines, shares) = judgement_lines(core).await?;
     Ok(Some(EvolveView {
         actions,
         rules,
+        lines,
+        shares,
         suspended,
         mode,
         live: format!(
@@ -1323,6 +1435,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insights_shows_retrieval_by_the_person_and_by_the_model() {
+        use crate::store::feedback::{Door, Labeller, NewCandidate, NewEvent};
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        core.ingest("alpha line\n\nbravo line", "web", None)
+            .await
+            .unwrap();
+        let (version, model) = (
+            crate::core::judging::catalogue::answers_query("").version,
+            core.decider.model().to_string(),
+        );
+        let search = |q: &'static str| NewEvent {
+            query: q.into(),
+            door: Door::Ui,
+            scope: None,
+            filters: "{}".into(),
+            query_vec: vec![0.1, 0.2],
+            embed_model: "fake".into(),
+            candidates: ["a", "b"]
+                .iter()
+                .map(|a| NewCandidate {
+                    artifact_id: (*a).into(),
+                    score: 0.5,
+                    similarity: Some(0.5),
+                    shown: true,
+                    ..Default::default()
+                })
+                .collect(),
+            answered: false,
+            fold_onto: None,
+            context: None,
+        };
+        let judged = core.store.record_search(search("alpha"), 0).await.unwrap();
+        let rows = [("a".to_string(), 0.95), ("b".to_string(), 0.1)];
+        core.store
+            .put_search_labels(&judged, &rows, version, &model)
+            .await
+            .unwrap();
+        core.store
+            .judge_hit(&judged, "a", Labeller::Confirm)
+            .await
+            .unwrap();
+        let none = core.store.record_search(search("bravo"), 0).await.unwrap();
+        let rows = [("a".to_string(), 0.1), ("b".to_string(), 0.1)];
+        core.store
+            .put_search_labels(&none, &rows, version, &model)
+            .await
+            .unwrap();
+        let html = insights(core).await;
+
+        assert!(html.contains("from 1 judged search"), "{html}");
+        assert!(
+            html.contains("by the model: recall@10 1.00 · MRR 1.00 · 1 search left out"),
+            "{html}"
+        );
+        assert!(
+            html.contains("agreement: hit rate 1.00 · selectivity 0.50 over 1 judged search"),
+            "{html}"
+        );
+        assert!(html.contains("model labels are shown only"), "{html}");
+        assert!(
+            !html.contains("bears held up"),
+            "nothing ruled on yet: {html}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_bearing_record_shows_before_any_search_is_labelled() {
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        core.ingest("alpha line", "web", None).await.unwrap();
+        crate::store::search_labels::tests::decided(
+            &core.store,
+            crate::store::asks::AskVerdict::Right,
+            &["keep", "drop"],
+        )
+        .await;
+        // The decision's decider is the store test's; the page reads the live decider's.
+        sqlx::query!("UPDATE decide_events SET decider = 'fake-decider'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let html = insights(core).await;
+        assert!(html.contains("bears held up: 1 of 2"), "{html}");
+        assert!(!html.contains("by the model"), "{html}");
+    }
+
+    #[tokio::test]
     async fn the_measures_embed_nothing() {
         let (core, embedder) = crate::core::test_support::test_core_counting_embed_calls().await;
         core.ingest("alpha line\n\nbravo line", "web", None)
@@ -1543,6 +1743,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insights_lists_the_lines_in_force_and_why_they_moved() {
+        use crate::core::judging::band::Thresholds;
+        use crate::store::asks::AskVerdict;
+        use crate::store::decisions::test_support::judged;
+        let (core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let t = |act_at, ask_at| Thresholds { act_at, ask_at };
+        let reason = "3 of 41 acted or answered were undone or corrected";
+        core.store
+            .move_thresholds("pair_relation", "fake-decider/v1", t(0.92, 0.6), reason)
+            .await
+            .unwrap();
+        // Another model's move is not in force here.
+        core.store
+            .move_thresholds("link_kind", "other/v1", t(0.82, 0.6), "elsewhere")
+            .await
+            .unwrap();
+        let m = "fake-decider";
+        judged(&core.store, m, "split", false, AskVerdict::Right).await;
+        judged(&core.store, m, "split", false, AskVerdict::Wrong).await;
+        judged(&core.store, m, "settled", false, AskVerdict::NothingHere).await;
+        judged(&core.store, m, "not_held", true, AskVerdict::Wrong).await;
+
+        let body = insights(core).await;
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        assert!(body.contains("judgement lines (4)"), "{body}");
+        assert!(
+            body.contains(&format!(
+                "pair_relation · act 0.92 · ask 0.60 · moved {today}: {reason}"
+            )),
+            "{body}"
+        );
+        assert!(
+            body.contains("link_kind · act 0.90 · ask 0.60 · as configured"),
+            "{body}"
+        );
+        assert!(
+            body.contains("reap_worth · act 0.99 · ask 0.60 · as configured"),
+            "{body}"
+        );
+        assert!(
+            body.contains("decide_settled · settled 0.80 · as configured"),
+            "{body}"
+        );
+        assert!(!body.contains("elsewhere"), "{body}");
+        assert!(body.contains("split and right: 1 of 2"), "{body}");
+        assert!(
+            body.contains("held and &#34;nothing here&#34;: 1 of 3"),
+            "{body}"
+        );
+        assert!(body.contains("not held and wrong: 1 of 1"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_ask_line_that_was_only_held_is_not_shown_as_moved() {
+        use crate::core::judging::band::{Thresholds, era};
+        use crate::core::judging::catalogue;
+        let (mut core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let t = |act_at, ask_at| Thresholds { act_at, ask_at };
+        let moved = "3 of 41 acted or answered were undone or corrected";
+        let held = "2 rows lapsed unanswered, the ask line already a step under the act line";
+        // Held after a move: the move is still the last. Held as configured: it never moved.
+        let pair = era("fake-decider", catalogue::pair_relation().version);
+        core.store
+            .move_thresholds("pair_relation", &pair, t(0.92, 0.90), moved)
+            .await
+            .unwrap();
+        core.store
+            .hold_ask_line("pair_relation", &pair, t(0.92, 0.90), held)
+            .await
+            .unwrap();
+        core.decide_cfg.bands.per.insert(
+            "link_kind".into(),
+            crate::config::BandOverride {
+                act_at: Some(0.90),
+                ask_at: Some(0.88),
+            },
+        );
+        let link = era("fake-decider", catalogue::link_kind().version);
+        core.store
+            .hold_ask_line("link_kind", &link, t(0.90, 0.88), held)
+            .await
+            .unwrap();
+
+        let body = insights(core).await;
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        assert!(
+            body.contains(&format!(
+                "pair_relation · act 0.92 · ask 0.90 · moved {today}: {moved}"
+            )),
+            "{body}"
+        );
+        assert!(
+            body.contains("link_kind · act 0.90 · ask 0.88 · as configured"),
+            "{body}"
+        );
+        assert!(!body.contains("lapsed unanswered"), "{body}");
+    }
+
+    #[tokio::test]
     async fn the_evolve_block_tells_an_evidence_undo_from_an_operator_undo_and_says_what_the_rules_did()
      {
         use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
@@ -1699,11 +1998,54 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("Old note"), "{body}");
-        assert!(body.contains("nothing new in it"), "{body}");
         assert!(
             body.contains(&format!("/ui/ops/artifacts/{id}/reactivate")),
             "the restore button posts to the existing route: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn insights_shows_a_burial_without_a_reason() {
+        let core = crate::core::test_support::test_core().await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let id = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "an old note nobody needs".into(),
+                    title: Some("Old note".into()),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+        core.store
+            .set_artifact_status(&id, crate::store::artifacts::ArtifactStatus::Deprecated)
+            .await
+            .unwrap();
+        // A grave from before keeps the model's words in its meta; they are not shown.
+        core.store
+            .bury(
+                &id,
+                r#"{"reason":"the model's own words"}"#,
+                -86_400,
+                None,
+                None,
+                &crate::jobs::reap::test_support::row(&id),
+            )
+            .await
+            .unwrap();
+
+        let body = insights(core).await;
+        assert!(
+            body.contains("— out of search and out of the index, text kept"),
+            "{body}"
+        );
+        assert!(body.contains("buried "), "{body}");
+        assert!(!body.contains("the model's own words"), "{body}");
     }
 
     #[tokio::test]

@@ -1058,7 +1058,6 @@ Then run sync.";
                 when: Some("2099-09-04T09:00".into()),
                 rule: None,
                 events: vec![],
-                links: vec![],
             },
         ));
         core.synthesizer = Some(synthesizer.clone());
@@ -1101,7 +1100,6 @@ Then run sync.";
                     when: Some("2099-09-04T09:00".into()),
                     rule: None,
                     events: vec![],
-                    links: vec![],
                 },
             )
             .answering_an_empty_judgement_on_retry(),

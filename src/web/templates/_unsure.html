@@ -1,0 +1,57 @@
+{# What the base is torn on, one button per answer. `web::unsure::unsure` is the fold. #}
+{% if !unsure.is_empty() %}
+<h2 class="oc-text-section">Unsure{% if !unsure.rows.is_empty() %} · {{ unsure.rows.len() }}{% endif %}</h2>
+{% if let Some(said) = unsure.notice %}
+<div class="oc-notice oc-notice--info" role="status">{{ crate::web::icons::icon("info", 16) }}<span class="oc-notice__text">{{ said }}</span></div>
+{% endif %}
+{% if !unsure.rows.is_empty() %}
+<ul class="oc-list unsure" role="list">
+  {% for r in unsure.rows %}
+  <li>
+    <div class="oc-list__main">
+      <span class="muted">{{ r.label }}</span>
+      <span class="oc-list__title">{% for s in r.subjects %}<a href="{{ s.0 }}">{{ s.1 }}</a>{% if !loop.last %} ↔ {% endif %}{% endfor %}</span>
+      <span class="oc-list__meta mono">{% for w in r.weights %}{{ w.0 }} {{ w.1 }}{% if !loop.last %} · {% endif %}{% endfor %}</span>
+    </div>
+    <div class="unsure-answers oc-row">
+      {% for b in r.buttons %}
+      <form method="post" action="/ui/ops/unsure/{{ r.id }}/answer">
+        <input type="hidden" name="pick" value="{{ b.0 }}">
+        <button class="oc-btn" type="submit">{{ b.1 }}</button>
+      </form>
+      {% endfor %}
+      <form method="post" action="/ui/ops/unsure/{{ r.id }}/answer">
+        <input type="hidden" name="pick" value="leave">
+        <button class="oc-btn" type="submit">Leave</button>
+      </form>
+    </div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% if unsure.waiting_rows > 0 %}
+<p class="muted">{{ unsure.waiting_rows }} more waiting</p>
+{% endif %}
+{% for w in unsure.waiting_acts %}
+<p class="muted">{{ w.0 }} · {{ w.1 }} sure, not yet carried out</p>
+{% endfor %}
+{% if !unsure.answered.is_empty() %}
+<details class="unsure-answered">
+  <summary class="muted">answered ({{ unsure.answered.len() }})</summary>
+  <ul class="oc-list" role="list">
+    {% for a in unsure.answered %}
+    <li>
+      <div class="oc-list__main">
+        <span class="muted">{{ a.label }}</span>
+        <span class="oc-list__title">{% for s in a.subjects %}<a href="{{ s.0 }}">{{ s.1 }}</a>{% if !loop.last %} ↔ {% endif %}{% endfor %}</span>
+        <span class="oc-list__meta">{{ a.said }}</span>
+      </div>
+      <form method="post" action="/ui/ops/unsure/{{ a.id }}/again">
+        <button class="oc-btn" type="submit">Ask again</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+{% endif %}

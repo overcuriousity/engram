@@ -31,7 +31,10 @@ pub struct NewDecision {
     pub prior: String,
     pub standing: String,
     pub not_held: bool,
+    /// As the server named itself.
     pub model: String,
+    /// The configured decision model.
+    pub decider: String,
     pub read: usize,
     pub dropped: usize,
     pub query_vec: Vec<f32>,
@@ -78,8 +81,9 @@ impl Store {
         sqlx::query!(
             "INSERT INTO decide_events
                (id, question, questions, situation, scope, filters, answers, prior, standing,
-                not_held, model, read, dropped, query_vec, vec_dim, embed_model, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                not_held, model, decider, read, dropped, query_vec, vec_dim, embed_model, created_at,
+                bears_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &id,
             &d.question,
             &d.questions,
@@ -91,12 +95,14 @@ impl Store {
             &d.standing,
             d.not_held as i64,
             &d.model,
+            &d.decider,
             d.read as i64,
             d.dropped as i64,
             vec_to_blob(&d.query_vec),
             d.query_vec.len() as i64,
             &d.embed_model,
-            now()
+            now(),
+            crate::core::decide::state::BEARS_VERSION
         )
         .execute(&mut *tx)
         .await?;
@@ -239,6 +245,157 @@ impl Store {
     }
 }
 
+/// Of Decide's judged decisions, per standing: how many, and how many came out the way that says
+/// the line is off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecideShares {
+    /// `split`, and of those judged right.
+    pub split: (usize, usize),
+    /// Held, and of those judged "nothing here".
+    pub held: (usize, usize),
+    /// Not held, and of those judged wrong.
+    pub not_held: (usize, usize),
+}
+
+impl Store {
+    /// Held `settled` decisions of `model` made since Decide's line last moved, judged right or
+    /// wrong: (judged, wrong).
+    pub async fn settled_record(&self, model: &str) -> Result<(usize, usize)> {
+        let rows = self.decides_since_move(model).await?;
+        let settled = rows
+            .iter()
+            .filter(|r| r.0 && r.1.as_deref() == Some("settled"));
+        let judged: Vec<_> = settled
+            .filter_map(|r| r.2.filter(|v| *v != AskVerdict::NothingHere))
+            .collect();
+        let wrong = judged.iter().filter(|v| **v == AskVerdict::Wrong).count();
+        Ok((judged.len(), wrong))
+    }
+
+    /// Held decisions of `model` that leaned since Decide's line last moved, judged or not: what a
+    /// lower line would have called settled.
+    pub async fn leaning_record(&self, model: &str) -> Result<usize> {
+        Ok(self
+            .decides_since_move(model)
+            .await?
+            .iter()
+            .filter(|r| r.0 && r.1.as_deref() == Some("leaning"))
+            .count())
+    }
+
+    /// Every judged decision of `model` read under the wording of `bears` in force, for Insights.
+    pub async fn decide_shares(&self, model: &str) -> Result<DecideShares> {
+        let mut out = DecideShares::default();
+        for (held, standing, verdict) in self.decides_since(model, 0).await? {
+            let Some(v) = verdict else { continue };
+            let count = |(n, hit): &mut (usize, usize), yes: bool| {
+                *n += 1;
+                *hit += usize::from(yes);
+            };
+            if held {
+                count(&mut out.held, v == AskVerdict::NothingHere);
+                if standing.as_deref() == Some("split") {
+                    count(&mut out.split, v == AskVerdict::Right);
+                }
+            } else {
+                count(&mut out.not_held, v == AskVerdict::Wrong);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn decides_since_move(
+        &self,
+        model: &str,
+    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+        let era = crate::core::decide::settled_era(model);
+        let since = self
+            .moved_at(crate::core::decide::SETTLED_ID, &era, false)
+            .await?;
+        self.decides_since(model, since).await
+    }
+
+    /// `model`'s decisions made after `since` in Decide's era, as (held, the first question's
+    /// standing, verdict): one read under another wording of `bears` is not comparable.
+    async fn decides_since(
+        &self,
+        model: &str,
+        since: i64,
+    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+        let rows = sqlx::query!(
+            r#"SELECT questions, standing, not_held AS "not_held!: i64", verdict FROM decide_events
+                WHERE decider = ? AND created_at > ? AND COALESCE(bears_version, 1) = ?"#,
+            model,
+            since,
+            crate::core::decide::state::BEARS_VERSION
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                // A row this binary cannot read has no standing.
+                let first = crate::core::decide::wire::stored_questions(&r.questions)
+                    .ok()
+                    .and_then(|qs| qs.into_iter().next());
+                let standing = first.and_then(|q| {
+                    serde_json::from_str::<serde_json::Value>(&r.standing)
+                        .ok()?
+                        .get(&q.key)?
+                        .as_str()
+                        .map(str::to_string)
+                });
+                (
+                    r.not_held == 0,
+                    standing,
+                    r.verdict.as_deref().and_then(AskVerdict::parse),
+                )
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::store::Store;
+
+    /// A judged decision made under the configured `decider` on one noul, `verdict`, whose standing
+    /// is `standing`; the server named itself otherwise.
+    pub(crate) async fn judged(
+        store: &Store,
+        decider: &str,
+        standing: &str,
+        not_held: bool,
+        verdict: AskVerdict,
+    ) -> String {
+        let q = crate::infer::decide::Question::noul("verdict", "Keep it?");
+        let id = store
+            .record_decision(NewDecision {
+                question: "Keep it?".into(),
+                questions: crate::core::decide::wire::questions_json(std::slice::from_ref(&q)),
+                situation: None,
+                scope: None,
+                filters: "{}".into(),
+                answers: (!not_held).then(|| r#"{"verdict":{"yes":0.9}}"#.into()),
+                prior: "{}".into(),
+                standing: serde_json::json!({ "verdict": standing }).to_string(),
+                not_held,
+                model: "as-reported".into(),
+                decider: decider.into(),
+                read: 0,
+                dropped: 0,
+                query_vec: vec![1.0],
+                embed_model: "fake".into(),
+                evidence: vec![],
+            })
+            .await
+            .unwrap();
+        store.judge_decision(&id, verdict, None).await.unwrap();
+        id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,6 +427,7 @@ mod tests {
             standing: r#"{"c":"settled"}"#.into(),
             not_held: false,
             model: "clef".into(),
+            decider: "clef".into(),
             read: 3,
             dropped: 1,
             query_vec: vec![0.1, 0.2, 0.3],
@@ -375,6 +533,38 @@ mod tests {
         assert!(s.decision(&old).await.unwrap().is_none());
         assert!(s.decision(&judged).await.unwrap().is_some());
         assert!(s.decision(&fresh).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn decisions_read_under_another_wording_of_bears_are_in_no_share_and_no_record() {
+        use super::test_support::judged;
+        use crate::core::decide::state::BEARS_VERSION;
+        let s = Store::memory().await.unwrap();
+        judged(&s, "clef", "split", false, AskVerdict::Right).await;
+        let before = judged(&s, "clef", "split", false, AskVerdict::Right).await;
+        let other = judged(&s, "clef", "settled", false, AskVerdict::Wrong).await;
+        // A row from before the version was kept was read under the first wording.
+        sqlx::query!(
+            "UPDATE decide_events SET bears_version = NULL WHERE id = ?",
+            before
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let next = i64::from(BEARS_VERSION) + 1;
+        sqlx::query!(
+            "UPDATE decide_events SET bears_version = ? WHERE id = ?",
+            next,
+            other
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let counted = 1 + usize::from(BEARS_VERSION == 1);
+        let d = s.decide_shares("clef").await.unwrap();
+        assert_eq!(d.split, (counted, counted));
+        assert_eq!(d.held, (counted, 0), "the other wording's is not held here");
+        assert_eq!(s.settled_record("clef").await.unwrap(), (0, 0));
     }
 
     #[tokio::test]

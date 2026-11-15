@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT attempts FROM jobs\n              WHERE subject = ? AND stage = ? AND target_id = ?\n                AND state IN ('pending', 'running')",
+  "describe": {
+    "columns": [
+      {
+        "name": "attempts",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e623d42c50a9028a0431ac9c1aa1fe73e5dc573e57e96d408d14a02ee65a3220"
+}

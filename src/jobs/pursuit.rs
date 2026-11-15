@@ -3,10 +3,23 @@
 //! Local decides, the model only writes: `run` groups and scores, `generate` makes the one call.
 
 use crate::core::Core;
+use crate::core::judging::catalogue::answerable;
+use crate::core::judging::check::{
+    Checked, FLAG_UNCHECKED, Which, check, outage, unchecked_detail,
+};
+use crate::core::judging::state::{self, Note};
 use crate::error::Result;
 use crate::infer::prompt;
 use crate::store::artifacts::NewSynthesized;
+use crate::store::decision_log::{NewLogged, State};
 use crate::store::jobs::Stage;
+
+/// The after-write check refused the draft.
+const UNFAITHFUL: &str = "a check found the draft unfaithful";
+/// The gate before the writer found no answer in the sources.
+const UNANSWERED: &str = "the sources do not hold the answer";
+/// The gate before the writer was unsure.
+const UNSURE: &str = "the sources may not hold the answer";
 
 /// One call, superseding nothing. Idempotent: a retry after a crash between insert and update must
 /// not write twice.
@@ -105,6 +118,30 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n\n");
 
+    // Before the writer: do these sources hold the answer? Judged only when every packed source
+    // fits; otherwise written as before. A failed gate is the unit's error under its own name,
+    // never a writer call.
+    let gate = answerable_gate(core, pursuit_id, &p.queries, &sources)
+        .await
+        .map_err(outage)?;
+    match gate {
+        Gate::Write => {}
+        // Closed either way: an unsatisfied pursuit is a gap a capture can cover or the owner
+        // dismiss; nothing would try an open one again.
+        Gate::Unsure | Gate::Close => {
+            let reason = if matches!(gate, Gate::Unsure) {
+                UNSURE
+            } else {
+                UNANSWERED
+            };
+            core.store
+                .close_pursuit(pursuit_id, "unsatisfied", reason, now)
+                .await?;
+            tracing::info!(pursuit = pursuit_id, reason, "the gate wrote nothing");
+            return Ok(());
+        }
+    }
+
     let permit = core.gate.background().await;
     let reply = generator.complete(prompt::GENERATE_SYSTEM, &user).await;
     permit.finished();
@@ -128,6 +165,52 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
         return Ok(());
     }
 
+    // Drift is flagged, not prevented: a literal no source carries is marked for the reader.
+    let missing = crate::infer::verify::missing_literals(&g.text, &g.caveats, &source_text);
+    // Then the check, before anything is stored. A check that failed is the queue's to retry.
+    let originals: Vec<Note> = sources
+        .iter()
+        .map(|c| Note {
+            title: c.title.as_deref(),
+            day: None,
+            text: &c.text,
+        })
+        .collect();
+    let rewrite = Note {
+        title: Some(&g.title),
+        day: None,
+        text: &g.text,
+    };
+    let checked = check(
+        core,
+        pursuit_id,
+        &originals,
+        &rewrite,
+        Which::AddsNothingOnly,
+    )
+    .await
+    .map_err(outage)?;
+    let unchecked = match checked {
+        Checked::Refused { question, yes } => {
+            core.store
+                .close_pursuit(pursuit_id, "unsatisfied", UNFAITHFUL, now)
+                .await?;
+            tracing::info!(
+                pursuit = pursuit_id,
+                question,
+                yes,
+                "the check refused the generation"
+            );
+            return Ok(());
+        }
+        // Stored and flagged: a retry is told the same, and the draft is not thrown away unread.
+        Checked::Unjudged { detail } => {
+            tracing::warn!(pursuit = pursuit_id, detail, "the check could not be put");
+            Some(detail)
+        }
+        Checked::Passed | Checked::TooLong => None,
+    };
+
     let ids: Vec<String> = sources.iter().map(|c| c.id.clone()).collect();
     let made = core
         .store
@@ -143,15 +226,19 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
             &ids,
         )
         .await?;
-    // Drift is flagged, not prevented: a literal no source carries is marked for the reader.
-    let missing = crate::infer::verify::missing_literals(&made.text, &made.caveats, &source_text);
+    let mut flags = Vec::new();
+    let mut detail = Vec::new();
     if let Some(first) = missing.first() {
+        flags.push(crate::infer::verify::FLAG_LITERALS.to_string());
+        detail.push(format!("missing literal: {first}"));
+    }
+    if let Some(why) = &unchecked {
+        flags.push(FLAG_UNCHECKED.to_string());
+        detail.push(unchecked_detail(why));
+    }
+    if !flags.is_empty() {
         core.store
-            .set_artifact_flags(
-                &made.id,
-                &[crate::infer::verify::FLAG_LITERALS.to_string()],
-                Some(&format!("missing literal: {first}")),
-            )
+            .set_artifact_flags(&made.id, &flags, Some(&detail.join("; ")))
             .await?;
     }
     core.store
@@ -164,12 +251,157 @@ pub async fn generate(core: &Core, pursuit_id: &str) -> Result<()> {
     Ok(())
 }
 
+enum Gate {
+    Write,
+    Unsure,
+    Close,
+}
+
+impl Gate {
+    /// The band and reason it is logged with: no Unsure row, so in between is `leave`, `unsure`.
+    fn logged_as(&self) -> (crate::core::judging::band::Band, Option<&'static str>) {
+        use crate::core::judging::band::Band;
+        match self {
+            Gate::Write => (Band::Act, None),
+            Gate::Unsure => (Band::Leave, Some("unsure")),
+            Gate::Close => (Band::Leave, None),
+        }
+    }
+}
+
+/// `answerable` over the questions and every packed source, logged as kind "pursuit", state `done`.
+/// The packed sources are the second subject, so a retry after a writer outage is not asked again;
+/// its stored answer is banded at the lines in force now, and logged again where they moved.
+async fn answerable_gate(
+    core: &Core,
+    pursuit_id: &str,
+    queries: &[String],
+    sources: &[crate::store::artifacts::Chunk],
+) -> Result<Gate> {
+    use crate::core::judging::band::{era, pick_and_top};
+    use crate::infer::decide::Answer;
+    let a = answerable();
+    let excerpts: Vec<Note> = sources
+        .iter()
+        .map(|c| Note {
+            title: c.title.as_deref(),
+            day: None,
+            text: &c.text,
+        })
+        .collect();
+    let Some(shown) =
+        state::answerable_whole(queries, &excerpts, &core.counter, state::room(core, &[&a]))
+    else {
+        return Ok(Gate::Write);
+    };
+    let t = core.thresholds(&a).await?;
+    let packed = sources
+        .iter()
+        .map(|c| c.id.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let in_era = era(core.decider.model(), a.version);
+    let prior = core
+        .store
+        .last_logged(a.id, pursuit_id, Some(&packed), &in_era)
+        .await?;
+    let known = prior.and_then(|r| {
+        let yes = serde_json::from_str::<serde_json::Value>(&r.answer)
+            .ok()?
+            .get("yes")?
+            .as_f64()?;
+        Some((r, yes))
+    });
+    if let Some((r, yes)) = known {
+        let gate = gate_at(yes, t);
+        let (band, reason) = gate.logged_as();
+        let moved = core
+            .store
+            .last_threshold_move(a.id, &in_era)
+            .await?
+            .is_some_and(|m| m.moved_at > r.decided_at);
+        // The answer stands; the line it is read against does not. A row of its own says which
+        // band this reading was given.
+        if moved || band != r.band || reason != r.reason.as_deref() {
+            core.store
+                .log_decision(&NewLogged {
+                    question_id: a.id.into(),
+                    question_version: a.version,
+                    model: core.decider.model().into(),
+                    subject_kind: "pursuit",
+                    subject_a: pursuit_id.into(),
+                    subject_b: Some(packed),
+                    rev_a: None,
+                    rev_b: None,
+                    answer: r.answer,
+                    top: r.top,
+                    pick: r.pick,
+                    swapped_agree: None,
+                    band,
+                    reason: reason.map(Into::into),
+                    state: State::Done,
+                })
+                .await?;
+        }
+        return Ok(gate);
+    }
+    let permit = core.gate.background_light().await;
+    let got = core
+        .decider
+        .decide(&shown, std::slice::from_ref(&a.question))
+        .await;
+    permit.finished();
+    let yes = match got?.answers.get(&a.question.key) {
+        Some(Answer::Noul { yes }) => *yes,
+        _ => {
+            return Err(crate::error::Error::InferenceRejected {
+                role: "decide",
+                detail: "the answer has no noul for \"answerable\"".into(),
+            });
+        }
+    };
+    let answer = Answer::Noul { yes };
+    let gate = gate_at(yes, t);
+    let (band, reason) = gate.logged_as();
+    let (pick, top) = pick_and_top(&a.question, &answer);
+    core.store
+        .log_decision(&NewLogged {
+            question_id: a.id.into(),
+            question_version: a.version,
+            model: core.decider.model().into(),
+            subject_kind: "pursuit",
+            subject_a: pursuit_id.into(),
+            subject_b: Some(packed),
+            rev_a: None,
+            rev_b: None,
+            answer: crate::core::judging::weights(&a.question, &answer).to_string(),
+            top,
+            pick,
+            swapped_agree: None,
+            band,
+            reason: reason.map(Into::into),
+            state: State::Done,
+        })
+        .await?;
+    Ok(gate)
+}
+
+fn gate_at(yes: f64, t: crate::core::judging::band::Thresholds) -> Gate {
+    if yes >= t.act_at {
+        Gate::Write
+    } else if yes < t.ask_at {
+        Gate::Close
+    } else {
+        Gate::Unsure
+    }
+}
+
 /// The engaged sources can lead the list and are all skipped, so a probe of `sources.len()` could
 /// leave nothing to judge.
 const ANSWER_PROBE_EXTRA: usize = 3;
 
-/// An unseen artifact created after the pursuit opened that now answers it at or above
-/// `weak_below`. `None` across embedding models: their cosines are not distances.
+/// An unseen artifact created after the pursuit opened, found at or above `weak_below`, that the
+/// decision model says answers it. `None` across embedding models: their cosines are not distances.
 async fn answered_since(
     core: &Core,
     p: &crate::store::pursuits::Pursuit,
@@ -196,13 +428,29 @@ async fn answered_since(
     if fresh.is_empty() {
         return Ok(None);
     }
-    Ok(core
-        .store
-        .artifacts_by_ids(&fresh)
-        .await?
-        .into_iter()
-        .find(|c| c.created_at > p.opened_at && c.in_results())
-        .map(|c| c.id))
+    // Found by distance; answered only when the note, asked alone, would help with the pursuit's
+    // leading query, the one its gap shows. A failed call is the unit's to retry, never an answer.
+    let Some(query) = p.queries.first() else {
+        return Ok(None);
+    };
+    let relevant_at = crate::jobs::label::relevant_at(core).await?;
+    let notes = core.store.artifacts_by_ids(&fresh).await?;
+    for id in &fresh {
+        let Some(c) = notes
+            .iter()
+            .find(|c| &c.id == id && c.created_at > p.opened_at && c.in_results())
+        else {
+            continue;
+        };
+        match crate::jobs::label::answers(core, query, c).await? {
+            Some(yes) if yes >= relevant_at => return Ok(Some(c.id.clone())),
+            Some(_) => {}
+            None => {
+                tracing::info!(pursuit = p.id, artifact_id = %c.id, "the note is too long to ask about whole; not counted as an answer")
+            }
+        }
+    }
+    Ok(None)
 }
 
 pub const PURSUIT_AFTER: &str = "pursuit.events_after";
@@ -868,6 +1116,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_pursuit_counts_as_answered_only_by_a_note_that_answers_it() {
+        use crate::infer::decide::{Answer, Answers, Question};
+        let saying = |yes: f64| {
+            std::sync::Arc::new(crate::infer::fake::RuleDecider::new(
+                move |_, qs: &[Question]| {
+                    Ok(Answers {
+                        answers: qs
+                            .iter()
+                            .map(|q| (q.key.clone(), Answer::Noul { yes }))
+                            .collect(),
+                        model: "rule-decider".into(),
+                        input_tokens: 0,
+                    })
+                },
+            ))
+        };
+        for (yes, answered) in [(0.2, false), (0.95, true)] {
+            let mut core = test_core().await;
+            core.generator = Some(std::sync::Arc::new(
+                crate::infer::fake::ScriptedCompleter::new(vec![
+                    r#"{"artifact":{"title":"T","text":"read the journal with journalctl","category":"concept","tags":[],"caveats":[]}}"#.into(),
+                ]),
+            ));
+            let ids = two_sources(&core).await;
+            let v = core.embedder.embed_query("read the journal").await.unwrap();
+            let pid = core
+                .store
+                .insert_pursuit(
+                    crate::store::now() - 100,
+                    &["read the journal".into()],
+                    &ids,
+                    Some((&v, core.embedder.model())),
+                )
+                .await
+                .unwrap();
+            let src = core
+                .ingest("read the journal at /var/log/journal", "web", None)
+                .await
+                .unwrap();
+            while crate::jobs::run_one(&core).await.unwrap() {}
+            core.background.wait_idle().await;
+            let at = core
+                .vectors
+                .search(
+                    &v,
+                    &Default::default(),
+                    1,
+                    &crate::vector::SearchFilter {
+                        corpus_id: Some(src.id.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+                .first()
+                .and_then(|h| h.similarity)
+                .expect("the capture embedded nothing")
+                - 0.01;
+            core.set_weak_below(at);
+            let dec = saying(yes);
+            core.decider = dec.clone();
+
+            generate(&core, &pid).await.unwrap();
+
+            assert!(
+                dec.requests()
+                    .iter()
+                    .any(|(_, qs)| qs[0].key == "answers_query"
+                        && qs[0].instructions.contains("«read the journal»")),
+                "the note was not asked whether it answers the pursuit"
+            );
+            let p = core.store.get_pursuit(&pid).await.unwrap();
+            assert_eq!(p.state == "satisfied", answered, "{yes}: {p:?}");
+        }
+    }
+
+    #[tokio::test]
     async fn a_pursuit_swept_up_after_the_capture_is_still_closed_by_it() {
         let mut core = pursuing_core().await;
         let q = "Netcat can serve a file to one client, then exits";
@@ -944,6 +1269,499 @@ mod tests {
             "the paste is still on the capture page as a hole in the base: {:?}",
             open.gaps.iter().map(|g| &g.gap).collect::<Vec<_>>()
         );
+    }
+
+    #[tokio::test]
+    async fn a_generated_artifact_that_adds_a_fact_is_not_stored_and_the_pursuit_closes() {
+        let mut core = test_core().await;
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"artifact":{"title":"Reading a journal","text":"Mount with `mount -o ro,loop`, then read /var/log/journal.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+            ]),
+        ));
+        use crate::core::judging::check::test_support::{answering, is_check};
+        // The gate before the writer says yes; the check after it refuses.
+        let check = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, qs| {
+            Ok(answering(qs, 0.01, 0.04).unwrap_or_else(|| yes_to(qs, 0.9)))
+        }));
+        core.decider = check.clone();
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["how do I read the journal".into()], &ids, None)
+            .await
+            .unwrap();
+
+        generate(&core, &pid).await.unwrap();
+
+        let reqs: Vec<_> = check
+            .requests()
+            .into_iter()
+            .filter(|(_, qs)| is_check(qs))
+            .collect();
+        assert_eq!(reqs.len(), 1);
+        assert_eq!(reqs[0].1.len(), 1, "adds_nothing only");
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty(),
+            "an artifact that adds a fact was stored"
+        );
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert_eq!(p.reason.as_deref(), Some(UNFAITHFUL));
+        assert!(p.artifact_id.is_none());
+    }
+
+    /// A pursuit whose gate says yes and whose after-write check ends in `failure`.
+    async fn check_failing_with(
+        failure: fn() -> crate::error::Error,
+    ) -> (crate::core::Core, String) {
+        let mut core = test_core().await;
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![
+                r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+            ]),
+        ));
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(move |_, qs| {
+            if crate::core::judging::check::test_support::is_check(qs) {
+                return Err(failure());
+            }
+            Ok(yes_to(qs, 0.9))
+        }));
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["q".into()], &ids, None)
+            .await
+            .unwrap();
+        (core, pid)
+    }
+
+    #[tokio::test]
+    async fn a_generation_whose_check_is_down_is_retried() {
+        let (core, pid) = check_failing_with(|| crate::error::Error::Inference {
+            role: "decide",
+            detail: "down".into(),
+        })
+        .await;
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Inference { .. }),
+            "{err}"
+        );
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_generation_whose_check_is_rejected_is_stored_flagged_and_not_retried() {
+        let (core, pid) = check_failing_with(|| crate::error::Error::InferenceRejected {
+            role: "decide",
+            detail: "400".into(),
+        })
+        .await;
+        generate(&core, &pid)
+            .await
+            .expect("a rejection is not the queue's to retry");
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "generated", "{p:?}");
+        let made = core.store.synthesized_artifacts(10).await.unwrap();
+        assert_eq!(made.len(), 1, "the draft was dropped unread");
+        assert_eq!(made[0].flags, [FLAG_UNCHECKED.to_string()]);
+        assert_eq!(
+            core.store
+                .get_artifact(&made[0].id)
+                .await
+                .unwrap()
+                .flag_detail
+                .as_deref(),
+            Some("not checked: 400")
+        );
+    }
+
+    /// The gate says `yes` (settable), the after-write check passes.
+    fn gate(
+        yes: f64,
+    ) -> (
+        std::sync::Arc<crate::infer::fake::RuleDecider>,
+        std::sync::Arc<std::sync::Mutex<f64>>,
+    ) {
+        use crate::core::judging::check::test_support::answering;
+        let line = std::sync::Arc::new(std::sync::Mutex::new(yes));
+        let l = line.clone();
+        let d = crate::infer::fake::RuleDecider::new(move |_, qs| {
+            if let Some(a) = answering(qs, 0.9, 0.9) {
+                return Ok(a);
+            }
+            Ok(yes_to(qs, *l.lock().unwrap()))
+        });
+        (std::sync::Arc::new(d), line)
+    }
+
+    /// `yes` to every question asked.
+    fn yes_to(qs: &[crate::infer::decide::Question], yes: f64) -> crate::infer::decide::Answers {
+        crate::infer::decide::Answers {
+            answers: qs
+                .iter()
+                .map(|q| (q.key.clone(), crate::infer::decide::Answer::Noul { yes }))
+                .collect(),
+            model: "rule-decider".into(),
+            input_tokens: 0,
+        }
+    }
+
+    fn gate_asks(d: &crate::infer::fake::RuleDecider) -> usize {
+        d.requests()
+            .iter()
+            .filter(|(_, qs)| qs.iter().any(|q| q.key == "answerable"))
+            .count()
+    }
+
+    async fn gated(
+        yes: f64,
+    ) -> (
+        crate::core::Core,
+        std::sync::Arc<crate::infer::fake::RuleDecider>,
+        std::sync::Arc<std::sync::Mutex<f64>>,
+        std::sync::Arc<crate::infer::fake::ScriptedCompleter>,
+        String,
+    ) {
+        let mut core = test_core().await;
+        let writer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"artifact":{"title":"Reading a journal","text":"Mount with `mount -o ro,loop`, then read /var/log/journal.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+        ]));
+        core.generator = Some(writer.clone());
+        let (d, line) = gate(yes);
+        core.decider = d.clone();
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(100, &["how do I read the journal".into()], &ids, None)
+            .await
+            .unwrap();
+        (core, d, line, writer, pid)
+    }
+
+    async fn gate_row(core: &crate::core::Core, pid: &str) -> crate::store::decision_log::Logged {
+        let id = sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM decisions WHERE subject_kind = 'pursuit' AND subject_a = ?
+                ORDER BY decided_at DESC, id DESC LIMIT 1"#,
+            pid
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .expect("a pursuit decision");
+        core.store.logged(&id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn sources_that_hold_the_answer_are_written_from() {
+        let (core, d, _, writer, pid) = gated(0.9).await;
+        generate(&core, &pid).await.unwrap();
+        assert_eq!(gate_asks(&d), 1);
+        assert_eq!(writer.calls(), 1);
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "generated", "{p:?}");
+        let r = gate_row(&core, &pid).await;
+        assert_eq!(r.question_id, "answerable");
+        assert_eq!(r.band, crate::core::judging::band::Band::Act);
+        assert_eq!(r.state, crate::store::decision_log::State::Done);
+    }
+
+    #[tokio::test]
+    async fn sources_that_do_not_close_the_pursuit_without_a_writer_call() {
+        let (core, d, _, writer, pid) = gated(0.3).await;
+        generate(&core, &pid).await.unwrap();
+        assert_eq!(gate_asks(&d), 1);
+        assert_eq!(writer.calls(), 0, "the writer was called");
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert!(p.artifact_id.is_none());
+        assert!(
+            core.store
+                .synthesized_artifacts(10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let r = gate_row(&core, &pid).await;
+        assert_eq!(r.band, crate::core::judging::band::Band::Leave);
+        assert_eq!(r.state, crate::store::decision_log::State::Done);
+    }
+
+    #[tokio::test]
+    async fn in_between_the_pursuit_closes_as_a_gap_and_no_writer_is_called() {
+        let (core, d, _, writer, _) = gated(0.7).await;
+        // With a vector, so the closed pursuit can stand as a gap.
+        let v = core.embedder.embed_query("read the journal").await.unwrap();
+        let ids = two_sources(&core).await;
+        let pid = core
+            .store
+            .insert_pursuit(
+                200,
+                &["read the journal".into()],
+                &ids,
+                Some((&v, core.embedder.model())),
+            )
+            .await
+            .unwrap();
+        generate(&core, &pid).await.unwrap();
+        assert_eq!(gate_asks(&d), 1);
+        assert_eq!(writer.calls(), 0, "the writer was called");
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.state, "unsatisfied", "{p:?}");
+        assert_eq!(p.reason.as_deref(), Some(UNSURE));
+        let r = gate_row(&core, &pid).await;
+        assert_eq!(r.band, crate::core::judging::band::Band::Leave);
+        assert_eq!(r.reason.as_deref(), Some("unsure"));
+        let open = core
+            .store
+            .open_gaps(core.embedder.model(), core.weak_below())
+            .await
+            .unwrap();
+        assert!(
+            open.gaps
+                .iter()
+                .any(|g| g.gap.kind == crate::store::gaps::GapKind::Pursuit && g.gap.id == pid),
+            "not listed as a gap"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_writer_outage_after_a_yes_is_not_asked_again() {
+        let (mut core, d, _, _, pid) = gated(0.9).await;
+        // An exhausted script is an outage: retried.
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![]),
+        ));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+        let writer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+        ]));
+        core.generator = Some(writer.clone());
+        generate(&core, &pid).await.unwrap();
+        assert_eq!(gate_asks(&d), 1, "asked again on unchanged sources");
+        assert_eq!(writer.calls(), 1);
+        assert_eq!(
+            core.store.get_pursuit(&pid).await.unwrap().state,
+            "generated"
+        );
+        assert_eq!(
+            gate_rows(&core, &pid).await,
+            1,
+            "a reuse under unmoved lines logged a row"
+        );
+    }
+
+    #[tokio::test]
+    async fn sources_that_do_not_all_fit_are_not_judged() {
+        let (core, d, _, writer, _) = gated(0.01).await;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let long = "journal words for sizing ".repeat(60);
+        let na = |o: i64, t: &str| NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            title: Some(format!("L{o}")),
+            ..Default::default()
+        };
+        let ids: Vec<String> = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[na(0, "read the journal at /var/log/journal"), na(1, &long)],
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        let queries = vec!["read the journal".to_string()];
+        let pid = core
+            .store
+            .insert_pursuit(300, &queries, &ids, None)
+            .await
+            .unwrap();
+        // A window where the first source fits and both do not.
+        let a = answerable();
+        let note = |t: &'static str, x: &'static str| Note {
+            title: Some(t),
+            day: None,
+            text: x,
+        };
+        let short = [note("L0", "read the journal at /var/log/journal")];
+        let one = core
+            .counter
+            .count(&state::answerable(&queries, &short, &core.counter, usize::MAX).unwrap());
+        let overhead = core.decider.context_tokens() - state::room(&core, &[&a]);
+        d.set_context_tokens(overhead + one + 5);
+        generate(&core, &pid).await.unwrap();
+        assert_eq!(gate_asks(&d), 0, "judged on a prefix of the sources");
+        assert_eq!(writer.calls(), 1);
+        assert_eq!(
+            core.store.get_pursuit(&pid).await.unwrap().state,
+            "generated"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pursuit_too_long_to_ask_about_is_written_as_before() {
+        let (core, d, _, writer, pid) = gated(0.01).await;
+        d.set_context_tokens(10);
+        generate(&core, &pid).await.unwrap();
+        assert_eq!(d.calls(), 0, "nothing fits: not judged on cut text");
+        assert_eq!(writer.calls(), 1);
+        assert_eq!(
+            core.store.get_pursuit(&pid).await.unwrap().state,
+            "generated"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_gate_opens_no_unsure_row() {
+        let full = test_core().await.decide_cfg.max_per_tick;
+        for yes in [0.3, 0.7, 0.9] {
+            let (core, _, _, _, pid) = gated(yes).await;
+            generate(&core, &pid).await.unwrap();
+            gate_row(&core, &pid).await;
+            assert_eq!(core.store.open_ask_count().await.unwrap(), 0, "{yes}");
+            assert_eq!(core.store.waiting_ask_count().await.unwrap(), 0, "{yes}");
+            assert!(core.store.waiting_acts(10).await.unwrap().is_empty());
+            assert!(
+                core.store
+                    .unsettled_acts(i64::MAX)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                core.judging_budget().await.unwrap(),
+                full,
+                "the gate is not armed judging"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_is_down_is_retried_and_calls_no_writer() {
+        let (mut core, _, _, writer, pid) = gated(0.9).await;
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Inference {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        assert_eq!(writer.calls(), 0);
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_is_rejected_is_not_retried_as_an_outage_and_calls_no_writer() {
+        let (mut core, _, _, writer, pid) = gated(0.9).await;
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::InferenceRejected {
+                role: "decide",
+                detail: "400".into(),
+            })
+        }));
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InferenceRejected { .. }),
+            "{err}"
+        );
+        assert!(!err.retryable());
+        assert_eq!(writer.calls(), 0);
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+    }
+
+    #[tokio::test]
+    async fn a_gate_the_store_fails_under_is_a_store_error() {
+        let (core, d, _, writer, pid) = gated(0.9).await;
+        // runtime: test-only trigger; the gate's row cannot be written.
+        sqlx::query(
+            "CREATE TRIGGER gate_fails BEFORE INSERT ON decisions
+             BEGIN SELECT RAISE(ABORT, 'refused by the test'); END",
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Store(_)),
+            "a store error named as the endpoint's: {err}"
+        );
+        assert_eq!(gate_asks(&d), 1);
+        assert_eq!(writer.calls(), 0);
+    }
+
+    async fn gate_rows(core: &crate::core::Core, pid: &str) -> i64 {
+        sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM decisions WHERE subject_kind = 'pursuit' AND subject_a = ?",
+            pid
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_stored_answer_read_against_moved_lines_is_logged_again() {
+        use crate::core::judging::band::{Band, Thresholds, era};
+        let (mut core, d, _, _, pid) = gated(0.9).await;
+        // The gate says yes, then the writer is out: the answer is stored and the unit retried.
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![]),
+        ));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        let first = gate_row(&core, &pid).await;
+        assert_eq!(first.band, Band::Act);
+
+        // The act line moves above the stored answer before the retry.
+        let a = answerable();
+        core.store
+            .move_thresholds(
+                a.id,
+                &era(core.decider.model(), a.version),
+                Thresholds {
+                    act_at: 0.95,
+                    ask_at: 0.6,
+                },
+                "test",
+            )
+            .await
+            .unwrap();
+        let writer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+        ]));
+        core.generator = Some(writer.clone());
+        generate(&core, &pid).await.unwrap();
+
+        assert_eq!(gate_asks(&d), 1, "the stored answer was asked for again");
+        assert_eq!(
+            writer.calls(),
+            0,
+            "written under a line the answer is below"
+        );
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.reason.as_deref(), Some(UNSURE), "{p:?}");
+        assert_eq!(gate_rows(&core, &pid).await, 2, "the reuse left no row");
+        let again = gate_row(&core, &pid).await;
+        assert_ne!(again.id, first.id);
+        assert_eq!(again.answer, first.answer, "the same answer");
+        assert_eq!(again.band, Band::Leave);
+        assert_eq!(again.reason.as_deref(), Some("unsure"));
+        let kept = core.store.logged(&first.id).await.unwrap().unwrap();
+        assert_eq!(kept.band, Band::Act, "the first reading was rewritten");
     }
 
     #[tokio::test]

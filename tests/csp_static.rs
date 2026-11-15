@@ -486,3 +486,38 @@ fn comment_lines_are_under_8_percent_of_src() {
         share * 100.0
     );
 }
+
+#[test]
+fn no_background_judgement_is_made_by_a_chat_model() {
+    let gone = [
+        "DEDUPE_SYSTEM",
+        "LINK_SYSTEM",
+        "REAP_SYSTEM",
+        "dedupe_schema",
+        "link_schema",
+        "reap_schema",
+        "parse_dedupe",
+        "parse_link",
+        "parse_reap",
+        "for_judging",
+        "for_link_judging",
+        "for_reaping",
+        "(attempt {",
+    ];
+    let mut left = Vec::new();
+    for (name, src) in files("src", "rs") {
+        for g in gone {
+            if src.contains(g) {
+                left.push(format!("{name}: {g}"));
+            }
+        }
+    }
+    for name in ["dedupe", "associate", "reap"] {
+        let path = format!("src/jobs/{name}.rs");
+        let src = fs::read_to_string(root().join(&path)).unwrap();
+        if non_test(&src).contains(".complete(") {
+            left.push(format!("{path}: .complete("));
+        }
+    }
+    assert!(left.is_empty(), "{}", left.join("\n"));
+}

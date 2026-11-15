@@ -69,9 +69,9 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     let mut out = Vec::new();
     if core.consolidate.enabled {
         out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
-        // Arming the judging without a judge is a treadmill: `dedupe::run` returns `Ok(())` and the
-        // pair stays `Pending`.
-        if core.consolidate.max_dedupe_per_tick > 0 && core.judge.is_some() {
+        // `decides()`: the role is required, but the contained build's stands for no model, and
+        // a judging stage armed there fails every call.
+        if core.consolidate.max_dedupe_per_tick > 0 && core.decides() {
             out.push((Stage::ArmDedupe, CONSOLIDATE_TARGET));
         }
     }
@@ -85,9 +85,11 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     }
     // `acts_on_corpus()`, not `may_act()` (always true below `full`): burial destroys text,
     // and `jobs::retract`, which undoes it, is itself gated on `acts_on_corpus()`.
-    if core.reap.enabled && core.judge.is_some() && core.evolve.autonomous.acts_on_corpus() {
+    if core.reap.enabled && core.evolve.autonomous.acts_on_corpus() && core.decides() {
         out.push((Stage::Reap, CONSOLIDATE_TARGET));
     }
+    // Always: waiting decisions are applied and seated whatever else is switched off.
+    out.push((Stage::Decisions, CONSOLIDATE_TARGET));
     if core.associating() {
         out.push((Stage::Associate, ASSOCIATE_TARGET));
         // Behind the generator: a pursuit reaching `Generate` with no `[infer.generate]` would stay
@@ -120,6 +122,7 @@ pub fn periodic_period(
         Stage::Context => crate::jobs::context::INTERVAL_HOURS.saturating_mul(3600),
         Stage::Associate => core.associate.interval_mins.max(1).saturating_mul(60),
         Stage::Reap => core.reap.interval_mins.max(1).saturating_mul(60),
+        Stage::Decisions => u64::from(core.decide_cfg.tick_mins.max(1)).saturating_mul(60),
         // Shorter than the idle window, so a run of searches is grouped soon after it goes quiet.
         Stage::Pursuit => (core.pursuit.idle_secs / 2).max(60),
         _ => return None,
@@ -360,7 +363,7 @@ pub const ASSOCIATE_TARGET: &str = "collection";
 mod tests {
 
     #[tokio::test]
-    async fn dedupe_judging_is_not_armed_on_a_base_with_no_judge() {
+    async fn dedupe_judging_needs_a_decision_model_and_is_off_at_zero() {
         use crate::store::jobs::Stage;
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = true;
@@ -377,14 +380,31 @@ mod tests {
         );
         assert!(
             armed(&core).contains(&Stage::ArmDedupe),
-            "and with a judge, so does the judging"
+            "and so does the judging"
         );
         assert!(
             super::periodic_period(&core, Stage::ArmDedupe).is_some(),
             "with a period to go with it"
         );
 
-        core.judge = None;
+        // The contained build: its decide role stands for no model.
+        core.decides = false;
+        assert!(
+            armed(&core).contains(&Stage::Consolidate),
+            "finding pairs needs no judge"
+        );
+        assert!(
+            !armed(&core).contains(&Stage::ArmDedupe),
+            "judging was armed with nothing to judge with"
+        );
+        assert!(super::periodic_period(&core, Stage::ArmDedupe).is_none());
+        assert!(
+            armed(&core).contains(&Stage::Decisions),
+            "what waits is still seated and lapsed"
+        );
+        core.decides = true;
+
+        core.consolidate.max_dedupe_per_tick = 0;
         assert!(armed(&core).contains(&Stage::Consolidate));
         assert!(!armed(&core).contains(&Stage::ArmDedupe));
         assert!(super::periodic_period(&core, Stage::ArmDedupe).is_none());
@@ -492,7 +512,7 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn the_reap_sweep_is_armed_only_when_enabled_a_judge_exists_and_it_may_act() {
+    async fn the_reap_sweep_is_armed_only_when_enabled_and_it_may_act() {
         use crate::store::jobs::Stage;
         let mut core = crate::core::test_support::test_core().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
@@ -515,13 +535,14 @@ mod tests {
 
         let mut judgeless = crate::core::test_support::test_core().await;
         judgeless.evolve.autonomous = crate::config::Autonomy::Full;
-        judgeless.judge = None;
+        judgeless.decides = false;
         assert!(
             !periodic_units(&judgeless)
                 .iter()
                 .any(|(s, _)| *s == Stage::Reap),
-            "no judge, no sweep — the rules alone may never tombstone"
+            "nothing to judge with, so nothing may be put before a judge"
         );
+        assert_eq!(periodic_period(&judgeless, Stage::Reap), None);
 
         for level in [
             crate::config::Autonomy::Off,

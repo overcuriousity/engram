@@ -1040,16 +1040,18 @@ impl Core {
     /// Row before payload, as the sweep's auto-supersede does, so a partial failure is visible on
     /// Ops.
     pub async fn supersede(&self, loser_id: &str, winner_id: &str) -> Result<()> {
-        self.supersede_with(loser_id, winner_id, None).await
+        self.supersede_with(loser_id, winner_id, None)
+            .await
+            .map(|_| ())
     }
 
-    /// The journal row rides the hiding's transaction.
+    /// The journal row rides the hiding's transaction; its id is returned.
     pub async fn supersede_with(
         &self,
         loser_id: &str,
         winner_id: &str,
         journal: Option<crate::store::actions::NewAction>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let _guard = self.lifecycle_lock.lock().await;
         // Neither side may be retired: `set_superseded_by` overwrites status, and a deprecated
         // winner hides the answer.
@@ -1062,7 +1064,8 @@ impl Core {
                 )));
             }
         }
-        self.store
+        let row = self
+            .store
             .set_superseded_by_with(loser_id, Some(winner_id), journal.as_ref())
             .await?;
         self.vectors
@@ -1105,13 +1108,13 @@ impl Core {
             }
         }
         tracing::info!(loser_id, winner_id, "superseded an artifact");
-        Ok(())
+        Ok(row)
     }
 
     /// Row before payload: SQLite is the source of truth, so drift repair finishes a partial
     /// failure.
     pub async fn deprecate(&self, id: &str) -> Result<()> {
-        self.deprecate_with(id, None).await
+        self.deprecate_with(id, None).await.map(|_| ())
     }
 
     /// `deprecate`, journaling what a corpus job did; see `supersede_with`.
@@ -1119,7 +1122,7 @@ impl Core {
         &self,
         id: &str,
         journal: Option<crate::store::actions::NewAction>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let _guard = self.lifecycle_lock.lock().await;
         // A superseded artifact stays superseded: deprecating it too yields a state with no undo
         // button.
@@ -1129,7 +1132,8 @@ impl Core {
                  reactivate it first"
             )));
         }
-        self.store
+        let row = self
+            .store
             .set_artifact_status_with(id, ArtifactStatus::Deprecated, journal.as_ref())
             .await?;
         self.vectors
@@ -1139,7 +1143,7 @@ impl Core {
             .clear_lifecycle_dirty(std::slice::from_ref(&id.to_string()))
             .await?;
         tracing::info!(artifact_id = id, "deprecated an artifact");
-        Ok(())
+        Ok(row)
     }
 
     /// Entered with `lifecycle_lock` held. `false` where it was not reaped or the grave is empty.
@@ -1646,7 +1650,11 @@ impl Core {
             | Stage::Probe
             | Stage::Condense
             | Stage::LinkJudge
-            | Stage::Generate => {
+            | Stage::Generate
+            | Stage::Merge
+            | Stage::Rescue
+            | Stage::Read
+            | Stage::Label => {
                 return Err(Error::Validation(
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"
@@ -1659,7 +1667,8 @@ impl Core {
             | Stage::ArmDedupe
             | Stage::Context
             | Stage::Remind
-            | Stage::Reap => {
+            | Stage::Reap
+            | Stage::Decisions => {
                 return Err(Error::Validation(
                     "that stage is a collection-wide sweep, not a per-corpus stage".into(),
                 ));

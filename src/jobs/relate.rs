@@ -5,7 +5,7 @@ use crate::core::Core;
 use crate::error::Result;
 use crate::store::artifacts::{Chunk, Provenance};
 use crate::store::jobs::Stage;
-use crate::store::pairs::PairState;
+use crate::store::pairs::{Net, PairState};
 
 /// Idle-only: `enqueue` would wind a still-queued unit's attempts back to zero.
 pub async fn arm(core: &Core, artifact_id: &str, seq: i64) -> Result<()> {
@@ -35,13 +35,9 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         .vectors
         .neighbours(artifact_id, core.consolidate.per_point)
         .await?;
-    // The live generation's threshold, which autonomy moves; read before any await so the lock is
-    // never held across one.
-    let review_min = core
-        .ranking
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .review_min;
+    // The wide net reaches below the review line; the line itself is the live one, which the tuner
+    // may move under `scan_min`.
+    let floor = core.consolidate.scan_min.min(live_review_min(core));
 
     for h in hits {
         // `similarity`, not `score`: `review_min` is a cosine, and `score` is a fused rank
@@ -54,7 +50,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
             );
             continue;
         };
-        if similarity < review_min {
+        if similarity < floor {
             continue;
         }
         // Ordinary: the vector store can list a point SQLite has dropped, as a delete lags its
@@ -77,6 +73,14 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The live generation's threshold, which autonomy moves; never held across an await.
+fn live_review_min(core: &Core) -> f32 {
+    core.ranking
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .review_min
 }
 
 /// Containment, not similarity: the only ground on which a pair is hidden without asking.
@@ -108,9 +112,11 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         return Ok(false);
     }
 
+    let review_min = live_review_min(core);
     // Same corpus is the whole condition: two documents sharing a sentence are two sources.
-    // `is_some` keeps two merges from matching on `None`.
-    if a.corpus_id.is_some() && a.corpus_id == b.corpus_id {
+    // `is_some` keeps two merges from matching on `None`. Below the review line nothing is hidden
+    // alone: the pair goes to the wide net instead.
+    if score >= review_min && a.corpus_id.is_some() && a.corpus_id == b.corpus_id {
         let (long, short) = if a.text.len() >= b.text.len() {
             (a, b)
         } else {
@@ -175,9 +181,9 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
         return Ok(false);
     }
 
-    // Alike is not duplicate: on a base teaching one subject, most near pairs are two sources on
-    // one topic. The cosine admits nothing alone: containment or one shared document must hold.
-    // Nothing is written, not even a link, which records use, not text.
+    // Alike is not duplicate: most near pairs are two sources on one topic. Only containment or one
+    // shared document, at the review line, files a pair that may act; the rest goes to the wide net,
+    // asked about and acted on by a person. No link is written, which records use, not text.
     let (longer, shorter) = if a.text.len() >= b.text.len() {
         (a, b)
     } else {
@@ -185,12 +191,13 @@ async fn classify_pair(core: &Core, a: &Chunk, b: &Chunk, score: f32) -> Result<
     };
     let corroborated = contains_normalized(&longer.text, &shorter.text)
         || (a.corpus_id.is_some() && a.corpus_id == b.corpus_id);
-    if !corroborated {
-        tracing::debug!(a = %a.id, b = %b.id, score, "alike, but nothing says duplicate");
-        return Ok(false);
+    if corroborated && score >= review_min {
+        core.store.record_pair(&a.id, &b.id, score).await?;
+    } else if score >= core.consolidate.scan_min {
+        core.store
+            .record_pair_in(&a.id, &b.id, score, Some(Net::Wide), None)
+            .await?;
     }
-
-    core.store.record_pair(&a.id, &b.id, score).await?;
     Ok(false)
 }
 
@@ -199,6 +206,7 @@ mod tests {
     use super::*;
     use crate::core::test_support::test_core;
     use crate::jobs::consolidate::tests::seed;
+    use crate::store::pairs::Net;
 
     #[tokio::test]
     async fn a_merge_armed_by_the_repair_pass_still_files_nothing() {
@@ -299,8 +307,9 @@ mod tests {
     #[tokio::test]
     async fn the_review_threshold_is_the_live_generation_s_not_the_file_s() {
         // A neighbour at cosine 0.86: below the shipped 0.88, above a rung the base may step down
-        // to.
-        let core = test_core().await;
+        // to. The wide net is drawn in above it, so the live rung alone decides.
+        let mut core = test_core().await;
+        core.consolidate.scan_min = 0.87;
         let ids = seed(
             &core,
             &[
@@ -480,7 +489,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_corpus_similarity_alone_does_not_reach_the_model() {
+    async fn cross_corpus_similarity_alone_files_no_pair_that_may_act() {
         let core = test_core().await;
         let a_id = crate::jobs::consolidate::tests::seed_into_new_corpus(
             &core,
@@ -499,12 +508,16 @@ mod tests {
 
         classify_pair(&core, &a, &b, 0.93).await.unwrap();
 
+        // The wide net files it for the judge to ask about; nothing but a person acts on it.
+        let pending = core
+            .store
+            .pairs_by_state(PairState::Pending, 10)
+            .await
+            .unwrap();
+        assert!(!pending.is_empty(), "the wide net filed nothing");
         assert!(
-            core.store
-                .pairs_by_state(PairState::Pending, 10)
-                .await
-                .unwrap()
-                .is_empty()
+            pending.iter().all(|p| p.net == Some(Net::Wide)),
+            "{pending:?}"
         );
     }
 
@@ -820,6 +833,150 @@ mod tests {
         assert!(!after.in_results(), "the duplicated copy is still visible");
     }
 
+    // ---- the wide net ----
+
+    /// Two captures, one note each, at cosine `sim` to each other.
+    async fn two_captures(core: &Core, sim: f32) -> (String, String) {
+        let a = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            core,
+            "The proxy listens on port 8080.",
+            [1.0, 0.0],
+        )
+        .await;
+        let b = crate::jobs::consolidate::tests::seed_into_new_corpus(
+            core,
+            "The proxy listens on port 9090.",
+            [sim, (1.0 - sim * sim).sqrt()],
+        )
+        .await;
+        (a, b)
+    }
+
+    #[tokio::test]
+    async fn two_notes_alike_at_seventy_four_from_different_captures_are_filed_in_the_wide_net() {
+        let core = test_core().await;
+        let (a, b) = two_captures(&core, 0.74).await;
+
+        run(&core, &b).await.unwrap();
+
+        let p = core
+            .store
+            .pair_between(&a, &b)
+            .await
+            .unwrap()
+            .expect("the pair was filed");
+        assert_eq!(p.state, PairState::Pending);
+        assert_eq!(p.net, Some(Net::Wide));
+        assert!((p.score - 0.74).abs() < 0.01, "{}", p.score);
+    }
+
+    #[tokio::test]
+    async fn a_pair_under_scan_min_is_not_filed() {
+        let core = test_core().await;
+        let (a, b) = two_captures(&core, 0.65).await;
+
+        run(&core, &b).await.unwrap();
+
+        assert!(core.store.pair_between(&a, &b).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn an_uncorroborated_pair_above_review_min_is_filed_wide_not_plain() {
+        let core = test_core().await;
+        let (a, b) = two_captures(&core, 0.93).await;
+
+        run(&core, &b).await.unwrap();
+
+        let p = core.store.pair_between(&a, &b).await.unwrap().unwrap();
+        assert_eq!(p.net, Some(Net::Wide));
+    }
+
+    #[tokio::test]
+    async fn a_corroborated_pair_above_review_min_is_filed_as_before() {
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem before writing.", [1.0, 0.0]),
+                ("Attach the volume before writing.", [0.93, 0.37]),
+            ],
+        )
+        .await;
+
+        run(&core, &ids[1]).await.unwrap();
+
+        let p = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.net, None);
+    }
+
+    #[tokio::test]
+    async fn passages_and_same_window_pairs_are_still_not_filed() {
+        let core = test_core().await;
+        let pa = seed_passage(&core, "skript-a", "Spuren sind materielle Veraenderungen.").await;
+        let pb = seed_passage(&core, "skript-b", "Als Spur gilt jede Veraenderung.").await;
+        let (a, b) = pair_of(&core, &[pa, pb]).await;
+        classify_pair(&core, &a, &b, 0.75).await.unwrap();
+
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let na = |o: i64, t: &str| crate::store::artifacts::NewArtifact {
+            ordinal: o,
+            text: t.into(),
+            segment_idx: Some(0),
+            ..Default::default()
+        };
+        let rows = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[na(0, "mount the disk first"), na(1, "run the installer")],
+            )
+            .await
+            .unwrap();
+        classify_pair(&core, &rows[0], &rows[1], 0.75)
+            .await
+            .unwrap();
+
+        assert!(
+            core.store
+                .pairs_by_state(PairState::Pending, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn containment_below_the_review_line_hides_nothing() {
+        // Below `review_min` nothing acts alone: a contained duplicate is filed, not superseded.
+        let core = test_core().await;
+        let ids = seed(
+            &core,
+            &[
+                ("Mount the filesystem. Then write.", [1.0, 0.0]),
+                ("Mount the filesystem.", [0.75, 0.66]),
+            ],
+        )
+        .await;
+
+        run(&core, &ids[1]).await.unwrap();
+
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+        let p = core
+            .store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!((p.state, p.net), (PairState::Pending, Some(Net::Wide)));
+    }
+
     #[tokio::test]
     async fn a_pair_above_auto_supersede_is_filed_for_the_judge_not_hidden() {
         let core = test_core().await;
@@ -834,7 +991,7 @@ mod tests {
         run(&core, &ids[1]).await.unwrap();
         assert!(core.store.get_artifact(&ids[0]).await.unwrap().in_results());
         assert!(core.store.get_artifact(&ids[1]).await.unwrap().in_results());
-        let to_judge = core.store.pairs_to_judge(10).await.unwrap();
+        let to_judge = core.store.pairs_to_judge("test/v1", 10).await.unwrap();
         assert_eq!(to_judge.len(), 1, "{to_judge:?}");
         assert!(
             core.store

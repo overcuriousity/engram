@@ -9,6 +9,7 @@ pub mod fetch;
 pub mod gaps;
 pub mod image;
 pub mod ingest;
+pub mod judging;
 pub mod moments;
 pub mod pdf;
 pub mod ranking;
@@ -50,6 +51,8 @@ pub struct Working {
     /// Held here so a transient `Core` (`background::open_for_pass`) shares its measurement with
     /// the serving one.
     pub line: Arc<std::sync::atomic::AtomicU32>,
+    /// Held here so a transient `Core` spends the same tick as the serving one.
+    pub calls: Arc<crate::core::judging::Meter>,
 }
 
 impl Default for Working {
@@ -58,6 +61,7 @@ impl Default for Working {
             sittings: Arc::new(Default::default()),
             query_cache: Arc::new(std::sync::Mutex::new(QueryCache::new(QUERY_CACHE_CAPACITY))),
             line: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            calls: Arc::new(Default::default()),
         }
     }
 }
@@ -109,8 +113,12 @@ pub struct Core {
     /// passages.
     pub synthesizer: Option<Arc<dyn Synthesizer>>,
     pub embedder: Arc<dyn Embedder>,
-    /// Always there: `[infer.decide]` is required.
+    /// Always there: `[infer.decide]` is required. Built behind `judging::Metered`.
     pub decider: Arc<dyn Decider>,
+    /// The judging calls this tick that the decision log does not hold; lives on `Working`.
+    pub calls: Arc<crate::core::judging::Meter>,
+    /// What each question's answers do, by question id; empty until a stage registers.
+    pub appliers: Arc<crate::core::judging::Appliers>,
     /// `false` where the decider stands for nothing: the contained build, whose role points at a
     /// port no model listens on. See `Core::decides`.
     pub decides: bool,
@@ -119,19 +127,12 @@ pub struct Core {
     pub rerank_apply: Vec<crate::config::RerankApply>,
     /// `None` when `[infer.ask]` is not configured: no ask page, no ask tool.
     pub completer: Option<Arc<dyn Completer>>,
-    /// Rules on duplicate pairs, on the synthesize endpoint so sweep traffic stays off the ask
-    /// model.
-    pub judge: Option<Arc<dyn Completer>>,
-    /// Separate from `judge` because the response format is part of the completer.
-    pub link_judge: Option<Arc<dyn Completer>>,
     /// Names a knowledge gap; `None` with no synthesize role, and gaps are then named by their
     /// terms.
     pub gap_namer: Option<Arc<dyn Completer>>,
-    /// Rules on a retired artifact; its own response shape. `None` with no synthesize role.
-    pub reaper: Option<Arc<dyn Completer>>,
     /// Writes an artifact from a pursuit. `None` with no synthesize role.
     pub generator: Option<Arc<dyn Completer>>,
-    /// Not `judge`: the press was the verdict, and the judge splits this class nine to three.
+    /// Writes the merge of a pair: a person pressed Synthese, or the decision model read it as a duplicate.
     pub pair_synthesizer: Option<Arc<dyn Completer>>,
     /// `None` is the whole off switch for the fanned-out second round, so disabled costs no call.
     pub planner: Option<Arc<dyn Completer>>,
@@ -199,6 +200,15 @@ impl Budget {
     pub fn spent(&self) -> bool {
         self.used >= self.cap
     }
+}
+
+/// What each built-in question's answers do.
+fn builtin_appliers() -> Arc<crate::core::judging::Appliers> {
+    let mut a = crate::core::judging::Appliers::default();
+    a.register(Arc::new(crate::jobs::dedupe::PairApplier));
+    a.register(Arc::new(crate::jobs::associate::LinkApplier));
+    a.register(Arc::new(crate::jobs::reap::ReapApplier));
+    Arc::new(a)
 }
 
 impl Core {
@@ -396,7 +406,11 @@ impl Core {
                 ) as Arc<dyn Synthesizer>
             }),
             embedder: Arc::new(HttpEmbedder::new(&cfg.infer.embed)),
-            decider: Arc::new(HttpDecider::new(&cfg.infer.decide).with_counter(counter.clone())),
+            decider: Arc::new(crate::core::judging::Metered::new(
+                Arc::new(HttpDecider::new(&cfg.infer.decide).with_counter(counter.clone())),
+                working.calls.clone(),
+            )),
+            calls: working.calls,
             decides: true,
             reranker: cfg
                 .infer
@@ -412,20 +426,8 @@ impl Core {
             completer: cfg.infer.ask.as_ref().map(|a| {
                 Arc::new(HttpCompleter::new(a).with_counter(counter.clone())) as Arc<dyn Completer>
             }),
-            judge: synth.map(|s| {
-                Arc::new(HttpCompleter::for_judging(s).with_counter(counter.clone()))
-                    as Arc<dyn Completer>
-            }),
-            link_judge: synth.map(|s| {
-                Arc::new(HttpCompleter::for_link_judging(s).with_counter(counter.clone()))
-                    as Arc<dyn Completer>
-            }),
             gap_namer: synth.map(|s| {
                 Arc::new(HttpCompleter::for_gap_naming(s).with_counter(counter.clone()))
-                    as Arc<dyn Completer>
-            }),
-            reaper: synth.map(|s| {
-                Arc::new(HttpCompleter::for_reaping(s).with_counter(counter.clone()))
                     as Arc<dyn Completer>
             }),
             generator: synth.map(|s| {
@@ -490,6 +492,7 @@ impl Core {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            appliers: builtin_appliers(),
             decodes: Arc::new(tokio::sync::Semaphore::new(
                 crate::core::image::MAX_CONCURRENT_DECODES,
             )),
@@ -703,10 +706,7 @@ pub mod test_support {
     pub async fn test_core_without_synthesizer() -> Core {
         let mut core = build(Arc::new(FakeSynthesizer::default()), None).await;
         core.synthesizer = None;
-        core.judge = None;
-        core.link_judge = None;
         core.gap_namer = None;
-        core.reaper = None;
         core.generator = None;
         core.pair_synthesizer = None;
         core
@@ -722,6 +722,8 @@ pub mod test_support {
             synthesizer: Some(synthesizer),
             embedder: Arc::new(FakeEmbedder::new(TEST_DIM)),
             decider: Arc::new(FakeDecider::default()),
+            // Unmetered, so a test counts only what it meters itself (`judging::test_support::metered`).
+            calls: Arc::new(Default::default()),
             decides: true,
             reranker,
             rerank_apply: vec![
@@ -729,12 +731,9 @@ pub mod test_support {
                 crate::config::RerankApply::Search,
             ],
             completer: Some(Arc::new(FakeCompleter::default())),
-            judge: Some(Arc::new(FakeCompleter::default())),
-            link_judge: Some(Arc::new(FakeCompleter::default())),
             gap_namer: Some(Arc::new(FakeCompleter {
                 reply: Some(r#"{"label":"Fake topic"}"#.into()),
             })),
-            reaper: Some(Arc::new(FakeCompleter::default())),
             generator: Some(Arc::new(FakeCompleter::default())),
             // Only a pair a person pressed is synthesized; tests of that path set this.
             pair_synthesizer: None,
@@ -788,6 +787,7 @@ pub mod test_support {
             )),
             corpus_locks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             lifecycle_lock: Arc::new(tokio::sync::Mutex::new(())),
+            appliers: builtin_appliers(),
             decodes: Arc::new(tokio::sync::Semaphore::new(
                 crate::core::image::MAX_CONCURRENT_DECODES,
             )),

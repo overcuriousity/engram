@@ -134,6 +134,39 @@
             "name": "created_at"
           }
         }
+      },
+      {
+        "name": "kind",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "first",
+        "ordinal": 13,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "first"
+          }
+        }
+      },
+      {
+        "name": "shown",
+        "ordinal": 14,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "shown"
+          }
+        }
       }
     ],
     "parameters": {
@@ -151,6 +184,9 @@
       true,
       true,
       false,
+      false,
+      true,
+      true,
       false
     ]
   },

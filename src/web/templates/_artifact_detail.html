@@ -41,6 +41,10 @@
     </form>
   </div>
 
+  {% if d.may_be_out_of_date %}
+  <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">May be out of date</span></div>
+  {% endif %}
+
   {% if d.corpus_restored %}
   <div class="oc-notice oc-notice--warning" role="status">{{ warn }}<span class="oc-notice__text">Source not stored · rebuilt from the vector store</span></div>
   {% endif %}

@@ -39,7 +39,6 @@ pub struct Grave {
     pub id: String,
     pub title: Option<String>,
     pub reaped_at: i64,
-    pub reason: Option<String>,
 }
 
 /// Where an artifact stands: still current, flagged stale with no named
@@ -336,6 +335,8 @@ pub(crate) struct ArtifactRow {
     pub trashed_at: Option<i64>,
     #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
     pub trashed_from: Option<String>,
+    #[allow(dead_code, reason = "filled by query_as!, not carried by Chunk")]
+    pub category_by: Option<String>,
 }
 
 impl From<ArtifactRow> for Chunk {
@@ -894,17 +895,38 @@ impl Store {
         Ok(())
     }
 
+    /// `by`: `person`, `reading` or `writer`, so a reading can tell whose category it would replace.
     /// Leaves `embed_state`: the embedder never sees a category.
-    pub async fn update_artifact_category(&self, id: &str, category: Option<&str>) -> Result<()> {
+    pub async fn update_artifact_category_by(
+        &self,
+        id: &str,
+        category: Option<&str>,
+        by: &str,
+    ) -> Result<()> {
         self.expect_updated(
             sqlx::query!(
-                "UPDATE artifacts SET category = ? WHERE id = ?",
+                "UPDATE artifacts SET category = ?, category_by = ? WHERE id = ?",
                 category,
+                by,
                 id
             )
             .execute(&self.pool)
             .await?,
         )
+    }
+
+    /// A reading's category, written only where there is none and no person cleared it. Whether it
+    /// landed: one statement, so a person's edit in between wins.
+    pub async fn fill_category(&self, id: &str, category: &str) -> Result<bool> {
+        let res = sqlx::query!(
+            "UPDATE artifacts SET category = ?, category_by = 'reading'
+              WHERE id = ? AND category IS NULL AND category_by IS NOT 'person'",
+            category,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
     }
 
     /// An empty list is a clear.
@@ -1070,16 +1092,19 @@ impl Store {
 
     /// `status` moves in lockstep; this is the one place keeping the two columns consistent.
     pub async fn set_superseded_by(&self, artifact_id: &str, by: Option<&str>) -> Result<()> {
-        self.set_superseded_by_with(artifact_id, by, None).await
+        self.set_superseded_by_with(artifact_id, by, None)
+            .await
+            .map(|_| ())
     }
 
     /// One transaction: a hidden artifact with no open journal row can never be restored.
+    /// Returns the journal row's id when one was written.
     pub async fn set_superseded_by_with(
         &self,
         artifact_id: &str,
         by: Option<&str>,
         journal: Option<&crate::store::actions::NewAction>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let status = if by.is_some() {
             ArtifactStatus::Superseded
         } else {
@@ -1103,16 +1128,19 @@ impl Store {
         if res.rows_affected() == 0 {
             return Err(Error::NotFound);
         }
-        if let Some(a) = journal {
-            crate::store::actions::insert(&mut *tx, a).await?;
-        }
+        let row = match journal {
+            Some(a) => Some(crate::store::actions::insert(&mut *tx, a).await?),
+            None => None,
+        };
         tx.commit().await?;
-        Ok(())
+        Ok(row)
     }
 
     /// Does not touch `superseded_by`; use `set_superseded_by(id, None)` to clear one.
     pub async fn set_artifact_status(&self, id: &str, status: ArtifactStatus) -> Result<()> {
-        self.set_artifact_status_with(id, status, None).await
+        self.set_artifact_status_with(id, status, None)
+            .await
+            .map(|_| ())
     }
 
     pub async fn set_artifact_status_with(
@@ -1120,7 +1148,7 @@ impl Store {
         id: &str,
         status: ArtifactStatus,
         journal: Option<&crate::store::actions::NewAction>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         // Marks dirty and stamps `retired_at` in the statement that moves the status, as
         // `set_superseded_by` does.
         let mut tx = self.pool.begin().await?;
@@ -1137,11 +1165,12 @@ impl Store {
             .execute(&mut *tx)
             .await?,
         )?;
-        if let Some(a) = journal {
-            crate::store::actions::insert(&mut *tx, a).await?;
-        }
+        let row = match journal {
+            Some(a) => Some(crate::store::actions::insert(&mut *tx, a).await?),
+            None => None,
+        };
         tx.commit().await?;
-        Ok(())
+        Ok(row)
     }
 
     pub async fn trash_artifact(&self, id: &str, at: i64) -> Result<()> {
@@ -1465,14 +1494,27 @@ impl Store {
                      AND s.via_id IS NOT NULL
                 )";
 
-    /// Open reminders on the note's active artifacts hold a row back (`kind = 'due'` only).
-    /// Age reads `retired_at` alone. Rules SQLite can state are here, before the `LIMIT`;
-    /// "seen since retired" lives on the vector point (see `jobs::reap::nominees`).
-    pub async fn reap_candidates(&self, min_age_secs: i64, limit: i64) -> Result<Vec<Chunk>> {
+    /// Open reminders on the note's active artifacts hold a row back (`kind = 'due'` only). Rules
+    /// SQLite can state are here, before the `LIMIT`; "seen since retired" is `jobs::reap::nominees`'.
+    /// Asked in `era` is out until changed or put back; found valuable by a person, in any era.
+    pub async fn reap_candidates(
+        &self,
+        min_age_secs: i64,
+        era: &str,
+        limit: i64,
+    ) -> Result<Vec<Chunk>> {
         // runtime: shares the REAPABLE predicate with the graveyard insert.
         let rows = sqlx::query_as::<_, ArtifactRow>(sqlx::AssertSqlSafe(format!(
             "SELECT * FROM artifacts art
               WHERE {}
+                AND NOT EXISTS (SELECT 1 FROM decisions d
+                                 WHERE d.question_id = 'reap_worth' AND d.subject_a = art.id
+                                   AND d.subject_b IS art.superseded_by
+                                   AND d.rev_a = art.embed_rev
+                                   AND ((d.era = ?
+                                         AND COALESCE(d.reason, '') NOT IN ('asked_again', 'changed'))
+                                        OR (d.answered_pick = 'yes'
+                                            AND COALESCE(d.reason, '') != 'asked_again')))
               ORDER BY art.retired_at ASC
               LIMIT ?",
             Self::REAPABLE
@@ -1480,6 +1522,7 @@ impl Store {
         .bind(now() - min_age_secs)
         .bind(now() - min_age_secs)
         .bind(now() - min_age_secs)
+        .bind(era)
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
@@ -1499,7 +1542,8 @@ impl Store {
         Ok(res.rows_affected())
     }
 
-    /// Only a rescue restarts the clock; otherwise the rescued row is judged every run.
+    /// Restarts the clock: after a rescue, or the rescued row is judged every run, and for a row
+    /// the sweep stands down. Never to ask again: that would silence the question for an age.
     pub async fn restamp_retired(&self, id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL",
@@ -1521,7 +1565,7 @@ impl Store {
         vec: Option<&[f32]>,
         embed_model: Option<&str>,
         journal: &crate::store::actions::NewAction,
-    ) -> Result<()> {
+    ) -> Result<String> {
         let reaped_at = now();
         let cutoff = reaped_at - min_age_secs;
         let mut tx = self.pool.begin().await?;
@@ -1553,15 +1597,32 @@ impl Store {
         )
         .execute(&mut *tx)
         .await?;
-        crate::store::actions::insert(&mut *tx, journal).await?;
+        let row = crate::store::actions::insert(&mut *tx, journal).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(row)
+    }
+
+    /// Whether `id` is still a reap candidate by every rule `reap_candidates` holds.
+    pub async fn reapable(&self, id: &str, min_age_secs: i64) -> Result<bool> {
+        let cutoff = now() - min_age_secs;
+        // runtime: shares the REAPABLE predicate with the graveyard insert and the bury update.
+        let n: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            "SELECT COUNT(*) FROM artifacts art WHERE art.id = ? AND {}",
+            Self::REAPABLE
+        )))
+        .bind(id)
+        .bind(cutoff)
+        .bind(cutoff)
+        .bind(cutoff)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(n > 0)
     }
 
     /// Only graves whose stub exists: this list is the Restore button.
     pub async fn graveyard_list(&self, limit: i64) -> Result<Vec<Grave>> {
         sqlx::query!(
-            r#"SELECT g.id AS "id!", g.title AS title, g.meta_json AS meta_json, g.reaped_at AS reaped_at
+            r#"SELECT g.id AS "id!", g.title AS title, g.reaped_at AS reaped_at
                FROM graveyard g
                JOIN artifacts a ON a.id = g.id
               ORDER BY g.reaped_at DESC, g.id DESC LIMIT ?"#,
@@ -1571,15 +1632,10 @@ impl Store {
         .await?
         .into_iter()
         .map(|r| {
-            let meta: serde_json::Value = serde_json::from_str(&r.meta_json).unwrap_or_default();
             Ok(Grave {
                 id: r.id,
                 title: r.title,
                 reaped_at: r.reaped_at,
-                reason: meta
-                    .get("reason")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
             })
         })
         .collect()
@@ -2756,7 +2812,7 @@ mod tests {
             .unwrap();
         backdate_retired_at(&s, &pair[1].id, 100 * 86_400).await;
 
-        let got = s.reap_candidates(90 * 86_400, 20).await.unwrap();
+        let got = s.reap_candidates(90 * 86_400, "era", 20).await.unwrap();
         let mut ids = got.iter().map(|c| c.id.as_str()).collect::<Vec<_>>();
         ids.sort_unstable();
         let mut want = vec![made[0].id.as_str(), made[2].id.as_str()];
@@ -2818,7 +2874,10 @@ mod tests {
             "the note is one somebody is still being reminded about"
         );
         assert!(
-            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .is_empty(),
             "so nothing of it is nominated"
         );
         assert!(
@@ -2875,7 +2934,10 @@ mod tests {
         backdate_retired_at(&s, &made[0].id, 100 * 86_400).await;
 
         assert!(
-            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .is_empty(),
             "the merge carries the note's text, and the note is one somebody \
              is still being reminded about"
         );
@@ -2945,11 +3007,20 @@ mod tests {
             .await
             .unwrap();
         backdate_retired_at(&s, &made[1].id, 100 * 86_400).await;
-        assert_eq!(s.reap_candidates(90 * 86_400, 20).await.unwrap().len(), 1);
+        assert_eq!(
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
 
         insert_open_moment(&s, &made[0].id).await;
         assert!(
-            s.reap_candidates(90 * 86_400, 20).await.unwrap().is_empty(),
+            s.reap_candidates(90 * 86_400, "era", 20)
+                .await
+                .unwrap()
+                .is_empty(),
             "the nomination would no longer be made"
         );
         assert!(

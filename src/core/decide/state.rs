@@ -2,6 +2,8 @@ use crate::infer::budget::TokenCounter;
 use crate::infer::decide::{Kind, Question};
 
 pub const BEARS_KEY: &str = "bears";
+/// A change of `bears_question`'s wording bumps it, and Decide's tuned line starts from config.
+pub const BEARS_VERSION: u32 = 1;
 pub const NO_INFORMATION: &str = "No information.";
 
 pub fn bears_question(q: &str) -> Question {

@@ -60,6 +60,14 @@ pub async fn maybe_promote(core: &Core, ids: &[String], at: i64) -> Result<usize
         if core.store.segment_no_promote(corpus_id, idx).await? {
             continue;
         }
+        // Used and already standing alone: a rewrite would add nothing. Unread is promoted as before.
+        let alone = core
+            .store
+            .reading_yes(id, &crate::core::judging::catalogue::self_contained())
+            .await?;
+        if alone.is_some_and(|y| y >= crate::jobs::read::SELF_CONTAINED_AT) {
+            continue;
+        }
         // `keep_artifacts`: the window job appends, so the passages survive to be superseded.
         core.store.reset_segment(corpus_id, idx, true).await?;
         core.store
@@ -608,6 +616,67 @@ mod tests {
             core.store.segment_state(&corpus, 0).await.unwrap(),
             Some(SegmentState::Verbatim)
         );
+    }
+
+    /// Over the line, with a `self_contained` reading of `yes` when given; whether it promoted.
+    async fn used_reading(yes: Option<f64>) -> bool {
+        let (core, corpus, p) = earned_with_one_passage().await;
+        if let Some(yes) = yes {
+            let a = crate::core::judging::catalogue::self_contained();
+            core.store
+                .put_readings(
+                    &p,
+                    &[(&a, &crate::infer::decide::Answer::Noul { yes })],
+                    "fake-decider",
+                )
+                .await
+                .unwrap();
+        }
+        core.store
+            .bump_activation(std::slice::from_ref(&p), 3.0, 14.0, 1_000)
+            .await
+            .unwrap();
+        let armed = maybe_promote(&core, std::slice::from_ref(&p), 1_000)
+            .await
+            .unwrap();
+        let job = core
+            .store
+            .live_job(Stage::SegmentWindow, &unit(&corpus))
+            .await
+            .unwrap();
+        let actions = core
+            .store
+            .open_actions(&[crate::store::actions::Kind::Promote], 10)
+            .await
+            .unwrap()
+            .len();
+        let state = core.store.segment_state(&corpus, 0).await.unwrap();
+        assert_eq!(armed == 1, job);
+        assert_eq!(armed, actions);
+        assert_eq!(
+            state,
+            Some(if job {
+                SegmentState::Pending
+            } else {
+                SegmentState::Verbatim
+            })
+        );
+        job
+    }
+
+    #[tokio::test]
+    async fn a_used_passage_that_stands_alone_is_not_rewritten() {
+        assert!(!used_reading(Some(0.8)).await);
+    }
+
+    #[tokio::test]
+    async fn a_used_fragment_is_promoted() {
+        assert!(used_reading(Some(0.23)).await);
+    }
+
+    #[tokio::test]
+    async fn a_passage_not_read_yet_is_promoted_as_before() {
+        assert!(used_reading(None).await);
     }
 
     use crate::store::artifacts::CorpusSpan;

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_readings (artifact_id, question_id, question_version, answer, model, at)\n                 VALUES (?, ?, ?, ?, ?, ?)\n                 ON CONFLICT (artifact_id, question_id) DO UPDATE SET\n                   question_version = excluded.question_version, answer = excluded.answer,\n                   model = excluded.model, at = excluded.at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "242b21a3a4f8e228b49c4afb8c2e3a236ab11173cd4e713b573fa78ee945b1ce"
+}

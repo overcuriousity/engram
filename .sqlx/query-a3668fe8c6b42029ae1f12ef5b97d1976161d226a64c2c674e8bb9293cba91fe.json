@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO gap_rejections\n               (kind, gap_id, artifact_id, rev, question, era, yes, at)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "a3668fe8c6b42029ae1f12ef5b97d1976161d226a64c2c674e8bb9293cba91fe"
+}

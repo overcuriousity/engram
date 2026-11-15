@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO decisions (id, question_id, question_version, model, era, subject_kind,\n                   subject_a, answer, top, pick, band, state, decided_at)\n                 VALUES (?, 'pair_relation', 1, 'm', 'e', 'pair', 'x', '{}', 0.5, 'distinct', 'leave', 'done', ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "aa9f5456aaf424257725753a81d73c8eac592ec94f769ded1d8d7aaecd547db3"
+}

@@ -2,6 +2,8 @@
 //! (`merge::losses`) or a number (`verify::missing_numbers`) is refused unwritten.
 
 use crate::core::Core;
+use crate::core::judging::check::{Checked, Which, check, outage};
+use crate::core::judging::state::Note;
 use crate::error::{Error, Result};
 use crate::store::jobs::Stage;
 
@@ -117,6 +119,32 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
             "the rewrite would lose a literal or a number; refused"
         );
         return Ok(());
+    }
+    // A failed check is an outage, retried; too long to judge rests on the checks above.
+    let original = Note {
+        title: c.title.as_deref(),
+        day: None,
+        text: &c.text,
+    };
+    let rewrite = Note {
+        title: Some(&g.title),
+        day: None,
+        text: &g.text,
+    };
+    match check(core, &c.id, &[original], &rewrite, Which::Both)
+        .await
+        .map_err(outage)?
+    {
+        Checked::Refused { question, yes } => {
+            tracing::info!(artifact_id, question, yes, "the check refused the rewrite");
+            return Ok(());
+        }
+        // A rewrite replaces the note's text, so one nothing checked is not written.
+        Checked::Unjudged { detail } => {
+            tracing::info!(artifact_id, %detail, "the rewrite could not be checked; left as it is");
+            return Ok(());
+        }
+        Checked::Passed | Checked::TooLong => {}
     }
     let evidence = serde_json::json!({
         "rehearsals": probes.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
@@ -421,5 +449,95 @@ mod tests {
                 "an artifact the operator did not permit rewriting was rewritten: {level:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_condensation_that_fails_the_check_changes_nothing() {
+        let (mut core, writer) = core_with(vec![reply(
+            "The loop mount needs `mount -o loop /dev/loop0`.",
+        )])
+        .await;
+        let check = Arc::new(crate::core::judging::check::test_support::judge(0.03, 0.9));
+        core.decider = check.clone();
+        let id = synthesized(&core).await;
+        let before = core.store.get_artifact(&id).await.unwrap();
+
+        run(&core, &id).await.unwrap();
+
+        assert_eq!((writer.calls(), check.calls()), (1, 1));
+        assert_eq!(
+            core.store.get_artifact(&id).await.unwrap().text,
+            before.text
+        );
+        assert!(core.store.versions_of(&id).await.unwrap().is_empty());
+        assert!(
+            core.store
+                .open_action_on(&id, crate::store::actions::Kind::Condense)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_literal_in_a_condensation_is_caught_before_the_model_is_asked() {
+        let (mut core, _) = core_with(vec![reply("The loop mount needs a recent version.")]).await;
+        let check = Arc::new(crate::core::judging::check::test_support::judge(0.9, 0.9));
+        core.decider = check.clone();
+        let id = synthesized(&core).await;
+        run(&core, &id).await.unwrap();
+        assert_eq!(check.calls(), 0);
+        assert!(core.store.versions_of(&id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_condensation_too_long_to_check_rests_on_the_literal_checks() {
+        let (mut core, _) = core_with(vec![reply(
+            "The loop mount needs `mount -o loop /dev/loop0`.",
+        )])
+        .await;
+        let check = Arc::new(crate::core::judging::check::test_support::judge(0.01, 0.01));
+        check.set_context_tokens(200);
+        core.decider = check.clone();
+        let id = synthesized(&core).await;
+        run(&core, &id).await.unwrap();
+        assert_eq!(check.calls(), 0);
+        assert_eq!(core.store.versions_of(&id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_condensation_whose_check_errs_is_retried() {
+        let (mut core, _) = core_with(vec![reply(
+            "The loop mount needs `mount -o loop /dev/loop0`.",
+        )])
+        .await;
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::Inference {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        let id = synthesized(&core).await;
+        assert!(run(&core, &id).await.unwrap_err().retryable());
+        assert!(core.store.versions_of(&id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_condensation_the_check_will_not_judge_is_not_written_and_not_retried() {
+        let (mut core, _) = core_with(vec![reply(
+            "The loop mount needs `mount -o loop /dev/loop0`.",
+        )])
+        .await;
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "400".into(),
+            })
+        }));
+        let id = synthesized(&core).await;
+        let before = core.store.get_artifact(&id).await.unwrap().text;
+        run(&core, &id).await.unwrap();
+        assert!(core.store.versions_of(&id).await.unwrap().is_empty());
+        assert_eq!(core.store.get_artifact(&id).await.unwrap().text, before);
     }
 }

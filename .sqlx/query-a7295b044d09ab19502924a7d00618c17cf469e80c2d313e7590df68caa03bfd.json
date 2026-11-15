@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!\" FROM artifacts a\n                 LEFT JOIN artifact_reads m\n                   ON m.artifact_id = a.id AND m.asked = ?1 AND m.at >= a.updated_at\n                WHERE a.status = 'active' AND a.superseded_by IS NULL\n                  AND a.embed_state = 'embedded'\n                  AND CASE m.visit\n                        WHEN 'no_room' THEN m.room <> ?2\n                        WHEN 'rejected' THEN m.retry_at <= ?3\n                        ELSE EXISTS (SELECT 1 FROM json_each(?1) q\n                                      WHERE NOT EXISTS (SELECT 1 FROM artifact_readings r\n                                                         WHERE r.artifact_id = a.id\n                                                           AND r.question_id = q.key\n                                                           AND r.question_version = q.value))\n                      END\n                ORDER BY a.created_at DESC, a.id DESC LIMIT ?4",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "a7295b044d09ab19502924a7d00618c17cf469e80c2d313e7590df68caa03bfd"
+}

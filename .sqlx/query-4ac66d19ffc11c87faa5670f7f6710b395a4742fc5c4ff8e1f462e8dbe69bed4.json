@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET attempts = ? WHERE stage = 'rescue'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4ac66d19ffc11c87faa5670f7f6710b395a4742fc5c4ff8e1f462e8dbe69bed4"
+}

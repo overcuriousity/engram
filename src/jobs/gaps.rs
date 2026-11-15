@@ -4,8 +4,10 @@
 
 use crate::core::Core;
 use crate::core::gaps::{MIN_CLUSTER, cluster, cluster_key, terms_label};
+use crate::core::judging::band::era;
+use crate::core::judging::catalogue::answers_query;
 use crate::error::Result;
-use crate::store::gaps::{GapCluster, GapKind};
+use crate::store::gaps::{CoveredBy, GapCluster, GapKind};
 
 /// Small enough that captures never load the vector store, large enough that the wait is the
 /// slowest query.
@@ -20,6 +22,10 @@ static COVER_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
 /// queries of the store the search box uses. Taken newest-first, so older gaps go unchecked by this
 /// capture.
 const COVER_MAX_GAPS: usize = 200;
+
+/// Model calls one capture may make to cover gaps: one light call each, outside the tick's budget.
+/// A note the model already said does not answer a gap is not asked about again and takes none.
+pub const COVER_ASK_MAX: usize = 8;
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SweepReport {
@@ -83,8 +89,9 @@ impl TypedFrom {
     }
 }
 
-/// Closes, silently and reversibly, each open gap this corpus's own artifacts answer at
-/// `weak_below` plus margin; no model call. Every failure is a warning: a stored capture is stored.
+/// Closes, silently and reversibly, each open gap this corpus's own artifacts answer: its best hit
+/// above `weak_below`, asked `answers_query` alone, says yes at `act_at`. A no is remembered and
+/// not asked twice (`Store::reject_gap_note`). A failure is a warning: a stored capture is stored.
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
     // What closes the gap the capture was typed from is the link, not a score (`close_line`).
     let typed_from =
@@ -170,42 +177,91 @@ pub async fn cover_answering(
         }
     }
     let mut closed = 0;
+    // The linked gaps first, before anything that can fail: they need no model.
+    let mut found = Vec::new();
     for (g, hit) in open.gaps.iter().zip(best) {
-        let typed = typed_from.matches(g);
         // `gap_coverage` names the answering artifact, so even the linked gap needs a hit.
         let Some(hit) = hit else { continue };
-        // `None` is "no opinion", and closing by distance is a claim about distance. On the linked
-        // gap the score is recorded, not read.
-        if !typed {
-            let Some(sim) = hit.similarity else { continue };
-            if sim < cover_line(core) {
-                continue;
-            }
+        // On the linked gap the score is recorded, not read, and nothing is asked.
+        if typed_from.matches(g) {
+            closed += record(core, corpus_id, g, &hit, CoveredBy::Capture, &mut failure).await;
+            continue;
         }
-        let sim = hit.similarity.unwrap_or_default();
-        let by = if typed {
-            crate::store::gaps::CoveredBy::Capture
-        } else {
-            crate::store::gaps::CoveredBy::Distance
-        };
-        // Skipped, not returned: the vector store can name an artifact SQLite no longer has, and
-        // `cover` runs only once.
-        match core
-            .store
-            .cover_gap(
-                g.gap.kind,
-                &g.gap.id,
-                corpus_id,
-                &hit.payload.artifact_id,
-                sim,
-                by,
-            )
-            .await
-        {
-            Ok(()) => closed += 1,
+        // A hit above the weak line is found; `None` is "no opinion" and finds nothing.
+        if let Some(sim) = hit.similarity.filter(|s| *s >= core.weak_below()) {
+            found.push((g, hit, sim));
+        }
+    }
+    // Whether a found note covers is the model's to say, the note alone against the gap's
+    // question; the best found are asked, and the rest wait for a later capture.
+    found.sort_by(|a, b| b.2.total_cmp(&a.2));
+    if !found.is_empty() {
+        match crate::jobs::label::relevant_at(core).await {
             Err(e) => {
-                tracing::warn!(gap_id = %g.gap.id, error = %e, "could not record that a capture answered a gap");
                 failure.get_or_insert(e);
+            }
+            Ok(relevant_at) => {
+                let asked = answers_query("");
+                let era = era(core.decider.model(), asked.version);
+                let mut calls = 0;
+                for (g, hit, _) in found {
+                    if calls == COVER_ASK_MAX {
+                        break;
+                    }
+                    // What the model said of this note against this gap stands until one of them,
+                    // the era or the line changes: it takes no place among the asked.
+                    match core
+                        .store
+                        .gap_note_rejected(&g.gap, &hit.payload.artifact_id, &era, relevant_at)
+                        .await
+                    {
+                        Ok(false) => {}
+                        Ok(true) => continue,
+                        // Unknown whether it would be a repeat: not asked by this capture.
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                            continue;
+                        }
+                    }
+                    let note = match core.store.get_artifact(&hit.payload.artifact_id).await {
+                        Ok(note) if note.in_results() => note,
+                        Ok(_) => continue,
+                        // The vector store can name an artifact SQLite no longer has: not the
+                        // model's failure, so the others are still asked.
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                            continue;
+                        }
+                    };
+                    calls += 1;
+                    match crate::jobs::label::answers(core, &g.gap.text, &note).await {
+                        Ok(Some(yes)) if yes >= relevant_at => {
+                            closed +=
+                                record(core, corpus_id, g, &hit, CoveredBy::Model, &mut failure)
+                                    .await;
+                        }
+                        // Remembered, so the next capture does not put the same note to it again.
+                        Ok(Some(yes)) => {
+                            if let Err(e) = core
+                                .store
+                                .reject_gap_note(&g.gap, &note.id, note.embed_rev, &era, yes)
+                                .await
+                            {
+                                tracing::warn!(gap_id = %g.gap.id, error = %e, "could not remember that a note does not answer a gap");
+                                failure.get_or_insert(e);
+                            }
+                        }
+                        Ok(None) => {
+                            tracing::info!(gap_id = %g.gap.id, artifact_id = %note.id, "the note is too long to ask about whole; the gap stays open");
+                        }
+                        // Never closed on an error, and a model that is down is asked no more.
+                        Err(e) => {
+                            tracing::warn!(gap_id = %g.gap.id, error = %e, "could not ask whether a capture answers a gap");
+                            failure.get_or_insert(e);
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -217,6 +273,39 @@ pub async fn cover_answering(
         return Err(e);
     }
     Ok(closed)
+}
+
+/// Writes one coverage row; a failure is a warning, kept for the caller to report.
+async fn record(
+    core: &Core,
+    corpus_id: &str,
+    g: &crate::store::gaps::GapVec,
+    hit: &crate::vector::SearchHit,
+    by: CoveredBy,
+    failure: &mut Option<crate::error::Error>,
+) -> usize {
+    let sim = hit.similarity.unwrap_or_default();
+    // Skipped, not returned: the vector store can name an artifact SQLite no longer has, and
+    // `cover` runs only once.
+    match core
+        .store
+        .cover_gap(
+            g.gap.kind,
+            &g.gap.id,
+            corpus_id,
+            &hit.payload.artifact_id,
+            sim,
+            by,
+        )
+        .await
+    {
+        Ok(()) => 1,
+        Err(e) => {
+            tracing::warn!(gap_id = %g.gap.id, error = %e, "could not record that a capture answered a gap");
+            failure.get_or_insert(e);
+            0
+        }
+    }
 }
 
 pub async fn sweep(core: &Core) -> Result<SweepReport> {
@@ -588,6 +677,7 @@ mod tests {
         core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
         core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
+        answering(&mut core, 0.95, 0.90);
 
         let closed = cover(&core, &corpus).await.unwrap();
 
@@ -627,6 +717,452 @@ mod tests {
         );
     }
 
+    fn saying(yes: f64) -> std::sync::Arc<crate::infer::fake::RuleDecider> {
+        use crate::infer::decide::{Answer, Answers, Question};
+        std::sync::Arc::new(crate::infer::fake::RuleDecider::new(
+            move |_, qs: &[Question]| {
+                Ok(Answers {
+                    answers: qs
+                        .iter()
+                        .map(|q| (q.key.clone(), Answer::Noul { yes }))
+                        .collect(),
+                    model: "rule-decider".into(),
+                    input_tokens: 0,
+                })
+            },
+        ))
+    }
+
+    /// The model says `yes` of every note, and a note answers from `relevant_at`: both stated, so
+    /// no test leans on where a fake's answer and the configured line happen to sit.
+    fn answering(
+        core: &mut Core,
+        yes: f64,
+        relevant_at: f64,
+    ) -> std::sync::Arc<crate::infer::fake::RuleDecider> {
+        core.decide_cfg.bands.per.insert(
+            "answers_query".into(),
+            crate::config::BandOverride {
+                act_at: Some(relevant_at),
+                ask_at: None,
+            },
+        );
+        let dec = saying(yes);
+        core.decider = dec.clone();
+        dec
+    }
+
+    fn asked_about(d: &crate::infer::fake::RuleDecider, q: &str) -> usize {
+        d.requests()
+            .iter()
+            .filter(|(_, qs)| {
+                qs.len() == 1
+                    && qs[0].key == "answers_query"
+                    && qs[0].instructions.contains(&format!("«{q}»"))
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_gap_closes_when_a_new_note_answers_its_question() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        // Found, but under the old line: only the answer can close it.
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01);
+        let dec = answering(&mut core, 0.95, 0.90);
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+        assert_eq!(asked_about(&dec, "how do I mount an E01"), 1);
+        let covered = core.store.gaps_covered_by(&corpus).await.unwrap();
+        assert_eq!(covered.len(), 1);
+        assert_eq!(covered[0].id, id);
+        // A model's answer is not a distance: moving the line does not reopen it.
+        core.store.trim_gap_coverage(1.0).await.unwrap();
+        assert_eq!(core.store.gaps_covered_by(&corpus).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_similar_note_that_does_not_answer_leaves_the_gap_open() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
+        let dec = answering(&mut core, 0.2, 0.90);
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(asked_about(&dec, "how do I mount an E01"), 1);
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .any(|g| g.gap.id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_note_answers_from_the_line_and_not_a_hair_under_it() {
+        for (yes, closes) in [(0.80, 1), (0.79, 0)] {
+            let mut core = test_core().await;
+            core.learn.enabled = true;
+            let v = vec![1.0, 0.0, 0.0, 0.0];
+            gap_search(&core, "how do I mount an E01", v.clone()).await;
+            core.set_weak_below(1.0);
+            let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+            core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01);
+            answering(&mut core, yes, 0.80);
+
+            assert_eq!(cover(&core, &corpus).await.unwrap(), closes, "{yes}");
+        }
+    }
+
+    const MOUNT: &str = "how do I mount an E01";
+
+    /// A gap worded `MOUNT`, and a capture found near it that the model said does not answer it:
+    /// (gap, corpus, the decider that said so).
+    async fn said_no_once(
+        core: &mut Core,
+    ) -> (
+        String,
+        String,
+        std::sync::Arc<crate::infer::fake::RuleDecider>,
+    ) {
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(core, MOUNT, v.clone()).await;
+        core.set_weak_below(1.0);
+        let corpus = captured(core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(core, &v, &corpus).await - 0.01);
+        let dec = answering(core, 0.2, 0.90);
+        assert_eq!(cover(core, &corpus).await.unwrap(), 0);
+        assert_eq!(asked_about(&dec, MOUNT), 1);
+        (id, corpus, dec)
+    }
+
+    #[tokio::test]
+    async fn a_note_the_model_said_no_of_is_not_put_to_the_same_gap_again() {
+        let mut core = test_core().await;
+        let (id, corpus, dec) = said_no_once(&mut core).await;
+
+        // The corpus settles again, and the box closes over it again: nothing more is asked.
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(cover_answering(&core, &corpus, None).await.unwrap(), 0);
+
+        assert_eq!(dec.calls(), 1, "the same note, the same question, twice");
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .any(|g| g.gap.id == id),
+            "a no closes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_note_that_changed_is_put_to_the_gap_again() {
+        let mut core = test_core().await;
+        let (_, corpus, dec) = said_no_once(&mut core).await;
+        // The note that was asked about: the capture's nearest to the gap.
+        let note = core
+            .vectors
+            .search(
+                &[1.0, 0.0, 0.0, 0.0],
+                &Default::default(),
+                1,
+                &crate::vector::SearchFilter {
+                    corpus_id: Some(corpus.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .payload
+            .artifact_id;
+        core.store
+            .update_artifact_text(&note, "Mount an E01 read-only with ewfmount.")
+            .await
+            .unwrap();
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(asked_about(&dec, MOUNT), 2);
+        // And what it said of the new text stands in turn.
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(dec.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_gap_worded_anew_is_asked_about_again() {
+        let mut core = test_core().await;
+        let (id, corpus, dec) = said_no_once(&mut core).await;
+        // The box folds a longer typing onto the search it grew from: the same row, other words.
+        sqlx::query!(
+            "UPDATE search_events SET query = 'mount an E01 image read-only' WHERE id = ?",
+            id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(asked_about(&dec, "mount an E01 image read-only"), 1);
+        assert_eq!(dec.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn another_model_is_asked_what_the_last_one_said_no_to() {
+        let mut core = test_core().await;
+        let (_, corpus, dec) = said_no_once(&mut core).await;
+        // Another model is another era; the line is where it was.
+        core.decider = std::sync::Arc::new(crate::infer::fake::FakeDecider::saying(0.95));
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+        assert_eq!(dec.calls(), 1, "the first model was not asked again");
+    }
+
+    #[tokio::test]
+    async fn a_line_that_came_down_under_what_the_model_said_asks_again() {
+        let mut core = test_core().await;
+        let (_, corpus, _) = said_no_once(&mut core).await;
+        // The same model saying the same 0.2, and a line it now clears.
+        let dec = answering(&mut core, 0.2, 0.15);
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+        assert_eq!(asked_about(&dec, MOUNT), 1);
+    }
+
+    #[tokio::test]
+    async fn a_call_that_fails_leaves_the_gap_open() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = gap_search(&core, "how do I mount an E01", v.clone()).await;
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Internal(
+                "the decision model is down".into(),
+            ))
+        }));
+
+        assert!(cover(&core, &corpus).await.is_err());
+        assert!(
+            core.store
+                .open_gaps(core.embedder.model(), core.weak_below())
+                .await
+                .unwrap()
+                .gaps
+                .iter()
+                .any(|g| g.gap.id == id)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_capture_asks_about_its_best_eight_gaps_and_no_more() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let vecs: Vec<Vec<f32>> = (0..12)
+            .map(|i| vec![1.0, i as f32 * 0.3, (12 - i) as f32 * 0.05, 0.0])
+            .collect();
+        for (i, v) in vecs.iter().enumerate() {
+            gap_search(&core, &format!("gap number {i}"), v.clone()).await;
+        }
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        let mut sims = Vec::new();
+        for (i, v) in vecs.iter().enumerate() {
+            sims.push((best_similarity(&core, v, &corpus).await, i));
+        }
+        let floor = sims.iter().map(|s| s.0).fold(f32::MAX, f32::min);
+        core.set_weak_below(floor - 0.01);
+        let dec = answering(&mut core, 0.2, 0.90);
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+
+        let asked: Vec<f32> = dec
+            .requests()
+            .iter()
+            .map(|(_, qs)| {
+                let i = (0..12)
+                    .find(|i| qs[0].instructions.contains(&format!("«gap number {i}»")))
+                    .unwrap();
+                sims.iter().find(|s| s.1 == i).unwrap().0
+            })
+            .collect();
+        assert_eq!(asked.len(), COVER_ASK_MAX);
+        assert!(
+            asked.windows(2).all(|w| w[0] >= w[1]),
+            "best first: {asked:?}"
+        );
+        sims.sort_by(|a, b| b.0.total_cmp(&a.0));
+        assert!(
+            asked.last().unwrap() >= &sims[COVER_ASK_MAX - 1].0,
+            "{asked:?} {sims:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn what_one_capture_did_not_get_to_ask_the_next_one_does() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let vecs: Vec<Vec<f32>> = (0..12)
+            .map(|i| vec![1.0, i as f32 * 0.3, (12 - i) as f32 * 0.05, 0.0])
+            .collect();
+        for (i, v) in vecs.iter().enumerate() {
+            gap_search(&core, &format!("gap number {i}"), v.clone()).await;
+        }
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        let mut floor = f32::MAX;
+        for v in &vecs {
+            floor = floor.min(best_similarity(&core, v, &corpus).await);
+        }
+        core.set_weak_below(floor - 0.01);
+        let dec = answering(&mut core, 0.2, 0.90);
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(dec.calls(), COVER_ASK_MAX);
+        // The eight it said no of take no place: the four left are asked, and then nothing is.
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(dec.calls(), 12);
+        for i in 0..12 {
+            assert_eq!(
+                asked_about(&dec, &format!("gap number {i}")),
+                1,
+                "gap number {i}"
+            );
+        }
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 0);
+        assert_eq!(dec.calls(), 12);
+    }
+
+    #[tokio::test]
+    async fn a_first_call_that_fails_asks_no_more_and_closes_nothing() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        for i in 0..3 {
+            gap_search(
+                &core,
+                &format!("how do I mount an E01, take {i}"),
+                v.clone(),
+            )
+            .await;
+        }
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01);
+        let dec = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Internal(
+                "the decision model is down".into(),
+            ))
+        }));
+        core.decider = dec.clone();
+
+        assert!(cover(&core, &corpus).await.is_err());
+        assert_eq!(dec.calls(), 1);
+        assert!(
+            core.store
+                .gaps_covered_by(&corpus)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_linked_gap_is_covered_while_the_model_is_down() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        gap_search(&core, "how do I mount an E01", v.clone()).await;
+        let typed = unmatched_search(&core, "the ID photo is on Wednesday", v.clone()).await;
+        core.set_weak_below(0.0);
+        let dec = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Internal(
+                "the decision model is down".into(),
+            ))
+        }));
+        core.decider = dec.clone();
+        let src = core
+            .ingest_capture(
+                crate::core::ingest::Capture::new("The ID photo is on Wednesday at 09:00.", "web")
+                    .with_search(&typed),
+            )
+            .await
+            .unwrap();
+        while crate::jobs::run_one(&core).await.unwrap() {}
+        core.background.wait_idle().await;
+
+        let covered = core.store.gaps_covered_by(&src.id).await.unwrap();
+        assert_eq!(
+            covered.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            [typed.as_str()],
+            "the link closes its gap; the other waits for a model"
+        );
+        assert!(
+            asked_about(&dec, "how do I mount an E01") >= 1,
+            "the other gap was found and its call failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_decide_gap_closes_the_same_way() {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let v = vec![1.0, 0.0, 0.0, 0.0];
+        let id = core
+            .store
+            .record_decision(crate::store::decisions::NewDecision {
+                question: "Keep the E01 mounted?".into(),
+                questions: "{}".into(),
+                situation: None,
+                scope: None,
+                filters: "{}".into(),
+                answers: None,
+                prior: "{}".into(),
+                standing: r#"{"verdict":"not_held"}"#.into(),
+                not_held: true,
+                model: "clef".into(),
+                decider: "clef".into(),
+                read: 0,
+                dropped: 0,
+                query_vec: v.clone(),
+                embed_model: core.embedder.model().to_string(),
+                evidence: vec![],
+            })
+            .await
+            .unwrap();
+        core.set_weak_below(1.0);
+        let corpus = captured(&core, "Mounting an E01 image read-only.").await;
+        core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01);
+        let dec = answering(&mut core, 0.95, 0.90);
+
+        assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
+        assert_eq!(asked_about(&dec, "Keep the E01 mounted?"), 1);
+        assert!(
+            core.store
+                .gaps_covered_by(&corpus)
+                .await
+                .unwrap()
+                .iter()
+                .any(|g| g.id == id && g.kind == GapKind::Decide)
+        );
+    }
+
     #[tokio::test]
     async fn one_gap_the_capture_cannot_record_does_not_cost_the_others() {
         // The vector store names an artifact SQLite no longer has, and `gap_coverage` has a foreign
@@ -642,6 +1178,7 @@ mod tests {
         core.set_weak_below(
             best_similarity(&core, &answerable, &corpus).await - 0.01 - COVER_MARGIN,
         );
+        answering(&mut core, 0.95, 0.90);
 
         core.vectors
             .upsert(vec![crate::vector::VectorPoint {
@@ -676,6 +1213,7 @@ mod tests {
         core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
         core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
+        answering(&mut core, 0.95, 0.90);
         assert_eq!(cover(&core, &corpus).await.unwrap(), 1);
 
         core.delete_corpus(&corpus).await.unwrap();
@@ -703,6 +1241,7 @@ mod tests {
         core.set_weak_below(1.0);
         let corpus = captured(&core, "Mounting an E01 image read-only.").await;
         core.set_weak_below(best_similarity(&core, &v, &corpus).await - 0.01 - COVER_MARGIN);
+        answering(&mut core, 0.95, 0.90);
         let before = embedder.calls();
 
         assert_eq!(cover(&core, &corpus).await.unwrap(), 1);

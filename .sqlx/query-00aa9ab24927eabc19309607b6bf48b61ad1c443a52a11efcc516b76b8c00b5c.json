@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET outcome = ?, outcome_at = ?, answered_pick = COALESCE(?, answered_pick)\n              WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "00aa9ab24927eabc19309607b6bf48b61ad1c443a52a11efcc516b76b8c00b5c"
+}

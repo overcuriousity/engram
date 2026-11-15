@@ -67,7 +67,7 @@ server broke. There are no error codes; the status is the vocabulary.
 | `GET /moments?kind=due\|event&from=&to=` | List of reminders, or of dates that refer to the window. |
 | `POST /context` | Body: the situation bundle. Answers `{ "offer": {…} \| null }`. Records the situation either way. |
 | `POST /context/seen` | Body `{ artifact_id, rung, slot }`, sent when the card is actually on screen. Always `204`. |
-| `GET /status`, `GET /consolidation` | The state of the base, and the pairs the judge has not settled yet. `status` also says which doors are open — `transcribe`, `asks`, `vision`, `learn`, `recommend` — and carries the idle line's facts: `held`, `last_kept`, the box hint's `examples` (in the `Accept-Language` asked for), and `teach`. |
+| `GET /status`, `GET /consolidation` | The state of the base, and the pairs the judge has not settled yet. `status` also says which doors are open — `transcribe`, `asks`, `vision`, `learn`, `recommend` — and carries the idle line's facts: `held`, `last_kept`, the box hint's `examples` (in the `Accept-Language` asked for), and `teach`. `unsure` is the number of `items` `GET /unsure` answers with: rows a person can answer now, not rows waiting for a seat. |
 | `GET /corpora/{id}/bands` | The corpus page as data: `image`, `pdf`, `unread`, `restored`, `note`, `coverage`, `meta`, `exif`, `promoted`, `unplaced`, `written_from`, and `bands` — each `{ from, to, gap, reread, lines, artifact_ids, echoes }`. |
 | `GET /facets` | `{ categories: [{ value, count }] }`: what the box's chips narrow by. |
 | `GET /echo?q=` | `{ kind, detail }`: what capture will do with that text, said before it is pressed — the line under the web's box. Empty `kind` for an empty box. No model call. |
@@ -137,12 +137,15 @@ The routes that used to ask for a decision are gone and answer `404`:
 
 | Route | Answers |
 |---|---|
-| `GET /insights` | `{ held, used, retrieval }`. Read-only. |
+| `GET /insights` | `{ held, used, retrieval }`. Read-only. `retrieval` carries the person's `judged`, `recall_at_10` and `mrr`, and beside them `by_model` (`searches`, `left_out`, `recall_at_10`, `mrr`), `agreement` (`judged`, `hit_rate`, `selectivity`), `bears` (`held_up`, `ruled_on`) and `labels_count`; a figure with nothing under it is `null`. |
 | `GET /insights/set-aside` | The journal: what the base merged, wrote, hid and buried on its own, each with its undo. |
 | `POST /artifacts/{id}/deprecate` · `/reactivate` · `/unsupersede` | Hide by hand, and the undos a journal row admits. `204`. |
 | `DELETE /artifacts/{id}` | Into Trash: out of every read, deleted for good after 30 days. `204`. |
 | `POST /artifacts/{id}/restore` | Out of Trash, with the status it had. `204`; `404` when it is not in Trash. |
 | `POST /merges/{id}/undo` | Take a merge back: its sources return, the merge is retired. `204`. |
+| `GET /unsure` | What the base is torn on: `{ items: [{ id, label, subjects: [{ id, title }], weights: { answer: n }, answers: [pick] }], waiting, next }`. `weights` are whole numbers out of 100, one per answer the model weighed; `waiting` counts rows with no seat yet, which are not in `items`. |
+| `POST /unsure/{id}/answer` | Body `{ pick }`, one of the row's `answers`, or null to leave it. Carried out at once, by you. `204`; `400` when already answered, and when what the row asks about changed since it was asked: that row is closed and the question is asked again. |
+| `POST /unsure/{id}/again` | For an answer that did nothing: ask it again. `204`; `400` when it is already being asked again. |
 | `POST /condensations/{id}/undo` | Put the version a condensation retired back. Answers `{ "artifact_id" }`, which the path does not carry. |
 | `POST /search/{id}/verdict` | Body `{ verdict, artifact_id }` — `hit`, `no`, `skip`, or `none` to take it back. Answers `{ state, already }`; `already` is another door having judged the search first, which is a sentence and not an error. |
 | `POST /search/{id}/gap` | Body `{ q }`: *nothing here has it*. Answers `{ recorded }`. |

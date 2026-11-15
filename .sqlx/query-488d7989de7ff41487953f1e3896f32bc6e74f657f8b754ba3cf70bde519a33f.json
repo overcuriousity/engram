@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO search_label_failures (event_id, question_version, model, refused, retry_at)\n             VALUES (?, ?, ?, ?, ?)\n             ON CONFLICT(event_id) DO UPDATE SET\n               refused = CASE WHEN question_version = excluded.question_version\n                               AND model = excluded.model\n                              THEN refused + excluded.refused ELSE excluded.refused END,\n               question_version = excluded.question_version,\n               model = excluded.model,\n               retry_at = excluded.retry_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "488d7989de7ff41487953f1e3896f32bc6e74f657f8b754ba3cf70bde519a33f"
+}

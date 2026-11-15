@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(MAX(moved_at), 0) AS \"at!: i64\" FROM decision_thresholds\n                WHERE question_id = ? AND era = ?\n                  AND CASE WHEN ? THEN ask_moved ELSE act_moved END = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "at!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "104adafb94f8e3d219b9ed80d5dbe6818bf5642e89f6e2bd3b46e8a8af36f564"
+}

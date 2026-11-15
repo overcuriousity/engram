@@ -141,7 +141,10 @@ CREATE TABLE IF NOT EXISTS artifacts (
   reaped_at        INTEGER,
   -- In Trash since then; `trashed_from` is the status it goes back to.
   trashed_at       INTEGER,
-  trashed_from     TEXT
+  trashed_from     TEXT,
+  -- Who set `category`: 'person' | 'reading' | 'writer'; NULL on older rows. A
+  -- reading fills only a null category nobody cleared.
+  category_by      TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_artifacts_corpus     ON artifacts(corpus_id, ordinal);
 CREATE INDEX IF NOT EXISTS idx_artifacts_embed      ON artifacts(embed_state);
@@ -153,6 +156,39 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_status     ON artifacts(status);
 -- be paid for on every lifecycle write and read nothing back.
 CREATE INDEX IF NOT EXISTS idx_artifacts_dirty      ON artifacts(lifecycle_dirty) WHERE lifecycle_dirty = 1;
 CREATE INDEX IF NOT EXISTS idx_artifacts_provenance ON artifacts(provenance);
+
+-- What the decision model read off a note once it was embedded: its kind, a
+-- pin, a shelf life, whether it stands alone. The newest answer per question;
+-- a reading is not a decision, so it is never banded or put to a person.
+CREATE TABLE IF NOT EXISTS artifact_readings (
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  question_id TEXT NOT NULL,
+  question_version INTEGER NOT NULL,
+  answer TEXT NOT NULL,
+  model TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (artifact_id, question_id)
+);
+
+-- The reader's last visit to a note: the text it saw, what it asked, how it
+-- went. Readings of that text stand through a re-embed; a note that could not
+-- be read is left alone until its text, the questions or — for 'rejected' —
+-- the hour changes.
+CREATE TABLE IF NOT EXISTS artifact_reads (
+  artifact_id TEXT NOT NULL PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- Of the title and the text, the two things a reading is of.
+  text_hash   TEXT NOT NULL,
+  -- Question id to version, as JSON: a new version is a new visit.
+  asked       TEXT NOT NULL,
+  -- The tokens the note had to fit in. 'no_room' stands while this is the same.
+  room        INTEGER NOT NULL,
+  -- 'read' | 'no_room' | 'rejected'
+  visit       TEXT NOT NULL,
+  -- Rejected visits in a row; the wait doubles with each.
+  tries       INTEGER NOT NULL DEFAULT 0,
+  retry_at    INTEGER NOT NULL DEFAULT 0,
+  at          INTEGER NOT NULL
+);
 
 -- ── Lineage ──────────────────────────────────────────────────────────────────
 -- What a merged artifact is made of, as resolved captured roots rather than as
@@ -289,6 +325,14 @@ CREATE TABLE IF NOT EXISTS artifact_pairs (
   -- decided to do about it — two facts about one pair, and storing the second
   -- on top of the first would lose the finding that put it on the queue.
   synthesis_asked INTEGER NOT NULL DEFAULT 0,
+  -- Who asked for the writing: 'model' (a decision) or 'operator'. NULL on rows
+  -- asked before the column, which were all a person's press.
+  synthesis_by   TEXT,
+  -- Which net filed the pair, when it is not one that may act alone: 'wide'
+  -- (similarity alone, or below the review line) or 'decide' (a judged decision
+  -- queued it). NULL: containment or one shared document at the review line,
+  -- or a link.
+  net            TEXT,
   UNIQUE(a_id, b_id)
 );
 CREATE INDEX IF NOT EXISTS idx_pairs_state ON artifact_pairs(state, created_at DESC);
@@ -391,6 +435,31 @@ CREATE INDEX IF NOT EXISTS idx_candidates_similarity
 CREATE TABLE IF NOT EXISTS search_context (
   event_id  TEXT PRIMARY KEY REFERENCES search_events(id) ON DELETE CASCADE,
   context   TEXT NOT NULL
+);
+
+-- What the decision model said of each candidate of a recorded search: would
+-- this note help someone who searched for the query? One row per candidate,
+-- the newest era kept; never the person's verdict, which stays on the event.
+CREATE TABLE IF NOT EXISTS search_labels (
+  event_id TEXT NOT NULL REFERENCES search_events(id) ON DELETE CASCADE,
+  artifact_id TEXT NOT NULL,
+  yes REAL NOT NULL,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (event_id, artifact_id)
+);
+
+-- A search the decision model failed to label, under the newest era that
+-- tried: when it may be tried again, and how often the model refused it. From
+-- `LABEL_GIVE_UP` refusals on it is given up until the question or the model
+-- changes; a failure that waiting fixes is never counted. Gone once labelled.
+CREATE TABLE IF NOT EXISTS search_label_failures (
+  event_id TEXT PRIMARY KEY REFERENCES search_events(id) ON DELETE CASCADE,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  refused INTEGER NOT NULL,
+  retry_at INTEGER NOT NULL
 );
 
 -- ── Idle passes ──────────────────────────────────────────────────────────────
@@ -515,7 +584,10 @@ CREATE TABLE IF NOT EXISTS decide_events (
   -- {key: standing}
   standing     TEXT NOT NULL,
   not_held     INTEGER NOT NULL,
+  -- As the server named itself.
   model        TEXT NOT NULL,
+  -- The configured decision model, which the tuner and the figures read; NULL before it was kept.
+  decider      TEXT,
   read         INTEGER NOT NULL,
   dropped      INTEGER NOT NULL,
   query_vec    BLOB NOT NULL,
@@ -526,7 +598,9 @@ CREATE TABLE IF NOT EXISTS decide_events (
   verdict      TEXT,
   -- {key: answer}, the right answer when known.
   correct      TEXT,
-  dismissed_at INTEGER
+  dismissed_at INTEGER,
+  -- The wording of `bears` it was read under; NULL before it was kept, when there was only 1.
+  bears_version INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_decides_created ON decide_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_decides_open ON decide_events(not_held, verdict, dismissed_at);
@@ -580,15 +654,37 @@ CREATE TABLE IF NOT EXISTS gap_coverage (
   score       REAL NOT NULL,
   -- How the hole came to be closed: 'distance' for the coverage check's own
   -- measurement, 'capture' for a capture typed into the box the query was
-  -- typed into. The two are not the same claim and are not collected the same
+  -- typed into, 'model' for a note the decision model said answers the gap's
+  -- question. They are not the same claim and are not collected the same
   -- way — `trim_gap_coverage` drops a measurement that has fallen under the
-  -- line, and a capture never scored against one. NULL on every row written
-  -- before the column, all of which were measurements.
+  -- line, and neither a capture nor a model's answer scored against one. NULL
+  -- on every row written before the column, all of which were measurements.
   covered_by  TEXT,
   covered_at  INTEGER NOT NULL,
   PRIMARY KEY (kind, gap_id)
 );
 CREATE INDEX IF NOT EXISTS idx_gap_coverage_corpus ON gap_coverage(corpus_id);
+
+-- What the decision model said of a note put to a gap's question, when that
+-- did not close the gap: the same note is not put to the same question about
+-- the same gap again until the note, the question's words or the era changes.
+-- One row per gap and note, the newest asking kept. `kind` and `gap_id` are as
+-- in `gap_coverage`, and `trim_gap_coverage` collects the rows of a gap that
+-- is gone.
+CREATE TABLE IF NOT EXISTS gap_rejections (
+  kind        TEXT NOT NULL,
+  gap_id      TEXT NOT NULL,
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- The note's `embed_rev` when it was asked about.
+  rev         INTEGER NOT NULL,
+  -- The gap's question as it was put.
+  question    TEXT NOT NULL,
+  -- The model and the wording of `answers_query`.
+  era         TEXT NOT NULL,
+  yes         REAL NOT NULL,
+  at          INTEGER NOT NULL,
+  PRIMARY KEY (kind, gap_id, artifact_id)
+);
 
 -- ── Association ──────────────────────────────────────────────────────────────
 -- Two artifacts that keep being retrieved by the same searches. The other half
@@ -610,7 +706,8 @@ CREATE TABLE IF NOT EXISTS artifact_links (
   cues        TEXT NOT NULL DEFAULT '[]',
   -- 'learning' | 'related' | 'unrelated' | 'dismissed'
   state       TEXT NOT NULL DEFAULT 'learning',
-  -- The judge's one line, for `related`.
+  -- A fixed hand-over line, or the line a judge wrote before kinds. Never the
+  -- decision model's text: a kind's line is rendered at read time.
   reason      TEXT,
   -- Revisions the judge read. A re-embed of either side reopens the verdict:
   -- the text changed under it.
@@ -618,6 +715,17 @@ CREATE TABLE IF NOT EXISTS artifact_links (
   judged_rev_b INTEGER,
   judge_attempts INTEGER NOT NULL DEFAULT 0,
   created_at  INTEGER NOT NULL,
+  -- `link_kind`'s pick: 'continues' | 'example' | 'alternative' | 'background'
+  -- | 'contradicts' | 'unrelated'. NULL for a link judged before kinds, and
+  -- for a duplicate, whose hand-over line is in `reason`.
+  kind        TEXT,
+  -- For a directional kind, the end that comes first: 'a' | 'b'. NULL when the
+  -- direction did not hold.
+  first       TEXT,
+  -- 1 when the row was recorded for a neighbour the writer was shown at
+  -- capture: its question is owed whatever its weight, and a hand-over to
+  -- consolidation from it may not act alone.
+  shown       INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (a_id, b_id),
   CHECK (a_id < b_id)
 );
@@ -842,6 +950,55 @@ CREATE TABLE IF NOT EXISTS corpus_actions (
   -- operator | evidence
   undone_by     TEXT,
   undone_reason TEXT
+);
+
+-- Every background decision, whatever it led to: what was asked, what came back, which band, what became of it.
+CREATE TABLE IF NOT EXISTS decisions (
+  id TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  era TEXT NOT NULL,
+  subject_kind TEXT NOT NULL,      -- pair | link | artifact | pursuit | write | search
+  subject_a TEXT NOT NULL,
+  subject_b TEXT,
+  rev_a INTEGER,                   -- what the subjects were when asked
+  rev_b INTEGER,
+  answer TEXT NOT NULL,            -- probabilities as returned
+  top REAL NOT NULL,
+  pick TEXT NOT NULL,
+  swapped_agree INTEGER,
+  band TEXT NOT NULL,              -- act | ask | leave
+  reason TEXT,                     -- too_long, restricted, ...
+  state TEXT NOT NULL,             -- waiting | open | done | lapsed
+  outcome TEXT,                    -- kept | undone | confirmed | corrected | refused
+  outcome_at INTEGER,
+  answered_pick TEXT,              -- what a person chose, on an ask row
+  decided_at INTEGER NOT NULL,
+  opened_at INTEGER                -- when an ask row was seated; its lapse runs from here
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_subject ON decisions(question_id, subject_a, subject_b, era);
+CREATE INDEX IF NOT EXISTS idx_decisions_band ON decisions(band, state, top DESC);
+CREATE INDEX IF NOT EXISTS idx_decisions_at ON decisions(decided_at);
+CREATE TABLE IF NOT EXISTS decision_actions (
+  decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+  action_id TEXT NOT NULL,
+  PRIMARY KEY (decision_id, action_id)
+);
+CREATE TABLE IF NOT EXISTS decision_thresholds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  question_id TEXT NOT NULL,
+  era TEXT NOT NULL,
+  act_at REAL NOT NULL,
+  ask_at REAL NOT NULL,
+  reason TEXT NOT NULL,
+  moved_at INTEGER NOT NULL,
+  -- Which line this row moved: each line's evidence is counted from its own last move.
+  act_moved INTEGER NOT NULL DEFAULT 1,
+  ask_moved INTEGER NOT NULL DEFAULT 1,
+  -- 1: no line moved. Rows lapsed while the ask line was already a step under the act line, and
+  -- its evidence starts over here all the same (`ask_moved` is 1); no list of moves shows the row.
+  held INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_corpus_actions_open
   ON corpus_actions(kind, at) WHERE undone_at IS NULL;

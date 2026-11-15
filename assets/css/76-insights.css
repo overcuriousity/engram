@@ -4,6 +4,9 @@
 .regions-table table.set-aside td { vertical-align: top; }
 
 .set-aside-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+/* One button per answer; five of them wrap rather than push the page wide. */
+.unsure-answers { flex-wrap: wrap; gap: 0.25rem; }
+.unsure .oc-list__main { min-width: 0; overflow-wrap: anywhere; }
 
 /* On a phone, rows rather than a table; each row's badge is its heading. */
 @media (width <= 40rem) {
