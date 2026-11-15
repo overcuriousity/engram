@@ -25,6 +25,9 @@ const RETRY_MAX_SECS: i64 = 86_400;
 /// yet another edit inside a single payload write.
 const PAYLOAD_ROUNDS: usize = 4;
 
+/// Visits in one unit: the first, and one more for each edit that landed during the last.
+const READ_ROUNDS: usize = 3;
+
 /// The four questions the catalogue still holds (time_bound may have been dropped by the replay).
 pub fn reading_questions() -> Vec<Asked> {
     vec![category(), pinned(), time_bound(), self_contained()]
@@ -103,9 +106,26 @@ pub async fn queue(core: &Core, artifact_id: &str) -> Result<()> {
 }
 
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
+    // An edit embedded while its note is being read arms nothing, this unit being live, and the
+    // scan passes a note that has readings: the text that stands is read here, before it ends.
+    for _ in 0..READ_ROUNDS {
+        let Some(read) = read_once(core, artifact_id).await? else {
+            return Ok(());
+        };
+        match core.store.get_artifact(artifact_id).await {
+            Ok(now) if text_hash(&now) != read => {}
+            Ok(_) | Err(Error::NotFound) => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// One visit. The hash of the text that was read, when a reading of it was stored.
+async fn read_once(core: &Core, artifact_id: &str) -> Result<Option<String>> {
     let me = core.store.get_artifact(artifact_id).await?;
     if !me.in_results() {
-        return Ok(());
+        return Ok(None);
     }
     let asked = reading_questions();
     let refs: Vec<&Asked> = asked.iter().collect();
@@ -129,7 +149,11 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         tracing::info!(artifact_id, "no room to read this note");
         // Marked, so the scan does not come back for it while nothing has changed.
         mark.visit = Visit::NoRoom;
-        return core.store.put_read_mark(artifact_id, &mark).await;
+        return core
+            .store
+            .put_read_mark(artifact_id, &mark)
+            .await
+            .map(|()| None);
     };
     let questions: Vec<_> = asked.iter().map(|a| a.question.clone()).collect();
     let permit = core.gate.background_light().await;
@@ -137,7 +161,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     permit.finished();
     let answers = match got {
         Ok(got) => got.answers,
-        Err(e) => return unread(core, artifact_id, mark, e).await,
+        Err(e) => return unread(core, artifact_id, mark, e).await.map(|()| None),
     };
     let rows = asked
         .iter()
@@ -153,7 +177,7 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         .collect::<Result<Vec<_>>>();
     let rows = match rows {
         Ok(rows) => rows,
-        Err(e) => return unread(core, artifact_id, mark, e).await,
+        Err(e) => return unread(core, artifact_id, mark, e).await.map(|()| None),
     };
     core.store
         .put_readings(artifact_id, &rows, core.decider.model())
@@ -165,7 +189,8 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let kind = crate::infer::prompt::normalize_category(&pick);
     core.store.fill_category(artifact_id, &kind).await?;
     // Whether or not it landed: a retry after a failed payload write finds the category filled.
-    sync_payload(core, artifact_id).await
+    sync_payload(core, artifact_id).await?;
+    Ok(Some(mark.text_hash))
 }
 
 /// A read the model did not give. A failure the queue retries is left to it up to the ceiling.
@@ -771,6 +796,54 @@ mod tests {
         assert_eq!(retry_wait(5), 57_600);
         assert_eq!(retry_wait(6), 86_400);
         assert_eq!(retry_wait(1_000), 86_400);
+    }
+
+    /// Answers as `inner`, and rewrites the note while the first question about it is out.
+    struct EditedWhileAsked {
+        inner: Arc<RuleDecider>,
+        store: crate::store::Store,
+        id: String,
+        edited: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::infer::decide::Decider for EditedWhileAsked {
+        async fn decide(&self, state: &str, questions: &[Question]) -> Result<Answers> {
+            if !self.edited.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.store
+                    .update_artifact_text(&self.id, "the note, rewritten")
+                    .await?;
+            }
+            self.inner.decide(state, questions).await
+        }
+        fn context_tokens(&self) -> usize {
+            self.inner.context_tokens()
+        }
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+    }
+
+    #[tokio::test]
+    async fn an_edit_landing_while_a_note_is_read_is_read_before_the_unit_ends() {
+        // The edit's own embed arms nothing while this unit is live, and the scan passes a note
+        // that has readings: nothing else would read the text that stands.
+        let mut core = test_core().await;
+        let id = note(&core, "a note").await;
+        let inner = reader("reference", 0.8, 0.1);
+        core.decider = Arc::new(EditedWhileAsked {
+            inner: inner.clone(),
+            store: core.store.clone(),
+            id: id.clone(),
+            edited: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        run(&core, &id).await.unwrap();
+
+        assert_eq!(reads(&inner).len(), 2, "the text that stands was not read");
+        let me = core.store.get_artifact(&id).await.unwrap();
+        let mark = core.store.read_mark(&id).await.unwrap().unwrap();
+        assert_eq!(mark.text_hash, text_hash(&me));
     }
 
     /// A person's edit, row and payload, lands just before the first payload write passed
