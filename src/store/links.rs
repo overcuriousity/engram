@@ -141,9 +141,59 @@ pub struct Link {
     pub kind: Option<LinkKind>,
     /// For a directional kind: whether `a_id` comes first. None when the direction did not hold.
     pub first_is_a: Option<bool>,
+    /// Recorded for a neighbour shown at capture: asked whatever its weight, and what it hands to
+    /// consolidation may not act alone.
+    pub shown: bool,
 }
 
 impl Store {
+    /// A neighbour shown at capture, as a link awaiting its kind. A row still learning is marked
+    /// and lifted to `weight`, decay folded in first; one ruled on or dismissed is left as it is.
+    pub async fn record_shown_link(
+        &self,
+        a: &str,
+        b: &str,
+        weight: f64,
+        half_life_days: f64,
+    ) -> Result<()> {
+        // The CHECK would refuse it.
+        if a == b {
+            return Ok(());
+        }
+        let (a, b) = canonical(a, b);
+        let at = now();
+        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
+        let existing = sqlx::query!(
+            "SELECT weight, bumped_at FROM artifact_links WHERE a_id = ? AND b_id = ?",
+            a,
+            b
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let carried = existing
+            .as_ref()
+            .map(|r| decayed(r.weight, r.bumped_at, at, half_life_days))
+            .unwrap_or(0.0);
+        let weight = weight.max(carried);
+        sqlx::query!(
+            "INSERT INTO artifact_links
+                   (a_id, b_id, weight, bumped_at, queries, cues, state, shown, created_at)
+             VALUES (?, ?, ?, ?, 0, '[]', 'learning', 1, ?)
+             ON CONFLICT(a_id, b_id) DO UPDATE SET
+               weight = excluded.weight, bumped_at = excluded.bumped_at, shown = 1
+             WHERE artifact_links.state = 'learning'",
+            a,
+            b,
+            weight,
+            at,
+            at
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// A decided kind lands `related`, revisions stamped; `dismissed` stays unbeatable. `first_is_a`
     /// names `a` as given. `weight` must clear `associate.show_min` with room to decay; the conflict
     /// branch folds decay in before max.
@@ -289,6 +339,7 @@ pub(crate) struct LinkRow {
     pub created_at: i64,
     pub kind: Option<String>,
     pub first: Option<String>,
+    pub shown: i64,
 }
 
 pub(crate) fn row_to_link(r: LinkRow) -> Link {
@@ -307,6 +358,7 @@ pub(crate) fn row_to_link(r: LinkRow) -> Link {
         created_at: r.created_at,
         kind: r.kind.as_deref().and_then(LinkKind::parse),
         first_is_a: first_of(r.first.as_deref()),
+        shown: r.shown != 0,
     }
 }
 
@@ -706,7 +758,8 @@ impl Store {
 
     /// Cross-corpus is decided over origins in Rust: a merge belongs to every corpus it drew from.
     /// A link asked about in `era`, by search or as a neighbour shown at capture, is not listed
-    /// again until a text changes or it is asked again.
+    /// again until a text changes or it is asked again. A link recorded for a shown neighbour is
+    /// owed its question whatever its weight, its searches or its documents, and leads.
     pub async fn links_to_judge(
         &self,
         era: &str,
@@ -724,7 +777,7 @@ impl Store {
                JOIN artifacts a ON a.id = l.a_id
                JOIN artifacts b ON b.id = l.b_id
               WHERE l.state = 'learning'
-                AND l.weight >= ? AND l.queries >= ?
+                AND (l.shown = 1 OR (l.weight >= ? AND l.queries >= ?))
                 AND a.status = 'active' AND a.superseded_by IS NULL
                 AND b.status = 'active' AND b.superseded_by IS NULL
                 AND NOT EXISTS (
@@ -733,7 +786,7 @@ impl Store {
                        AND d.subject_a = l.a_id AND d.subject_b = l.b_id AND d.era = ?
                        AND d.rev_a = a.embed_rev AND d.rev_b = b.embed_rev
                        AND d.reason IS NOT 'asked_again' AND d.reason IS NOT 'changed')
-              ORDER BY l.weight DESC LIMIT ?",
+              ORDER BY l.shown DESC, l.weight DESC LIMIT ?",
             min_weight,
             min_queries,
             era,
@@ -745,7 +798,7 @@ impl Store {
         let strong: Vec<Link> = rows
             .into_iter()
             .map(row_to_link)
-            .filter(|l| decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
+            .filter(|l| l.shown || decayed(l.weight, l.bumped_at, at, half_life_days) >= min_weight)
             .collect();
         // A same-document link is shown and never judged.
         let mut ids: Vec<String> = strong
@@ -757,7 +810,7 @@ impl Store {
         let origins = self.origins_of(&ids).await?;
         Ok(strong
             .into_iter()
-            .filter(|l| origins_disjoint(&origins, &l.a_id, &l.b_id))
+            .filter(|l| l.shown || origins_disjoint(&origins, &l.a_id, &l.b_id))
             .take(limit.max(0) as usize)
             .collect())
     }
@@ -1881,5 +1934,107 @@ mod tests {
             .unwrap();
         assert_eq!(armed.len(), 1, "{armed:?}");
         assert!(armed[0].a_id == far || armed[0].b_id == far);
+    }
+
+    #[tokio::test]
+    async fn a_link_recorded_for_a_shown_neighbour_is_offered_whatever_its_weight_and_leads() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        let (c, d) = two_corpora(&store).await;
+        for q in ["one", "two", "three"] {
+            store
+                .bump_link(&c, &d, 2.0, Some(q), 30.0, now())
+                .await
+                .unwrap();
+        }
+        store.record_shown_link(&b, &a, 1.0, 30.0).await.unwrap();
+
+        let l = store.get_link(&a, &b).await.unwrap().expect("the row");
+        assert_eq!(l.state, LinkState::Learning);
+        assert!(l.shown);
+        assert_eq!((l.queries, l.weight), (0, 1.0), "no search bound it");
+        assert!(!store.get_link(&c, &d).await.unwrap().unwrap().shown);
+
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, now(), 10)
+            .await
+            .unwrap();
+        assert_eq!(armed.len(), 2, "{armed:?}");
+        assert_eq!(
+            canonical(&a, &b),
+            (armed[0].a_id.as_str(), armed[0].b_id.as_str()),
+            "the shown neighbour's question is owed first"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shown_neighbour_from_the_same_document_is_still_offered() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two(&store).await;
+        store.record_shown_link(&a, &b, 1.0, 30.0).await.unwrap();
+        let armed = store
+            .links_to_judge("test/v1", 4.0, 3, 30.0, now(), 10)
+            .await
+            .unwrap();
+        assert_eq!(armed.len(), 1, "{armed:?}");
+    }
+
+    #[tokio::test]
+    async fn recording_a_shown_neighbour_marks_a_learning_link_and_never_lowers_it() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now())
+            .await
+            .unwrap();
+        store.record_shown_link(&a, &b, 1.0, 30.0).await.unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert!(l.shown);
+        assert_eq!(l.state, LinkState::Learning);
+        assert_eq!(l.queries, 1, "the search that bound it is kept");
+        assert!(l.weight > 4.9, "lowered to {}", l.weight);
+
+        store.record_shown_link(&a, &b, 9.0, 30.0).await.unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.weight, 9.0, "lifted to the weight asked for");
+    }
+
+    #[tokio::test]
+    async fn recording_a_shown_neighbour_leaves_a_settled_link_as_it_is() {
+        let store = Store::memory().await.unwrap();
+        let (a, b) = two_corpora(&store).await;
+        store
+            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now())
+            .await
+            .unwrap();
+        store.dismiss_link(&a, &b).await.unwrap();
+        store.record_shown_link(&a, &b, 9.0, 30.0).await.unwrap();
+        let l = store.get_link(&a, &b).await.unwrap().unwrap();
+        assert_eq!(l.state, LinkState::Dismissed);
+        assert_eq!(l.weight, 5.0, "a dismissal keeps the evidence it was made against");
+        assert!(!l.shown);
+
+        let (c, d) = two_corpora(&store).await;
+        store
+            .bump_link(&c, &d, 5.0, Some("q"), 30.0, now())
+            .await
+            .unwrap();
+        store
+            .set_link_kind(
+                &c,
+                &d,
+                LinkState::Related,
+                Some(LinkKind::Alternative),
+                None,
+                Some((0, 0)),
+            )
+            .await
+            .unwrap();
+        store.record_shown_link(&c, &d, 9.0, 30.0).await.unwrap();
+        let l = store.get_link(&c, &d).await.unwrap().unwrap();
+        assert_eq!(
+            (l.state, l.kind, l.weight),
+            (LinkState::Related, Some(LinkKind::Alternative), 5.0)
+        );
     }
 }

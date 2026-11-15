@@ -69,6 +69,8 @@ pub fn pair(
                 .map(|n| plain("- ", n))
                 .collect();
             if !mine.is_empty() {
+                // A blank line between sources, as between every block: a source's text has line
+                // breaks of its own, and a single one would not show where the next begins.
                 parts.push(format!(
                     "Earlier versions merged into {name}:\n{}",
                     mine.join("\n\n")
@@ -179,13 +181,20 @@ pub fn rewrite(
     (counter.count(&s) <= tokens).then_some(s)
 }
 
-/// The state budget for these questions on this decider (twins counted when swapped).
+/// The state budget for these questions on this decider, counted against the keys they are sent
+/// under. Asked as they are, questions keep their own keys. A request led by a swapped question is
+/// a swapped read of them all (`decide_swapped`): every key becomes `q0`, `q1`, … and every choice
+/// gets its twin. Which of the two a mixed list becomes is its caller's to say, so it gets the
+/// smaller budget: a state sized here fits either way.
 pub fn room(core: &Core, asked: &[&Asked]) -> usize {
-    let (swapped, plain): (Vec<&Asked>, Vec<&Asked>) = asked.iter().partition(|a| a.swapped);
-    let mut questions: Vec<Question> = plain.iter().map(|a| a.question.clone()).collect();
-    let both: Vec<Question> = swapped.iter().map(|a| a.question.clone()).collect();
-    questions.extend(swapped_questions(&both));
-    budget(&core.counter, core.decider.context_tokens(), &questions)
+    let own: Vec<Question> = asked.iter().map(|a| a.question.clone()).collect();
+    let window = core.decider.context_tokens();
+    let as_they_are = budget(&core.counter, window, &own);
+    if asked.iter().any(|a| a.swapped) {
+        as_they_are.min(budget(&core.counter, window, &swapped_questions(&own)))
+    } else {
+        as_they_are
+    }
 }
 
 #[cfg(test)]
@@ -349,10 +358,69 @@ mod tests {
             &swapped_questions(std::slice::from_ref(&p.question)),
         );
         assert_eq!(room(&core, &[&p]), only);
-        let mixed = [r.question.clone(), p.question.clone()];
-        let mut wire = vec![r.question.clone()];
-        wire.extend(swapped_questions(&mixed[1..]));
-        assert_eq!(room(&core, &[&r, &p]), budget(&core.counter, ctx, &wire));
+        // With a plain question beside it, as `ask_with` sends the two: `q0`, `q0r`, `q1`.
+        let wire = swapped_questions(&[p.question.clone(), r.question.clone()]);
+        assert_eq!(room(&core, &[&p, &r]), budget(&core.counter, ctx, &wire));
+    }
+
+    #[tokio::test]
+    async fn a_state_sized_by_room_fits_under_the_keys_the_request_is_sent_with() {
+        use crate::core::judging::catalogue::{category, link_direction, link_kind, pinned};
+        use crate::infer::decide::check;
+        let core = crate::core::test_support::test_core().await;
+        let ctx = core.decider.context_tokens();
+        let long = "word ".repeat(ctx);
+        let sized = |asked: &[&Asked]| -> String {
+            core.counter
+                .cut(&long, room(&core, asked), true)
+                .unwrap_or_default()
+        };
+        let own = |asked: &[&Asked]| -> Vec<Question> {
+            asked.iter().map(|a| a.question.clone()).collect()
+        };
+        let (c, p, k, d) = (category(), pinned(), link_kind(), link_direction());
+        // A reading goes as it is, under the questions' own keys.
+        let state = sized(&[&c, &p]);
+        assert!(core.counter.count(&state) + 8 > room(&core, &[&c, &p]));
+        check(&core.counter, ctx, &state, &own(&[&c, &p])).unwrap();
+        // A link is a swapped read: `q0`, `q0r`, `q1`, `q1r`.
+        let wire = swapped_questions(&own(&[&k, &d]));
+        check(&core.counter, ctx, &sized(&[&k, &d]), &wire).unwrap();
+        // Led by a swapped question, a plain choice is renumbered and twinned with the rest.
+        let wire = swapped_questions(&own(&[&k, &c]));
+        check(&core.counter, ctx, &sized(&[&k, &c]), &wire).unwrap();
+        // Led by a plain one, the same two go as they are.
+        check(&core.counter, ctx, &sized(&[&c, &k]), &own(&[&c, &k])).unwrap();
+    }
+
+    #[test]
+    fn a_rewrite_fits_with_every_original_or_gives_no_state() {
+        let o = [note(Some("O1"), None, "x"), note(Some("O2"), None, "y")];
+        let w = note(Some("W"), None, "z");
+        let whole = c().count(&rewrite(&o, &w, &c(), 1000).unwrap());
+        assert!(rewrite(&o, &w, &c(), whole).is_some());
+        assert!(
+            rewrite(&o, &w, &c(), whole - 1).is_none(),
+            "no original is dropped to make room"
+        );
+        let alone = c().count(&rewrite(&[], &w, &c(), 1000).unwrap());
+        assert!(rewrite(&o, &w, &c(), alone).is_none());
+    }
+
+    #[test]
+    fn one_note_fits_whole_or_gives_no_state() {
+        let n = note(Some("Ports"), None, "Use 8080.");
+        let whole = c().count("Ports\nUse 8080.");
+        assert_eq!(one(&n, &c(), whole).unwrap(), "Ports\nUse 8080.");
+        assert!(one(&n, &c(), whole - 1).is_none(), "a note is never cut");
+    }
+
+    #[test]
+    fn a_window_fits_whole_or_gives_no_state() {
+        let text = "remind me to call Anna on Friday";
+        let whole = c().count(text);
+        assert_eq!(window(text, &c(), whole).unwrap(), text);
+        assert!(window(text, &c(), whole - 1).is_none(), "a window is never cut");
     }
 
     #[test]

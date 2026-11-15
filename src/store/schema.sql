@@ -170,6 +170,26 @@ CREATE TABLE IF NOT EXISTS artifact_readings (
   PRIMARY KEY (artifact_id, question_id)
 );
 
+-- The reader's last visit to a note: the text it saw, what it asked, how it
+-- went. Readings of that text stand through a re-embed; a note that could not
+-- be read is left alone until its text, the questions or — for 'rejected' —
+-- the hour changes.
+CREATE TABLE IF NOT EXISTS artifact_reads (
+  artifact_id TEXT NOT NULL PRIMARY KEY REFERENCES artifacts(id) ON DELETE CASCADE,
+  -- Of the title and the text, the two things a reading is of.
+  text_hash   TEXT NOT NULL,
+  -- Question id to version, as JSON: a new version is a new visit.
+  asked       TEXT NOT NULL,
+  -- The tokens the note had to fit in. 'no_room' stands while this is the same.
+  room        INTEGER NOT NULL,
+  -- 'read' | 'no_room' | 'rejected'
+  visit       TEXT NOT NULL,
+  -- Rejected visits in a row; the wait doubles with each.
+  tries       INTEGER NOT NULL DEFAULT 0,
+  retry_at    INTEGER NOT NULL DEFAULT 0,
+  at          INTEGER NOT NULL
+);
+
 -- ── Lineage ──────────────────────────────────────────────────────────────────
 -- What a merged artifact is made of, as resolved captured roots rather than as
 -- parent edges. `root_id` always names source text — `captured` or `note`, the

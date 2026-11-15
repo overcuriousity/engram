@@ -15,6 +15,59 @@ pub struct Reading {
     pub at: i64,
 }
 
+/// How the reader's last visit to a note went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visit {
+    Read,
+    /// Not one character of it fits beside the questions.
+    NoRoom,
+    /// The model gave no answer to store; asked again after `retry_at`.
+    Rejected,
+}
+
+impl Visit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Visit::Read => "read",
+            Visit::NoRoom => "no_room",
+            Visit::Rejected => "rejected",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Visit> {
+        match s {
+            "read" => Some(Visit::Read),
+            "no_room" => Some(Visit::NoRoom),
+            "rejected" => Some(Visit::Rejected),
+            _ => None,
+        }
+    }
+}
+
+/// The reader's last visit to a note. A mark about other text or other questions says nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadMark {
+    /// Of the title and the text.
+    pub text_hash: String,
+    /// `asked_key` of the questions put.
+    pub asked: String,
+    /// The tokens the note had to fit in.
+    pub room: i64,
+    pub visit: Visit,
+    /// Rejected visits in a row.
+    pub tries: i64,
+    pub retry_at: i64,
+}
+
+/// One JSON object of question id to version: what the SQL walks, and what a mark is keyed on.
+pub fn asked_key(versions: &[(&str, u32)]) -> String {
+    let asked: serde_json::Map<String, serde_json::Value> = versions
+        .iter()
+        .map(|(id, v)| ((*id).to_string(), (*v).into()))
+        .collect();
+    serde_json::Value::Object(asked).to_string()
+}
+
 impl Store {
     pub async fn put_readings(
         &self,
@@ -70,31 +123,104 @@ impl Store {
             .collect())
     }
 
-    /// Live artifacts with no reading at the current version of some reading question, newest first.
+    /// Live, embedded artifacts the reader should visit, newest first: one with no reading at the
+    /// current version of some question, or one rejected whose wait is over. A note the last visit
+    /// could not read is left out while its text and the questions are the same and, for no room,
+    /// `room` is, or, for a rejection, the wait runs. One still to be embedded is read after that.
     pub async fn artifacts_lacking_readings(
         &self,
         versions: &[(&str, u32)],
+        room: i64,
         limit: i64,
     ) -> Result<Vec<String>> {
-        // One JSON object of question id to version keeps the SQL literal.
-        let asked: serde_json::Map<String, serde_json::Value> = versions
-            .iter()
-            .map(|(id, v)| ((*id).to_string(), (*v).into()))
-            .collect();
-        let asked = serde_json::Value::Object(asked).to_string();
+        let asked = asked_key(versions);
+        let at = now();
+        // A mark older than the text's last change is about other text and is not joined.
         Ok(sqlx::query_scalar!(
             r#"SELECT a.id AS "id!" FROM artifacts a
+                 LEFT JOIN artifact_reads m
+                   ON m.artifact_id = a.id AND m.asked = ?1 AND m.at >= a.updated_at
                 WHERE a.status = 'active' AND a.superseded_by IS NULL
-                  AND EXISTS (SELECT 1 FROM json_each(?) q
-                               WHERE NOT EXISTS (SELECT 1 FROM artifact_readings r
-                                                  WHERE r.artifact_id = a.id AND r.question_id = q.key
-                                                    AND r.question_version = q.value))
-                ORDER BY a.created_at DESC, a.id DESC LIMIT ?"#,
+                  AND a.embed_state = 'embedded'
+                  AND CASE m.visit
+                        WHEN 'no_room' THEN m.room <> ?2
+                        WHEN 'rejected' THEN m.retry_at <= ?3
+                        ELSE EXISTS (SELECT 1 FROM json_each(?1) q
+                                      WHERE NOT EXISTS (SELECT 1 FROM artifact_readings r
+                                                         WHERE r.artifact_id = a.id
+                                                           AND r.question_id = q.key
+                                                           AND r.question_version = q.value))
+                      END
+                ORDER BY a.created_at DESC, a.id DESC LIMIT ?4"#,
             asked,
+            room,
+            at,
             limit
         )
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    pub async fn put_read_mark(&self, artifact_id: &str, mark: &ReadMark) -> Result<()> {
+        let (visit, at) = (mark.visit.as_str(), now());
+        sqlx::query!(
+            "INSERT INTO artifact_reads (artifact_id, text_hash, asked, room, visit, tries, retry_at, at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (artifact_id) DO UPDATE SET
+               text_hash = excluded.text_hash, asked = excluded.asked, room = excluded.room,
+               visit = excluded.visit, tries = excluded.tries, retry_at = excluded.retry_at,
+               at = excluded.at",
+            artifact_id,
+            mark.text_hash,
+            mark.asked,
+            mark.room,
+            visit,
+            mark.tries,
+            mark.retry_at,
+            at
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn read_mark(&self, artifact_id: &str) -> Result<Option<ReadMark>> {
+        let row = sqlx::query!(
+            "SELECT text_hash, asked, room, visit, tries, retry_at FROM artifact_reads
+              WHERE artifact_id = ?",
+            artifact_id
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        // A visit this binary cannot name is no mark.
+        Ok(row.and_then(|r| {
+            Some(ReadMark {
+                visit: Visit::parse(&r.visit)?,
+                text_hash: r.text_hash,
+                asked: r.asked,
+                room: r.room,
+                tries: r.tries,
+                retry_at: r.retry_at,
+            })
+        }))
+    }
+
+    /// Whether every question in `asked` has a reading at its version no older than the note's
+    /// text: how readings from before visits were marked are told from stale ones.
+    pub async fn readings_current(&self, artifact_id: &str, asked: &str) -> Result<bool> {
+        let lacking = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64" FROM json_each(?1) q
+                WHERE NOT EXISTS (SELECT 1 FROM artifact_readings r
+                                    JOIN artifacts a ON a.id = r.artifact_id
+                                   WHERE r.artifact_id = ?2 AND r.question_id = q.key
+                                     AND r.question_version = q.value
+                                     AND r.at >= a.updated_at)"#,
+            asked,
+            artifact_id
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(lacking == 0)
     }
 
     /// The yes of a noul reading, when the artifact has one at this version.

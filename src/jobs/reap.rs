@@ -169,10 +169,8 @@ pub(crate) async fn live_neighbours(core: &Core, id: &str) -> Result<Vec<(String
 }
 
 /// Row before point, marker before delete: a failed delete leaves `lifecycle_dirty` for
-/// `repair_lifecycle_drift`. Under `lifecycle_lock` so no restore lands between copy and wipe. The
-/// journal row is linked to `decision_id` as it is written; a row that stopped being a candidate
-/// journals nothing. Once `bury` has committed nothing here is an error: the burial stands, and an
-/// `Err` would put its decision back to wait on a note that is no longer a candidate.
+/// `repair_lifecycle_drift`. Under `lifecycle_lock` so no restore lands between copy and wipe.
+/// Nothing after `bury` commits is an error: an `Err` would put a burial that stands back to wait.
 pub(crate) async fn reap_one(
     core: &Core,
     c: &Chunk,
@@ -267,25 +265,40 @@ pub(crate) async fn reap_one(
     Ok(vec![row])
 }
 
-/// Asks `Stage::Rescue` to write. The model's asks are paced by `max_rescues_per_run` in flight;
-/// one over waits as its decision does. A person's is not paced.
-async fn arm_rescue(core: &Core, c: &Chunk, by: DecidedBy) -> Result<()> {
+/// Whether the base may carry out a reap decision on its own: the switches `periodic_units` arms
+/// the sweep on, read again at each act because a decision can wait across a change of them.
+fn acts_alone(core: &Core) -> bool {
+    core.reap.enabled && core.evolve.autonomous.acts_on_corpus()
+}
+
+/// Gives back the claim `settle` took and journals nothing: the model's act waits for the next
+/// tick. A wait is not a failure, so it is not an `Err`.
+async fn wait(core: &Core, d: &Logged) -> Result<Vec<String>> {
+    core.store
+        .set_decision_state(&d.id, State::Done, State::Waiting)
+        .await?;
+    Ok(vec![])
+}
+
+/// The model's rescues are paced by `max_rescues_per_run` in flight; one already armed for this
+/// note takes no new room. A person's is not paced.
+async fn rescue_has_room(core: &Core, id: &str) -> Result<bool> {
+    if core.store.live_job(Stage::Rescue, id).await? {
+        return Ok(true);
+    }
+    let live = core
+        .store
+        .control
+        .live_count(&core.store.subject, Stage::Rescue)
+        .await?;
+    Ok(live < i64::try_from(core.reap.max_rescues_per_run).unwrap_or(i64::MAX))
+}
+
+/// Asks `Stage::Rescue` to write.
+async fn arm_rescue(core: &Core, c: &Chunk) -> Result<()> {
     if core.generator.is_none() {
         tracing::info!(artifact_id = %c.id, "valuable, but no generator model to rewrite it with; nothing is armed");
         return Ok(());
-    }
-    if by == DecidedBy::Model
-        && !core.store.live_job(Stage::Rescue, &c.id).await?
-        && core
-            .store
-            .control
-            .live_count(&core.store.subject, Stage::Rescue)
-            .await?
-            >= i64::try_from(core.reap.max_rescues_per_run).unwrap_or(i64::MAX)
-    {
-        return Err(Error::Validation(
-            "as many rescues are armed as a run may write; this one waits".into(),
-        ));
     }
     // Behind capture work, as the merge is.
     core.store
@@ -357,6 +370,11 @@ impl Applier for ReapApplier {
         let Some(c) = note_of(core, d).await? else {
             return Ok(vec![]);
         };
+        // Again here, as `settle` reads `armed`. A person's answer is never held.
+        if by == DecidedBy::Model && !acts_alone(core) {
+            tracing::debug!(artifact_id = %c.id, "the reap is off or the base may not act alone; the decision waits");
+            return wait(core, d).await;
+        }
         match pick {
             "no" => {
                 // Again here: a waiting burial can outlive a restore. A person's verdict wins.
@@ -376,15 +394,32 @@ impl Applier for ReapApplier {
                 }
                 reap_one(core, &c, &d.id, by).await
             }
-            "yes" => arm_rescue(core, &c, by).await.map(|()| vec![]),
+            "yes" => {
+                // With no generator nothing is armed, so nothing is held.
+                if by == DecidedBy::Model
+                    && core.generator.is_some()
+                    && !rescue_has_room(core, &c.id).await?
+                {
+                    tracing::debug!(artifact_id = %c.id, "as many rescues are armed as a run may write; this one waits");
+                    return wait(core, d).await;
+                }
+                arm_rescue(core, &c).await.map(|()| vec![])
+            }
             other => Err(Error::Validation(format!(
                 "\"{other}\" is not an answer about a retired note"
             ))),
         }
     }
 
-    async fn reopen(&self, core: &Core, d: &Logged) -> Result<()> {
-        core.store.restamp_retired(&d.subject_a).await
+    /// Nothing to put back: the reason the caller stamps (`asked_again`, `changed`) is what lets
+    /// `reap_candidates` nominate the note again, in its own place. A restamp would silence the
+    /// question for `min_age_days`; a note buried, restored or rescued since is left as it is.
+    async fn reopen(&self, _: &Core, _: &Logged) -> Result<()> {
+        Ok(())
+    }
+
+    fn armed(&self, core: &Core) -> bool {
+        acts_alone(core)
     }
 }
 
