@@ -61,8 +61,39 @@
           {# A passage or note has no name of its own (`Provenance::names_its_own_text`), so no heading. #}
           {% if !d.title.is_empty() %}<span class="artifact-title">{{ d.title }}</span>{% endif %}
           <span class="spacer"></span>
+          {% let r = d.reminder %}
+          <button class="oc-btn" type="button" data-show="#remind-{{ d.id }}">{{ crate::web::icons::icon("alarm-clock", 16) }}<span>{% if r.exists %}reminder{% if r.repeat != "once" %} · {{ r.repeat }}{% endif %}{% else %}Add a reminder{% endif %}</span></button>
           <button class="oc-btn" type="button" data-show="#edit-{{ d.id }}">{{ crate::web::icons::icon("pencil", 16) }}<span>Edit</span></button>
         </div>
+        {# Under the head, not the text: the card is a scroll box, and its foot is behind the fade and the row handle. #}
+        {# An existing reminder posts its own zone back, so an unchanged save moves nothing; a new one takes the browser's. #}
+        <form id="remind-{{ d.id }}" class="oc-form remind-edit" hidden
+              hx-post="/ui/artifacts/{{ d.id }}/reminder"
+              hx-target="closest [data-terms]" hx-swap="outerHTML"
+              {%~ if !r.exists %} data-send-tz{% endif %}>
+          <input type="hidden" name="terms" value="{{ d.terms }}">
+          {% if r.exists %}<input type="hidden" name="tz" value="{{ r.tz }}">{% endif %}
+          <div class="oc-row remind-fields">
+            <div class="oc-field"><label for="remind-when-{{ d.id }}">When</label>
+              <input type="datetime-local" id="remind-when-{{ d.id }}" name="when" class="oc-input" value="{{ r.when }}" required></div>
+            <div class="oc-field"><label for="remind-repeat-{{ d.id }}">Repeats</label>
+              <select id="remind-repeat-{{ d.id }}" name="repeat" class="oc-input" data-oc-menu data-shows-rule>
+                {% for n in ["once", "daily", "weekly", "monthly", "yearly", "custom"] %}
+                <option value="{{ n }}"{% if r.repeat == *n %} selected{% endif %}>{{ n }}</option>
+                {% endfor %}
+              </select></div>
+            <div class="oc-field"{% if r.repeat != "custom" %} hidden{% endif %} data-rule-field><label for="remind-rule-{{ d.id }}">Rule</label>
+              <input id="remind-rule-{{ d.id }}" name="rule" class="oc-input mono" value="{{ r.rule }}" placeholder="FREQ=WEEKLY;BYDAY=MO" autocapitalize="off" spellcheck="false"></div>
+          </div>
+          <div class="oc-form__actions oc-row">
+            <button class="oc-btn oc-btn--primary" type="submit">Save</button>
+            {% if r.exists %}
+            <button class="oc-btn" type="button" hx-post="/ui/artifacts/{{ d.id }}/reminder/remove"
+                    hx-include="closest form" hx-target="closest [data-terms]" hx-swap="outerHTML">Remove</button>
+            {% endif %}
+            <button class="oc-btn" type="button" data-hide="#remind-{{ d.id }}">Cancel</button>
+          </div>
+        </form>
         <div class="md clampable" data-copyable>{{ d.html|safe }}</div>
         {% if let Some(event_id) = d.search_event %}
         {% let artifact_id = d.id %}
@@ -127,36 +158,6 @@
             <button class="oc-btn" type="button" data-hide="#edit-{{ d.id }}">Cancel</button>
           </div>
         </form>
-        {# An existing reminder posts its own zone back, so an unchanged save moves nothing; a new one takes the browser's. #}
-        {% let r = d.reminder %}
-        <details class="remind-edit">
-          <summary>{% if r.exists %}reminder{% if r.repeat != "once" %} · {{ r.repeat }}{% endif %}{% else %}Add a reminder{% endif %}</summary>
-          <form class="oc-form" hx-post="/ui/artifacts/{{ d.id }}/reminder"
-                hx-target="closest [data-terms]" hx-swap="outerHTML"
-                {%~ if !r.exists %} data-send-tz{% endif %}>
-            <input type="hidden" name="terms" value="{{ d.terms }}">
-            {% if r.exists %}<input type="hidden" name="tz" value="{{ r.tz }}">{% endif %}
-            <div class="oc-row remind-fields">
-              <div class="oc-field"><label for="remind-when-{{ d.id }}">When</label>
-                <input type="datetime-local" id="remind-when-{{ d.id }}" name="when" class="oc-input" value="{{ r.when }}" required></div>
-              <div class="oc-field"><label for="remind-repeat-{{ d.id }}">Repeats</label>
-                <select id="remind-repeat-{{ d.id }}" name="repeat" class="oc-input" data-oc-menu data-shows-rule>
-                  {% for n in ["once", "daily", "weekly", "monthly", "yearly", "custom"] %}
-                  <option value="{{ n }}"{% if r.repeat == *n %} selected{% endif %}>{{ n }}</option>
-                  {% endfor %}
-                </select></div>
-              <div class="oc-field"{% if r.repeat != "custom" %} hidden{% endif %} data-rule-field><label for="remind-rule-{{ d.id }}">Rule</label>
-                <input id="remind-rule-{{ d.id }}" name="rule" class="oc-input mono" value="{{ r.rule }}" placeholder="FREQ=WEEKLY;BYDAY=MO" autocapitalize="off" spellcheck="false"></div>
-            </div>
-            <div class="oc-form__actions oc-row">
-              <button class="oc-btn oc-btn--primary" type="submit">Save</button>
-              {% if r.exists %}
-              <button class="oc-btn" type="button" hx-post="/ui/artifacts/{{ d.id }}/reminder/remove"
-                      hx-include="closest form" hx-target="closest [data-terms]" hx-swap="outerHTML">Remove</button>
-              {% endif %}
-            </div>
-          </form>
-        </details>
       </div>
 
       {% if !d.related.is_empty() %}

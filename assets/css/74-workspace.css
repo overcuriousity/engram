@@ -592,14 +592,7 @@ body { overflow-x: hidden; }
 .due-date { display: inline-flex; flex-wrap: wrap; gap: 0.25rem; }
 
 .due-coming { margin: 0.25rem 0 0; }
-.remind-edit { margin-top: 0.5rem; }
-.remind-edit > summary {
-  cursor: pointer;
-  font-size: var(--text-micro);
-  color: var(--color-fg-muted);
-}
-.remind-edit > summary:hover { color: var(--color-fg-secondary); }
-.remind-edit form { flex-wrap: wrap; gap: 0.25rem; margin-top: 0.35rem; }
+.remind-edit { margin-bottom: var(--space-3); }
 
 .due-fold { margin: 0.15rem 0 0; font-size: var(--text-micro); }
 
