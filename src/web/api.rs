@@ -1699,7 +1699,7 @@ async fn status(tenant: Tenant, headers: axum::http::HeaderMap) -> Result<Json<S
                 &crate::store::jobs::Stage::GENERATORS,
             )
             .await?,
-        unsure: tenant.core.store.open_ask_count().await?,
+        unsure: crate::web::unsure::open_count(&tenant.core).await?,
         held: HeldBrief {
             corpora: held_corpora,
             artifacts: held_artifacts,

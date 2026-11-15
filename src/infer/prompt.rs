@@ -158,7 +158,8 @@ INPUT als Notiz in der Zeit:
   Leer, wenn sie keine nennt.
 
 Das Urteil ist kein Artefakt. Schreibe nie ein Artefakt, das die Absicht der
-Notiz beschreibt oder ihre Daten wiederholt: das gehört allein in "moment" und "events". Eine Notiz von
+Notiz beschreibt oder ihre Daten wiederholt: das gehört allein in "moment" und
+"events". Eine Notiz von
 ein oder zwei Sätzen ergibt genau ein Artefakt, in der Sprache der Notiz.
 
 Ohne JUDGE-Block antworte allein mit "artifacts"."#;
@@ -408,7 +409,8 @@ una nota nel tempo:
   non ne indica nessuna.
 
 Il giudizio non è un artefatto. Non scrivere mai un artefatto che descriva
-l'intento della nota o ne ripeta le date: questo spetta solo a "moment" e "events". Una nota di una o
+l'intento della nota o ne ripeta le date: questo spetta solo a "moment" e
+"events". Una nota di una o
 due frasi produce esattamente un artefatto, nella lingua della nota.
 
 Senza blocco JUDGE, rispondi con "artifacts" da solo."#;

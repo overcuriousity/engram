@@ -203,6 +203,17 @@ async fn live_ranking(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
+/// Where the logs are written. The replay's report is stdout and is redirected to a file, so its
+/// logs go to stderr; everything else logs to stdout.
+fn log_writer(args: &Args) -> tracing_subscriber::fmt::writer::BoxMakeWriter {
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+    if args.replay_decisions {
+        BoxMakeWriter::new(std::io::stderr)
+    } else {
+        BoxMakeWriter::new(std::io::stdout)
+    }
+}
+
 /// A command that works on the data and exits; read by both `server_lock` and the client split.
 fn data_command(args: &Args) -> bool {
     args.reindex
@@ -335,18 +346,12 @@ async fn run_account_command(
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // The replay's report is stdout and is redirected to a file: its logs go to stderr.
-    let logs = if args.replay_decisions {
-        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stderr)
-    } else {
-        tracing_subscriber::fmt::writer::BoxMakeWriter::new(std::io::stdout)
-    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "engram=info,tower_http=info".into()),
         )
-        .with_writer(logs)
+        .with_writer(log_writer(&args))
         .init();
 
     if let Some(pw) = &args.hash_password {
@@ -779,6 +784,24 @@ mod startup_tests {
         for f in ["--reembed", "--force-version"] {
             assert!(Args::try_parse_from(["engram", f]).is_err(), "{f}");
             assert!(Args::try_parse_from(["engram", "--restore", "/x", f]).is_ok());
+        }
+    }
+
+    // `BoxMakeWriter` prints the type it was built from, which is all it lets a test see.
+    #[test]
+    fn the_replay_logs_to_stderr_and_the_server_to_stdout() {
+        let writer = |argv: &[&str]| format!("{:?}", log_writer(&Args::parse_from(argv)));
+        let replay = writer(&["engram", "--replay-decisions", "--user", "s"]);
+        assert!(
+            replay.contains("stderr") && !replay.contains("stdout"),
+            "{replay}"
+        );
+        for argv in [&["engram"][..], &["engram", "--list-users"]] {
+            let other = writer(argv);
+            assert!(
+                other.contains("stdout") && !other.contains("stderr"),
+                "{argv:?}: {other}"
+            );
         }
     }
 

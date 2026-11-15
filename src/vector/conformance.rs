@@ -302,6 +302,38 @@ pub async fn stale_candidates_need_a_stamp(s: &dyn VectorStore) {
     assert_eq!(ids(&got), ["old-quiet"]);
 }
 
+pub async fn stale_candidates_page_on_from_the_last_one_given(s: &dyn VectorStore) {
+    s.ensure_collection(DIM).await.unwrap();
+    s.upsert(
+        ["a", "b", "c", "d", "e"]
+            .iter()
+            .map(|id| point(id, "c", [1.0, 0.0, 0.0], &[], None))
+            .collect(),
+    )
+    .await
+    .unwrap();
+    // Two share a stamp, so the id has to carry the cursor across them.
+    for (id, at) in [("a", 300), ("b", 100), ("c", 200), ("d", 200), ("e", 9_000)] {
+        s.set_last_verified_at(id, at, false).await.unwrap();
+    }
+    let cursor = |h: &super::SearchHit| {
+        let stamp = h.payload.last_verified_at.unwrap();
+        Some((stamp, h.payload.artifact_id.clone()))
+    };
+    let first = s.stale_candidates(1_000, 1, 2).await.unwrap();
+    assert_eq!(ids(&first), ["b", "c"]);
+    let second = s
+        .stale_candidates_after(1_000, 1, 2, cursor(&first[1]))
+        .await
+        .unwrap();
+    assert_eq!(ids(&second), ["d", "a"], "nothing skipped, nothing twice");
+    let third = s
+        .stale_candidates_after(1_000, 1, 2, cursor(&second[1]))
+        .await
+        .unwrap();
+    assert!(third.is_empty(), "{:?}", ids(&third));
+}
+
 pub async fn resurface_offers_the_old_and_unseen(s: &dyn VectorStore) {
     s.ensure_collection(DIM).await.unwrap();
     let mut young = point("young", "c", [1.0, 0.0, 0.0], &[], None);
@@ -483,6 +515,7 @@ macro_rules! suite {
             a_trashed_artifact_is_excluded_until_restored,
             a_re_embed_keeps_the_stamps, set_payload_merges_and_leaves_the_vector,
             touch_counts_only_retrievals, stale_candidates_need_a_stamp,
+            stale_candidates_page_on_from_the_last_one_given,
             resurface_offers_the_old_and_unseen, apply_lifecycle_writes_a_batch,
             facets_count_categories, neighbours_exclude_the_artifact_itself,
             context_sets_match_on_the_nearest_situation, deletes_take_everything_with_them,

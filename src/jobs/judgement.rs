@@ -1,4 +1,4 @@
-//! What a judged synthesis reply becomes: moments. Links come from `judging::link_shown`.
+//! What a judged synthesis reply becomes: moments. Links come from `associate::link_shown`.
 //! Best-effort throughout: a judgement that cannot be applied is a warning, never a lost capture.
 
 use crate::core::Core;
@@ -1489,17 +1489,23 @@ mod tests {
             core.decide_cfg.max_per_tick = 0;
             let other = crate::core::test_support::seed_artifact(&core, "elsewhere").await;
             let made =
-                crate::core::judging::link_shown(&core, &anchor, std::slice::from_ref(&other))
+                crate::jobs::associate::link_shown(&core, &anchor, std::slice::from_ref(&other))
                     .await
                     .unwrap();
             assert_eq!(made, 0);
             assert!(
-                core.store
-                    .get_link(&anchor, &other)
-                    .await
-                    .unwrap()
-                    .is_none()
+                decision(&core, &anchor, &other).await.is_none(),
+                "a call was spent past the budget"
             );
+            // Not asked now, and not forgotten: it waits as a learning link for the sweep.
+            let waiting = core
+                .store
+                .get_link(&anchor, &other)
+                .await
+                .unwrap()
+                .expect("the neighbour was recorded for the sweep");
+            assert_eq!(waiting.state, LinkState::Learning);
+            assert!(waiting.shown);
             let _ = neighbour;
         }
     }

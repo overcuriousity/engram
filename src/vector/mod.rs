@@ -227,6 +227,32 @@ pub trait VectorStore: Send + Sync {
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>>;
+    /// The next `limit` of `stale_candidates`, stalest first then by id, past the candidate with
+    /// this stamp and id: a caller that passes some over pages on with the last one it was given.
+    /// Every store here answers it with its own query; the default lists them all and cuts.
+    async fn stale_candidates_after(
+        &self,
+        older_than: i64,
+        max_hits: i64,
+        limit: usize,
+        after: Option<(i64, String)>,
+    ) -> Result<Vec<SearchHit>> {
+        let Some((stamp, id)) = after else {
+            return self.stale_candidates(older_than, max_hits, limit).await;
+        };
+        let all = self
+            .stale_candidates(older_than, max_hits, usize::MAX)
+            .await?;
+        Ok(all
+            .into_iter()
+            .filter(|h| {
+                let p = &h.payload;
+                p.last_verified_at
+                    .is_some_and(|v| (v, p.artifact_id.as_str()) > (stamp, id.as_str()))
+            })
+            .take(limit)
+            .collect())
+    }
     /// An empty `sparse` means no indexable token, and the lexical half is skipped.
     async fn search(
         &self,

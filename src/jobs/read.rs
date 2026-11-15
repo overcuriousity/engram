@@ -7,20 +7,96 @@ use crate::core::judging::band::pick_and_top;
 use crate::core::judging::catalogue::{category, pinned, self_contained, time_bound};
 use crate::core::judging::{Asked, state};
 use crate::error::{Error, Result};
-use crate::store::jobs::Stage;
+use crate::store::artifacts::Chunk;
+use crate::store::jobs::{MAX_ATTEMPTS, Stage};
+use crate::store::readings::{ReadMark, Visit};
 
 /// `pinned` is stored and has no effect: the only pin that ranks is a tag a person sets.
 pub const PINNED_AT: f64 = 0.90;
 pub const TIME_BOUND_AT: f64 = 0.5;
 pub const SELF_CONTAINED_AT: f64 = 0.5;
 
+/// A note the model would not read is left an hour, twice as long after each further visit, and
+/// a day at most.
+const RETRY_FIRST_SECS: i64 = 3_600;
+const RETRY_MAX_SECS: i64 = 86_400;
+
+/// Rounds of write-then-look in `sync_payload`; an edit lands in one, and each further one needs
+/// yet another edit inside a single payload write.
+const PAYLOAD_ROUNDS: usize = 4;
+
 /// The four questions the catalogue still holds (time_bound may have been dropped by the replay).
 pub fn reading_questions() -> Vec<Asked> {
     vec![category(), pinned(), time_bound(), self_contained()]
 }
 
-/// Idle-only, as `relate::arm`: a queued read keeps its attempts.
+/// The questions and their versions as a mark keeps them.
+pub fn asked_key(asked: &[Asked]) -> String {
+    let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
+    crate::store::readings::asked_key(&versions)
+}
+
+/// The tokens a note has to fit in beside these questions, as a mark keeps them.
+pub fn room(core: &Core, asked: &[Asked]) -> i64 {
+    let refs: Vec<&Asked> = asked.iter().collect();
+    i64::try_from(state::room(core, &refs)).unwrap_or(i64::MAX)
+}
+
+/// What a reading is of: the title and the text. A re-embed changes neither.
+fn text_hash(c: &Chunk) -> String {
+    crate::store::corpora::content_hash(format!(
+        "{}\u{0}{}",
+        c.title.as_deref().unwrap_or_default(),
+        c.text
+    ))
+}
+
+fn retry_wait(tries: i64) -> i64 {
+    let doublings = (tries.clamp(1, 16) - 1) as u32;
+    RETRY_FIRST_SECS
+        .saturating_mul(1i64 << doublings)
+        .min(RETRY_MAX_SECS)
+}
+
+/// Whether the reader has anything to do here: not when the note's readings are of the text it
+/// has now, and not when the last visit could not read that text and nothing about that changed.
+async fn due(core: &Core, me: &Chunk) -> Result<bool> {
+    let asked = reading_questions();
+    let key = asked_key(&asked);
+    let Some(mark) = core.store.read_mark(&me.id).await? else {
+        // Readings from before visits were marked stand while the text is no newer than they are.
+        return Ok(!core.store.readings_current(&me.id, &key).await?);
+    };
+    if mark.text_hash != text_hash(me) || mark.asked != key {
+        return Ok(true);
+    }
+    Ok(match mark.visit {
+        Visit::Read => false,
+        Visit::NoRoom => mark.room != room(core, &asked),
+        Visit::Rejected => mark.retry_at <= crate::store::now(),
+    })
+}
+
+/// After an embed. A reading is of the text, not the vector, so a note whose text was already
+/// read (or could not be, see `due`) is left alone: a re-index costs no call.
 pub async fn arm(core: &Core, artifact_id: &str) -> Result<()> {
+    let me = match core.store.get_artifact(artifact_id).await {
+        Ok(me) => Some(me),
+        // Gone since: the unit finds that out and closes.
+        Err(Error::NotFound) => None,
+        Err(e) => return Err(e),
+    };
+    if let Some(me) = &me
+        && !due(core, me).await?
+    {
+        return Ok(());
+    }
+    queue(core, artifact_id).await
+}
+
+/// Idle-only, as `relate::arm`: a queued read keeps its attempts. For a caller that has already
+/// chosen the note, as the quiet scan has.
+pub async fn queue(core: &Core, artifact_id: &str) -> Result<()> {
     core.store
         .rearm_idle_seq(Stage::Read, "artifact", artifact_id, 0)
         .await
@@ -34,6 +110,14 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let asked = reading_questions();
     let refs: Vec<&Asked> = asked.iter().collect();
     let room = state::room(core, &refs);
+    let mut mark = ReadMark {
+        text_hash: text_hash(&me),
+        asked: asked_key(&asked),
+        room: i64::try_from(room).unwrap_or(i64::MAX),
+        visit: Visit::Read,
+        tries: 0,
+        retry_at: 0,
+    };
     let note = state::Note {
         title: me.title.as_deref(),
         day: None,
@@ -43,13 +127,18 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let whole = state::one(&note, &core.counter, usize::MAX).unwrap_or_default();
     let Some(shown) = core.counter.cut(&whole, room, true) else {
         tracing::info!(artifact_id, "no room to read this note");
-        return Ok(());
+        // Marked, so the scan does not come back for it while nothing has changed.
+        mark.visit = Visit::NoRoom;
+        return core.store.put_read_mark(artifact_id, &mark).await;
     };
     let questions: Vec<_> = asked.iter().map(|a| a.question.clone()).collect();
     let permit = core.gate.background_light().await;
     let got = core.decider.decide(&shown, &questions).await;
     permit.finished();
-    let answers = got?.answers;
+    let answers = match got {
+        Ok(got) => got.answers,
+        Err(e) => return unread(core, artifact_id, mark, e).await,
+    };
     let rows = asked
         .iter()
         .map(|a| {
@@ -61,21 +150,72 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
                     detail: format!("the answer has none for \"{}\"", a.id),
                 })
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<Result<Vec<_>>>();
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => return unread(core, artifact_id, mark, e).await,
+    };
     core.store
         .put_readings(artifact_id, &rows, core.decider.model())
         .await?;
+    core.store.put_read_mark(artifact_id, &mark).await?;
 
     // `category` is asked first. Its top pick is taken whatever its probability: a kind describes.
     let (pick, _) = pick_and_top(&rows[0].0.question, rows[0].1);
     let kind = crate::infer::prompt::normalize_category(&pick);
-    if core.store.fill_category(artifact_id, &kind).await? {
-        let chunk = core.store.get_artifact(artifact_id).await?;
+    core.store.fill_category(artifact_id, &kind).await?;
+    // Whether or not it landed: a retry after a failed payload write finds the category filled.
+    sync_payload(core, artifact_id).await
+}
+
+/// A read the model did not give. A failure the queue retries is left to it up to the ceiling.
+/// There, or at once for a refusal or for a note already refused, the unit closes and the note
+/// waits out `retry_wait`: nothing stays queued, and the scan and the next embed pass it by.
+async fn unread(core: &Core, artifact_id: &str, mut mark: ReadMark, e: Error) -> Result<()> {
+    let before = core
+        .store
+        .read_mark(artifact_id)
+        .await?
+        .filter(|m| {
+            m.visit == Visit::Rejected && m.text_hash == mark.text_hash && m.asked == mark.asked
+        })
+        .map_or(0, |m| m.tries);
+    let spent = core
+        .store
+        .live_job_attempts(Stage::Read, artifact_id)
+        .await?
+        .is_some_and(|a| a >= MAX_ATTEMPTS);
+    if e.retryable() && before == 0 && !spent {
+        return Err(e);
+    }
+    mark.visit = Visit::Rejected;
+    mark.tries = before + 1;
+    mark.retry_at = crate::store::now() + retry_wait(mark.tries);
+    tracing::warn!(
+        artifact_id,
+        error = %e,
+        tries = mark.tries,
+        "could not read this note; leaving it for now"
+    );
+    core.store.put_read_mark(artifact_id, &mark).await
+}
+
+/// Writes the vector payload from the row as stored, then looks at the row again: an edit that
+/// landed while the write was on its way is written too, so the last write is never older than
+/// the row. That holds between writers that look again; one that does not can still leave its
+/// older value last.
+pub async fn sync_payload(core: &Core, artifact_id: &str) -> Result<()> {
+    let mut chunk = core.store.get_artifact(artifact_id).await?;
+    for _ in 0..PAYLOAD_ROUNDS {
         // A pending embed writes the whole payload anyway.
-        if chunk.embed_state == crate::store::artifacts::EmbedState::Embedded {
-            core.vectors
-                .set_payload(&crate::vector::VectorPayload::edited(&chunk))
-                .await?;
+        if chunk.embed_state != crate::store::artifacts::EmbedState::Embedded {
+            return Ok(());
+        }
+        let written = crate::vector::VectorPayload::edited(&chunk);
+        core.vectors.set_payload(&written).await?;
+        chunk = core.store.get_artifact(artifact_id).await?;
+        if crate::vector::VectorPayload::edited(&chunk) == written {
+            return Ok(());
         }
     }
     Ok(())
@@ -448,6 +588,373 @@ mod tests {
             .unwrap()
             .expect("a read unit is held with the generators");
         assert_eq!(job.stage, Stage::Read);
+    }
+
+    async fn queued(core: &Core, id: &str) -> bool {
+        core.store.live_job(Stage::Read, id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_re_embed_of_unchanged_text_arms_no_read_and_changed_text_does() {
+        let mut core = test_core_without_synthesizer().await;
+        let dec = reader("reference", 0.8, 0.1);
+        core.decider = dec.clone();
+        let live = capture(&core, "The proxy listens on port 8080.").await;
+        assert!(!live.is_empty());
+        let read = reads(&dec).len();
+        assert!(read > 0);
+
+        for c in &live {
+            core.store
+                .reset_embed_state(c.corpus_id.as_deref().unwrap())
+                .await
+                .unwrap();
+        }
+        for c in &live {
+            crate::jobs::embed::run(&core, &c.id).await.unwrap();
+            assert!(
+                !queued(&core, &c.id).await,
+                "a re-embed armed a reading of text already read"
+            );
+        }
+        drain(&core).await;
+        assert_eq!(reads(&dec).len(), read);
+
+        let id = &live[0].id;
+        core.store
+            .update_artifact_text(id, "The proxy listens on port 9090.")
+            .await
+            .unwrap();
+        crate::jobs::embed::run(&core, id).await.unwrap();
+        assert!(queued(&core, id).await, "changed text is read again");
+        drain(&core).await;
+        assert_eq!(reads(&dec).len(), read + 1);
+        crate::jobs::embed::run(&core, id).await.unwrap();
+        assert!(!queued(&core, id).await);
+    }
+
+    #[tokio::test]
+    async fn readings_from_before_visits_were_marked_stand_until_the_text_changes() {
+        let core = test_core().await;
+        let id = note(&core, "a note read long ago").await;
+        let asked = reading_questions();
+        let yes = Answer::Noul { yes: 0.5 };
+        let rows: Vec<(&Asked, &Answer)> = asked.iter().map(|a| (a, &yes)).collect();
+        core.store.put_readings(&id, &rows, "m").await.unwrap();
+        sqlx::query!("UPDATE artifact_readings SET at = 1")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        arm(&core, &id).await.unwrap();
+        assert!(!queued(&core, &id).await);
+        core.store
+            .update_artifact_text(&id, "the note, rewritten")
+            .await
+            .unwrap();
+        arm(&core, &id).await.unwrap();
+        assert!(queued(&core, &id).await);
+    }
+
+    #[tokio::test]
+    async fn a_note_there_is_no_room_for_is_marked_and_passed_by_until_something_changes() {
+        let mut core = test_core().await;
+        let dec = reader("reference", 0.8, 0.1);
+        dec.set_context_tokens(8);
+        core.decider = dec.clone();
+        let (a, b) = (note(&core, "one note").await, note(&core, "another").await);
+        for id in [&a, &b] {
+            run(&core, id).await.unwrap();
+            let mark = core.store.read_mark(id).await.unwrap().unwrap();
+            assert_eq!(mark.visit, Visit::NoRoom);
+            arm(&core, id).await.unwrap();
+            assert!(!queued(&core, id).await, "armed again with nothing changed");
+        }
+        assert_eq!(dec.calls(), 0);
+
+        core.store
+            .update_artifact_text(&a, "one note, rewritten")
+            .await
+            .unwrap();
+        arm(&core, &a).await.unwrap();
+        assert!(queued(&core, &a).await, "new text is another chance");
+
+        dec.set_context_tokens(8192);
+        arm(&core, &b).await.unwrap();
+        assert!(queued(&core, &b).await, "more room is another chance");
+    }
+
+    async fn end_the_wait(core: &Core) {
+        sqlx::query!("UPDATE artifact_reads SET retry_at = 0")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_note_the_model_refuses_closes_its_unit_and_waits_longer_after_every_visit() {
+        let mut core = test_core().await;
+        let dec = Arc::new(crate::infer::fake::ScriptedDecider::rejecting(
+            "HTTP 400: no",
+        ));
+        core.decider = dec.clone();
+        let id = note(&core, "a note").await;
+        queue(&core, &id).await.unwrap();
+        drain(&core).await;
+        assert_eq!(dec.calls(), 1, "the queue asked a refusal again");
+        assert!(!queued(&core, &id).await, "a refused read stayed queued");
+        let first = core.store.read_mark(&id).await.unwrap().unwrap();
+        assert_eq!((first.visit, first.tries), (Visit::Rejected, 1));
+        let wait = first.retry_at - crate::store::now();
+        assert!(
+            (RETRY_FIRST_SECS - 5..=RETRY_FIRST_SECS).contains(&wait),
+            "{wait}"
+        );
+        assert!(core.store.readings_of(&id).await.unwrap().is_empty());
+        arm(&core, &id).await.unwrap();
+        assert!(!queued(&core, &id).await, "armed inside its wait");
+
+        end_the_wait(&core).await;
+        arm(&core, &id).await.unwrap();
+        assert!(queued(&core, &id).await);
+        drain(&core).await;
+        assert_eq!(dec.calls(), 2);
+        let second = core.store.read_mark(&id).await.unwrap().unwrap();
+        assert_eq!(second.tries, 2);
+        assert!(second.retry_at - crate::store::now() > RETRY_FIRST_SECS);
+        assert!(!queued(&core, &id).await);
+    }
+
+    #[tokio::test]
+    async fn a_read_that_keeps_failing_is_closed_at_the_ceiling_and_tried_once_a_visit_after() {
+        let mut core = test_core().await;
+        // An empty script fails every call in the way the queue retries.
+        let dec = Arc::new(crate::infer::fake::ScriptedDecider::new(Vec::new()));
+        core.decider = dec.clone();
+        let id = note(&core, "a note").await;
+        queue(&core, &id).await.unwrap();
+        for attempt in 1..=MAX_ATTEMPTS {
+            assert!(
+                queued(&core, &id).await,
+                "closed before the ceiling, at attempt {attempt}"
+            );
+            assert_eq!(core.store.read_mark(&id).await.unwrap(), None);
+            sqlx::query!("UPDATE jobs SET run_after = 0")
+                .execute(&core.store.control.pool)
+                .await
+                .unwrap();
+            assert!(crate::jobs::run_one(&core).await.unwrap());
+        }
+        assert!(
+            !queued(&core, &id).await,
+            "a unit at the ceiling stayed queued"
+        );
+        assert_eq!(dec.calls() as i64, MAX_ATTEMPTS);
+        let mark = core.store.read_mark(&id).await.unwrap().unwrap();
+        assert_eq!((mark.visit, mark.tries), (Visit::Rejected, 1));
+        assert!(mark.retry_at > crate::store::now());
+
+        end_the_wait(&core).await;
+        arm(&core, &id).await.unwrap();
+        assert!(queued(&core, &id).await);
+        assert!(crate::jobs::run_one(&core).await.unwrap());
+        assert!(
+            !queued(&core, &id).await,
+            "a note that failed before got the queue's retries again"
+        );
+        assert_eq!(dec.calls() as i64, MAX_ATTEMPTS + 1);
+        assert_eq!(core.store.read_mark(&id).await.unwrap().unwrap().tries, 2);
+    }
+
+    #[test]
+    fn the_wait_doubles_from_an_hour_to_a_day() {
+        assert_eq!(retry_wait(1), 3_600);
+        assert_eq!(retry_wait(2), 7_200);
+        assert_eq!(retry_wait(5), 57_600);
+        assert_eq!(retry_wait(6), 86_400);
+        assert_eq!(retry_wait(1_000), 86_400);
+    }
+
+    /// A person's edit, row and payload, lands just before the first payload write passed
+    /// through, which was already on its way with the row as it was.
+    struct EditedMidWrite {
+        inner: Arc<dyn crate::vector::VectorStore>,
+        store: crate::store::Store,
+        edited: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::vector::VectorStore for EditedMidWrite {
+        async fn ensure_collection(&self, dim: usize) -> Result<()> {
+            self.inner.ensure_collection(dim).await
+        }
+        async fn upsert(&self, points: Vec<crate::vector::VectorPoint>) -> Result<()> {
+            self.inner.upsert(points).await
+        }
+        async fn set_payload(&self, payload: &crate::vector::VectorPayload) -> Result<()> {
+            if !self.edited.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let id = &payload.artifact_id;
+                self.store
+                    .update_artifact_category_by(id, Some("procedure"), "person")
+                    .await?;
+                let fresh = self.store.get_artifact(id).await?;
+                self.inner
+                    .set_payload(&crate::vector::VectorPayload::edited(&fresh))
+                    .await?;
+            }
+            self.inner.set_payload(payload).await
+        }
+        async fn set_lifecycle(
+            &self,
+            artifact_id: &str,
+            status: crate::store::artifacts::ArtifactStatus,
+            superseded_by: Option<&str>,
+        ) -> Result<()> {
+            self.inner
+                .set_lifecycle(artifact_id, status, superseded_by)
+                .await
+        }
+        async fn set_last_verified_at(
+            &self,
+            artifact_id: &str,
+            at: i64,
+            reset_hits: bool,
+        ) -> Result<()> {
+            self.inner
+                .set_last_verified_at(artifact_id, at, reset_hits)
+                .await
+        }
+        async fn stale_candidates(
+            &self,
+            older_than: i64,
+            max_hits: i64,
+            limit: usize,
+        ) -> Result<Vec<crate::vector::SearchHit>> {
+            self.inner
+                .stale_candidates(older_than, max_hits, limit)
+                .await
+        }
+        async fn search(
+            &self,
+            vector: &[f32],
+            sparse: &crate::vector::sparse::SparseVector,
+            limit: usize,
+            filter: &crate::vector::SearchFilter,
+        ) -> Result<Vec<crate::vector::SearchHit>> {
+            self.inner.search(vector, sparse, limit, filter).await
+        }
+        async fn touch(&self, targets: &[crate::vector::Touch], seen_at: i64) -> Result<()> {
+            self.inner.touch(targets, seen_at).await
+        }
+        async fn apply_lifecycle(&self, rows: &[crate::vector::LifecycleRow]) -> Result<()> {
+            self.inner.apply_lifecycle(rows).await
+        }
+        async fn lifecycle_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, crate::vector::StoredLifecycle>> {
+            self.inner.lifecycle_of(artifact_ids).await
+        }
+        async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+            self.inner.all_artifact_ids().await
+        }
+        async fn payloads_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, crate::vector::VectorPayload>> {
+            self.inner.payloads_of(artifact_ids).await
+        }
+        async fn resurface(
+            &self,
+            limit: usize,
+            older_than: i64,
+            unseen_since: i64,
+        ) -> Result<Vec<crate::vector::SearchHit>> {
+            self.inner.resurface(limit, older_than, unseen_since).await
+        }
+        async fn facets(&self, limit: usize) -> Result<crate::vector::Facets> {
+            self.inner.facets(limit).await
+        }
+        async fn neighbours(
+            &self,
+            artifact_id: &str,
+            limit: usize,
+        ) -> Result<Vec<crate::vector::SearchHit>> {
+            self.inner.neighbours(artifact_id, limit).await
+        }
+        async fn set_context_vectors(
+            &self,
+            artifact_id: &str,
+            vectors: Vec<Vec<f32>>,
+        ) -> Result<()> {
+            self.inner.set_context_vectors(artifact_id, vectors).await
+        }
+        async fn context_query(
+            &self,
+            vector: &[f32],
+            limit: usize,
+            filter: &crate::vector::SearchFilter,
+        ) -> Result<Vec<crate::vector::SearchHit>> {
+            self.inner.context_query(vector, limit, filter).await
+        }
+        async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
+            self.inner.delete_artifacts(artifact_ids).await
+        }
+        async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
+            self.inner.delete_by_corpus(corpus_id).await
+        }
+        async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+            self.inner.sample(limit).await
+        }
+        async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
+            self.inner.dense_of(artifact_id).await
+        }
+        async fn count(&self) -> Result<u64> {
+            self.inner.count().await
+        }
+    }
+
+    #[tokio::test]
+    async fn an_edit_landing_while_the_payload_is_being_written_is_not_left_overwritten() {
+        let mut core = test_core().await;
+        core.decider = reader("concept", 0.9, 0.1);
+        let id = seed_artifact(&core, "Keys").await;
+        assert!(core.store.mark_embedded(&id, "m", 0).await.unwrap());
+        core.vectors = Arc::new(EditedMidWrite {
+            inner: core.vectors.clone(),
+            store: core.store.clone(),
+            edited: std::sync::atomic::AtomicBool::new(false),
+        });
+        run(&core, &id).await.unwrap();
+        let row = core.store.get_artifact(&id).await.unwrap();
+        assert_eq!(row.category.as_deref(), Some("procedure"));
+        assert_eq!(category_by(&core, &id).await.as_deref(), Some("person"));
+        let payloads = core
+            .vectors
+            .payloads_of(std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(
+            payloads[&id].category.as_deref(),
+            Some("procedure"),
+            "the payload kept the reading's category over the row's"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reading_whose_payload_write_failed_writes_it_on_the_retry() {
+        let mut core = test_core().await;
+        core.decider = reader("concept", 0.9, 0.1);
+        let id = seed_artifact(&core, "Keys").await;
+        assert!(core.store.mark_embedded(&id, "m", 0).await.unwrap());
+        // As after a run whose category landed and whose payload write did not.
+        assert!(core.store.fill_category(&id, "concept").await.unwrap());
+        run(&core, &id).await.unwrap();
+        let payloads = core
+            .vectors
+            .payloads_of(std::slice::from_ref(&id))
+            .await
+            .unwrap();
+        assert_eq!(payloads[&id].category.as_deref(), Some("concept"));
     }
 
     #[test]

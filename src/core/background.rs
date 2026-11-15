@@ -69,8 +69,9 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     let mut out = Vec::new();
     if core.consolidate.enabled {
         out.push((Stage::Consolidate, CONSOLIDATE_TARGET));
-        // The decision model is required, so there is always something to judge with.
-        if core.consolidate.max_dedupe_per_tick > 0 {
+        // `decides()`: the role is required, but the contained build's stands for no model, and
+        // a judging stage armed there fails every call.
+        if core.consolidate.max_dedupe_per_tick > 0 && core.decides() {
             out.push((Stage::ArmDedupe, CONSOLIDATE_TARGET));
         }
     }
@@ -84,7 +85,7 @@ pub fn periodic_units(core: &crate::core::Core) -> Vec<(crate::store::jobs::Stag
     }
     // `acts_on_corpus()`, not `may_act()` (always true below `full`): burial destroys text,
     // and `jobs::retract`, which undoes it, is itself gated on `acts_on_corpus()`.
-    if core.reap.enabled && core.evolve.autonomous.acts_on_corpus() {
+    if core.reap.enabled && core.evolve.autonomous.acts_on_corpus() && core.decides() {
         out.push((Stage::Reap, CONSOLIDATE_TARGET));
     }
     // Always: waiting decisions are applied and seated whatever else is switched off.
@@ -362,7 +363,7 @@ pub const ASSOCIATE_TARGET: &str = "collection";
 mod tests {
 
     #[tokio::test]
-    async fn dedupe_judging_is_armed_without_a_chat_judge_and_off_at_zero() {
+    async fn dedupe_judging_needs_a_decision_model_and_is_off_at_zero() {
         use crate::store::jobs::Stage;
         let mut core = crate::core::test_support::test_core().await;
         core.consolidate.enabled = true;
@@ -385,6 +386,23 @@ mod tests {
             super::periodic_period(&core, Stage::ArmDedupe).is_some(),
             "with a period to go with it"
         );
+
+        // The contained build: its decide role stands for no model.
+        core.decides = false;
+        assert!(
+            armed(&core).contains(&Stage::Consolidate),
+            "finding pairs needs no judge"
+        );
+        assert!(
+            !armed(&core).contains(&Stage::ArmDedupe),
+            "judging was armed with nothing to judge with"
+        );
+        assert!(super::periodic_period(&core, Stage::ArmDedupe).is_none());
+        assert!(
+            armed(&core).contains(&Stage::Decisions),
+            "what waits is still seated and lapsed"
+        );
+        core.decides = true;
 
         core.consolidate.max_dedupe_per_tick = 0;
         assert!(armed(&core).contains(&Stage::Consolidate));
@@ -514,6 +532,17 @@ mod tests {
             !periodic_units(&off).iter().any(|(s, _)| *s == Stage::Reap),
             "the switch arms nothing"
         );
+
+        let mut judgeless = crate::core::test_support::test_core().await;
+        judgeless.evolve.autonomous = crate::config::Autonomy::Full;
+        judgeless.decides = false;
+        assert!(
+            !periodic_units(&judgeless)
+                .iter()
+                .any(|(s, _)| *s == Stage::Reap),
+            "nothing to judge with, so nothing may be put before a judge"
+        );
+        assert_eq!(periodic_period(&judgeless, Stage::Reap), None);
 
         for level in [
             crate::config::Autonomy::Off,

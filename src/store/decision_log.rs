@@ -191,9 +191,10 @@ pub struct ThresholdMove {
 pub struct ActRecord {
     /// Model acts whose window closed or that were undone, and Unsure rows a person answered.
     pub acted: usize,
-    /// Of those, undone acts and corrected answers.
+    /// Of those, undone acts, corrected answers, and answers whose action was undone since.
     pub undone: usize,
-    /// Ask rows waiting or open now: the band a lower line would act on.
+    /// Ask rows waiting or open now: the band a lower line would act on. Not an act demoted to
+    /// an ask, which was over the line already.
     pub asks_open: usize,
 }
 
@@ -562,6 +563,90 @@ impl Store {
         )
     }
 
+    /// Takes a row off `answered_without_action`'s list, by that list's own predicate, for the one
+    /// caller that asks it again. False: it is not listed (any more), so a second press does nothing.
+    pub async fn claim_ask_again(&self, id: &str) -> Result<bool> {
+        Ok(sqlx::query!(
+            "UPDATE decisions SET reason = 'asked_again'
+              WHERE id = ? AND outcome IN ('confirmed', 'corrected')
+                AND reason IS NOT 'asked_again'
+                AND NOT EXISTS (SELECT 1 FROM decision_actions WHERE decision_id = decisions.id)",
+            id
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected()
+            == 1)
+    }
+
+    /// `claim_ask_again` taken back when the subject could not be put back: listed again, with the
+    /// reason it had.
+    pub async fn release_ask_again(&self, id: &str, reason: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            "UPDATE decisions SET reason = ? WHERE id = ? AND reason = 'asked_again'",
+            reason,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// `close_changed_ask` taken back when the subject could not be put back: the row is seated or
+    /// waiting as it was, with the reason it had, and the next sweep tries again.
+    pub async fn restore_changed_ask(
+        &self,
+        id: &str,
+        to: State,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query!(
+            "UPDATE decisions SET state = ?, reason = ?
+              WHERE id = ? AND band = 'ask' AND state = 'done' AND reason = 'changed'",
+            to.as_str(),
+            reason,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Queued or running units of `stage` the queue will still run: one at the retry ceiling waits
+    /// out its backoff and holds no share of the tick.
+    pub async fn queued_units(&self, stage: crate::store::jobs::Stage) -> Result<i64> {
+        Ok(sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM jobs
+              WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')
+                AND attempts < ?",
+            &self.subject,
+            stage.as_str(),
+            crate::store::jobs::MAX_ATTEMPTS
+        )
+        .fetch_one(&self.control.pool)
+        .await?)
+    }
+
+    /// The targets `queued_units` counts, oldest first.
+    pub async fn queued_unit_targets(
+        &self,
+        stage: crate::store::jobs::Stage,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT target_id AS "target_id!" FROM jobs
+                WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')
+                  AND attempts < ?
+                ORDER BY id LIMIT ?"#,
+            &self.subject,
+            stage.as_str(),
+            crate::store::jobs::MAX_ATTEMPTS,
+            limit
+        )
+        .fetch_all(&self.control.pool)
+        .await?)
+    }
+
     /// Open to lapsed, stamped in `outcome_at` (the outcome stays empty) so the tuner can tell
     /// when. The days run from when the row was seated: one that waited for a seat was not shown.
     pub async fn lapse_asks(&self, older_than: i64) -> Result<u64> {
@@ -647,7 +732,20 @@ impl Store {
         t: Thresholds,
         reason: &str,
     ) -> Result<()> {
-        self.record_move(question_id, era, t, (true, true), reason)
+        self.record_move(question_id, era, t, (true, true), false, reason)
+            .await
+    }
+
+    /// The ask line stays at `t`, which lapses could not raise, and its evidence starts over all
+    /// the same: counted again, the same lapses would keep it from ever coming down. Not a move.
+    pub async fn hold_ask_line(
+        &self,
+        question_id: &str,
+        era: &str,
+        t: Thresholds,
+        reason: &str,
+    ) -> Result<()> {
+        self.record_move(question_id, era, t, (false, true), true, reason)
             .await
     }
 
@@ -665,21 +763,25 @@ impl Store {
             changed(from.act_at, to.act_at),
             changed(from.ask_at, to.ask_at),
         );
-        self.record_move(question_id, era, to, moved, reason).await
+        self.record_move(question_id, era, to, moved, false, reason)
+            .await
     }
 
+    /// `act_moved` and `ask_moved` say whose evidence starts over at this row; `held` that no
+    /// line moved.
     async fn record_move(
         &self,
         question_id: &str,
         era: &str,
         t: Thresholds,
         (act_moved, ask_moved): (bool, bool),
+        held: bool,
         reason: &str,
     ) -> Result<()> {
         sqlx::query!(
             "INSERT INTO decision_thresholds
-               (question_id, era, act_at, ask_at, reason, moved_at, act_moved, ask_moved)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+               (question_id, era, act_at, ask_at, reason, moved_at, act_moved, ask_moved, held)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             question_id,
             era,
             t.act_at,
@@ -687,14 +789,16 @@ impl Store {
             reason,
             now(),
             act_moved,
-            ask_moved
+            ask_moved,
+            held
         )
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    /// The newest move of a question's line in this era.
+    /// The newest move of a question's line in this era; a row that only held the ask line is
+    /// not one.
     pub async fn last_threshold_move(
         &self,
         question_id: &str,
@@ -703,7 +807,7 @@ impl Store {
         Ok(sqlx::query_as!(
             ThresholdMove,
             "SELECT question_id, era, act_at, ask_at, reason, moved_at FROM decision_thresholds
-              WHERE question_id = ? AND era = ? ORDER BY id DESC LIMIT 1",
+              WHERE question_id = ? AND era = ? AND held = 0 ORDER BY id DESC LIMIT 1",
             question_id,
             era
         )
@@ -711,8 +815,8 @@ impl Store {
         .await?)
     }
 
-    /// When the act line (`ask` false) or the ask line last moved, else 0: what was decided before
-    /// stands for the line before.
+    /// When the act line (`ask` false) or the ask line last moved, or the ask line was last held
+    /// (`hold_ask_line`), else 0: what was decided before stands for the line before.
     pub(crate) async fn moved_at(&self, question_id: &str, era: &str, ask: bool) -> Result<i64> {
         Ok(sqlx::query_scalar!(
             r#"SELECT COALESCE(MAX(moved_at), 0) AS "at!: i64" FROM decision_thresholds
@@ -727,8 +831,10 @@ impl Store {
     }
 
     /// Decided after the act line last moved: model acts kept or undone, and answered Unsure rows (`corrected`
-    /// as undone). Not a refused act (no journal row, or `refused`), a check or the pursuit gate.
-    /// An undone merge is one decision however many rows it wrote.
+    /// as undone, and so one confirmed whose action was undone since). Not a refused act (no journal
+    /// row, or `refused`), a check or the pursuit gate. An undone merge is one decision however many
+    /// rows it wrote. `asks_open` leaves out an act demoted to an ask (`restricted`, `no_writer`):
+    /// it was over the line already, and a lower line would not act on it either.
     pub async fn act_record(&self, question_id: &str, era: &str) -> Result<ActRecord> {
         let since = self.moved_at(question_id, era, false).await?;
         let r = sqlx::query!(
@@ -738,7 +844,8 @@ impl Store {
                 WHERE question_id = ? AND era = ? AND decided_at > ?
                   AND subject_kind NOT IN ('write', 'pursuit')
                   AND ((band = 'act' AND state = 'done' AND outcome IN ('kept', 'undone'))
-                    OR (band = 'ask' AND state = 'done' AND outcome IN ('confirmed', 'corrected')))"#,
+                    OR (band = 'ask' AND state = 'done'
+                        AND outcome IN ('confirmed', 'corrected', 'undone')))"#,
             question_id,
             era,
             since
@@ -748,7 +855,8 @@ impl Store {
         let asks_open = sqlx::query_scalar!(
             r#"SELECT COUNT(*) AS "n!: i64" FROM decisions
                 WHERE question_id = ? AND era = ? AND band = 'ask' AND state IN ('waiting', 'open')
-                  AND subject_kind NOT IN ('write', 'pursuit')"#,
+                  AND subject_kind NOT IN ('write', 'pursuit')
+                  AND COALESCE(reason, '') NOT IN ('restricted', 'no_writer')"#,
             question_id,
             era
         )
@@ -761,14 +869,14 @@ impl Store {
         })
     }
 
-    /// Lapses and answers since the ask line last moved (by `outcome_at`, which a lapse stamps), and the
-    /// rows open and waiting now.
+    /// Lapses and answers since the ask line last moved or was held (by `outcome_at`, which a lapse
+    /// stamps and an undo of a confirmed answer's action leaves), and the rows open and waiting now.
     pub async fn ask_record(&self, question_id: &str, era: &str) -> Result<AskRecord> {
         let since = self.moved_at(question_id, era, true).await?;
         let r = sqlx::query!(
             r#"SELECT
                  COALESCE(SUM(state = 'lapsed' AND outcome_at > ?1), 0) AS "lapsed!: i64",
-                 COALESCE(SUM(band = 'ask' AND outcome IN ('confirmed', 'corrected')
+                 COALESCE(SUM(band = 'ask' AND outcome IN ('confirmed', 'corrected', 'undone')
                               AND outcome_at > ?1), 0) AS "answered!: i64",
                  COALESCE(SUM(state = 'open'), 0) AS "open!: i64",
                  COALESCE(SUM(band = 'ask' AND state = 'waiting'), 0) AS "waiting!: i64"
@@ -789,11 +897,12 @@ impl Store {
         })
     }
 
+    /// Newest first; a row that only held the ask line is not a move.
     pub async fn threshold_moves(&self, limit: i64) -> Result<Vec<ThresholdMove>> {
         Ok(sqlx::query_as!(
             ThresholdMove,
             "SELECT question_id, era, act_at, ask_at, reason, moved_at FROM decision_thresholds
-              ORDER BY id DESC LIMIT ?",
+              WHERE held = 0 ORDER BY id DESC LIMIT ?",
             limit
         )
         .fetch_all(&self.pool)
@@ -1293,6 +1402,97 @@ mod tests {
         );
     }
 
+    /// An Unsure row a person answered as the model picked, long ago, whose answer wrote one
+    /// merge row.
+    async fn confirmed(store: &Store, source: &str, survivor: &str) -> String {
+        let id = store
+            .log_decision(&sample(Band::Ask, State::Done, 0.8))
+            .await
+            .unwrap();
+        let row = store
+            .record_action(&merge_of(source, survivor))
+            .await
+            .unwrap();
+        store.link_decision_actions(&id, &[row]).await.unwrap();
+        store
+            .set_decision_outcome(&id, Outcome::Confirmed, Some("yes"))
+            .await
+            .unwrap();
+        // runtime: test-only backdating of the answer.
+        sqlx::query("UPDATE decisions SET outcome_at = 1 WHERE id = ?")
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn an_undo_after_a_confirmed_answer_counts_against_the_line() {
+        let store = Store::memory().await.unwrap();
+        let on = confirmed(&store, "x", "m").await;
+        let under = confirmed(&store, "y", "n").await;
+        store
+            .undo_action_on("x", Kind::Merge, UndoneBy::Operator, "no")
+            .await
+            .unwrap();
+        store
+            .undo_actions_under("n", UndoneBy::Evidence, "gone")
+            .await
+            .unwrap();
+        for id in [&on, &under] {
+            let l = store.logged(id).await.unwrap().unwrap();
+            assert_eq!(l.outcome, Some(Outcome::Undone));
+            // Still the person's answer, given when it was given.
+            assert_eq!(
+                (l.answered_pick.as_deref(), l.outcome_at),
+                (Some("yes"), Some(1))
+            );
+        }
+        assert_eq!(
+            store.act_record("same_note", "m/v1").await.unwrap(),
+            ActRecord {
+                acted: 2,
+                undone: 2,
+                asks_open: 0
+            }
+        );
+        assert_eq!(
+            store
+                .ask_record("same_note", "m/v1")
+                .await
+                .unwrap()
+                .answered_since_move,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undo_after_a_corrected_answer_leaves_it_corrected_and_counted_once() {
+        let store = Store::memory().await.unwrap();
+        let id = confirmed(&store, "x", "m").await;
+        store
+            .set_decision_outcome(&id, Outcome::Corrected, Some("no"))
+            .await
+            .unwrap();
+        store
+            .undo_action_on("x", Kind::Merge, UndoneBy::Operator, "no")
+            .await
+            .unwrap();
+        assert_eq!(
+            store.logged(&id).await.unwrap().unwrap().outcome,
+            Some(Outcome::Corrected)
+        );
+        assert_eq!(
+            store.act_record("same_note", "m/v1").await.unwrap(),
+            ActRecord {
+                acted: 1,
+                undone: 1,
+                asks_open: 0
+            }
+        );
+    }
+
     #[tokio::test]
     async fn decisions_are_counted_since_a_time() {
         let store = Store::memory().await.unwrap();
@@ -1570,6 +1770,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_act_demoted_to_an_ask_is_not_a_row_a_lower_line_would_act_on() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        logged_n(&store, q, "pair", Band::Ask, State::Waiting, None, 2).await;
+        for reason in ["restricted", "no_writer"] {
+            for id in logged_n(&store, q, "pair", Band::Act, State::Waiting, None, 1).await {
+                assert!(store.demote_decision(&id, reason).await.unwrap());
+            }
+        }
+        // All four are asked; only the two that were under the line would be acted on by a lower one.
+        assert_eq!(store.waiting_ask_count().await.unwrap(), 4);
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().asks_open, 2);
+    }
+
+    #[tokio::test]
     async fn only_what_was_decided_after_the_last_move_counts() {
         let store = Store::memory().await.unwrap();
         let q = "same_note";
@@ -1742,5 +1957,57 @@ mod tests {
             store.thresholds_in_force(q, "m/v1").await.unwrap(),
             Some(t(0.88, 0.62))
         );
+    }
+
+    #[tokio::test]
+    async fn a_held_ask_line_starts_its_evidence_over_and_is_not_listed_as_a_move() {
+        let store = Store::memory().await.unwrap();
+        let q = "same_note";
+        let t = Thresholds {
+            act_at: 0.9,
+            ask_at: 0.88,
+        };
+        let old = logged_n(&store, q, "pair", Band::Ask, State::Open, None, 2).await;
+        for id in &old {
+            age(&store, id, now() - 100).await;
+        }
+        assert_eq!(store.lapse_asks(now() - 50).await.unwrap(), 2);
+        assert_eq!(
+            store
+                .ask_record(q, "m/v1")
+                .await
+                .unwrap()
+                .lapsed_since_move,
+            2
+        );
+        store
+            .hold_ask_line(q, "m/v1", t, "2 rows lapsed unanswered")
+            .await
+            .unwrap();
+        // runtime: test-only stamp, after the lapses above.
+        sqlx::query("UPDATE decision_thresholds SET moved_at = ?")
+            .bind(now() + 1)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .ask_record(q, "m/v1")
+                .await
+                .unwrap()
+                .lapsed_since_move,
+            0
+        );
+        // The act line's evidence is where it was, the lines are, and nothing reads as a move.
+        assert_eq!(store.moved_at(q, "m/v1", false).await.unwrap(), 0);
+        assert_eq!(store.thresholds_in_force(q, "m/v1").await.unwrap(), Some(t));
+        assert!(
+            store
+                .last_threshold_move(q, "m/v1")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.threshold_moves(10).await.unwrap().is_empty());
     }
 }

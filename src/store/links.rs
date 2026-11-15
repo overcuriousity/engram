@@ -170,6 +170,7 @@ impl Store {
         )
         .fetch_optional(&mut *tx)
         .await?;
+        // Read inside the write's transaction, so the decay folds from the number being replaced.
         let carried = existing
             .as_ref()
             .map(|r| decayed(r.weight, r.bumped_at, at, half_life_days))
@@ -186,86 +187,6 @@ impl Store {
             b,
             weight,
             at,
-            at
-        )
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        Ok(())
-    }
-
-    /// A decided kind lands `related`, revisions stamped; `dismissed` stays unbeatable. `first_is_a`
-    /// names `a` as given. `weight` must clear `associate.show_min` with room to decay; the conflict
-    /// branch folds decay in before max.
-    pub async fn relate_by_kind(
-        &self,
-        a: &str,
-        b: &str,
-        kind: LinkKind,
-        first_is_a: Option<bool>,
-        weight: f64,
-        half_life_days: f64,
-    ) -> Result<()> {
-        let flipped = canonical(a, b).0 != a;
-        let (a, b) = canonical(a, b);
-        let first = first_is_a.map(|f| if f != flipped { "a" } else { "b" });
-        let kind = kind.as_str();
-        let at = now();
-        let mut tx = self.pool.begin_with(IMMEDIATE).await?;
-        let existing = sqlx::query!(
-            "SELECT weight, bumped_at, state FROM artifact_links
-                                     WHERE a_id = ? AND b_id = ?",
-            a,
-            b
-        )
-        .fetch_optional(&mut *tx)
-        .await?;
-        // Read inside the write's transaction, so the decay folds from the number being replaced.
-        let dismissed = existing
-            .as_ref()
-            .is_some_and(|r| LinkState::parse(r.state.as_str()) == LinkState::Dismissed);
-        let carried = existing
-            .as_ref()
-            .map(|r| decayed(r.weight, r.bumped_at, at, half_life_days))
-            .unwrap_or(0.0);
-        sqlx::query!(
-            "INSERT INTO artifact_links
-                   (a_id, b_id, weight, bumped_at, queries, cues, state, reason, kind, first,
-                    judged_rev_a, judged_rev_b, created_at)
-             VALUES (?, ?, ?, ?, 0, '[]', 'related', NULL, ?, ?,
-                     (SELECT embed_rev FROM artifacts WHERE id = ?),
-                     (SELECT embed_rev FROM artifacts WHERE id = ?), ?)
-             ON CONFLICT(a_id, b_id) DO UPDATE SET
-               weight = CASE WHEN artifact_links.state = 'dismissed'
-                             THEN artifact_links.weight ELSE excluded.weight END,
-               bumped_at = CASE WHEN artifact_links.state = 'dismissed'
-                                THEN artifact_links.bumped_at ELSE excluded.bumped_at END,
-               state = CASE WHEN artifact_links.state = 'dismissed'
-                            THEN artifact_links.state ELSE 'related' END,
-               reason = CASE WHEN artifact_links.state = 'dismissed'
-                             THEN artifact_links.reason ELSE NULL END,
-               kind = CASE WHEN artifact_links.state = 'dismissed'
-                           THEN artifact_links.kind ELSE excluded.kind END,
-               first = CASE WHEN artifact_links.state = 'dismissed'
-                            THEN artifact_links.first ELSE excluded.first END,
-               judged_rev_a = CASE WHEN artifact_links.state = 'dismissed'
-                                   THEN artifact_links.judged_rev_a
-                                   ELSE excluded.judged_rev_a END,
-               judged_rev_b = CASE WHEN artifact_links.state = 'dismissed'
-                                   THEN artifact_links.judged_rev_b
-                                   ELSE excluded.judged_rev_b END",
-            a,
-            b,
-            if dismissed {
-                carried
-            } else {
-                weight.max(carried)
-            },
-            at,
-            kind,
-            first,
-            a,
-            b,
             at
         )
         .execute(&mut *tx)
@@ -757,9 +678,8 @@ impl Store {
     }
 
     /// Cross-corpus is decided over origins in Rust: a merge belongs to every corpus it drew from.
-    /// A link asked about in `era`, by search or as a neighbour shown at capture, is not listed
-    /// again until a text changes or it is asked again. A link recorded for a shown neighbour is
-    /// owed its question whatever its weight, its searches or its documents, and leads.
+    /// A link asked about in `era` is not listed again until a text changes or it is asked again.
+    /// One recorded for a shown neighbour leads, whatever its weight, searches or documents.
     pub async fn links_to_judge(
         &self,
         era: &str,
@@ -1497,8 +1417,17 @@ mod tests {
     async fn a_decided_relation_is_not_reopened_by_the_next_sweep() {
         let store = Store::memory().await.unwrap();
         let (a, b) = two_corpora(&store).await;
+        // As an answer about a shown neighbour lands: the row, then the kind and the revisions.
+        store.record_shown_link(&b, &a, 4.0, 30.0).await.unwrap();
         store
-            .relate_by_kind(&b, &a, LinkKind::Example, Some(true), 4.0, 30.0)
+            .set_link_kind(
+                &b,
+                &a,
+                LinkState::Related,
+                Some(LinkKind::Example),
+                Some(true),
+                Some((0, 0)),
+            )
             .await
             .unwrap();
 
@@ -1532,16 +1461,11 @@ mod tests {
             .await
             .unwrap();
         store.dismiss_link(&a, &b).await.unwrap();
-        store
-            .relate_by_kind(&a, &b, LinkKind::Background, None, 4.0, 30.0)
-            .await
-            .unwrap();
+        store.record_shown_link(&a, &b, 9.0, 30.0).await.unwrap();
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(l.state, LinkState::Dismissed);
-        assert_eq!(
-            l.kind, None,
-            "the model's kind does not land on a dismissal"
-        );
+        assert_eq!(l.kind, None);
+        assert!(!l.shown, "a dismissal is not marked for the sweep");
         assert_eq!(
             l.weight, 5.0,
             "a dismissal keeps the evidence it was made against"
@@ -1554,7 +1478,18 @@ mod tests {
         let (a, b) = two_corpora(&store).await;
         let show_min = 2.0;
         store
-            .relate_by_kind(&a, &b, LinkKind::Alternative, None, show_min * 2.0, 30.0)
+            .record_shown_link(&a, &b, show_min * 2.0, 30.0)
+            .await
+            .unwrap();
+        store
+            .set_link_kind(
+                &a,
+                &b,
+                LinkState::Related,
+                Some(LinkKind::Alternative),
+                None,
+                Some((0, 0)),
+            )
             .await
             .unwrap();
         let at = now();
@@ -1599,10 +1534,7 @@ mod tests {
             .bump_link(&a, &b, 9.0, Some("q"), 30.0, now())
             .await
             .unwrap();
-        store
-            .relate_by_kind(&a, &b, LinkKind::Alternative, None, 4.0, 30.0)
-            .await
-            .unwrap();
+        store.record_shown_link(&a, &b, 4.0, 30.0).await.unwrap();
         let l = store.get_link(&a, &b).await.unwrap().unwrap();
         assert_eq!(
             l.weight, 9.0,
@@ -1615,10 +1547,7 @@ mod tests {
             .bump_link(&c, &d, 9.0, Some("q"), 30.0, now() - 60 * 86_400)
             .await
             .unwrap();
-        store
-            .relate_by_kind(&c, &d, LinkKind::Alternative, None, 4.0, 30.0)
-            .await
-            .unwrap();
+        store.record_shown_link(&c, &d, 4.0, 30.0).await.unwrap();
         let l = store.get_link(&c, &d).await.unwrap().unwrap();
         assert_eq!(l.weight, 4.0, "the decay was not folded in");
     }
@@ -2000,23 +1929,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recording_a_shown_neighbour_leaves_a_settled_link_as_it_is() {
+    async fn recording_a_shown_neighbour_leaves_a_ruled_on_link_as_it_is() {
         let store = Store::memory().await.unwrap();
-        let (a, b) = two_corpora(&store).await;
-        store
-            .bump_link(&a, &b, 5.0, Some("q"), 30.0, now())
-            .await
-            .unwrap();
-        store.dismiss_link(&a, &b).await.unwrap();
-        store.record_shown_link(&a, &b, 9.0, 30.0).await.unwrap();
-        let l = store.get_link(&a, &b).await.unwrap().unwrap();
-        assert_eq!(l.state, LinkState::Dismissed);
-        assert_eq!(l.weight, 5.0, "a dismissal keeps the evidence it was made against");
-        assert!(!l.shown);
-
         let (c, d) = two_corpora(&store).await;
         store
-            .bump_link(&c, &d, 5.0, Some("q"), 30.0, now())
+            .bump_link(&c, &d, 5.0, Some("q"), 30.0, 0)
             .await
             .unwrap();
         store

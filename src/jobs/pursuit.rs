@@ -1556,6 +1556,11 @@ mod tests {
             core.store.get_pursuit(&pid).await.unwrap().state,
             "generated"
         );
+        assert_eq!(
+            gate_rows(&core, &pid).await,
+            1,
+            "a reuse under unmoved lines logged a row"
+        );
     }
 
     #[tokio::test]
@@ -1647,7 +1652,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_gate_that_errs_is_retried_and_calls_no_writer() {
+    async fn a_gate_that_is_down_is_retried_and_calls_no_writer() {
+        let (mut core, _, _, writer, pid) = gated(0.9).await;
+        core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(crate::error::Error::Inference {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        assert_eq!(writer.calls(), 0);
+        assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+    }
+
+    #[tokio::test]
+    async fn a_gate_that_is_rejected_is_not_retried_as_an_outage_and_calls_no_writer() {
         let (mut core, _, _, writer, pid) = gated(0.9).await;
         core.decider = std::sync::Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
             Err(crate::error::Error::InferenceRejected {
@@ -1655,9 +1674,90 @@ mod tests {
                 detail: "400".into(),
             })
         }));
-        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::InferenceRejected { .. }),
+            "{err}"
+        );
+        assert!(!err.retryable());
         assert_eq!(writer.calls(), 0);
         assert_eq!(core.store.get_pursuit(&pid).await.unwrap().state, "open");
+    }
+
+    #[tokio::test]
+    async fn a_gate_the_store_fails_under_is_a_store_error() {
+        let (core, d, _, writer, pid) = gated(0.9).await;
+        // runtime: test-only trigger; the gate's row cannot be written.
+        sqlx::query(
+            "CREATE TRIGGER gate_fails BEFORE INSERT ON decisions
+             BEGIN SELECT RAISE(ABORT, 'refused by the test'); END",
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+        let err = generate(&core, &pid).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::Error::Store(_)),
+            "a store error named as the endpoint's: {err}"
+        );
+        assert_eq!(gate_asks(&d), 1);
+        assert_eq!(writer.calls(), 0);
+    }
+
+    async fn gate_rows(core: &crate::core::Core, pid: &str) -> i64 {
+        sqlx::query_scalar!(
+            "SELECT COUNT(*) FROM decisions WHERE subject_kind = 'pursuit' AND subject_a = ?",
+            pid
+        )
+        .fetch_one(&core.store.pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_stored_answer_read_against_moved_lines_is_logged_again() {
+        use crate::core::judging::band::{Band, Thresholds, era};
+        let (mut core, d, _, _, pid) = gated(0.9).await;
+        // The gate says yes, then the writer is out: the answer is stored and the unit retried.
+        core.generator = Some(std::sync::Arc::new(
+            crate::infer::fake::ScriptedCompleter::new(vec![]),
+        ));
+        assert!(generate(&core, &pid).await.unwrap_err().retryable());
+        let first = gate_row(&core, &pid).await;
+        assert_eq!(first.band, Band::Act);
+
+        // The act line moves above the stored answer before the retry.
+        let a = answerable();
+        core.store
+            .move_thresholds(
+                a.id,
+                &era(core.decider.model(), a.version),
+                Thresholds {
+                    act_at: 0.95,
+                    ask_at: 0.6,
+                },
+                "test",
+            )
+            .await
+            .unwrap();
+        let writer = std::sync::Arc::new(crate::infer::fake::ScriptedCompleter::new(vec![
+            r#"{"artifact":{"title":"T","text":"Mount with `mount -o ro,loop`.","category":"procedure","tags":[],"caveats":[]}}"#.into(),
+        ]));
+        core.generator = Some(writer.clone());
+        generate(&core, &pid).await.unwrap();
+
+        assert_eq!(gate_asks(&d), 1, "the stored answer was asked for again");
+        assert_eq!(writer.calls(), 0, "written under a line the answer is below");
+        let p = core.store.get_pursuit(&pid).await.unwrap();
+        assert_eq!(p.reason.as_deref(), Some(UNSURE), "{p:?}");
+        assert_eq!(gate_rows(&core, &pid).await, 2, "the reuse left no row");
+        let again = gate_row(&core, &pid).await;
+        assert_ne!(again.id, first.id);
+        assert_eq!(again.answer, first.answer, "the same answer");
+        assert_eq!(again.band, Band::Leave);
+        assert_eq!(again.reason.as_deref(), Some("unsure"));
+        let kept = core.store.logged(&first.id).await.unwrap().unwrap();
+        assert_eq!(kept.band, Band::Act, "the first reading was rewritten");
     }
 
     #[tokio::test]

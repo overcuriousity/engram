@@ -267,6 +267,20 @@ mod tests {
         Answer::Noul { yes }
     }
 
+    const ROOM: i64 = 1_000;
+
+    /// As after its embed, created at `at`.
+    async fn embedded(store: &Store, id: &str, at: i64) {
+        sqlx::query!(
+            "UPDATE artifacts SET created_at = ?, embed_state = 'embedded' WHERE id = ?",
+            at,
+            id
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn readings_are_kept_newest_per_question() {
         let store = Store::memory().await.unwrap();
@@ -337,17 +351,14 @@ mod tests {
             one_artifact(&store).await,
         );
         for (id, at) in [(&old, 100), (&new, 300), (&gone, 200)] {
-            sqlx::query!("UPDATE artifacts SET created_at = ? WHERE id = ?", at, id)
-                .execute(&store.pool)
-                .await
-                .unwrap();
+            embedded(&store, id, at).await;
         }
         store.trash_artifact(&gone, 400).await.unwrap();
         let asked = crate::jobs::read::reading_questions();
         let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
         assert_eq!(
             store
-                .artifacts_lacking_readings(&versions, 10)
+                .artifacts_lacking_readings(&versions, ROOM, 10)
                 .await
                 .unwrap(),
             [new.clone(), old.clone()],
@@ -360,14 +371,14 @@ mod tests {
         store.put_readings(&new, &rows[..3], "m").await.unwrap();
         assert_eq!(
             store
-                .artifacts_lacking_readings(&versions, 10)
+                .artifacts_lacking_readings(&versions, ROOM, 10)
                 .await
                 .unwrap(),
             std::slice::from_ref(&new)
         );
         assert_eq!(
             store
-                .artifacts_lacking_readings(&versions, 1)
+                .artifacts_lacking_readings(&versions, ROOM, 1)
                 .await
                 .unwrap(),
             std::slice::from_ref(&new)
@@ -375,9 +386,202 @@ mod tests {
         let mut next = versions.clone();
         next[2].1 = 2;
         assert_eq!(
-            store.artifacts_lacking_readings(&next, 10).await.unwrap(),
+            store
+                .artifacts_lacking_readings(&next, ROOM, 10)
+                .await
+                .unwrap(),
             [new, old],
             "a question at a new version reads every note again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_note_still_to_be_embedded_is_left_to_its_own_read() {
+        let store = Store::memory().await.unwrap();
+        let (waiting, done) = (one_artifact(&store).await, one_artifact(&store).await);
+        embedded(&store, &done, 100).await;
+        let asked = crate::jobs::read::reading_questions();
+        let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
+        assert_eq!(
+            store
+                .artifacts_lacking_readings(&versions, ROOM, 10)
+                .await
+                .unwrap(),
+            std::slice::from_ref(&done)
+        );
+        embedded(&store, &waiting, 200).await;
+        assert_eq!(
+            store
+                .artifacts_lacking_readings(&versions, ROOM, 10)
+                .await
+                .unwrap(),
+            [waiting, done]
+        );
+    }
+
+    fn mark(asked: &str, visit: Visit, retry_at: i64) -> ReadMark {
+        ReadMark {
+            text_hash: "h".into(),
+            asked: asked.into(),
+            room: ROOM,
+            visit,
+            tries: 1,
+            retry_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_note_that_could_not_be_read_is_left_out_until_something_about_it_changes() {
+        let store = Store::memory().await.unwrap();
+        let (tight, refused, plain) = (
+            one_artifact(&store).await,
+            one_artifact(&store).await,
+            one_artifact(&store).await,
+        );
+        for (id, at) in [(&tight, 300), (&refused, 200), (&plain, 100)] {
+            embedded(&store, id, at).await;
+        }
+        let asked = crate::jobs::read::reading_questions();
+        let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
+        let key = asked_key(&versions);
+        let lacking = |versions: Vec<(&'static str, u32)>, room: i64| {
+            let store = store.clone();
+            async move {
+                store
+                    .artifacts_lacking_readings(&versions, room, 10)
+                    .await
+                    .unwrap()
+            }
+        };
+        store
+            .put_read_mark(&tight, &mark(&key, Visit::NoRoom, 0))
+            .await
+            .unwrap();
+        store
+            .put_read_mark(&refused, &mark(&key, Visit::Rejected, now() + 600))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.read_mark(&refused).await.unwrap().unwrap().visit,
+            Visit::Rejected
+        );
+        assert_eq!(
+            lacking(versions.clone(), ROOM).await,
+            std::slice::from_ref(&plain),
+            "neither holds a place in the list"
+        );
+        assert_eq!(
+            lacking(versions.clone(), ROOM + 1).await,
+            [tight.clone(), plain.clone()],
+            "more room is another chance for the one that had none"
+        );
+        let mut next = versions.clone();
+        next[0].1 += 1;
+        assert_eq!(
+            lacking(next, ROOM).await,
+            [tight.clone(), refused.clone(), plain.clone()],
+            "a question at a new version tries every note again"
+        );
+
+        store
+            .put_read_mark(&refused, &mark(&key, Visit::Rejected, now() - 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            lacking(versions.clone(), ROOM).await,
+            [refused.clone(), plain.clone()],
+            "its wait is over"
+        );
+        store
+            .put_read_mark(&refused, &mark(&key, Visit::Rejected, now() + 600))
+            .await
+            .unwrap();
+
+        // The text changed after the visit, so the mark is about other text.
+        let later = now() + 60;
+        sqlx::query!(
+            "UPDATE artifacts SET updated_at = ? WHERE id = ?",
+            later,
+            &tight
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(lacking(versions, ROOM).await, [tight, plain]);
+    }
+
+    #[tokio::test]
+    async fn a_rejected_note_that_has_older_readings_is_still_tried_again_when_its_wait_is_over() {
+        let store = Store::memory().await.unwrap();
+        let id = one_artifact(&store).await;
+        embedded(&store, &id, 100).await;
+        let asked = crate::jobs::read::reading_questions();
+        let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
+        let key = asked_key(&versions);
+        let yes = noul(0.5);
+        let rows: Vec<(&Asked, &Answer)> = asked.iter().map(|a| (a, &yes)).collect();
+        store.put_readings(&id, &rows, "m").await.unwrap();
+        store
+            .put_read_mark(&id, &mark(&key, Visit::Rejected, now() + 600))
+            .await
+            .unwrap();
+        assert!(
+            store
+                .artifacts_lacking_readings(&versions, ROOM, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        store
+            .put_read_mark(&id, &mark(&key, Visit::Rejected, now() - 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .artifacts_lacking_readings(&versions, ROOM, 10)
+                .await
+                .unwrap(),
+            [id]
+        );
+    }
+
+    #[tokio::test]
+    async fn readings_stand_while_they_are_no_older_than_the_text() {
+        let store = Store::memory().await.unwrap();
+        let id = one_artifact(&store).await;
+        let asked = crate::jobs::read::reading_questions();
+        let versions: Vec<(&str, u32)> = asked.iter().map(|a| (a.id, a.version)).collect();
+        let key = asked_key(&versions);
+        assert!(!store.readings_current(&id, &key).await.unwrap());
+        let yes = noul(0.5);
+        let rows: Vec<(&Asked, &Answer)> = asked.iter().map(|a| (a, &yes)).collect();
+        store.put_readings(&id, &rows[..3], "m").await.unwrap();
+        assert!(
+            !store.readings_current(&id, &key).await.unwrap(),
+            "three of four"
+        );
+        store.put_readings(&id, &rows, "m").await.unwrap();
+        assert!(store.readings_current(&id, &key).await.unwrap());
+        let mut next = versions.clone();
+        next[1].1 += 1;
+        assert!(
+            !store
+                .readings_current(&id, &asked_key(&next))
+                .await
+                .unwrap()
+        );
+        let later = now() + 60;
+        sqlx::query!(
+            "UPDATE artifacts SET updated_at = ? WHERE id = ?",
+            later,
+            &id
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        assert!(
+            !store.readings_current(&id, &key).await.unwrap(),
+            "the text is newer than its readings"
         );
     }
 

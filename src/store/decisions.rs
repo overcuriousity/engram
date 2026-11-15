@@ -81,8 +81,9 @@ impl Store {
         sqlx::query!(
             "INSERT INTO decide_events
                (id, question, questions, situation, scope, filters, answers, prior, standing,
-                not_held, model, decider, read, dropped, query_vec, vec_dim, embed_model, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                not_held, model, decider, read, dropped, query_vec, vec_dim, embed_model, created_at,
+                bears_version)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &id,
             &d.question,
             &d.questions,
@@ -100,7 +101,8 @@ impl Store {
             vec_to_blob(&d.query_vec),
             d.query_vec.len() as i64,
             &d.embed_model,
-            now()
+            now(),
+            crate::core::decide::state::BEARS_VERSION
         )
         .execute(&mut *tx)
         .await?;
@@ -281,7 +283,7 @@ impl Store {
             .count())
     }
 
-    /// Every judged decision of `model`, for Insights.
+    /// Every judged decision of `model` read under the wording of `bears` in force, for Insights.
     pub async fn decide_shares(&self, model: &str) -> Result<DecideShares> {
         let mut out = DecideShares::default();
         for (held, standing, verdict) in self.decides_since(model, 0).await? {
@@ -313,7 +315,8 @@ impl Store {
         self.decides_since(model, since).await
     }
 
-    /// `model`'s decisions made after `since`, as (held, the first question's standing, verdict).
+    /// `model`'s decisions made after `since` in Decide's era, as (held, the first question's
+    /// standing, verdict): one read under another wording of `bears` is not comparable.
     async fn decides_since(
         &self,
         model: &str,
@@ -321,9 +324,10 @@ impl Store {
     ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
         let rows = sqlx::query!(
             r#"SELECT questions, standing, not_held AS "not_held!: i64", verdict FROM decide_events
-                WHERE decider = ? AND created_at > ?"#,
+                WHERE decider = ? AND created_at > ? AND COALESCE(bears_version, 1) = ?"#,
             model,
-            since
+            since,
+            crate::core::decide::state::BEARS_VERSION
         )
         .fetch_all(&self.pool)
         .await?;
@@ -529,6 +533,38 @@ mod tests {
         assert!(s.decision(&old).await.unwrap().is_none());
         assert!(s.decision(&judged).await.unwrap().is_some());
         assert!(s.decision(&fresh).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn decisions_read_under_another_wording_of_bears_are_in_no_share_and_no_record() {
+        use super::test_support::judged;
+        use crate::core::decide::state::BEARS_VERSION;
+        let s = Store::memory().await.unwrap();
+        judged(&s, "clef", "split", false, AskVerdict::Right).await;
+        let before = judged(&s, "clef", "split", false, AskVerdict::Right).await;
+        let other = judged(&s, "clef", "settled", false, AskVerdict::Wrong).await;
+        // A row from before the version was kept was read under the first wording.
+        sqlx::query!(
+            "UPDATE decide_events SET bears_version = NULL WHERE id = ?",
+            before
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let next = i64::from(BEARS_VERSION) + 1;
+        sqlx::query!(
+            "UPDATE decide_events SET bears_version = ? WHERE id = ?",
+            next,
+            other
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        let counted = 1 + usize::from(BEARS_VERSION == 1);
+        let d = s.decide_shares("clef").await.unwrap();
+        assert_eq!(d.split, (counted, counted));
+        assert_eq!(d.held, (counted, 0), "the other wording's is not held here");
+        assert_eq!(s.settled_record("clef").await.unwrap(), (0, 0));
     }
 
     #[tokio::test]

@@ -66,11 +66,13 @@ pub fn pair_relation() -> Asked {
     )
 }
 
+/// v2: v1 opened by saying the same searches keep finding the two, which is not true of a
+/// neighbour shown at capture; the wording now says nothing about how they were found.
 pub fn link_kind() -> Asked {
-    choice(
+    let mut a = choice(
         "link_kind",
         true,
-        "These two notes keep being found by the same searches. How are they related?",
+        "Here are two notes. How are they related?",
         &[
             ("continues", "one is the next step after the other"),
             ("example", "one is an instance of what the other describes"),
@@ -83,7 +85,9 @@ pub fn link_kind() -> Asked {
             ("duplicate", "they say the same thing"),
             ("unrelated", "no connection worth showing"),
         ],
-    )
+    );
+    a.version = 2;
+    a
 }
 
 /// v2: v1 picked `a_first` in 53 of 53 real cases; each option now says what the other note does.
@@ -252,7 +256,11 @@ mod tests {
             validate(std::slice::from_ref(&a.question)).unwrap();
             assert_eq!(a.question.key, a.id);
             assert!(a.version >= 1, "{}", a.id);
-            let want = if a.id == "link_direction" { 2 } else { 1 };
+            let want = if matches!(a.id, "link_kind" | "link_direction") {
+                2
+            } else {
+                1
+            };
             assert_eq!(a.version, want, "{}", a.id);
         }
     }
@@ -313,6 +321,18 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn link_kind_v2_says_nothing_about_how_the_notes_were_found() {
+        let a = link_kind();
+        assert!(a.swapped);
+        assert_eq!(a.version, 2);
+        assert_eq!(
+            a.question.instructions,
+            "Here are two notes. How are they related?"
+        );
+        assert!(!a.question.instructions.contains("search"));
     }
 
     #[test]

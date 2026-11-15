@@ -718,9 +718,81 @@ impl Store {
         Ok(out)
     }
 
+    /// What the model said (`yes`) of a note at revision `rev` put to the gap's question, its
+    /// text, where that did not close the gap: one row per gap and note, the newest asking kept.
+    pub async fn reject_gap_note(
+        &self,
+        gap: &Gap,
+        artifact_id: &str,
+        rev: i64,
+        era: &str,
+        yes: f64,
+    ) -> Result<()> {
+        sqlx::query!(
+            "INSERT OR REPLACE INTO gap_rejections
+               (kind, gap_id, artifact_id, rev, question, era, yes, at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            gap.kind.as_str(),
+            gap.id,
+            artifact_id,
+            rev,
+            gap.text,
+            era,
+            yes,
+            now()
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether this note as it stands was already put to the gap's question in this `era` and
+    /// said under `relevant_at`: asking again would get the same answer. A changed note, other
+    /// words for the gap, another era or a lower line each make it worth asking again.
+    pub async fn gap_note_rejected(
+        &self,
+        gap: &Gap,
+        artifact_id: &str,
+        era: &str,
+        relevant_at: f64,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT 1 AS "x!: i64" FROM gap_rejections r
+                 JOIN artifacts a ON a.id = r.artifact_id
+                WHERE r.kind = ? AND r.gap_id = ? AND r.artifact_id = ?
+                  AND r.rev = a.embed_rev AND r.question = ? AND r.era = ? AND r.yes < ?"#,
+            gap.kind.as_str(),
+            gap.id,
+            artifact_id,
+            gap.text,
+            era,
+            relevant_at
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
     /// `gap_id` names one of several tables, so no foreign key cascades. Also drops coverage
-    /// scored under `below`, except `capture` and `model` rows, which no line wrote.
+    /// scored under `below`, except `capture` and `model` rows, which no line wrote, and what the
+    /// model said of a gap that is gone. Returns the coverage dropped.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
+        sqlx::query!(
+            "DELETE FROM gap_rejections
+              WHERE (kind = 'ask'
+                     AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = gap_rejections.gap_id))
+                 OR (kind IN ('search', 'unmatched')
+                     AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = gap_rejections.gap_id))
+                 OR (kind = 'pursuit'
+                     AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = gap_rejections.gap_id))
+                 OR (kind = 'subject'
+                     AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = gap_rejections.gap_id))
+                 OR (kind = 'decide'
+                     AND NOT EXISTS (SELECT 1 FROM decide_events WHERE id = gap_rejections.gap_id))
+                 OR kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject', 'decide')"
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(sqlx::query!(
             "DELETE FROM gap_coverage
               WHERE (score < ? AND (covered_by IS NULL OR covered_by NOT IN ('capture', 'model')))

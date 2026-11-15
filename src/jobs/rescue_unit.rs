@@ -4,11 +4,12 @@
 
 use super::reap::{live_neighbours, min_age_secs, reap_era, step_aside};
 use crate::core::Core;
+use crate::core::judging::band::Band;
 use crate::core::judging::check::{Checked, Which, check, outage};
 use crate::core::judging::state::Note;
 use crate::error::{Error, Result};
 use crate::store::artifacts::Chunk;
-use crate::store::decision_log::Outcome;
+use crate::store::decision_log::{Logged, NewLogged, Outcome, State};
 
 /// Where the judge's reason was: no text of the decision's reaches the writer.
 const LACKS: &str =
@@ -16,8 +17,11 @@ const LACKS: &str =
 /// The cue the rewrite is stored with.
 const CUE: &str = "reap rescue";
 
-/// `Stage::Rescue`: an inference outage is the queue's to retry; any other failure stands the note
-/// down to the back of the reap queue.
+/// The reason on a question put to a person because the model's rescue could not be written.
+const UNWRITTEN: &str = "rescue_refused";
+
+/// `Stage::Rescue`: an inference outage is the queue's to retry. Any other failure puts the
+/// model's ask to a person, or stands a person's down to the back of the reap queue.
 pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     let c = core.store.get_artifact(artifact_id).await?;
     // Restored, buried or rescued since it was asked for: there is nothing left to rescue.
@@ -32,19 +36,27 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
     match rescue_one(core, &c).await {
         Ok(new_id) => {
             tracing::info!(artifact_id = %c.id, new_id, "rescued a retired artifact into a rewrite");
+            // The rewrite is stored: a mark that fails must not have the unit write it again.
+            if let Err(e) = kept(core, &c).await {
+                tracing::warn!(artifact_id = %c.id, error = %e, "could not mark the decision behind a rescue kept");
+            }
             Ok(())
         }
         Err(e @ (Error::Inference { .. } | Error::InferenceBusy { .. })) => Err(e),
         Err(e) => {
-            tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact; standing it down");
-            step_aside(core, &c.id).await;
-            refused(core, &c).await
+            tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact");
+            // Put to a person the note keeps its age: a restamp would close the question as changed.
+            if !refused(core, &c).await? {
+                step_aside(core, &c.id).await;
+            }
+            Ok(())
         }
     }
 }
 
-/// A model's ask that came to nothing; a person's answer stands as they gave it.
-async fn refused(core: &Core, c: &Chunk) -> Result<()> {
+/// The model's own decision that armed this rescue, while nothing has become of it. `c` is the
+/// note as it was before the rewrite; a person's answer is not the model's and stands as given.
+async fn asked_by_model(core: &Core, c: &Chunk) -> Result<Option<Logged>> {
     let d = core
         .store
         .last_logged(
@@ -54,12 +66,57 @@ async fn refused(core: &Core, c: &Chunk) -> Result<()> {
             &reap_era(core),
         )
         .await?;
-    if let Some(d) = d.filter(|d| d.answered_pick.is_none()) {
+    Ok(d.filter(|d| {
+        d.band == Band::Act && d.pick == "yes" && d.answered_pick.is_none() && d.outcome.is_none()
+    }))
+}
+
+/// A model's ask that was written. No journal row stands for a rescue, so no outcome window can
+/// close on one: the decision is marked kept here, which is what the tuner counts.
+async fn kept(core: &Core, c: &Chunk) -> Result<()> {
+    if let Some(d) = asked_by_model(core, c).await? {
         core.store
-            .set_decision_outcome(&d.id, Outcome::Refused, None)
+            .set_decision_outcome(&d.id, Outcome::Kept, None)
             .await?;
     }
     Ok(())
+}
+
+/// A model's ask that came to nothing: refused, and the same question put to a person, so the
+/// note is neither buried on the model's word nor out of sight for the era. False: it was a
+/// person's ask, or nobody's that can be found.
+async fn refused(core: &Core, c: &Chunk) -> Result<bool> {
+    let Some(d) = asked_by_model(core, c).await? else {
+        return Ok(false);
+    };
+    core.store
+        .set_decision_outcome(&d.id, Outcome::Refused, None)
+        .await?;
+    let id = core
+        .store
+        .log_decision(&NewLogged {
+            question_id: d.question_id.clone(),
+            question_version: u32::try_from(d.question_version).unwrap_or(0),
+            model: d.model.clone(),
+            subject_kind: "artifact",
+            subject_a: d.subject_a.clone(),
+            subject_b: d.subject_b.clone(),
+            rev_a: d.rev_a,
+            rev_b: d.rev_b,
+            answer: d.answer.clone(),
+            top: d.top,
+            pick: d.pick.clone(),
+            swapped_agree: d.swapped_agree,
+            band: Band::Ask,
+            reason: Some(UNWRITTEN.into()),
+            state: State::Waiting,
+        })
+        .await?;
+    // Seated if a row is free; else it waits for one as any question does.
+    if let Some(ask) = core.store.logged(&id).await? {
+        crate::core::judging::settle(core, ask).await?;
+    }
+    Ok(true)
 }
 
 async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
@@ -197,12 +254,23 @@ async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::judging::Applier;
     use crate::core::test_support::test_core;
     use crate::jobs::reap::test_support::{
-        SURE_NO, SURE_YES, backdate_retired_at, deciding, deprecate_long_ago, scripted, seed,
+        SURE_NO, SURE_YES, backdate_retired_at, deciding, decision, deprecate_long_ago, scripted,
+        seed,
     };
     use crate::store::artifacts::{ArtifactStatus, NewMerged};
     use std::sync::Arc;
+
+    /// The one open question, which must be about `id`.
+    async fn open_question(core: &Core, id: &str) -> Logged {
+        let mut open = core.store.open_asks(10).await.unwrap();
+        assert_eq!(open.len(), 1, "one question is put to a person");
+        let row = open.remove(0);
+        assert_eq!(row.subject_a, id);
+        row
+    }
 
     const RESCUE_REPLY: &str = r#"{"artifact":{"title":"Kept fact","text":"the port is 8443","category":null,"tags":[],"caveats":[]}}"#;
 
@@ -379,15 +447,51 @@ mod tests {
                 .superseded_by
                 .is_some()
         );
+        // Theirs, as they gave it: the rescue being written does not make it the model's act.
+        assert_eq!(
+            core.store.logged(&d.id).await.unwrap().unwrap().outcome,
+            Some(Outcome::Corrected)
+        );
     }
 
     #[tokio::test]
-    async fn an_outage_is_retried_and_any_other_failure_stands_the_note_down() {
+    async fn a_model_s_rescue_that_was_written_is_kept_though_it_journals_nothing() {
+        let mut core = test_core().await;
+        deciding(&mut core, SURE_YES);
+        writing(&mut core, &[RESCUE_REPLY]);
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        crate::jobs::reap::run(&core).await.unwrap();
+        let asked = decision(&core, &ids[0], None).await;
+        assert_eq!(asked.outcome, None);
+
+        run(&core, &ids[0]).await.unwrap();
+
+        let d = core.store.logged(&asked.id).await.unwrap().unwrap();
+        assert_eq!(d.outcome, Some(Outcome::Kept));
+        assert!(
+            core.store
+                .decision_action_ids(&d.id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let record = core
+            .store
+            .act_record("reap_worth", &reap_era(&core))
+            .await
+            .unwrap();
+        assert_eq!((record.acted, record.undone), (1, 0));
+    }
+
+    #[tokio::test]
+    async fn an_outage_is_retried_and_any_other_failure_puts_the_model_s_ask_to_a_person() {
         let mut core = test_core().await;
         deciding(&mut core, SURE_YES);
         let ids = seed(&core, &["the admin port is 8443"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
         crate::jobs::reap::run(&core).await.unwrap();
+        let asked = decision(&core, &ids[0], None).await;
         let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
 
         // No replies left: the writer is unreachable.
@@ -397,14 +501,82 @@ mod tests {
             core.store.get_artifact(&ids[0]).await.unwrap().retired_at,
             before
         );
+        assert!(core.store.open_asks(10).await.unwrap().is_empty());
 
         writing(&mut core, &["not a draft"]);
         run(&core, &ids[0]).await.unwrap();
-        assert!(core.store.get_artifact(&ids[0]).await.unwrap().retired_at > before);
-        let d = crate::jobs::reap::test_support::decision(&core, &ids[0], None).await;
         assert_eq!(
-            d.outcome,
-            Some(crate::store::decision_log::Outcome::Refused)
+            core.store.logged(&asked.id).await.unwrap().unwrap().outcome,
+            Some(Outcome::Refused)
+        );
+        let row = open_question(&core, &ids[0]).await;
+        assert_ne!(row.id, asked.id);
+        assert_eq!(
+            (row.band, row.pick.as_str(), row.reason.as_deref()),
+            (Band::Ask, "yes", Some("rescue_refused"))
+        );
+        assert_eq!(
+            core.store.get_artifact(&ids[0]).await.unwrap().retired_at,
+            before,
+            "a restamp closes the person's question as changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_note_whose_rescue_was_refused_stays_out_of_the_reap_and_is_a_person_s_to_bury() {
+        let mut core = test_core().await;
+        let dec = deciding(&mut core, SURE_YES);
+        writing(&mut core, &["not a draft"]);
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        crate::jobs::embed::run(&core, &ids[0]).await.unwrap();
+        deprecate_long_ago(&core, &ids[0]).await;
+        crate::jobs::reap::run(&core).await.unwrap();
+        run(&core, &ids[0]).await.unwrap();
+        let row = open_question(&core, &ids[0]).await;
+        let calls = dec.calls();
+
+        // Not the model's again in this era, and still the note the question is about.
+        let (cands, _) = crate::jobs::reap::nominees(&core).await.unwrap();
+        assert!(cands.is_empty());
+        crate::jobs::reap::run(&core).await.unwrap();
+        assert_eq!(dec.calls(), calls);
+        assert!(
+            crate::jobs::reap::ReapApplier
+                .unchanged(&core, &row)
+                .await
+                .unwrap()
+        );
+        crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(open_question(&core, &ids[0]).await.id, row.id);
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_none());
+
+        crate::core::judging::answer(&core, &row.id, Some("no"))
+            .await
+            .unwrap();
+        assert!(core.store.graveyard_row(&ids[0]).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_person_s_rescue_that_fails_stands_the_note_down_and_asks_nobody() {
+        let mut core = test_core().await;
+        deciding(&mut core, 0.3);
+        writing(&mut core, &["not a draft"]);
+        let ids = seed(&core, &["the admin port is 8443"]).await;
+        deprecate_long_ago(&core, &ids[0]).await;
+        crate::jobs::reap::run(&core).await.unwrap();
+        let d = decision(&core, &ids[0], None).await;
+        crate::core::judging::answer(&core, &d.id, Some("yes"))
+            .await
+            .unwrap();
+        let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
+
+        run(&core, &ids[0]).await.unwrap();
+
+        assert!(core.store.get_artifact(&ids[0]).await.unwrap().retired_at > before);
+        assert!(core.store.open_asks(10).await.unwrap().is_empty());
+        assert_eq!(
+            core.store.logged(&d.id).await.unwrap().unwrap().outcome,
+            Some(Outcome::Corrected)
         );
     }
 
@@ -416,6 +588,7 @@ mod tests {
         let ids = seed(&core, &["the admin port is 8443"]).await;
         deprecate_long_ago(&core, &ids[0]).await;
         crate::jobs::reap::run(&core).await.unwrap();
+        let asked = decision(&core, &ids[0], None).await;
         let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
         let check = Arc::new(crate::core::judging::check::test_support::judge(0.9, 0.04));
         core.decider = check.clone();
@@ -435,12 +608,17 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        assert!(old.retired_at > before, "the note is stood down");
-        let d = crate::jobs::reap::test_support::decision(&core, &ids[0], None).await;
         assert_eq!(
-            d.outcome,
-            Some(crate::store::decision_log::Outcome::Refused)
+            core.store.logged(&asked.id).await.unwrap().unwrap().outcome,
+            Some(Outcome::Refused)
         );
+        // Judged valuable and not rewritten: a person's to answer, in its own place in the queue.
+        let row = open_question(&core, &ids[0]).await;
+        assert_eq!(
+            (row.band, row.reason.as_deref()),
+            (Band::Ask, Some("rescue_refused"))
+        );
+        assert_eq!(old.retired_at, before);
     }
 
     #[tokio::test]

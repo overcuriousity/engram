@@ -273,9 +273,9 @@ use crate::error::Error;
 use crate::infer::decide::decide_swapped;
 use crate::store::actions::Job;
 use crate::store::artifacts::{Chunk, Provenance};
-use crate::store::decision_log::Logged;
+use crate::store::decision_log::{Logged, Outcome};
 use crate::store::links::{Link, LinkKind, LinkState};
-use crate::store::pairs::DecidedBy;
+use crate::store::pairs::{DecidedBy, Net};
 use async_trait::async_trait;
 
 fn day(at: i64) -> Option<String> {
@@ -294,9 +294,93 @@ pub(crate) fn link_era(core: &Core) -> String {
     crate::core::judging::band::era(core.decider.model(), catalogue::link_kind().version)
 }
 
-/// The subject kind of a `link_kind` decision on a neighbour shown at capture, which has no link
-/// row until its answer makes one. A link found by searches is `"link"`.
+/// The subject kind of a `link_kind` decision on a neighbour shown at capture; a link found by
+/// searches is `"link"`. The decision carries it to where a pair is filed: what a shown neighbour
+/// hands to consolidation may not act alone.
 pub const SHOWN: &str = "shown";
+
+/// What a shown neighbour's link weighs while it waits to be asked: under `show_min`, so nothing
+/// shows it before an answer, and over `prune_below`, so it lasts until the sweep reaches it.
+fn waiting_weight(core: &Core) -> f64 {
+    (core.associate.prune_below + core.associate.show_min) / 2.0
+}
+
+/// After a judged capture: ask `link_kind` between the anchor and each neighbour it was shown;
+/// only an act makes the link here, an Unsure row's pick makes it later. A neighbour the tick has
+/// no call left for, or whose question failed, waits as a learning link. Returns the links made.
+pub async fn link_shown(core: &Core, anchor_id: &str, shown: &[String]) -> Result<usize> {
+    let anchor = core.store.get_artifact(anchor_id).await?;
+    if !anchor.in_results() {
+        return Ok(0);
+    }
+    let mut budget = core.judging_budget().await?;
+    let mut made = 0;
+    for id in shown {
+        if id == anchor_id {
+            continue;
+        }
+        // One neighbour that cannot be read or asked about does not cost the others their question.
+        match ask_shown(core, &anchor, id, &mut budget).await {
+            Ok(true) => made += 1,
+            Ok(false) => {}
+            Err(e) => tracing::warn!(
+                anchor = anchor_id,
+                neighbour = %id,
+                error = %e,
+                "a shown neighbour could not be asked about"
+            ),
+        }
+    }
+    Ok(made)
+}
+
+/// One shown neighbour; true when its answer made the link.
+async fn ask_shown(core: &Core, anchor: &Chunk, id: &str, budget: &mut usize) -> Result<bool> {
+    let other = match core.store.get_artifact(id).await {
+        Ok(c) if c.in_results() => c,
+        Ok(_) | Err(Error::NotFound) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    // A link already ruled on, or dismissed by a person, is not asked about again here.
+    if core
+        .store
+        .get_link(&anchor.id, id)
+        .await?
+        .is_some_and(|l| l.state != LinkState::Learning)
+    {
+        return Ok(false);
+    }
+    let (a, b) = if anchor.id <= other.id {
+        (anchor, &other)
+    } else {
+        (&other, anchor)
+    };
+    if asked_already(core, a, b).await? {
+        return Ok(false);
+    }
+    let waits = || {
+        core.store.record_shown_link(
+            &a.id,
+            &b.id,
+            waiting_weight(core),
+            core.associate.half_life_days,
+        )
+    };
+    if *budget == 0 {
+        waits().await?;
+        return Ok(false);
+    }
+    *budget -= 1;
+    if let Err(e) = ask_link(core, SHOWN, a, b, &[]).await {
+        waits().await?;
+        return Err(e);
+    }
+    Ok(core
+        .store
+        .get_link(&a.id, &b.id)
+        .await?
+        .is_some_and(|l| l.state == LinkState::Related))
+}
 
 /// Asked in this era about both texts as they are now, and not put back since. `a` and `b` in
 /// canonical order, as every link question is asked.
@@ -340,13 +424,27 @@ pub async fn judge(core: &Core, target: &str) -> Result<()> {
         return Ok(());
     }
     let cues: Vec<String> = link.cues.iter().map(|c| c.q.clone()).collect();
-    ask_link(core, "link", &a, &b, &cues).await?;
+    // A neighbour shown at capture that waited for the sweep is still that.
+    let source = if link.shown { SHOWN } else { "link" };
+    ask_link(core, source, &a, &b, &cues).await?;
     Ok(())
 }
 
 /// The one way a link is asked about: `link_kind` with `link_direction` in the same request, the
 /// direction checked with the notes exchanged, then settled. `a` and `b` in canonical order.
 pub(crate) async fn ask_link(
+    core: &Core,
+    subject_kind: &'static str,
+    a: &Chunk,
+    b: &Chunk,
+    cues: &[String],
+) -> Result<Logged> {
+    let d = read_link(core, subject_kind, a, b, cues).await?;
+    judging::settle(core, d).await
+}
+
+/// `ask_link` up to its settling: the decision as the two reads leave it.
+async fn read_link(
     core: &Core,
     subject_kind: &'static str,
     a: &Chunk,
@@ -371,19 +469,19 @@ pub(crate) async fn ask_link(
         s.as_deref(),
     )
     .await?;
-    let d = exchanged(core, d, a, b, cues).await?;
-    judging::settle(core, d).await
+    exchanged(core, d, a, b, cues, room).await
 }
 
-/// A direction the pick could store is asked once more with the notes exchanged (B's text under
-/// `A:`, A's under `B:`): option order cannot show a pull to the note labelled A, this can. The
-/// exchanged pick is kept beside the direction's read; it is not a decision of its own.
+/// A direction the pick could store is asked once more with the notes exchanged: option order
+/// cannot show a pull to the note labelled A, this can. Its pick and whether its own swapped read
+/// agreed are kept beside the direction's read. `room` is the first read's: the same searches fit.
 async fn exchanged(
     core: &Core,
     d: Logged,
     a: &Chunk,
     b: &Chunk,
     cues: &[String],
+    room: usize,
 ) -> Result<Logged> {
     let directional = LinkKind::parse(&d.pick).is_some_and(LinkKind::directional);
     let mut answer: serde_json::Value = serde_json::from_str(&d.answer).unwrap_or_default();
@@ -392,7 +490,6 @@ async fn exchanged(
         return Ok(d);
     }
     let direction = catalogue::link_direction();
-    let room = state::room(core, &[&direction]);
     let Some(s) = state::link(&note(b), &note(a), cues, &core.counter, room) else {
         return Ok(d);
     };
@@ -416,18 +513,20 @@ async fn exchanged(
         })?;
     let (again, _) = crate::core::judging::band::pick_and_top(&direction.question, read);
     answer["direction"]["exchanged"] = again.into();
+    answer["direction"]["exchanged_agree"] = serde_json::json!(got.agree.get(key));
     core.store
         .set_decision_answer(&d.id, &answer.to_string())
         .await?;
     core.store.logged(&d.id).await?.ok_or(Error::NotFound)
 }
 
-/// Whether the decision's `subject_a` comes first: only when the direction's swapped read agreed
-/// and, with the notes exchanged, the other label was named.
+/// Whether the decision's `subject_a` comes first: only when the direction's swapped read agreed,
+/// the exchanged read's own swapped read agreed and, with the notes exchanged, the other label was
+/// named.
 fn first_is_a(d: &Logged) -> Option<bool> {
     let v: serde_json::Value = serde_json::from_str(&d.answer).ok()?;
     let r = v.get("direction")?;
-    if !r.get("agree")?.as_bool()? {
+    if !r.get("agree")?.as_bool()? || !r.get("exchanged_agree")?.as_bool()? {
         return None;
     }
     match (r.get("pick")?.as_str()?, r.get("exchanged")?.as_str()?) {
@@ -437,17 +536,33 @@ fn first_is_a(d: &Logged) -> Option<bool> {
     }
 }
 
-/// What a kind does to a link. No journal row: a link hides nothing.
+/// The pair a duplicate or a contradiction hands to consolidation; score zero, as no cosine was
+/// measured. From a shown neighbour it is filed restricted: nearness at capture is no ground to
+/// merge or supersede without a person. A pair already there keeps what it has. True when filed.
+async fn hand_over(core: &Core, x: &str, y: &str, shown: bool) -> Result<bool> {
+    if shown {
+        core.store
+            .record_pair_in(x, y, 0.0, Some(Net::Shown), Some("link"))
+            .await
+    } else {
+        core.store.record_pair_with_detail(x, y, 0.0, "link").await
+    }
+}
+
+/// What a kind does to a link, the same for a link found by searches and one from a shown
+/// neighbour. No journal row: a link hides nothing.
 async fn carry_out(
     core: &Core,
     link: &Link,
     a: &Chunk,
     b: &Chunk,
     kind: LinkKind,
-    first_is_a: Option<bool>,
-    revs: Option<(i64, i64)>,
+    d: &Logged,
 ) -> Result<()> {
     let (x, y) = (link.a_id.as_str(), link.b_id.as_str());
+    // The revisions read: a text changed since reopens the link at the next sweep.
+    let revs = d.rev_a.zip(d.rev_b);
+    let shown = d.subject_kind == SHOWN;
     // Never over passages: they are not consolidation's material.
     let passages = [a, b]
         .iter()
@@ -455,19 +570,13 @@ async fn carry_out(
         .count();
     match kind {
         LinkKind::Duplicate => {
-            // Consolidation owns every decision that hides an artifact; score zero, as no cosine was
-            // measured. The line is shown verbatim, so it claims no handover that did not happen
-            // and calls only a passage stored source text.
+            // Consolidation owns every decision that hides an artifact. The line is shown verbatim,
+            // so it claims no handover that did not happen and calls only a passage stored source
+            // text. No kind is kept: the line says it.
             let reason = match passages {
                 2 => "same content, and both are stored source text",
                 1 => "same content, and one of these is stored source text",
-                _ if core
-                    .store
-                    .record_pair_with_detail(x, y, 0.0, "link")
-                    .await? =>
-                {
-                    "same content; handed to consolidation"
-                }
+                _ if hand_over(core, x, y, shown).await? => "same content; handed to consolidation",
                 _ => "same content; consolidation already has this pair",
             };
             core.store
@@ -476,9 +585,7 @@ async fn carry_out(
         }
         LinkKind::Contradicts => {
             if passages == 0 {
-                core.store
-                    .record_pair_with_detail(x, y, 0.0, "link")
-                    .await?;
+                hand_over(core, x, y, shown).await?;
             }
             core.store
                 .set_link_kind(x, y, LinkState::Related, Some(kind), None, revs)
@@ -490,12 +597,19 @@ async fn carry_out(
                 .await
         }
         _ => {
-            let first = first_is_a.filter(|_| kind.directional());
+            let first = first_is_a(d).filter(|_| kind.directional());
             core.store
                 .set_link_kind(x, y, LinkState::Related, Some(kind), first, revs)
                 .await
         }
     }
+}
+
+/// A decision that reached `apply` with nothing left to carry out: marked as `changed`, so it is
+/// not read as an answer that was carried out.
+async fn left_alone(core: &Core, d: &Logged) -> Result<Vec<String>> {
+    core.store.set_decision_reason(&d.id, "changed").await?;
+    Ok(vec![])
 }
 
 async fn artifact(core: &Core, id: &str) -> Result<Option<Chunk>> {
@@ -555,9 +669,14 @@ impl Applier for LinkApplier {
         let Some(b_id) = d.subject_b.as_deref() else {
             return Ok(false);
         };
-        // A shown neighbour has no row until its answer makes one; a searched link's row is gone.
-        if d.subject_kind != SHOWN && core.store.get_link(&d.subject_a, b_id).await?.is_none() {
-            return Ok(false);
+        match core.store.get_link(&d.subject_a, b_id).await? {
+            // Ruled on or dismissed since: no longer awaiting its kind.
+            Some(l) if l.state != LinkState::Learning => return Ok(false),
+            Some(_) => {}
+            // A shown neighbour has no row until its answer makes one.
+            None if d.subject_kind == SHOWN => {}
+            // A searched link's row is gone.
+            None => return Ok(false),
         }
         for (id, rev) in [(d.subject_a.as_str(), d.rev_a), (b_id, d.rev_b)] {
             let Some(c) = artifact(core, id).await? else {
@@ -575,56 +694,50 @@ impl Applier for LinkApplier {
         core: &Core,
         d: &Logged,
         pick: &str,
-        _: DecidedBy,
+        by: DecidedBy,
     ) -> Result<Vec<String>> {
         let kind = LinkKind::parse(pick)
             .ok_or_else(|| Error::Validation(format!("no link kind is called {pick:?}")))?;
         let Some(b_id) = d.subject_b.as_deref() else {
             return Ok(vec![]);
         };
-        let link = match core.store.get_link(&d.subject_a, b_id).await? {
-            Some(link) => {
-                // Settled since it was asked, by a person's dismissal or a sibling: nothing is left.
-                if link.state != LinkState::Learning {
-                    return Ok(vec![]);
-                }
-                link
+        let shown = d.subject_kind == SHOWN;
+        if core.store.get_link(&d.subject_a, b_id).await?.is_none() {
+            // A searched link's row is gone.
+            if !shown {
+                return left_alone(core, d).await;
             }
-            // A neighbour shown at capture: the answer makes the link, unless it says there is none.
-            None if d.subject_kind == SHOWN && kind != LinkKind::Unrelated => {
-                if artifact(core, &d.subject_a).await?.is_none()
-                    || artifact(core, b_id).await?.is_none()
-                {
-                    return Ok(vec![]);
-                }
-                let first = first_is_a(d).filter(|_| kind.directional());
-                // Twice `show_min`: a decided relation stays visible for one half-life, then fades.
-                core.store
-                    .relate_by_kind(
-                        &d.subject_a,
-                        b_id,
-                        kind,
-                        first,
-                        core.associate.show_min * 2.0,
-                        core.associate.half_life_days,
-                    )
-                    .await?;
-                core.store
-                    .get_link(&d.subject_a, b_id)
-                    .await?
-                    .ok_or(Error::NotFound)?
+            // A shown neighbour the model calls unrelated leaves no row. A person's answer keeps
+            // one, as a searched link does: it is what asking again puts back.
+            if kind == LinkKind::Unrelated && by == DecidedBy::Model {
+                return Ok(vec![]);
             }
-            None => return Ok(vec![]),
-        };
+        }
         let (Some(a), Some(b)) = (
-            artifact(core, &link.a_id).await?,
-            artifact(core, &link.b_id).await?,
+            artifact(core, &d.subject_a).await?,
+            artifact(core, b_id).await?,
         ) else {
-            return Ok(vec![]);
+            return left_alone(core, d).await;
         };
-        // The revisions read: a text changed since reopens the link at the next sweep.
-        let revs = d.rev_a.zip(d.rev_b);
-        carry_out(core, &link, &a, &b, kind, first_is_a(d), revs).await?;
+        if shown {
+            // The answer makes the row, or lifts the one that waited for the sweep. Twice
+            // `show_min`: a decided relation stays visible for one half-life, then fades.
+            core.store
+                .record_shown_link(
+                    &a.id,
+                    &b.id,
+                    core.associate.show_min * 2.0,
+                    core.associate.half_life_days,
+                )
+                .await?;
+        }
+        let link = match core.store.get_link(&a.id, &b.id).await? {
+            Some(link) if link.state == LinkState::Learning => link,
+            // Settled since it was asked, by a person's dismissal or a sibling. `unchanged` keeps
+            // such a decision from here; one that arrives all the same carries nothing out.
+            _ => return left_alone(core, d).await,
+        };
+        carry_out(core, &link, &a, &b, kind, d).await?;
         Ok(vec![])
     }
 
@@ -632,14 +745,40 @@ impl Applier for LinkApplier {
         let Some(b_id) = d.subject_b.as_deref() else {
             return Ok(());
         };
-        // A person's dismissal since stays: asking again is not taking it back.
         match core.store.get_link(&d.subject_a, b_id).await? {
-            Some(l) if l.state != LinkState::Dismissed => {
+            // Only what this decision's own answer set is taken back, read off the revisions it
+            // stamped. A link still learning is open already; one a person dismissed, or anything
+            // ruled on it since, stays.
+            Some(l) => {
+                let own = matches!(d.outcome, Some(Outcome::Confirmed | Outcome::Corrected))
+                    && d.reason.as_deref() != Some("changed")
+                    && matches!(l.state, LinkState::Related | LinkState::Unrelated)
+                    && (l.judged_rev_a, l.judged_rev_b) == (d.rev_a, d.rev_b);
+                if !own {
+                    return Ok(());
+                }
                 core.store
                     .set_link_kind(&d.subject_a, b_id, LinkState::Learning, None, None, None)
                     .await
             }
-            _ => Ok(()),
+            // A shown neighbour whose question was never answered has no row for the sweep to
+            // find: one is recorded while both notes are still in results.
+            None if d.subject_kind == SHOWN => {
+                for id in [d.subject_a.as_str(), b_id] {
+                    if !artifact(core, id).await?.is_some_and(|c| c.in_results()) {
+                        return Ok(());
+                    }
+                }
+                core.store
+                    .record_shown_link(
+                        &d.subject_a,
+                        b_id,
+                        waiting_weight(core),
+                        core.associate.half_life_days,
+                    )
+                    .await
+            }
+            None => Ok(()),
         }
     }
 }
@@ -1190,9 +1329,9 @@ mod tests {
         assert_eq!(JUDGED_AFTER, "associate.judged_after");
     }
 
-    /// How the decider reads a link: the kind and how sure, whether the kind's reversed read names
-    /// another, which note comes first given the state, and whether the direction's reversed read
-    /// names the other note.
+    /// How the decider reads a link: the kind and how sure, its reversed read's kind, which note
+    /// comes first given the state, whether the direction's reversed read names the other note
+    /// (always, or only when exchanged), the words where a pick goes, and a state it fails on.
     #[derive(Clone, Copy)]
     struct Says {
         kind: &'static str,
@@ -1200,6 +1339,9 @@ mod tests {
         kind_twin: Option<&'static str>,
         first: fn(&str) -> &'static str,
         torn_direction: bool,
+        torn_exchange: bool,
+        wording: Option<&'static str>,
+        down_for: Option<&'static str>,
     }
 
     /// Always the note labelled A: the pull the exchanged read exists to catch.
@@ -1223,17 +1365,29 @@ mod tests {
             kind_twin: None,
             first: the_text,
             torn_direction: false,
+            torn_exchange: false,
+            wording: None,
+            down_for: None,
         }
+    }
+
+    fn asks_direction(q: &crate::infer::decide::Question) -> bool {
+        matches!(&q.kind, QKind::Choice { options } if options.iter().any(|(n, _)| n == "a_first"))
     }
 
     fn deciding(core: &mut Core, s: Says) -> Arc<RuleDecider> {
         let d = Arc::new(RuleDecider::new(move |state, qs| {
+            if s.down_for.is_some_and(|t| state.contains(t)) {
+                return Err(Error::Validation("the decider is down".into()));
+            }
+            // The exchanged request asks the direction alone.
+            let exchange = qs.iter().all(asks_direction);
             let mut answers = std::collections::HashMap::new();
             for q in qs {
                 let QKind::Choice { options } = &q.kind else {
                     return Err(Error::Validation("a choice only".into()));
                 };
-                let direction = options.iter().any(|(n, _)| n == "a_first");
+                let direction = asks_direction(q);
                 let (favoured, top) = if direction {
                     ((s.first)(state), 0.95)
                 } else {
@@ -1241,7 +1395,7 @@ mod tests {
                 };
                 let twin = q.key.ends_with('r');
                 let said = match (direction, twin) {
-                    (true, true) if s.torn_direction => {
+                    (true, true) if s.torn_direction || (s.torn_exchange && exchange) => {
                         if favoured == "a_first" {
                             "b_first"
                         } else {
@@ -1255,7 +1409,7 @@ mod tests {
                 answers.insert(
                     q.key.clone(),
                     Answer::Choice {
-                        pick: said.into(),
+                        pick: s.wording.unwrap_or(said).into(),
                         probabilities: options
                             .iter()
                             .map(|(n, _)| if n == favoured { top } else { rest })
@@ -1310,13 +1464,6 @@ mod tests {
             .unwrap()
     }
 
-    fn link_era(core: &Core) -> String {
-        crate::core::judging::band::era(
-            core.decider.model(),
-            crate::core::judging::catalogue::link_kind().version,
-        )
-    }
-
     async fn decision(core: &Core, ids: &[String]) -> crate::store::decision_log::Logged {
         let (a, b) = crate::store::links::canonical(&ids[0], &ids[1]);
         core.store
@@ -1364,10 +1511,24 @@ mod tests {
                 Some("Explains what this uses")
             )
         );
-        // B first: the lines trade sides.
+        // B first: every directional kind's lines trade sides.
+        for k in [LinkKind::Continues, LinkKind::Example, LinkKind::Background] {
+            let (from_first, from_second) = both(k);
+            assert_eq!(link_line(k, Some(false), false), from_first, "{k:?}");
+            assert_eq!(link_line(k, Some(false), true), from_second, "{k:?}");
+            assert_ne!(from_first, from_second, "{k:?}");
+        }
         assert_eq!(
             link_line(LinkKind::Continues, Some(false), true),
             Some("The step before this")
+        );
+        assert_eq!(
+            link_line(LinkKind::Example, Some(false), true),
+            Some("What this is an example of")
+        );
+        assert_eq!(
+            link_line(LinkKind::Background, Some(false), true),
+            Some("Explains what this uses")
         );
         for side in [true, false] {
             assert_eq!(
@@ -2123,5 +2284,574 @@ mod tests {
                 .is_some(),
             "a pair that could not be bound cost the event its other pairs"
         );
+    }
+
+    /// The two notes in the order every link question names them.
+    async fn in_order(core: &Core, x: &str, y: &str) -> (Chunk, Chunk) {
+        let (a, b) = crate::store::links::canonical(x, y);
+        (
+            core.store.get_artifact(a).await.unwrap(),
+            core.store.get_artifact(b).await.unwrap(),
+        )
+    }
+
+    async fn pair_of(core: &Core, ids: &[String]) -> crate::store::pairs::ArtifactPair {
+        core.store
+            .pair_between(&ids[0], &ids[1])
+            .await
+            .unwrap()
+            .expect("consolidation was never told")
+    }
+
+    /// The line of a state that names the searches, if it kept any.
+    fn searches(state: &str) -> Option<&str> {
+        state
+            .lines()
+            .find(|l| l.starts_with("Found together by these searches:"))
+    }
+
+    /// A decider torn on the kind, so the question becomes an Unsure row.
+    fn torn(kind: &'static str) -> Says {
+        Says {
+            kind_twin: Some(if kind == "unrelated" {
+                "alternative"
+            } else {
+                "unrelated"
+            }),
+            ..says(kind)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_torn_exchanged_read_confirms_no_direction() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(
+            &mut core,
+            Says {
+                torn_exchange: true,
+                ..says("continues")
+            },
+        );
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        assert_eq!(decider.calls(), 2, "the exchanged read was asked");
+        let d = decision(&core, &ids).await;
+        let answer: serde_json::Value = serde_json::from_str(&d.answer).unwrap();
+        // The exchanged read still names the other note on average; its two halves disagree.
+        let read = &answer["direction"];
+        assert_eq!(read["agree"], true, "{answer}");
+        assert_ne!(read["pick"], read["exchanged"], "{answer}");
+        assert_eq!(read["exchanged_agree"], false, "{answer}");
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.kind, Some(LinkKind::Continues));
+        assert_eq!(
+            l.first_is_a, None,
+            "a torn exchanged read confirmed a direction"
+        );
+        for id in &ids {
+            assert_eq!(
+                line_from(&core, id).await.as_deref(),
+                Some("Related to this")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_exchanged_read_that_held_says_so_beside_its_pick() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, says("continues"));
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let d = decision(&core, &ids).await;
+        let answer: serde_json::Value = serde_json::from_str(&d.answer).unwrap();
+        assert_eq!(answer["direction"]["exchanged_agree"], true, "{answer}");
+        assert!(link_of(&core, &ids).await.first_is_a.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_exchanged_read_sees_the_searches_the_first_read_saw() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(&mut core, says("continues"));
+        let ids = seed(&core, 2).await;
+        for q in [
+            "mount a loop device read only",
+            "carve deleted files from a raw image",
+            "list the partitions of a disk image",
+        ] {
+            core.store
+                .bump_link(&ids[0], &ids[1], 2.0, Some(q), 30.0, crate::store::now())
+                .await
+                .unwrap();
+        }
+        let (a, b) = in_order(&core, &ids[0], &ids[1]).await;
+        let cues: Vec<String> = link_of(&core, &ids)
+            .await
+            .cues
+            .iter()
+            .map(|c| c.q.clone())
+            .collect();
+        let (kind, direction) = (catalogue::link_kind(), catalogue::link_direction());
+        // A window in which the direction alone leaves room for more searches than both questions.
+        let tight = (64..8192)
+            .find(|n| {
+                decider.set_context_tokens(*n);
+                let both = state::link(
+                    &note(&a),
+                    &note(&b),
+                    &cues,
+                    &core.counter,
+                    state::room(&core, &[&kind, &direction]),
+                );
+                let alone = state::link(
+                    &note(&b),
+                    &note(&a),
+                    &cues,
+                    &core.counter,
+                    state::room(&core, &[&direction]),
+                );
+                matches!((both, alone), (Some(x), Some(y)) if searches(&x) != searches(&y))
+            })
+            .expect("a window that tells the two rooms apart");
+        decider.set_context_tokens(tight);
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let requests = decider.requests();
+        assert_eq!(requests.len(), 2, "the request, then the exchanged one");
+        assert_eq!(
+            searches(&requests[0].0),
+            searches(&requests[1].0),
+            "the two reads were shown different searches"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_person_confirming_a_directional_kind_stores_the_direction_the_reads_found() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(&mut core, torn("continues"));
+        let ids = bound(&core).await;
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+        let d = decision(&core, &ids).await;
+        assert_eq!((d.band, d.state), (Band::Ask, State::Open));
+        assert_eq!(decider.calls(), 2, "an asked direction is exchanged too");
+        let l = link_of(&core, &ids).await;
+        assert_eq!((l.state, l.first_is_a), (LinkState::Learning, None));
+
+        crate::core::judging::answer(&core, &d.id, Some("continues"))
+            .await
+            .unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.kind, Some(LinkKind::Continues));
+        let (a, _) = crate::store::links::canonical(&ids[0], &ids[1]);
+        assert_eq!(
+            l.first_is_a,
+            Some(a == ids[0]),
+            "t0 comes first, as the reads stored it"
+        );
+        assert_eq!(
+            line_from(&core, &ids[0]).await.as_deref(),
+            Some("The next step after this")
+        );
+        assert_eq!(
+            line_from(&core, &ids[1]).await.as_deref(),
+            Some("The step before this")
+        );
+        assert_eq!(decider.calls(), 2, "a person's answer asks nothing");
+    }
+
+    #[tokio::test]
+    async fn a_waiting_act_applied_by_the_sweep_takes_its_direction_from_the_stored_reads() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        let decider = deciding(&mut core, says("example"));
+        let ids = bound(&core).await;
+        let (a, b) = in_order(&core, &ids[0], &ids[1]).await;
+        // Asked and read, and the stage went no further: a settled act the sweep finds waiting.
+        let d = read_link(&core, "link", &a, &b, &[]).await.unwrap();
+        assert_eq!((d.band, d.state), (Band::Act, State::Waiting));
+        core.store.mark_act_settled(&d.id).await.unwrap();
+        assert_eq!(link_of(&core, &ids).await.state, LinkState::Learning);
+        let calls = decider.calls();
+
+        crate::jobs::decisions::run(&core).await.unwrap();
+
+        assert_eq!(decider.calls(), calls, "the sweep asks nothing again");
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Related);
+        assert_eq!(l.kind, Some(LinkKind::Example));
+        assert_eq!(
+            l.first_is_a,
+            Some(a.id == ids[0]),
+            "t0 is the general one, as the reads stored it"
+        );
+        assert_eq!(
+            line_from(&core, &ids[0]).await.as_deref(),
+            Some("An example of this")
+        );
+        assert_eq!(decision(&core, &ids).await.state, State::Done);
+    }
+
+    #[tokio::test]
+    async fn nothing_the_decision_model_wrote_is_stored_for_a_link() {
+        const WRITTEN: &str = "both notes walk through the same procedure";
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(
+            &mut core,
+            Says {
+                wording: Some(WRITTEN),
+                ..says("continues")
+            },
+        );
+        // A link found by searches, and a neighbour shown at capture.
+        let searched = bound(&core).await;
+        judge(&core, &link_target(&searched[0], &searched[1]))
+            .await
+            .unwrap();
+        let shown = seed(&core, 2).await;
+        assert_eq!(link_shown(&core, &shown[0], &shown[1..]).await.unwrap(), 1);
+
+        for ids in [&searched, &shown] {
+            let l = link_of(&core, ids).await;
+            assert_eq!(
+                l.kind,
+                Some(LinkKind::Continues),
+                "the answer was carried out"
+            );
+            assert_eq!(l.reason, None);
+            let d = decision(&core, ids).await;
+            assert_eq!(d.pick, "continues", "the pick is the option's name");
+            for stored in [format!("{l:?}"), format!("{d:?}")] {
+                assert!(
+                    !stored.contains(WRITTEN),
+                    "the model's words were stored: {stored}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn link_shown_asks_while_the_tick_has_calls_and_leaves_the_rest_to_the_sweep() {
+        let mut core = test_core().await;
+        let decider = deciding(&mut core, says("alternative"));
+        let ids = seed(&core, 3).await;
+        core.decide_cfg.max_per_tick = 1;
+
+        let made = link_shown(&core, &ids[0], &ids[1..]).await.unwrap();
+
+        assert_eq!(made, 1);
+        assert_eq!(decider.calls(), 1, "the tick had one call left");
+        let asked = link_of(&core, &ids).await;
+        assert_eq!(
+            (asked.state, asked.kind),
+            (LinkState::Related, Some(LinkKind::Alternative))
+        );
+        let rest = [ids[0].clone(), ids[2].clone()];
+        let waiting = core
+            .store
+            .get_link(&rest[0], &rest[1])
+            .await
+            .unwrap()
+            .expect("the neighbour past the budget was recorded for the sweep");
+        assert_eq!(waiting.state, LinkState::Learning);
+        assert!(waiting.shown);
+        assert!(
+            waiting.weight < core.associate.show_min,
+            "nothing shows it before an answer"
+        );
+        assert!(waiting.weight > core.associate.prune_below);
+
+        // Once the tick has room the sweep arms it, and it is asked as the shown neighbour it is.
+        on(&mut core).await;
+        core.decide_cfg.max_per_tick = 60;
+        let r = run(&core).await.unwrap();
+        assert_eq!(r.armed, 1);
+        judge(&core, &link_target(&rest[0], &rest[1]))
+            .await
+            .unwrap();
+        assert_eq!(decider.calls(), 2);
+        assert_eq!(decision(&core, &rest).await.subject_kind, SHOWN);
+        let l = link_of(&core, &rest).await;
+        assert_eq!(
+            (l.state, l.kind),
+            (LinkState::Related, Some(LinkKind::Alternative))
+        );
+        assert!(
+            l.weight >= core.associate.show_min * 2.0,
+            "shown above the floor: {}",
+            l.weight
+        );
+        assert_eq!(run(&core).await.unwrap().armed, 0, "asked once");
+    }
+
+    #[tokio::test]
+    async fn a_shown_neighbour_that_cannot_be_asked_about_does_not_cost_the_next_its_question() {
+        let mut core = test_core().await;
+        deciding(
+            &mut core,
+            Says {
+                down_for: Some("t1"),
+                ..says("alternative")
+            },
+        );
+        let ids = seed(&core, 3).await;
+
+        let made = link_shown(&core, &ids[0], &ids[1..]).await.unwrap();
+
+        assert_eq!(made, 1, "the neighbour after the failed one was not asked");
+        let l = link_of(&core, &[ids[0].clone(), ids[2].clone()]).await;
+        assert_eq!(l.state, LinkState::Related);
+        let failed = link_of(&core, &ids).await;
+        assert_eq!(failed.state, LinkState::Learning);
+        assert!(failed.shown, "the failed question is left for the sweep");
+    }
+
+    #[tokio::test]
+    async fn a_shown_neighbour_called_a_duplicate_or_a_contradiction_is_handed_over_restricted() {
+        for kind in ["duplicate", "contradicts"] {
+            let mut core = test_core().await;
+            deciding(&mut core, says(kind));
+            let ids = seed(&core, 2).await;
+
+            assert_eq!(link_shown(&core, &ids[0], &ids[1..]).await.unwrap(), 1);
+
+            let pair = pair_of(&core, &ids).await;
+            assert_eq!(pair.state, crate::store::pairs::PairState::Pending);
+            assert_eq!(pair.net, Some(Net::Shown), "{kind}");
+            assert!(
+                crate::jobs::dedupe::restricted(&pair, 0.0),
+                "a neighbour merely shown at capture could merge without a person"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_searched_link_called_a_duplicate_is_handed_over_unrestricted() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, says("duplicate"));
+        let ids = bound(&core).await;
+
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+
+        let pair = pair_of(&core, &ids).await;
+        assert_eq!(pair.net, None);
+        assert!(!crate::jobs::dedupe::restricted(&pair, 1.0));
+    }
+
+    #[tokio::test]
+    async fn a_shown_neighbour_answered_later_is_still_handed_over_restricted() {
+        let mut core = test_core().await;
+        deciding(&mut core, torn("duplicate"));
+        let ids = seed(&core, 2).await;
+        assert_eq!(link_shown(&core, &ids[0], &ids[1..]).await.unwrap(), 0);
+        let d = decision(&core, &ids).await;
+        assert_eq!((d.band, d.state), (Band::Ask, State::Open));
+        assert_eq!(d.subject_kind, SHOWN);
+        assert!(
+            core.store
+                .pair_between(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        crate::core::judging::answer(&core, &d.id, Some("duplicate"))
+            .await
+            .unwrap();
+
+        let pair = pair_of(&core, &ids).await;
+        assert_eq!(
+            pair.net,
+            Some(Net::Shown),
+            "the source was lost on the way"
+        );
+        assert!(crate::jobs::dedupe::restricted(&pair, 0.0));
+    }
+
+    #[tokio::test]
+    async fn a_pair_consolidation_already_has_keeps_the_net_it_was_filed_in() {
+        let mut core = test_core().await;
+        deciding(&mut core, says("duplicate"));
+        let ids = seed(&core, 2).await;
+        core.store
+            .record_pair(&ids[0], &ids[1], 0.91)
+            .await
+            .unwrap();
+
+        assert_eq!(link_shown(&core, &ids[0], &ids[1..]).await.unwrap(), 1);
+
+        assert_eq!(
+            pair_of(&core, &ids).await.net,
+            None,
+            "a pair already pending was newly restricted"
+        );
+        assert_eq!(
+            link_of(&core, &ids).await.reason.as_deref(),
+            Some("same content; consolidation already has this pair")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shown_duplicate_is_stored_as_a_searched_one_is() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, says("duplicate"));
+        let searched = bound(&core).await;
+        judge(&core, &link_target(&searched[0], &searched[1]))
+            .await
+            .unwrap();
+        let shown = seed(&core, 2).await;
+        assert_eq!(link_shown(&core, &shown[0], &shown[1..]).await.unwrap(), 1);
+
+        let (s, c) = (
+            link_of(&core, &searched).await,
+            link_of(&core, &shown).await,
+        );
+        assert_eq!(
+            (c.state, c.kind, c.first_is_a, c.reason.as_deref()),
+            (s.state, s.kind, s.first_is_a, s.reason.as_deref())
+        );
+        assert_eq!(c.kind, None, "the hand-over line says it; no kind is kept");
+        assert_eq!(
+            c.reason.as_deref(),
+            Some("same content; handed to consolidation")
+        );
+        assert_eq!(
+            line_from(&core, &shown[0]).await.as_deref(),
+            Some("same content; handed to consolidation")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persons_unrelated_on_a_shown_neighbour_keeps_a_row_to_ask_again_from() {
+        let mut core = test_core().await;
+        deciding(&mut core, torn("alternative"));
+        let ids = seed(&core, 2).await;
+        assert_eq!(link_shown(&core, &ids[0], &ids[1..]).await.unwrap(), 0);
+        let d = decision(&core, &ids).await;
+        assert_eq!((d.band, d.state), (Band::Ask, State::Open));
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        crate::core::judging::answer(&core, &d.id, Some("unrelated"))
+            .await
+            .unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(
+            (l.state, l.kind),
+            (LinkState::Unrelated, Some(LinkKind::Unrelated)),
+            "stored as a searched link's unrelated is"
+        );
+
+        crate::core::judging::ask_again(&core, &d.id).await.unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!((l.state, l.kind), (LinkState::Learning, None));
+        assert_eq!(to_judge(&core).await.len(), 1, "asked again means asked");
+    }
+
+    #[tokio::test]
+    async fn a_link_ruled_on_or_dismissed_since_is_no_longer_what_was_asked_about() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, torn("alternative"));
+        let ids = bound(&core).await;
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+        let d = decision(&core, &ids).await;
+        assert_eq!(d.state, State::Open);
+        assert!(LinkApplier.unchanged(&core, &d).await.unwrap());
+
+        // A sibling ruled on it, reading the same texts.
+        core.store
+            .set_link_kind(
+                &ids[0],
+                &ids[1],
+                LinkState::Related,
+                Some(LinkKind::Example),
+                None,
+                d.rev_a.zip(d.rev_b),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !LinkApplier.unchanged(&core, &d).await.unwrap(),
+            "a link ruled on since was still awaiting its kind"
+        );
+        LinkApplier.reopen(&core, &d).await.unwrap();
+        let l = link_of(&core, &ids).await;
+        assert_eq!(
+            (l.state, l.kind),
+            (LinkState::Related, Some(LinkKind::Example)),
+            "a ruling made since was put back"
+        );
+
+        core.store.dismiss_link(&ids[0], &ids[1]).await.unwrap();
+        assert!(!LinkApplier.unchanged(&core, &d).await.unwrap());
+        LinkApplier.reopen(&core, &d).await.unwrap();
+        assert_eq!(link_of(&core, &ids).await.state, LinkState::Dismissed);
+    }
+
+    #[tokio::test]
+    async fn an_answer_reaching_a_link_dismissed_since_carries_nothing_out_and_says_so() {
+        let mut core = test_core().await;
+        on(&mut core).await;
+        deciding(&mut core, torn("alternative"));
+        let ids = bound(&core).await;
+        judge(&core, &link_target(&ids[0], &ids[1])).await.unwrap();
+        let d = decision(&core, &ids).await;
+        core.store.dismiss_link(&ids[0], &ids[1]).await.unwrap();
+
+        let rows = LinkApplier
+            .apply(&core, &d, "alternative", DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        assert!(rows.is_empty());
+        let l = link_of(&core, &ids).await;
+        assert_eq!((l.state, l.kind), (LinkState::Dismissed, None));
+        assert_eq!(
+            decision(&core, &ids).await.reason.as_deref(),
+            Some("changed"),
+            "it reads as an answer that was carried out"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shown_neighbour_whose_question_is_put_back_unanswered_waits_for_the_sweep() {
+        let mut core = test_core().await;
+        deciding(&mut core, torn("alternative"));
+        let ids = seed(&core, 2).await;
+        assert_eq!(link_shown(&core, &ids[0], &ids[1..]).await.unwrap(), 0);
+        let d = decision(&core, &ids).await;
+        assert!(
+            core.store
+                .get_link(&ids[0], &ids[1])
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        LinkApplier.reopen(&core, &d).await.unwrap();
+
+        let l = link_of(&core, &ids).await;
+        assert_eq!(l.state, LinkState::Learning);
+        assert!(l.shown, "the sweep has no row to find it by");
     }
 }

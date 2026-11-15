@@ -1020,24 +1020,39 @@ impl Core {
     pub async fn stale_candidates(&self, limit: usize) -> Result<Vec<SearchResult>> {
         let cutoff = now_secs() - self.consolidate.stale_after_days as i64 * SECONDS_PER_DAY;
         let limit = limit.clamp(1, MAX_LIMIT);
-        let hits = self
-            .vectors
-            .stale_candidates(cutoff, self.consolidate.stale_max_hits, limit * 4)
-            .await?;
+        // Most old notes are lasting ones, so one page can hold none that is time-bound.
+        const PAGES: usize = 8;
+        let page = limit * 4;
         // A note read as lasting is not stale for being old; one with no reading is as before.
         let time_bound = crate::core::judging::catalogue::time_bound();
         let mut kept = Vec::new();
-        for h in hits {
-            if kept.len() == limit {
-                break;
-            }
-            let yes = self
-                .store
-                .reading_yes(&h.payload.artifact_id, &time_bound)
+        let mut after = None;
+        for _ in 0..PAGES {
+            let hits = self
+                .vectors
+                .stale_candidates_after(cutoff, self.consolidate.stale_max_hits, page, after.take())
                 .await?;
-            if yes.is_none_or(|y| y >= crate::jobs::read::TIME_BOUND_AT) {
-                // Drawn, not matched: nothing here is weak.
-                kept.push(SearchResult::from(h));
+            let full = hits.len() == page;
+            // Every candidate carries a stamp; one without cannot be paged past.
+            after = hits.last().and_then(|h| {
+                let stamp = h.payload.last_verified_at?;
+                Some((stamp, h.payload.artifact_id.clone()))
+            });
+            for h in hits {
+                if kept.len() == limit {
+                    return Ok(kept);
+                }
+                let yes = self
+                    .store
+                    .reading_yes(&h.payload.artifact_id, &time_bound)
+                    .await?;
+                if yes.is_none_or(|y| y >= crate::jobs::read::TIME_BOUND_AT) {
+                    // Drawn, not matched: nothing here is weak.
+                    kept.push(SearchResult::from(h));
+                }
+            }
+            if kept.len() == limit || !full || after.is_none() {
+                break;
             }
         }
         Ok(kept)
@@ -3183,6 +3198,55 @@ mod tests {
         let core = test_core().await;
         let id = old_unused(&core, None).await;
         assert_eq!(ids_of(&core.stale_candidates(10).await.unwrap()), [id]);
+    }
+
+    #[tokio::test]
+    async fn lasting_notes_at_the_stale_end_do_not_hide_the_time_bound_ones_behind_them() {
+        let core = test_core().await;
+        // One page for a limit of one is four candidates; five lasting notes are staler than these.
+        let src = seed(
+            &core,
+            &[
+                ("the build server runs Debian 12", "note", &[]),
+                ("the office is on the third floor", "note", &[]),
+                ("the team meets on Mondays", "note", &[]),
+                ("the wiki lives on the intranet", "note", &[]),
+                ("the printer is called Gutenberg", "note", &[]),
+                ("the licence runs out in March", "note", &[]),
+                ("the trial ends next week", "note", &[]),
+            ],
+        )
+        .await;
+        let mut notes = core.store.artifacts_for_corpus(&src).await.unwrap();
+        notes.sort_by_key(|c| c.ordinal);
+        let time_bound = crate::core::judging::catalogue::time_bound();
+        for (i, c) in notes.iter().enumerate() {
+            core.vectors
+                .set_last_verified_at(&c.id, 1 + i as i64, false)
+                .await
+                .unwrap();
+            let yes = if i < 5 { 0.1 } else { 0.9 };
+            core.store
+                .put_readings(
+                    &c.id,
+                    &[(
+                        &time_bound,
+                        &crate::infer::decide::Answer::Noul { yes },
+                    )],
+                    "m",
+                )
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            ids_of(&core.stale_candidates(1).await.unwrap()),
+            [notes[5].id.as_str()]
+        );
+        assert_eq!(
+            ids_of(&core.stale_candidates(10).await.unwrap()),
+            [notes[5].id.as_str(), notes[6].id.as_str()],
+            "the store ran out before the limit was met"
+        );
     }
 
     #[tokio::test]

@@ -278,6 +278,17 @@ impl Bands {
                 .unwrap_or(self.ask_at),
         }
     }
+
+    /// Every question with a line of its own, each once and in order: a `[decide.bands.<id>]` in
+    /// the file and the built-in entry for the same id are one line, and a refusal names the same
+    /// one on every start.
+    fn ids(&self) -> std::collections::BTreeSet<&str> {
+        self.per
+            .keys()
+            .map(String::as_str)
+            .chain(DEFAULTS.iter().map(|d| d.0))
+            .collect()
+    }
 }
 
 impl Default for DecideConfig {
@@ -2027,6 +2038,15 @@ impl Config {
                 c.scan_min, c.review_min
             )));
         }
+        // The wide net reaches down to here and no further: at 0 every neighbour is a pair to ask.
+        const SCAN_MIN_FLOOR: f32 = 0.70;
+        if c.scan_min.is_nan() || c.scan_min < SCAN_MIN_FLOOR {
+            return Err(ConfigError::Invalid(format!(
+                "consolidate.scan_min ({}) must be at least {SCAN_MIN_FLOOR:.2}: below it \
+                 neighbours that merely share a subject are filed as pairs to ask about",
+                c.scan_min
+            )));
+        }
         self.infer
             .embed
             .templates()
@@ -2070,10 +2090,8 @@ impl Config {
         let mut bands = vec![("decide.bands".to_string(), dc.bands.of(""))];
         bands.extend(
             dc.bands
-                .per
-                .keys()
-                .map(String::as_str)
-                .chain(DEFAULTS.iter().map(|d| d.0))
+                .ids()
+                .into_iter()
                 .map(|k| (format!("decide.bands.{k}"), dc.bands.of(k))),
         );
         for (key, t) in bands {
@@ -3279,6 +3297,30 @@ mode = "off"
     }
 
     #[test]
+    fn scan_min_below_the_wide_nets_floor_is_refused_by_name() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["0.0", "0.5", "0.69", "-1.0"] {
+            let p = write(
+                &dir,
+                &format!("{MINIMAL}\n[consolidate]\nscan_min = {bad}\n"),
+            );
+            match Config::load(Some(&p)) {
+                Err(ConfigError::Invalid(why)) => {
+                    assert!(why.contains("consolidate.scan_min"), "{why}")
+                }
+                Err(e) => panic!("scan_min {bad}: {e}"),
+                Ok(_) => panic!("scan_min {bad} was accepted"),
+            }
+        }
+        let p = write(
+            &dir,
+            &format!("{MINIMAL}\n[consolidate]\nscan_min = 0.70\n"),
+        );
+        assert_eq!(Config::load(Some(&p)).unwrap().consolidate.scan_min, 0.70);
+    }
+
+    #[test]
     fn a_fingerprint_that_is_not_32_bytes_is_refused_at_startup() {
         // A typo here is a phone that refuses every connection with nothing saying why.
         let _guard = env_guard();
@@ -3455,6 +3497,33 @@ mode = "off"
                 Err(ConfigError::Invalid(m)) => assert!(m.contains("decide.bands"), "{m}"),
                 other => panic!("expected Invalid, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_question_named_in_the_file_and_built_in_is_validated_once() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!(
+            "{MINIMAL}\n[decide.bands.reap_worth]\nact_at = 0.97\n\n[decide.bands.q]\nact_at = 0.95\n"
+        );
+        let d = Config::load(Some(&write(&dir, &body))).unwrap().decide;
+        let ids: Vec<&str> = d.bands.ids().into_iter().collect();
+        assert_eq!(
+            ids.len(),
+            DEFAULTS.len() + 1,
+            "the file's reap_worth and the built-in one are one line: {ids:?}"
+        );
+        for id in ["q", "reap_worth"] {
+            assert_eq!(ids.iter().filter(|i| **i == id).count(), 1, "{id}");
+        }
+        // An id no built-in line knows is refused in one sentence that names it once.
+        let body = format!("{MINIMAL}\n[decide.bands.q]\nask_at = 0.95\n");
+        match Config::load(Some(&write(&dir, &body))) {
+            Err(ConfigError::Invalid(m)) => {
+                assert_eq!(m.matches("decide.bands.q").count(), 1, "{m}")
+            }
+            other => panic!("expected Invalid, got {other:?}"),
         }
     }
 

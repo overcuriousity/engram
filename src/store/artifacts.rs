@@ -1554,7 +1554,8 @@ impl Store {
         Ok(res.rows_affected())
     }
 
-    /// Only a rescue restarts the clock; otherwise the rescued row is judged every run.
+    /// Restarts the clock: after a rescue, or the rescued row is judged every run, and for a row
+    /// the sweep stands down. Never to ask again: that would silence the question for an age.
     pub async fn restamp_retired(&self, id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE artifacts SET retired_at = ? WHERE id = ? AND retired_at IS NOT NULL",

@@ -400,10 +400,10 @@ mod tests {
     /// Any statement the trigger names on `decisions` fails from here on.
     async fn failing(core: &Core, on: &str) {
         // runtime: test-only trigger, its event assembled from the argument.
-        sqlx::query(&format!(
+        sqlx::query(sqlx::AssertSqlSafe(format!(
             "CREATE TRIGGER check_fails BEFORE {on} ON decisions
              BEGIN SELECT RAISE(ABORT, 'refused by the test'); END"
-        ))
+        )))
         .execute(&core.store.pool)
         .await
         .unwrap();

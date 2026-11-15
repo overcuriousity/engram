@@ -1,6 +1,9 @@
 {# What the base is torn on, one button per answer. `web::unsure::unsure` is the fold. #}
 {% if !unsure.is_empty() %}
-<h2 class="oc-text-section">Unsure · {{ unsure.rows.len() }}</h2>
+<h2 class="oc-text-section">Unsure{% if !unsure.rows.is_empty() %} · {{ unsure.rows.len() }}{% endif %}</h2>
+{% if let Some(said) = unsure.notice %}
+<div class="oc-notice oc-notice--info" role="status">{{ crate::web::icons::icon("info", 16) }}<span class="oc-notice__text">{{ said }}</span></div>
+{% endif %}
 {% if !unsure.rows.is_empty() %}
 <ul class="oc-list unsure" role="list">
   {% for r in unsure.rows %}
