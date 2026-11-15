@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT query_vec AS \"query_vec!\", embed_model FROM pursuits WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "query_vec!",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "pursuits",
+            "name": "embed_model"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      true
+    ]
+  },
+  "hash": "5d4b3b5700cec37ea35699fd2bf708bbae96cb97e8bd7d806bfde2d557e8d5c0"
+}

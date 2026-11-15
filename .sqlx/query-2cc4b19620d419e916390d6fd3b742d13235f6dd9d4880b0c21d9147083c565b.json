@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decide_events SET bears_version = NULL WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "2cc4b19620d419e916390d6fd3b742d13235f6dd9d4880b0c21d9147083c565b"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT corpus_id FROM artifacts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "corpus_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "corpus_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e329cfc4553aacc190da06ca9d18875704382492fa621f74491bbc59bd4278b5"
+}

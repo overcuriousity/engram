@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE COALESCE(m.origin_corpus_id, a.corpus_id) = ? AND m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "11888761ca10fe8231edfcee3e46206fde590556742e15a1a99b6e2e80385b44"
+}

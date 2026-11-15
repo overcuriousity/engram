@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET notify = ? WHERE subject = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "8936a879046779f94fc077461c5fdc0d1b9e653b73377cac8b287611f8cbb93e"
+}

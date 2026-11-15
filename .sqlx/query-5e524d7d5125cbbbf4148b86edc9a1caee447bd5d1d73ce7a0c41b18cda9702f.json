@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id FROM artifacts WHERE corpus_id = ?\n             ORDER BY COALESCE(segment_idx, 0), ordinal, rowid",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "5e524d7d5125cbbbf4148b86edc9a1caee447bd5d1d73ce7a0c41b18cda9702f"
+}

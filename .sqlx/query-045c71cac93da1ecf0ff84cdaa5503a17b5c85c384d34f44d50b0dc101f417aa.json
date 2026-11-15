@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT query FROM search_events",
+  "describe": {
+    "columns": [
+      {
+        "name": "query",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "045c71cac93da1ecf0ff84cdaa5503a17b5c85c384d34f44d50b0dc101f417aa"
+}

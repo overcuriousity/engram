@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(MAX(n), 0) + 1 FROM artifact_versions WHERE artifact_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "COALESCE(MAX(n), 0) + 1",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "366b7d85aab924bd2c4b420cc131c0b24abd598f473c0460334109cd87899f7e"
+}

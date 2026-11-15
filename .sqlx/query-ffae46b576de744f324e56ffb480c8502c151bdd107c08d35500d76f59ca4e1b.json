@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO interaction_events (artifact_id, kind, detail, scope, at)\n             VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "ffae46b576de744f324e56ffb480c8502c151bdd107c08d35500d76f59ca4e1b"
+}

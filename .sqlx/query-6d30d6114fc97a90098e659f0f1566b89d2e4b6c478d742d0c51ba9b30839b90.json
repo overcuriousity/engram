@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE corpora SET origin = 'journal', metadata = 'nope' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6d30d6114fc97a90098e659f0f1566b89d2e4b6c478d742d0c51ba9b30839b90"
+}

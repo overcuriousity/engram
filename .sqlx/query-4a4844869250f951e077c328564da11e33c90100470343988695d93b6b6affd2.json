@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(t) FROM (\n               SELECT m.at - ? AS t FROM moments m JOIN artifacts a ON a.id = m.artifact_id\n                 WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active' AND m.at IS NOT NULL\n               UNION ALL\n               SELECT m.at FROM moments m JOIN artifacts a ON a.id = m.artifact_id\n                 WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active' AND m.at IS NOT NULL\n               UNION ALL\n               SELECT m.snoozed_until FROM moments m JOIN artifacts a ON a.id = m.artifact_id\n                 WHERE m.kind = 'due' AND m.done_at IS NULL AND a.status = 'active'\n                   AND m.snoozed_until IS NOT NULL\n             ) WHERE t > ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "MIN(t)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4a4844869250f951e077c328564da11e33c90100470343988695d93b6b6affd2"
+}

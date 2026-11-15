@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT\n               COALESCE(SUM(CASE WHEN c.band = 1 THEN 1 ELSE 0 END), 0) AS band_used,\n               COALESCE(SUM(CASE WHEN c.band = 0 AND c.rank >=\n                   (SELECT COUNT(*) FROM search_candidates s\n                     WHERE s.event_id = c.event_id AND s.band = 0 AND s.shown = 1) - ?\n                 THEN 1 ELSE 0 END), 0) AS tail_used\n             FROM observations o\n             JOIN search_candidates c\n               ON c.event_id = o.event_id AND c.artifact_id = o.artifact_id\n              AND c.shown = 1\n            WHERE o.generation_id = ? AND o.source = 'opened' AND o.excluded_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "band_used",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "tail_used",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "072c16d0c3667b8fd987ae09366c72d0230a5fc012c3fad1b3adf4cabf6e6ab6"
+}

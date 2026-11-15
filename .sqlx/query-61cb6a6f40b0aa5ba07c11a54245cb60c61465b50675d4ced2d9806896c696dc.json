@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT context FROM search_context WHERE event_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "context",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_context",
+            "name": "context"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "61cb6a6f40b0aa5ba07c11a54245cb60c61465b50675d4ced2d9806896c696dc"
+}

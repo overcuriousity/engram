@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT text_hash, asked, room, visit, tries, retry_at FROM artifact_reads\n              WHERE artifact_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "text_hash",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_reads",
+            "name": "text_hash"
+          }
+        }
+      },
+      {
+        "name": "asked",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_reads",
+            "name": "asked"
+          }
+        }
+      },
+      {
+        "name": "room",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_reads",
+            "name": "room"
+          }
+        }
+      },
+      {
+        "name": "visit",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_reads",
+            "name": "visit"
+          }
+        }
+      },
+      {
+        "name": "tries",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_reads",
+            "name": "tries"
+          }
+        }
+      },
+      {
+        "name": "retry_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_reads",
+            "name": "retry_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c6fccd4f4ee6ab42c8598395b7f44589103b0f9d73c11ff9fe636c0d3c71e852"
+}

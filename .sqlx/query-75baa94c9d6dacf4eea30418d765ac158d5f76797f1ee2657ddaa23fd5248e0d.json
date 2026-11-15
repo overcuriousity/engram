@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET series_id = NULL WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "75baa94c9d6dacf4eea30418d765ac158d5f76797f1ee2657ddaa23fd5248e0d"
+}

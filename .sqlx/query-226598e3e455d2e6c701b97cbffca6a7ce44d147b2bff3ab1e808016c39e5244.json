@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", created_at AS \"created_at!\", params AS \"params!\", embed_recipe AS \"embed_recipe!\", chat_model AS \"chat_model!\", parent_id AS \"parent_id?\", run_id AS \"run_id?\", predicted AS \"predicted?\", state AS \"state!\"\n               FROM generations ORDER BY created_at DESC, id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "params!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "params"
+          }
+        }
+      },
+      {
+        "name": "embed_recipe!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "embed_recipe"
+          }
+        }
+      },
+      {
+        "name": "chat_model!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "chat_model"
+          }
+        }
+      },
+      {
+        "name": "parent_id?",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "parent_id"
+          }
+        }
+      },
+      {
+        "name": "run_id?",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "run_id"
+          }
+        }
+      },
+      {
+        "name": "predicted?",
+        "ordinal": 7,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "predicted"
+          }
+        }
+      },
+      {
+        "name": "state!",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "226598e3e455d2e6c701b97cbffca6a7ce44d147b2bff3ab1e808016c39e5244"
+}

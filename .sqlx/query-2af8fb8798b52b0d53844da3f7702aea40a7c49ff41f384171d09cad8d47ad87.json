@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET door = ?, scope = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2af8fb8798b52b0d53844da3f7702aea40a7c49ff41f384171d09cad8d47ad87"
+}

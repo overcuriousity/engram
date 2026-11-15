@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DROP TABLE artifact_links",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "5d29f607fca15a84a1539e43d800509162628ba68e180909fc2f9da6f730d8b6"
+}

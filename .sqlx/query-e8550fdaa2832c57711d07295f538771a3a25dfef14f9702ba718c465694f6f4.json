@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM jobs WHERE stage = 'segment_window'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "e8550fdaa2832c57711d07295f538771a3a25dfef14f9702ba718c465694f6f4"
+}

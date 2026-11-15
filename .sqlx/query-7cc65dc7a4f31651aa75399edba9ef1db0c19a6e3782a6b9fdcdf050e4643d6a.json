@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT origin, metadata FROM corpora WHERE raw_text = 'an answer whose question expired'",
+  "describe": {
+    "columns": [
+      {
+        "name": "origin",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "origin"
+          }
+        }
+      },
+      {
+        "name": "metadata",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "metadata"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7cc65dc7a4f31651aa75399edba9ef1db0c19a6e3782a6b9fdcdf050e4643d6a"
+}

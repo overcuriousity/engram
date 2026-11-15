@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT shown, explored_from FROM search_candidates WHERE event_id = 'e'",
+  "describe": {
+    "columns": [
+      {
+        "name": "shown",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "shown"
+          }
+        }
+      },
+      {
+        "name": "explored_from",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "explored_from"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "82cf5b5eff0ba63ab8b5a3fa066e972807305287733c447e0a0eaeaed2f51a17"
+}

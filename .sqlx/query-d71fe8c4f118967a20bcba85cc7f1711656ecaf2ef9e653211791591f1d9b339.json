@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE generations SET state = 'reverted' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d71fe8c4f118967a20bcba85cc7f1711656ecaf2ef9e653211791591f1d9b339"
+}

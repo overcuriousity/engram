@@ -1,0 +1,158 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", created_at AS \"created_at!\", judged_count AS \"judged_count!\", pairs_used AS \"pairs_used!\", pairs_skipped AS \"pairs_skipped!\", base_params AS \"base_params!\", base_recall AS \"base_recall!\", base_mrr AS \"base_mrr!\", best_params AS \"best_params!\", best_recall AS \"best_recall!\", best_mrr AS \"best_mrr!\", diff AS \"diff!\" FROM eval_runs ORDER BY created_at DESC, id DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "judged_count!",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "judged_count"
+          }
+        }
+      },
+      {
+        "name": "pairs_used!",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "pairs_used"
+          }
+        }
+      },
+      {
+        "name": "pairs_skipped!",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "pairs_skipped"
+          }
+        }
+      },
+      {
+        "name": "base_params!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "base_params"
+          }
+        }
+      },
+      {
+        "name": "base_recall!",
+        "ordinal": 6,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "base_recall"
+          }
+        }
+      },
+      {
+        "name": "base_mrr!",
+        "ordinal": 7,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "base_mrr"
+          }
+        }
+      },
+      {
+        "name": "best_params!",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "best_params"
+          }
+        }
+      },
+      {
+        "name": "best_recall!",
+        "ordinal": 9,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "best_recall"
+          }
+        }
+      },
+      {
+        "name": "best_mrr!",
+        "ordinal": 10,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "best_mrr"
+          }
+        }
+      },
+      {
+        "name": "diff!",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "eval_runs",
+            "name": "diff"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5c7807c6a5e07778a0e8db36af106f44abf5ec8aaaec67fe8afd6633afa8e736"
+}

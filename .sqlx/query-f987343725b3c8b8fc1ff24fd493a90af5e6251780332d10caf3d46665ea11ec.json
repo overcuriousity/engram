@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (SELECT COUNT(*) FROM search_events WHERE created_at > ?)\n                  + (SELECT COUNT(*) FROM ask_events WHERE created_at > ?) AS \"n!: i64\"",
+  "describe": {
+    "columns": [
+      {
+        "name": "n!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "f987343725b3c8b8fc1ff24fd493a90af5e6251780332d10caf3d46665ea11ec"
+}

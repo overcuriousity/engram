@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM moments\n              WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL\n                AND (notified_at IS NOT NULL OR snoozed_until IS NOT NULL)",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "12bc07388cd6edc7cd1e89c10ec746474e181e13bfa4b378f1346e7eaa2d75eb"
+}

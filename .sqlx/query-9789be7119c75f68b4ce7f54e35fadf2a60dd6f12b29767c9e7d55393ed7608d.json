@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE generations SET state = 'superseded' WHERE state = 'live'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "9789be7119c75f68b4ce7f54e35fadf2a60dd6f12b29767c9e7d55393ed7608d"
+}

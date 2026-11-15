@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT activation, activated_at, created_at FROM artifacts WHERE status = 'active'",
+  "describe": {
+    "columns": [
+      {
+        "name": "activation",
+        "ordinal": 0,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "activation"
+          }
+        }
+      },
+      {
+        "name": "activated_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "activated_at"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "created_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "cf0a1b728869ab0f2a52b78e40db85ca39fcfd07aeb9781201781e90bff6f90e"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE COALESCE(m.origin_corpus_id, a.corpus_id) = ? AND m.source IN ('cue', 'classified')",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "42af8552fc69c99d45a45e3a74124ee8a2aa1b4d4f7334e87c7a67526e2e51b0"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gap_clusters WHERE key = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "17e6602ffbcae9e7696a24e84de709e64e40e324c2904a4c3de2c24c4aee222a"
+}

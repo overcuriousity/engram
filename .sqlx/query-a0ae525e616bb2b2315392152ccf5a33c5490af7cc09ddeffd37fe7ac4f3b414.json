@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM rehearsal_results\n              WHERE rehearsal_id = ? AND id NOT IN (\n                    SELECT id FROM rehearsal_results WHERE rehearsal_id = ?\n                     ORDER BY at DESC, id DESC LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "a0ae525e616bb2b2315392152ccf5a33c5490af7cc09ddeffd37fe7ac4f3b414"
+}

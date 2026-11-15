@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT filters FROM decide_events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "filters",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "filters"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "d4c32bfddc3677be07a1136796a37802de3756851a2ea75925ba0057e0290e34"
+}

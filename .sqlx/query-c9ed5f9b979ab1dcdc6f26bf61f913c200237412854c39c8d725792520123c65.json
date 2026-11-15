@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", rehearsal_id AS \"rehearsal_id!\", generation_id AS \"generation_id!\", at AS \"at!\", rank AS \"rank?\", outranked_by AS \"outranked_by!\"\n               FROM rehearsal_results WHERE rehearsal_id = ? AND generation_id = ?\n              ORDER BY at DESC, id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "rehearsal_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "rehearsal_id"
+          }
+        }
+      },
+      {
+        "name": "generation_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "generation_id"
+          }
+        }
+      },
+      {
+        "name": "at!",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "rank?",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "rank"
+          }
+        }
+      },
+      {
+        "name": "outranked_by!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "outranked_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "c9ed5f9b979ab1dcdc6f26bf61f913c200237412854c39c8d725792520123c65"
+}

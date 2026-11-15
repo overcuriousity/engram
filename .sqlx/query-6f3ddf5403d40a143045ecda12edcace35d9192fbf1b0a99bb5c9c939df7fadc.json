@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM observations o\n               JOIN generations g ON g.id = o.generation_id\n              WHERE o.query = ? AND o.strength < 0 AND o.excluded_at IS NULL\n                AND g.embed_recipe = ? AND g.chat_model = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6f3ddf5403d40a143045ecda12edcace35d9192fbf1b0a99bb5c9c939df7fadc"
+}

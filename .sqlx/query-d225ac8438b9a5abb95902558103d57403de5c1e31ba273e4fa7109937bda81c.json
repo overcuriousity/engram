@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT key AS \"key!\", labelled_by, members FROM gap_clusters",
+  "describe": {
+    "columns": [
+      {
+        "name": "key!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gap_clusters",
+            "name": "key"
+          }
+        }
+      },
+      {
+        "name": "labelled_by",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gap_clusters",
+            "name": "labelled_by"
+          }
+        }
+      },
+      {
+        "name": "members",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gap_clusters",
+            "name": "members"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "d225ac8438b9a5abb95902558103d57403de5c1e31ba273e4fa7109937bda81c"
+}

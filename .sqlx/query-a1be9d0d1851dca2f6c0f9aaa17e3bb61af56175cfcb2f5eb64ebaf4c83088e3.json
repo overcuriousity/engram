@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO sleep_runs\n               (id, started, ended, stopped, generation_id, integrated, novel, known, conflicts,\n                rehearsed, found, adopted, reverted, refused, undone, restored, interference,\n                condensed, budget_used, budget, detail)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 21
+    },
+    "nullable": []
+  },
+  "hash": "a1be9d0d1851dca2f6c0f9aaa17e3bb61af56175cfcb2f5eb64ebaf4c83088e3"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO artifact_pairs (a_id, b_id, score, state, created_at)\n                 VALUES (?, ?, 0.9, 'pending', 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0f32d21c2ebc18be7f54bc104f323276680e38c78a91c3a268af53c55491fce8"
+}

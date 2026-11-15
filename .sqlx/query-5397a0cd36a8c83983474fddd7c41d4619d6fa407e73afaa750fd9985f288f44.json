@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_id, via_id FROM artifact_sources\n              WHERE child_id = ? ORDER BY root_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_sources",
+            "name": "root_id"
+          }
+        }
+      },
+      {
+        "name": "via_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_sources",
+            "name": "via_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "5397a0cd36a8c83983474fddd7c41d4619d6fa407e73afaa750fd9985f288f44"
+}

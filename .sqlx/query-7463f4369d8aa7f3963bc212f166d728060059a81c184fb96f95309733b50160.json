@@ -1,0 +1,33 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT state, COUNT(*) AS n FROM jobs WHERE subject = ? GROUP BY state",
+  "describe": {
+    "columns": [
+      {
+        "name": "state",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "state"
+          }
+        }
+      },
+      {
+        "name": "n",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7463f4369d8aa7f3963bc212f166d728060059a81c184fb96f95309733b50160"
+}

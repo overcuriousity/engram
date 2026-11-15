@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE graveyard SET vec = ?, embed_model = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "ecb8a4f2d2c061489b3510e4c3860f4c6090b696f4216c85660875c00123dd75"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_pairs (a_id, b_id, score, state, created_at)\n             VALUES (?, ?, ?, ?, ?)\n             ON CONFLICT(a_id, b_id) DO UPDATE SET state = excluded.state\n               WHERE artifact_pairs.state = 'pending'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "9aca97c3cede76014d71844e3a387efc38bce894c735e4f63859978764427615"
+}

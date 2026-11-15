@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT rank, artifact_id, bears, bearing, joint, n, read\n               FROM decide_evidence WHERE event_id = ? ORDER BY rank",
+  "describe": {
+    "columns": [
+      {
+        "name": "rank",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_evidence",
+            "name": "rank"
+          }
+        }
+      },
+      {
+        "name": "artifact_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_evidence",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "bears",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "decide_evidence",
+            "name": "bears"
+          }
+        }
+      },
+      {
+        "name": "bearing",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_evidence",
+            "name": "bearing"
+          }
+        }
+      },
+      {
+        "name": "joint",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_evidence",
+            "name": "joint"
+          }
+        }
+      },
+      {
+        "name": "n",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_evidence",
+            "name": "n"
+          }
+        }
+      },
+      {
+        "name": "read",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_evidence",
+            "name": "read"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "d5059eb73ba0287fd1b855be6b09fa050cfad62c2886629fb508b24afab05328"
+}

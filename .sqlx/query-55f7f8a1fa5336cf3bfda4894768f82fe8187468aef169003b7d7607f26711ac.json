@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM gap_coverage WHERE kind = ? AND gap_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "55f7f8a1fa5336cf3bfda4894768f82fe8187468aef169003b7d7607f26711ac"
+}

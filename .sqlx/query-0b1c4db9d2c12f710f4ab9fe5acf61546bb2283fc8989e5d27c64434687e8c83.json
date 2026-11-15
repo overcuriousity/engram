@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM decide_events WHERE created_at < ? AND verdict IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "0b1c4db9d2c12f710f4ab9fe5acf61546bb2283fc8989e5d27c64434687e8c83"
+}

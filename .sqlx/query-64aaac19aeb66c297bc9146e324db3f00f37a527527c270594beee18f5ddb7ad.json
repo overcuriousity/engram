@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM segments WHERE corpus_id = ? AND idx >= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "64aaac19aeb66c297bc9146e324db3f00f37a527527c270594beee18f5ddb7ad"
+}

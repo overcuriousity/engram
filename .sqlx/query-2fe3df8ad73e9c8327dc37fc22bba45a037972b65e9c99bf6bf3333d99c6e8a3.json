@@ -1,0 +1,86 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT question_id, era, act_at, ask_at, reason, moved_at FROM decision_thresholds\n              WHERE held = 0 ORDER BY id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "question_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "question_id"
+          }
+        }
+      },
+      {
+        "name": "era",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "era"
+          }
+        }
+      },
+      {
+        "name": "act_at",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "act_at"
+          }
+        }
+      },
+      {
+        "name": "ask_at",
+        "ordinal": 3,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "ask_at"
+          }
+        }
+      },
+      {
+        "name": "reason",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "reason"
+          }
+        }
+      },
+      {
+        "name": "moved_at",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decision_thresholds",
+            "name": "moved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2fe3df8ad73e9c8327dc37fc22bba45a037972b65e9c99bf6bf3333d99c6e8a3"
+}

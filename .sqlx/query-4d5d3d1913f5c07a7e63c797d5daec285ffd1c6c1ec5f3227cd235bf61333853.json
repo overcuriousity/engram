@@ -1,0 +1,110 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, scope, at, bundle, device_key, local_hour, weekday, tz\n               FROM context_events\n              WHERE at >= ?\n              ORDER BY at, id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "scope",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "scope"
+          }
+        }
+      },
+      {
+        "name": "at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "bundle",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "bundle"
+          }
+        }
+      },
+      {
+        "name": "device_key",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "device_key"
+          }
+        }
+      },
+      {
+        "name": "local_hour",
+        "ordinal": 5,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "local_hour"
+          }
+        }
+      },
+      {
+        "name": "weekday",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "weekday"
+          }
+        }
+      },
+      {
+        "name": "tz",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "context_events",
+            "name": "tz"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4d5d3d1913f5c07a7e63c797d5daec285ffd1c6c1ec5f3227cd235bf61333853"
+}

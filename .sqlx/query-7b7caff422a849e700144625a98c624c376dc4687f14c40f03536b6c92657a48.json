@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET state = 'failed' WHERE stage = 'consolidate'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "7b7caff422a849e700144625a98c624c376dc4687f14c40f03536b6c92657a48"
+}

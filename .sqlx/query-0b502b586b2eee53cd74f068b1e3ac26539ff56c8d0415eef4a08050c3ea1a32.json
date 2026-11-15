@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (SELECT CASE WHEN c.shown = 1\n                                 THEN (SELECT COUNT(*) FROM search_candidates s\n                                        WHERE s.event_id = e.id AND s.shown = 1\n                                          AND (s.band < c.band\n                                               OR (s.band = c.band AND s.rank < c.rank)))\n                                 ELSE c.rank END\n                       FROM search_candidates c\n                      WHERE c.event_id = e.id AND c.artifact_id = e.expect_id\n                      ORDER BY c.shown DESC, c.band ASC, c.rank ASC\n                      LIMIT 1) AS rank\n               FROM search_events e\n              WHERE e.verdict = 'hit'",
+  "describe": {
+    "columns": [
+      {
+        "name": "rank",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "0b502b586b2eee53cd74f068b1e3ac26539ff56c8d0415eef4a08050c3ea1a32"
+}

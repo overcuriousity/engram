@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!\" FROM artifacts a\n              WHERE a.provenance = 'merged'\n                AND a.source_count >\n                    (SELECT COUNT(*) FROM artifact_sources WHERE child_id = a.id)\n                AND (a.flags IS NULL OR a.flags NOT LIKE '%orphaned_source%')\n              ORDER BY a.created_at DESC, a.id\n              LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b6f64e3a6260a9c97fe3a77cca484abc49de55fa52c4cbb3aaabbdd28735362f"
+}

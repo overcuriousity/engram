@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH ranked AS (\n               SELECT rehearsal_id, rank, at,\n                      ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n\n                 FROM rehearsal_results WHERE generation_id = ?\n             ),\n             last_two AS (\n               SELECT a.rehearsal_id, a.at\n                 FROM ranked a JOIN ranked b\n                   ON a.rehearsal_id = b.rehearsal_id AND a.n = 1 AND b.n = 2\n                WHERE a.rank IS NOT b.rank\n             )\n             SELECT r.id AS \"id!\", r.created_at AS \"created_at!\", r.class AS \"class!\", r.query AS \"query!\", r.query_vec AS \"query_vec!\", r.embed_model AS \"embed_model!\", r.artifact_id AS \"artifact_id!\", r.source_id AS \"source_id?\", r.retired_at AS \"retired_at?\" FROM rehearsals r\n               JOIN last_two l ON l.rehearsal_id = r.id\n              WHERE r.retired_at IS NULL\n              ORDER BY l.at ASC, r.id ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "class!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "class"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec!",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "embed_model"
+          }
+        }
+      },
+      {
+        "name": "artifact_id!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "source_id?",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "retired_at?",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "retired_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "8c29f6622828f1177bc3312ecba9933b8c861e1b2d2ef1c36070e5e6dd382fef"
+}

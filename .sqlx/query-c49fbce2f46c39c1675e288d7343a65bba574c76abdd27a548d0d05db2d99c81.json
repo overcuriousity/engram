@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM moments\n              WHERE artifact_id = ? AND kind = ?\n                AND (at IS ?\n                     OR (moved_from IS NOT NULL AND moved_from IS ?)\n                     OR (? IS NULL AND moved_at IS NOT NULL AND moved_from IS NULL))",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c49fbce2f46c39c1675e288d7343a65bba574c76abdd27a548d0d05db2d99c81"
+}

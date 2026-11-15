@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET run_after = ? WHERE stage = 'retention'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "bcceb9736a384d2d51631ce2ba441898228ae40688b25e70f7957396fd63ffaf"
+}

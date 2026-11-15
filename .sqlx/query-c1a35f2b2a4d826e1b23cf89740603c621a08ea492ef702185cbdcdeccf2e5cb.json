@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT query, verdict AS \"verdict!\", expect_id FROM (\n           SELECT query, verdict, expect_id, judged_at, id,\n                  ROW_NUMBER() OVER (PARTITION BY query ORDER BY judged_at DESC, id DESC) AS n\n             FROM search_events WHERE verdict IN ('hit', 'gap') AND judged_at >= ?\n         ) WHERE n = 1\n          ORDER BY judged_at DESC, id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "query",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "verdict!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "verdict"
+          }
+        }
+      },
+      {
+        "name": "expect_id",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "expect_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "c1a35f2b2a4d826e1b23cf89740603c621a08ea492ef702185cbdcdeccf2e5cb"
+}

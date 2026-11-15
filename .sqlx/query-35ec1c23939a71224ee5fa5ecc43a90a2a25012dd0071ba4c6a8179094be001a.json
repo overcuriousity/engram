@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT origin FROM corpora WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "origin",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpora",
+            "name": "origin"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "35ec1c23939a71224ee5fa5ecc43a90a2a25012dd0071ba4c6a8179094be001a"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM artifacts a WHERE a.status = 'active' AND a.superseded_by IS NULL AND a.reaped_at IS NULL\n                AND a.embed_state = 'embedded'\n                AND NOT EXISTS (SELECT 1 FROM rehearsals r WHERE r.artifact_id = a.id AND r.retired_at IS NULL)\n                AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.artifact_id = a.id AND o.strength > 0 AND o.excluded_at IS NULL)",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9b43101a404f7b99cb1607d5ebdbb71582d746bff6b00a326888697eb8876e0f"
+}

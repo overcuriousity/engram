@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT judged_by FROM search_events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "judged_by",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "judged_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "6cb8a07593077105af7dc49f40bc370d416b1edd74e153c2dcf70e8bdf8cb2f0"
+}

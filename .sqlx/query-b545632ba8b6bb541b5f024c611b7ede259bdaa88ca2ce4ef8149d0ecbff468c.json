@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET lang = ? WHERE subject = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b545632ba8b6bb541b5f024c611b7ede259bdaa88ca2ce4ef8149d0ecbff468c"
+}

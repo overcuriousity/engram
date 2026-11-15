@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT text, updated_at FROM artifacts WHERE id = 'a'",
+  "describe": {
+    "columns": [
+      {
+        "name": "text",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "updated_at",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "updated_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "8c33c6dea73b7fe711466e7dc4b7ebc384d2dc65d39630d687ac90f133a1d95d"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT root_id FROM artifact_sources\n              WHERE child_id = ? AND restored = 0 ORDER BY root_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "root_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_sources",
+            "name": "root_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b1426e8d93bec41f9a1a8e659dcc35d9e8d8801a588585ddcc4e78204d1291fd"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT target_id AS \"target_id!\" FROM jobs\n                WHERE subject = ? AND stage = ? AND state IN ('pending', 'running')\n                  AND attempts < ?\n                ORDER BY id LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "target_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "98d74b94de956fcf4e3ab3e6aee1309446806b9c39edd5b2a2253ef918e5ae41"
+}

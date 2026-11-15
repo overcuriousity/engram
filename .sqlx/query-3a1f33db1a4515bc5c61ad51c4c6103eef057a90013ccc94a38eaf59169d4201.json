@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET embed_state = 'embedded', embed_model = ?\n             WHERE id = ? AND embed_rev = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "3a1f33db1a4515bc5c61ad51c4c6103eef057a90013ccc94a38eaf59169d4201"
+}

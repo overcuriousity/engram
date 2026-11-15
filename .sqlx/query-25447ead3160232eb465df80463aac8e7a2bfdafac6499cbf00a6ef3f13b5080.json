@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT run_after FROM jobs WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "run_after",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "run_after"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "25447ead3160232eb465df80463aac8e7a2bfdafac6499cbf00a6ef3f13b5080"
+}

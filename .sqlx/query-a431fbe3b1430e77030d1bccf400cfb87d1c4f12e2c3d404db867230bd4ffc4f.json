@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET opened_at = ?\n              WHERE id = ? AND judged_at IS NULL\n                AND EXISTS (SELECT 1 FROM search_candidates\n                             WHERE event_id = ? AND artifact_id = ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "a431fbe3b1430e77030d1bccf400cfb87d1c4f12e2c3d404db867230bd4ffc4f"
+}

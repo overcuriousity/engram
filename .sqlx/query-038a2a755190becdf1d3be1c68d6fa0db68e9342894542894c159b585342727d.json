@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT door FROM search_events",
+  "describe": {
+    "columns": [
+      {
+        "name": "door",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "door"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "038a2a755190becdf1d3be1c68d6fa0db68e9342894542894c159b585342727d"
+}

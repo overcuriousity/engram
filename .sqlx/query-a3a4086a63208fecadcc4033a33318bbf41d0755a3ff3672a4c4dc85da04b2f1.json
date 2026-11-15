@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE decisions SET state = 'waiting', reason = 'unsettled'\n              WHERE id = ? AND state = 'done' AND band = 'act' AND reason = 'changed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a3a4086a63208fecadcc4033a33318bbf41d0755a3ff3672a4c4dc85da04b2f1"
+}

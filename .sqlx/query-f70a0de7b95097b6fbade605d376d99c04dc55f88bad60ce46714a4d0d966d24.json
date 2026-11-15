@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT s.child_id FROM artifact_sources s\n               JOIN artifacts child ON child.id = s.child_id\n               JOIN artifacts root  ON root.id  = s.root_id\n              WHERE child.provenance = 'merged'\n                AND child.status = 'active'\n                AND child.superseded_by IS NULL\n                AND child.embed_state = 'embedded'\n                AND root.status = 'active'\n                AND root.superseded_by IS NULL\n                AND s.restored = 0\n              LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "child_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_sources",
+            "name": "child_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f70a0de7b95097b6fbade605d376d99c04dc55f88bad60ce46714a4d0d966d24"
+}

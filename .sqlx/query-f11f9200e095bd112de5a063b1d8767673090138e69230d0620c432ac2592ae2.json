@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events\n                     SET query = ?, filters = ?, query_vec = ?, vec_dim = ?,\n                         embed_model = ?, created_at = ?, answered = ?, skips = 0,\n                         generation_id = (SELECT id FROM generations WHERE state = 'live'\n                                           ORDER BY created_at DESC, id DESC LIMIT 1)\n                     WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "f11f9200e095bd112de5a063b1d8767673090138e69230d0620c432ac2592ae2"
+}

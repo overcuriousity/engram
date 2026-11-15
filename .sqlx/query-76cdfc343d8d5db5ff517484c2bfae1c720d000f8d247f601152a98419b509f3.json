@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.id AS \"id!\" FROM artifacts a\n                  WHERE a.provenance = 'merged'\n                    AND a.status = 'active'\n                    AND a.superseded_by IS NULL\n                    AND a.embed_state != 'embedded'\n                    AND NOT EXISTS (SELECT 1 FROM artifacts r WHERE r.superseded_by = a.id)\n                    AND a.id > ?\n                  ORDER BY a.id\n                  LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "76cdfc343d8d5db5ff517484c2bfae1c720d000f8d247f601152a98419b509f3"
+}

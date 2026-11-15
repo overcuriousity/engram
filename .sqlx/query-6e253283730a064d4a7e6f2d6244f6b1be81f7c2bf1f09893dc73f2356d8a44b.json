@@ -1,0 +1,122 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", question, questions, answers, standing, not_held, created_at,\n                      verdict, correct\n                 FROM decide_events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "question",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "question"
+          }
+        }
+      },
+      {
+        "name": "questions",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "questions"
+          }
+        }
+      },
+      {
+        "name": "answers",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "answers"
+          }
+        }
+      },
+      {
+        "name": "standing",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "standing"
+          }
+        }
+      },
+      {
+        "name": "not_held",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "not_held"
+          }
+        }
+      },
+      {
+        "name": "created_at",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "verdict",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "verdict"
+          }
+        }
+      },
+      {
+        "name": "correct",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "correct"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "6e253283730a064d4a7e6f2d6244f6b1be81f7c2bf1f09893dc73f2356d8a44b"
+}

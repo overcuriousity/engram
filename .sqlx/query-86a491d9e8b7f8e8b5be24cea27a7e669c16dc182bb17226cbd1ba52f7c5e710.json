@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET snoozed_until = ?                  WHERE id = ? AND done_at IS NULL AND at IS NOT NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "86a491d9e8b7f8e8b5be24cea27a7e669c16dc182bb17226cbd1ba52f7c5e710"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT vapid_private, vapid_public FROM instance WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "vapid_private",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "instance",
+            "name": "vapid_private"
+          }
+        }
+      },
+      {
+        "name": "vapid_public",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "instance",
+            "name": "vapid_public"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "235999f2bf526e84c2bc34e4cf2dfc5d8f93ba8172251d27e91ce8eb4283ccfa"
+}

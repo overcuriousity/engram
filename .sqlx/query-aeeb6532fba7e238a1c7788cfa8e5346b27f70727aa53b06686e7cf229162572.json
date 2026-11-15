@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT keep_artifacts FROM segments WHERE corpus_id = ? AND idx = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "keep_artifacts",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "segments",
+            "name": "keep_artifacts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "aeeb6532fba7e238a1c7788cfa8e5346b27f70727aa53b06686e7cf229162572"
+}

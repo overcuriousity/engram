@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET superseded_by = ?, status = ?, lifecycle_dirty = 1,\n                    retired_at = CASE WHEN ? THEN COALESCE(retired_at, ?) ELSE NULL END\n             WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "9c0c16f9cf5195e08f7f9c1d25ae67ad5244e453090829a0ff3095cb7ca69185"
+}

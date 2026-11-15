@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO sweep_runs (stage, started_at, ended_at, outcome, detail)\n             VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "7ed464dbe265be8e86adb924d5cf1cc091230524b471fd599c6286d35378b224"
+}

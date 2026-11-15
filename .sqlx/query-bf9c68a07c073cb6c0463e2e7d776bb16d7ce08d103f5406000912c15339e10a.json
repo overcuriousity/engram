@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO rehearsals\n               (id, created_at, class, query, query_vec, vec_dim, embed_model, artifact_id, source_id)\n             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "bf9c68a07c073cb6c0463e2e7d776bb16d7ce08d103f5406000912c15339e10a"
+}

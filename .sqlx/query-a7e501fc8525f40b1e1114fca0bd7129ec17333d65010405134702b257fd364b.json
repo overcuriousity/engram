@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT gap_id FROM gap_rejections ORDER BY gap_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "gap_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "gap_rejections",
+            "name": "gap_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a7e501fc8525f40b1e1114fca0bd7129ec17333d65010405134702b257fd364b"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO rehearsal_results (id, rehearsal_id, generation_id, at, rank, outranked_by)\n             VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "06b767d032cddc03bdfcd84ad95a96f7b53a26a7a8c70ceac79c89d67e749005"
+}

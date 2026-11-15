@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET flags = ?, flag_detail = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2a2af0a5b823e58d08cfd8d24b142c676285a683e59fd837c8b2f2dffebf49e5"
+}

@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT lifecycle_dirty FROM artifacts WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "lifecycle_dirty",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "lifecycle_dirty"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2f2c31ba0c2ad845feb7d55017ecc7c90226846335894d9f0e3182081e0e5186"
+}

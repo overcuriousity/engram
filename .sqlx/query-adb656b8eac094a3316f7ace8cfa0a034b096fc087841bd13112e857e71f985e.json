@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT DISTINCT a.corpus_id AS \"corpus_id!\" FROM artifact_sources s\n                       JOIN artifacts a ON a.id = s.root_id\n                      WHERE s.child_id = ? AND a.corpus_id IS NOT NULL\n                      LIMIT 2",
+  "describe": {
+    "columns": [
+      {
+        "name": "corpus_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "corpus_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "adb656b8eac094a3316f7ace8cfa0a034b096fc087841bd13112e857e71f985e"
+}

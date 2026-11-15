@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM context_events WHERE at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "ab08faf30093f0bafea58d6748bf3138c4d070ade6f9c2918c451dd826d883d8"
+}

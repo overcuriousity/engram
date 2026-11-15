@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id, shown FROM search_candidates WHERE band = 0 ORDER BY rank",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "shown",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "shown"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "eb16922431f107fad2aa59f0f8c760481b43284ed07c5f78a82389af7cd31f3e"
+}

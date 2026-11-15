@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM context_clusters",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "e41ce5a951b29d47c2400094dba5e30f7013e59105e10126494ecfe67aa6f9da"
+}

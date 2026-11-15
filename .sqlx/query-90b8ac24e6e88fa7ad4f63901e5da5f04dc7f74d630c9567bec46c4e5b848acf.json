@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM graveyard WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "90b8ac24e6e88fa7ad4f63901e5da5f04dc7f74d630c9567bec46c4e5b848acf"
+}

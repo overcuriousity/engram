@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE pursuits SET state = 'dismissed', closed_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "912225936a1564824dfdc8c9b9df0518b3da676a16d520108233ec4893ca4510"
+}

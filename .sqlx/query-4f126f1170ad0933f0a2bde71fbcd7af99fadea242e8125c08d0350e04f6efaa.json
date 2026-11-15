@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments\n                SET moved_from = COALESCE(moved_from, at), moved_at = ?, at = ?, tz = ?,\n                    snoozed_until = NULL, notified_at = NULL\n              WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "4f126f1170ad0933f0a2bde71fbcd7af99fadea242e8125c08d0350e04f6efaa"
+}

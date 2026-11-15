@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO corpora (id, raw_text, origin, content_hash, status,\n                                  created_at, updated_at)\n             VALUES ('corpus-a', 'text', 'paste', 'h', 'ready', 0, 0)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "067ea0222860f61a61446f1c156cadf205366484d5e90c4ab99ecf77465add03"
+}

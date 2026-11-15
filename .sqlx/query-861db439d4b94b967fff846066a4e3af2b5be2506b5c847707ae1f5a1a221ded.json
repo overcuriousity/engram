@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET class = 0\n              WHERE id IN (\n                SELECT id FROM jobs\n                 WHERE subject = ? AND state = 'pending' AND class = 1\n                   AND max(created_at, run_after) < ?\n                 ORDER BY max(created_at, run_after)\n                 LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "861db439d4b94b967fff846066a4e3af2b5be2506b5c847707ae1f5a1a221ded"
+}

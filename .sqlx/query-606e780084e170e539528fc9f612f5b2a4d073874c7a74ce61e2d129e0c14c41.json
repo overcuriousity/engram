@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET run_after = 0 WHERE stage = 'label' AND target_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "606e780084e170e539528fc9f612f5b2a4d073874c7a74ce61e2d129e0c14c41"
+}

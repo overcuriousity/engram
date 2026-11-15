@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT MIN(COALESCE(explored_from, rank)) + 1 FROM search_candidates\n                  WHERE event_id = ? AND artifact_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "MIN(COALESCE(explored_from, rank)) + 1",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c3ecbfb1c0ac4276791762bbb2fe899bffb258b1cf72392d27d34d0f4a142afe"
+}

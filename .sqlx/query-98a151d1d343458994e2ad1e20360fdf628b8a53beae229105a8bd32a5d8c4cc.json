@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO artifact_versions (artifact_id, n, text, title, caveats, created_at, action_id)\n             SELECT ?, COALESCE(MAX(n), 0) + 1, ?, ?, ?, ?, ?\n               FROM artifact_versions WHERE artifact_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "98a151d1d343458994e2ad1e20360fdf628b8a53beae229105a8bd32a5d8c4cc"
+}

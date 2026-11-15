@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE users SET issuer = ? WHERE issuer = '' AND subject IS NOT ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a0588b6c0fdeb26adeed9757632bac2f86889f50e1ab1ea0480c2aec9d5110f0"
+}

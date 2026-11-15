@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET artifact_id = ?\n              WHERE artifact_id = ? AND done_at IS NULL\n                AND NOT EXISTS (SELECT 1 FROM moments w\n                                 WHERE w.artifact_id = ?\n                                   AND w.kind = moments.kind\n                                   AND w.at IS moments.at\n                                   AND w.rule IS moments.rule\n                                   AND w.done_at IS NULL)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "8dbd7244102f367d1e40d4f4f79168d8e5f5d1cb2ed894a93aff7ac415ea4800"
+}

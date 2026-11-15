@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs SET synthesis_asked = 0, synthesis_by = NULL\n              WHERE synthesis_asked = 1 AND merged_into IS NULL AND judge_unreadable >= ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "4f1607e3426b8889d7b12d08b7a4b8e3e2f2d5d10bb4237facd277a9709aed06"
+}

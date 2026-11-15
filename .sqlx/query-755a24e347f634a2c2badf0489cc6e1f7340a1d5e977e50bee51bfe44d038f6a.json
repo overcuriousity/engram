@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT mime, bytes FROM attachments WHERE corpus_id = ? ORDER BY id LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "mime",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "mime"
+          }
+        }
+      },
+      {
+        "name": "bytes",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "attachments",
+            "name": "bytes"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "755a24e347f634a2c2badf0489cc6e1f7340a1d5e977e50bee51bfe44d038f6a"
+}

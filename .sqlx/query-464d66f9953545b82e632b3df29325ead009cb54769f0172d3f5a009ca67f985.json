@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT trashed_from FROM artifacts WHERE id = ? AND status = 'trashed'",
+  "describe": {
+    "columns": [
+      {
+        "name": "trashed_from",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "trashed_from"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "464d66f9953545b82e632b3df29325ead009cb54769f0172d3f5a009ca67f985"
+}

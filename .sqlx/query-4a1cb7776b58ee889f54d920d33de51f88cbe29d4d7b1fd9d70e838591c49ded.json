@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO jobs (subject, stage, target_kind, target_id, state, attempts, run_after, created_at, seq, class, empty_runs)\n             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?, 0, ?, 0)\n             ON CONFLICT(subject, stage, target_id) DO UPDATE SET\n               state = 'pending', run_after = excluded.run_after, attempts = 0, empty_runs = 0,\n               last_error = NULL, claimed_at = NULL, class = excluded.class\n             WHERE jobs.state IN ('pending', 'done', 'failed')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "4a1cb7776b58ee889f54d920d33de51f88cbe29d4d7b1fd9d70e838591c49ded"
+}

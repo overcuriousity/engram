@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT subject_a FROM decisions WHERE subject_kind = 'write' ORDER BY subject_a",
+  "describe": {
+    "columns": [
+      {
+        "name": "subject_a",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decisions",
+            "name": "subject_a"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b532195341ea08f58fdd3cae508e3ecfd05151820f7caf7b6acb4c34f0bd882c"
+}

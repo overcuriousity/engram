@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO integrations\n               (artifact_id, at, tag, nearest_id, nearest_score, detail)\n             VALUES (?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "627eda122d73ba6646fcd5956b725d08e7c0d15b5275641ace48e431b306f81e"
+}

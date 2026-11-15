@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM artifacts WHERE ordinal = 2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "69eb441caa881d5130e572855a9d6331b0a18abf7cb4b10d7ecc79109526fa73"
+}

@@ -1,0 +1,62 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a_id, b_id, weight, bumped_at FROM artifact_links\n              WHERE state = 'learning' ORDER BY bumped_at ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "a_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "a_id"
+          }
+        }
+      },
+      {
+        "name": "b_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "b_id"
+          }
+        }
+      },
+      {
+        "name": "weight",
+        "ordinal": 2,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "weight"
+          }
+        }
+      },
+      {
+        "name": "bumped_at",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifact_links",
+            "name": "bumped_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "964ca37ee313785f195a9ab1ca630ea11c20b1f82ec31f909a6a42930a4f1e72"
+}

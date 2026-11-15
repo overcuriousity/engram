@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT verdict AS \"verdict!\", judged_by, opened_at FROM search_events WHERE id = 'e'",
+  "describe": {
+    "columns": [
+      {
+        "name": "verdict!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "verdict"
+          }
+        }
+      },
+      {
+        "name": "judged_by",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "judged_by"
+          }
+        }
+      },
+      {
+        "name": "opened_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "opened_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "afda936eac467cbe86cb90ae912d8a92cd0ca6af8e81b96b8bee7923c4d2ee75"
+}

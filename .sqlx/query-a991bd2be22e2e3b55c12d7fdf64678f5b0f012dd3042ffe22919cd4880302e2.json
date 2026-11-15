@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT issuer FROM users WHERE subject = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "issuer",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "users",
+            "name": "issuer"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a991bd2be22e2e3b55c12d7fdf64678f5b0f012dd3042ffe22919cd4880302e2"
+}

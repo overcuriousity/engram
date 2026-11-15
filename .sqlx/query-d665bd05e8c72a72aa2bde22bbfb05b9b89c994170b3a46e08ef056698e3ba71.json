@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_links\n                SET state = 'learning', reason = NULL, kind = NULL, first = NULL,\n                    judged_rev_a = NULL, judged_rev_b = NULL\n              WHERE (a_id, b_id) IN (\n                SELECT l.a_id, l.b_id FROM artifact_links l\n                  JOIN artifacts a ON a.id = l.a_id\n                  JOIN artifacts b ON b.id = l.b_id\n                 WHERE l.state IN ('related', 'unrelated')\n                   AND (a.embed_rev IS NOT l.judged_rev_a OR b.embed_rev IS NOT l.judged_rev_b)\n                 LIMIT ?\n              )",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "d665bd05e8c72a72aa2bde22bbfb05b9b89c994170b3a46e08ef056698e3ba71"
+}

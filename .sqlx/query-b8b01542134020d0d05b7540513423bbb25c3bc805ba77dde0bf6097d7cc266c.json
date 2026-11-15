@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT query_vec, vec_dim FROM search_events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "query_vec",
+        "ordinal": 0,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "vec_dim",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "vec_dim"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "b8b01542134020d0d05b7540513423bbb25c3bc805ba77dde0bf6097d7cc266c"
+}

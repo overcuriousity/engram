@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE graveyard SET vec = NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "98c918f8be8dc5ec3fb0e20ce8cfa527575e0796cbefd555caefb168936d3ed6"
+}

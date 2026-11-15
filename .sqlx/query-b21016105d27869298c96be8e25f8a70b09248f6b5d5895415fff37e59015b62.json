@@ -1,0 +1,158 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", at AS \"at!\", job AS \"job!\", kind AS \"kind!\", subject_id AS \"subject_id!\", survivor_id AS \"survivor_id?\", detail AS \"detail?\", evidence_json AS \"evidence_json!\", pair_score AS \"pair_score?\", undone_at AS \"undone_at?\", undone_by AS \"undone_by?\", undone_reason AS \"undone_reason?\" FROM corpus_actions WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "job!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "job"
+          }
+        }
+      },
+      {
+        "name": "kind!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "subject_id!",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "subject_id"
+          }
+        }
+      },
+      {
+        "name": "survivor_id?",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "survivor_id"
+          }
+        }
+      },
+      {
+        "name": "detail?",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "detail"
+          }
+        }
+      },
+      {
+        "name": "evidence_json!",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "evidence_json"
+          }
+        }
+      },
+      {
+        "name": "pair_score?",
+        "ordinal": 8,
+        "type_info": "Float",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "pair_score"
+          }
+        }
+      },
+      {
+        "name": "undone_at?",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "undone_at"
+          }
+        }
+      },
+      {
+        "name": "undone_by?",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "undone_by"
+          }
+        }
+      },
+      {
+        "name": "undone_reason?",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "corpus_actions",
+            "name": "undone_reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "b21016105d27869298c96be8e25f8a70b09248f6b5d5895415fff37e59015b62"
+}

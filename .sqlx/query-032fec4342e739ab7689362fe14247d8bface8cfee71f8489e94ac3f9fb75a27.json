@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET lifecycle_dirty = 0 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "032fec4342e739ab7689362fe14247d8bface8cfee71f8489e94ac3f9fb75a27"
+}

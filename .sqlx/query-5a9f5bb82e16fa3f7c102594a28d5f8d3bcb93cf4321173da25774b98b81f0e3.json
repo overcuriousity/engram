@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM decide_events",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "5a9f5bb82e16fa3f7c102594a28d5f8d3bcb93cf4321173da25774b98b81f0e3"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET activation = 100.0, activated_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "7f33f1c8d8ee4565cecb7513c8a4e5eb4a82dfe664e8b01c6365c9a6775a11ba"
+}

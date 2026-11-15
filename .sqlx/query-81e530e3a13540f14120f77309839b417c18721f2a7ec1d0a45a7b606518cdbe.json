@@ -1,0 +1,254 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT m.id AS \"id?\", m.artifact_id AS \"artifact_id!\", m.kind AS \"kind!\", m.at AS \"at?\", m.until AS \"until?\", m.tz AS \"tz!\", m.rule AS \"rule?\", m.source AS \"source!\", m.span AS \"span?\", m.done_at AS \"done_at?\", m.snoozed_until AS \"snoozed_until?\", m.notified_at AS \"notified_at?\", m.moved_from AS \"moved_from?\", m.moved_at AS \"moved_at?\", m.series_id AS \"series_id?\", m.origin_corpus_id AS \"origin_corpus_id?\", m.created_at AS \"created_at!\", a.title AS \"title?\", a.text AS \"text!\", a.provenance AS \"provenance!\" FROM moments m JOIN artifacts a ON a.id = m.artifact_id WHERE m.kind = 'due' AND m.done_at IS NULL AND m.at IS NOT NULL\n               AND a.status = 'active'\n               AND (m.notified_at IS NULL OR m.notified_at < COALESCE(m.snoozed_until, m.at))\n             ORDER BY COALESCE(m.snoozed_until, m.at)",
+  "describe": {
+    "columns": [
+      {
+        "name": "id?",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "artifact_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "kind!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "kind"
+          }
+        }
+      },
+      {
+        "name": "at?",
+        "ordinal": 3,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "until?",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "until"
+          }
+        }
+      },
+      {
+        "name": "tz!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "tz"
+          }
+        }
+      },
+      {
+        "name": "rule?",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "rule"
+          }
+        }
+      },
+      {
+        "name": "source!",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "source"
+          }
+        }
+      },
+      {
+        "name": "span?",
+        "ordinal": 8,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "span"
+          }
+        }
+      },
+      {
+        "name": "done_at?",
+        "ordinal": 9,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "done_at"
+          }
+        }
+      },
+      {
+        "name": "snoozed_until?",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "snoozed_until"
+          }
+        }
+      },
+      {
+        "name": "notified_at?",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "notified_at"
+          }
+        }
+      },
+      {
+        "name": "moved_from?",
+        "ordinal": 12,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "moved_from"
+          }
+        }
+      },
+      {
+        "name": "moved_at?",
+        "ordinal": 13,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "moved_at"
+          }
+        }
+      },
+      {
+        "name": "series_id?",
+        "ordinal": 14,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "series_id"
+          }
+        }
+      },
+      {
+        "name": "origin_corpus_id?",
+        "ordinal": 15,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "origin_corpus_id"
+          }
+        }
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 16,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "moments",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "title?",
+        "ordinal": 17,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "title"
+          }
+        }
+      },
+      {
+        "name": "text!",
+        "ordinal": 18,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "text"
+          }
+        }
+      },
+      {
+        "name": "provenance!",
+        "ordinal": 19,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "provenance"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "81e530e3a13540f14120f77309839b417c18721f2a7ec1d0a45a7b606518cdbe"
+}

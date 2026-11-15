@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT parent_id FROM generations WHERE id = ? AND state = 'live'",
+  "describe": {
+    "columns": [
+      {
+        "name": "parent_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "generations",
+            "name": "parent_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4cb048a318ae8ad0259779cd3b474aa4ba423078729e676a9429a240a7ea3739"
+}

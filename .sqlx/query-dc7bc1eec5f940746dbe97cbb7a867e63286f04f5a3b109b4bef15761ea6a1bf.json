@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE segments SET no_promote = 1 WHERE corpus_id = ? AND idx = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "dc7bc1eec5f940746dbe97cbb7a867e63286f04f5a3b109b4bef15761ea6a1bf"
+}

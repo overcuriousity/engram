@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO gap_clusters (key, label, labelled_by, members, created_at)\n             VALUES (?, ?, ?, ?, ?)\n             ON CONFLICT(key) DO UPDATE SET label = excluded.label, labelled_by = excluded.labelled_by",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "af4292cb0ce8faeadfa047fd89fa62b28f0f7581fab72d39165ac5a6b958d5d3"
+}

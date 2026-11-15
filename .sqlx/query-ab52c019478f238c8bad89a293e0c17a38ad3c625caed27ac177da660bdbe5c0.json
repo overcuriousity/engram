@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT vec_dim FROM ask_events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "vec_dim",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "ask_events",
+            "name": "vec_dim"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ab52c019478f238c8bad89a293e0c17a38ad3c625caed27ac177da660bdbe5c0"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifacts SET status = COALESCE(trashed_from, 'active'),\n                        trashed_from = NULL, trashed_at = NULL, lifecycle_dirty = 1\n                 WHERE id = ? AND status = 'trashed'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a441d51de110c5da6437ff1f0cd4094c9c0eb2403e776650c64eb5313c002197"
+}

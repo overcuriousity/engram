@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM rehearsal_results WHERE at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "c2e442da2fb03a3746576110d3097c8253df3159b98ac7efe433088e8ff017c8"
+}

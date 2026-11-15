@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM jobs\n              WHERE subject = ? AND stage = 'segment_window'\n                AND substr(target_id, 1, length(?) + 1) = ? || '#'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "f5f408c3d524979b30cfeba05ce8b8b201c5e7d7dace773ab988abb5974842ff"
+}

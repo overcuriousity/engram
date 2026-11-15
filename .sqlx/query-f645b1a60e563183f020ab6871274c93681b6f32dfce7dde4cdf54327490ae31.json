@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET judged_at = ?, verdict = 'gap' WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f645b1a60e563183f020ab6871274c93681b6f32dfce7dde4cdf54327490ae31"
+}

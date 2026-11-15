@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM artifacts",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "ab15f3bd42c430ef8deb6144da62884ef0e815f5f55363e3f5b3b818b66e8be0"
+}

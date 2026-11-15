@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_readings SET at = 1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "a401eaa2d478271f2e8f36a0b63ad2c3aa5cd12bfdf25a1104b9fca7a00a3760"
+}

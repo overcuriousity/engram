@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE segments SET state = ?, last_error = ?,\n                    keep_artifacts = CASE WHEN ? = 'done' THEN 0 ELSE keep_artifacts END\n             WHERE corpus_id = ? AND idx = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "5c29ab51c8db36c833ca194f7c4bcbeb0a5ea2eb91dce9b21fb35904c78ea616"
+}

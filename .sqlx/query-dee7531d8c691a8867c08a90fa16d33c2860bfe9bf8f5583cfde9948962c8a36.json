@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE observations SET excluded_at = ?\n              WHERE excluded_at IS NULL\n                AND artifact_id IS NOT NULL\n                AND artifact_id NOT IN (SELECT id FROM artifacts)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "dee7531d8c691a8867c08a90fa16d33c2860bfe9bf8f5583cfde9948962c8a36"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT attempts, run_after FROM jobs WHERE target_id = 'src-1#0'",
+  "describe": {
+    "columns": [
+      {
+        "name": "attempts",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      },
+      {
+        "name": "run_after",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "run_after"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1c61fe8e3a3aa5339e3174011270cb1c2a19ccc60eeca213fa76d0f49fc687d6"
+}

@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT target_kind, target_id FROM jobs\n              WHERE stage = 'embed' AND state = 'pending'",
+  "describe": {
+    "columns": [
+      {
+        "name": "target_kind",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_kind"
+          }
+        }
+      },
+      {
+        "name": "target_id",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "522d58c53352493ae001486d806ea0a879a2d8d3ac9018cf5b47145042d065ca"
+}

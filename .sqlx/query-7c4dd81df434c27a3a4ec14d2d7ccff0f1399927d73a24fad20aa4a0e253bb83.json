@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT class FROM jobs WHERE stage = 'relate'",
+  "describe": {
+    "columns": [
+      {
+        "name": "class",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "class"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "7c4dd81df434c27a3a4ec14d2d7ccff0f1399927d73a24fad20aa4a0e253bb83"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_links SET judge_attempts = 2 WHERE state = 'learning'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "e2737d91799c8c9a6c9eb92cd5c12157237dad4f837395745e3be1f6b88c10b9"
+}

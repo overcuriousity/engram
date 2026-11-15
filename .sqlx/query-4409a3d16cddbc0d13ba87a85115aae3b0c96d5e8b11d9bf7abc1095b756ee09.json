@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT artifact_id FROM search_candidates\n          WHERE event_id = ? AND shown = 1 AND band = 0 ORDER BY rank",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4409a3d16cddbc0d13ba87a85115aae3b0c96d5e8b11d9bf7abc1095b756ee09"
+}

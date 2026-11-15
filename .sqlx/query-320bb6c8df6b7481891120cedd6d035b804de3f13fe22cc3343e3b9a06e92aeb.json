@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR REPLACE INTO gap_coverage\n               (kind, gap_id, corpus_id, artifact_id, score, covered_at, covered_by)\n             VALUES (?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "320bb6c8df6b7481891120cedd6d035b804de3f13fe22cc3343e3b9a06e92aeb"
+}

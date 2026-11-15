@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE corpus_actions SET undone_at = ?, undone_by = ?, undone_reason = ?\n              WHERE subject_id = ? AND kind = ? AND undone_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "78d616f6ad150b350b168f8c3f88c13276bfad909157b929cfdc72509c6af3b5"
+}

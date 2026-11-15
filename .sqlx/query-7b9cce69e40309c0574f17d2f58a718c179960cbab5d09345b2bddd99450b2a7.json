@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\" FROM artifacts WHERE corpus_id = ? AND provenance != 'note'\n               AND (segment_idx = ? OR segment_idx IS NULL)\n             ORDER BY ordinal",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7b9cce69e40309c0574f17d2f58a718c179960cbab5d09345b2bddd99450b2a7"
+}

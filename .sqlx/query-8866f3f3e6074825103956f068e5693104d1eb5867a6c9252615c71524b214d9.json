@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs SET attempts = 4 WHERE stage = 'segment_window'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "8866f3f3e6074825103956f068e5693104d1eb5867a6c9252615c71524b214d9"
+}

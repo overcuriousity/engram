@@ -1,0 +1,81 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT e.id AS \"id!\", e.query AS \"query!\", e.expect_id AS \"expect_id!\", e.query_vec, e.embed_model, (SELECT MIN(COALESCE(c.explored_from, c.rank)) + 1\n                       FROM search_candidates c\n                      WHERE c.event_id = e.id AND c.artifact_id = e.expect_id) AS served_rank\n               FROM search_events e\n              WHERE e.verdict = 'hit' AND e.expect_id IS NOT NULL AND e.generation_id = ?\n              ORDER BY e.judged_at DESC, e.id DESC\n              LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "expect_id!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "expect_id"
+          }
+        }
+      },
+      {
+        "name": "query_vec",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "embed_model"
+          }
+        }
+      },
+      {
+        "name": "served_rank",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "ef7ceb06ab84c4d7c14de852f3a349dfc5ac92dfdbb65bf80332213d46e279e5"
+}

@@ -1194,7 +1194,7 @@ mod tests {
         let ids = |rows: Vec<Logged>| rows.into_iter().map(|l| l.id).collect::<Vec<_>>();
         assert_eq!(
             ids(store.waiting_acts_but(&["same_note"], 1).await.unwrap()),
-            [free.clone()]
+            std::slice::from_ref(&free)
         );
         assert_eq!(
             ids(store.waiting_acts(10).await.unwrap()),

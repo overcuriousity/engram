@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM artifact_sources WHERE child_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "6330958e3df2cfa46461bbbf20a2a223ef81b0515fc3a211f9b324801331d955"
+}

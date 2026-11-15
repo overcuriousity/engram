@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) FROM corpus_actions\n              WHERE at > ? AND job = ? AND kind != 'moment'\n                AND json_extract(evidence_json, '$.asked_by') IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "COUNT(*)",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "973fedf586ec58565c3c90250c14b7f0cc84e43958961054d33b3c50549a8324"
+}

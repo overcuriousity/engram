@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO search_candidates\n                   (event_id, rank, artifact_id, score, similarity, shown, band, explored_from)\n                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "5bfab8325792824a81907ec44dcdd127fcfcec2c8857eec704e50247fec50051"
+}

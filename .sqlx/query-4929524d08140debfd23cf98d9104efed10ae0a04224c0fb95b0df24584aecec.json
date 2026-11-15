@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", expect_id AS \"expect_id!\", judged_at AS \"judged_at!\" FROM search_events\n          WHERE judged_at > ? AND judged_at < ?\n            AND verdict = 'hit' AND expect_id IS NOT NULL\n          ORDER BY judged_at ASC, id ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "expect_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "expect_id"
+          }
+        }
+      },
+      {
+        "name": "judged_at!",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "judged_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4929524d08140debfd23cf98d9104efed10ae0a04224c0fb95b0df24584aecec"
+}

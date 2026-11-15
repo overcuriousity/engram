@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 FROM corpus_actions\n              WHERE subject_id = ? AND kind = ? AND undone_at IS NOT NULL LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6367415044cf923065fd8e8901eec5344156d09583ba89f844159f83323ba5ad"
+}

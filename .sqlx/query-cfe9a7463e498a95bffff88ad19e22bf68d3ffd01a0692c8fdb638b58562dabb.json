@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs\n                SET state = 'pending', detail = NULL, obsolete_id = NULL, merged_into = NULL,\n                    decided_by = NULL, judge_attempts = 0, judge_unreadable = 0\n              WHERE state = 'stale'\n                AND (a_id = ?1 OR b_id = ?1)\n                AND NOT EXISTS (\n                      SELECT 1 FROM artifacts x\n                       WHERE x.id IN (artifact_pairs.a_id, artifact_pairs.b_id)\n                         AND (x.status <> 'active' OR x.superseded_by IS NOT NULL) AND x.status <> 'trashed')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "cfe9a7463e498a95bffff88ad19e22bf68d3ffd01a0692c8fdb638b58562dabb"
+}

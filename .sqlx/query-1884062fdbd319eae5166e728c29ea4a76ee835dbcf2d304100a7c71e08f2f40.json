@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT run_after, empty_runs FROM jobs WHERE stage = ? AND state = 'pending'",
+  "describe": {
+    "columns": [
+      {
+        "name": "run_after",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "run_after"
+          }
+        }
+      },
+      {
+        "name": "empty_runs",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "empty_runs"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1884062fdbd319eae5166e728c29ea4a76ee835dbcf2d304100a7c71e08f2f40"
+}

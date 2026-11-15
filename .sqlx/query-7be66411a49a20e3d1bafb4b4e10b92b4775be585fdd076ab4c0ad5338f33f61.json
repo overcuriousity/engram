@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET rule = ?, series_id = COALESCE(series_id, id)\n              WHERE artifact_id = ? AND kind = 'due' AND done_at IS NULL AND at IS ?\n                AND (rule IS NULL OR rule <> ?)\n                AND moved_at IS NULL AND source <> 'set'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "7be66411a49a20e3d1bafb4b4e10b92b4775be585fdd076ab4c0ad5338f33f61"
+}

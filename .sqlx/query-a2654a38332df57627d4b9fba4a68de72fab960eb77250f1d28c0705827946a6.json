@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO ask_citations (event_id, n, artifact_id, score, used)\n                 VALUES (?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "a2654a38332df57627d4b9fba4a68de72fab960eb77250f1d28c0705827946a6"
+}

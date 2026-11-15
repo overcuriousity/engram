@@ -1,0 +1,170 @@
+{
+  "db_name": "SQLite",
+  "query": "WITH latest AS (\n               SELECT id, rehearsal_id, at, rank, outranked_by,\n                      ROW_NUMBER() OVER (PARTITION BY rehearsal_id ORDER BY at DESC, id DESC) AS n\n                 FROM rehearsal_results WHERE generation_id = ?\n             )\n             SELECT r.id AS \"id!\", r.created_at AS \"created_at!\", r.class AS \"class!\", r.query AS \"query!\", r.query_vec AS \"query_vec!\", r.embed_model AS \"embed_model!\", r.artifact_id AS \"artifact_id!\", r.source_id AS \"source_id?\", r.retired_at AS \"retired_at?\", x.id AS \"x_id!\", x.at AS x_at, x.rank AS x_rank, x.outranked_by AS x_outranked_by\n               FROM latest x JOIN rehearsals r ON r.id = x.rehearsal_id\n              WHERE x.n = 1 AND r.retired_at IS NULL\n              ORDER BY x.at DESC, x.id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "created_at!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "created_at"
+          }
+        }
+      },
+      {
+        "name": "class!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "class"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec!",
+        "ordinal": 4,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model!",
+        "ordinal": 5,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "embed_model"
+          }
+        }
+      },
+      {
+        "name": "artifact_id!",
+        "ordinal": 6,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "source_id?",
+        "ordinal": 7,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "source_id"
+          }
+        }
+      },
+      {
+        "name": "retired_at?",
+        "ordinal": 8,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsals",
+            "name": "retired_at"
+          }
+        }
+      },
+      {
+        "name": "x_id!",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "x_at",
+        "ordinal": 10,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "at"
+          }
+        }
+      },
+      {
+        "name": "x_rank",
+        "ordinal": 11,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "rank"
+          }
+        }
+      },
+      {
+        "name": "x_outranked_by",
+        "ordinal": 12,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "rehearsal_results",
+            "name": "outranked_by"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "89d158441efe21d96a22f5f498a2b6242ccda5fe27c173f3cfd3919e572e9c69"
+}

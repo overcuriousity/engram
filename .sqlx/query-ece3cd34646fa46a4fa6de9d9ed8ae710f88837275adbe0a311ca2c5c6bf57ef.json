@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET done_at = ? WHERE id = ? AND done_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ece3cd34646fa46a4fa6de9d9ed8ae710f88837275adbe0a311ca2c5c6bf57ef"
+}

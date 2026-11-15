@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO observations\n           (id, created_at, generation_id, query, query_vec, vec_dim,\n            embed_model, artifact_id, rank, source, strength, event_id)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 12
+    },
+    "nullable": []
+  },
+  "hash": "b9b72d2fe52f999f63a119ae4a46a6b7783a4fb7462c7263718bbe92d634d2ed"
+}

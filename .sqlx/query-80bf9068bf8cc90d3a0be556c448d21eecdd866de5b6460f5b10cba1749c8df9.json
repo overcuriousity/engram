@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM artifact_links WHERE a_id = ? AND b_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "80bf9068bf8cc90d3a0be556c448d21eecdd866de5b6460f5b10cba1749c8df9"
+}

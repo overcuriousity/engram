@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs SET judge_attempts = judge_attempts + 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "a9f69b9725ba862481aaeabde3e413bdfe27ffdc1ec46dd6dc47352665282898"
+}

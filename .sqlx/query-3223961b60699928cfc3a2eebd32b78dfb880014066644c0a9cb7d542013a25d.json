@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE moments SET series_id = ?\n              WHERE series_id IS NULL\n                AND (id = ?\n                     OR (kind = 'due'\n                         AND artifact_id = (SELECT artifact_id FROM moments\n                                             WHERE id = ? AND series_id IS NULL)\n                         AND rule = (SELECT rule FROM moments\n                                      WHERE id = ? AND series_id IS NULL)))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "3223961b60699928cfc3a2eebd32b78dfb880014066644c0a9cb7d542013a25d"
+}

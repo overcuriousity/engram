@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT query FROM search_events ORDER BY created_at",
+  "describe": {
+    "columns": [
+      {
+        "name": "query",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f0e4d2be895ded080fb4e2099a22c293bccd43af2ce6244909861fb86a7b4cbf"
+}

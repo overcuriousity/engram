@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE generations SET created_at = 200 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "09d7850ce330520bf8c50d89c1b3aafa191bc7365274e8657fc89a4f99d65934"
+}

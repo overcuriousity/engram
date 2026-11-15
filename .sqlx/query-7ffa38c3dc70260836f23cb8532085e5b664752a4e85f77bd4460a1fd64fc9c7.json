@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM interaction_events WHERE at < ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "7ffa38c3dc70260836f23cb8532085e5b664752a4e85f77bd4460a1fd64fc9c7"
+}

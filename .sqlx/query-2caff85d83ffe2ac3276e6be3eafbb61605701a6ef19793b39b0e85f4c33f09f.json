@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE artifact_pairs\n                SET state = 'dismissed', detail = ?, decided_by = ?, merged_into = NULL\n              WHERE merged_into = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "2caff85d83ffe2ac3276e6be3eafbb61605701a6ef19793b39b0e85f4c33f09f"
+}

@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE jobs\n                SET state = 'running', claimed_at = ?, attempts = attempts + 1\n              WHERE id = (\n                SELECT id FROM jobs\n                 WHERE subject = ? AND state = 'pending' AND run_after <= ?\n                 ORDER BY class, attempts, seq, id LIMIT 1\n              )\n              RETURNING id, stage, target_kind, target_id, attempts",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "stage",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "stage"
+          }
+        }
+      },
+      {
+        "name": "target_kind",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_kind"
+          }
+        }
+      },
+      {
+        "name": "target_id",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "target_id"
+          }
+        }
+      },
+      {
+        "name": "attempts",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "jobs",
+            "name": "attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "15b461464b2c1260ca643fdb7175d11ae61a1c145a1af9362cf674788781213f"
+}

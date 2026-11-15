@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_label_failures SET retry_at = 0",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "89eae523db9934768a0a9dd6b7c6b74d5cffd3ab3fff33495d053de13710f221"
+}
