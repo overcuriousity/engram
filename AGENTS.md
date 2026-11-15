@@ -45,6 +45,7 @@ https://github.com/overcuriousity/overcuriousity-dev-manifest/tree/v2026.11.1/ma
 | `oc-kit` dependency | ported into engram's own modules | owner's decision; `oc-check` is a dev-dependency only |
 | musl for both targets | aarch64 is `aarch64-unknown-linux-gnu` | bundled SQLite and the C dependencies were not tried under cargo-zigbuild |
 | no decorative motion | the vector background (`[ui.background]`) stays | owner's decision; it passes the CSP and contrast rules and is static under `prefers-reduced-motion` |
+| from 150rem a third region (22rem) | none in the workspace: what is due stays under the box at every width | owner's decision |
 | deployment keys top level, app settings under `[app]` | `public_url`, `trusted_proxies`, `allow_plain_http` under `[server]`; existing sections stay | restructuring breaks live configs; **to be streamlined later** (ROADMAP) |
 | origin check on every state-changing request | a bearer request without a cookie skips it | the extension posts from its own origin; not verified in a browser here |
 | deliberate tagged releases | every green push to master is released as `YYYY.MMDD.N` | owner's decision |
