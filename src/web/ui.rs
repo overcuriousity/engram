@@ -5866,7 +5866,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "needs node and a headless Chrome; see `test_support::measure`"]
-    async fn wide_windows_get_list_and_detail_then_a_third_region() {
+    async fn wide_windows_get_list_and_detail_and_no_third_region() {
         use askama::Template as _;
 
         let (app, cookie, _core) = app_session_and_core().await;
@@ -5888,7 +5888,12 @@ mod tests {
                 r#"class="pane-open regions regions-rail-focus-source"#,
             );
         assert!(page.contains(r#"class="region-rail rail">"#), "{page}");
-        assert!(page.contains(r#"class="region-side" data-off"#), "{page}");
+        assert!(page.contains(r#"class="region-side" hidden"#), "{page}");
+        let idle = get_body(&app, &cookie, "/ui").await;
+        assert!(
+            idle.contains(r#"<div id="idle" class="region-side">"#),
+            "{idle}"
+        );
         let pages = [("results".to_string(), page)];
 
         let p = &crate::web::test_support::measure(&pages, "1500")["pages"][0];
@@ -5902,7 +5907,13 @@ mod tests {
         crate::web::test_support::nothing_is_broken(&serde_json::json!({"pages": [p]}), "2560");
         assert!(near(&p["railRem"], 28.0), "the list at 2560px: {p}");
         assert!(near(&p["focusPaneRem"], 52.0), "the detail at 2560px: {p}");
-        assert!(near(&p["sideRem"], 22.0), "the due rail at 2560px: {p}");
+        assert!(near(&p["sideRem"], 0.0), "no third region at 2560px: {p}");
+
+        // Idle, what is due sits under the box at the box's width, however wide the window is.
+        let pages = [("idle".to_string(), idle)];
+        let p = &crate::web::test_support::measure(&pages, "2560")["pages"][0];
+        crate::web::test_support::nothing_is_broken(&serde_json::json!({"pages": [p]}), "2560");
+        assert!(near(&p["sideRem"], 52.0), "the idle column at 2560px: {p}");
     }
 
     #[tokio::test]
@@ -5942,7 +5953,7 @@ mod tests {
             )
             .replace(
                 r#"<div id="idle" class="region-side">"#,
-                r#"<div id="idle" class="region-side" data-off>"#,
+                r#"<div id="idle" class="region-side" hidden>"#,
             )
             .replace(
                 r#"class="regions regions-rail-focus-source"#,

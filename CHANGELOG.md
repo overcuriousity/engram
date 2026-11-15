@@ -38,6 +38,7 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 - A note is read again when its text changes, not each time it is embedded. A note the model said does not answer a gap is not put to that gap again until the note, the gap's words, the model or the line changes.
 - `consolidate.scan_min` below 0.70 is refused at start.
 - `--replay-decisions` logs to stderr, ends at the first call the endpoint does not answer and then exits 1 with what it had.
+- What is due, the offer and the idle line stay under the box at every width; the third column on very wide windows is gone.
 
 ### Removed
 - `auth.oidc.redirect_url`: derived from `server.public_url`. A config that still sets it is refused.
