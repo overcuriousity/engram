@@ -833,8 +833,8 @@ impl Store {
     /// Decided after the act line last moved: model acts kept or undone, and answered Unsure rows (`corrected`
     /// as undone, and so one confirmed whose action was undone since). Not a refused act (no journal
     /// row, or `refused`), a check or the pursuit gate. An undone merge is one decision however many
-    /// rows it wrote. `asks_open` leaves out an act demoted to an ask (`restricted`, `no_writer`):
-    /// it was over the line already, and a lower line would not act on it either.
+    /// rows it wrote. `asks_open` leaves out an act put to a person (`restricted`, `no_writer`,
+    /// `rescue_refused`): it was over the line already, and a lower line would not act on it either.
     pub async fn act_record(&self, question_id: &str, era: &str) -> Result<ActRecord> {
         let since = self.moved_at(question_id, era, false).await?;
         let r = sqlx::query!(
@@ -856,7 +856,7 @@ impl Store {
             r#"SELECT COUNT(*) AS "n!: i64" FROM decisions
                 WHERE question_id = ? AND era = ? AND band = 'ask' AND state IN ('waiting', 'open')
                   AND subject_kind NOT IN ('write', 'pursuit')
-                  AND COALESCE(reason, '') NOT IN ('restricted', 'no_writer')"#,
+                  AND COALESCE(reason, '') NOT IN ('restricted', 'no_writer', 'rescue_refused')"#,
             question_id,
             era
         )
@@ -1785,6 +1785,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rescue_put_to_a_person_is_not_a_row_a_lower_line_would_act_on() {
+        let store = Store::memory().await.unwrap();
+        let q = "reap_worth";
+        logged_n(&store, q, "artifact", Band::Ask, State::Waiting, None, 2).await;
+        // The model's yes was over the line and its rescue could not be written: asked, waiting
+        // for a seat or seated.
+        for state in [State::Waiting, State::Open] {
+            for id in logged_n(&store, q, "artifact", Band::Ask, state, None, 1).await {
+                store
+                    .set_decision_reason(&id, "rescue_refused")
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(store.act_record(q, "m/v1").await.unwrap().asks_open, 2);
+    }
+
+    #[tokio::test]
     async fn only_what_was_decided_after_the_last_move_counts() {
         let store = Store::memory().await.unwrap();
         let q = "same_note";
@@ -1973,11 +1991,7 @@ mod tests {
         }
         assert_eq!(store.lapse_asks(now() - 50).await.unwrap(), 2);
         assert_eq!(
-            store
-                .ask_record(q, "m/v1")
-                .await
-                .unwrap()
-                .lapsed_since_move,
+            store.ask_record(q, "m/v1").await.unwrap().lapsed_since_move,
             2
         );
         store
@@ -1991,11 +2005,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            store
-                .ask_record(q, "m/v1")
-                .await
-                .unwrap()
-                .lapsed_since_move,
+            store.ask_record(q, "m/v1").await.unwrap().lapsed_since_move,
             0
         );
         // The act line's evidence is where it was, the lines are, and nothing reads as a move.

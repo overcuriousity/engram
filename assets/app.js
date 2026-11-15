@@ -861,9 +861,10 @@
       run();
     });
 
-    // `boxVerbs` and `boxBusy` own Decide's state and announce neither; the toggle reads it off the button.
+    // `boxVerbs` and `boxBusy` own Decide's state and announce neither, and a swap brings a new button:
+    // the toggle reads it off whichever Decide is there.
     var verbs = form.querySelector('.verbs');
-    if (verbs && window.MutationObserver) {
+    if (verbs) {
       new MutationObserver(follow).observe(verbs, {
         attributes: true, attributeFilter: ['disabled'], childList: true, subtree: true,
       });

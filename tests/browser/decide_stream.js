@@ -76,51 +76,154 @@ const SCENARIOS = {
   error: `
     q('Should I keep it?');
     press();
-    press();
     later(1500, function () { send({}); });
   `,
   invalid: `
     q('Which one?');
-    press();
-    kind('choice');
-    document.querySelector('[name="decide-option"]').value = 'keep';
-    press();
-    later(500, function () { send({}); });
+    later(0, function () {
+      toggle();
+      kind('choice');
+      field('decide-option').value = 'keep';
+      pressRow();
+      later(500, function () { send({}); });
+    });
   `,
-  // Enter in the row presses Decide: a staged file disables it, an empty box says why.
+  // The toggle opens the row, the row's own Decide runs what it shows, and closing it is yes / no again
+  // with the fields kept.
+  row: `
+    var row = document.getElementById('decide-row');
+    var t = document.querySelector('[data-decide-toggle]');
+    var box = document.querySelector('textarea[name="q"]');
+    var out = {};
+    q('Which one?');
+    later(0, function () {
+      out.toggleLive = !t.disabled;
+      toggle();
+      out.opened = !row.hidden && t.getAttribute('aria-expanded') === 'true';
+      out.focusAfterOpen = document.activeElement.name;
+      kind('choice');
+      out.optionsShown = !document.getElementById('decide-options').hidden;
+      var names = document.querySelectorAll('[name="decide-option"]');
+      names[0].value = 'keep';
+      names[1].value = 'switch';
+      field('decide-desc').value = 'stay with it';
+      pressRow();
+    });
+    later(1200, function () {
+      out.statusAfterRow = document.getElementById('ask-status').textContent;
+      box.blur();
+      toggle();
+      out.closed = row.hidden && t.getAttribute('aria-expanded') === 'false';
+      // A pressed toggle must not send the focus to the box: on a phone that raises the keyboard.
+      out.boxFocusedOnClose = document.activeElement === box;
+      press();
+    });
+    later(2400, function () {
+      out.toggleLiveAgain = !t.disabled;
+      toggle();
+      out.reopened = !row.hidden;
+      out.kindAfterReopen = row.querySelector('input[name="decide-kind"]:checked').value;
+      out.optionsShownAfterReopen = !document.getElementById('decide-options').hidden;
+      out.optionsAfterReopen = Array.prototype.map.call(
+        document.querySelectorAll('[name="decide-option"]'), function (i) { return i.value; });
+      out.descAfterReopen = field('decide-desc').value;
+      send(out);
+    });
+  `,
+  // A rating is 1 to N: the plain numbers, then the two ends named, then a top held to ten.
+  rating: `
+    var n = field('decide-top');
+    var label = document.querySelector('[data-decide-top]');
+    var out = {};
+    var set = function (value, event) {
+      n.value = value;
+      if (event) n.dispatchEvent(new Event(event, { bubbles: true }));
+    };
+    q('How sure is it?');
+    later(0, function () {
+      toggle();
+      kind('score');
+      out.ratingShown = !document.getElementById('decide-rating').hidden;
+      out.topAtStart = n.value;
+      out.labelAtStart = label.textContent;
+      pressRow();
+    });
+    later(1200, function () {
+      set('7', 'input');
+      out.labelAfterSeven = label.textContent;
+      field('decide-low').value = 'not at all';
+      field('decide-high').value = ' completely ';
+      press();
+    });
+    later(2400, function () {
+      set('40', 'change');
+      out.topAfterChange = n.value;
+      set('0', 'input');
+      out.labelAfterZero = label.textContent;
+      out.topWhileTyping = n.value;
+      set('99');
+      n.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+      out.topAfterEnter = n.value;
+    });
+    later(3600, function () { send(out); });
+  `,
+  // Enter in the row presses its Decide: a staged file disables it, an empty box says why.
   enter: `
-    q('Should I keep it?');
-    press();
+    var t = document.querySelector('[data-decide-toggle]');
+    var out = {};
     var enter = function () {
       document.getElementById('decide-row').querySelector('input[name="decide-kind"]:checked')
         .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
     };
-    document.getElementById('staged').hidden = false;
     q('Should I keep it?');
-    enter();
-    var staged = document.getElementById('decide-problem').textContent;
-    document.getElementById('staged').hidden = true;
-    q('');
-    enter();
-    later(500, function () { send({ problemWhenStaged: staged }); });
+    later(0, function () {
+      toggle();
+      document.getElementById('staged').hidden = false;
+      q('Should I keep it?');
+      out.rowDecideOffWhenStaged = document.querySelector('[data-verb="decide-row"]').disabled;
+      enter();
+      out.problemWhenStaged = document.getElementById('decide-problem').textContent;
+      document.getElementById('staged').hidden = true;
+      q('');
+      enter();
+    });
+    later(500, function () {
+      // Open, the toggle stays live over an empty box, or a pointer could not close the row.
+      out.toggleLiveWhileOpen = !t.disabled;
+      out.problemText = document.getElementById('decide-problem').textContent;
+      toggle();
+      out.closed = document.getElementById('decide-row').hidden;
+      out.toggleOffOnceClosed = t.disabled;
+      send(out);
+    });
   `,
   // 390 px: eight options of forty characters, then a result naming them with eight rail rows.
   narrow: `
     q('Which of these eight should I keep for the winter?');
-    press();
-    kind('choice');
-    var add = document.querySelector('[data-decide-add="option"]');
-    for (var i = 0; i < 6; i++) add.click();
-    var names = document.querySelectorAll('[name="decide-option"]');
-    for (var j = 0; j < names.length; j++) {
-      names[j].value = ('option ' + (j + 1) + ' with a name forty characters long').slice(0, 40);
-    }
-    var row = measure();
-    var addDisabled = add.disabled;
-    press();
-    later(4500, function () {
-      send({ optionCount: names.length, addDisabled: addDisabled, rowOpen: row, result: measure(),
-        decideHeight: document.querySelector('[data-verb="decide"]').getBoundingClientRect().height });
+    later(0, function () {
+      toggle();
+      kind('choice');
+      var add = document.querySelector('[data-decide-add="option"]');
+      for (var i = 0; i < 6; i++) add.click();
+      var names = document.querySelectorAll('[name="decide-option"]');
+      for (var j = 0; j < names.length; j++) {
+        names[j].value = ('option ' + (j + 1) + ' with a name forty characters long').slice(0, 40);
+      }
+      var name = names[0].getBoundingClientRect();
+      var desc = field('decide-desc').getBoundingClientRect();
+      var row = measure();
+      var addDisabled = add.disabled;
+      kind('score');
+      var rating = measure();
+      kind('choice');
+      pressRow();
+      later(4500, function () {
+        var t = document.querySelector('[data-decide-toggle]').getBoundingClientRect();
+        send({ optionCount: names.length, addDisabled: addDisabled, rowOpen: row, rating: rating,
+          result: measure(), stacked: desc.top >= name.bottom && desc.left === name.left,
+          toggleWidth: t.width, toggleHeight: t.height,
+          decideHeight: document.querySelector('[data-verb="decide"]').getBoundingClientRect().height });
+      });
     });
   `,
 };
@@ -142,6 +245,9 @@ const HARNESS = `
       box.dispatchEvent(new Event('input', { bubbles: true }));
     }
     function press() { document.querySelector('[data-verb="decide"]').click(); }
+    function toggle() { document.querySelector('[data-decide-toggle]').click(); }
+    function pressRow() { document.querySelector('[data-verb="decide-row"]').click(); }
+    function field(name) { return document.querySelector('#decide-row [name="' + name + '"]'); }
     function kind(v) {
       var r = document.querySelector('input[name="decide-kind"][value="' + v + '"]');
       r.click();
@@ -150,7 +256,7 @@ const HARNESS = `
     function measure() {
       var de = document.documentElement;
       var small = [];
-      var targets = document.querySelectorAll('.verbs .oc-btn, #decide-row input, #decide-row button, #decide-row summary');
+      var targets = document.querySelectorAll('.verbs .oc-btn, #decide-row input, #decide-row button');
       for (var i = 0; i < targets.length; i++) {
         var el = targets[i];
         // A radio is drawn by its chip; the chip is what the thumb hits.
@@ -182,22 +288,36 @@ const HARNESS = `
 `;
 
 const PLUS = '<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M12 5v14"/></svg>';
+const CHEVRON = '<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>';
+// As `_decide_verb.html`, `_decide_option.html` and `_decide_row.html` render them.
+const GROUP = '<span class="decide-group" role="group" aria-label="Decide">' +
+  '<button class="oc-btn" type="button" data-verb="decide" disabled title="Type or attach something first">Decide</button>' +
+  '<button class="oc-btn oc-btn--icon decide-toggle" type="button" data-decide-toggle disabled aria-expanded="false" ' +
+  'aria-controls="decide-row" aria-label="Choose the answer shape" data-oc-tip="Choose the answer shape">' + CHEVRON + '</button></span>';
 const OPTION = '<span class="decide-option">' +
-  '<input class="oc-input" name="decide-option" maxlength="40" aria-label="Option">' +
-  '<details><summary>describe</summary><input class="oc-input" name="decide-desc" aria-label="What this option means"></details>' +
+  '<label class="decide-field"><span class="muted">Option</span>' +
+  '<input class="oc-input" name="decide-option" maxlength="40" autocomplete="off"></label>' +
+  '<label class="decide-field decide-field--wide"><span class="muted">What it means (optional)</span>' +
+  '<input class="oc-input" name="decide-desc" autocomplete="off"></label>' +
   '</span>';
-const LEVEL = '<span class="decide-level"><input class="oc-input" name="decide-level" aria-label="Level"></span>';
 const ROW = '<fieldset id="decide-row" class="decide-row" hidden><legend class="muted">Answer</legend>' +
   '<label class="chip"><input type="radio" name="decide-kind" value="noul" checked><span>yes / no</span></label>' +
   '<label class="chip"><input type="radio" name="decide-kind" value="choice"><span>options</span></label>' +
-  '<label class="chip"><input type="radio" name="decide-kind" value="score"><span>scale</span></label>' +
+  '<label class="chip"><input type="radio" name="decide-kind" value="score"><span>rating</span></label>' +
   '<div id="decide-options" class="decide-list" hidden>' + OPTION + OPTION +
-  '<button class="oc-btn oc-btn--icon" type="button" data-decide-add="option" aria-label="Add an option">' + PLUS + '</button></div>' +
-  '<div id="decide-levels" class="decide-list" hidden><span class="muted">lowest first</span>' + LEVEL + LEVEL +
-  '<button class="oc-btn oc-btn--icon" type="button" data-decide-add="level" aria-label="Add a level">' + PLUS + '</button></div>' +
+  '<button class="oc-btn" type="button" data-decide-add="option">' + PLUS + '<span>Add an option</span></button></div>' +
+  '<div id="decide-rating" class="decide-list" hidden>' +
+  '<label class="decide-field decide-field--top"><span class="muted">Rating from 1 to</span>' +
+  '<input class="oc-input" type="number" name="decide-top" min="2" max="10" step="1" value="5" inputmode="numeric" autocomplete="off"></label>' +
+  '<label class="decide-field"><span class="muted">1 means</span>' +
+  '<input class="oc-input" name="decide-low" maxlength="40" autocomplete="off"></label>' +
+  '<label class="decide-field"><span class="muted"><span data-decide-top>5</span> means</span>' +
+  '<input class="oc-input" name="decide-high" maxlength="40" autocomplete="off"></label></div>' +
   '<p id="decide-problem" class="muted" role="status"></p>' +
-  '<template id="decide-option-row">' + OPTION + '</template>' +
-  '<template id="decide-level-row">' + LEVEL + '</template></fieldset>';
+  '<div class="decide-run"><button class="oc-btn" type="button" data-verb="decide-row" disabled ' +
+  'title="Type or attach something first">Decide</button>' +
+  '<span class="muted decide-enter">or <kbd>↵</kbd> in any field</span></div>' +
+  '<template id="decide-option-row">' + OPTION + '</template></fieldset>';
 
 const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Decide</title>
@@ -210,7 +330,7 @@ const PAGE = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <div id="staged" class="staged" hidden></div>
 <div class="verbs">
 <span id="ask-verb-slot"><button class="oc-btn" type="button" data-verb="ask" disabled>Ask</button></span>
-<span id="decide-verb-slot"><button class="oc-btn" type="button" data-verb="decide" disabled aria-expanded="false" aria-controls="decide-row">Decide</button></span>
+<span id="decide-verb-slot">${GROUP}</span>
 <button class="oc-btn" type="button" data-verb="capture" disabled>Capture</button>
 <button id="ask-stop" class="oc-btn" type="button" hidden>Stop</button>
 <span id="search-spinner" class="spinner">searching…</span><span class="verbs-spacer"></span></div>
@@ -386,10 +506,23 @@ async function keyboard(url) {
   const type = (text) => cmd('Input.insertText', { text });
   // What has focus, by the name a test can read.
   const focus = () => js(`(function (el) {
-    return el.getAttribute('data-decide-add') ? 'add-' + el.getAttribute('data-decide-add')
-      : el.tagName === 'SUMMARY' ? 'summary' : el.name || el.tagName.toLowerCase();
+    return el.hasAttribute('data-decide-toggle') ? 'toggle'
+      : el.getAttribute('data-decide-add') ? 'add-' + el.getAttribute('data-decide-add')
+      : el.getAttribute('data-verb') ? 'verb-' + el.getAttribute('data-verb')
+      : el.name || el.tagName.toLowerCase();
   })(document.activeElement)`);
   const rowOpen = () => js(`!document.getElementById('decide-row').hidden`);
+  const status = () => js(`document.getElementById('ask-status').textContent`);
+  const expanded = () => js(`document.querySelector('[data-decide-toggle]').getAttribute('aria-expanded')`);
+  // From the box: Ask, Decide, then the toggle beside it.
+  const toToggle = async () => {
+    const seen = [];
+    for (let i = 0; i < 3; i++) {
+      await key('Tab');
+      seen.push(await focus());
+    }
+    return seen;
+  };
 
   await cmd('Page.navigate', { url });
   while (!(await js(`!!window.engramDecide && document.readyState !== 'loading'`))) await wait(50);
@@ -397,31 +530,45 @@ async function keyboard(url) {
   const out = {};
   await js(`document.querySelector('textarea[name="q"]').focus()`);
   await type('Which one?');
+  // Closed, the chord is a yes / no decision at once.
   await key('Enter', ALT);
-  out.openedByChord = await rowOpen();
+  out.rowOpenAfterChord = await rowOpen();
+  await wait(1000);
+  out.statusAfterChord = await status();
+  out.tabsToToggle = await toToggle();
+  await key('Enter');
+  out.openedByToggle = await rowOpen();
+  out.expandedAfterOpen = await expanded();
   out.focusAfterOpen = await focus();
   await key('ArrowRight');
   out.kindAfterArrow = await js(`document.querySelector('input[name="decide-kind"]:checked').value`);
   out.optionsShown = await js(`!document.getElementById('decide-options').hidden`);
   out.tabs = [];
   const names = ['keep', 'switch'];
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 6; i++) {
     await key('Tab');
     const f = await focus();
     out.tabs.push(f);
     if (f === 'decide-option') await type(names.shift() || '');
   }
-  // Back from the add button to the second name, and run it from there.
+  // Back from the row's Decide to the second name, and run it from there.
+  await key('Tab', SHIFT);
   await key('Tab', SHIFT);
   await key('Tab', SHIFT);
   out.focusBeforeEnter = await focus();
   await key('Enter');
   await wait(1000);
-  out.statusAfterEnter = await js(`document.getElementById('ask-status').textContent`);
+  out.statusAfterEnter = await status();
   await key('Escape');
   out.closedByEscape = !(await rowOpen());
+  out.expandedAfterEscape = await expanded();
   out.focusAfterEscape = await focus();
+  // Closed again, the chord is yes / no again; what was typed waits behind the toggle.
   await key('Enter', ALT);
+  out.rowOpenAfterSecondChord = await rowOpen();
+  await wait(1000);
+  await toToggle();
+  await key('Enter');
   out.reopened = await rowOpen();
   out.optionsAfterReopen = await js(`Array.prototype.map.call(
     document.querySelectorAll('[name="decide-option"]'), function (i) { return i.value; })`);

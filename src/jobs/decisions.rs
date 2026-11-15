@@ -131,8 +131,11 @@ pub async fn run(core: &Core) -> Result<Report> {
             }
         }
     }
-    r.scanned = scan(core).await?;
-    r.labelled = label(core).await?;
+    // One reading for both: what the scan arms holds its share at once, and the labels' quarter
+    // is of the tick, not of what the scan left.
+    let left = core.judging_budget().await?;
+    r.scanned = scan(core, left / 2).await?;
+    r.labelled = label(core, left / 4).await?;
     Ok(r)
 }
 
@@ -184,8 +187,8 @@ const LABEL_LOOKAHEAD: i64 = 64;
 /// its live candidates. The first may overrun it when no label unit is in flight; one queued below
 /// the retry ceiling holds its share, and the oldest that does not fit waits rather than being
 /// passed.
-async fn label(core: &Core) -> Result<u64> {
-    let mut left = core.judging_budget().await? / 4;
+async fn label(core: &Core, share: usize) -> Result<u64> {
+    let mut left = share;
     if left == 0 {
         return Ok(0);
     }
@@ -231,12 +234,12 @@ async fn label(core: &Core) -> Result<u64> {
 /// has left, so the pair judge is never starved; a note already queued keeps its slot, so a queue
 /// that has not caught up is not piled onto. A note that could not be read holds none: the store
 /// leaves it out until it is due again.
-async fn scan(core: &Core) -> Result<u64> {
+async fn scan(core: &Core, share: usize) -> Result<u64> {
     let idle = crate::store::now() - core.evolve.idle_secs.max(0);
     if core.store.activity_since(idle).await? || core.store.captured_since(idle).await? {
         return Ok(0);
     }
-    let half = i64::try_from(core.judging_budget().await? / 2).unwrap_or(i64::MAX);
+    let half = i64::try_from(share).unwrap_or(i64::MAX);
     if half == 0 {
         return Ok(0);
     }

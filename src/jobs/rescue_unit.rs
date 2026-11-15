@@ -42,7 +42,13 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
             }
             Ok(())
         }
-        Err(e @ (Error::Inference { .. } | Error::InferenceBusy { .. })) => Err(e),
+        // An outage of a model or of a store is retried; a reply that will not do is not.
+        Err(
+            e @ (Error::Inference { .. }
+            | Error::InferenceBusy { .. }
+            | Error::Vector(_)
+            | Error::Store(_)),
+        ) => Err(e),
         Err(e) => {
             tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact");
             // Put to a person the note keeps its age: a restamp would close the question as changed.
@@ -187,14 +193,22 @@ async fn rescue_one(core: &Core, c: &Chunk) -> Result<String> {
         day: None,
         text: &g.text,
     };
-    if let Checked::Refused { question, yes } =
-        check(core, &c.id, &originals, &rewrite, Which::Both)
-            .await
-            .map_err(outage)?
+    match check(core, &c.id, &originals, &rewrite, Which::Both)
+        .await
+        .map_err(outage)?
     {
-        return Err(Error::Validation(format!(
-            "the check refused the rewrite ({question} at {yes})"
-        )));
+        Checked::Refused { question, yes } => {
+            return Err(Error::Validation(format!(
+                "the check refused the rewrite ({question} at {yes})"
+            )));
+        }
+        // A rescue stands in for the note, so a rewrite nothing checked is not written.
+        Checked::Unjudged { detail } => {
+            return Err(Error::Validation(format!(
+                "the rewrite could not be checked ({detail})"
+            )));
+        }
+        Checked::Passed | Checked::TooLong => {}
     }
     let made = core
         .store
@@ -631,9 +645,9 @@ mod tests {
         crate::jobs::reap::run(&core).await.unwrap();
         let before = core.store.get_artifact(&ids[0]).await.unwrap().retired_at;
         core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
-            Err(Error::InferenceRejected {
+            Err(Error::Inference {
                 role: "decide",
-                detail: "400".into(),
+                detail: "down".into(),
             })
         }));
 

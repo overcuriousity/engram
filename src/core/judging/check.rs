@@ -457,6 +457,11 @@ mod tests {
             full,
             "a check is not armed judging"
         );
+        // The checks' decider answers a check only.
+        let mut core = core;
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(
+            crate::core::judging::test_support::by_state,
+        ));
         crate::core::judging::ask(
             &core,
             &crate::core::judging::catalogue::reap_worth(),
@@ -467,7 +472,7 @@ mod tests {
                 rev_a: None,
                 rev_b: None,
             },
-            None,
+            Some("0.3"),
         )
         .await
         .unwrap();

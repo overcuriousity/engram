@@ -2388,10 +2388,7 @@ mod question_tests {
         assert_eq!(next_ask_at(0.60, 0.90, false, ask(1, 4, 0, 3)), Some(0.62));
         assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 4, 0, 3)), Some(0.58));
         // Rows still open do not keep it up: answered, none lapsed and rows waiting brings it down.
-        assert_eq!(
-            next_ask_at(0.60, 0.90, false, ask(0, 4, 20, 3)),
-            Some(0.58)
-        );
+        assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 4, 20, 3)), Some(0.58));
         // Nothing waiting, or nothing answered: it stays.
         assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 4, 0, 0)), None);
         assert_eq!(next_ask_at(0.60, 0.90, false, ask(0, 0, 0, 3)), None);
@@ -2407,14 +2404,8 @@ mod question_tests {
         );
         assert_eq!(next_ask_at(0.88, 0.88, true, ask(1, 0, 0, 0)), Some(0.86));
         assert_eq!(next_ask_at(0.50, 0.90, false, ask(0, 4, 0, 3)), None);
-        assert_eq!(
-            next_ask_at(0.51, 0.90, false, ask(0, 4, 20, 3)),
-            Some(0.50)
-        );
-        assert_eq!(
-            next_ask_at(0.89, 0.92, true, ask(1, 0, 20, 0)),
-            Some(0.90)
-        );
+        assert_eq!(next_ask_at(0.51, 0.90, false, ask(0, 4, 20, 3)), Some(0.50));
+        assert_eq!(next_ask_at(0.89, 0.92, true, ask(1, 0, 20, 0)), Some(0.90));
     }
 
     #[test]

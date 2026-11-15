@@ -342,12 +342,14 @@ fn pair_past(
             _ => None,
         };
     }
-    if !rows.is_empty() {
-        let gone: HashSet<&str> = of(Kind::Discard).map(|r| r.subject_id.as_str()).collect();
-        return (gone.contains(p.a_id.as_str()) && gone.contains(p.b_id.as_str()))
-            .then_some("vacuous");
-    }
     let picked = carried.map(|c| c.0.as_str());
+    if !rows.is_empty() {
+        // One row where the other side was retired already: the decision says it was both.
+        let gone: HashSet<&str> = of(Kind::Discard).map(|r| r.subject_id.as_str()).collect();
+        return (picked == Some("vacuous")
+            || (gone.contains(p.a_id.as_str()) && gone.contains(p.b_id.as_str())))
+        .then_some("vacuous");
+    }
     match p.state {
         PairState::Contradiction => Some("conflict"),
         PairState::NoConflict => match picked {
@@ -369,7 +371,24 @@ fn pair_past(
     }
 }
 
-async fn pairs(core: &Core, base: &Base) -> Result<Vec<Found>> {
+/// Whether both members stand retired by hand, neither behind the other. A base from before the
+/// decision log keeps a person's "neither says anything" as a dismissed pair like any other they
+/// dismissed, with no journal row: only where the two stand now tells it from one left alone.
+async fn both_retired(core: &Core, p: &ArtifactPair) -> Result<bool> {
+    for id in [&p.a_id, &p.b_id] {
+        let c = match core.store.get_artifact(id).await {
+            Ok(c) => c,
+            Err(Error::NotFound) => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if c.status != ArtifactStatus::Deprecated || c.superseded_by.is_some() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+async fn pairs(core: &Core, base: &Base, failed: &mut usize) -> Result<Vec<Found>> {
     let journal = base.journal(core).await?;
     let carried = pair_decisions(core).await?;
     let mut by_pair: BTreeMap<i64, Vec<&Action>> = BTreeMap::new();
@@ -390,8 +409,20 @@ async fn pairs(core: &Core, base: &Base) -> Result<Vec<Found>> {
         for p in core.store.pairs_by_state(s, i64::MAX).await? {
             let rows = by_pair.get(&p.id).map(Vec::as_slice).unwrap_or_default();
             let said = carried.get(&p.id);
-            let Some(past) = pair_past(&p, rows, said) else {
-                continue;
+            let unrecorded = said.is_none()
+                && rows.is_empty()
+                && p.state == PairState::Dismissed
+                && p.decided_by == Some(DecidedBy::Operator);
+            let past = match pair_past(&p, rows, said) {
+                Some(past) => past,
+                None if unrecorded => {
+                    let read = both_retired(core, &p).await;
+                    match or_skip(read, "pair_relation", &p.a_id, failed) {
+                        Some(true) => "vacuous",
+                        _ => continue,
+                    }
+                }
+                None => continue,
             };
             let asked = said.is_some_and(|c| c.1)
                 || rows.iter().any(|r| {
@@ -622,7 +653,7 @@ async fn searches(core: &Core) -> Result<Vec<Found>> {
 /// What this base holds to ask a question about. A question the base has nothing for finds none.
 async fn found(core: &Core, base: &Base, id: &str, failed: &mut usize) -> Result<Vec<Found>> {
     match id {
-        "pair_relation" => pairs(core, base).await,
+        "pair_relation" => pairs(core, base, failed).await,
         "link_kind" => links(core, false).await,
         "link_direction" => links(core, true).await,
         "reap_worth" => reaps(core, base, failed).await,
@@ -1347,7 +1378,7 @@ fn render_one(r: &QuestionReport) -> String {
     // Named only when there are some: a run with every case read keeps the line the plan draws.
     let failed = match r.skipped_failed {
         0 => String::new(),
-        n => format!(" · {n} could not be read"),
+        n => format!(" · {n} failed"),
     };
     let mut s = format!(
         "{} v{}{scope} · {} asked · {} too long · {} without text{failed} · {} left out\n",
@@ -1482,10 +1513,16 @@ mod tests {
     use crate::infer::fake::RuleDecider;
     use crate::jobs::consolidate::tests::{seed, seed_titled};
     use crate::store::actions::{Job, Kind, NewAction, UndoneBy};
-    use crate::store::links::LinkState;
+    use crate::store::decision_log::{NewLogged, Outcome, State};
+    use crate::store::links::{LinkKind, LinkState};
     use crate::store::pairs::{ArtifactPair, DecidedBy, PairState};
+    use crate::vector::{
+        Facets, LifecycleRow, SearchFilter, SearchHit, StoredLifecycle, Touch, VectorPayload,
+        VectorPoint, VectorStore, sparse::SparseVector,
+    };
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn rule(f: impl Fn(&str, &Question) -> Answer + Send + Sync + 'static) -> Arc<RuleDecider> {
         Arc::new(RuleDecider::new(move |state, qs| {
@@ -2011,7 +2048,7 @@ mod tests {
         )
         .await;
         core.store
-            .update_artifact_category(&ids[0], Some("procedure"))
+            .update_artifact_category_by(&ids[0], Some("procedure"), "writer")
             .await
             .unwrap();
 
@@ -2185,7 +2222,7 @@ mod tests {
             .await
             .unwrap();
         core.store
-            .update_artifact_category(&ids[2], Some("procedure"))
+            .update_artifact_category_by(&ids[2], Some("procedure"), "writer")
             .await
             .unwrap();
         bury(&core, &ids[3], Some("buried")).await;
@@ -3090,5 +3127,703 @@ mod tests {
             .await
             .unwrap();
         assert!(cases.is_empty(), "{cases:?}");
+    }
+
+    /// A `pair_relation` decision about `p` as the log keeps it once it is done.
+    async fn decided(core: &Core, p: &ArtifactPair, pick: &str, band: Band) -> String {
+        core.store
+            .log_decision(&NewLogged {
+                question_id: "pair_relation".into(),
+                question_version: catalogue::pair_relation().version,
+                model: "rule-decider".into(),
+                subject_kind: "pair",
+                subject_a: p.id.to_string(),
+                subject_b: None,
+                rev_a: None,
+                rev_b: None,
+                answer: "{}".into(),
+                top: 0.9,
+                pick: pick.into(),
+                swapped_agree: Some(true),
+                band,
+                reason: None,
+                state: State::Done,
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn pair_cases(core: &Core) -> HashMap<String, Case> {
+        let (cases, _) = cases(core, &catalogue::pair_relation(), 200)
+            .await
+            .unwrap();
+        cases
+            .into_iter()
+            .map(|c| (key(&c.subjects.0, c.subjects.1.as_deref().unwrap()), c))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_persons_vacuous_answer_is_their_verdict_though_nothing_was_journaled() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("newer", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        let p = pair(&core, &ids[0], &ids[1]).await;
+        // One side is behind another note already, so only the decision says what was answered.
+        core.store
+            .set_superseded_by(&p.a_id, Some(&ids[2]))
+            .await
+            .unwrap();
+        let d = decided(&core, &p, "distinct", Band::Ask).await;
+        crate::jobs::dedupe::carry_out(&core, &p, "vacuous", DecidedBy::Operator, &d)
+            .await
+            .unwrap();
+        core.store
+            .set_decision_outcome(&d, Outcome::Corrected, Some("vacuous"))
+            .await
+            .unwrap();
+        assert!(core.store.recent_actions(10).await.unwrap().is_empty());
+
+        let by = pair_cases(&core).await;
+        let c = &by[&key(&p.a_id, &p.b_id)];
+        assert_eq!(c.past.as_deref(), Some("vacuous"));
+        assert_eq!(c.person, Some(PersonSaid::Agreed), "the person's own verdict");
+    }
+
+    #[tokio::test]
+    async fn a_pair_a_person_dismissed_is_vacuous_only_where_both_notes_were_retired() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("three", [1.0, 0.0]),
+                ("four", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        // As a base from before the decision log holds the two presses: no decision, no row.
+        let retired = pair(&core, &ids[0], &ids[1]).await;
+        crate::jobs::dedupe::discard_both(&core, &retired, None, DecidedBy::Operator, None)
+            .await
+            .unwrap();
+        let left = pair(&core, &ids[2], &ids[3]).await;
+        core.store
+            .set_pair_state(left.id, PairState::Dismissed, None, DecidedBy::Operator)
+            .await
+            .unwrap();
+
+        let by = pair_cases(&core).await;
+        assert_eq!(by.len(), 1, "a pair left alone says nothing of the two: {by:?}");
+        let c = &by[&key(&retired.a_id, &retired.b_id)];
+        assert_eq!(c.past.as_deref(), Some("vacuous"));
+        assert_eq!(c.person, Some(PersonSaid::Agreed));
+    }
+
+    #[tokio::test]
+    async fn a_vacuous_pick_that_retired_one_note_is_vacuous_by_its_decision() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("newer", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        let p = pair(&core, &ids[0], &ids[1]).await;
+        // One side went behind another note while the decision waited: only the other is retired.
+        core.store
+            .set_superseded_by(&p.a_id, Some(&ids[2]))
+            .await
+            .unwrap();
+        let d = decided(&core, &p, "vacuous", Band::Act).await;
+        let rows = crate::jobs::dedupe::carry_out(&core, &p, "vacuous", DecidedBy::Model, &d)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+
+        let by = pair_cases(&core).await;
+        let c = &by[&key(&p.a_id, &p.b_id)];
+        assert_eq!(c.past.as_deref(), Some("vacuous"));
+        assert_eq!(c.person, None);
+    }
+
+    #[tokio::test]
+    async fn a_refusal_is_known_by_the_decision_it_left_not_by_its_wording() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [1.0, 0.0]),
+                ("three", [1.0, 0.0]),
+                ("four", [1.0, 0.0]),
+                ("five", [1.0, 0.0]),
+                ("six", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        // A guard no phrase names closed a sure `duplicate` with both kept.
+        let refused = pair(&core, &ids[0], &ids[1]).await;
+        decided(&core, &refused, "duplicate", Band::Act).await;
+        let kept = pair(&core, &ids[2], &ids[3]).await;
+        decided(&core, &kept, "distinct", Band::Act).await;
+        // Only asked, and closed elsewhere: the decision carried out nothing.
+        let asked = pair(&core, &ids[4], &ids[5]).await;
+        decided(&core, &asked, "duplicate", Band::Ask).await;
+        for p in [&refused, &kept, &asked] {
+            core.store
+                .set_pair_state(
+                    p.id,
+                    PairState::NoConflict,
+                    Some("kept apart"),
+                    DecidedBy::Model,
+                )
+                .await
+                .unwrap();
+        }
+
+        let by = pair_cases(&core).await;
+        assert!(!by.contains_key(&key(&refused.a_id, &refused.b_id)), "{by:?}");
+        for p in [&kept, &asked] {
+            assert_eq!(
+                by[&key(&p.a_id, &p.b_id)].past.as_deref(),
+                Some("distinct")
+            );
+        }
+    }
+
+    /// Give a buried note the vector its point carried.
+    async fn grave_vector(core: &Core, id: &str, v: &[f32]) {
+        let (blob, model) = (
+            crate::store::feedback::vec_to_blob(v),
+            core.embedder.model().to_string(),
+        );
+        sqlx::query!(
+            "UPDATE graveyard SET vec = ?, embed_model = ? WHERE id = ?",
+            blob,
+            model,
+            id
+        )
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_reads_the_journal_and_the_graveyard_vectors_once() {
+        let core = core_with(anything()).await;
+        let ids = seed(
+            &core,
+            &[
+                ("still here", [1.0, 0.0]),
+                ("first buried", [1.0, 0.0]),
+                ("second buried", [1.0, 0.0]),
+                ("buried without a vector", [1.0, 0.0]),
+            ],
+        )
+        .await;
+        for id in &ids[1..] {
+            bury(&core, id, Some("buried words")).await;
+        }
+        for id in &ids[1..3] {
+            grave_vector(&core, id, &[1.0, 0.0]).await;
+        }
+        let base = Base::default();
+        let near = neighbours(&core, &base, &ids[1], None).await.unwrap();
+        assert_eq!(near.len(), 1, "the one live note");
+        assert_eq!(near[0].text, "still here");
+        assert!(base.journal(&core).await.unwrap().is_empty());
+
+        sqlx::query!("UPDATE graveyard SET vec = NULL")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        core.store
+            .record_action(&crate::jobs::reap::test_support::row(&ids[1]))
+            .await
+            .unwrap();
+        let near = neighbours(&core, &base, &ids[2], None).await.unwrap();
+        assert_eq!(near.len(), 1, "from the vectors read for the first");
+        let none = neighbours(&core, &base, &ids[3], None).await.unwrap();
+        assert!(none.is_empty(), "no vector was kept for it");
+        assert!(
+            base.journal(&core).await.unwrap().is_empty(),
+            "every question reads the journal as the first one found it"
+        );
+    }
+
+    /// Yes at 0.9 to the first `ok` calls, then an endpoint that is gone.
+    fn gone_after(ok: usize) -> Arc<RuleDecider> {
+        let calls = AtomicUsize::new(0);
+        Arc::new(RuleDecider::new(move |_, qs| {
+            if calls.fetch_add(1, Ordering::SeqCst) >= ok {
+                return Err(Error::Inference {
+                    role: "decide",
+                    detail: "connection refused".into(),
+                });
+            }
+            crate::jobs::reap::test_support::answers(qs, 0.9)
+        }))
+    }
+
+    #[tokio::test]
+    async fn a_dead_endpoint_ends_the_run_at_its_first_failed_call_with_what_was_asked() {
+        let decider = gone_after(1);
+        let core = core_with(decider.clone()).await;
+        seed(
+            &core,
+            &[
+                ("one", [1.0, 0.0]),
+                ("two", [0.0, 1.0]),
+                ("three", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+
+        let r = run(&core, None, 200).await.unwrap();
+        assert_eq!(decider.calls(), 2, "the failed call is the last one made");
+        let (last, before) = r.split_last().unwrap();
+        assert_eq!(last.id, "pinned", "the first question with a note to ask");
+        assert_eq!((last.asked, last.skipped_failed), (1, 0));
+        let why = last.stopped.as_deref().unwrap();
+        assert!(why.contains("connection refused"), "{why}");
+        assert!(before.iter().all(|q| q.stopped.is_none() && q.asked == 0));
+        let text = render(&r);
+        assert!(
+            text.contains(" · 1 asked · ")
+                && text.contains("\n  stopped: the decision endpoint did not answer"),
+            "{text}"
+        );
+        assert!(!text.contains("time_bound"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_case_the_endpoint_refuses_is_counted_and_the_next_is_asked() {
+        let decider = Arc::new(RuleDecider::new(|state, qs| {
+            if state.contains("poison") {
+                return Err(Error::InferenceRejected {
+                    role: "decide",
+                    detail: "HTTP 400".into(),
+                });
+            }
+            crate::jobs::reap::test_support::answers(qs, 0.9)
+        }));
+        let core = core_with(decider.clone()).await;
+        seed(
+            &core,
+            &[
+                ("fine", [1.0, 0.0]),
+                ("poison", [0.0, 1.0]),
+                ("fine too", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+
+        let r = run(&core, Some("pinned"), 200).await.unwrap();
+        assert_eq!((r[0].asked, r[0].skipped_failed), (2, 1));
+        assert_eq!(r[0].stopped, None);
+        assert_eq!(decider.calls(), 3);
+        let text = render(&r);
+        assert!(
+            text.contains(" · 2 asked · 0 too long · 0 without text · 1 failed · 0 left out\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_exchanged_read_waits_on_its_own_and_the_first_is_not_asked_again() {
+        let calls = AtomicUsize::new(0);
+        let decider = Arc::new(RuleDecider::new(move |_, qs| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 1 {
+                return Err(Error::InferenceBusy {
+                    role: "decide",
+                    detail: "HTTP 429 Too Many Requests".into(),
+                });
+            }
+            Ok(Answers {
+                answers: qs
+                    .iter()
+                    .map(|q| (q.key.clone(), pick(q, "a_first", 0.8)))
+                    .collect(),
+                model: "rule-decider".into(),
+                input_tokens: 0,
+            })
+        }));
+        let core = core_with(decider.clone()).await;
+        a_related_link(&core).await;
+
+        let r = run(&core, Some("link_direction"), 200).await.unwrap();
+        assert_eq!((r[0].asked, r[0].exchanged_holds), (1, Some((0, 1))));
+        let states: Vec<String> = decider.requests().into_iter().map(|r| r.0).collect();
+        assert_eq!(states.len(), 3, "the first read, then the exchanged one twice");
+        assert_ne!(states[0], states[1]);
+        assert_eq!(states[1], states[2]);
+    }
+
+    /// The store beneath, except that these notes' neighbours cannot be read.
+    struct NoNeighbours {
+        inner: Arc<dyn VectorStore>,
+        of: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl VectorStore for NoNeighbours {
+        async fn ensure_collection(&self, dim: usize) -> Result<()> {
+            self.inner.ensure_collection(dim).await
+        }
+        async fn upsert(&self, points: Vec<VectorPoint>) -> Result<()> {
+            self.inner.upsert(points).await
+        }
+        async fn set_payload(&self, payload: &VectorPayload) -> Result<()> {
+            self.inner.set_payload(payload).await
+        }
+        async fn set_lifecycle(
+            &self,
+            artifact_id: &str,
+            status: ArtifactStatus,
+            superseded_by: Option<&str>,
+        ) -> Result<()> {
+            self.inner
+                .set_lifecycle(artifact_id, status, superseded_by)
+                .await
+        }
+        async fn set_last_verified_at(
+            &self,
+            artifact_id: &str,
+            at: i64,
+            reset_hits: bool,
+        ) -> Result<()> {
+            self.inner
+                .set_last_verified_at(artifact_id, at, reset_hits)
+                .await
+        }
+        async fn stale_candidates(
+            &self,
+            older_than: i64,
+            max_hits: i64,
+            limit: usize,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner
+                .stale_candidates(older_than, max_hits, limit)
+                .await
+        }
+        async fn search(
+            &self,
+            vector: &[f32],
+            sparse: &SparseVector,
+            limit: usize,
+            filter: &SearchFilter,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.search(vector, sparse, limit, filter).await
+        }
+        async fn touch(&self, targets: &[Touch], seen_at: i64) -> Result<()> {
+            self.inner.touch(targets, seen_at).await
+        }
+        async fn apply_lifecycle(&self, rows: &[LifecycleRow]) -> Result<()> {
+            self.inner.apply_lifecycle(rows).await
+        }
+        async fn lifecycle_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, StoredLifecycle>> {
+            self.inner.lifecycle_of(artifact_ids).await
+        }
+        async fn all_artifact_ids(&self) -> Result<Vec<String>> {
+            self.inner.all_artifact_ids().await
+        }
+        async fn payloads_of(
+            &self,
+            artifact_ids: &[String],
+        ) -> Result<HashMap<String, VectorPayload>> {
+            self.inner.payloads_of(artifact_ids).await
+        }
+        async fn resurface(
+            &self,
+            limit: usize,
+            older_than: i64,
+            unseen_since: i64,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner
+                .resurface(limit, older_than, unseen_since)
+                .await
+        }
+        async fn facets(&self, limit: usize) -> Result<Facets> {
+            self.inner.facets(limit).await
+        }
+        async fn neighbours(&self, artifact_id: &str, limit: usize) -> Result<Vec<SearchHit>> {
+            if self.of.iter().any(|id| id == artifact_id) {
+                return Err(Error::Vector("connection refused".into()));
+            }
+            self.inner.neighbours(artifact_id, limit).await
+        }
+        async fn set_context_vectors(
+            &self,
+            artifact_id: &str,
+            vectors: Vec<Vec<f32>>,
+        ) -> Result<()> {
+            self.inner.set_context_vectors(artifact_id, vectors).await
+        }
+        async fn context_query(
+            &self,
+            vector: &[f32],
+            limit: usize,
+            filter: &SearchFilter,
+        ) -> Result<Vec<SearchHit>> {
+            self.inner.context_query(vector, limit, filter).await
+        }
+        async fn delete_artifacts(&self, artifact_ids: &[String]) -> Result<()> {
+            self.inner.delete_artifacts(artifact_ids).await
+        }
+        async fn delete_by_corpus(&self, corpus_id: &str) -> Result<()> {
+            self.inner.delete_by_corpus(corpus_id).await
+        }
+        async fn sample(&self, limit: usize) -> Result<Vec<(String, Vec<f32>)>> {
+            self.inner.sample(limit).await
+        }
+        async fn dense_of(&self, artifact_id: &str) -> Result<Option<Vec<f32>>> {
+            self.inner.dense_of(artifact_id).await
+        }
+        async fn count(&self) -> Result<u64> {
+            self.inner.count().await
+        }
+    }
+
+    fn without_neighbours_of(core: &mut Core, ids: &[&String]) {
+        core.vectors = Arc::new(NoNeighbours {
+            inner: core.vectors.clone(),
+            of: ids.iter().map(|id| (*id).clone()).collect(),
+        });
+    }
+
+    #[tokio::test]
+    async fn a_retired_note_whose_neighbours_cannot_be_read_is_counted_and_the_rest_are_asked() {
+        let decider = anything();
+        let mut core = core_with(decider.clone()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("old one", [1.0, 0.0]),
+                ("new one", [1.0, 0.0]),
+                ("old two", [0.0, 1.0]),
+                ("new two", [0.0, 1.0]),
+            ],
+        )
+        .await;
+        for (old, new) in [(0, 1), (2, 3)] {
+            core.store
+                .set_superseded_by(&ids[old], Some(&ids[new]))
+                .await
+                .unwrap();
+        }
+        without_neighbours_of(&mut core, &[&ids[0]]);
+
+        let r = run(&core, Some("reap_worth"), 200).await.unwrap();
+        let u = &r[1];
+        assert_eq!(u.scope.as_deref(), Some("unjudged retired notes"));
+        assert_eq!((u.asked, u.skipped_failed, u.stopped.as_ref()), (1, 1, None));
+        assert_eq!(u.extremes, [(0.9, "old two".to_string())]);
+        assert_eq!(decider.calls(), 1, "never asked without its neighbours");
+        let text = render(&r[1..]);
+        assert!(
+            text.contains(" · 1 asked · 0 too long · 0 without text · 1 failed · 0 left out\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_note_whose_neighbours_cannot_be_read_is_counted_and_the_other_pairs_are_asked()
+    {
+        let mut core = core_with(anything()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("a", [1.0, 0.0]),
+                ("b", [1.0, 0.0]),
+                ("c", [0.0, 1.0]),
+                ("d", [0.0, 1.0]),
+            ],
+        )
+        .await;
+        without_neighbours_of(&mut core, &[&ids[0], &ids[1]]);
+
+        let r = run(&core, Some("pair_relation"), 200).await.unwrap();
+        let u = &r[1];
+        assert_eq!(u.scope.as_deref(), Some("unjudged neighbours"));
+        assert_eq!((u.asked, u.skipped_failed, u.stopped.as_ref()), (1, 2, None));
+        let titles: Vec<&str> = u.confident.iter().map(|c| c.title.as_str()).collect();
+        assert!(titles == ["c ↔ d"] || titles == ["d ↔ c"], "{titles:?}");
+    }
+
+    #[tokio::test]
+    async fn a_filed_pair_is_not_unjudged_whichever_of_its_notes_is_met_first() {
+        let core = core_with(anything()).await;
+        let ids = titled_at(
+            &core,
+            &[
+                ("a", [1.0, 0.0]),
+                ("b", [1.0, 0.0]),
+                ("c", [0.0, 1.0]),
+                ("d", [0.0, 1.0]),
+                ("e", [-1.0, 0.0]),
+                ("f", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+        // Newest first: one filed pair is met from its first note, the others from their second.
+        let (a, b) = crate::store::links::canonical(&ids[0], &ids[1]);
+        let (c, d) = crate::store::links::canonical(&ids[2], &ids[3]);
+        let (e, f) = crate::store::links::canonical(&ids[4], &ids[5]);
+        for (id, at) in [(a, 600_i64), (b, 500), (c, 300), (d, 400), (e, 100), (f, 200)] {
+            sqlx::query!("UPDATE artifacts SET created_at = ? WHERE id = ?", at, id)
+                .execute(&core.store.pool)
+                .await
+                .unwrap();
+        }
+        core.store.record_pair(a, b, 0.99).await.unwrap();
+        core.store.record_pair(d, c, 0.99).await.unwrap();
+
+        let (cases, left_out) = unjudged_cases(&core, &catalogue::pair_relation(), 200)
+            .await
+            .unwrap();
+        let got: Vec<(String, Option<String>)> = cases.into_iter().map(|c| c.subjects).collect();
+        assert_eq!(
+            got,
+            [(e.to_string(), Some(f.to_string()))],
+            "the unfiled pair once, in the order a filed pair has"
+        );
+        assert_eq!(left_out, 0);
+    }
+
+    #[tokio::test]
+    async fn a_reading_exactly_at_its_line_counts_as_yes() {
+        let core = core_with(rule(|state, _| {
+            let n: f64 = state
+                .split_whitespace()
+                .last()
+                .and_then(|w| w.parse().ok())
+                .unwrap_or(0.0);
+            Answer::Noul { yes: n / 100.0 }
+        }))
+        .await;
+        seed(
+            &core,
+            &[
+                ("note 29", [1.0, 0.0]),
+                ("note 30", [0.0, 1.0]),
+                ("note 31", [-1.0, 0.0]),
+            ],
+        )
+        .await;
+        for id in ["asks_reminder", "has_date"] {
+            let r = run(&core, Some(id), 200).await.unwrap();
+            assert_eq!(r[0].reading, Some((0.3, 2)), "{id}: 0.30 and 0.31");
+            let text = render(&r);
+            assert!(text.contains("\n  at 0.30   yes 2 of 3\n"), "{text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_link_judged_with_a_kind_is_compared_by_that_kind_and_its_stored_order() {
+        let decider = anything();
+        let core = core_with(decider.clone()).await;
+        let texts: Vec<String> = (0..14).map(|i| format!("note {i}")).collect();
+        let rows: Vec<(&str, [f32; 2])> = texts.iter().map(|t| (t.as_str(), [1.0, 0.0])).collect();
+        let ids = seed(&core, &rows).await;
+        let now = crate::store::now();
+        let judged = [
+            (Some(LinkKind::Continues), Some(true), LinkState::Related),
+            (Some(LinkKind::Example), Some(false), LinkState::Related),
+            (Some(LinkKind::Background), None, LinkState::Related),
+            (Some(LinkKind::Alternative), None, LinkState::Related),
+            (Some(LinkKind::Contradicts), None, LinkState::Related),
+            (Some(LinkKind::Unrelated), None, LinkState::Unrelated),
+            // A duplicate keeps no kind: its hand-over line is the record.
+            (None, None, LinkState::Related),
+        ];
+        let mut keys = Vec::new();
+        for (i, (kind, first, state)) in judged.into_iter().enumerate() {
+            let (a, b) = crate::store::links::canonical(&ids[2 * i], &ids[2 * i + 1]);
+            core.store
+                .bump_link(a, b, 1.0, Some("mount loop"), 30.0, now)
+                .await
+                .unwrap();
+            match kind {
+                Some(_) => core
+                    .store
+                    .set_link_kind(a, b, state, kind, first, Some((0, 0)))
+                    .await
+                    .unwrap(),
+                None => core
+                    .store
+                    .set_link_state(
+                        a,
+                        b,
+                        state,
+                        Some("same content; handed to consolidation"),
+                        Some((0, 0)),
+                    )
+                    .await
+                    .unwrap(),
+            }
+            keys.push(key(a, b));
+        }
+        let (a, b) = keys[3].split_once('|').unwrap();
+        core.store.dismiss_link(a, b).await.unwrap();
+
+        let (kinds, _) = cases(&core, &catalogue::link_kind(), 200).await.unwrap();
+        let by: HashMap<String, &Case> = kinds
+            .iter()
+            .map(|c| (key(&c.subjects.0, c.subjects.1.as_deref().unwrap()), c))
+            .collect();
+        let want_kinds = [
+            "continues",
+            "example",
+            "background",
+            "alternative",
+            "contradicts",
+            "unrelated",
+            "duplicate",
+        ];
+        for (k, past) in keys.iter().zip(want_kinds) {
+            assert_eq!(by[k].past.as_deref(), Some(past));
+        }
+        assert_eq!(by[&keys[3]].person, Some(PersonSaid::Disagreed));
+        assert_eq!(by[&keys[0]].person, None);
+
+        let (directions, _) = cases(&core, &catalogue::link_direction(), 200)
+            .await
+            .unwrap();
+        let got: HashMap<String, Option<String>> = directions
+            .into_iter()
+            .map(|c| (key(&c.subjects.0, &c.subjects.1.unwrap()), c.past))
+            .collect();
+        let want: HashMap<String, Option<String>> = [
+            (keys[0].clone(), Some("a_first".to_string())),
+            (keys[1].clone(), Some("b_first".to_string())),
+            (keys[2].clone(), None),
+        ]
+        .into();
+        assert_eq!(got, want, "only a kind with an order is asked for one");
+
+        let r = run(&core, Some("link_kind"), 200).await.unwrap();
+        let asked = catalogue::link_kind();
+        assert_eq!((r[0].asked, r[0].version), (7, asked.version));
+        let pasts: Vec<&str> = r[0].past_picks.iter().map(|p| p.0.as_str()).collect();
+        let mut named = want_kinds.to_vec();
+        named.sort();
+        assert_eq!(pasts, named, "each kind by its own name, none as `related`");
+        let sent = &decider.requests()[0].1[0];
+        assert_eq!(sent.instructions, asked.question.instructions);
     }
 }

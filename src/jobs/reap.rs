@@ -1392,8 +1392,8 @@ mod tests {
         run(&core).await.unwrap();
         let d = decision(&core, &ids[0], None).await;
         assert_eq!(d.state, State::Open);
-        // runtime: test-only backdating.
-        sqlx::query("UPDATE decisions SET decided_at = decided_at - ? WHERE id = ?")
+        // runtime: test-only backdating of when the row was seated.
+        sqlx::query("UPDATE decisions SET opened_at = opened_at - ? WHERE id = ?")
             .bind(31 * 86_400)
             .bind(&d.id)
             .execute(&core.store.pool)

@@ -2671,11 +2671,7 @@ mod tests {
             .unwrap();
 
         let pair = pair_of(&core, &ids).await;
-        assert_eq!(
-            pair.net,
-            Some(Net::Shown),
-            "the source was lost on the way"
-        );
+        assert_eq!(pair.net, Some(Net::Shown), "the source was lost on the way");
         assert!(crate::jobs::dedupe::restricted(&pair, 0.0));
     }
 

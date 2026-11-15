@@ -131,13 +131,20 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
         day: None,
         text: &g.text,
     };
-    if let Checked::Refused { question, yes } =
-        check(core, &c.id, &[original], &rewrite, Which::Both)
-            .await
-            .map_err(outage)?
+    match check(core, &c.id, &[original], &rewrite, Which::Both)
+        .await
+        .map_err(outage)?
     {
-        tracing::info!(artifact_id, question, yes, "the check refused the rewrite");
-        return Ok(());
+        Checked::Refused { question, yes } => {
+            tracing::info!(artifact_id, question, yes, "the check refused the rewrite");
+            return Ok(());
+        }
+        // A rewrite replaces the note's text, so one nothing checked is not written.
+        Checked::Unjudged { detail } => {
+            tracing::info!(artifact_id, %detail, "the rewrite could not be checked; left as it is");
+            return Ok(());
+        }
+        Checked::Passed | Checked::TooLong => {}
     }
     let evidence = serde_json::json!({
         "rehearsals": probes.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
@@ -505,13 +512,32 @@ mod tests {
         )])
         .await;
         core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::Inference {
+                role: "decide",
+                detail: "down".into(),
+            })
+        }));
+        let id = synthesized(&core).await;
+        assert!(run(&core, &id).await.unwrap_err().retryable());
+        assert!(core.store.versions_of(&id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_condensation_the_check_will_not_judge_is_not_written_and_not_retried() {
+        let (mut core, _) = core_with(vec![reply(
+            "The loop mount needs `mount -o loop /dev/loop0`.",
+        )])
+        .await;
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
             Err(Error::InferenceRejected {
                 role: "decide",
                 detail: "400".into(),
             })
         }));
         let id = synthesized(&core).await;
-        assert!(run(&core, &id).await.unwrap_err().retryable());
+        let before = core.store.get_artifact(&id).await.unwrap().text;
+        run(&core, &id).await.unwrap();
         assert!(core.store.versions_of(&id).await.unwrap().is_empty());
+        assert_eq!(core.store.get_artifact(&id).await.unwrap().text, before);
     }
 }

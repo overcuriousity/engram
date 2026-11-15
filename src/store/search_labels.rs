@@ -972,7 +972,13 @@ pub(crate) mod tests {
             store.label_failed(&id, V, M, true, 0).await.unwrap(),
             LABEL_GIVE_UP
         );
-        assert!(store.unlabelled_searches(V, M, 10).await.unwrap().is_empty());
+        assert!(
+            store
+                .unlabelled_searches(V, M, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             store.unlabelled_searches(V + 1, M, 10).await.unwrap(),
             std::slice::from_ref(&id),

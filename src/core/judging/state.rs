@@ -181,11 +181,9 @@ pub fn rewrite(
     (counter.count(&s) <= tokens).then_some(s)
 }
 
-/// The state budget for these questions on this decider, counted against the keys they are sent
-/// under. Asked as they are, questions keep their own keys. A request led by a swapped question is
-/// a swapped read of them all (`decide_swapped`): every key becomes `q0`, `q1`, … and every choice
-/// gets its twin. Which of the two a mixed list becomes is its caller's to say, so it gets the
-/// smaller budget: a state sized here fits either way.
+/// The state budget for these questions on this decider, under the keys they are sent with: their
+/// own, or `q0`, `q1`, … with a twin per choice in a swapped read (`decide_swapped`). A mixed list
+/// may go either way, so it gets the smaller budget and its state fits both.
 pub fn room(core: &Core, asked: &[&Asked]) -> usize {
     let own: Vec<Question> = asked.iter().map(|a| a.question.clone()).collect();
     let window = core.decider.context_tokens();

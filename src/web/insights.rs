@@ -649,7 +649,10 @@ pub(crate) async fn report(tenant: &Tenant) -> Result<Report> {
     })
 }
 
-async fn page(tenant: Tenant) -> UiResult<Response> {
+async fn page(
+    tenant: Tenant,
+    axum::extract::Query(said): axum::extract::Query<crate::web::unsure::Said>,
+) -> UiResult<Response> {
     let artifact_count: i64 = sqlx::query_scalar!("SELECT COUNT(*) AS n FROM artifacts")
         .fetch_one(&tenant.core.store.pool)
         .await?;
@@ -738,7 +741,7 @@ async fn page(tenant: Tenant) -> UiResult<Response> {
         .collect();
 
     Ok(HtmlTemplate(InsightsTemplate {
-        unsure: crate::web::unsure::unsure(&tenant).await?,
+        unsure: crate::web::unsure::unsure(&tenant).await?.saying(&said),
         sleep: sleep_view(&tenant.core).await?,
         evolve: evolve_view(&tenant.core).await?,
         held: tenant.core.store.held().await?,
@@ -1790,6 +1793,52 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("not held and wrong: 1 of 1"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn an_ask_line_that_was_only_held_is_not_shown_as_moved() {
+        use crate::core::judging::band::{Thresholds, era};
+        use crate::core::judging::catalogue;
+        let (mut core, _) = crate::jobs::tune::test_support::adopted_and_watching().await;
+        let t = |act_at, ask_at| Thresholds { act_at, ask_at };
+        let moved = "3 of 41 acted or answered were undone or corrected";
+        let held = "2 rows lapsed unanswered, the ask line already a step under the act line";
+        // Held after a move: the move is still the last. Held as configured: it never moved.
+        let pair = era("fake-decider", catalogue::pair_relation().version);
+        core.store
+            .move_thresholds("pair_relation", &pair, t(0.92, 0.90), moved)
+            .await
+            .unwrap();
+        core.store
+            .hold_ask_line("pair_relation", &pair, t(0.92, 0.90), held)
+            .await
+            .unwrap();
+        core.decide_cfg.bands.per.insert(
+            "link_kind".into(),
+            crate::config::BandOverride {
+                act_at: Some(0.90),
+                ask_at: Some(0.88),
+            },
+        );
+        let link = era("fake-decider", catalogue::link_kind().version);
+        core.store
+            .hold_ask_line("link_kind", &link, t(0.90, 0.88), held)
+            .await
+            .unwrap();
+
+        let body = insights(core).await;
+        let today = chrono::Utc::now().format("%Y-%m-%d");
+        assert!(
+            body.contains(&format!(
+                "pair_relation · act 0.92 · ask 0.90 · moved {today}: {moved}"
+            )),
+            "{body}"
+        );
+        assert!(
+            body.contains("link_kind · act 0.90 · ask 0.88 · as configured"),
+            "{body}"
+        );
+        assert!(!body.contains("lapsed unanswered"), "{body}");
     }
 
     #[tokio::test]

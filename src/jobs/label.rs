@@ -410,6 +410,15 @@ mod tests {
             .unwrap();
             searches.push(id);
         }
+        // Captured long ago and embedded: the scan waits out a capture and reads embedded notes.
+        sqlx::query!("UPDATE corpora SET created_at = 1000")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query!("UPDATE artifacts SET embed_state = 'embedded'")
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
         let r = crate::jobs::decisions::run(&core).await.unwrap();
         // A quarter of 40 is 10: two searches of four candidates; a third would make 12.
         assert_eq!(r.labelled, 2);
@@ -419,7 +428,8 @@ mod tests {
         }
         assert_eq!(armed, [true, true, false, false, false], "oldest first");
         assert_eq!(r.scanned, 20, "the scan keeps its half");
-        assert_eq!(core.judging_budget().await.unwrap(), 40);
+        // What was armed holds its share from now: twenty readings and two searches of four.
+        assert_eq!(core.judging_budget().await.unwrap(), 12);
 
         // The two still queued hold their share: nothing more is armed.
         let again = crate::jobs::decisions::run(&core).await.unwrap();

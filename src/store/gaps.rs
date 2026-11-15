@@ -1572,6 +1572,116 @@ mod tests {
         assert_eq!(store.trim_gap_coverage(0.0).await.unwrap(), 0);
     }
 
+    /// An unmatched search worded `q`, as the gap `open_gaps` would hand out.
+    async fn unmatched(store: &Store, q: &str) -> Gap {
+        Gap {
+            kind: GapKind::Unmatched,
+            id: search_with(store, q, &[0.10]).await,
+            text: q.into(),
+        }
+    }
+
+    async fn a_note(store: &Store) -> String {
+        let src = store.insert_corpus("raw", "web", None).await.unwrap();
+        store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "Mounting an E01 image read-only.".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id
+    }
+
+    async fn rejections(store: &Store) -> Vec<String> {
+        sqlx::query_scalar!("SELECT gap_id FROM gap_rejections ORDER BY gap_id")
+            .fetch_all(&store.pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn what_the_model_said_of_a_note_stands_until_the_note_the_words_the_era_or_the_line_changes()
+     {
+        let store = Store::memory().await.unwrap();
+        let gap = unmatched(&store, "mount an E01").await;
+        let note = a_note(&store).await;
+        let rev = store.get_artifact(&note).await.unwrap().embed_rev;
+        let said = async |gap: &Gap, era: &str, relevant_at: f64| {
+            store
+                .gap_note_rejected(gap, &note, era, relevant_at)
+                .await
+                .unwrap()
+        };
+        assert!(!said(&gap, "m/v1", 0.9).await, "nothing asked yet");
+        store
+            .reject_gap_note(&gap, &note, rev, "m/v1", 0.2)
+            .await
+            .unwrap();
+
+        assert!(said(&gap, "m/v1", 0.9).await);
+        let other = unmatched(&store, "grep a pcap").await;
+        assert!(!said(&other, "m/v1", 0.9).await, "another gap");
+        let reworded = Gap {
+            text: "mount an E01 image".into(),
+            ..gap.clone()
+        };
+        assert!(!said(&reworded, "m/v1", 0.9).await, "other words");
+        assert!(!said(&gap, "n/v1", 0.9).await, "another model");
+        assert!(!said(&gap, "m/v2", 0.9).await, "another wording");
+        assert!(!said(&gap, "m/v1", 0.2).await, "a line it clears");
+
+        store
+            .update_artifact_text(&note, "Mount an E01 read-only with ewfmount.")
+            .await
+            .unwrap();
+        assert!(!said(&gap, "m/v1", 0.9).await, "the note changed");
+        // Asked again, the newest answer is the one kept.
+        store
+            .reject_gap_note(&gap, &note, rev + 1, "m/v1", 0.3)
+            .await
+            .unwrap();
+        assert!(said(&gap, "m/v1", 0.9).await);
+        assert!(!said(&gap, "m/v1", 0.3).await);
+        assert_eq!(rejections(&store).await, [gap.id.clone()]);
+    }
+
+    #[tokio::test]
+    async fn what_the_model_said_of_a_gap_that_is_gone_is_collected() {
+        // `gap_id` cannot be a foreign key here either; the note is one, and takes its rows along.
+        let store = Store::memory().await.unwrap();
+        let note = a_note(&store).await;
+        let kept = unmatched(&store, "mount an E01").await;
+        let expired = unmatched(&store, "grep a pcap").await;
+        for gap in [&kept, &expired] {
+            store
+                .reject_gap_note(gap, &note, 0, "m/v1", 0.2)
+                .await
+                .unwrap();
+        }
+        sqlx::query!("DELETE FROM search_events WHERE id = ?", &expired.id)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.trim_gap_coverage(0.0).await.unwrap(),
+            0,
+            "no coverage was dropped"
+        );
+        assert_eq!(rejections(&store).await, [kept.id]);
+
+        sqlx::query!("DELETE FROM artifacts WHERE id = ?", &note)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert!(rejections(&store).await.is_empty());
+    }
+
     #[tokio::test]
     async fn dismissing_an_unmatched_search_closes_it() {
         let store = Store::memory().await.unwrap();

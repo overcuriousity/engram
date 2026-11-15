@@ -408,7 +408,10 @@ pub(crate) async fn settle_counted(core: &Core, d: Logged) -> Result<(Logged, bo
                     return Err(e);
                 }
             }
-            Ok((logged(core, &d.id).await?, true))
+            // An applier that has to wait gives its claim back: applied only if it stayed done.
+            let after = logged(core, &d.id).await?;
+            let acted = after.state == State::Done;
+            Ok((after, acted))
         }
         Band::Ask => {
             let max = i64::try_from(core.decide_cfg.ask_open_max).unwrap_or(i64::MAX);
@@ -543,13 +546,16 @@ mod tests {
     use crate::store::pairs::DecidedBy;
 
     async fn backdate(core: &crate::core::Core, id: &str, secs: i64) {
-        // runtime: test-only backdating.
-        sqlx::query("UPDATE decisions SET decided_at = decided_at - ? WHERE id = ?")
-            .bind(secs)
-            .bind(id)
-            .execute(&core.store.pool)
-            .await
-            .unwrap();
+        // runtime: test-only backdating, of when it was decided and when it was seated.
+        sqlx::query(
+            "UPDATE decisions SET decided_at = decided_at - ?1, opened_at = opened_at - ?1
+              WHERE id = ?2",
+        )
+        .bind(secs)
+        .bind(id)
+        .execute(&core.store.pool)
+        .await
+        .unwrap();
     }
 
     async fn state_of(core: &crate::core::Core, id: &str) -> State {

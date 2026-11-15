@@ -20,6 +20,10 @@ pub(crate) const LOSS_REFUSED: &str =
 /// The after-write check refused the draft.
 pub(crate) const UNFAITHFUL: &str = "a check found the draft unfaithful; both stay as they are";
 
+/// The decision model would not answer the after-write check, and a retry is told the same. A
+/// merge replaces two notes, so a draft nothing checked is not written.
+pub(crate) const UNCHECKED: &str = "the draft could not be checked; both stay as they are";
+
 /// Who asked and the decision the ask came from, when there is one.
 struct Ask {
     by: DecidedBy,
@@ -166,22 +170,23 @@ async fn write(core: &Core, p: &ArtifactPair, members: Vec<Chunk>, ask: &Ask) ->
         leave_both(core, p, LOSS_REFUSED, ask.by).await?;
         return ask.refused(core).await;
     }
-    if faithless(core, p, &members, &draft).await? {
-        leave_both(core, p, UNFAITHFUL, ask.by).await?;
+    if let Some(why) = faithless(core, p, &members, &draft).await? {
+        leave_both(core, p, why, ask.by).await?;
         return ask.refused(core).await;
     }
 
     write_merge(core, p, &sources, &draft, ask).await
 }
 
-/// After the loss check: whether the decision model refuses the draft against the members. A failed
-/// check is an outage of this unit; a draft too long to judge rests on the loss check alone.
+/// After the loss check: why the draft is not written, when the decision model refuses it against
+/// the members or will not judge it. A failed check is an outage of this unit; a draft too long to
+/// judge rests on the loss check alone.
 async fn faithless(
     core: &Core,
     p: &ArtifactPair,
     members: &[Chunk],
     draft: &MergedDraft,
-) -> Result<bool> {
+) -> Result<Option<&'static str>> {
     use crate::core::judging::check::{Checked, Which, check, outage};
     use crate::core::judging::state::Note;
     let originals: Vec<Note> = members
@@ -200,16 +205,22 @@ async fn faithless(
     let got = check(core, &p.id.to_string(), &originals, &rewrite, Which::Both)
         .await
         .map_err(outage)?;
-    if let Checked::Refused { question, yes } = got {
-        tracing::warn!(
-            pair = p.id,
-            question,
-            yes,
-            "the check refused the merge draft"
-        );
-        return Ok(true);
-    }
-    Ok(false)
+    Ok(match got {
+        Checked::Refused { question, yes } => {
+            tracing::warn!(
+                pair = p.id,
+                question,
+                yes,
+                "the check refused the merge draft"
+            );
+            Some(UNFAITHFUL)
+        }
+        Checked::Unjudged { detail } => {
+            tracing::warn!(pair = p.id, %detail, "the merge draft could not be checked");
+            Some(UNCHECKED)
+        }
+        Checked::Passed | Checked::TooLong => None,
+    })
 }
 
 /// The loss check is the caller's.
@@ -857,9 +868,9 @@ mod tests {
         let (_ids, pair) = pool_pair(&core).await;
         dedupe::run(&core, &pair.to_string()).await.unwrap();
         core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
-            Err(Error::InferenceRejected {
+            Err(Error::Inference {
                 role: "decide",
-                detail: "400".into(),
+                detail: "down".into(),
             })
         }));
 
@@ -870,6 +881,31 @@ mod tests {
         assert!(p.merged_into.is_none());
         assert!(p.synthesis_asked, "the ask waits for the retry");
         assert_eq!(decision(&core, pair).await.outcome, None);
+    }
+
+    #[tokio::test]
+    async fn a_draft_the_check_will_not_judge_is_not_written_and_not_retried() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.95);
+        let (ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        core.decider = Arc::new(crate::infer::fake::RuleDecider::new(|_, _| {
+            Err(Error::InferenceRejected {
+                role: "decide",
+                detail: "400".into(),
+            })
+        }));
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_none());
+        assert_eq!(p.detail.as_deref(), Some(UNCHECKED));
+        for id in &ids {
+            assert!(core.store.get_artifact(id).await.unwrap().in_results());
+        }
+        assert_eq!(decision(&core, pair).await.outcome, Some(Outcome::Refused));
     }
 
     #[tokio::test]
