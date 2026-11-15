@@ -647,7 +647,7 @@
     });
   }
 
-  // Decide: parked and streamed as ask is, against the options in `#decide-row`; the rail fills as
+  // Decide: parked and streamed as ask is, in the shape `#decide-row` shows; the rail fills as
   // each passage is read. Text from the stream is set as text; only server-rendered fragments are HTML.
   function decideDriver() {
     var form = document.getElementById('box-form');
@@ -662,8 +662,9 @@
     var said = document.getElementById('decide-problem');
     var lists = {
       choice: document.getElementById('decide-options'),
-      score: document.getElementById('decide-levels'),
+      score: document.getElementById('decide-rating'),
     };
+    var topField = row.querySelector('[name="decide-top"]');
     var source = null;
     // As ask's: a frame from a superseded decision must not write into this one.
     var generation = 0;
@@ -678,16 +679,54 @@
       return row.querySelector('input[name="decide-kind"]:checked');
     }
 
-    function expand(on) {
-      row.hidden = !on;
-      var btn = form.querySelector('[data-verb="decide"]');
-      if (btn) btn.setAttribute('aria-expanded', on ? 'true' : 'false');
-      if (on && checked()) checked().focus();
-      if (!on) box.focus();
+    // Looked up at each use: the group arrives out of band on the first capture.
+    function toggle() {
+      return form.querySelector('[data-decide-toggle]');
     }
 
-    function shape() {
+    // The toggle is disabled with Decide only while the row is closed: open, it is the pointer's way to close it.
+    function follow() {
+      var t = toggle();
+      var btn = form.querySelector('[data-verb="decide"]');
+      if (!t || !btn) return;
+      var off = btn.disabled && row.hidden;
+      // Only on a change: the observer below hears this write too.
+      if (t.disabled !== off) t.disabled = off;
+    }
+
+    // The rating's top, held to its bounds. Written back only once settled: mid-typing, the 1 of a 10 would become 2.
+    function rating(settle) {
+      var n = window.engramDecide.ratingTop(topField.value);
+      if (settle) topField.value = n;
+      row.querySelector('[data-decide-top]').textContent = n;
+    }
+
+    // From the radio, not the last `change`: a reload restores the fields without firing one.
+    function show() {
       var kind = checked() ? checked().value : 'noul';
+      lists.choice.hidden = kind !== 'choice';
+      lists.score.hidden = kind !== 'score';
+      rating(false);
+    }
+
+    // `toBox`: Escape returns to the box; a pressed toggle keeps the focus, or a phone would raise its keyboard.
+    function expand(on, toBox) {
+      row.hidden = !on;
+      var t = toggle();
+      if (t) t.setAttribute('aria-expanded', on ? 'true' : 'false');
+      said.textContent = '';
+      if (on) {
+        show();
+        if (checked()) checked().focus();
+      } else if (toBox) {
+        box.focus();
+      }
+      follow();
+    }
+
+    // Closed, the row shows no shape: the decision is yes / no, and what was typed waits for the next opening.
+    function shape() {
+      var kind = !row.hidden && checked() ? checked().value : 'noul';
       return {
         kind: kind,
         options: Array.prototype.map.call(lists.choice.querySelectorAll('.decide-option'), function (o) {
@@ -696,9 +735,9 @@
             description: o.querySelector('[name="decide-desc"]').value,
           };
         }),
-        levels: Array.prototype.map.call(lists.score.querySelectorAll('[name="decide-level"]'), function (i) {
-          return i.value;
-        }),
+        top: topField.value,
+        low: row.querySelector('[name="decide-low"]').value,
+        high: row.querySelector('[name="decide-high"]').value,
       };
     }
 
@@ -766,6 +805,8 @@
     function run() {
       var D = window.engramDecide;
       var q = box.value;
+      // Enter in the field commits no `change`, so the top is settled here too.
+      rating(true);
       var r = shape();
       var why = D.problem(q, r);
       said.textContent = why;
@@ -807,32 +848,47 @@
       });
     }
 
-    // Delegated: the button arrives out of band on the first capture.
+    // Delegated: the group arrives out of band on the first capture. Either Decide runs what is showing.
     form.addEventListener('click', function (e) {
-      var btn = e.target.closest ? e.target.closest('[data-verb="decide"]') : null;
+      var t = e.target.closest ? e.target.closest('[data-decide-toggle]') : null;
+      if (t) {
+        if (!t.disabled) expand(row.hidden, false);
+        return;
+      }
+      var btn = e.target.closest ? e.target.closest('[data-verb="decide"], [data-verb="decide-row"]') : null;
       if (!btn || btn.disabled) return;
       e.preventDefault();
-      if (row.hidden) expand(true);
-      else run();
+      run();
     });
 
+    // `boxVerbs` and `boxBusy` own Decide's state and announce neither; the toggle reads it off the button.
+    var verbs = form.querySelector('.verbs');
+    if (verbs && window.MutationObserver) {
+      new MutationObserver(follow).observe(verbs, {
+        attributes: true, attributeFilter: ['disabled'], childList: true, subtree: true,
+      });
+    }
+    follow();
+
     row.addEventListener('change', function (e) {
+      if (e.target.name === 'decide-top') { rating(true); return; }
       if (e.target.name !== 'decide-kind') return;
-      lists.choice.hidden = e.target.value !== 'choice';
-      lists.score.hidden = e.target.value !== 'score';
+      show();
       said.textContent = '';
+    });
+
+    row.addEventListener('input', function (e) {
+      if (e.target.name === 'decide-top') rating(false);
     });
 
     row.addEventListener('click', function (e) {
       var add = e.target.closest ? e.target.closest('[data-decide-add]') : null;
       if (!add || add.disabled) return;
-      var one = add.getAttribute('data-decide-add');
-      var cls = one === 'option' ? '.decide-option' : '.decide-level';
-      var max = window.engramDecide.LIMITS[one === 'option' ? 'options' : 'levels'][1];
-      var fresh = document.getElementById('decide-' + one + '-row').content.firstElementChild.cloneNode(true);
+      var fresh = document.getElementById('decide-option-row').content.firstElementChild.cloneNode(true);
       add.parentNode.insertBefore(fresh, add);
       fresh.querySelector('input').focus();
-      add.disabled = add.parentNode.querySelectorAll(cls).length >= max;
+      var max = window.engramDecide.LIMITS.options[1];
+      add.disabled = add.parentNode.querySelectorAll('.decide-option').length >= max;
     });
 
     row.addEventListener('keydown', function (e) {
@@ -840,15 +896,15 @@
         // Stopped here, or the page's Escape would blur the box it just focused.
         e.preventDefault();
         e.stopPropagation();
-        expand(false);
+        expand(false, true);
         return;
       }
       if (e.key !== 'Enter' || e.isComposing) return;
-      // A summary opens its description and a button does its own act.
-      if (e.target.closest('summary, button')) return;
+      // A button does its own act.
+      if (e.target.closest('button')) return;
       e.preventDefault();
-      // Through the button, so whatever disables it (busy, a staged file) holds here too.
-      var btn = form.querySelector('[data-verb="decide"]');
+      // Through the row's own button, so whatever disables it (busy, a staged file) holds here too.
+      var btn = row.querySelector('[data-verb="decide-row"]');
       if (btn && !btn.disabled) { btn.click(); return; }
       var staged = document.getElementById('staged');
       var busy = form.getAttribute('aria-busy') === 'true';

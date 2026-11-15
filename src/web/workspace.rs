@@ -1507,6 +1507,96 @@ mod tests {
         );
     }
 
+    /// The slot's contents: the markup from its id to the next verb or region.
+    fn decide_slot<'a>(html: &'a str, until: &str) -> &'a str {
+        let slot = html
+            .split(r#"id="decide-verb-slot""#)
+            .nth(1)
+            .expect("the slot");
+        &slot[..slot.find(until).expect("the slot does not end")]
+    }
+
+    #[tokio::test]
+    async fn a_toggle_beside_decide_opens_the_answer_row() {
+        let html = workspace_held("/ui").await;
+        let slot = decide_slot(&html, r#"data-verb="capture""#);
+        for part in [
+            r#"role="group" aria-label="Decide""#,
+            r#"data-verb="decide" disabled"#,
+            r#"data-decide-toggle disabled"#,
+            r#"aria-expanded="false" aria-controls="decide-row""#,
+            r#"aria-label="Choose the answer shape""#,
+            r#"data-icon="chevron-down""#,
+        ] {
+            assert!(slot.contains(part), "{part} is not in the group: {slot}");
+        }
+        assert!(
+            !slot.contains("oc-btn--primary"),
+            "Decide took the primary style: {slot}"
+        );
+        assert_eq!(
+            slot.matches("aria-expanded").count(),
+            1,
+            "Decide itself opens nothing now: {slot}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_answer_row_has_plain_fields_and_its_own_decide() {
+        let html = workspace_held("/ui").await;
+        let row = html.split(r#"id="decide-row""#).nth(1).expect("the row");
+        let row = &row[..row.find("</fieldset>").expect("the row does not end")];
+        for part in [
+            "<span>yes / no</span>",
+            "<span>options</span>",
+            "<span>rating</span>",
+            r#"<span class="muted">Option</span>"#,
+            r#"name="decide-option" maxlength="40""#,
+            r#"<span class="muted">What it means (optional)</span>"#,
+            r#"<span>Add an option</span>"#,
+            r#"<span class="muted">Rating from 1 to</span>"#,
+            r#"type="number" name="decide-top" min="2" max="10" step="1" value="5""#,
+            r#"<span class="muted">1 means</span>"#,
+            r#"<span data-decide-top>5</span> means"#,
+            r#"name="decide-low""#,
+            r#"name="decide-high""#,
+            r#"data-verb="decide-row" disabled"#,
+            r#"title="Type or attach something first""#,
+            "<kbd>↵</kbd> in any field",
+            r#"id="decide-problem""#,
+        ] {
+            assert!(row.contains(part), "{part} is not in the row: {row}");
+        }
+        for gone in [
+            "<details",
+            "<summary",
+            "scale",
+            "decide-level",
+            "lowest first",
+        ] {
+            assert!(!row.contains(gone), "{gone} is still in the row: {row}");
+        }
+        let lines = row.split("<template").next().unwrap();
+        assert_eq!(
+            lines.matches(r#"name="decide-option""#).count(),
+            2,
+            "two options to start: {row}"
+        );
+        assert_eq!(
+            lines.matches(r#"name="decide-desc""#).count(),
+            2,
+            "each with its description in sight: {row}"
+        );
+        assert!(
+            row.contains(r#"<template id="decide-option-row">"#),
+            "nothing to add an option from: {row}"
+        );
+        assert!(
+            !row.contains("oc-btn--primary"),
+            "the row's Decide took the primary style: {row}"
+        );
+    }
+
     #[tokio::test]
     async fn a_core_that_does_not_decide_offers_no_decide_verb() {
         let mut core = crate::core::test_support::test_core().await;
@@ -1515,6 +1605,7 @@ mod tests {
             let html = workspace_held_by(core.clone(), uri).await;
             assert!(html.contains(r#"id="decide-verb-slot""#), "{html}");
             assert!(!html.contains(r#"data-verb="decide""#), "{uri}: {html}");
+            assert!(!html.contains("data-decide-toggle"), "{uri}: {html}");
         }
     }
 
@@ -1523,6 +1614,7 @@ mod tests {
         let html = workspace("/ui").await;
         assert!(html.contains(r#"id="decide-verb-slot""#), "{html}");
         assert!(!html.contains(r#"data-verb="decide""#), "{html}");
+        assert!(!html.contains("data-decide-toggle"), "{html}");
     }
 
     #[tokio::test]
@@ -1533,6 +1625,11 @@ mod tests {
             "{html}"
         );
         assert!(html.contains(r#"data-verb="decide""#), "{html}");
+        let slot = decide_slot(&html, r#"id="keyhint-slot""#);
+        assert!(
+            slot.contains("data-decide-toggle") && slot.contains(r#"aria-controls="decide-row""#),
+            "the toggle did not arrive with Decide: {slot}"
+        );
     }
 
     #[tokio::test]

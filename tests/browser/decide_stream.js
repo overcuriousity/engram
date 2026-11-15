@@ -31,26 +31,33 @@ const events = [];
 let report = null;
 let child = null;
 
-// Each scenario is the body of a function run at `DOMContentLoaded`, with
-// `q`, `press`, `later` and `send` in scope. No backticks: this is a template literal.
+// Each scenario is the body of a function run at `DOMContentLoaded`, with `q`, `press` (the
+// Decide beside Ask), `toggle`, `pressRow` (the row's own Decide), `kind`, `field`, `later` and
+// `send` in scope. No backticks: this is a template literal.
+//
+// The toggle takes Decide's state from a MutationObserver, a microtask later: a scenario
+// presses it from `later(0, ...)`, never in the statement after `q`.
 const SCENARIOS = {
+  // One press with the row closed is a yes / no decision; the row stays closed.
   single: `
+    var row = document.getElementById('decide-row');
+    var t = document.querySelector('[data-decide-toggle]');
+    var offAtStart = t.disabled;
     q('Should I keep it?');
     press();
-    var row = document.getElementById('decide-row');
-    var btn = document.querySelector('[data-verb="decide"]');
-    var radio = row.querySelector('input[name="decide-kind"]:checked');
-    var opened = !row.hidden && btn.getAttribute('aria-expanded') === 'true' &&
-      document.activeElement === radio;
-    press();
-    later(4500, function () { send({ rowOpenAfterFirstPress: opened }); });
+    var closed = row.hidden && t.getAttribute('aria-expanded') === 'false';
+    var offWhileBusy = null;
+    later(0, function () { offWhileBusy = t.disabled; });
+    later(4500, function () {
+      send({ rowClosedAfterPress: closed, toggleOffAtStart: offAtStart,
+        toggleOffWhileBusy: offWhileBusy, toggleLiveWhenDone: !t.disabled });
+    });
   `,
   // The second press lands while the first stream is reading. The button
   // disables itself while busy, which is the page's own guard and not the one
   // under test, so it is re-enabled here.
   double: `
     q('Should I keep it?');
-    press();
     press();
     later(150, function () {
       document.querySelector('[data-verb="decide"]').disabled = false;
@@ -61,7 +68,6 @@ const SCENARIOS = {
   // Stop while the question is still being parked: no stream may open after it.
   stop: `
     q('Should I keep it?');
-    press();
     press();
     later(100, function () { document.getElementById('ask-stop').click(); });
     later(1500, function () { send({}); });
