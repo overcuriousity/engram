@@ -487,19 +487,25 @@ impl Store {
     /// Band act, waiting and settled, highest top first.
     pub async fn waiting_acts(&self, limit: i64) -> Result<Vec<Logged>> {
         read_all(
-            logged_rows!("WHERE band = 'act' AND state = 'waiting' AND reason IS NOT 'unsettled'
-             ORDER BY top DESC, id LIMIT ?", limit)
-                .fetch_all(&self.pool)
-                .await?,
+            logged_rows!(
+                "WHERE band = 'act' AND state = 'waiting' AND reason IS NOT 'unsettled'
+             ORDER BY top DESC, id LIMIT ?",
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await?,
         )
     }
 
     /// Band ask, waiting for a seat, highest top first.
     pub async fn waiting_asks(&self, limit: i64) -> Result<Vec<Logged>> {
         read_all(
-            logged_rows!("WHERE band = 'ask' AND state = 'waiting' ORDER BY top DESC, id LIMIT ?", limit)
-                .fetch_all(&self.pool)
-                .await?,
+            logged_rows!(
+                "WHERE band = 'ask' AND state = 'waiting' ORDER BY top DESC, id LIMIT ?",
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await?,
         )
     }
 
@@ -554,12 +560,15 @@ impl Store {
     /// Confirmed or corrected with no journal row, newest first; a reason of `asked_again` leaves the list.
     pub async fn answered_without_action(&self, limit: i64) -> Result<Vec<Logged>> {
         read_all(
-            logged_rows!("WHERE outcome IN ('confirmed', 'corrected')
+            logged_rows!(
+                "WHERE outcome IN ('confirmed', 'corrected')
                AND reason IS NOT 'asked_again'
                AND NOT EXISTS (SELECT 1 FROM decision_actions WHERE decision_id = decisions.id)
-             ORDER BY outcome_at DESC, id DESC LIMIT ?", limit)
-                .fetch_all(&self.pool)
-                .await?,
+             ORDER BY outcome_at DESC, id DESC LIMIT ?",
+                limit
+            )
+            .fetch_all(&self.pool)
+            .await?,
         )
     }
 
@@ -1271,7 +1280,10 @@ mod tests {
         let mut a = merge_of("x", "m");
         a.kind = Kind::Supersede;
         let row = store.record_action(&a).await.unwrap();
-        store.link_decision_actions(&id, &[row.clone()]).await.unwrap();
+        store
+            .link_decision_actions(&id, std::slice::from_ref(&row))
+            .await
+            .unwrap();
         assert_eq!(
             store
                 .undo_actions_under("m", UndoneBy::Evidence, "gone")
@@ -1280,7 +1292,15 @@ mod tests {
             0
         );
         assert_eq!(store.logged(&id).await.unwrap().unwrap().outcome, None);
-        assert!(store.action(&row).await.unwrap().unwrap().undone_at.is_none());
+        assert!(
+            store
+                .action(&row)
+                .await
+                .unwrap()
+                .unwrap()
+                .undone_at
+                .is_none()
+        );
     }
 
     #[tokio::test]

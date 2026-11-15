@@ -514,6 +514,10 @@ async fn main() -> anyhow::Result<()> {
         } else {
             print!("{}", engram::jobs::replay::render(&reports));
         }
+        // What was asked is printed all the same; a script must still see the run was cut short.
+        if reports.iter().any(|r| r.stopped.is_some()) {
+            std::process::exit(1);
+        }
         return Ok(());
     }
 

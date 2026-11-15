@@ -44,8 +44,12 @@ pub async fn run(core: &Core) -> Result<Report> {
             close_unanswerable(core, &d).await;
             continue;
         };
-        if !wrote(&d, "close an orphaned decision", core.store.close_unsettled(&d.id).await)
-            .unwrap_or(false)
+        if !wrote(
+            &d,
+            "close an orphaned decision",
+            core.store.close_unsettled(&d.id).await,
+        )
+        .unwrap_or(false)
         {
             continue;
         }
@@ -75,8 +79,12 @@ pub async fn run(core: &Core) -> Result<Report> {
             },
             Ok(false) => {
                 // Closed before the reopen, so a second worker reaching it does neither.
-                if !wrote(&d, "close a changed decision", core.store.claim_act(&d.id).await)
-                    .unwrap_or(false)
+                if !wrote(
+                    &d,
+                    "close a changed decision",
+                    core.store.claim_act(&d.id).await,
+                )
+                .unwrap_or(false)
                 {
                     continue;
                 }
@@ -414,7 +422,10 @@ mod tests {
         let r = run(&core).await.unwrap();
         assert_eq!(r.scanned, 1, "the unreadable ones were armed again");
         let after = armed(&core, &ids).await;
-        assert!(after[0], "thirty unreadable notes kept the next from its turn");
+        assert!(
+            after[0],
+            "thirty unreadable notes kept the next from its turn"
+        );
         assert!(after[1..].iter().all(|a| !a));
     }
 
@@ -542,7 +553,12 @@ mod tests {
 
         let r = run(&core).await.unwrap();
         assert_eq!(r.labelled, 1, "the one search that can run was not reached");
-        assert!(core.store.live_job(Stage::Label, &healthy[0]).await.unwrap());
+        assert!(
+            core.store
+                .live_job(Stage::Label, &healthy[0])
+                .await
+                .unwrap()
+        );
         for id in stuck {
             assert!(!core.store.live_job(Stage::Label, id).await.unwrap());
         }

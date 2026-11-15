@@ -638,8 +638,13 @@ pub(crate) async fn discard_both(
     let mut rows = Vec::new();
     for id in &retire {
         // The journal is what the base did to itself; a person's press is not journaled.
-        let journal = (by == DecidedBy::Model)
-            .then(|| decided(action(Kind::Discard, pair, id, None, detail), by, decision_id));
+        let journal = (by == DecidedBy::Model).then(|| {
+            decided(
+                action(Kind::Discard, pair, id, None, detail),
+                by,
+                decision_id,
+            )
+        });
         let row = core.deprecate_with(id, journal).await?;
         // Linked as written, so a failure on the second side leaves the first one undoable.
         if let (Some(r), Some(d)) = (&row, decision_id) {
@@ -2845,7 +2850,11 @@ pub(crate) mod tests {
         PairApplier.reopen(&core, &d).await.unwrap();
 
         let p = core.store.get_pair(pair).await.unwrap();
-        assert_eq!(p.state, PairState::NoConflict, "a settled pair was reopened");
+        assert_eq!(
+            p.state,
+            PairState::NoConflict,
+            "a settled pair was reopened"
+        );
         assert_eq!(
             p.merged_into.as_deref(),
             Some(merged.as_str()),

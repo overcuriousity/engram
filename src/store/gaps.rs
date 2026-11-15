@@ -1647,7 +1647,7 @@ mod tests {
             .unwrap();
         assert!(said(&gap, "m/v1", 0.9).await);
         assert!(!said(&gap, "m/v1", 0.3).await);
-        assert_eq!(rejections(&store).await, [gap.id.clone()]);
+        assert_eq!(rejections(&store).await, std::slice::from_ref(&gap.id));
     }
 
     #[tokio::test]

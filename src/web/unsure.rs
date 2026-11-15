@@ -145,7 +145,9 @@ async fn drawn(
     a: &dyn judging::Applier,
     d: &Logged,
 ) -> Option<(Vec<(String, String)>, Vec<(String, String)>)> {
-    let read = async { Ok::<_, crate::error::Error>((a.subjects(core, d).await?, a.buttons(core, d).await?)) };
+    let read = async {
+        Ok::<_, crate::error::Error>((a.subjects(core, d).await?, a.buttons(core, d).await?))
+    };
     match read.await {
         Ok(row) => Some(row),
         Err(e) => {
@@ -775,7 +777,13 @@ mod tests {
             ("reap_worth", "artifact", a.clone(), None, 1),
             // What is gone is named by nothing, so no link leads nowhere.
             ("pair_relation", "pair", "999999".to_string(), None, 0),
-            ("link_kind", "link", "gone".to_string(), Some("too".to_string()), 0),
+            (
+                "link_kind",
+                "link",
+                "gone".to_string(),
+                Some("too".to_string()),
+                0,
+            ),
             ("reap_worth", "artifact", "gone".to_string(), None, 0),
         ] {
             let id = core

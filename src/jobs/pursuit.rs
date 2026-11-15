@@ -1747,7 +1747,11 @@ mod tests {
         generate(&core, &pid).await.unwrap();
 
         assert_eq!(gate_asks(&d), 1, "the stored answer was asked for again");
-        assert_eq!(writer.calls(), 0, "written under a line the answer is below");
+        assert_eq!(
+            writer.calls(),
+            0,
+            "written under a line the answer is below"
+        );
         let p = core.store.get_pursuit(&pid).await.unwrap();
         assert_eq!(p.reason.as_deref(), Some(UNSURE), "{p:?}");
         assert_eq!(gate_rows(&core, &pid).await, 2, "the reuse left no row");

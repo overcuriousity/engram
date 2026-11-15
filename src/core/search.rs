@@ -3229,10 +3229,7 @@ mod tests {
             core.store
                 .put_readings(
                     &c.id,
-                    &[(
-                        &time_bound,
-                        &crate::infer::decide::Answer::Noul { yes },
-                    )],
+                    &[(&time_bound, &crate::infer::decide::Answer::Noul { yes })],
                     "m",
                 )
                 .await

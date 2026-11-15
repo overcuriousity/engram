@@ -504,11 +504,7 @@ pub async fn ask_again(core: &Core, id: &str) -> Result<()> {
         return Err(Error::Validation(NOT_ASKED_AGAIN.into()));
     }
     if let Err(e) = applier.reopen(core, &d).await {
-        if let Err(undo) = core
-            .store
-            .release_ask_again(id, d.reason.as_deref())
-            .await
-        {
+        if let Err(undo) = core.store.release_ask_again(id, d.reason.as_deref()).await {
             tracing::warn!(decision = id, error = %undo, "could not list an answer again after its subject would not reopen");
         }
         return Err(e);

@@ -134,7 +134,9 @@ impl Applier for TestApplier {
     }
     async fn subjects(&self, _: &Core, d: &Logged) -> Result<Vec<(String, String)>> {
         if self.unreadable.lock().unwrap().as_deref() == Some(d.subject_a.as_str()) {
-            return Err(Error::Store("the test applier could not read its subjects".into()));
+            return Err(Error::Store(
+                "the test applier could not read its subjects".into(),
+            ));
         }
         let mut out = vec![(d.subject_a.clone(), format!("Title {}", d.subject_a))];
         if let Some(b) = &d.subject_b {
@@ -143,7 +145,8 @@ impl Applier for TestApplier {
         Ok(out)
     }
     async fn unchanged(&self, _: &Core, d: &Logged) -> Result<bool> {
-        let this_one = self.changed_subject.lock().unwrap().as_deref() == Some(d.subject_a.as_str());
+        let this_one =
+            self.changed_subject.lock().unwrap().as_deref() == Some(d.subject_a.as_str());
         Ok(!this_one && !self.changed.load(Ordering::SeqCst))
     }
     async fn apply(

@@ -817,7 +817,10 @@ async fn write_window(
             core.heal_dangling_supersessions().await?;
         }
     }
-    core.store.insert_artifacts(corpus_id, &new).await.map(Written::New)
+    core.store
+        .insert_artifacts(corpus_id, &new)
+        .await
+        .map(Written::New)
 }
 
 /// A promotion re-run under append: the earlier non-passage rows, which the write returns instead

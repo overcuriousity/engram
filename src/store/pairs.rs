@@ -1613,11 +1613,7 @@ mod tests {
         );
 
         s.record_unreadable_judgement(id).await.unwrap();
-        assert!(
-            s.ask_pair_synthesis_by(id, DecidedBy::Model)
-                .await
-                .unwrap()
-        );
+        assert!(s.ask_pair_synthesis_by(id, DecidedBy::Model).await.unwrap());
         assert_eq!(
             s.get_pair(id).await.unwrap().judge_unreadable,
             1,

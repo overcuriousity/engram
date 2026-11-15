@@ -3568,7 +3568,11 @@ mode = "off"
         let _guard = env_guard();
         let dir = tempfile::tempdir().unwrap();
         for (line, key, other) in [
-            ("ask_open_max = 0", "decide.ask_open_max", "decide.tick_mins"),
+            (
+                "ask_open_max = 0",
+                "decide.ask_open_max",
+                "decide.tick_mins",
+            ),
             ("tick_mins = 0", "decide.tick_mins", "decide.ask_open_max"),
         ] {
             let body = format!("{MINIMAL}\n[decide]\n{line}\n");

@@ -13,11 +13,16 @@ use crate::store::decision_log::{NewLogged, Outcome, State};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Checked {
     Passed,
-    Refused { question: &'static str, yes: f64 },
+    Refused {
+        question: &'static str,
+        yes: f64,
+    },
     TooLong,
     /// The decision model would not answer, and a retry is told the same: the rewrite rests on the
     /// literal checks, and the caller flags what it stores.
-    Unjudged { detail: String },
+    Unjudged {
+        detail: String,
+    },
 }
 
 /// On an artifact stored though its check could not be put; the detail says why.

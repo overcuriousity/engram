@@ -1812,9 +1812,7 @@ mod tests {
             older_than: i64,
             unseen_since: i64,
         ) -> Result<Vec<SearchHit>> {
-            self.inner
-                .resurface(limit, older_than, unseen_since)
-                .await
+            self.inner.resurface(limit, older_than, unseen_since).await
         }
         async fn facets(&self, limit: usize) -> Result<Facets> {
             self.inner.facets(limit).await
@@ -1888,7 +1886,11 @@ mod tests {
         assert_eq!((r.applied, r.reasked), (0, 0));
         assert_eq!(decision(&core, &ids[0], None).await.reason, None);
         assert_eq!(
-            core.store.dirty_lifecycle_artifacts(10).await.unwrap().len(),
+            core.store
+                .dirty_lifecycle_artifacts(10)
+                .await
+                .unwrap()
+                .len(),
             1,
             "the marker must stay for the repair pass"
         );

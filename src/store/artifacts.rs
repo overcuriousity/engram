@@ -895,20 +895,8 @@ impl Store {
         Ok(())
     }
 
-    /// Leaves `embed_state`: the embedder never sees a category.
-    pub async fn update_artifact_category(&self, id: &str, category: Option<&str>) -> Result<()> {
-        self.expect_updated(
-            sqlx::query!(
-                "UPDATE artifacts SET category = ? WHERE id = ?",
-                category,
-                id
-            )
-            .execute(&self.pool)
-            .await?,
-        )
-    }
-
     /// `by`: `person`, `reading` or `writer`, so a reading can tell whose category it would replace.
+    /// Leaves `embed_state`: the embedder never sees a category.
     pub async fn update_artifact_category_by(
         &self,
         id: &str,
