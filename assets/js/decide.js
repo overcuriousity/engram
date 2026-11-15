@@ -6,8 +6,21 @@ function options(row) {
     .filter((o) => o.name);
 }
 
+// Held to its bounds rather than refused; a field that does not read as a number is the starting five.
+export function ratingTop(value) {
+  const n = Number.parseInt(String(value).trim(), 10);
+  if (Number.isNaN(n)) return 5;
+  return Math.min(Math.max(n, LIMITS.levels[0]), LIMITS.levels[1]);
+}
+
+// A rating is a score whose levels are 1 to N; only the two ends can carry a name.
 function levels(row) {
-  return row.levels.map((l) => l.trim()).filter(Boolean);
+  const n = ratingTop(row.top);
+  const ends = [row.low.trim(), row.high.trim()];
+  return Array.from({ length: n }, (_, i) => {
+    const label = i === 0 ? ends[0] : i === n - 1 ? ends[1] : "";
+    return label ? `${i + 1} (${label})` : String(i + 1);
+  });
 }
 
 // Assembled as text: a JS object would reorder integer-like option names.
@@ -30,10 +43,6 @@ export function problem(q, row) {
     if (names.length < LIMITS.options[0]) return "Name at least two options";
     if (names.length > LIMITS.options[1]) return "At most eight options";
     if (new Set(names).size < names.length) return "Use each option once";
-  } else if (row.kind === "score") {
-    const n = levels(row).length;
-    if (n < LIMITS.levels[0]) return "Name at least two levels";
-    if (n > LIMITS.levels[1]) return "At most ten levels";
   }
   return "";
 }
@@ -45,5 +54,5 @@ export function progressText(read, of, bearing) {
 }
 
 if (typeof document !== "undefined") {
-  globalThis.engramDecide = { bodyText, problem, progressText, LIMITS };
+  globalThis.engramDecide = { bodyText, problem, progressText, ratingTop, LIMITS };
 }

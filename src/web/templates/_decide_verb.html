@@ -1,7 +1,13 @@
-{# Always present, like the ask slot, so `_held.html` can swap the button in. Decide never takes the primary style. #}
+{# Always present, like the ask slot, so `_held.html` can swap the group in. Decide never takes the primary style. #}
 <span id="decide-verb-slot"{% if oob %} hx-swap-oob="true"{% endif %}>
   {%- if decide_enabled && held -%}
-  <button class="oc-btn" type="button" data-verb="decide" disabled
-          title="Type or attach something first" aria-expanded="false" aria-controls="decide-row">Decide</button>
+  <span class="decide-group" role="group" aria-label="Decide">
+    <button class="oc-btn" type="button" data-verb="decide" disabled
+            title="Type or attach something first">Decide</button>
+    {# Not a verb: app.js disables it with Decide only while the row is closed, so an open row can always be closed. #}
+    <button class="oc-btn oc-btn--icon decide-toggle" type="button" data-decide-toggle disabled
+            aria-expanded="false" aria-controls="decide-row"
+            aria-label="Choose the answer shape" data-oc-tip="Choose the answer shape">{{ crate::web::icons::icon("chevron-down", 16) }}</button>
+  </span>
   {%- endif -%}
 </span>

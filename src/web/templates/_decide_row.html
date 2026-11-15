@@ -1,23 +1,27 @@
-{# Shown by app.js when Decide is chosen: how the answer should look. #}
+{# Opened by the toggle beside Decide (app.js): how the answer should look. Closed, a decision is yes / no. #}
 <fieldset id="decide-row" class="decide-row" hidden>
   <legend class="muted">Answer</legend>
   <label class="chip"><input type="radio" name="decide-kind" value="noul" checked><span>yes / no</span></label>
   <label class="chip"><input type="radio" name="decide-kind" value="choice"><span>options</span></label>
-  <label class="chip"><input type="radio" name="decide-kind" value="score"><span>scale</span></label>
+  <label class="chip"><input type="radio" name="decide-kind" value="score"><span>rating</span></label>
   <div id="decide-options" class="decide-list" hidden>
     {%- for _ in 0..2 %}
     {% include "_decide_option.html" %}
     {%- endfor %}
-    <button class="oc-btn oc-btn--icon" type="button" data-decide-add="option" aria-label="Add an option">{{ crate::web::icons::icon("plus", 16) }}</button>
+    <button class="oc-btn" type="button" data-decide-add="option">{{ crate::web::icons::icon("plus", 16) }}<span>Add an option</span></button>
   </div>
-  <div id="decide-levels" class="decide-list" hidden>
-    <span class="muted">lowest first</span>
-    {%- for _ in 0..2 %}
-    {% include "_decide_level.html" %}
-    {%- endfor %}
-    <button class="oc-btn oc-btn--icon" type="button" data-decide-add="level" aria-label="Add a level">{{ crate::web::icons::icon("plus", 16) }}</button>
+  {# Sent as a score: the levels 1 to N, the two ends named when a label is given (decide.js). #}
+  <div id="decide-rating" class="decide-list" hidden>
+    <label class="decide-field decide-field--top"><span class="muted">Rating from 1 to</span><input class="oc-input" type="number" name="decide-top" min="2" max="10" step="1" value="5" inputmode="numeric" autocomplete="off"></label>
+    <label class="decide-field"><span class="muted">1 means</span><input class="oc-input" name="decide-low" maxlength="40" autocomplete="off"></label>
+    <label class="decide-field"><span class="muted"><span data-decide-top>5</span> means</span><input class="oc-input" name="decide-high" maxlength="40" autocomplete="off"></label>
   </div>
   <p id="decide-problem" class="muted" role="status"></p>
+  {# The same act as the Decide above. A verb of its own name, so app.js disables both alike and Alt+Enter finds only the one above. #}
+  <div class="decide-run">
+    <button class="oc-btn" type="button" data-verb="decide-row" disabled
+            title="Type or attach something first">Decide</button>
+    <span class="muted decide-enter">or <kbd>↵</kbd> in any field</span>
+  </div>
   <template id="decide-option-row">{% include "_decide_option.html" %}  </template>
-  <template id="decide-level-row">{% include "_decide_level.html" %}  </template>
 </fieldset>

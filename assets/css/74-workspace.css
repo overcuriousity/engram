@@ -175,13 +175,36 @@ body { overflow-x: hidden; }
   margin-top: 0.5rem;
 }
 .verbs-spacer { flex: 1 1 auto; }
-/* Hidden until Decide is chosen; an author `display` would beat `[hidden]`, so it is restored. */
+/* Decide and the toggle for its row are one control: joined under a pointer, 8px apart for a thumb. */
+.decide-group { display: inline-flex; gap: var(--space-2); }
+.decide-toggle { border-color: var(--color-border-strong); background: var(--color-bg-elevated); }
+.decide-toggle[aria-expanded="true"] { background: var(--color-bg-active); color: var(--color-fg-primary); }
+@media (pointer: fine) {
+  .decide-group { gap: 0; }
+  .decide-group [data-verb] { border-radius: var(--radius-md) 0 0 var(--radius-md); }
+  .decide-toggle { border-left: 0; border-radius: 0 var(--radius-md) var(--radius-md) 0; }
+}
+/* Hidden until the toggle opens it; an author `display` would beat `[hidden]`, so it is restored. */
 .decide-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); border: 0; padding: 0; margin: 0.5rem 0 0; min-width: 0; }
 .decide-row[hidden], .decide-list[hidden] { display: none; }
-.decide-list { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); flex-basis: 100%; }
-.decide-option { display: inline-flex; align-items: center; gap: var(--space-2); }
+.decide-list { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-2); flex-basis: 100%; }
+/* One line per option: the name, then what it means, in the same two columns on every line. */
+.decide-option { display: flex; align-items: flex-end; gap: var(--space-2); flex-basis: 100%; min-width: 0; }
+.decide-field { display: flex; flex-direction: column; gap: var(--space-1); flex: 0 1 18rem; min-width: 0; }
+.decide-field--wide { flex-grow: 1; }
+.decide-field--top { flex: none; }
+.decide-field--top .oc-input { width: 5rem; }
+/* The first line's labels head the columns; the rest stay for a screen reader. Stacked on a phone, every line shows its own. */
+@media (width >= 48rem) {
+  .decide-option ~ .decide-option .decide-field > span {
+    position: absolute; width: 1px; height: 1px; margin: -1px;
+    overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+}
+#decide-problem { flex-basis: 100%; }
 #decide-problem:empty { display: none; }
-.verbs .oc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.decide-run { display: flex; align-items: center; gap: var(--space-2); flex-basis: 100%; }
+.verbs .oc-btn:disabled, .decide-run .oc-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Setting one axis to `auto` turns the other to `auto` too, hence `overflow-x: hidden`. */
 .rail {

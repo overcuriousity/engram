@@ -43,7 +43,16 @@ fn one_decision_opens_one_stream_and_leaves_none_open() {
     assert_eq!(out["parkRequests"], 1, "{out}");
     assert_eq!(out["streamRequests"], 1, "the stream reconnected: {out}");
     assert_eq!(out["openStreams"], 0, "the stream was left open: {out}");
-    assert_eq!(r["rowOpenAfterFirstPress"], true, "{r}");
+    assert_eq!(
+        r["rowClosedAfterPress"], true,
+        "one press with the row closed did not run, or opened the row: {r}"
+    );
+    assert_eq!(r["toggleOffAtStart"], true, "{r}");
+    assert_eq!(
+        r["toggleOffWhileBusy"], true,
+        "the toggle did not follow Decide while it ran: {r}"
+    );
+    assert_eq!(r["toggleLiveWhenDone"], true, "{r}");
     assert_eq!(
         out["bodies"][0]["body"], r#"{"q":"Should I keep it?"}"#,
         "{out}"
@@ -150,13 +159,127 @@ fn a_row_that_cannot_be_sent_posts_nothing_and_says_why() {
 
 #[test]
 #[ignore = "needs node and a headless Chrome; see the module comment"]
-fn the_whole_row_works_from_the_keyboard() {
+fn the_toggle_opens_the_row_and_its_own_decide_runs_what_it_shows() {
+    let out = drive("row");
+    let r = &out["report"];
+    assert_eq!(r["toggleLive"], true, "{r}");
+    assert_eq!(r["opened"], true, "the toggle did not open the row: {r}");
+    assert_eq!(r["focusAfterOpen"], "decide-kind", "{r}");
+    assert_eq!(r["optionsShown"], true, "{r}");
+    assert_eq!(
+        out["bodies"][0]["body"],
+        r#"{"q":"Which one?","questions":{"verdict":{"type":"choice","criteria":{"keep":"stay with it","switch":""}}}}"#,
+        "the row's Decide did not run the options: {out}"
+    );
+    assert_eq!(r["statusAfterRow"], "The decision is ready.", "{r}");
+    assert_eq!(r["closed"], true, "the toggle did not close the row: {r}");
+    assert_eq!(
+        r["boxFocusedOnClose"], false,
+        "a pressed toggle sent the focus to the box: {r}"
+    );
+    assert_eq!(
+        out["bodies"][1]["body"], r#"{"q":"Which one?"}"#,
+        "a closed row did not return the shape to yes / no: {out}"
+    );
+    assert_eq!(out["parkRequests"], 2, "{out}");
+    assert_eq!(out["streamRequests"], 2, "{out}");
+    assert_eq!(out["openStreams"], 0, "{out}");
+    assert_eq!(r["toggleLiveAgain"], true, "{r}");
+    assert_eq!(r["reopened"], true, "{r}");
+    assert_eq!(r["kindAfterReopen"], "choice", "{r}");
+    assert_eq!(r["optionsShownAfterReopen"], true, "{r}");
+    assert_eq!(r["optionsAfterReopen"][0], "keep", "{r}");
+    assert_eq!(r["optionsAfterReopen"][1], "switch", "{r}");
+    assert_eq!(
+        r["descAfterReopen"], "stay with it",
+        "what was typed did not wait: {r}"
+    );
+    assert_eq!(r["formBusy"], false, "{r}");
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn a_rating_sends_one_to_n_with_its_ends_named() {
+    let out = drive("rating");
+    let r = &out["report"];
+    assert_eq!(r["ratingShown"], true, "{r}");
+    assert_eq!(r["topAtStart"], "5", "{r}");
+    assert_eq!(r["labelAtStart"], "5", "{r}");
+    assert_eq!(
+        out["bodies"][0]["body"],
+        r#"{"q":"How sure is it?","questions":{"verdict":{"type":"score","criteria":["1","2","3","4","5"]}}}"#,
+        "{out}"
+    );
+    assert_eq!(
+        r["labelAfterSeven"], "7",
+        "the second label did not follow the top: {r}"
+    );
+    assert_eq!(
+        out["bodies"][1]["body"],
+        r#"{"q":"How sure is it?","questions":{"verdict":{"type":"score","criteria":["1 (not at all)","2","3","4","5","6","7 (completely)"]}}}"#,
+        "{out}"
+    );
+    assert_eq!(
+        r["topAfterChange"], "10",
+        "a settled top was not held to ten: {r}"
+    );
+    assert_eq!(r["labelAfterZero"], "2", "{r}");
+    assert_eq!(
+        r["topWhileTyping"], "0",
+        "the field was rewritten under the typing: {r}"
+    );
+    assert_eq!(
+        r["topAfterEnter"], "10",
+        "Enter in the field ran it unsettled: {r}"
+    );
+    assert_eq!(
+        out["bodies"][2]["body"],
+        r#"{"q":"How sure is it?","questions":{"verdict":{"type":"score","criteria":["1 (not at all)","2","3","4","5","6","7","8","9","10 (completely)"]}}}"#,
+        "{out}"
+    );
+    assert_eq!(out["parkRequests"], 3, "{out}");
+    assert_eq!(out["openStreams"], 0, "{out}");
+    assert!(
+        r["resultHtml"]
+            .as_str()
+            .unwrap()
+            .contains("10 (completely)"),
+        "the bars do not carry the levels' names: {r}"
+    );
+    no_errors(r);
+}
+
+#[test]
+#[ignore = "needs node and a headless Chrome; see the module comment"]
+fn the_whole_form_works_from_the_keyboard() {
     let out = drive("keyboard");
     let r = &out["report"];
     assert_eq!(
-        r["openedByChord"], true,
-        "Alt+Enter did not open the row: {r}"
+        r["rowOpenAfterChord"], false,
+        "Alt+Enter opened the row instead of deciding: {r}"
     );
+    assert_eq!(
+        out["bodies"][0]["body"], r#"{"q":"Which one?"}"#,
+        "Alt+Enter with the row closed is yes / no: {out}"
+    );
+    assert_eq!(r["statusAfterChord"], "The decision is ready.", "{r}");
+    let to_toggle: Vec<&str> = r["tabsToToggle"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        to_toggle,
+        ["verb-ask", "verb-decide", "toggle"],
+        "the toggle is not the stop after Decide"
+    );
+    assert_eq!(
+        r["openedByToggle"], true,
+        "Enter on the toggle did not open the row: {r}"
+    );
+    assert_eq!(r["expandedAfterOpen"], "true", "{r}");
     assert_eq!(r["focusAfterOpen"], "decide-kind", "{r}");
     assert_eq!(r["kindAfterArrow"], "choice", "{r}");
     assert_eq!(r["optionsShown"], true, "{r}");
@@ -167,27 +290,39 @@ fn the_whole_row_works_from_the_keyboard() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(
-        tabs.iter().filter(|t| **t == "decide-option").count(),
-        2,
-        "Tab did not reach both names: {tabs:?}"
+        tabs,
+        [
+            "decide-option",
+            "decide-desc",
+            "decide-option",
+            "decide-desc",
+            "add-option",
+            "verb-decide-row"
+        ],
+        "Tab does not go name, meaning, name, meaning, add, Decide"
     );
-    assert_eq!(tabs.last(), Some(&"add-option"), "{tabs:?}");
     assert_eq!(r["focusBeforeEnter"], "decide-option", "{r}");
     assert_eq!(
-        out["parkRequests"], 1,
-        "Enter in a name did not run it: {out}"
-    );
-    assert_eq!(
-        out["bodies"][0]["body"],
+        out["bodies"][1]["body"],
         r#"{"q":"Which one?","questions":{"verdict":{"type":"choice","criteria":{"keep":"","switch":""}}}}"#,
-        "{out}"
+        "Enter in a name did not run it: {out}"
     );
     assert_eq!(r["statusAfterEnter"], "The decision is ready.", "{r}");
     assert_eq!(r["closedByEscape"], true, "{r}");
+    assert_eq!(r["expandedAfterEscape"], "false", "{r}");
     assert_eq!(
         r["focusAfterEscape"], "q",
         "focus did not go back to the box: {r}"
     );
+    assert_eq!(
+        r["rowOpenAfterSecondChord"], false,
+        "Alt+Enter reopened the row: {r}"
+    );
+    assert_eq!(
+        out["bodies"][2]["body"], r#"{"q":"Which one?"}"#,
+        "a row closed by Escape did not return the shape to yes / no: {out}"
+    );
+    assert_eq!(out["parkRequests"], 3, "{out}");
     assert_eq!(r["reopened"], true, "{r}");
     assert_eq!(r["optionsAfterReopen"][0], "keep", "{r}");
     assert_eq!(r["optionsAfterReopen"][1], "switch", "{r}");
@@ -206,7 +341,7 @@ fn nothing_runs_off_a_phone() {
         r["addDisabled"], true,
         "the add button outlived the limit: {r}"
     );
-    for at in ["rowOpen", "result"] {
+    for at in ["rowOpen", "rating", "result"] {
         let m = &r[at];
         assert!(
             m["scrollWidth"].as_u64() <= m["clientWidth"].as_u64(),
@@ -221,6 +356,14 @@ fn nothing_runs_off_a_phone() {
     assert!(
         r["decideHeight"].as_f64().unwrap() >= 44.0,
         "the Decide button is under 44 px: {r}"
+    );
+    assert!(
+        r["toggleWidth"].as_f64().unwrap() >= 44.0 && r["toggleHeight"].as_f64().unwrap() >= 44.0,
+        "the toggle is under 44 px: {r}"
+    );
+    assert_eq!(
+        r["stacked"], true,
+        "an option's two fields do not stack: {r}"
     );
     assert_eq!(r["railRows"], 8, "{r}");
     assert!(
@@ -242,7 +385,20 @@ fn enter_in_the_row_presses_decide_and_respects_its_state() {
         out["parkRequests"], 0,
         "Enter went around a disabled Decide: {out}"
     );
+    assert_eq!(
+        r["rowDecideOffWhenStaged"], true,
+        "the row's Decide outlived a staged file: {r}"
+    );
     assert_eq!(r["problemWhenStaged"], "", "{r}");
     assert_eq!(r["problemText"], "Type a question first", "{r}");
+    assert_eq!(
+        r["toggleLiveWhileOpen"], true,
+        "an open row could not be closed over an empty box: {r}"
+    );
+    assert_eq!(r["closed"], true, "{r}");
+    assert_eq!(
+        r["toggleOffOnceClosed"], true,
+        "closed over an empty box, the toggle did not follow Decide: {r}"
+    );
     no_errors(r);
 }
