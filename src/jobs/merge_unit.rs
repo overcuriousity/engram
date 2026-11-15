@@ -87,7 +87,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         }
         return Ok(());
     }
-    let Some(Members { members, .. }) = members_of(core, &p).await? else {
+    let Some(Members { members, .. }) = members_of(core, &p, by).await? else {
         return Ok(());
     };
     write(core, &p, members, &Ask { by, decision }).await
@@ -669,6 +669,44 @@ mod tests {
         assert_eq!(
             decision(&core, pair).await.outcome,
             Some(Outcome::Confirmed)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_merge_running_before_the_answers_outcome_is_written_still_finds_its_decision() {
+        let mut core = test_core().await;
+        writing(&mut core, &[POOL]);
+        deciding(&mut core, "duplicate", 0.7);
+        let (_ids, pair) = pool_pair(&core).await;
+        dedupe::run(&core, &pair.to_string()).await.unwrap();
+        let d = decision(&core, pair).await;
+        assert_eq!(d.state, State::Open);
+        // As `answer` leaves the row while the pick is carried out: claimed, the pick on it, no
+        // outcome yet. The merge it arms may be taken by an idle worker right here.
+        assert!(
+            core.store
+                .set_decision_state(&d.id, State::Open, State::Done)
+                .await
+                .unwrap()
+        );
+        core.store
+            .set_answered_pick(&d.id, Some("duplicate"))
+            .await
+            .unwrap();
+        core.store.ask_pair_synthesis(pair).await.unwrap();
+
+        run(&core, &pair.to_string()).await.unwrap();
+
+        let p = core.store.get_pair(pair).await.unwrap();
+        assert!(p.merged_into.is_some(), "the merge was not written");
+        assert!(
+            !core
+                .store
+                .decision_action_ids(&d.id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the merge was journaled without the decision that asked for it"
         );
     }
 
@@ -1368,6 +1406,11 @@ mod tests {
             "the card stops promising what will not come"
         );
         assert_eq!(p.state, PairState::NoConflict, "both stay as they are");
+        assert_eq!(
+            p.decided_by,
+            Some(DecidedBy::Operator),
+            "what a person's press came to was recorded as the model's decision"
+        );
     }
 
     #[tokio::test]

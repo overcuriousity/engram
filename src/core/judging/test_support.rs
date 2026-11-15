@@ -28,6 +28,7 @@ pub(crate) struct TestApplier {
     unreadable: Mutex<Option<String>>,
     disarmed: AtomicBool,
     applied: Mutex<Vec<(String, DecidedBy)>>,
+    picks_seen: Mutex<Vec<Option<String>>>,
     reopened: Mutex<Vec<String>>,
     buttons: Option<Vec<(String, String)>>,
     agreeing: Option<String>,
@@ -46,6 +47,7 @@ impl TestApplier {
             unreadable: Mutex::new(None),
             disarmed: AtomicBool::new(false),
             applied: Mutex::new(vec![]),
+            picks_seen: Mutex::new(vec![]),
             reopened: Mutex::new(vec![]),
             buttons: None,
             agreeing: None,
@@ -97,6 +99,10 @@ impl TestApplier {
     /// (pick, by) per apply call.
     pub(crate) fn applied(&self) -> Vec<(String, DecidedBy)> {
         self.applied.lock().unwrap().clone()
+    }
+    /// The row's `answered_pick` as each apply call found it.
+    pub(crate) fn picks_seen(&self) -> Vec<Option<String>> {
+        self.picks_seen.lock().unwrap().clone()
     }
     /// Decision ids reopened.
     pub(crate) fn reopened(&self) -> Vec<String> {
@@ -157,6 +163,12 @@ impl Applier for TestApplier {
         by: DecidedBy,
     ) -> Result<Vec<String>> {
         self.applied.lock().unwrap().push((pick.to_string(), by));
+        let on_row = core
+            .store
+            .logged(&d.id)
+            .await?
+            .and_then(|l| l.answered_pick);
+        self.picks_seen.lock().unwrap().push(on_row);
         // A real applier awaits the store; let a second worker in here.
         tokio::task::yield_now().await;
         if self.fails.load(Ordering::SeqCst) {

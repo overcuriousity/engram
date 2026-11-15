@@ -1020,39 +1020,31 @@ impl Core {
     pub async fn stale_candidates(&self, limit: usize) -> Result<Vec<SearchResult>> {
         let cutoff = now_secs() - self.consolidate.stale_after_days as i64 * SECONDS_PER_DAY;
         let limit = limit.clamp(1, MAX_LIMIT);
-        // Most old notes are lasting ones, so one page can hold none that is time-bound.
-        const PAGES: usize = 8;
-        let page = limit * 4;
+        // Most old notes are lasting ones, so many more are drawn than are wanted: one read of the
+        // store's stale end, filtered here, where paging would scan that end again for every page.
+        const DRAWN_PER_KEPT: usize = 32;
         // A note read as lasting is not stale for being old; one with no reading is as before.
         let time_bound = crate::core::judging::catalogue::time_bound();
+        let hits = self
+            .vectors
+            .stale_candidates(
+                cutoff,
+                self.consolidate.stale_max_hits,
+                limit * DRAWN_PER_KEPT,
+            )
+            .await?;
         let mut kept = Vec::new();
-        let mut after = None;
-        for _ in 0..PAGES {
-            let hits = self
-                .vectors
-                .stale_candidates_after(cutoff, self.consolidate.stale_max_hits, page, after.take())
-                .await?;
-            let full = hits.len() == page;
-            // Every candidate carries a stamp; one without cannot be paged past.
-            after = hits.last().and_then(|h| {
-                let stamp = h.payload.last_verified_at?;
-                Some((stamp, h.payload.artifact_id.clone()))
-            });
-            for h in hits {
-                if kept.len() == limit {
-                    return Ok(kept);
-                }
-                let yes = self
-                    .store
-                    .reading_yes(&h.payload.artifact_id, &time_bound)
-                    .await?;
-                if yes.is_none_or(|y| y >= crate::jobs::read::TIME_BOUND_AT) {
-                    // Drawn, not matched: nothing here is weak.
-                    kept.push(SearchResult::from(h));
-                }
-            }
-            if kept.len() == limit || !full || after.is_none() {
+        for h in hits {
+            if kept.len() == limit {
                 break;
+            }
+            let yes = self
+                .store
+                .reading_yes(&h.payload.artifact_id, &time_bound)
+                .await?;
+            if yes.is_none_or(|y| y >= crate::jobs::read::TIME_BOUND_AT) {
+                // Drawn, not matched: nothing here is weak.
+                kept.push(SearchResult::from(h));
             }
         }
         Ok(kept)
@@ -3203,7 +3195,7 @@ mod tests {
     #[tokio::test]
     async fn lasting_notes_at_the_stale_end_do_not_hide_the_time_bound_ones_behind_them() {
         let core = test_core().await;
-        // One page for a limit of one is four candidates; five lasting notes are staler than these.
+        // Five lasting notes are staler than the time-bound one: a draw of one would hold none.
         let src = seed(
             &core,
             &[

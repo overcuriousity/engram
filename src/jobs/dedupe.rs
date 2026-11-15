@@ -69,8 +69,13 @@ pub(crate) struct Members {
     roots: Vec<Chunk>,
 }
 
-/// `None` when the pair was settled here because no answer about it could be carried out.
-pub(crate) async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<Members>> {
+/// `None` when the pair was settled here because no answer about it could be carried out. `by`:
+/// whose answer came to that, so a person's can be asked again.
+pub(crate) async fn members_of(
+    core: &Core,
+    p: &ArtifactPair,
+    by: DecidedBy,
+) -> Result<Option<Members>> {
     // Pairs cascade on artifact delete, so a missing artifact is a store failure, not a deletion.
     let a = core.store.get_artifact(&p.a_id).await?;
     let b = core.store.get_artifact(&p.b_id).await?;
@@ -102,7 +107,7 @@ pub(crate) async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<M
             core,
             p,
             "a merged member has lost its sources; both stay as they are",
-            DecidedBy::Model,
+            by,
         )
         .await?;
         return Ok(None);
@@ -136,7 +141,7 @@ pub(crate) async fn members_of(core: &Core, p: &ArtifactPair) -> Result<Option<M
             p,
             "These cannot be written as one: what one of them is made of is stored source \
              text, which a merge must not rewrite, so both stay as they are.",
-            DecidedBy::Model,
+            by,
         )
         .await?;
         return Ok(None);
@@ -209,7 +214,7 @@ pub async fn run(core: &Core, pair_id: &str) -> Result<()> {
         members,
         root_map,
         roots,
-    }) = members_of(core, &p).await?
+    }) = members_of(core, &p, DecidedBy::Model).await?
     else {
         return Ok(());
     };
@@ -555,7 +560,10 @@ fn answered_with(d: &Logged, pick: &str) -> bool {
 pub(crate) fn asked_for_merge(d: &Logged, by: DecidedBy) -> bool {
     match by {
         DecidedBy::Model => d.band == Band::Act && d.pick == "duplicate",
-        DecidedBy::Operator => answered_with(d, "duplicate"),
+        // By the pick alone: the merge can run before the answer's outcome is written.
+        DecidedBy::Operator => {
+            d.band == Band::Ask && d.answered_pick.as_deref() == Some("duplicate")
+        }
         DecidedBy::Evidence => false,
     }
 }

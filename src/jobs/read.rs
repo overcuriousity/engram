@@ -201,9 +201,8 @@ async fn unread(core: &Core, artifact_id: &str, mut mark: ReadMark, e: Error) ->
 }
 
 /// Writes the vector payload from the row as stored, then looks at the row again: an edit that
-/// landed while the write was on its way is written too, so the last write is never older than
-/// the row. That holds between writers that look again; one that does not can still leave its
-/// older value last.
+/// landed meanwhile is written too, so the last write is never older than the row. That holds
+/// between writers that look again; one that does not can still leave its older value last.
 pub async fn sync_payload(core: &Core, artifact_id: &str) -> Result<()> {
     let mut chunk = core.store.get_artifact(artifact_id).await?;
     for _ in 0..PAYLOAD_ROUNDS {

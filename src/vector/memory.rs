@@ -231,17 +231,6 @@ impl VectorStore for MemoryVectors {
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.stale_candidates_after(older_than, max_hits, limit, None)
-            .await
-    }
-
-    async fn stale_candidates_after(
-        &self,
-        older_than: i64,
-        max_hits: i64,
-        limit: usize,
-        after: Option<(i64, String)>,
-    ) -> Result<Vec<SearchHit>> {
         let r = self
             .points
             .read()
@@ -254,11 +243,6 @@ impl VectorStore for MemoryVectors {
                     // An unstamped point is unknown, not stale; a missing `hit_count` means never retrieved.
                     && p.last_verified_at.is_some_and(|v| v < older_than)
                     && p.hit_count.unwrap_or(0) <= max_hits
-                    // Past the cursor in the order below.
-                    && after.as_ref().is_none_or(|(stamp, id)| {
-                        p.last_verified_at
-                            .is_some_and(|v| (v, p.artifact_id.as_str()) > (*stamp, id.as_str()))
-                    })
             })
             .collect();
         // A work queue needs a stable order; stalest first, id tiebreak, matching Qdrant so the two test alike.

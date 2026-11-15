@@ -56,9 +56,8 @@ pub async fn answers(core: &Core, query: &str, note: &Chunk) -> Result<Option<f6
 }
 
 /// Labels the search. A failure stores no label and is remembered, so the sweep passes the search
-/// by until it is due again; the unit is retried by the queue. A refusal, which retrying only
-/// repeats, is counted: from `LABEL_GIVE_UP` of them the search is given up for this era and the
-/// unit ends. A failure that waiting fixes is never counted, so an outage gives nothing up.
+/// by until it is due; the queue retries the unit. Only a refusal, which a retry repeats, is
+/// counted: from `LABEL_GIVE_UP` of them the search is given up for this era and the unit ends.
 pub async fn run(core: &Core, event_id: &str) -> Result<()> {
     let Err(e) = label(core, event_id).await else {
         return Ok(());

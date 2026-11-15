@@ -539,31 +539,15 @@ impl VectorStore for SqliteVectors {
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.stale_candidates_after(older_than, max_hits, limit, None)
-            .await
-    }
-
-    async fn stale_candidates_after(
-        &self,
-        older_than: i64,
-        max_hits: i64,
-        limit: usize,
-        after: Option<(i64, String)>,
-    ) -> Result<Vec<SearchHit>> {
-        let (stamp, id) = after.unzip();
         // runtime: contained-only vector tables, absent from the reference database.
         let rows = sqlx::query(
             "SELECT payload, last_seen_at, hit_count, last_verified_at FROM vec_points
-             WHERE status='active' AND last_verified_at IS NOT NULL AND last_verified_at < ?1
-               AND COALESCE(hit_count, 0) <= ?2
-               AND (?3 IS NULL OR last_verified_at > ?3
-                    OR (last_verified_at = ?3 AND artifact_id > ?4))
-             ORDER BY last_verified_at, artifact_id LIMIT ?5",
+             WHERE status='active' AND last_verified_at IS NOT NULL AND last_verified_at < ?
+               AND COALESCE(hit_count, 0) <= ?
+             ORDER BY last_verified_at, artifact_id LIMIT ?",
         )
         .bind(older_than)
         .bind(max_hits)
-        .bind(stamp)
-        .bind(id)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;

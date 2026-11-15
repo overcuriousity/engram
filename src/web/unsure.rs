@@ -179,9 +179,10 @@ pub(crate) async fn open_rows(core: &Core) -> Result<Vec<Open>> {
     Ok(out)
 }
 
-/// What `/status` counts as unsure: the rows `open_rows` lists, no more.
+/// What `/status` counts as unsure: the open rows of the questions `open_rows` can list. One
+/// count: `/status` is polled, and drawing every row to count them reads each row's subjects.
 pub(crate) async fn open_count(core: &Core) -> Result<i64> {
-    Ok(i64::try_from(open_rows(core).await?.len()).unwrap_or(i64::MAX))
+    core.store.open_ask_count_of(&core.appliers.ids()).await
 }
 
 pub(crate) async fn unsure(tenant: &Tenant) -> Result<Unsure> {
@@ -691,7 +692,8 @@ mod tests {
         assert!(!page.contains("Title a<"), "{page}");
         let (count, listed) = status_and_list(&app, &cookie).await;
         assert_eq!(listed, 1);
-        assert_eq!(count, 1);
+        // Counted by its question without drawing it: the row is open, and will show again.
+        assert_eq!(count, 2);
     }
 
     #[tokio::test]

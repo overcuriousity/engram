@@ -374,8 +374,12 @@ async fn faithful(
     }];
     let mut batch = Batch::unasked(Vec::with_capacity(chunks.len()));
     let mut asking = true;
+    // One rejection may be about its text; a second is taken to be about the endpoint, and the
+    // rest of the batch is flagged without a call that would be told the same.
+    let mut rejected: Option<String> = None;
+    let mut unasked: Option<String> = None;
     for (n, c) in chunks.into_iter().enumerate() {
-        let mut unchecked = None;
+        let mut unchecked = unasked.clone();
         if asking {
             let rewrite = state::Note {
                 title: c.title.as_deref(),
@@ -398,6 +402,11 @@ async fn faithful(
                 // Kept and flagged: a retry is told the same, and its lines are not thrown away.
                 Ok(Checked::Unjudged { detail }) => {
                     tracing::warn!(target, detail, "the check could not be put; kept, flagged");
+                    if rejected.is_some() {
+                        asking = false;
+                        unasked = Some(detail.clone());
+                    }
+                    rejected = Some(detail.clone());
                     unchecked = Some(detail);
                 }
                 Ok(Checked::Passed | Checked::TooLong) => {}
@@ -1354,6 +1363,37 @@ mod tests {
             core.store.segment_state(&out.id, 0).await.unwrap(),
             Some(SegmentState::Done)
         );
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_that_rejects_every_check_is_asked_twice_and_the_batch_is_kept_flagged() {
+        let mut core = test_core().await;
+        let dec = rejecting("line");
+        core.decider = dec.clone();
+        let out = core
+            .ingest("alpha line\n\nbravo line\n\ncharlie line", "web", None)
+            .await
+            .unwrap();
+        crate::jobs::synthesize::plan(&core, &out.id).await.unwrap();
+
+        run(&core, &unit_target(&out.id, 0)).await.unwrap();
+
+        let checks = dec
+            .requests()
+            .into_iter()
+            .filter(|(_, qs)| crate::core::judging::check::test_support::is_check(qs))
+            .count();
+        assert_eq!(checks, 2, "a third would be told the same");
+        let (written, _) = written_and_passages(&core, &out.id).await;
+        assert_eq!(written.len(), 3);
+        for c in &written {
+            assert_eq!(
+                c.flags,
+                [crate::core::judging::check::FLAG_UNCHECKED.to_string()],
+                "{}",
+                c.text
+            );
+        }
     }
 
     #[tokio::test]

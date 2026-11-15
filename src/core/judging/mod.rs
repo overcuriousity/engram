@@ -87,6 +87,25 @@ impl Appliers {
     pub fn get(&self, question_id: &str) -> Option<Arc<dyn Applier>> {
         self.0.get(question_id).cloned()
     }
+
+    /// Every question something here can show and carry out.
+    pub fn ids(&self) -> Vec<&'static str> {
+        let mut ids: Vec<_> = self.0.keys().copied().collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// The questions whose acts the base may not carry out on its own as it is configured now.
+    pub fn disarmed(&self, core: &Core) -> Vec<&'static str> {
+        let mut ids: Vec<_> = self
+            .0
+            .values()
+            .filter(|a| !a.armed(core))
+            .map(|a| a.question_id())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
 }
 
 /// The judging calls the decision log does not hold, by when each was sent: a note's reading, a
@@ -473,10 +492,15 @@ pub async fn answer(core: &Core, id: &str, pick: Option<&str>) -> Result<Logged>
     {
         return Err(answered());
     }
+    // On the row first: a unit `apply` arms can run before the outcome below is written.
+    core.store.set_answered_pick(id, Some(pick)).await?;
     // A person's pick is not subject to the daily cap.
     match applier.apply(core, &d, pick, DecidedBy::Operator).await {
         Ok(rows) => core.store.link_decision_actions(id, &rows).await?,
         Err(e) => {
+            if let Err(undo) = core.store.set_answered_pick(id, None).await {
+                tracing::warn!(decision = id, error = %undo, "could not take a failed pick off its row");
+            }
             release(core, id, State::Open).await;
             return Err(e);
         }
@@ -1149,6 +1173,57 @@ mod tests {
         let r = crate::jobs::decisions::run(&core).await.unwrap();
         assert_eq!(r.applied, 1);
         assert_eq!(ap.applied(), vec![("same".to_string(), DecidedBy::Model)]);
+    }
+
+    #[tokio::test]
+    async fn acts_of_a_disarmed_question_do_not_fill_the_sweep_ahead_of_ones_that_can_act() {
+        let (mut core, held, _) = core_with(TestApplier::new(CHOICE), by_state).await;
+        held.set_armed(false);
+        let free = Arc::new(TestApplier::new(NOUL));
+        let mut appliers = Appliers::default();
+        appliers.register(held.clone());
+        appliers.register(free.clone());
+        core.appliers = Arc::new(appliers);
+        // More than one sweep takes, every one of them above the act that can be carried out.
+        for i in 0..201 {
+            seeded(
+                &core,
+                CHOICE,
+                &format!("h{i}"),
+                serde_json::json!({"same": 0.99, "different": 0.01}),
+                Band::Act,
+            )
+            .await;
+        }
+        seeded(
+            &core,
+            NOUL,
+            "f",
+            serde_json::json!({"yes": 0.91, "no": 0.09}),
+            Band::Act,
+        )
+        .await;
+        let r = crate::jobs::decisions::run(&core).await.unwrap();
+        assert_eq!(r.applied, 1);
+        assert_eq!(free.applied(), vec![("yes".to_string(), DecidedBy::Model)]);
+        assert!(held.applied().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_persons_pick_is_on_the_row_while_it_is_carried_out_and_off_it_when_that_fails() {
+        let (core, ap, _) = core_with(TestApplier::new(NOUL), by_state).await;
+        let id = open_row(&core, "a").await;
+        ap.set_failing(true);
+        assert!(answer(&core, &id, Some("yes")).await.is_err());
+        let d = core.store.logged(&id).await.unwrap().unwrap();
+        assert_eq!((d.state, d.answered_pick), (State::Open, None));
+        ap.set_failing(false);
+        answer(&core, &id, Some("yes")).await.unwrap();
+        assert_eq!(
+            ap.picks_seen(),
+            vec![Some("yes".to_string()), Some("yes".to_string())],
+            "what carrying it out arms must find whose ask it is"
+        );
     }
 
     #[tokio::test]

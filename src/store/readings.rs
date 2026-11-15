@@ -123,10 +123,9 @@ impl Store {
             .collect())
     }
 
-    /// Live, embedded artifacts the reader should visit, newest first: one with no reading at the
-    /// current version of some question, or one rejected whose wait is over. A note the last visit
-    /// could not read is left out while its text and the questions are the same and, for no room,
-    /// `room` is, or, for a rejection, the wait runs. One still to be embedded is read after that.
+    /// Live, embedded artifacts the reader should visit, newest first: one with no reading at some
+    /// question's current version, or one rejected whose wait is over. One the last visit could
+    /// not read is left out while its text, the questions and (for no room) `room` are the same.
     pub async fn artifacts_lacking_readings(
         &self,
         versions: &[(&str, u32)],

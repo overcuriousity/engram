@@ -323,6 +323,19 @@ impl Store {
         Ok(())
     }
 
+    /// A person's pick, on the row before it is carried out: what carrying it out arms (a merge)
+    /// may run before the outcome is written, and must find whose ask it is. `None` takes it back.
+    pub async fn set_answered_pick(&self, id: &str, pick: Option<&str>) -> Result<()> {
+        sqlx::query!(
+            "UPDATE decisions SET answered_pick = ? WHERE id = ?",
+            pick,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn link_decision_actions(&self, id: &str, action_ids: &[String]) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         for a in action_ids {
@@ -486,10 +499,19 @@ impl Store {
 
     /// Band act, waiting and settled, highest top first.
     pub async fn waiting_acts(&self, limit: i64) -> Result<Vec<Logged>> {
+        self.waiting_acts_but(&[], limit).await
+    }
+
+    /// `waiting_acts` without the questions in `held`: acts nothing may carry out now would
+    /// otherwise fill the window ahead of the ones that can be.
+    pub async fn waiting_acts_but(&self, held: &[&str], limit: i64) -> Result<Vec<Logged>> {
+        let held = serde_json::json!(held).to_string();
         read_all(
             logged_rows!(
                 "WHERE band = 'act' AND state = 'waiting' AND reason IS NOT 'unsettled'
+                   AND question_id NOT IN (SELECT value FROM json_each(?))
              ORDER BY top DESC, id LIMIT ?",
+                held,
                 limit
             )
             .fetch_all(&self.pool)
@@ -523,6 +545,19 @@ impl Store {
                 .fetch_one(&self.pool)
                 .await?,
         )
+    }
+
+    /// Open rows of the questions in `shown`: what a count may promise the list will show, without
+    /// drawing the list.
+    pub async fn open_ask_count_of(&self, shown: &[&str]) -> Result<i64> {
+        let shown = serde_json::json!(shown).to_string();
+        Ok(sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "n!: i64" FROM decisions
+                WHERE state = 'open' AND question_id IN (SELECT value FROM json_each(?))"#,
+            shown
+        )
+        .fetch_one(&self.pool)
+        .await?)
     }
 
     /// Asks with no seat yet.
@@ -714,6 +749,8 @@ impl Store {
         .collect())
     }
 
+    /// The tuner's newest line. A hold moved nothing and is not one: where no line ever moved,
+    /// the file's stays in force.
     pub async fn thresholds_in_force(
         &self,
         question_id: &str,
@@ -721,7 +758,7 @@ impl Store {
     ) -> Result<Option<Thresholds>> {
         Ok(sqlx::query!(
             "SELECT act_at, ask_at FROM decision_thresholds
-              WHERE question_id = ? AND era = ? ORDER BY id DESC LIMIT 1",
+              WHERE question_id = ? AND era = ? AND held = 0 ORDER BY id DESC LIMIT 1",
             question_id,
             era
         )
@@ -839,11 +876,9 @@ impl Store {
         .await?)
     }
 
-    /// Decided after the act line last moved: model acts kept or undone, and answered Unsure rows (`corrected`
-    /// as undone, and so one confirmed whose action was undone since). Not a refused act (no journal
-    /// row, or `refused`), a check or the pursuit gate. An undone merge is one decision however many
-    /// rows it wrote. `asks_open` leaves out an act put to a person (`restricted`, `no_writer`,
-    /// `rescue_refused`): it was over the line already, and a lower line would not act on it either.
+    /// Since the act line last moved: model acts kept or undone and answered Unsure rows, a
+    /// correction or a later undo counting as undone, a merge once however many rows it wrote. No
+    /// refused act, check or pursuit gate. `asks_open` leaves out acts that were put to a person.
     pub async fn act_record(&self, question_id: &str, era: &str) -> Result<ActRecord> {
         let since = self.moved_at(question_id, era, false).await?;
         let r = sqlx::query!(
@@ -1144,6 +1179,28 @@ mod tests {
             State::Open
         );
         assert_eq!(store.open_asks(10).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn waiting_acts_of_a_held_question_are_left_out() {
+        let store = Store::memory().await.unwrap();
+        let held = store
+            .log_decision(&sample(Band::Act, State::Waiting, 0.99))
+            .await
+            .unwrap();
+        let mut other = sample(Band::Act, State::Waiting, 0.91);
+        other.question_id = "reap_worth".into();
+        let free = store.log_decision(&other).await.unwrap();
+        let ids = |rows: Vec<Logged>| rows.into_iter().map(|l| l.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(store.waiting_acts_but(&["same_note"], 1).await.unwrap()),
+            [free.clone()]
+        );
+        assert_eq!(
+            ids(store.waiting_acts(10).await.unwrap()),
+            [held, free],
+            "none held: highest top first"
+        );
     }
 
     #[tokio::test]
@@ -2028,9 +2085,10 @@ mod tests {
             store.ask_record(q, "m/v1").await.unwrap().lapsed_since_move,
             0
         );
-        // The act line's evidence is where it was, the lines are, and nothing reads as a move.
+        // The act line's evidence is where it was and nothing reads as a move. A hold is no line
+        // of the tuner's either: the file's stays in force, and an edit to it still counts.
         assert_eq!(store.moved_at(q, "m/v1", false).await.unwrap(), 0);
-        assert_eq!(store.thresholds_in_force(q, "m/v1").await.unwrap(), Some(t));
+        assert_eq!(store.thresholds_in_force(q, "m/v1").await.unwrap(), None);
         assert!(
             store
                 .last_threshold_move(q, "m/v1")

@@ -1223,32 +1223,16 @@ impl VectorStore for QdrantVectors {
         Ok(out)
     }
 
+    /// Scrolled and sorted, not sampled: a work queue must be stable across renders. Capped at `STALE_SCAN` on page render.
     async fn stale_candidates(
         &self,
         older_than: i64,
         max_hits: i64,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
-        self.stale_candidates_after(older_than, max_hits, limit, None)
-            .await
-    }
-
-    /// Scrolled and sorted, not sampled: a work queue must be stable across renders. Capped at `STALE_SCAN` on page render.
-    async fn stale_candidates_after(
-        &self,
-        older_than: i64,
-        max_hits: i64,
-        limit: usize,
-        after: Option<(i64, String)>,
-    ) -> Result<Vec<SearchHit>> {
         const STALE_SCAN: usize = 10_000;
         const PAGE: usize = 1_000;
 
-        // The cursor's stamp narrows the scroll; its id is applied to what comes back.
-        let stamped = match &after {
-            Some((stamp, _)) => json!({ "lt": older_than, "gte": stamp }),
-            None => json!({ "lt": older_than }),
-        };
         let filter = json!({
             "must_not": [
                 { "key": "status", "match": { "value": "deprecated" } },
@@ -1257,7 +1241,7 @@ impl VectorStore for QdrantVectors {
             ],
             "must": [
                 // No stamp is unknown, not stale; absent `hit_count` legitimately means never retrieved.
-                { "key": "last_verified_at", "range": stamped },
+                { "key": "last_verified_at", "range": { "lt": older_than } },
                 { "should": [
                     { "key": "hit_count", "range": { "lte": max_hits } },
                     { "is_empty": { "key": "hit_count" } },
@@ -1298,12 +1282,6 @@ impl VectorStore for QdrantVectors {
             }
         }
 
-        if let Some((stamp, id)) = &after {
-            found.retain(|p| {
-                p.last_verified_at
-                    .is_some_and(|v| (v, p.artifact_id.as_str()) > (*stamp, id.as_str()))
-            });
-        }
         // Stalest first; the id tiebreak keeps the order stable between renders.
         found.sort_by(|a, b| {
             a.last_verified_at

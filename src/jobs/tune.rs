@@ -767,11 +767,9 @@ pub fn next_act_at(
     }
 }
 
-/// A step up when a row lapsed since the ask line last moved; a step down when, since then, none
-/// lapsed, some were answered and rows wait. Never under 0.50 by its own move, never within a step
-/// of `act_at`: a rise stops a step under it, and an act line that came down this pass
-/// (`act_moved`) takes the ask line with it. Nothing else moves it: a line put closer than a step
-/// stays where it is until its own evidence or the act line moves it, and a lapse never lowers it.
+/// A step up when a row lapsed since the ask line last moved; a step down when none lapsed, some
+/// were answered and rows wait. Never under 0.50 by its own move; a rise stops a step under
+/// `act_at`, and an act line that came down this pass (`act_moved`) takes it along.
 pub fn next_ask_at(current: f64, act_at: f64, act_moved: bool, r: AskRecord) -> Option<f64> {
     let ceiling = two_places(act_at - STEP);
     let own = if r.lapsed_since_move > 0 {

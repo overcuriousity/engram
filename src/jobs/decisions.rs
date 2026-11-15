@@ -65,7 +65,10 @@ pub async fn run(core: &Core) -> Result<Report> {
         }
         r.reasked += 1;
     }
-    for d in core.store.waiting_acts(ACTS_PER_RUN).await? {
+    // A question switched off is left out by the store: its acts cannot be carried out, and at
+    // the top of the list they would keep the sweep from ever reaching the ones that can.
+    let held = core.appliers.disarmed(core);
+    for d in core.store.waiting_acts_but(&held, ACTS_PER_RUN).await? {
         let Some(applier) = core.appliers.get(&d.question_id) else {
             close_unanswerable(core, &d).await;
             continue;
@@ -191,10 +194,9 @@ async fn changed(core: &Core, d: &Logged) -> Option<bool> {
 /// waiting out a failed attempt or given up, so stuck ones never hide the ones behind them.
 const LABEL_LOOKAHEAD: i64 = 64;
 
-/// Unlabelled searches that are due, oldest first, in a quarter of the tick's budget, each costing
-/// its live candidates. The first may overrun it when no label unit is in flight; one queued below
-/// the retry ceiling holds its share, and the oldest that does not fit waits rather than being
-/// passed.
+/// Unlabelled searches that are due, oldest first, within `share`, each costing its live
+/// candidates. The first may overrun it when no label unit is in flight; a queued one below the
+/// retry ceiling holds its share, and the oldest that does not fit waits rather than being passed.
 async fn label(core: &Core, share: usize) -> Result<u64> {
     let mut left = share;
     if left == 0 {
@@ -237,11 +239,9 @@ async fn label(core: &Core, share: usize) -> Result<u64> {
     Ok(armed)
 }
 
-/// Notes from before readings existed, newest first, while nobody is using the base: no search, no
-/// question and no capture, whose own notes are read as they are embedded. Half of what the tick
-/// has left, so the pair judge is never starved; a note already queued keeps its slot, so a queue
-/// that has not caught up is not piled onto. A note that could not be read holds none: the store
-/// leaves it out until it is due again.
+/// Notes no reading has touched, newest first, while nobody searches, asks or captures. Within
+/// `share`, so the pair judge is never starved; a note already queued keeps its slot, and one that
+/// could not be read holds none: the store leaves it out until it is due again.
 async fn scan(core: &Core, share: usize) -> Result<u64> {
     let idle = crate::store::now() - core.evolve.idle_secs.max(0);
     if core.store.activity_since(idle).await? || core.store.captured_since(idle).await? {

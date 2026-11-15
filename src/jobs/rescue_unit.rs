@@ -42,13 +42,21 @@ pub async fn run(core: &Core, artifact_id: &str) -> Result<()> {
             }
             Ok(())
         }
-        // An outage of a model or of a store is retried; a reply that will not do is not.
+        // An outage of a model or of a store is retried; a reply that will not do is not. At the
+        // ceiling the queue gives the unit up, and a model's ask must not end there unseen.
         Err(
             e @ (Error::Inference { .. }
             | Error::InferenceBusy { .. }
             | Error::Vector(_)
             | Error::Store(_)),
-        ) => Err(e),
+        ) if !core
+            .store
+            .live_job_attempts(crate::store::jobs::Stage::Rescue, &c.id)
+            .await?
+            .is_some_and(|a| a >= crate::store::jobs::MAX_ATTEMPTS) =>
+        {
+            Err(e)
+        }
         Err(e) => {
             tracing::warn!(artifact_id = %c.id, error = %e, "could not rescue a valuable artifact");
             // Put to a person the note keeps its age: a restamp would close the question as changed.
@@ -655,5 +663,18 @@ mod tests {
         let old = core.store.get_artifact(&ids[0]).await.unwrap();
         assert_eq!(old.retired_at, before);
         assert!(old.superseded_by.is_none());
+
+        // At the ceiling the queue drops the unit: the question goes to a person instead.
+        sqlx::query!(
+            "UPDATE jobs SET attempts = ? WHERE stage = 'rescue'",
+            crate::store::jobs::MAX_ATTEMPTS
+        )
+        .execute(&core.store.control.pool)
+        .await
+        .unwrap();
+        run(&core, &ids[0]).await.unwrap();
+        let asked = core.store.open_asks(10).await.unwrap();
+        assert_eq!(asked.len(), 1, "the model's yes ended with the unit");
+        assert_eq!(asked[0].subject_a, ids[0]);
     }
 }

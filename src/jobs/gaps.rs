@@ -90,9 +90,8 @@ impl TypedFrom {
 }
 
 /// Closes, silently and reversibly, each open gap this corpus's own artifacts answer: its best hit
-/// above `weak_below`, asked `answers_query` alone, says yes at `act_at`. A no is remembered
-/// (`Store::reject_gap_note`), so a corpus covered again does not put the same note to the same
-/// gap twice. Every failure is a warning: a stored capture is stored.
+/// above `weak_below`, asked `answers_query` alone, says yes at `act_at`. A no is remembered and
+/// not asked twice (`Store::reject_gap_note`). A failure is a warning: a stored capture is stored.
 pub async fn cover(core: &Core, corpus_id: &str) -> Result<usize> {
     // What closes the gap the capture was typed from is the link, not a score (`close_line`).
     let typed_from =

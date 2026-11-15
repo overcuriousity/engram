@@ -39,9 +39,8 @@ pub struct BearsRecord {
 
 impl Store {
     /// Searches with a candidate still in results and no label from this model at this version,
-    /// oldest first. A search the person called no search (`discard`) is not labelled. Only what
-    /// can run now: not a search waiting out a failed attempt, and not one given up in this era,
-    /// so a limit is never spent on work that cannot be done.
+    /// oldest first; not one the person called no search (`discard`). Only what can run now: not
+    /// a search waiting out a failed attempt, and not one given up in this era.
     pub async fn unlabelled_searches(
         &self,
         version: u32,
@@ -214,9 +213,7 @@ impl Store {
 
     /// Over the searches a person judged a hit that the model labelled: the hit rate is the share
     /// whose expected note is relevant, the selectivity the mean share of a search's labelled
-    /// candidates that are relevant. An expected note the model never labelled (found elsewhere,
-    /// retired, too long to ask about) is a miss, not a search left out: dropped, it would flatter
-    /// the hit rate.
+    /// candidates that are relevant. An expected note the model never labelled is a miss.
     pub async fn label_agreement(
         &self,
         relevant_at: f64,
