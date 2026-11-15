@@ -724,12 +724,12 @@ impl Store {
 
     /// Armed judging only: an after-write check (`subject_kind = 'write'`) and the gate before a
     /// pursuit is written (`'pursuit'`) ride on a writer unit, which the queue already paces. A
-    /// `too_long` leave made no call and is not counted.
+    /// `too_long` leave and a rescue handed to a person made no call and are not counted.
     pub async fn decided_since(&self, at: i64) -> Result<i64> {
         Ok(sqlx::query_scalar!(
             "SELECT COUNT(*) FROM decisions
               WHERE decided_at >= ? AND subject_kind NOT IN ('write', 'pursuit')
-                AND reason IS NOT 'too_long'",
+                AND COALESCE(reason, '') NOT IN ('too_long', 'rescue_refused')",
             at
         )
         .fetch_one(&self.pool)
@@ -1298,6 +1298,10 @@ mod tests {
         let mut long = sample(Band::Leave, State::Done, 0.0);
         long.reason = Some("too_long".into());
         store.log_decision(&long).await.unwrap();
+        // A rescue that came to nothing, put to a person: the row repeats an answer already paid for.
+        let mut handed = sample(Band::Ask, State::Waiting, 0.99);
+        handed.reason = Some("rescue_refused".into());
+        store.log_decision(&handed).await.unwrap();
         assert_eq!(store.decided_since(now() - 60).await.unwrap(), 1);
     }
 

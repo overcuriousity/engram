@@ -31,6 +31,13 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 - The chat model no longer categorises, pins or links at capture; it writes. Reminders are still read by it, when two quick questions say there may be one.
 - Background rewrites (merge, rescue, condense, generate, capture synthesis) are checked against their originals and refused when they drop or add something.
 - A pursuit is written only when its sources hold the answer; a used passage that already stands alone is not rewritten.
+- An Unsure row lapses 30 days after it was shown, not after it was decided. A row whose notes changed or were settled elsewhere is closed and asked again. A late press goes back to Insights, which says what became of it.
+- A burial or a rescue the base is sure of waits while `[reap]` is off or `evolve.autonomous` is below `full`. Your own answers are never held.
+- A rescue that could not be written is put to you under Unsure. A merge, a rescue or a condensation whose check the decision model will not answer is not written.
+- A pair handed over from a neighbour shown at capture never merges or replaces without you.
+- A note is read again when its text changes, not each time it is embedded. A note the model said does not answer a gap is not put to that gap again until the note, the gap's words, the model or the line changes.
+- `consolidate.scan_min` below 0.70 is refused at start.
+- `--replay-decisions` logs to stderr, ends at the first call the endpoint does not answer and then exits 1 with what it had.
 
 ### Removed
 - `auth.oidc.redirect_url`: derived from `server.public_url`. A config that still sets it is refused.
