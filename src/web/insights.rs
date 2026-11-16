@@ -21,12 +21,29 @@ struct Retrieval {
     mrr: String,
     /// Rendered `|safe`: built here, its only variable part a count.
     note: String,
-    /// Retrieval by the model's labels and how far they agree with the person; empty before any.
+    /// Retrieval by the model's labels and how far they agree with the person, then the trails; empty before any.
     by_model: Vec<String>,
 }
 
 fn searches(n: usize) -> String {
     format!("{n} search{}", if n == 1 { "" } else { "es" })
+}
+
+/// Absent with no live trail.
+fn trail_line(t: &crate::store::trails::TrailCounts) -> Option<String> {
+    (t.live > 0).then(|| {
+        let mut s = format!(
+            "trails: {} on {} notes · {} by you",
+            t.live, t.notes, t.by_person
+        );
+        if t.found_through > 0 {
+            s.push_str(&format!(
+                " · {} searches found a note through one",
+                t.found_through
+            ));
+        }
+        s
+    })
 }
 
 /// The lines under the person's figures; a line with nothing to say is left out. The bearing record
@@ -763,7 +780,8 @@ async fn page(
                     .store
                     .feedback_stats(tenant.core.weak_below())
                     .await?;
-                let by_model = model_lines(&tenant.core.label_figures().await?);
+                let mut by_model = model_lines(&tenant.core.label_figures().await?);
+                by_model.extend(trail_line(&tenant.core.store.trail_counts().await?));
                 match f.judged {
                     0 => Retrieval {
                         recall_at_10: "—".into(),
@@ -1504,6 +1522,40 @@ mod tests {
             !html.contains("bears held up"),
             "nothing ruled on yet: {html}"
         );
+    }
+
+    #[tokio::test]
+    async fn insights_counts_trails() {
+        use crate::store::trails::{NewTrail, TrailSource};
+        let mut core = crate::core::test_support::test_core().await;
+        core.learn.enabled = true;
+        let src = core.store.insert_corpus("raw", "web", None).await.unwrap();
+        let new = vec![crate::store::artifacts::NewArtifact {
+            text: "alpha line".into(),
+            ..Default::default()
+        }];
+        let id = core.store.insert_artifacts(&src.id, &new).await.unwrap()[0]
+            .id
+            .clone();
+        let html = insights(core.clone()).await;
+        assert!(!html.contains("trails:"), "{html}");
+        core.store
+            .mint_trail(
+                &NewTrail {
+                    artifact_id: &id,
+                    query: "q",
+                    query_vec: &[1.0, 0.0],
+                    embed_model: "fake",
+                    source: TrailSource::Ask,
+                    source_id: "s1",
+                },
+                8,
+                20000,
+            )
+            .await
+            .unwrap();
+        let html = insights(core).await;
+        assert!(html.contains("trails: 1 on 1 notes · 1 by you"), "{html}");
     }
 
     #[tokio::test]
