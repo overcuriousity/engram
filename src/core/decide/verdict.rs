@@ -161,6 +161,14 @@ impl Core {
             .judge_decision(id, verdict, stored.as_deref())
             .await?;
 
+        // A weak decision's notes were never over the bearing line: nothing to confirm or contest.
+        if d.weak {
+            return Ok(Judged {
+                verdict: Some(verdict),
+                correct: stored,
+                decision: d,
+            });
+        }
         // Best-effort past this point: the verdict is written.
         if let Some(right) = right {
             let reads: Vec<(String, f64, Answer)> = d

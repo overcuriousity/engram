@@ -1649,6 +1649,57 @@ pub(crate) mod tests {
         assert_eq!(decide_gaps(&core).await.len(), 1);
     }
 
+    async fn weak_decision(core: &mut Core) -> String {
+        deciding(core, none_bear());
+        let d = core.decide(&req("Keep it?"), Door::Ui).await.unwrap();
+        assert!(d.weak);
+        d.event_id.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_weak_decision_is_a_gap_until_judged_right() {
+        use crate::store::asks::AskVerdict;
+        let mut core = learning().await;
+        let id = weak_decision(&mut core).await;
+        let open =
+            |g: Vec<crate::store::gaps::Gap>| g.into_iter().map(|g| g.id).collect::<Vec<_>>();
+        assert_eq!(open(decide_gaps(&core).await), vec![id.clone()]);
+        core.judge_decision(&id, AskVerdict::Wrong, None)
+            .await
+            .unwrap();
+        assert_eq!(open(decide_gaps(&core).await), vec![id.clone()]);
+        core.judge_decision(&id, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        assert!(decide_gaps(&core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_verdict_on_a_weak_decision_touches_no_note() {
+        use crate::store::asks::AskVerdict;
+        let mut core = learning().await;
+        let id = weak_decision(&mut core).await;
+        let before = touched(&core).await;
+        for v in [AskVerdict::Right, AskVerdict::Wrong] {
+            let j = core.judge_decision(&id, v, None).await.unwrap();
+            assert_eq!(j.verdict, Some(v));
+        }
+        assert_eq!(touched(&core).await, before);
+    }
+
+    /// Notes stamped verified, and queued pairs.
+    async fn touched(core: &Core) -> (Vec<Option<i64>>, i64) {
+        let stamps = sqlx::query_scalar!("SELECT last_verified_at FROM artifacts ORDER BY id")
+            .fetch_all(&core.store.pool)
+            .await
+            .unwrap();
+        let pairs = sqlx::query_scalar!("SELECT count(*) FROM artifact_pairs")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap();
+        (stamps, pairs)
+    }
+
     /// 30 held `settled` decisions made through `Core::decide` and judged by the person, `wrong` of
     /// them wrong; and the judgements that would tell about `split_at` and `bears_min`.
     async fn judged_thirty(core: &mut Core, wrong: usize) {
