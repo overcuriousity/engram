@@ -179,6 +179,8 @@ pub struct Core {
     pub trail_index: Arc<std::sync::RwLock<Option<Arc<crate::core::trails::TrailIndex>>>>,
     /// Whether model trails match; see `Core::model_trails_count`.
     pub model_trails: Arc<std::sync::atomic::AtomicBool>,
+    /// Moved by every `drop_trail_index`, so a load that raced a change is not kept.
+    pub trail_gen: Arc<std::sync::atomic::AtomicU64>,
     /// Shared by every clone and across registry evictions; see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
     /// Shared by every clone: the point is one queue of calls in front of one GPU.
@@ -496,6 +498,7 @@ impl Core {
             trails_cfg: cfg.trails.clone(),
             trail_index: Default::default(),
             model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            trail_gen: Default::default(),
             sittings: working.sittings,
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
@@ -794,6 +797,7 @@ pub mod test_support {
             trails_cfg: Default::default(),
             trail_index: Default::default(),
             model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            trail_gen: Default::default(),
             sittings: Arc::new(Default::default()),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,

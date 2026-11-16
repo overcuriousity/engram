@@ -183,22 +183,34 @@ impl Core {
         {
             return Ok(i);
         }
+        let generation = self.trail_gen.load(Ordering::SeqCst);
         let i = Arc::new(TrailIndex::new(
             self.store.live_trails(self.embedder.model()).await?,
         ));
-        *self
+        self.keep_trail_index(generation, i.clone());
+        Ok(i)
+    }
+
+    /// Kept only if no drop came between the read of `generation` and now: that load may predate
+    /// the change.
+    fn keep_trail_index(&self, generation: u64, i: Arc<TrailIndex>) {
+        let mut held = self
             .trail_index
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(i.clone());
-        Ok(i)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.trail_gen.load(Ordering::SeqCst) == generation {
+            *held = Some(i);
+        }
     }
 
     /// After any mint, withdraw, retire or forget; the next search loads the trails again.
     pub fn drop_trail_index(&self) {
-        *self
+        let mut held = self
             .trail_index
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.trail_gen.fetch_add(1, Ordering::SeqCst);
+        *held = None;
     }
 
     /// `trails.match_at`, never under the line two unrelated queries sit at.
@@ -370,6 +382,17 @@ mod tests {
         let idx = TrailIndex::new(vec![trail(own_vec.clone())]);
         assert!(idx.matches(&own_vec, 0.8, true, true).is_empty());
         assert_eq!(idx.matches(&own_vec, 0.8, false, true).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_load_a_drop_overtook_is_not_kept() {
+        let core = crate::core::test_support::test_core().await;
+        let generation = core.trail_gen.load(Ordering::SeqCst);
+        core.drop_trail_index();
+        core.keep_trail_index(generation, Arc::new(TrailIndex::new(Vec::new())));
+        assert!(core.trail_index.read().unwrap().is_none());
+        core.keep_trail_index(generation + 1, Arc::new(TrailIndex::new(Vec::new())));
+        assert!(core.trail_index.read().unwrap().is_some());
     }
 
     #[test]
