@@ -1654,7 +1654,8 @@ impl Core {
             | Stage::Merge
             | Stage::Rescue
             | Stage::Read
-            | Stage::Label => {
+            | Stage::Label
+            | Stage::Deepen => {
                 return Err(Error::Validation(
                     "that stage is a single inference call the queue arms itself; \
                      reprocess the document instead"

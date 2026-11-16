@@ -446,7 +446,7 @@ pub(crate) mod tests {
     const V: u32 = 1;
     const M: &str = "clef";
 
-    async fn search(store: &Store, query: &str, candidates: &[String]) -> String {
+    pub(crate) async fn search(store: &Store, query: &str, candidates: &[String]) -> String {
         store
             .record_search(
                 NewEvent {
@@ -480,7 +480,7 @@ pub(crate) mod tests {
         (0..n).map(|i| format!("{prefix}-{i}")).collect()
     }
 
-    async fn notes(store: &Store, n: usize) -> Vec<String> {
+    pub(crate) async fn notes(store: &Store, n: usize) -> Vec<String> {
         let src = store.insert_corpus("raw", "web", None).await.unwrap();
         let mut out = Vec::new();
         for i in 0..n {
