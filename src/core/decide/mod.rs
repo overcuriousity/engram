@@ -7,7 +7,7 @@ pub mod verdict;
 pub mod wire;
 
 use super::Core;
-use super::search::SearchQuery;
+use super::search::{SearchQuery, SearchResult};
 use crate::error::{Error, Result};
 use crate::infer::budget::TokenCounter;
 use crate::infer::decide::{
@@ -562,6 +562,32 @@ impl Core {
         self.mark_artifacts_cited(cited);
     }
 
+    /// The situation cut to what `search_inner` accepts as a query; empty if it cannot be searched.
+    async fn search_situation(
+        &self,
+        situation: &str,
+        query: &impl Fn(String) -> SearchQuery,
+    ) -> Result<Vec<SearchResult>> {
+        let room = (self.embedder.max_input_tokens() as f32 * 0.8) as usize;
+        let frame = self
+            .counter
+            .count(&self.embedder.templates().render_query(""));
+        let Some(text) = self
+            .counter
+            .cut(situation, room.saturating_sub(frame), true)
+        else {
+            return Ok(Vec::new());
+        };
+        match self.search_with(&query(text), None, Door::Ask).await {
+            Ok((hits, _)) => Ok(hits),
+            Err(Error::Validation(e)) => {
+                tracing::debug!(error = %e, "the situation was not searched; the question's notes stand");
+                Ok(Vec::new())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Asks search for twice the limit, so dropping retired notes still leaves `limit` to read.
     /// The passages, and the vector the question was embedded as (empty on a keyword fallback).
     async fn decide_passages(
@@ -569,25 +595,27 @@ impl Core {
         req: &DecideRequest,
         asked: &Asked,
     ) -> Result<(Vec<Passage>, Vec<f32>)> {
+        let query = |q: String| SearchQuery {
+            q,
+            limit: (asked.limit * 2).min(50),
+            tags: req.tags.clone(),
+            category: req.category.clone(),
+            // As deliberate as asking.
+            mark: true,
+            include_deprecated: false,
+            include_superseded: false,
+            rerank: true,
+            explain: false,
+        };
         let (hits, outcome) = self
-            .search_with(
-                &SearchQuery {
-                    q: asked.q.clone(),
-                    limit: (asked.limit * 2).min(50),
-                    tags: req.tags.clone(),
-                    category: req.category.clone(),
-                    // As deliberate as asking.
-                    mark: true,
-                    include_deprecated: false,
-                    include_superseded: false,
-                    rerank: true,
-                    explain: false,
-                },
-                None,
-                Door::Ask,
-            )
+            .search_with(&query(asked.q.clone()), None, Door::Ask)
             .await?;
-        let hits: Vec<_> = hits
+        // The situation says what the question leaves out; a note may match only that.
+        let from_situation = match &asked.situation {
+            Some(s) => self.search_situation(s, &query).await?,
+            None => Vec::new(),
+        };
+        let hits: Vec<_> = interleave(hits, from_situation)
             .into_iter()
             .filter(|h| !h.retired)
             .take(asked.limit)
@@ -607,6 +635,24 @@ impl Core {
             })
             .collect();
         Ok((passages, outcome.query_vec))
+    }
+}
+
+/// `a[0], b[0], a[1], b[1], …`; a note already taken is skipped and the longer tail follows.
+fn interleave(a: Vec<SearchResult>, b: Vec<SearchResult>) -> Vec<SearchResult> {
+    let mut seen = std::collections::HashSet::new();
+    let (mut a, mut b) = (a.into_iter(), b.into_iter());
+    let mut out = Vec::new();
+    loop {
+        let (x, y) = (a.next(), b.next());
+        if x.is_none() && y.is_none() {
+            return out;
+        }
+        for h in x.into_iter().chain(y) {
+            if seen.insert(h.artifact_id.clone()) {
+                out.push(h);
+            }
+        }
     }
 }
 
@@ -1647,6 +1693,23 @@ pub(crate) mod tests {
         assert!(decide_gaps(&core).await.is_empty());
         core.store.unjudge_decision(&id).await.unwrap();
         assert_eq!(decide_gaps(&core).await.len(), 1);
+    }
+
+    #[test]
+    fn interleaving_takes_each_note_once_and_keeps_the_longer_tail() {
+        let hits = |ids: &[&str]| -> Vec<crate::core::search::SearchResult> {
+            ids.iter()
+                .map(|i| crate::core::search::SearchResult {
+                    artifact_id: i.to_string(),
+                    ..Default::default()
+                })
+                .collect()
+        };
+        let got: Vec<_> = interleave(hits(&["a", "b", "c"]), hits(&["b", "d"]))
+            .into_iter()
+            .map(|h| h.artifact_id)
+            .collect();
+        assert_eq!(got, ["a", "b", "d", "c"]);
     }
 
     async fn weak_decision(core: &mut Core) -> String {
