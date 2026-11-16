@@ -63,10 +63,11 @@ pub fn question(question: &str, kind: &DecideKind) -> Question {
     }
 }
 
-fn standing_copy(d: &Value) -> &'static str {
+fn standing_copy(d: &Value) -> String {
+    let weak = d["weak"].as_bool().unwrap_or(false);
     serde_json::from_value(d["standing"]["verdict"].clone())
-        .map(crate::web::decide::standing_copy)
-        .unwrap_or("")
+        .map(|s| crate::web::decide::standing_line(s, weak))
+        .unwrap_or_default()
 }
 
 pub fn render(decision: &Value, q: &Question, unicode: bool) -> String {
@@ -84,7 +85,7 @@ pub fn render(decision: &Value, q: &Question, unicode: bool) -> String {
         let n = *n;
         out.push_str(&format!("{label:<w$}  {} {n:>3}\n", bar(n, unicode)));
     }
-    out.push_str(standing_copy(decision));
+    out.push_str(&standing_copy(decision));
     out.push('\n');
 
     let evidence = decision["evidence"].as_array().cloned().unwrap_or_default();
@@ -118,7 +119,12 @@ pub fn render(decision: &Value, q: &Question, unicode: bool) -> String {
     let read = decision["read"].as_u64().unwrap_or(0) as usize;
     let rest = read.saturating_sub(evidence.len());
     if rest > 0 {
-        out.push_str(&format!("{rest} more did not bear on it\n"));
+        let why = if decision["weak"].as_bool().unwrap_or(false) {
+            "were not weighed"
+        } else {
+            "did not bear on it"
+        };
+        out.push_str(&format!("{rest} more {why}\n"));
     }
     out
 }
@@ -398,6 +404,19 @@ mod tests {
             !out.contains('%') && !out.to_lowercase().contains("likely"),
             "{out}"
         );
+    }
+
+    #[test]
+    fn a_weak_decision_says_it_came_from_loose_matches() {
+        let mut d = held();
+        d["weak"] = serde_json::json!(true);
+        d["standing"] = serde_json::json!({"verdict": "leaning"});
+        let out = render(&d, &held_q(), true);
+        assert!(out.contains("Leaning, from loose matches.\n"), "{out}");
+        assert!(out.contains("2 more were not weighed"), "{out}");
+        assert!(!out.contains('%') && !out.contains("likely"), "{out}");
+        // Weak still holds an answer, so `--json` exits 0 as it does for any held decision.
+        assert!(!d["answers"].is_null());
     }
 
     #[test]

@@ -17,7 +17,8 @@ passages that answer you. Three doors, one backend: the web UI, a REST API at
 - **Ask** — one streamed answer across the base; abstains when the base has
   nothing and badges commands or paths no excerpt supports.
 - **Decide** — a typed question (yes or no, options, a scale) answered from the
-  notes that bear on it, with each note's own reading beside the verdict.
+  notes that bear on it, with each note's own reading beside the verdict;
+  when none quite does, the closest are weighed and it says so.
 - **Judge** — verdicts under a search or an answer give recall@10 and MRR on
   Insights and drive the idle pass's ranking moves.
 - **Duplicates and disagreements** — judged in the background; merges never drop

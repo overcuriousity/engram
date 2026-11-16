@@ -804,7 +804,7 @@ fn md_line(t: &str) -> String {
 
 /// The first question only: every door asks one, keyed `verdict`.
 pub fn format_decision(d: &crate::core::decide::Decision) -> String {
-    use crate::web::decide::{bars, pick_label, standing_copy};
+    use crate::web::decide::{bars, pick_label, standing_line};
     let mut out = format!("**{}**", md_line(&d.question));
     let (Some(q), Some((_, prior))) = (d.questions.first(), d.prior.first()) else {
         return out;
@@ -823,7 +823,10 @@ pub fn format_decision(d: &crate::core::decide::Decision) -> String {
     for b in bars(q, &joint.answer, prior) {
         out.push_str(&format!("- {}: {}\n", md_line(&b.label), b.weight));
     }
-    let standing = d.standing.first().map_or("", |(_, s)| standing_copy(*s));
+    let standing = d
+        .standing
+        .first()
+        .map_or(String::new(), |(_, s)| standing_line(*s, d.weak));
     out.push_str(&format!("\n{standing} Without notes: {without}."));
     if !d.evidence.is_empty() {
         let verdict = pick_label(q, &joint.answer);
@@ -840,7 +843,12 @@ pub fn format_decision(d: &crate::core::decide::Decision) -> String {
     let rest = d.read.saturating_sub(d.evidence.len());
     if rest > 0 {
         let s = if rest == 1 { "" } else { "s" };
-        out.push_str(&format!("\n\n_{rest} more passage{s} did not bear on it._"));
+        let why = match (d.weak, rest) {
+            (true, 1) => "was not weighed",
+            (true, _) => "were not weighed",
+            _ => "did not bear on it",
+        };
+        out.push_str(&format!("\n\n_{rest} more passage{s} {why}._"));
     }
     if d.dropped > 0 {
         out.push_str(&format!(
@@ -1943,6 +1951,20 @@ mod tests {
         d.standing = vec![("verdict".into(), crate::core::decide::Standing::NotHeld)];
         d.evidence = vec![];
         d
+    }
+
+    #[test]
+    fn a_weak_mcp_decision_says_it_came_from_loose_matches() {
+        let mut d = decision();
+        d.weak = true;
+        d.standing = vec![("verdict".into(), crate::core::decide::Standing::Leaning)];
+        let out = format_decision(&d);
+        assert!(
+            out.contains("Leaning, from loose matches. Without notes:"),
+            "{out}"
+        );
+        assert!(out.contains("2 more passages were not weighed"), "{out}");
+        assert!(!out.contains('%') && !out.contains("likely"), "{out}");
     }
 
     #[test]
