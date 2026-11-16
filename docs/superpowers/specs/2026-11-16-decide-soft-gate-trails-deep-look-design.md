@@ -131,8 +131,8 @@ A decision gains `weak: bool`. A weak decision is held: it has answers and evide
 | JSON (`src/core/decide/wire.rs`) | `"weak": true`, written only when true. "Absent means false", as a search hit's `weak` (`docs/api.md:53`); the word means the same thing on both: a loose match. |
 | Store | `decide_events.weak INTEGER NOT NULL DEFAULT 0`, an `ADDITIVE` entry. `decide_evidence.n` is set for every row in the joint read. |
 | Observations | A weak decision writes no `Cited` observation and marks nothing cited (`src/store/decisions.rs:125`, `src/core/decide/mod.rs:496`). Notes under the line are not positive evidence. |
-| Gaps (`decide_gaps_from!`, `src/store/gaps.rs:138`) | A weak decision is an open gap unless judged `right`: `(not_held = 1 AND verdict <> 'wrong') OR (weak = 1 AND verdict IS NOT 'right') OR (not_held = 0 AND verdict = 'nothing_here')`. |
-| Verdicts (`src/core/decide/verdict.rs`) | `sides` reads the evidence in the joint read, not the bearing rows, so Right on a weak decision stamps the notes that agree, as on any other. All three buttons show. |
+| Gaps (`decide_gaps_from!`, `src/store/gaps.rs:138`) | A weak decision is an open gap unless judged `right`. The first arm keeps its `COALESCE`: `(not_held = 1 AND COALESCE(verdict, '') <> 'wrong') OR (weak = 1 AND COALESCE(verdict, '') <> 'right') OR (not_held = 0 AND verdict = 'nothing_here')`. |
+| Verdicts (`src/core/decide/verdict.rs`) | All three buttons show. A verdict on a weak decision is stored, moves the gap by the rule above and counts toward the line, and does nothing else: no note is stamped confirmed, no pair is queued, no trail is made. The person confirmed the answer, not which of the loose notes gave it, and a loose note's own read lands on the right side by chance half the time. Which note answered is the deep look's to find (Part B). |
 | Web pane (`_decision.html`) | Bars as for any decision. The standing line reads `Leaning, from loose matches.` or `Split, from loose matches.` |
 | Web rail | Head: `Weighed the closest 3 of 8`. The rest line: `5 more were not weighed`. While streaming, a row under the line still says "does not bear"; `done` replaces the rail as it does today. |
 | `progressText` (`assets/js/decide.js:51`) | With no bearing read after the last one: `Weighing the closest together`. |
@@ -224,21 +224,31 @@ CREATE TABLE IF NOT EXISTS trails (
   query_vec BLOB NOT NULL,
   vec_dim INTEGER NOT NULL,
   embed_model TEXT NOT NULL,
-  -- 'verdict' | 'ask' | 'decide' | 'label' | 'deep'
-  source TEXT NOT NULL,
-  -- The event the pairing came from.
-  source_id TEXT NOT NULL,
-  -- 'person' | 'model'
-  tier TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   -- Times a search it lifted a note in was then confirmed, and contradicted.
   matched INTEGER NOT NULL DEFAULT 0,
   missed INTEGER NOT NULL DEFAULT 0,
+  -- The last confirmation, else `created_at`; what ageing reads.
+  used_at INTEGER NOT NULL,
   retired_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_trails_live
   ON trails(artifact_id, query) WHERE retired_at IS NULL;
+
+-- Every pairing that stands behind a trail. A trail with none is retired.
+CREATE TABLE IF NOT EXISTS trail_sources (
+  trail_id TEXT NOT NULL REFERENCES trails(id) ON DELETE CASCADE,
+  -- 'verdict' | 'ask' | 'decide' | 'label' | 'deep'
+  source TEXT NOT NULL,
+  -- The event the pairing came from.
+  source_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (trail_id, source, source_id)
+);
 ```
+
+A trail's **tier** is read off its sources: `person` when one of them is `verdict`,
+`ask` or `decide`, else `model`.
 
 `search_candidates` gains `trail_id TEXT` (nullable, `ADDITIVE`): the trail that
 lifted or brought this candidate, if one did.
@@ -249,7 +259,7 @@ lifted or brought this candidate, if one did.
 |---|---|---|---|---|
 | `verdict` | a search is judged a hit (`judge_hit`, `src/store/feedback.rs:511`) | the search's | `expect_id` | person |
 | `ask` | an ask is judged Right (`confirm_cited`, `src/core/ingest.rs:1216`) | the ask's | each cited note the answer used | person |
-| `decide` | a decision is judged, and the right answer is known | the decision's `q` | each note that agrees with the right answer | person |
+| `decide` | a decision that is not weak is judged, and the right answer is known | the decision's `q` | each bearing note that agrees with the right answer | person |
 | `label` | the labeller finds a relevant candidate in an unjudged search (`model_expected`, `src/store/search_labels.rs:319`) | the search's | that candidate | model |
 | `deep` | Part B finds a note | the source's | the found note | model |
 
@@ -259,13 +269,18 @@ the sweep counts, neither is a confirmation.
 Rules:
 
 - A source row with no vector under the live embed model makes no trail.
-- A trail whose query is within cosine 0.95 of a live trail on the same note
-  replaces nothing: the older stays, and takes the higher tier of the two.
+- A pairing whose query is within cosine 0.95 of a live trail on the same note
+  makes no second trail: it is added to that trail's sources.
 - At most `trails.per_note` (8) live trails a note; the one that goes is the model
   tier before the person tier, then the oldest.
 - At most `trails.max` (20000) live trails a base, by the same order.
-- Undoing the verdict that made a person trail retires it (`unjudge`,
-  `unjudge_decision`, an ask's undo).
+- Undoing a verdict removes its source row (`unjudge`, `unjudge_decision`, an ask's
+  undo). A trail left with only model sources is a model trail again; one left with
+  none is retired.
+- Ageing follows the store's rule that every table holding typed words ages
+  (`expire_feedback`, `src/store/feedback.rs:858`): a model trail is deleted
+  `feedback.retain_days` after `used_at`. A person trail stays, as the judged row it
+  came from stays.
 - A note deleted takes its trails with it (the foreign key). A trail on a note that
   was superseded counts for what superseded it, followed forward as
   `eval::satisfied_by` follows a chain (`src/eval/mod.rs:12`), at most 8 hops.
@@ -300,7 +315,12 @@ there are no live trails.
 4. **Join the pool.** After `cap_per_corpus` (`:1330`), so a trail note neither
    displaces nor is displaced by the cap. A joined note has `similarity: None`: no
    opinion, so it is not called loose and the cliff passes over it, as for a
-   lexical hit.
+   lexical hit. Its `score` is the lowest in the pool.
+   The reranker is given the whole pool, joined notes included, and its cut to
+   `top_n` (`:1451-1466`) does not apply to a matched note: the matched notes it cut
+   are put back after the rows it kept, in the order it gave them, with the score it
+   gave them. Without this the reranker would drop exactly the notes step 5 exists
+   to lift, at `Door::Ask` most of all.
 5. **Reorder.** After the reranker (`:1472`) and before priming (`:1504`), over
    positions from 0: each row's score is `1 / (pos + 2)`, plus
    `trail_weight / (tpos + 2)` where `tpos` is its place among the matched notes by
@@ -331,15 +351,23 @@ score.
 
 ### A trail answers for itself
 
-When a recorded search's candidate carries a `trail_id`:
+When a shown candidate of a recorded search carries a `trail_id`:
 
-- judged a hit on that note, or labelled relevant (`yes >= relevant_at`): the
-  trail's `matched` rises.
-- labelled with `yes` under `answers_query`'s `ask_at` (0.60): `missed` rises.
+| What happens to the search | Person trail | Model trail |
+|---|---|---|
+| judged a hit on that note | `matched` rises, `used_at` is now | the same |
+| judged "nothing here" | `missed` rises | `missed` rises |
+| that candidate labelled under `answers_query`'s `ask_at` (0.60), while `labels_count()` holds | nothing | `missed` rises |
+| that candidate labelled relevant | nothing | nothing |
 
-A trail with `missed >= 3` and `missed > matched` is retired. The labeller judges a
-note against the new query alone and does not know how the note got there, so a
-trail cannot confirm itself.
+A trail with `missed >= 3` and `missed > matched` is retired.
+
+Only a person confirms a trail. The labeller and the deep look are the same model
+asking the same question, so the model agreeing with a note its own trail brought is
+no second opinion. For the same reason a candidate that carries a model trail's id
+makes no `label` trail and is not the expected note of a model pair in
+`evidence_pairs`. The model may withdraw what the model proposed; it never touches a
+trail a person stands behind.
 
 ### Config
 
@@ -375,7 +403,9 @@ In this order:
    pursuit, an uncovered ask subject, and a Decide gap, which after Part 1 includes
    every weak decision not judged right. Each already has its text and its vector
    under the live embed model.
-2. **Recorded searches the labeller left out**: labelled under the era in force,
+2. **Weak decisions judged right.** Their gap is closed, but which note answered is
+   not known. The pool starts with the notes that were weighed.
+3. **Recorded searches the labeller left out**: labelled under the era in force,
    no candidate relevant, not judged a hit, vector under the live embed model.
    Searches with a `gave_up` observation first.
 
@@ -383,7 +413,8 @@ A source gets one deep look per era (question version and decision model), kept 
 
 ```sql
 CREATE TABLE IF NOT EXISTS deep_looks (
-  -- A gap kind ('ask' | 'search' | 'unmatched' | 'pursuit' | 'subject' | 'decide') or 'labelled'.
+  -- A gap kind ('ask' | 'search' | 'unmatched' | 'pursuit' | 'subject' | 'decide'),
+  -- 'weak_right' or 'labelled'.
   source_kind TEXT NOT NULL,
   source_id TEXT NOT NULL,
   -- '' marks the look as done, as the labeller's step-aside row does.
@@ -395,6 +426,10 @@ CREATE TABLE IF NOT EXISTS deep_looks (
   PRIMARY KEY (source_kind, source_id, artifact_id)
 );
 ```
+
+`deep_look_failures(source_kind, source_id, question_version, model, refused,
+retry_at)`, keyed by the first two, is `search_label_failures` for a deep look
+(`src/store/schema.sql:457`).
 
 Rows of a source that is gone are trimmed where gap coverage is trimmed
 (`trim_gap_coverage`, `src/store/gaps.rs:779`).
@@ -413,13 +448,16 @@ Rows of a source that is gone are trimmed where gap coverage is trimmed
 4. The first `decide.deep_max` (24) remain, in that order.
 
 Each is asked alone, on the `background_light` lane. The look ends at the first
-note at or above the line, or when the pool is spent. Every answer is stored. A
-failed call is handled as the labeller handles one (`label::run`,
-`src/jobs/label.rs:61-105`): no partial result, the unit retried, a refusal counted.
+note at or above the line, or when the pool is spent, and its answers are then
+stored together. A failed call is handled as the labeller handles one (`label::run`,
+`src/jobs/label.rs:61-105`): nothing is stored, the unit is retried, a refusal is
+counted in `deep_look_failures`, and from `LABEL_GIVE_UP` of them the source is
+given up for the era.
 
 ### What a find does
 
 - **A trail** on the found note, source `deep`, tier model.
+- **A weak decision judged right:** the trail, and nothing else.
 - **A gap source:** the gap is covered by the note, `CoveredBy::Model` (`cover_gap`,
   `src/store/gaps.rs:637`). That is what `cover_answering` already does for a new
   capture; the deep look does it for notes that were there all along.
@@ -531,7 +569,8 @@ wrong trail owns a query.
 - With a scripted decider whose `bears` is 0.02 for every passage, a decision over a
   base of three notes has answers, `weak: true`, three evidence rows with
   `joint: true`, a standing that is not `settled`, no `Cited` observation, and is an
-  open Decide gap. Judged Right, it is no gap.
+  open Decide gap. Judged Right, it is no gap, no note is stamped and no trail is
+  made.
 - A decision over an empty base is `not_held`, as today.
 - Thirty-one judged decisions of which four are weak and right move `decide_bears`
   down one step with a stated reason; the mirror case moves it up; `wrong` verdicts
@@ -546,7 +585,12 @@ wrong trail owns a query.
   find the note through it.
 - A model-tier trail changes no result while `labels_count()` is false.
 - Undoing the verdict retires the trail. Deleting captured searches deletes all.
-- A trail whose candidate is labelled under the ask line three times is retired.
+- A model trail whose candidate is labelled under the ask line three times is
+  retired; a person trail is not. A candidate brought by a model trail and labelled
+  relevant makes no trail and no sweep pair.
+- A matched note the reranker cut is in the results of a search at `Door::Ask`.
+- A trail made by two verdicts survives the undoing of one and is retired by the
+  undoing of both.
 - A gap whose answer is at rank 30 of its replay is covered by the model after one
   deep look, and the note has a `deep` trail. A second tick asks nothing more of it.
 - A deep look does not run while a search happened inside `evolve.idle_secs`.
@@ -574,6 +618,11 @@ this, is also untested; Part 1 makes it harmless, not known.
 - The reorder formula, the ladder and the shipped weight of 0.5.
 - The three thresholds for a trail's retirement (3 misses, more misses than matches)
   and the near-duplicate line (0.95).
+- A verdict on a weak decision stamps no note and makes no trail.
+- Only a person confirms a trail; the model can only withdraw a model trail.
+- A model trail ages `feedback.retain_days` after its last confirmation; a person
+  trail does not age.
+- A matched note survives the reranker's cut.
 - The deep look ends at its first find.
 
 ## Left to the builder
