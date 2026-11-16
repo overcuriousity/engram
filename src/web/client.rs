@@ -112,7 +112,16 @@ async fn ask_verdict(
         return Err(Error::NotFound);
     }
     match b.verdict.as_str() {
-        "none" => tenant.core.store.unjudge_ask(&id).await?,
+        "none" => {
+            tenant.core.store.unjudge_ask(&id).await?;
+            crate::core::trails::shrug(
+                "an undone answer",
+                tenant
+                    .core
+                    .withdraw_trails(crate::store::trails::TrailSource::Ask, &id)
+                    .await,
+            );
+        }
         v => {
             let verdict = crate::store::asks::AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;

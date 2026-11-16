@@ -538,6 +538,7 @@ async fn artifact_detail(
             .await?
         && tenant.core.store.open_event(event, &cid).await?
     {
+        crate::core::trails::shrug("an open", tenant.core.trails_after_open(event, &cid).await);
         d.search_event = Some(event.to_string());
     }
     // Opening a chunk is the deliberate act that counts as remembering it.

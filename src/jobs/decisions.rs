@@ -147,7 +147,20 @@ pub async fn run(core: &Core) -> Result<Report> {
     let left = core.judging_budget().await?;
     r.scanned = scan(core, left / 2).await?;
     r.labelled = label(core, left / 4).await?;
+    core.refresh_model_trails_count().await;
+    // Best-effort: a trail left under the old model is only unused until the next quiet tick.
+    if quiet(core).await?
+        && let Err(e) = core.reembed_stale_trails().await
+    {
+        tracing::warn!(error = %e, "could not embed old trails again");
+    }
     Ok(r)
+}
+
+/// Nobody searched, asked or captured for `evolve.idle_secs`.
+async fn quiet(core: &Core) -> Result<bool> {
+    let idle = crate::store::now() - core.evolve.idle_secs.max(0);
+    Ok(!(core.store.activity_since(idle).await? || core.store.captured_since(idle).await?))
 }
 
 /// A store write about one decision. A failure is logged and that decision waits for the next
@@ -243,8 +256,7 @@ async fn label(core: &Core, share: usize) -> Result<u64> {
 /// `share`, so the pair judge is never starved; a note already queued keeps its slot, and one that
 /// could not be read holds none: the store leaves it out until it is due again.
 async fn scan(core: &Core, share: usize) -> Result<u64> {
-    let idle = crate::store::now() - core.evolve.idle_secs.max(0);
-    if core.store.activity_since(idle).await? || core.store.captured_since(idle).await? {
+    if !quiet(core).await? {
         return Ok(0);
     }
     let half = i64::try_from(share).unwrap_or(i64::MAX);

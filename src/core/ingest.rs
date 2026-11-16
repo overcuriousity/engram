@@ -1232,11 +1232,18 @@ impl Core {
     /// A right answer also confirms the notes it drew on; wrong or empty ones say nothing about
     /// them.
     pub async fn judge_ask(&self, id: &str, verdict: crate::store::asks::AskVerdict) -> Result<()> {
+        use crate::store::trails::TrailSource::Ask;
         self.store.judge_ask(id, verdict).await?;
+        // A verdict given again replaces the one before, and its trails.
+        super::trails::shrug("a judged answer", self.withdraw_trails(Ask, id).await);
         if verdict == crate::store::asks::AskVerdict::Right {
             // Best-effort past this point: the verdict is written.
             match self.store.used_citations(id).await {
-                Ok(cited) => self.confirm_cited(&cited).await,
+                Ok(cited) => {
+                    self.confirm_cited(&cited).await;
+                    let made = self.mint_trails_from(Ask, id, &cited).await;
+                    super::trails::shrug("a right answer", made);
+                }
                 Err(e) => tracing::warn!(
                     ask_id = id,
                     error = %e,
@@ -2391,6 +2398,27 @@ mod tests {
                 .collect(),
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn an_ask_judged_right_leaves_a_trail_on_each_note_it_used() {
+        use crate::store::asks::AskVerdict;
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let ids = crate::jobs::consolidate::tests::seed(
+            &core,
+            &[("used", [1.0, 0.0]), ("shown only", [0.0, 1.0])],
+        )
+        .await;
+        let ask = crate::store::asks::NewAsk {
+            embed_model: core.embedder.model().into(),
+            ..an_ask_citing(&[(&ids[0], true), (&ids[1], false)])
+        };
+        let id = core.store.record_ask(ask).await.unwrap();
+        core.judge_ask(&id, AskVerdict::Right).await.unwrap();
+        let live = core.store.live_trails(core.embedder.model()).await.unwrap();
+        let on: Vec<&str> = live.iter().map(|t| t.artifact_id.as_str()).collect();
+        assert_eq!(on, [ids[0].as_str()]);
     }
 
     #[tokio::test]

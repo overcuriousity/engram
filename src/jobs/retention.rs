@@ -114,6 +114,19 @@ pub async fn run(core: &Core) -> Result<Report> {
                 failure.get_or_insert(e);
             }
         }
+        // A model trail ages from its last use; a person's stays, as its judged row does.
+        let before = crate::store::now() - core.feedback.retain_days * 86_400;
+        match core.store.expire_model_trails(before).await {
+            Ok(n) if n > 0 => {
+                tracing::info!(dropped = n, "expired model trails");
+                core.drop_trail_index();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "could not expire model trails");
+                failure.get_or_insert(e);
+            }
+        }
     }
 
     if core.learn.enabled {

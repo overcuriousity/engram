@@ -1288,6 +1288,7 @@ async fn get_artifact(
             .await?
         && tenant.core.store.open_event(event, &cid).await?
     {
+        crate::core::trails::shrug("an open", tenant.core.trails_after_open(event, &cid).await);
         search_event = Some(event.to_string());
     }
     // A deleted document does not make its artifact unreadable.

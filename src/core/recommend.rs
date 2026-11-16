@@ -272,8 +272,13 @@ impl Core {
 
 impl Core {
     /// The centroids live in Qdrant and a SQLite `DELETE` does not reach them. Runs before the rows
-    /// go, since they say which points carry a set; a failure does not block the delete.
+    /// go, since they say which points carry a set; a failure does not block the delete. Every
+    /// trail goes too: a trail holds query text.
     pub async fn forget_situations(&self) -> u64 {
+        match self.store.forget_trails().await {
+            Ok(_) => self.drop_trail_index(),
+            Err(e) => tracing::warn!(error = %e, "could not delete the trails"),
+        }
         let ids = match self.store.artifacts_with_context_clusters().await {
             Ok(ids) => ids,
             Err(e) => {

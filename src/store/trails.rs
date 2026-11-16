@@ -63,6 +63,13 @@ pub struct Trail {
     pub missed: i64,
 }
 
+/// An event's words, vector and embed model, as stored.
+pub struct Pairing {
+    pub query: String,
+    pub vec: Vec<u8>,
+    pub embed_model: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TrailCounts {
     pub live: i64,
@@ -329,6 +336,65 @@ impl Store {
             .execute(&self.pool)
             .await?
             .rows_affected())
+    }
+
+    /// The words, vector and embed model of the event a trail of this source is made from. `Deep`
+    /// has no event row of its own: its caller passes the pairing to `Core::mint_trail`.
+    pub async fn trail_pairing(
+        &self,
+        source: TrailSource,
+        event_id: &str,
+    ) -> Result<Option<Pairing>> {
+        Ok(match source {
+            TrailSource::Verdict | TrailSource::Label => {
+                sqlx::query_as!(
+                    Pairing,
+                    r#"SELECT query AS "query!", query_vec AS "vec!", embed_model AS "embed_model!"
+                         FROM search_events WHERE id = ?"#,
+                    event_id
+                )
+                .fetch_optional(&self.pool)
+                .await?
+            }
+            TrailSource::Ask => sqlx::query_as!(
+                Pairing,
+                r#"SELECT question AS "query!", query_vec AS "vec!", embed_model AS "embed_model!"
+                         FROM ask_events WHERE id = ?"#,
+                event_id
+            )
+            .fetch_optional(&self.pool)
+            .await?,
+            TrailSource::Decide => sqlx::query_as!(
+                Pairing,
+                r#"SELECT question AS "query!", query_vec AS "vec!", embed_model AS "embed_model!"
+                         FROM decide_events WHERE id = ?"#,
+                event_id
+            )
+            .fetch_optional(&self.pool)
+            .await?,
+            TrailSource::Deep => None,
+        })
+    }
+
+    /// The trails a search's candidates carry, each pairing once: `(artifact_id, trail_id, shown,
+    /// tier)`. A trail deleted since is left out.
+    pub async fn event_trails(&self, event_id: &str) -> Result<Vec<(String, String, bool, Tier)>> {
+        let rows = sqlx::query!(
+            r#"SELECT c.artifact_id AS "artifact_id!", t.id AS "trail_id!",
+                      MAX(c.shown) AS "shown!: i64",
+                      EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = t.id
+                                 AND s.source IN ('verdict', 'ask', 'decide')) AS "person!: i64"
+                 FROM search_candidates c JOIN trails t ON t.id = c.trail_id
+                WHERE c.event_id = ?
+                GROUP BY c.artifact_id, t.id"#,
+            event_id
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| (r.artifact_id, r.trail_id, r.shown != 0, tier(r.person)))
+            .collect())
     }
 
     pub async fn trail_counts(&self) -> Result<TrailCounts> {
