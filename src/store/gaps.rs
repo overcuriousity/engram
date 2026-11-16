@@ -139,6 +139,7 @@ macro_rules! decide_gaps_from {
     () => {
         " FROM decide_events
           WHERE ((not_held = 1 AND COALESCE(verdict, '') <> 'wrong')
+                 OR (weak = 1 AND COALESCE(verdict, '') <> 'right')
                  OR (not_held = 0 AND verdict = 'nothing_here'))
             AND dismissed_at IS NULL
             AND embed_model = ? AND vec_dim > 0
@@ -147,7 +148,7 @@ macro_rules! decide_gaps_from {
     };
 }
 
-/// Unjudged, a not-held decision dates from when it was made.
+/// Unjudged, a not-held or weak decision dates from when it was made.
 macro_rules! decide_gaps_sql {
     ($cols:literal) => {
         concat!(
