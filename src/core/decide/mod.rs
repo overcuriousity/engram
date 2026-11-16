@@ -26,6 +26,8 @@ pub const MAX_CALLER_QUESTIONS: usize = 8;
 pub const MAX_SITUATION_TOKENS: usize = 2000;
 /// Decide's `settled_at` as the tuner records it, beside the background questions' lines.
 pub const SETTLED_ID: &str = "decide_settled";
+/// Decide's `bears_min` as the tuner records it.
+pub const BEARS_ID: &str = "decide_bears";
 
 /// Decide's era: the model and the wording of `bears`.
 pub fn settled_era(model: &str) -> String {
@@ -272,6 +274,19 @@ impl Core {
         }
     }
 
+    /// The tuned bearing line for this model's era, else config.
+    pub async fn bears_at(&self) -> f64 {
+        let era = settled_era(self.decider.model());
+        match self.store.thresholds_in_force(BEARS_ID, &era).await {
+            Ok(Some(t)) => t.act_at,
+            Ok(None) => self.decide_cfg.bears_min,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the tuned bearing line; config is in force");
+                self.decide_cfg.bears_min
+            }
+        }
+    }
+
     /// A collector over `decide_events`, so there is exactly one account of what deciding means.
     pub async fn decide(&self, req: &DecideRequest, origin: impl Into<Origin>) -> Result<Decision> {
         let s = self.decide_events(req, origin);
@@ -300,6 +315,7 @@ impl Core {
             let (questions, situation) = (&asked.questions, asked.situation.as_deref());
             let mut cfg = core.decide_cfg.clone();
             cfg.settled_at = core.settled_at().await;
+            cfg.bears_min = core.bears_at().await;
 
             // Every spawned read holds a clone: a read still in flight keeps the lane until it is aborted.
             let lane = std::sync::Arc::new(core.gate.interactive());
@@ -1657,6 +1673,22 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(stored, "rule");
+    }
+
+    #[tokio::test]
+    async fn the_bears_line_is_the_tuned_one_else_config() {
+        let core = test_core().await;
+        assert_eq!(core.bears_at().await, 0.5);
+        let era = settled_era(core.decider.model());
+        let to = crate::core::judging::band::Thresholds {
+            act_at: 0.46,
+            ask_at: 0.46,
+        };
+        core.store
+            .move_thresholds(BEARS_ID, &era, to, "test")
+            .await
+            .unwrap();
+        assert_eq!(core.bears_at().await, 0.46);
     }
 
     #[tokio::test]

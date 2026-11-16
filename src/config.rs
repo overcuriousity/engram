@@ -202,6 +202,10 @@ pub struct DecideConfig {
     pub settled_at: f64,
     /// The share of bearing held by passages against the verdict that splits it.
     pub split_at: f64,
+    /// The closest passages weighed when none reaches the bearing line.
+    pub weak_take: usize,
+    /// Notes a deep look asks about, at most.
+    pub deep_max: usize,
     /// When background judgement acts, asks or leaves; `[decide.bands.<id>]` overrides one question.
     pub bands: Bands,
     /// Open questions to a person, at most, before the judge stops asking.
@@ -298,6 +302,8 @@ impl Default for DecideConfig {
             bears_min: 0.5,
             settled_at: 0.80,
             split_at: 0.34,
+            weak_take: 3,
+            deep_max: 24,
             bands: Bands::default(),
             ask_open_max: 20,
             ask_lapse_days: 30,
@@ -2081,6 +2087,16 @@ impl Config {
                 )));
             }
         }
+        for (key, v, max) in [
+            ("decide.weak_take", dc.weak_take, 8),
+            ("decide.deep_max", dc.deep_max, 50),
+        ] {
+            if !(1..=max).contains(&v) {
+                return Err(ConfigError::Invalid(format!(
+                    "{key} ({v}) must be between 1 and {max}"
+                )));
+            }
+        }
         if dc.joint_tokens < 256 {
             return Err(ConfigError::Invalid(format!(
                 "decide.joint_tokens ({}) is below 256: no excerpt would fit the joint read",
@@ -3554,6 +3570,10 @@ mode = "off"
             ("refuse_below = 1.5", "decide.refuse_below"),
             ("refuse_below = -0.1", "decide.refuse_below"),
             ("joint_tokens = 100", "decide.joint_tokens"),
+            ("weak_take = 0", "decide.weak_take"),
+            ("weak_take = 9", "decide.weak_take"),
+            ("deep_max = 0", "decide.deep_max"),
+            ("deep_max = 51", "decide.deep_max"),
         ] {
             let body = format!("{MINIMAL}\n[decide]\n{line}\n");
             match Config::load(Some(&write(&dir, &body))) {
