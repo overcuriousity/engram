@@ -21,7 +21,9 @@ pub fn candidates(
     tried: &[crate::store::generations::GenerationParams],
     budget: usize,
 ) -> Vec<RankingParams> {
-    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS, PRIME_LIFTS, SITTING_PRIMES, TRAIL_WEIGHTS};
+    use crate::core::ranking::{
+        HALF_LIVES, MULTIPLIERS, PRIME_LIFTS, SITTING_PRIMES, TRAIL_WEIGHTS,
+    };
     let recency = outward(
         &RECENCY,
         |v| *v < current.recency_weight,
