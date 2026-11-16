@@ -47,9 +47,10 @@ note, a kind of question, or a relation between them (owner's decision).
   queries, at every door, without a reindex and on all three vector stores.
 - A search or question that found nothing is looked at again, further down, without
   a person waiting.
-- The person's verdicts stay the authority: what only the model said is used only
-  while the model's labels agree with the person's, by the rule the sweep already
-  uses (`Core::labels_count`).
+- Autonomy from the first day (owner's decision, 2026-11-16): the base improves on
+  what the model finds and on what use leaves behind, over months, with nothing a
+  person has to judge, review or maintain. A verdict, where one is given, outranks
+  the model on the same question; none is ever required.
 - Evaluation stays honest: a replay never finds a note through the trail made from
   the very query being replayed.
 
@@ -63,14 +64,13 @@ note, a kind of question, or a relation between them (owner's decision).
   the search path, and ranking by kind of need. These are later work, for the issue
   tracker.
 - Trails on the Android app's own surfaces beyond what the API already carries.
-- Changing how model labels earn their trust (`label_overlap_min`,
-  `label_agree_min`, `label_select_max`).
 
 ## Anti-goals
 
 - A verdict presented as settled when no note cleared the line.
 - A trail that confirms itself: made from a model's guess, then counted as evidence
   because search now returns the note.
+- Anything that works only once a person has pressed enough buttons.
 - A trail that outlives a person's contradiction of it.
 - A measurable slowdown of search. The trail step is arithmetic over vectors
   already in memory; it calls no model and no service.
@@ -87,6 +87,26 @@ model would have said without notes.
 
 Spec 2 (`2026-11-13-decide-2-judgement-design.md:464-484`) says `bears_min` is not
 moved. Part 1 moves it.
+
+---
+
+## Trusted until shown otherwise
+
+`Core::labels_count` (`src/jobs/label.rs:178`) lets the model's labels steer a sweep
+only after thirty searches the person judged, with the model agreeing. A person who
+judges nothing never gets there, and the labels count for nothing for good. That is
+the opposite of the goal above, so the rule turns round, for the labels it already
+governs and for everything new here:
+
+- The model's labels count unless they are shown to be bad.
+- **Shown by the person:** over at least `label_overlap_min` judged searches, the
+  hit rate is under `label_agree_min` or the selectivity over `label_select_max`.
+  Unchanged figures; they now stop the labels and no longer have to start them.
+- **Shown without anyone:** the selectivity over the last 200 labelled searches,
+  judged or not, is over `label_select_max`. A model that calls everything relevant
+  is caught with no verdict given.
+
+Insights keeps both figures and says which, if either, has stopped the labels.
 
 ---
 
@@ -162,7 +182,19 @@ the line last moved, first question only:
 
 `wrong` says nothing about the line: a wrong answer may rest on relevant notes.
 
-Let `n` be the four cells together. Nothing moves under `decide.tune_min` (30) of
+A decision nobody judged is read a second time when the base is quiet (Part B):
+its evidence is asked the labeller's question, alone, note by note.
+
+| Decision, unjudged | Second reading | Says |
+|---|---|---|
+| not weak | no evidence note reaches `answers_query`'s `ask_at` (0.60) | **too low** |
+| weak | an evidence note is relevant (`>= relevant_at`) | **too high** |
+| either | anything else | the line was fine |
+
+A verdict on a decision replaces its second reading. While the labels are stopped
+(above), second readings count for nothing.
+
+Let `n` be the cells of both tables together. Nothing moves under `decide.tune_min` (30) of
 them. Then, with `decide.undo_target` (0.05) and `STEP` (0.02):
 
 - too low `/ n > undo_target` and too low `>` too high: the line rises a step.
@@ -171,8 +203,8 @@ them. Then, with `decide.undo_target` (0.05) and `STEP` (0.02):
 
 Bounds `BEARS_BOUNDS = (0.20, 0.80)`. `next_act_at` is not reused: it can only come
 down after thirty acts above the line, and a line that is too high produces few of
-those. The move is recorded with a reason in the house form, e.g. "4 of 31 weak were
-judged right".
+those. The move is recorded with a reason in the house form, e.g. "4 of 31 weak held a
+note that answered".
 
 Insights (`judgement_lines`, `src/web/insights.rs:948`): a line
 `decide_bears · bears 0.50 · as configured` beside `decide_settled`, and a share
@@ -302,8 +334,9 @@ there are no live trails.
    query vector is at least `match_at`. `match_at` is `trails.match_at` (0.80),
    never under the measured line at which two unrelated queries sit, read as
    `weak_below` reads its line (`gaps::line_above`, `src/core/mod.rs:275`).
-   Model-tier trails count only while `Core::labels_count()` holds; that answer is
-   cached and refreshed by the `Decisions` tick, never computed in a search.
+   Model trails match from the first day, at half a person trail's weight (step 5),
+   and not at all while the labels are stopped; that answer is cached and refreshed
+   by the `Decisions` tick, never computed in a search.
 2. **Leave-one-out.** At `Door::Judge`, a trail within cosine 0.999 of the query
    vector is left out. A replay is the stored query of some past event; the trail
    made from that same query must not find its note. This covers the sweep
@@ -323,10 +356,10 @@ there are no live trails.
    to lift, at `Door::Ask` most of all.
 5. **Reorder.** After the reranker (`:1472`) and before priming (`:1504`), over
    positions from 0: each row's score is `1 / (pos + 2)`, plus
-   `trail_weight / (tpos + 2)` where `tpos` is its place among the matched notes by
-   cosine. Rows are sorted by that; ties keep their order. At the shipped weight the
-   best-matched note lands near third place and cannot pass a first row that has no
-   trail of its own. After the reranker, because a reranker scores query against
+   `tier * trail_weight / (tpos + 2)` where `tpos` is its place among the matched
+   notes by cosine and `tier` is 1 for a person trail, 0.5 for a model trail. Rows are sorted by that; ties keep their order. At the shipped weight the
+   best-matched note lands near third place by a person trail and near seventh by a
+   model trail, and cannot pass a first row that has no trail of its own. After the reranker, because a reranker scores query against
    text and would sink exactly the notes a trail exists to surface.
 6. **Explain and record.** `HitExplanation` (`src/core/explain.rs`) gains
    `trail: Option<{ query, similarity }>`, shown in the rail's "why" as
@@ -355,19 +388,24 @@ When a shown candidate of a recorded search carries a `trail_id`:
 
 | What happens to the search | Person trail | Model trail |
 |---|---|---|
-| judged a hit on that note | `matched` rises, `used_at` is now | the same |
+| that note is opened | `matched` rises, `used_at` is now | the same |
+| judged a hit on that note | the same, and the trail gains a `verdict` source | the same: it is a person trail from here |
 | judged "nothing here" | `missed` rises | `missed` rises |
-| that candidate labelled under `answers_query`'s `ask_at` (0.60), while `labels_count()` holds | nothing | `missed` rises |
+| that candidate labelled under `answers_query`'s `ask_at` (0.60) | nothing | `missed` rises |
 | that candidate labelled relevant | nothing | nothing |
 
 A trail with `missed >= 3` and `missed > matched` is retired.
 
-Only a person confirms a trail. The labeller and the deep look are the same model
-asking the same question, so the model agreeing with a note its own trail brought is
-no second opinion. For the same reason a candidate that carries a model trail's id
-makes no `label` trail and is not the expected note of a model pair in
-`evidence_pairs`. The model may withdraw what the model proposed; it never touches a
+Use confirms a trail and the model may withdraw one; the model never confirms one.
+The labeller and the deep look are the same model asking the same question, so the
+model agreeing with a note its own trail brought is no second opinion. For the same
+reason a candidate that carries a model trail's id makes no `label` trail and is not
+the expected note of a model pair in `evidence_pairs`. The model never touches a
 trail a person stands behind.
+
+So a model trail lives on what happens after it: it is opened and stays, it is
+labelled unhelpful or ignored and goes, by retirement or by ageing. Nobody has to
+look at it.
 
 ### Config
 
@@ -405,7 +443,12 @@ In this order:
    under the live embed model.
 2. **Weak decisions judged right.** Their gap is closed, but which note answered is
    not known. The pool starts with the notes that were weighed.
-3. **Recorded searches the labeller left out**: labelled under the era in force,
+3. **Decisions nobody judged**, for the second reading that tunes Decide's line
+   (Part 1). The look reads the decision's evidence and nothing further: there is no
+   pool, no trail and no coverage. An unjudged weak decision is an open gap and gets
+   the whole look under 1; its evidence is read first and counts as its second
+   reading.
+4. **Recorded searches the labeller left out**: labelled under the era in force,
    no candidate relevant, not judged a hit, vector under the live embed model.
    Searches with a `gave_up` observation first.
 
@@ -414,7 +457,7 @@ A source gets one deep look per era (question version and decision model), kept 
 ```sql
 CREATE TABLE IF NOT EXISTS deep_looks (
   -- A gap kind ('ask' | 'search' | 'unmatched' | 'pursuit' | 'subject' | 'decide'),
-  -- 'weak_right' or 'labelled'.
+  -- 'weak_right', 'second_reading' or 'labelled'.
   source_kind TEXT NOT NULL,
   source_id TEXT NOT NULL,
   -- '' marks the look as done, as the labeller's step-aside row does.
@@ -461,7 +504,7 @@ given up for the era.
 - **A gap source:** the gap is covered by the note, `CoveredBy::Model` (`cover_gap`,
   `src/store/gaps.rs:637`). That is what `cover_answering` already does for a new
   capture; the deep look does it for notes that were there all along.
-- **A labelled search:** while `labels_count()` holds, it is a pair for the sweep:
+- **A labelled search:** unless the labels are stopped, it is a pair for the sweep:
   expected, the found note; served rank, none. `evidence_pairs`
   (`src/eval/sweep.rs:356`) takes these with the model's other pairs, inside the
   same room.
@@ -508,9 +551,9 @@ finds the note in third place, with "found before for «…»" beside it. If the
 confirms it there, the note has a trail of theirs; if the labeller keeps saying it
 does not help, the trail is retired.
 
-The model-tier half of that waits on `labels_count()`: thirty searches the person
-judged, with the model agreeing. Until then the base records what the model found
-and shows it on Insights, and only what the person confirmed changes what is served.
+None of that waits for a person. If the person confirms the note there, the trail
+is theirs and counts double; if they never press anything, the trail still stands
+or falls by whether it is opened and what the labeller says of it.
 
 ## Constraints
 
@@ -583,7 +626,15 @@ wrong trail owns a query.
   not.
 - The same search replayed at `Door::Judge` with the trail's own vector does not
   find the note through it.
-- A model-tier trail changes no result while `labels_count()` is false.
+- A model trail changes results on a base where nothing was ever judged, at half a
+  person trail's weight. It changes none while the selectivity over the last 200
+  labelled searches is over `label_select_max`.
+- On a base with no judged search, `labels_count()` is true.
+- Thirty-one unjudged decisions of which four are weak with an evidence note the
+  second reading finds relevant move `decide_bears` down one step. A verdict on one
+  of them replaces its second reading.
+- A model trail whose note is opened from a search has `matched` 1 and a new
+  `used_at`.
 - Undoing the verdict retires the trail. Deleting captured searches deletes all.
 - A model trail whose candidate is labelled under the ask line three times is
   retired; a person trail is not. A candidate brought by a model trail and labelled
@@ -610,16 +661,19 @@ this, is also untested; Part 1 makes it harmless, not known.
   `decide_bears`.
 - A weak decision exits the CLI with `0`.
 - The tuning rule for the line, its bounds and that `wrong` is silent.
-- Model-tier trails and deep-look pairs wait on `labels_count()`. The alternative is
-  to use them from the first day at a lower weight; that trades the owner's rule
-  that a label never stands in for a verdict against a base that improves before
-  thirty searches were judged.
+- `labels_count` turns round: trusted until shown otherwise. This changes a rule
+  that is live today, for the sweep's existing model pairs too.
+- A model trail counts half a person trail.
+- An open confirms a trail.
+- The second reading of unjudged decisions, and that it tunes the line beside
+  verdicts.
+- 200 labelled searches as the window for the selectivity check without a person.
 - Opens and unjudged citations make no trail.
 - The reorder formula, the ladder and the shipped weight of 0.5.
 - The three thresholds for a trail's retirement (3 misses, more misses than matches)
   and the near-duplicate line (0.95).
 - A verdict on a weak decision stamps no note and makes no trail.
-- Only a person confirms a trail; the model can only withdraw a model trail.
+- Use or a person confirms a trail; the model can only withdraw a model trail.
 - A model trail ages `feedback.retain_days` after its last confirmation; a person
   trail does not age.
 - A matched note survives the reranker's cut.
