@@ -1004,8 +1004,8 @@ mod tests {
     #[tokio::test]
     async fn an_unjudged_search_counts_only_while_the_model_agrees_with_the_person() {
         // 30 judged searches at hit rate 0.9, selectivity 0.2 -> the unjudged search adds a pair; at
-        // hit rate 0.8 it does not; at 29 judged it does not
-        for (hits, misses, counts) in [(27, 3, true), (24, 6, false), (27, 2, false)] {
+        // hit rate 0.8 it does not; with 29 judged the verdicts cannot yet stop it
+        for (hits, misses, counts) in [(27, 3, true), (24, 6, false), (27, 2, true)] {
             let (core, order) = seeded().await;
             let generation = a_generation(&core).await;
             for _ in 0..hits {

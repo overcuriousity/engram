@@ -267,6 +267,49 @@ impl Store {
         })
     }
 
+    /// Over the newest `last` searches this model labelled at this version: the mean share of a
+    /// search's labelled candidates that are relevant; `None` when there are none. Needs no verdict.
+    pub async fn recent_selectivity(
+        &self,
+        relevant_at: f64,
+        version: u32,
+        model: &str,
+        last: i64,
+    ) -> Result<Option<f64>> {
+        let rows = sqlx::query!(
+            r#"SELECT (SELECT COUNT(*) FROM search_labels l
+                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                          AND l.yes >= ? AND l.artifact_id <> '') AS "relevant!: i64",
+                      (SELECT COUNT(*) FROM search_labels l
+                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                          AND l.artifact_id <> '') AS "labelled!: i64"
+                 FROM search_events e
+                WHERE EXISTS (SELECT 1 FROM search_labels l
+                               WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?
+                                 AND l.artifact_id <> '')
+                ORDER BY e.created_at DESC, e.id DESC LIMIT ?"#,
+            version,
+            model,
+            relevant_at,
+            version,
+            model,
+            version,
+            model,
+            last
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            rows.iter()
+                .map(|r| r.relevant as f64 / r.labelled as f64)
+                .sum::<f64>()
+                / rows.len() as f64,
+        ))
+    }
+
     /// Over the held decisions made under this configured model and the wording of `bears` in
     /// force, judged `right` or `nothing_here`: every bearing note was ruled on; one held up when
     /// its verdict was `right` and its own reading picked the same.
