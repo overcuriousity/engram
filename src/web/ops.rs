@@ -71,17 +71,6 @@ async fn unsupersede_ui(
     artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
 }
 
-async fn deprecate_ui(
-    tenant: Tenant,
-    headers: axum::http::HeaderMap,
-    Path(aid): Path<String>,
-    Query(p): Query<ArtifactViewParams>,
-    Form(back): Form<ReturnTo>,
-) -> UiResult<Response> {
-    tenant.core.deprecate(&aid).await?;
-    artifact_changed(&tenant, &headers, &aid, &p.terms, &back).await
-}
-
 /// Stamps whichever of the three actions hid it; `undo_action_on` matches only open rows of that kind.
 /// `Supersede` is included: a buried artifact can also be superseded, and an open row would let the sweep redo it.
 pub(crate) async fn reactivate_artifact(tenant: &Tenant, aid: &str) -> crate::error::Result<()> {
@@ -175,7 +164,6 @@ async fn uncondense_ui(
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/ui/ops/artifacts/{id}/unsupersede", post(unsupersede_ui))
-        .route("/ui/ops/artifacts/{id}/deprecate", post(deprecate_ui))
         .route("/ui/ops/artifacts/{id}/reactivate", post(reactivate_ui))
         .route("/ui/ops/merges/{id}/undo", post(undo_merge_ui))
         .route("/ui/ops/condensations/{id}/undo", post(uncondense_ui))
@@ -201,7 +189,7 @@ mod tests {
             checked += 1;
         }
         assert!(
-            checked >= 4,
+            checked >= 3,
             "the pane's ops buttons went missing: {checked}"
         );
     }

@@ -25,6 +25,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -123,11 +124,19 @@ fun Wordmark() {
 fun EngramApp(
     engram: Engram,
     start: Screen? = null,
-    pairText: String? = null,
+    pairCode: String? = null,
     focusBox: Boolean = false,
     onUnpair: () -> Unit,
 ) {
     val connection by engram.connection.collectAsStateWithLifecycle()
+    // A pairing code is good once. The intent that carried it stays for as
+    // long as the activity does, and handed to the Pair screen a second time
+    // it was claimed again and refused: the app had to be started over.
+    val before = remember { engram.connection.value }
+    var spent by rememberSaveable(pairCode) { mutableStateOf(false) }
+    val pairedNow = !engram.loopback && connection != null && connection != before
+    if (pairedNow) SideEffect { spent = true }
+    val pairText = pairCode.takeUnless { spent || pairedNow }
     val refused by engram.refused.collectAsStateWithLifecycle()
     val pinned by engram.pinMismatch.collectAsStateWithLifecycle()
     val nav = rememberNavController()
@@ -256,7 +265,12 @@ fun EngramApp(
                     InsightsScreen(engram, onJournal = { go(Screen.Journal.route) }, onArtifact, onCorpus, onLibrary = { go(Screen.Library.route) })
                 }
                 composable(Screen.Journal.route) { JournalScreen(engram, onArtifact, onCorpus) }
-                composable(Screen.Pair.route) { PairScreen(engram, initialText = pairText, knownOrigin = connection?.origin) }
+                composable(Screen.Pair.route) {
+                    PairScreen(
+                        engram, initialText = pairText, knownOrigin = connection?.origin,
+                        onPaired = { nav.navigate(Routes.SEARCH) { popUpTo(nav.graph.id) { inclusive = true } } },
+                    )
+                }
                 composable(Routes.ASK) {
                     AskScreen(
                         engram, it.arguments?.getString("q").orEmpty(), onArtifact, onCorpus,

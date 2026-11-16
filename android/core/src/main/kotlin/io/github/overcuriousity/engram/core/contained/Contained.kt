@@ -2,6 +2,7 @@ package io.github.overcuriousity.engram.core.contained
 
 import io.github.overcuriousity.engram.core.Connection
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -44,19 +45,25 @@ class Contained(
      * is running answers a second start with itself, so a model that arrived
      * since, or an endpoint that was set, is only seen by a new one.
      */
-    suspend fun restart(): Connection? = gate.withLock {
-        _connected.value = null
-        _state.value = CoreState.Idle
-        withContext(Dispatchers.IO) { runCatching { halt() } }
-        started()
+    suspend fun restart(): Connection? = withContext(NonCancellable) {
+        // Whoever asked is usually a screen that the dropped connection takes
+        // away; a restart that stopped with it would leave the core stopped.
+        gate.withLock {
+            _connected.value = null
+            _state.value = CoreState.Idle
+            withContext(Dispatchers.IO) { runCatching { halt() } }
+            started()
+        }
     }
 
     /** The end of it: nothing listens afterwards, and a job in flight was waited for. */
-    suspend fun stop() = gate.withLock {
-        _connected.value = null
-        _state.value = CoreState.Idle
-        withContext(Dispatchers.IO) { runCatching { halt() } }
-        Unit
+    suspend fun stop() = withContext(NonCancellable) {
+        gate.withLock {
+            _connected.value = null
+            _state.value = CoreState.Idle
+            withContext(Dispatchers.IO) { runCatching { halt() } }
+            Unit
+        }
     }
 
     private suspend fun started(): Connection? {

@@ -91,7 +91,6 @@ private fun firstLine(kind: Kind, payload: String): String {
         Kind.gap_forget -> "Gaps · forgotten"
         Kind.artifact_op -> when (p["op"]?.jsonPrimitive?.contentOrNull) {
             "verify" -> "Artifact · still accurate"
-            "deprecate" -> "Artifact · hidden"
             "reactivate", "unsupersede" -> "Artifact · back in results"
             else -> "Artifact"
         }

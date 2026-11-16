@@ -296,15 +296,15 @@ internal class Transport(
         )
 
     // ── Decisions ────────────────────────────────────────────────────────────
-    // What a person still decides about the base: hiding a note, bringing one
+    // What a person still decides about the base: bringing a hidden note
     // back, taking back something the base did. Each is delivered by the
     // outbox, and the answer comes back as it came; what a status means is
     // the outbox's.
 
-    /** One of `deprecate`, `reactivate`, `unsupersede`, each a route of its own. */
+    /** `reactivate` or `unsupersede`, each a route of its own. */
     suspend fun artifactOp(id: String, op: String): Answer = decide("/api/v1/artifacts/$id/$op", "{}")
 
-    /** Gone from both stores. The answer comes back as it came, like every other decision. */
+    /** Into Trash. The answer comes back as it came, like every other decision. */
     suspend fun artifactDelete(id: String): Answer =
         send(Request.Builder().url(url("/api/v1/artifacts/$id")).delete().build())
 

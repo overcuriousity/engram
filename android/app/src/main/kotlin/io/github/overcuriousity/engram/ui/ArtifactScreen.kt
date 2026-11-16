@@ -87,8 +87,8 @@ fun ArtifactScreen(
     val dismissed = remember { mutableStateListOf<String>() }
     // What was decided here, before the server has been told. The read above
     // will not show it until the row is delivered and the screen is opened
-    // again, and a person who pressed Hide must not be shown an artifact that
-    // still claims to be in results.
+    // again, and a person who pressed Delete must not be shown an artifact
+    // that still claims to be in results.
     var decided by remember { mutableStateOf<Decision?>(null) }
     fun decide(d: Decision, write: suspend () -> String) {
         scope.launch {
@@ -122,7 +122,6 @@ fun ArtifactScreen(
             Decisions(
                 chunk = c,
                 decided = decided,
-                onHide = { decide(Decision(ArtifactAnswer.Hide)) { engram.outbox.enqueueArtifactOp(c.id, ArtifactOp.deprecate) } },
                 onReactivate = {
                     // The server's own unsupersede for a superseded one; a
                     // deprecated one has no winner and reactivates.
@@ -298,26 +297,22 @@ fun ArtifactScreen(
 
 // ── The decisions ────────────────────────────────────────────────────────
 
-/** An answer this screen can give about an artifact. Each is a route; delete is the one with no undo. */
-enum class ArtifactAnswer { Hide, Reactivate, Delete }
+/** An answer this screen can give about an artifact. Each is a route. */
+enum class ArtifactAnswer { Reactivate, Delete }
 
 /** One made here, and the outbox row it became — the handle Undo takes it back by while it is still queued. */
 data class Decision(val answer: ArtifactAnswer, val row: String? = null)
 
 /**
  * Which answers an artifact admits, from what the server said about it and
- * nothing else — the rule `_artifact_detail.html` follows. Hide only applies
- * to one that is in results; the way back is offered to one that is not;
- * delete is offered whatever the status, because "get rid of this" is a
- * decision that does not depend on whether it is currently hidden.
- *
- * There was a *Still accurate* beside hide, which reset the artifact's age.
- * It went when a good answer began confirming the notes it was drawn from:
- * the same reset, made by the verdict a person was already giving.
+ * nothing else — the rule `_artifact_detail.html` follows. Delete, into
+ * Trash, is the one way out of results by hand and is offered whatever the
+ * status; hiding is what the base does, and the way back from that is
+ * offered to an artifact it hid.
  */
 fun answersFor(status: String, supersededBy: String?): List<ArtifactAnswer> = when {
     supersededBy != null || status == "deprecated" -> listOf(ArtifactAnswer.Reactivate, ArtifactAnswer.Delete)
-    else -> listOf(ArtifactAnswer.Hide, ArtifactAnswer.Delete)
+    else -> listOf(ArtifactAnswer.Delete)
 }
 
 /**
@@ -328,7 +323,6 @@ fun answersFor(status: String, supersededBy: String?): List<ArtifactAnswer> = wh
 fun Decisions(
     chunk: Chunk,
     decided: Decision?,
-    onHide: () -> Unit,
     onReactivate: () -> Unit,
     onDelete: () -> Unit,
     onUndo: (String) -> Unit,
@@ -336,7 +330,6 @@ fun Decisions(
 ) {
     if (decided != null) {
         val words = when (decided.answer) {
-            ArtifactAnswer.Hide -> "Hidden from results · the artifact is kept"
             ArtifactAnswer.Reactivate -> "Back in results"
             ArtifactAnswer.Delete -> "Deleted · in Trash for 30 days"
         }
@@ -355,7 +348,6 @@ fun Decisions(
     }
     val answers = answersFor(chunk.status, chunk.supersededBy)
     Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-        if (ArtifactAnswer.Hide in answers) TextButton(onClick = onHide) { Text("Hide from results") }
         if (ArtifactAnswer.Reactivate in answers) TextButton(onClick = onReactivate) { Text(if (chunk.supersededBy != null) "Put it back" else "Reactivate") }
         Spacer(Modifier.weight(1f))
         TextButton(onClick = onDelete, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Delete") }

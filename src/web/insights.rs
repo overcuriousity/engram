@@ -438,9 +438,9 @@ pub(crate) async fn set_aside_rows(tenant: &Tenant) -> Result<(Vec<SetAsideRow>,
             beside: g.sources,
             caveat: None,
             actions: vec![SetAsideAction::new(
-                format!("/ui/ops/artifacts/{}/deprecate", g.id),
-                "Hide",
-                "Take it out of results and keep it",
+                format!("/ui/artifacts/{}/delete", g.id),
+                "Delete",
+                "Move it to Trash",
             )],
         });
     }
