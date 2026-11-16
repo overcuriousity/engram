@@ -1499,7 +1499,7 @@ mod tests {
             html.contains("agreement: hit rate 1.00 · selectivity 0.50 over 1 judged search"),
             "{html}"
         );
-        assert!(html.contains("model labels are shown only"), "{html}");
+        assert!(html.contains("model labels count toward sweeps"), "{html}");
         assert!(
             !html.contains("bears held up"),
             "nothing ruled on yet: {html}"

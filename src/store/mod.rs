@@ -104,7 +104,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 35] = [
+        const ADDITIVE: [(&str, &str, &str); 36] = [
             (
                 "artifacts",
                 "trashed_at",
