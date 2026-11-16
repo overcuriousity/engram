@@ -963,7 +963,7 @@ pub(crate) struct EvolveView {
     rules: Option<String>,
     /// One per line the judge is held to in this era, with when and why it last moved.
     lines: Vec<String>,
-    /// What would move Decide's `split_at` and `bears_min`, which nothing moves.
+    /// What Decide's verdicts say beside its lines; `split_at` is the one nothing moves.
     shares: Vec<String>,
 }
 
@@ -1009,12 +1009,23 @@ async fn judgement_lines(core: &crate::core::Core) -> Result<(Vec<String>, Vec<S
         core.settled_at().await,
         since(m)
     ));
+    let id = crate::core::decide::BEARS_ID;
+    let m = core
+        .store
+        .last_threshold_move(id, &crate::core::decide::settled_era(model))
+        .await?;
+    lines.push(format!(
+        "{id} · bears {:.2} · {}",
+        core.bears_at().await,
+        since(m)
+    ));
     let d = core.store.decide_shares(model).await?;
     let share = |name: &str, (n, hit): (usize, usize)| format!("{name}: {hit} of {n}");
     let shares = vec![
         share("split and right", d.split),
         share("held and \"nothing here\"", d.held),
         share("not held and wrong", d.not_held),
+        share("weak and right", d.weak),
     ];
     Ok((lines, shares))
 }
@@ -1824,7 +1835,7 @@ mod tests {
 
         let body = insights(core).await;
         let today = chrono::Utc::now().format("%Y-%m-%d");
-        assert!(body.contains("judgement lines (4)"), "{body}");
+        assert!(body.contains("judgement lines (5)"), "{body}");
         assert!(
             body.contains(&format!(
                 "pair_relation · act 0.92 · ask 0.60 · moved {today}: {reason}"
@@ -1843,7 +1854,12 @@ mod tests {
             body.contains("decide_settled · settled 0.80 · as configured"),
             "{body}"
         );
+        assert!(
+            body.contains("decide_bears · bears 0.50 · as configured"),
+            "{body}"
+        );
         assert!(!body.contains("elsewhere"), "{body}");
+        assert!(body.contains("weak and right: 0 of 0"), "{body}");
         assert!(body.contains("split and right: 1 of 2"), "{body}");
         assert!(
             body.contains("held and &#34;nothing here&#34;: 1 of 3"),

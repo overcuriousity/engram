@@ -6,6 +6,7 @@ use crate::error::Result;
 use crate::eval::lived::{holds_up, lived, settled};
 use crate::eval::sweep;
 use crate::store::decision_log::{ActRecord, AskRecord};
+use crate::store::decisions::BearsEvidence;
 use crate::store::generations::{Generation, GenerationParams, NewGeneration};
 
 /// A bound on work, not only the nearest rung: a tie keeps the current value, so a gain two rungs
@@ -738,6 +739,8 @@ const ACT_BOUNDS: (f64, f64) = (0.80, 0.99);
 const ASK_FLOOR: f64 = 0.50;
 /// Where Decide's `settled_at` may move to.
 const SETTLED_BOUNDS: (f64, f64) = (0.70, 0.95);
+/// Where Decide's bearing line may move to.
+pub const BEARS_BOUNDS: (f64, f64) = (0.20, 0.80);
 
 /// Lines are kept to two places, so a step lands on 0.92 and not on 0.9200000000000002.
 fn two_places(x: f64) -> f64 {
@@ -763,6 +766,26 @@ pub fn next_act_at(
         Some(two_places(current + STEP).min(hi))
     } else if share < undo_target / 2.0 && r.asks_open > 0 && current > lo + 1e-9 {
         Some(two_places(current - STEP).max(lo))
+    } else {
+        None
+    }
+}
+
+/// A step up when decisions that weighed notes which bore nothing exceed `target` of the judged
+/// and outnumber the other kind; a step down when weak decisions that held an answer do. Never
+/// past `BEARS_BOUNDS`.
+pub fn next_bears_at(current: f64, e: BearsEvidence, tune_min: usize, target: f64) -> Option<f64> {
+    if e.n() < tune_min || e.n() == 0 {
+        return None;
+    }
+    let n = e.n() as f64;
+    if e.too_low as f64 / n > target && e.too_low > e.too_high && current < BEARS_BOUNDS.1 - 1e-9 {
+        Some(two_places(current + STEP).min(BEARS_BOUNDS.1))
+    } else if e.too_high as f64 / n > target
+        && e.too_high > e.too_low
+        && current > BEARS_BOUNDS.0 + 1e-9
+    {
+        Some(two_places(current - STEP).max(BEARS_BOUNDS.0))
     } else {
         None
     }
@@ -838,7 +861,8 @@ fn move_reason(
 }
 
 /// Moves each line one step at most, for every question an applier carries out and for Decide's
-/// `settled_at`; nothing while the base may not act on its own. Returns the moves made.
+/// `settled_at` and `bears_min`; nothing while the base may not act on its own. Returns the
+/// moves made.
 pub async fn tune_questions(core: &Core) -> Result<usize> {
     use crate::core::judging::band::{Thresholds, era};
     if !core.evolve.autonomous.acts_on_corpus() {
@@ -880,7 +904,7 @@ pub async fn tune_questions(core: &Core) -> Result<usize> {
     }
 
     // Decide's line: a settled verdict judged wrong is its undo, one judged right is kept; held
-    // decisions that leaned are what a lower line would settle. `split_at` and `bears_min` stay.
+    // decisions that leaned are what a lower line would settle. `split_at` stays.
     let era = crate::core::decide::settled_era(model);
     let (judged, wrong) = core.store.settled_record(model).await?;
     let leaning = core.store.leaning_record(model).await?;
@@ -901,6 +925,31 @@ pub async fn tune_questions(core: &Core) -> Result<usize> {
             .move_thresholds(crate::core::decide::SETTLED_ID, &era, to, &reason)
             .await?;
         tracing::info!(%era, settled_at = n, %reason, "Decide's settled line moved");
+        moved += 1;
+    }
+
+    // The bearing line: weak decisions judged right say it is too high, decisions judged "nothing
+    // here" that weighed notes say it is too low.
+    let e = core.store.bears_verdicts(model).await?;
+    let current = core.bears_at().await;
+    if let Some(n) = next_bears_at(current, e, min, target) {
+        let reason = if n > current {
+            format!(
+                "{} of {} rested on notes that bore nothing",
+                e.too_low,
+                e.n()
+            )
+        } else {
+            format!("{} of {} weak held a note that answered", e.too_high, e.n())
+        };
+        let to = Thresholds {
+            act_at: n,
+            ask_at: n,
+        };
+        core.store
+            .move_thresholds(crate::core::decide::BEARS_ID, &era, to, &reason)
+            .await?;
+        tracing::info!(%era, bears_at = n, %reason, "Decide's bearing line moved");
         moved += 1;
     }
     Ok(moved)
@@ -2249,6 +2298,24 @@ mod tests {
             run.judged_count, 10,
             "the journal says what the base was judged on"
         );
+    }
+
+    #[test]
+    fn the_bearing_line_moves_on_what_weak_and_held_decisions_were_judged() {
+        let e = |too_low, too_high, fine| BearsEvidence {
+            too_low,
+            too_high,
+            fine,
+        };
+        for (current, ev, want) in [
+            (0.50, e(0, 4, 27), Some(0.48)),
+            (0.50, e(4, 0, 27), Some(0.52)),
+            (0.50, e(4, 4, 23), None),
+            (0.50, e(0, 4, 20), None),
+            (0.20, e(0, 31, 0), None),
+        ] {
+            assert_eq!(next_bears_at(current, ev, 30, 0.05), want, "{ev:?}");
+        }
     }
 
     #[test]
