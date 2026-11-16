@@ -630,7 +630,9 @@ CREATE TABLE IF NOT EXISTS decide_events (
   correct      TEXT,
   dismissed_at INTEGER,
   -- The wording of `bears` it was read under; NULL before it was kept, when there was only 1.
-  bears_version INTEGER
+  bears_version INTEGER,
+  -- 1: nothing reached the line and the closest were weighed.
+  weak         INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_decides_created ON decide_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_decides_open ON decide_events(not_held, verdict, dismissed_at);

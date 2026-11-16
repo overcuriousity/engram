@@ -795,6 +795,7 @@ pub(crate) mod tests {
                 prior: "{}".into(),
                 standing: "{}".into(),
                 not_held: false,
+                weak: false,
                 model: "as-reported".into(),
                 decider: M.into(),
                 read: reads.len() + 1,

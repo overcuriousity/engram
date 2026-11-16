@@ -2034,6 +2034,7 @@ mod tests {
                 prior: "{}".into(),
                 standing: r#"{"verdict":"not_held"}"#.into(),
                 not_held: true,
+                weak: false,
                 model: "clef".into(),
                 decider: "clef".into(),
                 read: 0,

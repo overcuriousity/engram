@@ -465,6 +465,7 @@ fn recorded(s: &StoredDecision) -> Result<Decision> {
         event_id: Some(s.id.clone()),
         state: None,
         reads: vec![],
+        weak: s.weak,
     })
 }
 
@@ -588,6 +589,7 @@ mod tests {
             event_id: Some("01EV".into()),
             state: None,
             reads: vec![],
+            weak: false,
         }
     }
 

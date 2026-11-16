@@ -293,6 +293,12 @@ impl Store {
                 "opened_at",
                 "ALTER TABLE decisions ADD COLUMN opened_at INTEGER",
             ),
+            // 0: a row from before had a bearing passage or none was weighed.
+            (
+                "decide_events",
+                "weak",
+                "ALTER TABLE decide_events ADD COLUMN weak INTEGER NOT NULL DEFAULT 0",
+            ),
         ];
         apply_additive(&self.pool, &ADDITIVE, &mut missing).await?;
 

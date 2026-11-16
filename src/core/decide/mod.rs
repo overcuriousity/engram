@@ -93,6 +93,8 @@ pub struct Decision {
     pub state: Option<String>,
     /// Every passage read, by rank; stored, not in the JSON.
     pub reads: Vec<PassageRead>,
+    /// Nothing reached the line, so the closest were weighed: loose matches.
+    pub weak: bool,
 }
 
 impl Decision {
@@ -396,8 +398,14 @@ impl Core {
             }
             reads.sort_by_key(|r| r.rank);
 
-            let mut bearing: Vec<&PassageRead> = reads.iter().filter(|r| r.bearing).collect();
+            // None over the line: the closest are weighed anyway, and the decision says so.
+            let weak = !reads.iter().any(|r| r.bearing);
+            let mut bearing: Vec<&PassageRead> =
+                reads.iter().filter(|r| r.bearing || weak).collect();
             bearing.sort_by(|a, b| b.bears.total_cmp(&a.bears).then(a.rank.cmp(&b.rank)));
+            if weak {
+                bearing.truncate(cfg.weak_take);
+            }
 
             let mut decision = Decision {
                 question: asked.q.clone(),
@@ -412,7 +420,9 @@ impl Core {
                 event_id: None,
                 state: None,
                 reads: Vec::new(),
+                weak: false,
             };
+            // Only when nothing was read at all.
             if bearing.is_empty() {
                 decision.reads = reads;
                 core.record_decision(&req, &asked, &origin, query_vec, &mut decision).await;
@@ -466,10 +476,11 @@ impl Core {
                         .map(|e| (e.bears, &e.read[i].1))
                         .collect();
                     let s = standing::standing(q, &v.answer, v.swapped_agree, &each, &cfg);
-                    (k.clone(), s)
+                    (k.clone(), standing::capped(s, weak))
                 })
                 .collect();
             decision.answers = Some(answers);
+            decision.weak = weak;
             decision.dropped = evidence.len() - packed;
             decision.evidence = evidence;
             decision.model = joint.answers.model;
@@ -509,7 +520,8 @@ impl Core {
                 }
             })
             .collect::<Vec<_>>();
-        let cited: Vec<String> = if held {
+        // Notes under the line are not positive evidence.
+        let cited: Vec<String> = if held && !d.weak {
             evidence
                 .iter()
                 .filter(|e| e.joint)
@@ -533,6 +545,7 @@ impl Core {
             prior: wire::prior_text(d),
             standing: wire::standing_text(d),
             not_held: !held,
+            weak: d.weak,
             model: d.model.clone(),
             decider: self.decider.model().to_string(),
             read: d.read,
@@ -749,22 +762,63 @@ pub(crate) mod tests {
         assert_eq!(d.reads.len(), 3);
     }
 
+    async fn cited_observations(core: &Core) -> i64 {
+        sqlx::query_scalar!("SELECT count(*) FROM observations WHERE source = 'cited'")
+            .fetch_one(&core.store.pool)
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
-    async fn nothing_bearing_means_no_verdict_whatever_the_model_would_say() {
-        let mut core = three_base().await;
-        let dec = deciding(&mut core, |_, qs| {
-            Ok(answers(qs, |q| Answer::Noul {
-                yes: if q.key == "bears" { 0.02 } else { 0.99 },
-            }))
-        });
-        let d = core.decide(&req("Keep bge-m3?"), Door::Api).await.unwrap();
-        assert!(d.not_held());
-        assert_eq!(d.answers, None);
-        assert_eq!(d.standing, vec![("verdict".to_string(), Standing::NotHeld)]);
-        assert!(d.evidence.is_empty());
-        assert_eq!(d.read, 3);
-        assert_eq!(d.prior.len(), 1);
-        assert!(dec.requests().iter().all(|(s, _)| !s.contains("Excerpt 1")));
+    async fn nothing_bearing_weighs_the_closest_and_says_so() {
+        let mut core = learning().await;
+        // A live generation, so a cited observation would be written if one were made.
+        core.store
+            .record_generation(&crate::store::generations::NewGeneration {
+                params: Default::default(),
+                embed_recipe: "recipe-a".into(),
+                chat_model: "qwen".into(),
+                parent_id: None,
+            })
+            .await
+            .unwrap();
+        deciding(&mut core, none_bear());
+        let d = core.decide(&req("Keep it?"), Door::Ui).await.unwrap();
+        assert!(d.weak && !d.not_held());
+        assert_eq!(d.evidence.len(), 3);
+        assert!(d.evidence.iter().all(|e| e.joint));
+        assert_eq!(d.standing[0].1, Standing::Leaning); // 0.99 would be settled
+        let stored = core
+            .store
+            .decision(d.event_id.as_deref().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.weak && !stored.not_held);
+        assert!(stored.evidence.iter().all(|e| !e.bearing && e.n.is_some()));
+        assert_eq!(cited_observations(&core).await, 0);
+    }
+
+    #[tokio::test]
+    async fn one_passage_that_does_not_bear_is_weighed_alone() {
+        let mut core = base(&[("Only", "one note")]).await;
+        deciding(&mut core, none_bear());
+        // A capture is a source and its note: a limit of 1 reads one passage.
+        let r = DecideRequest {
+            limit: Some(1),
+            ..req("Keep it?")
+        };
+        let d = core.decide(&r, Door::Ui).await.unwrap();
+        assert!(d.weak);
+        assert_eq!((d.read, d.evidence.len()), (1, 1));
+    }
+
+    #[test]
+    fn a_weak_standing_is_never_settled() {
+        use standing::capped;
+        assert_eq!(capped(Standing::Settled, true), Standing::Leaning);
+        assert_eq!(capped(Standing::Split, true), Standing::Split);
+        assert_eq!(capped(Standing::Settled, false), Standing::Settled);
     }
 
     #[tokio::test]
@@ -1452,13 +1506,13 @@ pub(crate) mod tests {
             .await
             .unwrap();
         core.background.wait_idle().await;
-        assert!(d.not_held() && d.event_id.is_some());
+        assert!(d.weak && d.event_id.is_some());
         let ids: Vec<String> = d.reads.iter().map(|r| r.artifact_id.clone()).collect();
         let act = core.store.activation_of(&ids).await.unwrap();
         let first = act.get(&ids[0]).map(|(a, _, _)| *a);
         assert!(
             ids.iter().all(|i| act.get(i).map(|(a, _, _)| *a) == first),
-            "a decision the base does not hold cites nothing"
+            "a weak decision cites nothing"
         );
     }
 
@@ -1500,7 +1554,9 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn a_not_held_decision_is_recorded_and_is_an_open_gap() {
-        let mut core = learning().await;
+        // Nothing to read: a base with notes would weigh the closest.
+        let mut core = test_core().await;
+        core.learn.enabled = true;
         deciding(&mut core, none_bear());
         let d = core
             .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
@@ -1508,13 +1564,7 @@ pub(crate) mod tests {
             .unwrap();
         let id = d.event_id.clone().expect("recorded");
         let s = core.store.decision(&id).await.unwrap().unwrap();
-        assert!(s.not_held && s.answers.is_none());
-        assert_eq!(s.evidence.len(), 3);
-        assert!(
-            s.evidence
-                .iter()
-                .all(|e| !e.bearing && e.n.is_none() && !e.joint)
-        );
+        assert!(s.not_held && s.answers.is_none() && s.evidence.is_empty());
         let gaps = decide_gaps(&core).await;
         assert_eq!(gaps.len(), 1);
         assert_eq!(
@@ -1581,7 +1631,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_not_held_decision_judged_wrong_is_no_gap_and_undoing_reopens_it() {
         use crate::store::asks::AskVerdict;
-        let mut core = learning().await;
+        let mut core = test_core().await;
+        core.learn.enabled = true;
         deciding(&mut core, none_bear());
         let d = core
             .decide(&req("Keep bge-m3?"), Door::Ui.by("me"))
