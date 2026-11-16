@@ -429,8 +429,8 @@ impl TrailIndex {
 }
 pub const OWN: f32 = 0.999;
 
-/// New order of `n` rows: row `pos` scores `1/(pos+2)`, plus `tier * weight / (tpos+2)` for a
-/// row at place `tpos` among the matched. Stable. Returns the permutation.
+/// New order of `n` rows: row `pos` scores `1/(pos+2)`; a matched row scores the larger of that
+/// and `tier * weight / (tpos+2)`. Stable: on a tie the row ahead stays ahead. Returns the permutation.
 pub fn reorder(n: usize, matched: &[(usize /*pos*/, usize /*tpos*/, Tier)], weight: f32) -> Vec<usize>;
 
 impl Core {
@@ -448,10 +448,10 @@ impl Core {
 - [ ] **Step 1: Write the failing tests.** Pure, in `src/core/trails.rs`:
 
 ```rust
-#[test] fn a_person_trail_lands_near_third_and_a_model_trail_lower() {
+#[test] fn a_person_trail_lands_fourth_and_a_model_trail_eighth() {
     // 10 rows; the matched row is last (pos 9), the only match (tpos 0), weight 0.5
-    assert_eq!(place_of(9, &reorder(10, &[(9, 0, Tier::Person)], 0.5)), 2);
-    assert_eq!(place_of(9, &reorder(10, &[(9, 0, Tier::Model)], 0.5)), 6);
+    assert_eq!(place_of(9, &reorder(10, &[(9, 0, Tier::Person)], 0.5)), 3);
+    assert_eq!(place_of(9, &reorder(10, &[(9, 0, Tier::Model)], 0.5)), 7);
 }
 #[test] fn a_first_row_without_a_trail_is_never_passed() {
     assert_eq!(reorder(10, &[(9, 0, Tier::Person)], 1.0)[0], 0);

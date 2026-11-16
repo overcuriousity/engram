@@ -355,11 +355,14 @@ there are no live trails.
    gave them. Without this the reranker would drop exactly the notes step 5 exists
    to lift, at `Door::Ask` most of all.
 5. **Reorder.** After the reranker (`:1472`) and before priming (`:1504`), over
-   positions from 0: each row's score is `1 / (pos + 2)`, plus
-   `tier * trail_weight / (tpos + 2)` where `tpos` is its place among the matched
-   notes by cosine and `tier` is 1 for a person trail, 0.5 for a model trail. Rows are sorted by that; ties keep their order. At the shipped weight the
-   best-matched note lands near third place by a person trail and near seventh by a
-   model trail, and cannot pass a first row that has no trail of its own. After the reranker, because a reranker scores query against
+   positions from 0: a row's score is `1 / (pos + 2)`. A matched row's score is the
+   larger of that and `tier * trail_weight / (tpos + 2)`, where `tpos` is its place
+   among the matched notes by cosine and `tier` is 1 for a person trail, 0.5 for a
+   model trail. Rows are sorted by score; on a tie the row that was ahead stays
+   ahead. So a trail is worth a place in the list: at the shipped weight the
+   best-matched note lands fourth by a person trail and eighth by a model trail, at
+   the highest weight second, and never first unless it already was. A matched row
+   never moves down. After the reranker, because a reranker scores query against
    text and would sink exactly the notes a trail exists to surface.
 6. **Explain and record.** `HitExplanation` (`src/core/explain.rs`) gains
    `trail: Option<{ query, similarity }>`, shown in the rail's "why" as
@@ -547,7 +550,7 @@ A question finds nothing clear. Decide answers from the closest notes and says s
 the decision is an open gap. In the next quiet quarter hour the deep look asks about
 twenty-four notes further down and finds one that answers. The gap closes, and the
 note keeps the question as a trail. A later query that reads like that question
-finds the note in third place, with "found before for «…»" beside it. If the person
+finds the note in eighth place, with "found before for «…»" beside it. If the person
 confirms it there, the note has a trail of theirs; if the labeller keeps saying it
 does not help, the trail is retired.
 
