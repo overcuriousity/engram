@@ -164,6 +164,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &sitting,
+            &Default::default(),
             false,
         );
         assert!(p.sitting_prime, "the file's value is the starting rung");
@@ -196,6 +197,7 @@ mod tests {
             &Default::default(),
             &consolidate,
             &Default::default(),
+            &Default::default(),
             false,
         );
         assert_eq!(p.review_min, 0.84);
@@ -221,6 +223,7 @@ mod tests {
                 &Default::default(),
                 &Default::default(),
                 &Default::default(),
+                &Default::default(),
                 false
             )
             .per_source_cap,
@@ -229,6 +232,7 @@ mod tests {
         assert_eq!(
             RankingParams::from_config(
                 &vector_config(3),
+                &Default::default(),
                 &Default::default(),
                 &Default::default(),
                 &Default::default(),

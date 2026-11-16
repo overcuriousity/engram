@@ -10,7 +10,7 @@ use crate::store::generations::{Generation, GenerationParams, NewGeneration};
 
 /// A bound on work, not only the nearest rung: a tie keeps the current value, so a gain two rungs
 /// out behind a tying rung would never be reached.
-pub(crate) const BUDGET: usize = 20;
+pub(crate) const BUDGET: usize = 22;
 
 /// Flat counts, so `jobs::did_work` reads them.
 #[derive(Debug, Default, Clone, serde::Serialize)]
@@ -717,6 +717,7 @@ async fn adopt(
         recency_weight = winner.recency_weight,
         per_source_cap = ?winner.per_source_cap,
         prime_lift = winner.prime_lift,
+        trail_weight = winner.trail_weight,
         rerank = winner.rerank,
         predicted,
         pairs,

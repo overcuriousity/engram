@@ -1000,6 +1000,7 @@ mod tests {
             candidate_multiplier: 5,
             recency_half_life_days: 90,
             prime_lift: 2,
+            trail_weight: 1.0,
             spread_max: 5,
             rerank: false,
             review_min: 0.84,
