@@ -415,6 +415,8 @@ CREATE TABLE IF NOT EXISTS search_candidates (
   -- afterwards: the observation is charged to the rank the ranking actually
   -- chose, not to the row the exploration lent it. See `Core::explores`.
   explored_from INTEGER,
+  -- The trail that lifted or brought this candidate, if one did.
+  trail_id    TEXT,
   PRIMARY KEY (event_id, rank)
 );
 -- `dealable!` asks two things of this table for every unjudged event, and the
@@ -1214,4 +1216,35 @@ CREATE TABLE IF NOT EXISTS artifact_versions (
   -- The corpus_actions row that retired this version.
   action_id   TEXT NOT NULL,
   PRIMARY KEY (artifact_id, n)
+);
+
+-- One query a note was confirmed to answer, kept with its vector so search can find the
+-- note through similar queries. The tier is read off `trail_sources`, never stored.
+CREATE TABLE IF NOT EXISTS trails (
+  id TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+  query TEXT NOT NULL,
+  query_vec BLOB NOT NULL,
+  vec_dim INTEGER NOT NULL,
+  embed_model TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  -- Times a search it lifted a note in was then confirmed, and contradicted.
+  matched INTEGER NOT NULL DEFAULT 0,
+  missed INTEGER NOT NULL DEFAULT 0,
+  -- The last confirmation, else `created_at`; what ageing reads.
+  used_at INTEGER NOT NULL,
+  retired_at INTEGER
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trails_live
+  ON trails(artifact_id, query) WHERE retired_at IS NULL;
+
+-- Every pairing that stands behind a trail. A trail with none is retired.
+CREATE TABLE IF NOT EXISTS trail_sources (
+  trail_id TEXT NOT NULL REFERENCES trails(id) ON DELETE CASCADE,
+  -- 'verdict' | 'ask' | 'decide' | 'label' | 'deep'
+  source TEXT NOT NULL,
+  -- The event the pairing came from.
+  source_id TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (trail_id, source, source_id)
 );

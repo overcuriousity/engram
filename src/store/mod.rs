@@ -29,6 +29,7 @@ pub mod segments;
 pub mod shingle;
 pub mod sleep_runs;
 pub mod sweeps;
+pub mod trails;
 pub mod versions;
 
 use crate::error::Result;
@@ -102,7 +103,7 @@ impl Store {
         let mut missing = missing_columns(&self.pool, SCHEMA).await?;
         // Columns safe to add in place: their default (or NULL) is true of every existing row.
         // Named one by one; any other missing column still refuses.
-        const ADDITIVE: [(&str, &str, &str); 34] = [
+        const ADDITIVE: [(&str, &str, &str); 35] = [
             (
                 "artifacts",
                 "trashed_at",
@@ -194,6 +195,12 @@ impl Store {
                 "search_candidates",
                 "explored_from",
                 "ALTER TABLE search_candidates ADD COLUMN explored_from INTEGER",
+            ),
+            // NULL: no trail lifted a row from before.
+            (
+                "search_candidates",
+                "trail_id",
+                "ALTER TABLE search_candidates ADD COLUMN trail_id TEXT",
             ),
             (
                 "search_events",
