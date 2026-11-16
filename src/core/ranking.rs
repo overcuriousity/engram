@@ -9,6 +9,8 @@ pub const MULTIPLIERS: [usize; 5] = [1, 2, 3, 5, 8];
 pub const HALF_LIVES: [u32; 5] = [30, 90, 180, 365, 730];
 /// Zero is off; the shipped value sits one above it so the pass can walk either way.
 pub const PRIME_LIFTS: [usize; 4] = [0, 1, 2, 4];
+/// Zero is off; the shipped value sits mid-ladder so the pass can walk either way.
+pub const TRAIL_WEIGHTS: [f32; 3] = [0.0, 0.5, 1.0];
 /// A switch, kept ladder-shaped so the chooser treats it like every other axis.
 pub const SITTING_PRIMES: [bool; 2] = [false, true];
 /// The rungs for `spread_max`: how many linked artifacts hang under the list.
@@ -27,6 +29,8 @@ pub struct RankingParams {
     pub recency_half_life_days: u32,
     /// How many places priming may lift a hit. Zero is off.
     pub prime_lift: usize,
+    /// How much a matching trail counts in the order. Zero is off.
+    pub trail_weight: f32,
     /// Shares `prime_lift`'s budget, so at a lift of zero it changes nothing.
     pub sitting_prime: bool,
     /// How many associated artifacts are appended under the ranked list.
@@ -46,6 +50,7 @@ impl Default for RankingParams {
             candidate_multiplier: crate::config::default_candidate_multiplier(),
             recency_half_life_days: crate::config::default_recency_half_life_days(),
             prime_lift: crate::config::default_prime_lift(),
+            trail_weight: crate::config::default_trail_weight(),
             sitting_prime: crate::config::default_sitting_prime(),
             spread_max: crate::config::default_spread_max(),
             rerank: crate::config::default_rerank_knob(),
@@ -61,6 +66,7 @@ impl RankingParams {
         associate: &crate::config::AssociateConfig,
         consolidate: &crate::config::ConsolidateConfig,
         sitting: &crate::config::SittingConfig,
+        trails: &crate::config::TrailsConfig,
         reranker_configured: bool,
     ) -> Self {
         Self {
@@ -73,6 +79,7 @@ impl RankingParams {
             candidate_multiplier: cfg.candidate_multiplier.max(1),
             recency_half_life_days: cfg.recency_half_life_days.max(1),
             prime_lift: associate.prime_lift,
+            trail_weight: trails.weight,
             sitting_prime: sitting.prime,
             spread_max: associate.spread_max,
             rerank: reranker_configured,
@@ -110,6 +117,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             false,
         );
         assert_eq!(p.candidate_multiplier, 5);
@@ -128,6 +136,7 @@ mod tests {
             &associate,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             true,
         );
         assert_eq!(p.prime_lift, 2);
@@ -136,6 +145,7 @@ mod tests {
         let p = RankingParams::from_config(
             &vector_config(3),
             &associate,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             false,

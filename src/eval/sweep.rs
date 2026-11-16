@@ -21,7 +21,7 @@ pub fn candidates(
     tried: &[crate::store::generations::GenerationParams],
     budget: usize,
 ) -> Vec<RankingParams> {
-    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS, PRIME_LIFTS, SITTING_PRIMES};
+    use crate::core::ranking::{HALF_LIVES, MULTIPLIERS, PRIME_LIFTS, SITTING_PRIMES, TRAIL_WEIGHTS};
     let recency = outward(
         &RECENCY,
         |v| *v < current.recency_weight,
@@ -48,6 +48,11 @@ pub fn candidates(
         |v| *v < current.prime_lift,
         |v| *v == current.prime_lift,
     );
+    let trails = outward(
+        &TRAIL_WEIGHTS,
+        |v| *v < current.trail_weight,
+        |v| *v == current.trail_weight,
+    );
     // The sitting shares the lift's budget, so turning it on under a zero lift is a sure tie.
     // Turning it off is offered whatever the lift, so an adopted sitting can always be undone.
     let sittings: Vec<bool> = match current.sitting_prime || current.prime_lift > 0 {
@@ -66,6 +71,7 @@ pub fn candidates(
         multipliers.len(),
         half_lives.len(),
         lifts.len(),
+        trails.len(),
         sittings.len(),
     ]
     .into_iter()
@@ -99,6 +105,12 @@ pub fn candidates(
         if let Some(prime_lift) = lifts.get(i) {
             out.push(RankingParams {
                 prime_lift: *prime_lift,
+                ..current
+            });
+        }
+        if let Some(trail_weight) = trails.get(i) {
+            out.push(RankingParams {
+                trail_weight: *trail_weight,
                 ..current
             });
         }
@@ -178,6 +190,7 @@ fn moved(cand: RankingParams, current: RankingParams) -> usize {
         + usize::from(cand.candidate_multiplier != current.candidate_multiplier)
         + usize::from(cand.recency_half_life_days != current.recency_half_life_days)
         + usize::from(cand.prime_lift != current.prime_lift)
+        + usize::from(cand.trail_weight != current.trail_weight)
         + usize::from(cand.spread_max != current.spread_max)
         + usize::from(cand.rerank != current.rerank)
         + usize::from(cand.review_min != current.review_min)
@@ -1424,6 +1437,23 @@ mod tests {
     }
 
     #[test]
+    fn the_trail_weight_walks_its_ladder_one_knob_at_a_time() {
+        let current = RankingParams::default();
+        let out = candidates(current, &[], 20);
+        for w in [0.0, 1.0] {
+            let c: Vec<_> = out.iter().filter(|c| c.trail_weight == w).collect();
+            assert_eq!(c.len(), 1, "{out:?}");
+            assert_eq!(
+                *c[0],
+                RankingParams {
+                    trail_weight: w,
+                    ..current
+                }
+            );
+        }
+    }
+
+    #[test]
     fn every_candidate_moves_at_most_one_knob() {
         let current = RankingParams::default();
         let all = candidates(current, &[], 64);
@@ -1444,6 +1474,7 @@ mod tests {
                 + (crate::core::ranking::MULTIPLIERS.len() - 1)
                 + (crate::core::ranking::HALF_LIVES.len() - 1)
                 + (crate::core::ranking::PRIME_LIFTS.len() - 1)
+                + (crate::core::ranking::TRAIL_WEIGHTS.len() - 1)
                 + 1,
             "every rung on every ladder, once, and nothing off them"
         );

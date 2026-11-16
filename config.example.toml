@@ -338,6 +338,16 @@ month_cycle = 0.0
 # Let what this sitting touched lift a result; needs associate.prime_lift above 0.
 prime = true
 
+# What a note was found for. Used at [learn] mode = full.
+# [trails]
+# How much a matching trail counts in the order (0 turns trails off). On a ladder.
+# weight = 0.5
+# Similarity between a query and a trail's from which the trail matches.
+# match_at = 0.80
+# Live trails a note keeps, and a base keeps.
+# per_note = 8
+# max = 20000
+
 [time]
 # Due reminders inside this window show on the front page.
 horizon_hours = 48
