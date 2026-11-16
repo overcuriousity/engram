@@ -1863,9 +1863,14 @@ pub(crate) mod tests {
         deciding(&mut core, marked(0.81));
         judged_thirty(&mut core, 3).await;
 
-        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 1);
+        // The thirty held "nothing here" decisions that leaned also move the bearing line.
+        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 2);
         assert_eq!(core.settled_at().await, 0.82);
-        let m = &core.store.threshold_moves(10).await.unwrap()[0];
+        let moves = core.store.threshold_moves(10).await.unwrap();
+        let m = moves
+            .iter()
+            .find(|m| m.question_id == "decide_settled")
+            .unwrap();
         assert_eq!(
             (m.question_id.as_str(), m.era.as_str()),
             ("decide_settled", "rule-decider/v1")
@@ -1879,7 +1884,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn split_at_and_bears_min_are_never_moved() {
+    async fn split_at_is_never_moved() {
         let mut core = three_base().await;
         core.evolve.autonomous = crate::config::Autonomy::Full;
         deciding(&mut core, marked(0.81));
@@ -1888,16 +1893,13 @@ pub(crate) mod tests {
         crate::jobs::tune::tune_questions(&core).await.unwrap();
         let moves = core.store.threshold_moves(10).await.unwrap();
         assert!(
-            moves.iter().all(|m| m.question_id == "decide_settled"),
+            moves
+                .iter()
+                .all(|m| ["decide_settled", "decide_bears"].contains(&m.question_id.as_str())),
             "{:?}",
             moves.iter().map(|m| &m.question_id).collect::<Vec<_>>()
         );
-        // None undone and held decisions leaning: settled_at comes down a step, and only it.
-        assert_eq!((moves.len(), moves[0].act_at), (1, 0.78));
-        assert_eq!(
-            (core.decide_cfg.split_at, core.decide_cfg.bears_min),
-            (0.34, 0.5)
-        );
+        assert_eq!(core.decide_cfg.split_at, 0.34);
         let shares = core
             .store
             .decide_shares(core.decider.model())
@@ -1906,5 +1908,31 @@ pub(crate) mod tests {
         assert_eq!(shares.split, (30, 0));
         assert_eq!(shares.held, (90, 30));
         assert_eq!(shares.not_held, (30, 30));
+    }
+
+    #[tokio::test]
+    async fn the_bearing_line_comes_down_when_weak_decisions_were_judged_right() {
+        use crate::store::asks::AskVerdict::{Right, Wrong};
+        use crate::store::decisions::test_support::judged_weak;
+        let mut core = three_base().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        let decider = core.decider.model().to_string();
+        for i in 0..31 {
+            judged_weak(&core.store, &decider, "split", false, i < 4, Right).await;
+        }
+        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 1);
+        assert_eq!(core.bears_at().await, 0.48);
+        let m = &core.store.threshold_moves(10).await.unwrap()[0];
+        assert_eq!(m.question_id, "decide_bears");
+        assert_eq!(m.reason, "4 of 31 weak held a note that answered");
+
+        // Wrong verdicts say nothing about where the line stands.
+        let mut core = three_base().await;
+        core.evolve.autonomous = crate::config::Autonomy::Full;
+        for i in 0..31 {
+            let v = if i < 4 { Wrong } else { Right };
+            judged_weak(&core.store, &decider, "split", false, i < 4, v).await;
+        }
+        assert_eq!(crate::jobs::tune::tune_questions(&core).await.unwrap(), 0);
     }
 }

@@ -261,18 +261,67 @@ pub struct DecideShares {
     pub held: (usize, usize),
     /// Not held, and of those judged wrong.
     pub not_held: (usize, usize),
+    /// Weak, and of those judged right.
+    pub weak: (usize, usize),
+}
+
+/// What the verdicts say about Decide's bearing line since it last moved.
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
+pub struct BearsEvidence {
+    /// Not weak, judged "nothing here": the line let notes in that bore nothing.
+    pub too_low: usize,
+    /// Weak, judged right: a note that answered was left under the line.
+    pub too_high: usize,
+    /// Not weak and right, or weak and "nothing here": the line did its work.
+    pub fine: usize,
+}
+
+impl BearsEvidence {
+    pub fn n(&self) -> usize {
+        self.too_low + self.too_high + self.fine
+    }
+}
+
+/// One decision as the tuner and Insights read it.
+struct DecideRow {
+    held: bool,
+    weak: bool,
+    /// The first question's standing.
+    standing: Option<String>,
+    verdict: Option<AskVerdict>,
 }
 
 impl Store {
+    /// `model`'s decisions since the bearing line last moved, judged "right" or "nothing here"
+    /// (a `wrong` verdict does not say where the line was, nor does a decision nothing held).
+    pub async fn bears_verdicts(&self, model: &str) -> Result<BearsEvidence> {
+        let era = crate::core::decide::settled_era(model);
+        let since = self
+            .moved_at(crate::core::decide::BEARS_ID, &era, false)
+            .await?;
+        let mut e = BearsEvidence::default();
+        for r in self.decides_since(model, since).await? {
+            match (r.held, r.weak, r.verdict) {
+                (true, false, Some(AskVerdict::NothingHere)) => e.too_low += 1,
+                (true, true, Some(AskVerdict::Right)) => e.too_high += 1,
+                (true, false, Some(AskVerdict::Right))
+                | (true, true, Some(AskVerdict::NothingHere)) => e.fine += 1,
+                _ => {}
+            }
+        }
+        Ok(e)
+    }
+
     /// Held `settled` decisions of `model` made since Decide's line last moved, judged right or
     /// wrong: (judged, wrong).
     pub async fn settled_record(&self, model: &str) -> Result<(usize, usize)> {
         let rows = self.decides_since_move(model).await?;
+        // A weak decision stands at most "leaning", so it says nothing about the settled line.
         let settled = rows
             .iter()
-            .filter(|r| r.0 && r.1.as_deref() == Some("settled"));
+            .filter(|r| r.held && !r.weak && r.standing.as_deref() == Some("settled"));
         let judged: Vec<_> = settled
-            .filter_map(|r| r.2.filter(|v| *v != AskVerdict::NothingHere))
+            .filter_map(|r| r.verdict.filter(|v| *v != AskVerdict::NothingHere))
             .collect();
         let wrong = judged.iter().filter(|v| **v == AskVerdict::Wrong).count();
         Ok((judged.len(), wrong))
@@ -285,19 +334,28 @@ impl Store {
             .decides_since_move(model)
             .await?
             .iter()
-            .filter(|r| r.0 && r.1.as_deref() == Some("leaning"))
+            .filter(|r| r.held && !r.weak && r.standing.as_deref() == Some("leaning"))
             .count())
     }
 
     /// Every judged decision of `model` read under the wording of `bears` in force, for Insights.
     pub async fn decide_shares(&self, model: &str) -> Result<DecideShares> {
         let mut out = DecideShares::default();
-        for (held, standing, verdict) in self.decides_since(model, 0).await? {
+        for DecideRow {
+            held,
+            weak,
+            standing,
+            verdict,
+        } in self.decides_since(model, 0).await?
+        {
             let Some(v) = verdict else { continue };
             let count = |(n, hit): &mut (usize, usize), yes: bool| {
                 *n += 1;
                 *hit += usize::from(yes);
             };
+            if weak {
+                count(&mut out.weak, v == AskVerdict::Right);
+            }
             if held {
                 count(&mut out.held, v == AskVerdict::NothingHere);
                 if standing.as_deref() == Some("split") {
@@ -310,10 +368,7 @@ impl Store {
         Ok(out)
     }
 
-    async fn decides_since_move(
-        &self,
-        model: &str,
-    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+    async fn decides_since_move(&self, model: &str) -> Result<Vec<DecideRow>> {
         let era = crate::core::decide::settled_era(model);
         let since = self
             .moved_at(crate::core::decide::SETTLED_ID, &era, false)
@@ -321,15 +376,11 @@ impl Store {
         self.decides_since(model, since).await
     }
 
-    /// `model`'s decisions made after `since` in Decide's era, as (held, the first question's
-    /// standing, verdict): one read under another wording of `bears` is not comparable.
-    async fn decides_since(
-        &self,
-        model: &str,
-        since: i64,
-    ) -> Result<Vec<(bool, Option<String>, Option<AskVerdict>)>> {
+    /// `model`'s decisions made after `since` in Decide's era: one read under another wording of
+    /// `bears` is not comparable.
+    async fn decides_since(&self, model: &str, since: i64) -> Result<Vec<DecideRow>> {
         let rows = sqlx::query!(
-            r#"SELECT questions, standing, not_held AS "not_held!: i64", verdict FROM decide_events
+            r#"SELECT questions, standing, not_held AS "not_held!: i64", weak AS "weak!: i64", verdict FROM decide_events
                 WHERE decider = ? AND created_at > ? AND COALESCE(bears_version, 1) = ?"#,
             model,
             since,
@@ -351,11 +402,12 @@ impl Store {
                         .as_str()
                         .map(str::to_string)
                 });
-                (
-                    r.not_held == 0,
+                DecideRow {
+                    held: r.not_held == 0,
+                    weak: r.weak != 0,
                     standing,
-                    r.verdict.as_deref().and_then(AskVerdict::parse),
-                )
+                    verdict: r.verdict.as_deref().and_then(AskVerdict::parse),
+                }
             })
             .collect())
     }
@@ -375,6 +427,18 @@ pub(crate) mod test_support {
         not_held: bool,
         verdict: AskVerdict,
     ) -> String {
+        judged_weak(store, decider, standing, not_held, false, verdict).await
+    }
+
+    /// `judged`, that weighed the closest notes under the line when `weak`.
+    pub(crate) async fn judged_weak(
+        store: &Store,
+        decider: &str,
+        standing: &str,
+        not_held: bool,
+        weak: bool,
+        verdict: AskVerdict,
+    ) -> String {
         let q = crate::infer::decide::Question::noul("verdict", "Keep it?");
         let id = store
             .record_decision(NewDecision {
@@ -387,7 +451,7 @@ pub(crate) mod test_support {
                 prior: "{}".into(),
                 standing: serde_json::json!({ "verdict": standing }).to_string(),
                 not_held,
-                weak: false,
+                weak,
                 model: "as-reported".into(),
                 decider: decider.into(),
                 read: 0,
