@@ -268,8 +268,11 @@ class Engram internal constructor(
         }
 
         fun get(context: Context): Engram = instance ?: synchronized(this) {
-            instance ?: build(context.applicationContext).also { instance = it; _current.value = it }
+            instance ?: adopt(build(context.applicationContext))
         }
+
+        /** Makes [e] the instance in use. Tests hand in one whose core they can watch stop. */
+        internal fun adopt(e: Engram): Engram = e.also { instance = it; _current.value = it }
 
         /**
          * Store the mode and become an engram built for it. The two modes share
@@ -286,7 +289,7 @@ class Engram internal constructor(
             Sync.cancel(context)
             old.modes.chosen = mode
             old.shutdown()
-            synchronized(this@Companion) { build(context.applicationContext).also { instance = it; _current.value = it } }
+            synchronized(this@Companion) { adopt(build(context.applicationContext)) }
         }
     }
 }
