@@ -478,6 +478,7 @@ mod tests {
                 prior: "{}".into(),
                 standing: "{}".into(),
                 not_held: joint.is_none(),
+                weak: false,
                 model: "rule".into(),
                 decider: "clef".into(),
                 read: reads.len(),

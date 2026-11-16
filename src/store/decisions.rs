@@ -31,6 +31,8 @@ pub struct NewDecision {
     pub prior: String,
     pub standing: String,
     pub not_held: bool,
+    /// Nothing reached the line; the closest were weighed.
+    pub weak: bool,
     /// As the server named itself.
     pub model: String,
     /// The configured decision model.
@@ -61,6 +63,7 @@ pub struct StoredDecision {
     pub answers: Option<String>,
     pub standing: String,
     pub not_held: bool,
+    pub weak: bool,
     pub created_at: i64,
     pub verdict: Option<AskVerdict>,
     pub correct: Option<String>,
@@ -72,7 +75,7 @@ fn vec_to_blob(v: &[f32]) -> Vec<u8> {
 }
 
 impl Store {
-    /// A held decision's joint evidence is observed as cited, as an ask's used citations are.
+    /// A held decision's joint evidence is observed as cited, as an ask's used citations are; a weak one's is not.
     pub async fn record_decision(&self, d: NewDecision) -> Result<String> {
         // Read before the transaction opens, so the write lock is not held across another table.
         let generation = self.live_generation().await?;
@@ -82,8 +85,8 @@ impl Store {
             "INSERT INTO decide_events
                (id, question, questions, situation, scope, filters, answers, prior, standing,
                 not_held, model, decider, read, dropped, query_vec, vec_dim, embed_model, created_at,
-                bears_version)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                bears_version, weak)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             &id,
             &d.question,
             &d.questions,
@@ -102,7 +105,8 @@ impl Store {
             d.query_vec.len() as i64,
             &d.embed_model,
             now(),
-            crate::core::decide::state::BEARS_VERSION
+            crate::core::decide::state::BEARS_VERSION,
+            d.weak as i64
         )
         .execute(&mut *tx)
         .await?;
@@ -125,6 +129,7 @@ impl Store {
             if let Some(g) = &generation
                 && e.joint
                 && !d.not_held
+                && !d.weak
             {
                 crate::store::observations::insert(
                     &mut *tx,
@@ -148,8 +153,8 @@ impl Store {
 
     pub async fn decision(&self, id: &str) -> Result<Option<StoredDecision>> {
         let Some(r) = sqlx::query!(
-            r#"SELECT id AS "id!", question, questions, answers, standing, not_held, created_at,
-                      verdict, correct
+            r#"SELECT id AS "id!", question, questions, answers, standing, not_held, weak,
+                      created_at, verdict, correct
                  FROM decide_events WHERE id = ?"#,
             id
         )
@@ -183,6 +188,7 @@ impl Store {
             answers: r.answers,
             standing: r.standing,
             not_held: r.not_held != 0,
+            weak: r.weak != 0,
             created_at: r.created_at,
             verdict: r.verdict.as_deref().and_then(AskVerdict::parse),
             correct: r.correct,
@@ -381,6 +387,7 @@ pub(crate) mod test_support {
                 prior: "{}".into(),
                 standing: serde_json::json!({ "verdict": standing }).to_string(),
                 not_held,
+                weak: false,
                 model: "as-reported".into(),
                 decider: decider.into(),
                 read: 0,
@@ -426,6 +433,7 @@ mod tests {
             prior: r#"{"c":{"yes":0.5}}"#.into(),
             standing: r#"{"c":"settled"}"#.into(),
             not_held: false,
+            weak: false,
             model: "clef".into(),
             decider: "clef".into(),
             read: 3,
@@ -641,5 +649,21 @@ mod tests {
             1,
             "a decision the base did not hold cites nothing"
         );
+    }
+
+    #[tokio::test]
+    async fn a_row_written_without_weak_reads_as_not_weak() {
+        let s = Store::memory().await.unwrap();
+        // The column list from before `weak` was kept.
+        sqlx::query!(
+            "INSERT INTO decide_events
+               (id, question, questions, prior, standing, not_held, model, read, dropped,
+                query_vec, vec_dim, embed_model, created_at)
+             VALUES ('old', 'Keep it?', '{}', '{}', '{}', 0, 'clef', 0, 0, x'', 0, 'fake', 0)"
+        )
+        .execute(&s.pool)
+        .await
+        .unwrap();
+        assert!(!s.decision("old").await.unwrap().unwrap().weak);
     }
 }

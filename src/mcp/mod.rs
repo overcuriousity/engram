@@ -1933,6 +1933,7 @@ mod tests {
             event_id: None,
             state: None,
             reads: vec![],
+            weak: false,
         }
     }
 
