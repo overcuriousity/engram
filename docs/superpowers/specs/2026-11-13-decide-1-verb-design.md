@@ -74,6 +74,7 @@ Known and unknown:
   the verdict.
 - **A verdict from the model's own prior.** If no passage bears on the
   question there is no verdict, whatever the model would say unprompted.
+  *Superseded by `2026-11-16-decide-soft-gate-trails-deep-look-design.md`: a decision over passages that exist always has a verdict, marked weak when none cleared the line.*
 - **Advice.** Decide answers what the notes support. Copy and docs do not
   suggest it for questions the base cannot hold ("should I take the job").
 
@@ -185,6 +186,7 @@ instructions are `q`), an optional caller `situation`, the usual filters.
    that helps answer the question: «q»?".
 4. **Evidence.** Passages with `bears >= decide.bears_min` (0.5), strongest
    first. None: standing `not_held`, no joint read, no answers.
+   *Superseded by `2026-11-16-decide-soft-gate-trails-deep-look-design.md`: the closest passages are weighed, and `not_held` is only for no passage at all.*
 5. **Joint read.** Evidence packed strongest-first into
    `decide.joint_tokens` (2500, never more than the state budget); what does
    not fit is counted as `dropped`. The caller's questions are asked once; a
