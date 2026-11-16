@@ -25,6 +25,9 @@ pub struct GenerationParams {
     pub rerank: bool,
     #[serde(default = "crate::config::default_review_min")]
     pub review_min: f32,
+    /// Absent in older rows, which decode as the shipped weight.
+    #[serde(default = "crate::config::default_trail_weight")]
+    pub trail_weight: f32,
     /// Absent in older rows, which decode as the shipped `false`.
     #[serde(default = "crate::config::default_sitting_prime")]
     pub sitting_prime: bool,
@@ -44,6 +47,7 @@ impl From<crate::core::ranking::RankingParams> for GenerationParams {
             candidate_multiplier: p.candidate_multiplier,
             recency_half_life_days: p.recency_half_life_days,
             prime_lift: p.prime_lift,
+            trail_weight: p.trail_weight,
             spread_max: p.spread_max,
             rerank: p.rerank,
             review_min: p.review_min,
@@ -60,6 +64,7 @@ impl From<GenerationParams> for crate::core::ranking::RankingParams {
             candidate_multiplier: p.candidate_multiplier,
             recency_half_life_days: p.recency_half_life_days,
             prime_lift: p.prime_lift,
+            trail_weight: p.trail_weight,
             spread_max: p.spread_max,
             rerank: p.rerank,
             review_min: p.review_min,
@@ -451,6 +456,13 @@ mod tests {
             chat_model: "qwen".into(),
             parent_id: None,
         }
+    }
+
+    #[test]
+    fn a_row_without_a_trail_weight_reads_the_shipped_one() {
+        let p: GenerationParams =
+            serde_json::from_str(r#"{"recency_weight":0.1,"per_source_cap":3}"#).unwrap();
+        assert_eq!(p.trail_weight, 0.5);
     }
 
     #[test]
@@ -988,6 +1000,7 @@ mod tests {
             candidate_multiplier: 5,
             recency_half_life_days: 90,
             prime_lift: 2,
+            trail_weight: 1.0,
             spread_max: 5,
             rerank: false,
             review_min: 0.84,
