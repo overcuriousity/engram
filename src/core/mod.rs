@@ -16,6 +16,7 @@ pub mod ranking;
 pub mod recommend;
 pub mod search;
 pub mod sitting;
+pub mod trails;
 
 use crate::config::Config;
 use crate::infer::budget::TokenCounter;
@@ -174,6 +175,10 @@ pub struct Core {
     pub recommend: crate::config::RecommendConfig,
     pub ui: crate::config::UiConfig,
     pub trails_cfg: crate::config::TrailsConfig,
+    /// Shared by every clone; `None` until a search loads it. See `Core::trail_index`.
+    pub trail_index: Arc<std::sync::RwLock<Option<Arc<crate::core::trails::TrailIndex>>>>,
+    /// Whether model trails match; see `Core::model_trails_count`.
+    pub model_trails: Arc<std::sync::atomic::AtomicBool>,
     /// Shared by every clone and across registry evictions; see `Working`.
     pub sittings: Arc<crate::core::sitting::Sittings>,
     /// Shared by every clone: the point is one queue of calls in front of one GPU.
@@ -489,6 +494,8 @@ impl Core {
             recommend: cfg.recommend.clone(),
             ui: cfg.ui.clone(),
             trails_cfg: cfg.trails.clone(),
+            trail_index: Default::default(),
+            model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             sittings: working.sittings,
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::from_secs(cfg.pacing.cooldown_secs),
@@ -785,6 +792,8 @@ pub mod test_support {
             },
             ui: Default::default(),
             trails_cfg: Default::default(),
+            trail_index: Default::default(),
+            model_trails: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             sittings: Arc::new(Default::default()),
             gate: Arc::new(crate::infer::gate::InferenceGate::new(
                 std::time::Duration::ZERO,

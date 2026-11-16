@@ -144,6 +144,8 @@ pub struct NewCandidate {
     pub band: bool,
     /// `None` unless the search explored. See `search_candidates`.
     pub explored_from: Option<i64>,
+    /// The trail that matched this note in the search; see `core::trails`.
+    pub trail_id: Option<String>,
 }
 
 /// Test-only: in production every field is a decision, so a new field must break every call site.
@@ -157,6 +159,7 @@ impl Default for NewCandidate {
             shown: false,
             band: false,
             explored_from: None,
+            trail_id: None,
         }
     }
 }
@@ -344,8 +347,8 @@ impl Store {
         for (rank, c) in ev.candidates.iter().enumerate() {
             sqlx::query!(
                 "INSERT INTO search_candidates
-                   (event_id, rank, artifact_id, score, similarity, shown, band, explored_from)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                   (event_id, rank, artifact_id, score, similarity, shown, band, explored_from, trail_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 &id,
                 rank as i64,
                 &c.artifact_id,
@@ -353,7 +356,8 @@ impl Store {
                 c.similarity,
                 c.shown as i64,
                 c.band as i64,
-                c.explored_from
+                c.explored_from,
+                c.trail_id
             )
             .execute(&mut *tx)
             .await?;
