@@ -176,6 +176,7 @@ pub(crate) fn sweep_label(stage: &str) -> &str {
         "rescue" => "Writing rescues",
         "read" => "Reading notes",
         "label" => "Labelling searches",
+        "deepen" => "Looking deeper",
         other => other,
     }
 }

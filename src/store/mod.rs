@@ -8,6 +8,7 @@ pub mod control;
 pub mod corpora;
 pub mod decision_log;
 pub mod decisions;
+pub mod deep_looks;
 pub mod eval_runs;
 pub mod feedback;
 pub mod gaps;

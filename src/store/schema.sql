@@ -462,6 +462,34 @@ CREATE TABLE IF NOT EXISTS search_label_failures (
   retry_at INTEGER NOT NULL
 );
 
+-- What the decision model said of notes a search did not show, per source of a
+-- deep look. No foreign key: the source is one of several tables, so
+-- `trim_gap_coverage` drops rows whose source is gone.
+CREATE TABLE IF NOT EXISTS deep_looks (
+  -- A gap kind ('ask' | 'search' | 'unmatched' | 'pursuit' | 'subject' | 'decide'),
+  -- 'weak_right', 'second_reading' or 'labelled'.
+  source_kind TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  -- '' marks the look as done, as the labeller's step-aside row does.
+  artifact_id TEXT NOT NULL,
+  yes REAL NOT NULL,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  at INTEGER NOT NULL,
+  PRIMARY KEY (source_kind, source_id, artifact_id)
+);
+
+-- `search_label_failures` for a deep look: keyed by its source.
+CREATE TABLE IF NOT EXISTS deep_look_failures (
+  source_kind TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  question_version INTEGER NOT NULL,
+  model TEXT NOT NULL,
+  refused INTEGER NOT NULL,
+  retry_at INTEGER NOT NULL,
+  PRIMARY KEY (source_kind, source_id)
+);
+
 -- ── Idle passes ──────────────────────────────────────────────────────────────
 -- One row per idle pass over the evidence: what the running configuration
 -- scored, the best the ladder found, and the pairs that moved between them.
