@@ -12,8 +12,12 @@ Versions are CalVer (`YYYY.MMDD.N`); the release workflow turns `[Unreleased]` i
 - The Decide form: Decide runs at once as yes or no; a toggle beside it opens the answer's shape, and that row has its own Decide. Options are one line each, the name and what it means. A rating runs from 1 to N (2 to 10), with an optional label for each end, and is sent as a score.
 - The base looks at more of itself: pairs down to 0.70 similarity are judged for contradictions and replacements, and nothing below the review line is acted on without you. Notes from before are read while the base is quiet. Recorded searches are labelled by the decision model, shown beside your own verdicts on Insights.
 - The lines at which the base acts or asks move with what you undo and answer; Insights shows each line and why it moved.
+- Trails: a note keeps the searches and questions it was confirmed to answer, and a later query that reads like one finds the note, with "found before for" beside it. `[trails]` in the config; `weight` is moved by the idle pass.
+- The deep look: while the base is quiet, the decision model asks about notes further down for searches, questions and decisions that found nothing. What it finds closes the gap and becomes a trail. `decide.deep_max`; Insights counts the looks.
+- Decide weighs the closest notes when none clears the line, and says "from loose matches"; `weak` in the API. Its line tunes itself from your verdicts and from a second reading while the base is quiet. `decide.weak_take`.
 
 ### Changed
+- The model's labels count toward ranking sweeps unless your verdicts or their own selectivity show them bad. Before, they counted only after thirty judged searches.
 - **`[infer.decide]` is required.** engram needs a decision model (System One, `POST {base_url}/systemone`); a config without the block is refused at start. Copy it from `config.example.toml`.
 - engram follows the overcuriousity dev manifest v2026.11.1, profile everyday; deviations are listed in `AGENTS.md`.
 - Pages, the extension panel and the READMEs say less: labels and short glosses only.
