@@ -64,9 +64,14 @@ fn model_lines(f: &crate::jobs::label::Figures) -> Vec<String> {
     }
     if labelled {
         out.push(
-            match f.counts {
-                true => "model labels count toward sweeps",
-                false => "model labels are shown only",
+            match f.stopped {
+                None => "model labels count toward sweeps",
+                Some(crate::jobs::label::Stopped::ByThePerson) => {
+                    "model labels are stopped: they disagree with your verdicts"
+                }
+                Some(crate::jobs::label::Stopped::BySelectivity) => {
+                    "model labels are stopped: the model calls too much relevant"
+                }
             }
             .into(),
         );

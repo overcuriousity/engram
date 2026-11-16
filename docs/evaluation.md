@@ -94,10 +94,12 @@ your note relevant, and the **selectivity**, the mean share of a search's
 candidates it called relevant. A model that says yes to everything has a
 perfect hit rate and a selectivity of 1.0, which is why both are read. A label
 never becomes your verdict. An unjudged search adds the note the model rates
-highest to a sweep's pairs only while, over at least `decide.label_overlap_min`
-(30) of your judged searches, the hit rate is at least `decide.label_agree_min`
-(0.85) and the selectivity at most `decide.label_select_max` (0.30); otherwise
-the labels are shown and count for nothing. A new model or a new wording of
+highest to a sweep's pairs unless the labels are shown bad: over at least
+`decide.label_overlap_min` (30) of your judged searches the hit rate is under
+`decide.label_agree_min` (0.85) or the selectivity over `decide.label_select_max`
+(0.30), or, with no verdict needed, the selectivity over the model's newest 200
+labelled searches is over that maximum. Then the labels are shown and count for
+nothing, and Insights says which. A new model or a new wording of
 the question labels again from scratch.
 
 A grade is satisfied by anything that **superseded** the artifact it names.
