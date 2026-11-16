@@ -5,5 +5,5 @@
 {% include "_decide_rail_row.html" %}
 {% endfor %}
 {% if rest > 0 %}
-<p class="muted rail-rest">{{ rest }}{% if !rows.is_empty() %} more{% endif %} did not bear on it</p>
+<p class="muted rail-rest">{{ rest }}{% if !rows.is_empty() %} more{% endif %}{% if weak %} were not weighed{% else %} did not bear on it{% endif %}</p>
 {% endif %}

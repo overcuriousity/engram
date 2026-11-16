@@ -50,6 +50,7 @@ export function problem(q, row) {
 export function progressText(read, of, bearing) {
   if (read < of) return `Reading ${read} of ${of}`;
   if (read === of && bearing > 0) return `Weighing ${bearing} together`;
+  if (read === of && of > 0) return "Weighing the closest together";
   return "";
 }
 

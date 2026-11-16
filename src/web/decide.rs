@@ -106,6 +106,15 @@ pub fn standing_copy(s: Standing) -> &'static str {
     }
 }
 
+/// A weak decision says where its weights came from: the copy's full stop becomes ", from loose matches."
+pub fn standing_line(s: Standing, weak: bool) -> String {
+    let copy = standing_copy(s);
+    match copy.strip_suffix('.') {
+        Some(head) if weak => format!("{head}, from loose matches."),
+        _ => copy.to_string(),
+    }
+}
+
 fn render(t: impl Template) -> Result<String> {
     t.render().map_err(|e| Error::Internal(e.to_string()))
 }
@@ -122,7 +131,7 @@ struct DecisionTemplate<'a> {
     question: &'a str,
     /// Empty when not held: the notice stands in their place.
     bars: Vec<Bar>,
-    standing: &'static str,
+    standing: String,
     verdict_bar: String,
 }
 
@@ -131,7 +140,10 @@ pub fn decision_fragment(d: &Decision, verdict: Option<&str>) -> Result<String> 
         (Some((q, j)), Some((_, p))) => bars(q, j, p),
         _ => vec![],
     };
-    let standing = d.standing.first().map_or("", |(_, s)| standing_copy(*s));
+    let standing = d
+        .standing
+        .first()
+        .map_or(String::new(), |(_, s)| standing_line(*s, d.weak));
     let verdict_bar = match d.event_id {
         Some(_) => verdict_fragment(&verdict_bar(d, verdict, None))?,
         None => String::new(),
@@ -161,6 +173,8 @@ struct RailTemplate {
     rows: Vec<Row>,
     /// Passages read that did not bear.
     rest: usize,
+    /// The closest were weighed though none bore: the rest were not weighed.
+    weak: bool,
 }
 
 #[derive(Template)]
@@ -221,13 +235,16 @@ pub fn rail_fragment(d: &Decision) -> Result<String> {
     }
     render(RailTemplate {
         rest: d.read.saturating_sub(d.evidence.len()),
+        weak: d.weak,
         rows: rows.into_iter().map(|(_, r)| r).collect(),
     })
 }
 
-/// "Decided from 6 of 8"
+/// "Decided from 6 of 8", or "Weighed the closest 3 of 8" when none bore.
 pub fn rail_head(d: &Decision) -> String {
-    if d.not_held() {
+    if d.weak {
+        format!("Weighed the closest {} of {}", d.evidence.len(), d.read)
+    } else if d.not_held() {
         // The rest line under the rows says how many did not bear.
         "Nothing decided".to_string()
     } else {
@@ -701,6 +718,23 @@ mod tests {
         ));
         assert!(!h.contains("bar-track") && !h.contains("without notes"));
         assert!(h.contains(r#"id="decide-verdict""#));
+    }
+
+    #[test]
+    fn a_weak_decision_says_it_came_from_loose_matches() {
+        let mut d = held();
+        d.weak = true;
+        d.standing = vec![("verdict".into(), Standing::Leaning)];
+        d.evidence.truncate(3);
+        let h = decision_fragment(&d, None).unwrap();
+        assert!(h.contains("Leaning, from loose matches.") && h.contains("bar-track"));
+        assert!(!h.contains("oc-notice") && h.contains(">Nothing here<"));
+        assert_eq!(rail_head(&d), "Weighed the closest 3 of 8");
+        let r = rail_fragment(&d).unwrap();
+        assert!(r.contains("5 more were not weighed") && !r.contains("did not bear"));
+        for s in [&h, &r] {
+            assert!(!s.contains('%') && !s.contains("likely"));
+        }
     }
 
     #[test]

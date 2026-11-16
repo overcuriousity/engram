@@ -72,7 +72,8 @@ test("integer-like option names keep their order", () => {
 test("progress counts reads, then weighs", () => {
   assert.equal(progressText(3, 8, 2), "Reading 3 of 8");
   assert.equal(progressText(8, 8, 6), "Weighing 6 together");
-  assert.equal(progressText(8, 8, 0), "");
+  assert.equal(progressText(8, 8, 0), "Weighing the closest together");
+  assert.equal(progressText(0, 0, 0), "");
 });
 
 test("an option with no name is no option", () => {
