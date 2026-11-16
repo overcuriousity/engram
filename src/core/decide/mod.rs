@@ -580,11 +580,11 @@ impl Core {
         };
         match self.search_with(&query(text), None, Door::Ask).await {
             Ok((hits, _)) => Ok(hits),
-            Err(Error::Validation(e)) => {
+            // The situation only adds to what the question finds: no failure of its search fails the decision.
+            Err(e) => {
                 tracing::debug!(error = %e, "the situation was not searched; the question's notes stand");
                 Ok(Vec::new())
             }
-            Err(e) => Err(e),
         }
     }
 
