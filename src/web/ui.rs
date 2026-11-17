@@ -978,8 +978,8 @@ pub(crate) fn why_ranked(e: &crate::core::explain::HitExplanation) -> Option<Str
     if matches!(e.cap, crate::core::explain::CapEffect::Refilled) {
         parts.push("kept only because one source filled the list".to_string());
     }
-    if let Some(t) = &e.trail {
-        parts.push(format!("found before for «{}»", t.query));
+    if e.trail.is_some() {
+        parts.push("found before for a similar query".to_string());
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
@@ -3710,41 +3710,21 @@ mod tests {
     }
 
     #[test]
-    fn a_trail_hit_says_which_query_found_it_before() {
+    fn a_trail_hit_says_it_was_found_before_and_not_for_which_words() {
         let e = crate::core::explain::HitExplanation {
             trail: Some(crate::core::explain::TrailEffect {
-                query: "how do I flumph".into(),
                 similarity: 0.9,
                 moved: Default::default(),
             }),
             ..Default::default()
         };
-        let mut r = ranked(false);
-        r.why_ranked = why_ranked(&e);
-        let body = ResultsTemplate {
-            results: vec![r],
-            ..Default::default()
-        }
-        .render()
-        .unwrap();
-        assert!(
-            body.contains("found before for «how do I flumph»"),
-            "{body}"
+        assert_eq!(
+            why_ranked(&e).as_deref(),
+            Some("found before for a similar query")
         );
-        let mut e = e;
-        e.trail.as_mut().unwrap().query = "<b>x</b>".into();
-        let mut r = ranked(false);
-        r.why_ranked = why_ranked(&e);
-        let body = ResultsTemplate {
-            results: vec![r],
-            ..Default::default()
-        }
-        .render()
-        .unwrap();
-        assert!(
-            body.contains("«&#60;b&#62;x&#60;/b&#62;»") || body.contains("«&lt;b&gt;x"),
-            "{body}"
-        );
+        // The words are one member's; the row goes to all of them.
+        let wire = serde_json::to_string(&e).unwrap();
+        assert!(!wire.contains("query"), "{wire}");
     }
 
     #[test]

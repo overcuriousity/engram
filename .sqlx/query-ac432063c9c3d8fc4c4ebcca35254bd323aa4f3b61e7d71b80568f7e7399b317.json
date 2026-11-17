@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE trails SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "ac432063c9c3d8fc4c4ebcca35254bd323aa4f3b61e7d71b80568f7e7399b317"
+}

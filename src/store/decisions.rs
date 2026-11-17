@@ -359,7 +359,8 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         for r in rows {
-            let top = r.top.unwrap_or(0.0);
+            // Read again and no joint note was asked about (gone, or too long): it says nothing.
+            let Some(top) = r.top else { continue };
             match r.weak != 0 {
                 false if top < ask_at => e.too_low += 1,
                 true if top >= relevant_at => e.too_high += 1,
@@ -433,35 +434,74 @@ impl Store {
         self.decides_since(model, since).await
     }
 
-    /// Weak decisions a person called right, oldest first, whose vector is under the live embed model.
-    pub async fn weak_right_decisions(&self, embed_model: &str, limit: i64) -> Result<Vec<String>> {
+    /// Weak decisions a person called right, oldest first, whose vector is under the live embed
+    /// model and whose deep look is still owed in this era (`Store::deep_look_due`, not done).
+    pub async fn weak_right_decisions(
+        &self,
+        embed_model: &str,
+        version: u32,
+        model: &str,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        let at = now();
         Ok(sqlx::query_scalar!(
-            r#"SELECT id AS "id!" FROM decide_events
-                WHERE weak = 1 AND verdict = 'right' AND embed_model = ? AND vec_dim > 0
-                ORDER BY created_at ASC, id ASC LIMIT ?"#,
+            r#"SELECT e.id AS "id!" FROM decide_events e
+                WHERE e.weak = 1 AND e.verdict = 'right' AND e.embed_model = ? AND e.vec_dim > 0
+                  AND NOT EXISTS (SELECT 1 FROM deep_looks d
+                                   WHERE d.source_kind = 'weak_right' AND d.source_id = e.id
+                                     AND d.artifact_id = '' AND d.question_version = ?
+                                     AND d.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f
+                                   WHERE f.source_kind = 'weak_right' AND f.source_id = e.id
+                                     AND f.question_version = ? AND f.model = ?
+                                     AND (f.refused >= ? OR f.retry_at > ?))
+                ORDER BY e.created_at ASC, e.id ASC LIMIT ?"#,
             embed_model,
+            version,
+            model,
+            version,
+            model,
+            crate::store::search_labels::LABEL_GIVE_UP,
+            at,
             limit
         )
         .fetch_all(&self.pool)
         .await?)
     }
 
-    /// Unjudged, not weak, not `not_held`, under this decider and BEARS_VERSION, oldest first.
+    /// Unjudged, not weak, not `not_held`, under this decider and BEARS_VERSION, oldest first,
+    /// with the second reading still owed in this era.
     pub async fn decisions_unread(
         &self,
         decider: &str,
         embed_model: &str,
+        version: u32,
         limit: i64,
     ) -> Result<Vec<String>> {
+        let (at, model) = (now(), decider);
         Ok(sqlx::query_scalar!(
-            r#"SELECT id AS "id!" FROM decide_events
-                WHERE verdict IS NULL AND weak = 0 AND not_held = 0
-                  AND decider = ? AND COALESCE(bears_version, 1) = ?
-                  AND embed_model = ? AND vec_dim > 0
-                ORDER BY created_at ASC, id ASC LIMIT ?"#,
+            r#"SELECT e.id AS "id!" FROM decide_events e
+                WHERE e.verdict IS NULL AND e.weak = 0 AND e.not_held = 0
+                  AND e.decider = ? AND COALESCE(e.bears_version, 1) = ?
+                  AND e.embed_model = ? AND e.vec_dim > 0
+                  AND NOT EXISTS (SELECT 1 FROM deep_looks d
+                                   WHERE d.source_kind = 'second_reading' AND d.source_id = e.id
+                                     AND d.artifact_id = '' AND d.question_version = ?
+                                     AND d.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f
+                                   WHERE f.source_kind = 'second_reading' AND f.source_id = e.id
+                                     AND f.question_version = ? AND f.model = ?
+                                     AND (f.refused >= ? OR f.retry_at > ?))
+                ORDER BY e.created_at ASC, e.id ASC LIMIT ?"#,
             decider,
             crate::core::decide::state::BEARS_VERSION,
             embed_model,
+            version,
+            model,
+            version,
+            model,
+            crate::store::search_labels::LABEL_GIVE_UP,
+            at,
             limit
         )
         .fetch_all(&self.pool)
@@ -667,6 +707,33 @@ mod tests {
         assert_eq!(e, want);
         let e = s.bears_evidence("clef", 0.7, 0.5, false).await.unwrap();
         assert_eq!(e, BearsEvidence::default());
+    }
+
+    #[tokio::test]
+    async fn a_decision_read_again_does_not_stand_before_one_still_unread() {
+        let (s, _) = read_again().await;
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        // The two older ones are read; a window of one still reaches the third.
+        let owed = s
+            .decisions_unread("clef", "fake", version, 1)
+            .await
+            .unwrap();
+        assert_eq!(owed.len(), 1);
+        let src = crate::store::deep_looks::DeepSource {
+            kind: crate::store::deep_looks::DeepKind::SecondReading,
+            id: owed[0].clone(),
+        };
+        assert!(!s.deep_looked(&src, version, "clef").await.unwrap());
+        // Read and no joint note asked about: neither offered again nor counted as evidence.
+        let before = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        s.put_deep_look(&src, &[], version, "clef").await.unwrap();
+        let owed = s
+            .decisions_unread("clef", "fake", version, 1)
+            .await
+            .unwrap();
+        assert!(owed.is_empty());
+        let after = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        assert_eq!(after, before);
     }
 
     #[tokio::test]

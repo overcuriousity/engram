@@ -60,10 +60,10 @@ pub struct HitExplanation {
     pub trail: Option<TrailEffect>,
 }
 
-/// The trail that found or lifted a hit, and where the reorder moved it.
+/// The trail that found or lifted a hit, and where the reorder moved it. Not the trail's words:
+/// whoever typed them, the hit is shown to every member.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrailEffect {
-    pub query: String,
     pub similarity: f32,
     pub moved: StageEffect,
 }

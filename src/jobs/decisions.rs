@@ -255,7 +255,8 @@ async fn label(core: &Core, share: usize) -> Result<u64> {
     Ok(armed)
 }
 
-/// Sources looked at per sweep: enough that skipped ones never hide the rest.
+/// Sources read per kind and sweep; the store leaves out what is looked at or not due, so
+/// these are ones still owed a look.
 pub const DEEPEN_LOOKAHEAD: i64 = 16;
 /// What a second reading is counted at: it asks about a decision's few notes, not a whole pool.
 const SECOND_READING_COST: usize = 4;
@@ -283,12 +284,14 @@ async fn deepen(core: &Core, share: usize) -> Result<u64> {
     let of = |kind, ids: Vec<String>| ids.into_iter().map(move |id| DeepSource { kind, id });
     sources.extend(of(
         DeepKind::WeakRight,
-        store.weak_right_decisions(embed, DEEPEN_LOOKAHEAD).await?,
+        store
+            .weak_right_decisions(embed, version, model, DEEPEN_LOOKAHEAD)
+            .await?,
     ));
     sources.extend(of(
         DeepKind::SecondReading,
         store
-            .decisions_unread(model, embed, DEEPEN_LOOKAHEAD)
+            .decisions_unread(model, embed, version, DEEPEN_LOOKAHEAD)
             .await?,
     ));
     let relevant_at = crate::jobs::label::relevant_at(core).await?;

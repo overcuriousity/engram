@@ -25,8 +25,8 @@ pub struct GenerationParams {
     pub rerank: bool,
     #[serde(default = "crate::config::default_review_min")]
     pub review_min: f32,
-    /// Absent in older rows, which decode as the shipped weight.
-    #[serde(default = "crate::config::default_trail_weight")]
+    /// Absent in older rows, which ran with no trails: they must not decode as today's file.
+    #[serde(default = "crate::config::legacy_trail_weight")]
     pub trail_weight: f32,
     /// Absent in older rows, which decode as the shipped `false`.
     #[serde(default = "crate::config::default_sitting_prime")]
@@ -459,10 +459,11 @@ mod tests {
     }
 
     #[test]
-    fn a_row_without_a_trail_weight_reads_the_shipped_one() {
+    fn a_row_from_before_trails_reads_as_run_without_them() {
         let p: GenerationParams =
             serde_json::from_str(r#"{"recency_weight":0.1,"per_source_cap":3}"#).unwrap();
-        assert_eq!(p.trail_weight, 0.5);
+        assert_eq!(p.trail_weight, 0.0);
+        assert_ne!(p.trail_weight, crate::config::default_trail_weight());
     }
 
     #[test]

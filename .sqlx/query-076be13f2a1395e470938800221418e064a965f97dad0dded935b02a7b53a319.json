@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT e.id AS \"id!\" FROM decide_events e\n                WHERE e.verdict IS NULL AND e.weak = 0 AND e.not_held = 0\n                  AND e.decider = ? AND COALESCE(e.bears_version, 1) = ?\n                  AND e.embed_model = ? AND e.vec_dim > 0\n                  AND NOT EXISTS (SELECT 1 FROM deep_looks d\n                                   WHERE d.source_kind = 'second_reading' AND d.source_id = e.id\n                                     AND d.artifact_id = '' AND d.question_version = ?\n                                     AND d.model = ?)\n                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f\n                                   WHERE f.source_kind = 'second_reading' AND f.source_id = e.id\n                                     AND f.question_version = ? AND f.model = ?\n                                     AND (f.refused >= ? OR f.retry_at > ?))\n                ORDER BY e.created_at ASC, e.id ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 10
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "076be13f2a1395e470938800221418e064a965f97dad0dded935b02a7b53a319"
+}

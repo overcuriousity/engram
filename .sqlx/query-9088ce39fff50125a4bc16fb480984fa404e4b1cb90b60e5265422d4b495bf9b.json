@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT e.id AS \"id!\" FROM decide_events e\n                WHERE e.weak = 1 AND e.verdict = 'right' AND e.embed_model = ? AND e.vec_dim > 0\n                  AND NOT EXISTS (SELECT 1 FROM deep_looks d\n                                   WHERE d.source_kind = 'weak_right' AND d.source_id = e.id\n                                     AND d.artifact_id = '' AND d.question_version = ?\n                                     AND d.model = ?)\n                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f\n                                   WHERE f.source_kind = 'weak_right' AND f.source_id = e.id\n                                     AND f.question_version = ? AND f.model = ?\n                                     AND (f.refused >= ? OR f.retry_at > ?))\n                ORDER BY e.created_at ASC, e.id ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9088ce39fff50125a4bc16fb480984fa404e4b1cb90b60e5265422d4b495bf9b"
+}

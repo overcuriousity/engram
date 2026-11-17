@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT t.id AS \"id!\", t.artifact_id AS \"artifact_id!\", t.query AS \"query!\",\n                      t.query_vec AS \"query_vec!\", t.matched AS \"matched!\", t.missed AS \"missed!\",\n                      EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = t.id\n                                 AND s.source IN ('verdict', 'ask', 'decide')) AS \"person!: i64\"\n                 FROM trails t\n                WHERE t.retired_at IS NULL AND t.embed_model = ? AND t.vec_dim > 0\n                ORDER BY t.created_at, t.id",
+  "query": "SELECT t.id AS \"id!\", t.artifact_id AS \"artifact_id!\", t.query AS \"query!\",\n                      t.query_vec AS \"query_vec!\", t.matched AS \"matched!\", t.missed AS \"missed!\",\n                      EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = t.id\n                                 AND s.source IN ('verdict', 'ask', 'decide')) AS \"person!: i64\"\n                 FROM trails t\n                WHERE t.retired_at IS NULL AND t.embed_model = ? AND t.vec_dim > 0\n                  AND (? IS NULL OR t.artifact_id = ?)\n                ORDER BY t.created_at, t.id",
   "describe": {
     "columns": [
       {
@@ -77,7 +77,7 @@
       }
     ],
     "parameters": {
-      "Right": 1
+      "Right": 3
     },
     "nullable": [
       true,
@@ -89,5 +89,5 @@
       false
     ]
   },
-  "hash": "0995b1f1b823ae5de8aa636bb56dc4dd53531ae1b153650a32685f3dd822e2c0"
+  "hash": "f3e53272fb82d291c21a705b19ed99b132fd36937961d80d1ea05860ee3b6810"
 }

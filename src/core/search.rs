@@ -3,7 +3,7 @@ use crate::error::{Error, Result};
 use crate::store::artifacts::ArtifactStatus;
 use crate::store::feedback::{Door, Origin};
 use crate::vector::{SearchFilter, SearchHit};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub const DEFAULT_LIMIT: usize = 10;
 pub const MAX_LIMIT: usize = 50;
@@ -426,10 +426,10 @@ fn cliff_scores(results: &[SearchResult], reranked: bool) -> Vec<Option<f32>> {
     results.iter().map(|r| r.similarity).collect()
 }
 
-/// Flag every hit from the cliff on, without reordering: gaps are measured over sorted scores and
-/// the cut is carried back as a score, so what is marked stays a tail (`ask` truncates at the first
-/// mark).
-fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
+/// Flag every hit from the cliff on, without reordering: the cut is carried back as a score, so
+/// what is marked stays a tail (`ask` truncates at the first mark). A hit a trail found or lifted
+/// (`trailed`) is above the cut wherever its score falls.
+fn mark_past_cliff(results: &mut [SearchResult], reranked: bool, trailed: &HashSet<&str>) {
     let scored = cliff_scores(results, reranked);
     let mut sorted: Vec<f32> = scored.iter().flatten().copied().collect();
     sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
@@ -440,7 +440,8 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
     let cut = sorted[above - 1];
     let from = scored
         .iter()
-        .rposition(|s| s.is_some_and(|s| s >= cut))
+        .zip(results.iter())
+        .rposition(|(s, r)| s.is_some_and(|s| s >= cut) || trailed.contains(r.artifact_id.as_str()))
         .map_or(0, |i| i + 1);
     for r in results.iter_mut().skip(from) {
         r.past_cliff = true;
@@ -453,13 +454,17 @@ fn mark_past_cliff(results: &mut [SearchResult], reranked: bool) {
 /// Retired notes to the tail, then the cliff read over the live prefix, then the tail marked with
 /// it. The marks must stay a suffix; a high-scoring retired row read with the rest would switch the
 /// cliff off.
-fn sink_retired_and_mark_the_cliff(results: &mut [SearchResult], reranked: bool) {
+fn sink_retired_and_mark_the_cliff(
+    results: &mut [SearchResult],
+    reranked: bool,
+    trailed: &HashSet<&str>,
+) {
     results.sort_by_key(|r| r.retired);
     let live = results
         .iter()
         .position(|r| r.retired)
         .unwrap_or(results.len());
-    mark_past_cliff(&mut results[..live], reranked);
+    mark_past_cliff(&mut results[..live], reranked, trailed);
     for r in results.iter_mut().filter(|r| r.retired) {
         r.past_cliff = true;
         if let Some(e) = r.explanation.as_mut() {
@@ -1576,7 +1581,8 @@ impl Core {
         let explored = self.explore_swap(&mut results, q, limit, door, &origin);
 
         let visible = limit.min(results.len());
-        sink_retired_and_mark_the_cliff(&mut results[..visible], reranked);
+        let lifted: HashSet<&str> = trailed.iter().map(|m| m.artifact_id.as_str()).collect();
+        sink_retired_and_mark_the_cliff(&mut results[..visible], reranked, &lifted);
 
         // Recorded while the list is wider than the answer, off the request path except at the UI
         // door. The band is read first so it is in the pool; it is appended after the truncate,
@@ -4959,7 +4965,7 @@ mod tests {
             dummy("c", 0.30),
             dummy("d", 0.28),
         ];
-        mark_past_cliff(&mut results, true);
+        mark_past_cliff(&mut results, true, &Default::default());
         assert_eq!(
             results.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, true, true]
@@ -4973,7 +4979,7 @@ mod tests {
         );
 
         let mut flat = vec![dummy("a", 0.5), dummy("b", 0.5), dummy("c", 0.5)];
-        mark_past_cliff(&mut flat, true);
+        mark_past_cliff(&mut flat, true, &Default::default());
         assert!(flat.iter().all(|r| !r.past_cliff));
     }
 
@@ -4993,7 +4999,7 @@ mod tests {
             dummy("c", 0.30, false),
             dummy("d", 0.29, false),
         ];
-        sink_retired_and_mark_the_cliff(&mut results, true);
+        sink_retired_and_mark_the_cliff(&mut results, true, &Default::default());
         assert_eq!(
             results
                 .iter()
@@ -5031,7 +5037,7 @@ mod tests {
             .enumerate()
             .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
             .collect();
-        mark_past_cliff(&mut even, false);
+        mark_past_cliff(&mut even, false, &Default::default());
         assert!(
             even.iter().all(|r| !r.past_cliff),
             "a cliff was drawn on a list whose similarity falls evenly"
@@ -5044,16 +5050,26 @@ mod tests {
             .enumerate()
             .map(|(i, (f, s))| dummy(&i.to_string(), *f, Some(s)))
             .collect();
-        mark_past_cliff(&mut three, false);
+        mark_past_cliff(&mut three, false, &Default::default());
         assert_eq!(
             three.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true]
         );
 
+        // A hit a trail lifted is above the cut though its similarity is not.
+        let mut lifted = three.clone();
+        lifted.iter_mut().for_each(|r| r.past_cliff = false);
+        let id = lifted[3].artifact_id.clone();
+        mark_past_cliff(&mut lifted, false, &HashSet::from([id.as_str()]));
+        assert_eq!(
+            lifted.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
+            vec![false, false, false, false, true]
+        );
+
         let mut tail = three.clone();
         tail[4].similarity = None;
         tail.iter_mut().for_each(|r| r.past_cliff = false);
-        mark_past_cliff(&mut tail, false);
+        mark_past_cliff(&mut tail, false, &Default::default());
         assert_eq!(
             tail.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true]
@@ -5061,7 +5077,7 @@ mod tests {
         let mut mixed = three.clone();
         mixed[1].similarity = None;
         mixed.iter_mut().for_each(|r| r.past_cliff = false);
-        mark_past_cliff(&mut mixed, false);
+        mark_past_cliff(&mut mixed, false, &Default::default());
         assert_eq!(
             mixed.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true],
@@ -5070,7 +5086,7 @@ mod tests {
         let mut leading = three.clone();
         leading[0].similarity = None;
         leading.iter_mut().for_each(|r| r.past_cliff = false);
-        mark_past_cliff(&mut leading, false);
+        mark_past_cliff(&mut leading, false, &Default::default());
         assert_eq!(
             leading.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true, true],
@@ -5081,7 +5097,7 @@ mod tests {
             r.similarity = None;
             r.past_cliff = false;
         });
-        mark_past_cliff(&mut none, false);
+        mark_past_cliff(&mut none, false, &Default::default());
         assert!(none.iter().all(|r| !r.past_cliff));
 
         let mut inverted: Vec<SearchResult> = [0.80, 0.40, 0.78]
@@ -5089,7 +5105,7 @@ mod tests {
             .enumerate()
             .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
             .collect();
-        mark_past_cliff(&mut inverted, false);
+        mark_past_cliff(&mut inverted, false, &Default::default());
         assert!(
             inverted.iter().all(|r| !r.past_cliff),
             "an out-of-order hit manufactured a cliff above itself"
@@ -5102,7 +5118,7 @@ mod tests {
             .enumerate()
             .map(|(i, s)| dummy(&i.to_string(), 1.0 - i as f32 * 0.1, Some(*s)))
             .collect();
-        mark_past_cliff(&mut still, false);
+        mark_past_cliff(&mut still, false, &Default::default());
         assert_eq!(
             still.iter().map(|r| r.past_cliff).collect::<Vec<_>>(),
             vec![false, false, false, true]
@@ -5274,16 +5290,7 @@ mod tests {
         let (core, far_note) = trailed(crate::store::trails::TrailSource::Verdict).await;
         let (hits, _) = core.search_with(&q4(FLUMPH), None, Door::Ui).await.unwrap();
         let h = hits.iter().find(|h| h.artifact_id == far_note).unwrap();
-        assert_eq!(
-            h.explanation
-                .as_ref()
-                .unwrap()
-                .trail
-                .as_ref()
-                .unwrap()
-                .query,
-            FLUMPH
-        );
+        assert!(h.explanation.as_ref().unwrap().trail.is_some());
         assert!(!h.weak);
     }
 

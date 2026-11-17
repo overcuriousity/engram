@@ -894,6 +894,10 @@ pub(crate) fn default_spread_max() -> usize {
 pub fn default_trail_weight() -> f32 {
     0.5
 }
+/// What a generation row from before trails ran under: none.
+pub(crate) fn legacy_trail_weight() -> f32 {
+    0.0
+}
 /// The shipped `sitting.prime`: off, so an older generation row decodes as what it ran under.
 pub(crate) fn default_sitting_prime() -> bool {
     false

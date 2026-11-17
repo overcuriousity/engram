@@ -137,6 +137,10 @@ pub(crate) async fn pool(core: &Core, s: &DeepSource, b: &Brief) -> Result<Vec<S
     let mut asked = core.store.deep_asked(s, version, model).await?;
     // Only a search event has labels; another source's id matches none.
     asked.extend(core.store.labelled_notes(&s.id, version, model).await?);
+    // The person saw these and said none of them answers.
+    if s.kind == DeepKind::Gap(GapKind::Search) {
+        asked.extend(core.store.shown_notes(&s.id).await?);
+    }
     let mut seen: std::collections::HashSet<String> = asked.into_iter().collect();
     ids.retain(|id| seen.insert(id.clone()));
     let notes = core.store.artifacts_by_ids(&ids).await?;
@@ -431,6 +435,19 @@ mod tests {
     }
 
     async fn gap(core: &Core) -> DeepSource {
+        gap_showing(core, &[]).await
+    }
+
+    /// A search that showed `shown`, which a person then called a gap.
+    async fn gap_showing(core: &Core, shown: &[String]) -> DeepSource {
+        let candidates = shown
+            .iter()
+            .map(|a| crate::store::feedback::NewCandidate {
+                artifact_id: a.clone(),
+                shown: true,
+                ..Default::default()
+            })
+            .collect();
         let id = core
             .store
             .record_search(
@@ -442,7 +459,7 @@ mod tests {
                     filters: "{}".into(),
                     query_vec: query_vec(),
                     embed_model: M.into(),
-                    candidates: vec![],
+                    candidates,
                     answered: false,
                     context: None,
                 },
@@ -545,6 +562,20 @@ mod tests {
             13,
             "the twelve above it, then the find; none after"
         );
+    }
+
+    #[tokio::test]
+    async fn a_note_the_person_saw_and_rejected_is_not_asked_about() {
+        let (core, _, _, marked) = base(MARK).await;
+        let s = gap_showing(&core, std::slice::from_ref(&marked)).await;
+
+        run(&core, &s.target()).await.unwrap();
+
+        assert_eq!(open_gap_ids(&core).await, std::slice::from_ref(&s.id));
+        assert!(core.store.live_trails(M).await.unwrap().is_empty());
+        let (v, m) = (answers_query("").version, core.decider.model());
+        let asked = core.store.deep_asked(&s, v, m).await.unwrap();
+        assert!(!asked.is_empty() && !asked.contains(&marked));
     }
 
     #[tokio::test]

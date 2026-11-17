@@ -108,8 +108,9 @@ A trail is one query a note was confirmed to answer, kept on the note with the
 query's vector. Search matches a new query against the trails and gives a
 matching note a place in the list, whether or not its own wording was found:
 at the shipped weight the best match lands fourth for a person trail and eighth
-for a model trail, never first unless it already was. The rail says
-*found before for «…»*. A replay leaves out the trail made from the very query
+for a model trail, never first unless it already was, and it is never marked
+past the cliff. The rail says *found before for a similar query*; the trail's
+words are not shown, since another member may have typed them. A replay leaves out the trail made from the very query
 it replays, so a pair gains from trails only through another query's.
 
 A trail comes from a search judged a hit, an ask judged right, a decision
@@ -121,8 +122,10 @@ only withdraw a model trail.
 
 A trail goes after three misses over its matches: "nothing here" on a search it
 lifted a note in, or, for a model trail, the labeller rating that note under
-`answers_query`'s `ask_at` (0.60). Undoing the verdict removes its pairing, and
-a trail left with none is retired. A model trail is deleted after
+`answers_query`'s `ask_at` (0.60). "Nothing here" also takes back the model
+trail made from that same search. Undoing the verdict removes its pairing, and
+a trail left with none is retired. A trail whose words a new embed model
+refuses is retired. A model trail is deleted after
 `feedback.retain_days` without a confirmation; a person trail stays. Deleting
 captured searches deletes every trail.
 
@@ -135,7 +138,8 @@ unjudged decisions for their second reading, and recorded searches the labeller
 found nothing relevant in. Each gets one look per question version and model.
 
 The pool is the source's stored vector replayed to 50, plus the notes linked to
-the first five, less what was already asked about, cut to at most
+the first five, less what was already asked about and what a search the
+person called a gap had shown, cut to at most
 `decide.deep_max` (24). Notes are asked alone; the look ends at the first one
 at the labeller's line. A find makes a model trail and covers the gap by the
 model; for a labelled search it is also a pair for the sweep. A person's

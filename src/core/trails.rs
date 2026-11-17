@@ -32,18 +32,26 @@ pub(crate) fn shrug(what: &'static str, r: Result<()>) {
 }
 
 /// The live trails of one embed model.
+#[derive(Default)]
 pub struct TrailIndex {
     dim: usize,
-    /// Normalised rows, `dim` floats each.
+    /// Normalised rows, `dim` floats each: the only copy of a trail's vector held.
     rows: Vec<f32>,
-    trails: Vec<Trail>,
+    held: Vec<Held>,
 }
 
+#[derive(Clone)]
+struct Held {
+    trail_id: String,
+    artifact_id: String,
+    tier: Tier,
+}
+
+/// Without the trail's words: they are one person's, and the note is every member's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Matched {
     pub trail_id: String,
     pub artifact_id: String,
-    pub query: String,
     pub similarity: f32,
     pub tier: Tier,
 }
@@ -55,21 +63,43 @@ fn norm(v: &[f32]) -> f32 {
 impl TrailIndex {
     /// Trails of another width than the first are left out: no cosine is defined against them.
     pub fn new(trails: Vec<Trail>) -> Self {
-        let dim = trails.first().map_or(0, |t| t.vec.len());
-        let trails: Vec<Trail> = trails
-            .into_iter()
-            .filter(|t| t.vec.len() == dim && norm(&t.vec) > 0.0)
-            .collect();
-        let mut rows = Vec::with_capacity(trails.len() * dim);
-        for t in &trails {
-            let n = norm(&t.vec);
-            rows.extend(t.vec.iter().map(|x| x / n));
+        Self::default().with_note("", trails)
+    }
+
+    /// This index with one note's trails replaced by `fresh`, so a mint reads one note again
+    /// and not the base.
+    pub fn with_note(&self, artifact_id: &str, fresh: Vec<Trail>) -> Self {
+        let mut out = Self {
+            dim: self.dim,
+            rows: Vec::with_capacity(self.rows.len() + fresh.len() * self.dim),
+            held: Vec::with_capacity(self.held.len() + fresh.len()),
+        };
+        let rows = self.rows.chunks_exact(self.dim.max(1));
+        for (h, row) in self.held.iter().zip(rows) {
+            if h.artifact_id != artifact_id {
+                out.rows.extend_from_slice(row);
+                out.held.push(h.clone());
+            }
         }
-        Self { dim, rows, trails }
+        if out.held.is_empty() {
+            out.dim = fresh.first().map_or(0, |t| t.vec.len());
+        }
+        for t in fresh {
+            let n = norm(&t.vec);
+            if t.vec.len() == out.dim && n > 0.0 {
+                out.rows.extend(t.vec.iter().map(|x| x / n));
+                out.held.push(Held {
+                    trail_id: t.id,
+                    artifact_id: t.artifact_id,
+                    tier: t.tier,
+                });
+            }
+        }
+        out
     }
 
     pub fn is_empty(&self) -> bool {
-        self.trails.is_empty()
+        self.held.is_empty()
     }
 
     /// The best trail per note at or above `match_at`, best first. `leave_out_own` drops a trail
@@ -86,7 +116,7 @@ impl TrailIndex {
             return Vec::new();
         }
         let mut out: Vec<Matched> = self
-            .trails
+            .held
             .iter()
             .zip(self.rows.chunks_exact(self.dim))
             .filter(|(t, _)| with_model || t.tier == Tier::Person)
@@ -96,9 +126,8 @@ impl TrailIndex {
             })
             .filter(|(_, sim)| *sim >= match_at && !(leave_out_own && *sim >= OWN))
             .map(|(t, sim)| Matched {
-                trail_id: t.id.clone(),
+                trail_id: t.trail_id.clone(),
                 artifact_id: t.artifact_id.clone(),
-                query: t.query.clone(),
                 similarity: sim,
                 tier: t.tier,
             })
@@ -172,7 +201,6 @@ pub(crate) fn apply(results: &mut Vec<SearchResult>, matched: &[Matched], weight
             r.explanation.as_mut(),
         ) {
             e.trail = Some(crate::core::explain::TrailEffect {
-                query: m.query.clone(),
                 similarity: m.similarity,
                 moved: crate::core::explain::StageEffect {
                     from: Some(from),
@@ -216,7 +244,7 @@ impl Core {
         }
     }
 
-    /// After any mint, withdraw, retire or forget; the next search loads the trails again.
+    /// After a withdraw, retire or forget; the next search loads the trails again.
     pub fn drop_trail_index(&self) {
         let mut held = self
             .trail_index
@@ -224,6 +252,32 @@ impl Core {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.trail_gen.fetch_add(1, Ordering::SeqCst);
         *held = None;
+    }
+
+    /// After a mint: the held index with that note's trails read again. One not loaded stays so,
+    /// and one another change overtook is dropped.
+    async fn refresh_trails_of(&self, artifact_id: &str) {
+        let (generation, held) = {
+            let held = self
+                .trail_index
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (self.trail_gen.load(Ordering::SeqCst), held.clone())
+        };
+        let mut next = None;
+        if let Some(held) = held {
+            let model = self.embedder.model();
+            match self.store.live_trails_of(model, Some(artifact_id)).await {
+                Ok(fresh) => next = Some(Arc::new(held.with_note(artifact_id, fresh))),
+                Err(e) => tracing::warn!(error = %e, "could not read a note's trails again"),
+            }
+        }
+        let mut held = self
+            .trail_index
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let unmoved = self.trail_gen.fetch_add(1, Ordering::SeqCst) == generation;
+        *held = next.filter(|_| unmoved);
     }
 
     /// `trails.match_at`, never under the line two unrelated queries sit at.
@@ -265,10 +319,15 @@ impl Core {
             source,
             source_id,
         };
-        self.store
+        let minted = self
+            .store
             .mint_trail(&t, self.trails_cfg.per_note, self.trails_cfg.max)
             .await?;
-        self.drop_trail_index();
+        // The base's cap retires trails on other notes.
+        match minted.capped {
+            true => self.drop_trail_index(),
+            false => self.refresh_trails_of(artifact_id).await,
+        }
         Ok(())
     }
 
@@ -325,8 +384,20 @@ impl Core {
         .await
     }
 
-    /// "Nothing here" counts against every trail the search showed, a person's too.
+    /// "Nothing here" counts against every trail the search showed, a person's too, and takes
+    /// back what the model made of this search before the person spoke.
     pub async fn trails_after_gap(&self, event_id: &str) -> Result<()> {
+        use crate::store::deep_looks::{DeepKind, DeepSource};
+        self.withdraw_trails(TrailSource::Label, event_id).await?;
+        for kind in [
+            DeepKind::Labelled,
+            DeepKind::Gap(crate::store::gaps::GapKind::Search),
+            DeepKind::Gap(crate::store::gaps::GapKind::Unmatched),
+        ] {
+            let id = event_id.to_string();
+            let looked = DeepSource { kind, id }.target();
+            self.withdraw_trails(TrailSource::Deep, &looked).await?;
+        }
         let mut retired = false;
         for (_, trail, shown, _) in self.store.event_trails(event_id).await? {
             if shown {
@@ -382,15 +453,22 @@ impl Core {
             let permit = self.gate.background_light().await;
             let got = self.embedder.embed_query(&query).await;
             permit.finished();
+            let got = match got {
+                Ok(v) => self.store.reembed_trail(&id, &v, &model).await,
+                Err(e) => Err(e),
+            };
             match got {
-                Ok(v) => match self.store.reembed_trail(&id, &v, &model).await {
-                    Ok(()) => done += 1,
-                    Err(e) => failed = Some(e),
-                },
-                Err(e) => failed = Some(e),
-            }
-            if failed.is_some() {
-                break;
+                Ok(()) => done += 1,
+                // The live model refuses these words and will again: retired, so the trail
+                // does not hold up the ones behind it.
+                Err(e) if !e.retryable() => {
+                    tracing::warn!(trail = %id, error = %e, "a trail cannot be embedded again; retired");
+                    self.store.retire_trail(&id).await?;
+                }
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
             }
         }
         if done > 0 {
@@ -774,6 +852,47 @@ mod tests {
         assert!(core.store.gap_event(&ev, "mount the image").await.unwrap());
         core.trails_after_gap(&ev).await.unwrap();
         assert!(live(&core).await.iter().all(|t| t.missed == 1));
+    }
+
+    #[tokio::test]
+    async fn nothing_here_takes_back_the_model_trail_made_from_that_search() {
+        let core = learning().await;
+        let n = seed_artifact(&core, "mount").await;
+        let ev = searched(&core, "mount the image", &[(&n, None)]).await;
+        labelled(&core, &ev, &[(n.clone(), 1.0)]).await;
+        assert_eq!(live(&core).await.len(), 1);
+        assert!(core.store.gap_event(&ev, "mount the image").await.unwrap());
+        core.trails_after_gap(&ev).await.unwrap();
+        assert!(live(&core).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_mint_reaches_a_loaded_index_without_dropping_it() {
+        let core = learning().await;
+        let n = seed_artifact(&core, "mount").await;
+        assert!(core.trail_index().await.unwrap().is_empty());
+        trail_on(&core, &n, "older words", TrailSource::Verdict).await;
+        let held = core.trail_index.read().unwrap().clone();
+        assert!(held.is_some_and(|i| !i.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_trail_the_live_model_refuses_is_retired_and_does_not_fail_the_pass() {
+        let mut core = learning().await;
+        let n = seed_artifact(&core, "mount").await;
+        let t = crate::store::trails::NewTrail {
+            artifact_id: &n,
+            query: "older words",
+            query_vec: &[1.0, 0.0],
+            embed_model: "old",
+            source: TrailSource::Verdict,
+            source_id: "e0",
+        };
+        core.store.mint_trail(&t, 8, 20_000).await.unwrap();
+        core.embedder = Arc::new(crate::infer::fake::FakeEmbedder::rejecting("too long"));
+        assert_eq!(core.reembed_stale_trails().await.unwrap(), 0);
+        let model = core.embedder.model();
+        assert!(core.store.stale_trails(model, 10).await.unwrap().is_empty());
     }
 
     #[tokio::test]

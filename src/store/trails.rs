@@ -79,6 +79,12 @@ pub struct TrailCounts {
     pub found_through: i64,
 }
 
+pub struct Minted {
+    pub id: String,
+    /// The base's cap retired trails, on whatever notes they were.
+    pub capped: bool,
+}
+
 fn tier(by_person: i64) -> Tier {
     if by_person != 0 {
         Tier::Person
@@ -89,13 +95,13 @@ fn tier(by_person: i64) -> Tier {
 
 impl Store {
     /// Adds the pairing as a source of the live trail on this note within NEAR (0.95) of the
-    /// query, else makes a trail; then enforces `per_note` and `max`. Returns the trail's id.
+    /// query, else makes a trail; then enforces `per_note` and `max`.
     pub async fn mint_trail(
         &self,
         t: &NewTrail<'_>,
         per_note: usize,
         max: usize,
-    ) -> Result<String> {
+    ) -> Result<Minted> {
         let mut tx = self.pool.begin().await?;
         let held = sqlx::query!(
             r#"SELECT id AS "id!", query AS "query!", query_vec AS "query_vec!", embed_model AS "embed_model!"
@@ -196,7 +202,7 @@ impl Store {
             .await?;
         }
         tx.commit().await?;
-        Ok(id)
+        Ok(Minted { id, capped: n > 0 })
     }
 
     /// Removes the source row from every trail that has it; a trail left with none is retired.
@@ -224,6 +230,15 @@ impl Store {
     }
 
     pub async fn live_trails(&self, embed_model: &str) -> Result<Vec<Trail>> {
+        self.live_trails_of(embed_model, None).await
+    }
+
+    /// `live_trails`, of one note when `note` names it.
+    pub async fn live_trails_of(
+        &self,
+        embed_model: &str,
+        note: Option<&str>,
+    ) -> Result<Vec<Trail>> {
         let rows = sqlx::query!(
             r#"SELECT t.id AS "id!", t.artifact_id AS "artifact_id!", t.query AS "query!",
                       t.query_vec AS "query_vec!", t.matched AS "matched!", t.missed AS "missed!",
@@ -231,8 +246,11 @@ impl Store {
                                  AND s.source IN ('verdict', 'ask', 'decide')) AS "person!: i64"
                  FROM trails t
                 WHERE t.retired_at IS NULL AND t.embed_model = ? AND t.vec_dim > 0
+                  AND (? IS NULL OR t.artifact_id = ?)
                 ORDER BY t.created_at, t.id"#,
-            embed_model
+            embed_model,
+            note,
+            note
         )
         .fetch_all(&self.pool)
         .await?;
@@ -276,6 +294,17 @@ impl Store {
             vec_to_blob(vec),
             vec.len() as i64,
             embed_model,
+            id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn retire_trail(&self, id: &str) -> Result<()> {
+        sqlx::query!(
+            "UPDATE trails SET retired_at = ? WHERE id = ? AND retired_at IS NULL",
+            now(),
             id
         )
         .execute(&self.pool)
@@ -484,7 +513,7 @@ mod tests {
             .mint_trail(&new(&n, "q one!", &v(0.99, 0.05), Verdict, "e2"), 8, 20000)
             .await
             .unwrap();
-        assert_eq!(a, b);
+        assert_eq!(a.id, b.id);
         assert_eq!(store.live_trails(M).await.unwrap()[0].tier, Tier::Person);
     }
 
@@ -517,7 +546,8 @@ mod tests {
         let person = store
             .mint_trail(&new(&n, "q0", &vs[0], Verdict, "e0"), 8, 20000)
             .await
-            .unwrap();
+            .unwrap()
+            .id;
         for (i, vec) in vs.iter().enumerate().skip(1) {
             let (q, e) = (format!("q{i}"), format!("e{i}"));
             store
@@ -537,7 +567,8 @@ mod tests {
         let id = store
             .mint_trail(&new(&n, "q", &v(1.0, 0.0), Label, "e1"), 8, 20000)
             .await
-            .unwrap();
+            .unwrap()
+            .id;
         assert!(!store.trail_missed(&id).await.unwrap());
         assert!(!store.trail_missed(&id).await.unwrap());
         assert!(store.trail_missed(&id).await.unwrap());

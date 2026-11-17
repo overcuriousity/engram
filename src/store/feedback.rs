@@ -558,6 +558,16 @@ impl Store {
         .is_some())
     }
 
+    /// The notes a search showed.
+    pub async fn shown_notes(&self, event_id: &str) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT DISTINCT artifact_id FROM search_candidates WHERE event_id = ? AND shown = 1",
+            event_id
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Named by the page, not guessed. The pool is checked for the artifact: an in-flight
     /// rewording may have folded over the row. `false` when gone, judged, or folded.
     pub async fn open_event(&self, event_id: &str, artifact_id: &str) -> Result<bool> {

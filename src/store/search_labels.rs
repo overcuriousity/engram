@@ -82,6 +82,7 @@ impl Store {
         embed_model: &str,
         limit: i64,
     ) -> Result<Vec<String>> {
+        let at = now();
         Ok(sqlx::query_scalar!(
             r#"SELECT e.id AS "id!" FROM search_events e
                 WHERE e.verdict IS NOT 'hit' AND e.verdict IS NOT 'discard'
@@ -92,6 +93,14 @@ impl Store {
                   AND NOT EXISTS (SELECT 1 FROM search_labels l
                                    WHERE l.event_id = e.id AND l.artifact_id <> ''
                                      AND l.question_version = ? AND l.model = ? AND l.yes >= ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_looks d
+                                   WHERE d.source_kind = 'labelled' AND d.source_id = e.id
+                                     AND d.artifact_id = '' AND d.question_version = ?
+                                     AND d.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM deep_look_failures f
+                                   WHERE f.source_kind = 'labelled' AND f.source_id = e.id
+                                     AND f.question_version = ? AND f.model = ?
+                                     AND (f.refused >= ? OR f.retry_at > ?))
                 ORDER BY EXISTS (SELECT 1 FROM observations o
                                   WHERE o.event_id = e.id AND o.source = 'gave_up') DESC,
                          e.created_at ASC, e.id ASC
@@ -102,6 +111,12 @@ impl Store {
             version,
             model,
             relevant_at,
+            version,
+            model,
+            version,
+            model,
+            LABEL_GIVE_UP,
+            at,
             limit
         )
         .fetch_all(&self.pool)
