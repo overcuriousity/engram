@@ -929,8 +929,19 @@ pub async fn tune_questions(core: &Core) -> Result<usize> {
     }
 
     // The bearing line: weak decisions judged right say it is too high, decisions judged "nothing
-    // here" that weighed notes say it is too low.
-    let e = core.store.bears_verdicts(model).await?;
+    // here" that weighed notes say it is too low; while the labels count, a deep look's second
+    // reading of an unjudged decision says the same.
+    let e = core
+        .store
+        .bears_evidence(
+            model,
+            crate::jobs::label::relevant_at(core).await?,
+            core.thresholds(&crate::core::judging::catalogue::answers_query(""))
+                .await?
+                .ask_at,
+            core.labels_count().await?,
+        )
+        .await?;
     let current = core.bears_at().await;
     if let Some(n) = next_bears_at(current, e, min, target) {
         let reason = if n > current {
@@ -2362,6 +2373,36 @@ mod question_tests {
         let mut core = crate::core::test_support::test_core().await;
         core.evolve.autonomous = Autonomy::Full;
         core
+    }
+
+    #[tokio::test]
+    async fn four_of_thirty_one_unjudged_weak_decisions_with_a_relevant_note_lower_the_line() {
+        use crate::store::decisions::test_support::unjudged;
+        use crate::store::deep_looks::{DeepKind, DeepSource};
+        let mut core = full().await;
+        let (decider, version) = (
+            core.decider.model().to_string(),
+            catalogue::answers_query("").version,
+        );
+        for i in 0..31 {
+            let id = unjudged(&core.store, &decider, "split", false, true, &["a"]).await;
+            let s = DeepSource {
+                kind: DeepKind::Gap(crate::store::gaps::GapKind::Decide),
+                id,
+            };
+            let yes = if i < 4 { 0.99 } else { 0.01 };
+            core.store
+                .put_deep_look(&s, &[("a".into(), yes)], version, &decider)
+                .await
+                .unwrap();
+        }
+        // Labels stopped by the person: the readings count for nothing.
+        let overlap = std::mem::replace(&mut core.decide_cfg.label_overlap_min, 0);
+        assert!(!core.labels_count().await.unwrap());
+        assert_eq!(tune_questions(&core).await.unwrap(), 0);
+        core.decide_cfg.label_overlap_min = overlap;
+        assert_eq!(tune_questions(&core).await.unwrap(), 1);
+        assert_eq!(core.bears_at().await, 0.48);
     }
 
     /// `n` decisions of `q` in the core's era, each given `outcome`.

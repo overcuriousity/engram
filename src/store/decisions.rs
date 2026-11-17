@@ -312,6 +312,63 @@ impl Store {
         Ok(e)
     }
 
+    /// `bears_verdicts`, and when `with_readings` the unjudged held decisions since the line
+    /// moved that a deep look has read again (a second reading, or a weak one looked at as a
+    /// gap): what it said of their joint evidence stands in for a verdict. A verdict replaces it.
+    pub async fn bears_evidence(
+        &self,
+        model: &str,
+        relevant_at: f64,
+        ask_at: f64,
+        with_readings: bool,
+    ) -> Result<BearsEvidence> {
+        let mut e = self.bears_verdicts(model).await?;
+        if !with_readings {
+            return Ok(e);
+        }
+        let era = crate::core::decide::settled_era(model);
+        let since = self
+            .moved_at(crate::core::decide::BEARS_ID, &era, false)
+            .await?;
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        let rows = sqlx::query!(
+            r#"SELECT e.weak AS "weak!: i64",
+                      (SELECT MAX(d.yes) FROM decide_evidence v
+                         JOIN deep_looks d ON d.source_id = v.event_id
+                                          AND d.artifact_id = v.artifact_id
+                        WHERE v.event_id = e.id AND v.joint = 1
+                          AND d.source_kind = CASE e.weak WHEN 0 THEN 'second_reading'
+                                                          ELSE 'decide' END
+                          AND d.question_version = ? AND d.model = ?) AS "top: f64"
+                 FROM decide_events e
+                WHERE e.decider = ? AND e.created_at > ? AND COALESCE(e.bears_version, 1) = ?
+                  AND e.not_held = 0 AND e.verdict IS NULL
+                  AND EXISTS (SELECT 1 FROM deep_looks d
+                               WHERE d.source_id = e.id AND d.artifact_id = ''
+                                 AND d.question_version = ? AND d.model = ?
+                                 AND d.source_kind = CASE e.weak WHEN 0 THEN 'second_reading'
+                                                                 ELSE 'decide' END)"#,
+            version,
+            model,
+            model,
+            since,
+            crate::core::decide::state::BEARS_VERSION,
+            version,
+            model
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        for r in rows {
+            let top = r.top.unwrap_or(0.0);
+            match r.weak != 0 {
+                false if top < ask_at => e.too_low += 1,
+                true if top >= relevant_at => e.too_high += 1,
+                _ => e.fine += 1,
+            }
+        }
+        Ok(e)
+    }
+
     /// Held `settled` decisions of `model` made since Decide's line last moved, judged right or
     /// wrong: (judged, wrong).
     pub async fn settled_record(&self, model: &str) -> Result<(usize, usize)> {
@@ -474,8 +531,22 @@ pub(crate) mod test_support {
         weak: bool,
         verdict: AskVerdict,
     ) -> String {
+        let id = unjudged(store, decider, standing, not_held, weak, &[]).await;
+        store.judge_decision(&id, verdict, None).await.unwrap();
+        id
+    }
+
+    /// `judged_weak` before any verdict, resting jointly on `joint`.
+    pub(crate) async fn unjudged(
+        store: &Store,
+        decider: &str,
+        standing: &str,
+        not_held: bool,
+        weak: bool,
+        joint: &[&str],
+    ) -> String {
         let q = crate::infer::decide::Question::noul("verdict", "Keep it?");
-        let id = store
+        store
             .record_decision(NewDecision {
                 question: "Keep it?".into(),
                 questions: crate::core::decide::wire::questions_json(std::slice::from_ref(&q)),
@@ -493,12 +564,22 @@ pub(crate) mod test_support {
                 dropped: 0,
                 query_vec: vec![1.0],
                 embed_model: "fake".into(),
-                evidence: vec![],
+                evidence: joint
+                    .iter()
+                    .enumerate()
+                    .map(|(rank, a)| NewEvidence {
+                        rank,
+                        artifact_id: (*a).into(),
+                        bears: 0.9,
+                        bearing: true,
+                        joint: true,
+                        n: Some(rank + 1),
+                        read: r#"{"verdict":"yes"}"#.into(),
+                    })
+                    .collect(),
             })
             .await
-            .unwrap();
-        store.judge_decision(&id, verdict, None).await.unwrap();
-        id
+            .unwrap()
     }
 }
 
@@ -545,6 +626,62 @@ mod tests {
                 evidence(2, true, Some(2)),
             ],
         }
+    }
+
+    /// Four unjudged decisions a deep look read again, one it did not: (store, the first's id).
+    async fn read_again() -> (Store, String) {
+        use super::test_support::unjudged;
+        use crate::store::deep_looks::{DeepKind, DeepSource};
+        use crate::store::gaps::GapKind;
+        let s = Store::memory().await.unwrap();
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        let mut first = None;
+        for (weak, yes) in [(false, 0.2), (false, 0.9), (true, 0.9), (true, 0.2)] {
+            let id = unjudged(&s, "clef", "settled", false, weak, &["a"]).await;
+            let kind = match weak {
+                false => DeepKind::SecondReading,
+                true => DeepKind::Gap(GapKind::Decide),
+            };
+            let src = DeepSource {
+                kind,
+                id: id.clone(),
+            };
+            s.put_deep_look(&src, &[("a".into(), yes)], version, "clef")
+                .await
+                .unwrap();
+            first.get_or_insert(id);
+        }
+        unjudged(&s, "clef", "settled", false, false, &["a"]).await;
+        (s, first.unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_second_reading_stands_in_for_a_verdict_while_the_labels_count() {
+        let (s, _) = read_again().await;
+        let e = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        let want = BearsEvidence {
+            too_low: 1,
+            too_high: 1,
+            fine: 2,
+        };
+        assert_eq!(e, want);
+        let e = s.bears_evidence("clef", 0.7, 0.5, false).await.unwrap();
+        assert_eq!(e, BearsEvidence::default());
+    }
+
+    #[tokio::test]
+    async fn a_verdict_replaces_the_second_reading_of_its_decision() {
+        let (s, first) = read_again().await;
+        s.judge_decision(&first, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        let e = s.bears_evidence("clef", 0.7, 0.5, true).await.unwrap();
+        let want = BearsEvidence {
+            too_low: 0,
+            too_high: 1,
+            fine: 3,
+        };
+        assert_eq!(e, want);
     }
 
     #[tokio::test]

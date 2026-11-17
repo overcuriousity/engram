@@ -228,6 +228,51 @@ impl Store {
         .await?;
         Ok((row.looks, row.found))
     }
+
+    /// Unjudged searches under one generation whose left-out notes this model found relevant at
+    /// this version, newest first, with the note it rated highest. Never served, so no rank.
+    pub async fn deep_found_pairs(
+        &self,
+        generation_id: &str,
+        relevant_at: f64,
+        version: u32,
+        model: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::store::feedback::JudgedPair>> {
+        let rows = sqlx::query!(
+            r#"SELECT id AS "id!", query AS "query!", query_vec AS "query_vec!: Vec<u8>",
+                      embed_model AS "embed_model!", expect AS "expect!: String"
+                 FROM (SELECT e.id, e.query, e.query_vec, e.embed_model, e.created_at,
+                              (SELECT d.artifact_id FROM deep_looks d
+                                WHERE d.source_kind = 'labelled' AND d.source_id = e.id
+                                  AND d.artifact_id <> '' AND d.yes >= ?
+                                  AND d.question_version = ? AND d.model = ?
+                                ORDER BY d.yes DESC, d.artifact_id LIMIT 1) AS expect
+                         FROM search_events e
+                        WHERE e.judged_at IS NULL AND e.generation_id = ?)
+                WHERE expect IS NOT NULL
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?"#,
+            relevant_at,
+            version,
+            model,
+            generation_id,
+            limit as i64
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::store::feedback::JudgedPair {
+                event_id: r.id,
+                query: r.query,
+                expect: r.expect,
+                query_vec: crate::store::feedback::blob_to_vec(&r.query_vec),
+                embed_model: r.embed_model,
+                served_rank: None,
+            })
+            .collect())
+    }
 }
 
 #[cfg(test)]

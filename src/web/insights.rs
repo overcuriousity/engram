@@ -29,6 +29,11 @@ fn searches(n: usize) -> String {
     format!("{n} search{}", if n == 1 { "" } else { "es" })
 }
 
+/// Absent before any deep look.
+fn deep_line(looks: i64, found: i64) -> Option<String> {
+    (looks > 0).then(|| format!("deep looks: {looks} · {found} found a note search had missed"))
+}
+
 /// Absent with no live trail.
 fn trail_line(t: &crate::store::trails::TrailCounts) -> Option<String> {
     (t.live > 0).then(|| {
@@ -782,6 +787,16 @@ async fn page(
                     .await?;
                 let mut by_model = model_lines(&tenant.core.label_figures().await?);
                 by_model.extend(trail_line(&tenant.core.store.trail_counts().await?));
+                let (looks, found) = tenant
+                    .core
+                    .store
+                    .deep_counts(
+                        crate::jobs::label::relevant_at(&tenant.core).await?,
+                        crate::core::judging::catalogue::answers_query("").version,
+                        tenant.core.decider.model(),
+                    )
+                    .await?;
+                by_model.extend(deep_line(looks, found));
                 match f.judged {
                     0 => Retrieval {
                         recall_at_10: "—".into(),
