@@ -646,6 +646,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_linked_note_outside_the_replay_is_in_the_pool() {
+        let (core, dec, fillers, _) = base("LINKED").await;
+        // No vector: the replay cannot return it; only the link from its head brings it in.
+        let src = core
+            .store
+            .insert_corpus("linked", "web", None)
+            .await
+            .unwrap();
+        let linked = core
+            .store
+            .insert_artifacts(
+                &src.id,
+                &[crate::store::artifacts::NewArtifact {
+                    text: "the LINKED note".into(),
+                    ..Default::default()
+                }],
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .id;
+        let (half_life, now) = (core.associate.half_life_days, crate::store::now());
+        core.store
+            .bump_link(&fillers[0], &linked, 5.0, None, half_life, now)
+            .await
+            .unwrap();
+        core.store
+            .set_link_state(
+                &fillers[0],
+                &linked,
+                crate::store::links::LinkState::Related,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let s = gap(&core).await;
+
+        run(&core, &s.target()).await.unwrap();
+
+        let t = core.store.live_trails(M).await.unwrap();
+        assert_eq!((t.len(), t[0].artifact_id.as_str()), (1, linked.as_str()));
+        assert_eq!(
+            dec.calls(),
+            16,
+            "the fifteen of the replay, then the linked note"
+        );
+        assert!(open_gap_ids(&core).await.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_source_deleted_before_the_look_ends_quietly() {
         let (core, dec, _, _) = base(MARK).await;
         assert!(run(&core, "labelled:gone").await.is_ok());
