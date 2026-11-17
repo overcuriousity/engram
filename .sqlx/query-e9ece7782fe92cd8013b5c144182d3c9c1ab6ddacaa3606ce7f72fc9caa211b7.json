@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\" FROM decide_events\n                WHERE weak = 1 AND verdict = 'right' AND embed_model = ? AND vec_dim > 0\n                ORDER BY created_at ASC, id ASC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e9ece7782fe92cd8013b5c144182d3c9c1ab6ddacaa3606ce7f72fc9caa211b7"
+}

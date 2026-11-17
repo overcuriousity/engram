@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE search_events SET embed_model = 'clef', vec_dim = 2 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "f4ed6682e98bc881e4f3da80d1420147310667a91b422cbe18695356d7e4eaef"
+}

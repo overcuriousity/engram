@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT matched AS \"matched!\", missed AS \"missed!\", retired_at FROM trails WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "matched!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "matched"
+          }
+        }
+      },
+      {
+        "name": "missed!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "missed"
+          }
+        }
+      },
+      {
+        "name": "retired_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "retired_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "9a211d9159644ba67597f130459438655e286e0e2b42f6ecff8724d6d211bc5d"
+}

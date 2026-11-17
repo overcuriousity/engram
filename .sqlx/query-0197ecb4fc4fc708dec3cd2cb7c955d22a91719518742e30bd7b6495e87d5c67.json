@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"looks!: i64\",\n                      COALESCE(SUM(EXISTS (\n                        SELECT 1 FROM deep_looks f\n                         WHERE f.source_kind = d.source_kind AND f.source_id = d.source_id\n                           AND f.artifact_id <> '' AND f.yes >= ?\n                           AND f.question_version = ? AND f.model = ?)), 0) AS \"found!: i64\"\n                 FROM deep_looks d\n                WHERE d.artifact_id = '' AND d.question_version = ? AND d.model = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "looks!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "found!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "0197ecb4fc4fc708dec3cd2cb7c955d22a91719518742e30bd7b6495e87d5c67"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM trail_sources WHERE source = ? AND source_id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "58f99e120a412a0fc4b7e5555920b0b7502496ef3e0b357a83da7d085f0fecbe"
+}

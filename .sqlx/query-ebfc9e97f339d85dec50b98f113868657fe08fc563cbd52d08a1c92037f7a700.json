@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO trails\n                       (id, artifact_id, query, query_vec, vec_dim, embed_model, created_at, used_at)\n                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "ebfc9e97f339d85dec50b98f113868657fe08fc563cbd52d08a1c92037f7a700"
+}

@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 FROM deep_look_failures\n              WHERE source_kind = ? AND source_id = ? AND question_version = ? AND model = ?\n                AND (refused >= ? OR retry_at > ?)",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "edee66db151609c894d7b7cd740aa24a4f16c9ac547f95445f9489cc90133765"
+}

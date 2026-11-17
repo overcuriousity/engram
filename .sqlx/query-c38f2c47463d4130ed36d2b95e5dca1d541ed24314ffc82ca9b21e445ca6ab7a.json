@@ -1,0 +1,74 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id AS \"id!\", query AS \"query!\", query_vec AS \"query_vec!: Vec<u8>\",\n                      embed_model AS \"embed_model!\", expect AS \"expect!: String\"\n                 FROM (SELECT e.id, e.query, e.query_vec, e.embed_model, e.created_at,\n                              (SELECT d.artifact_id FROM deep_looks d\n                                WHERE d.source_kind = 'labelled' AND d.source_id = e.id\n                                  AND d.artifact_id <> '' AND d.yes >= ?\n                                  AND d.question_version = ? AND d.model = ?\n                                ORDER BY d.yes DESC, d.artifact_id LIMIT 1) AS expect\n                         FROM search_events e\n                        WHERE e.judged_at IS NULL AND e.generation_id = ?)\n                WHERE expect IS NOT NULL\n                ORDER BY created_at DESC, id DESC\n                LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec!: Vec<u8>",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model!",
+        "ordinal": 3,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_events",
+            "name": "embed_model"
+          }
+        }
+      },
+      {
+        "name": "expect!: String",
+        "ordinal": 4,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "deep_looks",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "c38f2c47463d4130ed36d2b95e5dca1d541ed24314ffc82ca9b21e445ca6ab7a"
+}

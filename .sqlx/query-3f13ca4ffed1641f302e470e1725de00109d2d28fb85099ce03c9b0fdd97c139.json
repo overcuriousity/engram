@@ -1,0 +1,21 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT 1 FROM deep_looks\n              WHERE source_kind = ? AND source_id = ? AND artifact_id = ''\n                AND question_version = ? AND model = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "1",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3f13ca4ffed1641f302e470e1725de00109d2d28fb85099ce03c9b0fdd97c139"
+}

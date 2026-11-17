@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT question AS \"query!\", query_vec AS \"vec!\", embed_model AS \"embed_model!\"\n                         FROM decide_events WHERE id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "query!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "question"
+          }
+        }
+      },
+      {
+        "name": "vec!",
+        "ordinal": 1,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "embed_model!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "decide_events",
+            "name": "embed_model"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "bd05ccdc1b260852f74ec748d704c13d2e9f6d5264d939aa0b660c7c8d5a0566"
+}

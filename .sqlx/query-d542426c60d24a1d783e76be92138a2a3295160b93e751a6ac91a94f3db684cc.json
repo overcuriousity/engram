@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO deep_look_failures\n               (source_kind, source_id, question_version, model, refused, retry_at)\n             VALUES (?, ?, ?, ?, ?, ?)\n             ON CONFLICT(source_kind, source_id) DO UPDATE SET\n               refused = CASE WHEN question_version = excluded.question_version\n                               AND model = excluded.model\n                              THEN refused + excluded.refused ELSE excluded.refused END,\n               question_version = excluded.question_version,\n               model = excluded.model,\n               retry_at = excluded.retry_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "d542426c60d24a1d783e76be92138a2a3295160b93e751a6ac91a94f3db684cc"
+}

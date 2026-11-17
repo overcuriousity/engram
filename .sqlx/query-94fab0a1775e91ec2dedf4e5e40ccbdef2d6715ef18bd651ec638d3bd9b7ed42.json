@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE trails SET retired_at = ?\n              WHERE retired_at IS NULL\n                AND NOT EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = trails.id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "94fab0a1775e91ec2dedf4e5e40ccbdef2d6715ef18bd651ec638d3bd9b7ed42"
+}

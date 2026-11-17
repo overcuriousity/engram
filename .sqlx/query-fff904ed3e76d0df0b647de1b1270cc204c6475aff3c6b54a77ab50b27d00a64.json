@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT OR IGNORE INTO trail_sources (trail_id, source, source_id, at) VALUES (?, ?, ?, ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "fff904ed3e76d0df0b647de1b1270cc204c6475aff3c6b54a77ab50b27d00a64"
+}

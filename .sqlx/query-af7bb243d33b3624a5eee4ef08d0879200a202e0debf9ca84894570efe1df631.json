@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT last_verified_at FROM artifacts ORDER BY id",
+  "describe": {
+    "columns": [
+      {
+        "name": "last_verified_at",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "artifacts",
+            "name": "last_verified_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "af7bb243d33b3624a5eee4ef08d0879200a202e0debf9ca84894570efe1df631"
+}

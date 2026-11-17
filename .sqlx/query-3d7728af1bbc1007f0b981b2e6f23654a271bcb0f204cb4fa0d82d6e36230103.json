@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE trails SET missed = missed + 1 WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "3d7728af1bbc1007f0b981b2e6f23654a271bcb0f204cb4fa0d82d6e36230103"
+}

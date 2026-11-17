@@ -1,0 +1,35 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COUNT(*) AS \"live!\",\n                      COUNT(DISTINCT artifact_id) AS \"notes!\",\n                      COALESCE(SUM(EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = trails.id\n                                              AND s.source IN ('verdict', 'ask', 'decide'))), 0) AS \"by_person!: i64\"\n                 FROM trails WHERE retired_at IS NULL",
+  "describe": {
+    "columns": [
+      {
+        "name": "live!",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "notes!",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "by_person!: i64",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f2568d1783f74009dcdc704798f270e99d60724788e1e8a5f31b29582a333206"
+}

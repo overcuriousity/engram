@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT l.artifact_id AS \"artifact_id!\" FROM search_labels l\n                 JOIN search_events e ON e.id = l.event_id\n                WHERE l.event_id = ? AND e.judged_at IS NULL AND l.yes >= ? AND l.artifact_id <> ''\n                  AND l.question_version = ? AND l.model = ?\n                  AND NOT EXISTS (\n                        SELECT 1 FROM search_candidates c JOIN trails t ON t.id = c.trail_id\n                         WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id\n                           AND NOT EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = t.id\n                                              AND s.source IN ('verdict', 'ask', 'decide')))\n                ORDER BY l.yes DESC,\n                         (SELECT MIN(c.rank) FROM search_candidates c\n                           WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id) ASC\n                LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "artifact_id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_labels",
+            "name": "artifact_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a33b49620992f75a096f68b809789ccad372547d28b351847c216fd8dc03bdcf"
+}

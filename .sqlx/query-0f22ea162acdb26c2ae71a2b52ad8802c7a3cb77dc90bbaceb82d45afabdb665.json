@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE trails SET matched = matched + 1, used_at = ? WHERE id = ?",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "0f22ea162acdb26c2ae71a2b52ad8802c7a3cb77dc90bbaceb82d45afabdb665"
+}

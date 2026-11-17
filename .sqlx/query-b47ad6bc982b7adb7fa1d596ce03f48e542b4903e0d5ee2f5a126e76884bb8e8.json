@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE trails SET retired_at = ? WHERE id IN (\n                   SELECT id FROM trails\n                    WHERE artifact_id = ? AND retired_at IS NULL AND id != ?\n                    ORDER BY EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = trails.id\n                                        AND s.source IN ('verdict', 'ask', 'decide')),\n                             created_at, id\n                    LIMIT ?)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "b47ad6bc982b7adb7fa1d596ce03f48e542b4903e0d5ee2f5a126e76884bb8e8"
+}

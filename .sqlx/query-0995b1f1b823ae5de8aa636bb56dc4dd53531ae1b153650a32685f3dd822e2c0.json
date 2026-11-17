@@ -1,0 +1,93 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT t.id AS \"id!\", t.artifact_id AS \"artifact_id!\", t.query AS \"query!\",\n                      t.query_vec AS \"query_vec!\", t.matched AS \"matched!\", t.missed AS \"missed!\",\n                      EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = t.id\n                                 AND s.source IN ('verdict', 'ask', 'decide')) AS \"person!: i64\"\n                 FROM trails t\n                WHERE t.retired_at IS NULL AND t.embed_model = ? AND t.vec_dim > 0\n                ORDER BY t.created_at, t.id",
+  "describe": {
+    "columns": [
+      {
+        "name": "id!",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "name": "artifact_id!",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "artifact_id"
+          }
+        }
+      },
+      {
+        "name": "query!",
+        "ordinal": 2,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "query"
+          }
+        }
+      },
+      {
+        "name": "query_vec!",
+        "ordinal": 3,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "query_vec"
+          }
+        }
+      },
+      {
+        "name": "matched!",
+        "ordinal": 4,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "matched"
+          }
+        }
+      },
+      {
+        "name": "missed!",
+        "ordinal": 5,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "trails",
+            "name": "missed"
+          }
+        }
+      },
+      {
+        "name": "person!: i64",
+        "ordinal": 6,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0995b1f1b823ae5de8aa636bb56dc4dd53531ae1b153650a32685f3dd822e2c0"
+}

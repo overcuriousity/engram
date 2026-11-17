@@ -1,0 +1,28 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT (SELECT COUNT(*) FROM search_labels l\n                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?\n                          AND l.yes >= ? AND l.artifact_id <> '') AS \"relevant!: i64\",\n                      (SELECT COUNT(*) FROM search_labels l\n                        WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?\n                          AND l.artifact_id <> '') AS \"labelled!: i64\"\n                 FROM search_events e\n                WHERE EXISTS (SELECT 1 FROM search_labels l\n                               WHERE l.event_id = e.id AND l.question_version = ? AND l.model = ?\n                                 AND l.artifact_id <> '')\n                ORDER BY e.created_at DESC, e.id DESC LIMIT ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "relevant!: i64",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": "Expression"
+      },
+      {
+        "name": "labelled!: i64",
+        "ordinal": 1,
+        "type_info": "Integer",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "1d81a90b169915d5095df7ef14d0a8fa7bc9e8ba0e4f868bdb1759dda1e6bc1e"
+}

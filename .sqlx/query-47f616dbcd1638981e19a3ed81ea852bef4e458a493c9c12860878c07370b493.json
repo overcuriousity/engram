@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT trail_id FROM search_candidates WHERE artifact_id = ?",
+  "describe": {
+    "columns": [
+      {
+        "name": "trail_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "search_candidates",
+            "name": "trail_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "47f616dbcd1638981e19a3ed81ea852bef4e458a493c9c12860878c07370b493"
+}

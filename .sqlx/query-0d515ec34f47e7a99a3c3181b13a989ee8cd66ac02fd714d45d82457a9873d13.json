@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM deep_look_failures\n              WHERE (source_kind = 'ask'\n                     AND NOT EXISTS (SELECT 1 FROM ask_events WHERE id = deep_look_failures.source_id))\n                 OR (source_kind IN ('search', 'unmatched', 'labelled')\n                     AND NOT EXISTS (SELECT 1 FROM search_events WHERE id = deep_look_failures.source_id))\n                 OR (source_kind = 'pursuit'\n                     AND NOT EXISTS (SELECT 1 FROM pursuits WHERE id = deep_look_failures.source_id))\n                 OR (source_kind = 'subject'\n                     AND NOT EXISTS (SELECT 1 FROM ask_subjects WHERE id = deep_look_failures.source_id))\n                 OR (source_kind IN ('decide', 'weak_right', 'second_reading')\n                     AND NOT EXISTS (SELECT 1 FROM decide_events WHERE id = deep_look_failures.source_id))\n                 OR source_kind NOT IN ('ask', 'search', 'unmatched', 'pursuit', 'subject', 'decide',\n                                        'weak_right', 'second_reading', 'labelled')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "0d515ec34f47e7a99a3c3181b13a989ee8cd66ac02fd714d45d82457a9873d13"
+}
