@@ -3,10 +3,12 @@
 use super::standing::pick;
 use super::{refuse, wire};
 use crate::core::Core;
+use crate::core::trails::shrug;
 use crate::error::{Error, Result};
 use crate::infer::decide::{Answer, Kind, Question, trim};
 use crate::store::asks::AskVerdict;
 use crate::store::decisions::StoredDecision;
+use crate::store::trails::TrailSource::Decide;
 
 /// What the person corrected a wrong verdict to, as every door sends it: an option name, a level index
 /// (a number or its digits), or yes / no; `key`, when the door names one, must be the first question's.
@@ -160,6 +162,8 @@ impl Core {
         self.store
             .judge_decision(id, verdict, stored.as_deref())
             .await?;
+        // A verdict given again replaces the one before, and its trails.
+        shrug("a judged decision", self.withdraw_trails(Decide, id).await);
 
         // A weak decision's notes were never over the bearing line: nothing to confirm or contest.
         if d.weak {
@@ -185,6 +189,10 @@ impl Core {
                 .collect();
             let s = sides(q, right, &reads);
             self.confirm_cited(&s.agree).await;
+            shrug(
+                "a judged decision",
+                self.mint_trails_from(Decide, id, &s.agree).await,
+            );
             if let Some(with) = s.agree.first() {
                 for against in s.against.iter().take(MAX_QUEUED_PAIRS) {
                     let decide = crate::store::pairs::Net::Decide;
@@ -218,6 +226,7 @@ impl Core {
     /// Clears the verdict and the right answer; stamps and queued pairs stay.
     pub async fn unjudge_decision(&self, id: &str) -> Result<Judged> {
         self.store.unjudge_decision(id).await?;
+        shrug("an undone decision", self.withdraw_trails(Decide, id).await);
         let d = self.store.decision(id).await?.ok_or(Error::NotFound)?;
         Ok(Judged {
             verdict: d.verdict,
@@ -532,6 +541,47 @@ mod tests {
         )
         .await;
         (ids, id)
+    }
+
+    #[tokio::test]
+    async fn a_decision_judged_right_leaves_a_trail_on_the_notes_that_agree_and_a_weak_one_leaves_none()
+     {
+        let mut core = test_core().await;
+        core.learn.enabled = true;
+        let (ids, id) = keep_or_switch(&core).await;
+        let q = choice(&["keep", "switch"]);
+        let weak = recorded(&core, &q, Some("keep"), &[(&ids[0], 0.95, "keep")]).await;
+        let model = core.embedder.model();
+        sqlx::query!("UPDATE decide_events SET embed_model = ?", model)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        sqlx::query!("UPDATE decide_events SET weak = 1 WHERE id = ?", weak)
+            .execute(&core.store.pool)
+            .await
+            .unwrap();
+        let trailed = || async {
+            let mut on: Vec<String> = core
+                .store
+                .live_trails(model)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|t| t.artifact_id)
+                .collect();
+            on.sort();
+            on
+        };
+        core.judge_decision(&weak, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        assert!(trailed().await.is_empty());
+        core.judge_decision(&id, AskVerdict::Right, None)
+            .await
+            .unwrap();
+        let mut agree = vec![ids[0].clone(), ids[1].clone()];
+        agree.sort();
+        assert_eq!(trailed().await, agree);
     }
 
     #[tokio::test]

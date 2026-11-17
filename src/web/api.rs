@@ -1286,8 +1286,12 @@ async fn get_artifact(
             .store
             .event_is_mine(event, &tenant.user.subject)
             .await?
-        && tenant.core.store.open_event(event, &cid).await?
+        && let (true, first) = tenant.core.store.open_event_first(event, &cid).await?
     {
+        // Once a search: a reload is not a second confirmation.
+        if first {
+            crate::core::trails::shrug("an open", tenant.core.trails_after_open(event, &cid).await);
+        }
         search_event = Some(event.to_string());
     }
     // A deleted document does not make its artifact unreadable.

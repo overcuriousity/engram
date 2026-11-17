@@ -132,7 +132,10 @@ async fn label(core: &Core, event_id: &str) -> Result<()> {
             answers_query("").version,
             core.decider.model(),
         )
-        .await
+        .await?;
+    let after = core.trails_after_labels(event_id, &rows).await;
+    crate::core::trails::shrug("a labelled search", after);
+    Ok(())
 }
 
 /// Marks a search none of whose live candidates fits one request as labelled, so it leaves the

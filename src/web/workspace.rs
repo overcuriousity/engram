@@ -672,7 +672,16 @@ async fn ask_verdict(
         return Err(Error::NotFound.into());
     }
     match f.verdict.as_str() {
-        "none" => tenant.core.store.unjudge_ask(&id).await?,
+        "none" => {
+            tenant.core.store.unjudge_ask(&id).await?;
+            crate::core::trails::shrug(
+                "an undone answer",
+                tenant
+                    .core
+                    .withdraw_trails(crate::store::trails::TrailSource::Ask, &id)
+                    .await,
+            );
+        }
         v => {
             let verdict = crate::store::asks::AskVerdict::parse(v)
                 .ok_or_else(|| Error::Validation(format!("unknown verdict {v}")))?;
@@ -716,7 +725,9 @@ pub(crate) async fn judge_search(
     if !tenant.core.learn.enabled {
         return Err(Error::NotFound);
     }
+    use crate::core::trails::shrug;
     use crate::store::feedback::Labeller;
+    use crate::store::trails::TrailSource;
     let store = &tenant.core.store;
     // The id comes off the page; one ownership check for all four answers (`Store::event_is_mine`).
     if !store.event_is_mine(id, &tenant.user.subject).await? {
@@ -738,6 +749,7 @@ pub(crate) async fn judge_search(
                         .core
                         .confirm_cited(std::slice::from_ref(&artifact_id.to_string()))
                         .await;
+                    shrug("a hit", tenant.core.trails_after_hit(id, artifact_id).await);
                     "hit"
                 }
                 Err(Error::NotFound) => return Ok(None),
@@ -760,7 +772,13 @@ pub(crate) async fn judge_search(
         "none" => {
             // Only back over what this bar wrote (`Labeller::Confirm`), so a hit from another tab survives.
             match store.unjudge(id, Labeller::Confirm).await {
-                Ok(()) => "",
+                Ok(()) => {
+                    shrug(
+                        "an undone hit",
+                        tenant.core.withdraw_trails(TrailSource::Verdict, id).await,
+                    );
+                    ""
+                }
                 Err(Error::NotFound) => return Ok(None),
                 Err(e) => return Err(e),
             }
@@ -807,6 +825,9 @@ pub(crate) async fn gap_search(tenant: &Tenant, id: &str, q: &str) -> Result<boo
         return Err(Error::NotFound);
     }
     let recorded = tenant.core.store.gap_event(id, q.trim()).await?;
+    if recorded {
+        crate::core::trails::shrug("nothing here", tenant.core.trails_after_gap(id).await);
+    }
     Ok(recorded)
 }
 

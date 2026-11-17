@@ -358,7 +358,8 @@ impl Store {
     }
 
     /// The candidate this model at this version rates highest for a search the person did not
-    /// judge, if it is relevant.
+    /// judge, if it is relevant. Not one a model trail brought: the model agreeing with its own
+    /// trail is no second opinion.
     pub async fn model_expected(
         &self,
         event_id: &str,
@@ -371,6 +372,11 @@ impl Store {
                  JOIN search_events e ON e.id = l.event_id
                 WHERE l.event_id = ? AND e.judged_at IS NULL AND l.yes >= ? AND l.artifact_id <> ''
                   AND l.question_version = ? AND l.model = ?
+                  AND NOT EXISTS (
+                        SELECT 1 FROM search_candidates c JOIN trails t ON t.id = c.trail_id
+                         WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id
+                           AND NOT EXISTS (SELECT 1 FROM trail_sources s WHERE s.trail_id = t.id
+                                              AND s.source IN ('verdict', 'ask', 'decide')))
                 ORDER BY l.yes DESC,
                          (SELECT MIN(c.rank) FROM search_candidates c
                            WHERE c.event_id = l.event_id AND c.artifact_id = l.artifact_id) ASC
