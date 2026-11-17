@@ -27,17 +27,7 @@ pub async fn relevant_at(core: &Core) -> Result<f64> {
 /// state; `None` when the whole note does not fit one request, since a cut text is not judged.
 pub async fn answers(core: &Core, query: &str, note: &Chunk) -> Result<Option<f64>> {
     let asked = answers_query(query);
-    let room = state::room(core, &[&asked]);
-    let shown = state::one(
-        &state::Note {
-            title: note.title.as_deref(),
-            day: None,
-            text: &note.text,
-        },
-        &core.counter,
-        room,
-    );
-    let Some(shown) = shown else {
+    let Some(shown) = shown(core, &asked, note) else {
         return Ok(None);
     };
     let permit = core.gate.background_light().await;
@@ -53,6 +43,24 @@ pub async fn answers(core: &Core, query: &str, note: &Chunk) -> Result<Option<f6
             detail: "the answer has none for \"answers_query\"".into(),
         }),
     }
+}
+
+/// Whether `answers` would ask about the note: the deep look drops one that does not fit before
+/// counting its pool.
+pub fn fits(core: &Core, query: &str, note: &Chunk) -> bool {
+    shown(core, &answers_query(query), note).is_some()
+}
+
+fn shown(core: &Core, asked: &crate::core::judging::Asked, note: &Chunk) -> Option<String> {
+    state::one(
+        &state::Note {
+            title: note.title.as_deref(),
+            day: None,
+            text: &note.text,
+        },
+        &core.counter,
+        state::room(core, &[asked]),
+    )
 }
 
 /// Labels the search. A failure stores no label and is remembered, so the sweep passes the search

@@ -125,6 +125,24 @@ impl Store {
         Ok(Some((query, candidates)))
     }
 
+    /// The notes the labeller asked about for this search in this era; the step-aside row is none.
+    pub async fn labelled_notes(
+        &self,
+        event_id: &str,
+        version: u32,
+        model: &str,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            "SELECT artifact_id FROM search_labels
+              WHERE event_id = ? AND artifact_id <> '' AND question_version = ? AND model = ?",
+            event_id,
+            version,
+            model
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// Replaces the search's labels: one era per search. Labelled, its failed attempts are done with.
     pub async fn put_search_labels(
         &self,
