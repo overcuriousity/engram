@@ -929,8 +929,19 @@ pub async fn tune_questions(core: &Core) -> Result<usize> {
     }
 
     // The bearing line: weak decisions judged right say it is too high, decisions judged "nothing
-    // here" that weighed notes say it is too low.
-    let e = core.store.bears_verdicts(model).await?;
+    // here" that weighed notes say it is too low; while the labels count, a deep look's second
+    // reading of an unjudged decision says the same.
+    let e = core
+        .store
+        .bears_evidence(
+            model,
+            crate::jobs::label::relevant_at(core).await?,
+            core.thresholds(&crate::core::judging::catalogue::answers_query(""))
+                .await?
+                .ask_at,
+            core.labels_count().await?,
+        )
+        .await?;
     let current = core.bears_at().await;
     if let Some(n) = next_bears_at(current, e, min, target) {
         let reason = if n > current {

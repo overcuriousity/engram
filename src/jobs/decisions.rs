@@ -293,11 +293,20 @@ async fn deepen(core: &Core, share: usize) -> Result<u64> {
             .await?,
     ));
     let relevant_at = crate::jobs::label::relevant_at(core).await?;
+    // A search still open as a gap is looked at as that, not a second time as left out.
+    let gapped: std::collections::HashSet<String> = sources
+        .iter()
+        .filter(|s| matches!(s.kind, DeepKind::Gap(_)))
+        .map(|s| s.id.clone())
+        .collect();
     sources.extend(of(
         DeepKind::Labelled,
         store
             .searches_left_out(relevant_at, version, model, embed, DEEPEN_LOOKAHEAD)
-            .await?,
+            .await?
+            .into_iter()
+            .filter(|id| !gapped.contains(id))
+            .collect(),
     ));
     let mut left = share;
     let mut armed = 0;

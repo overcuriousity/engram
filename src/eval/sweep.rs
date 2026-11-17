@@ -376,17 +376,24 @@ pub(crate) async fn evidence_pairs(core: &Core, generation_id: &str) -> Result<(
     // After the person's: an unjudged search adds the note the model expects, and only then.
     let room = OBSERVATION_LIMIT.saturating_sub(verdicts.len());
     if room > 0 && core.labels_count().await? {
+        let relevant_at = crate::jobs::label::relevant_at(core).await?;
+        let version = crate::core::judging::catalogue::answers_query("").version;
+        let model = core.decider.model();
         verdicts.extend(
             core.store
-                .model_judged_pairs(
-                    generation_id,
-                    crate::jobs::label::relevant_at(core).await?,
-                    crate::core::judging::catalogue::answers_query("").version,
-                    core.decider.model(),
-                    room,
-                )
+                .model_judged_pairs(generation_id, relevant_at, version, model, room)
                 .await?,
         );
+        // Then what a deep look found that the search left out: a search the labels already
+        // gave a pair counts once.
+        let room = OBSERVATION_LIMIT.saturating_sub(verdicts.len());
+        let paired: std::collections::HashSet<String> =
+            verdicts.iter().map(|p| p.event_id.clone()).collect();
+        let found = core
+            .store
+            .deep_found_pairs(generation_id, relevant_at, version, model, room)
+            .await?;
+        verdicts.extend(found.into_iter().filter(|p| !paired.contains(&p.event_id)));
     }
     let confirmed: std::collections::HashSet<(String, String)> = verdicts
         .iter()
@@ -1049,6 +1056,40 @@ mod tests {
                 .count();
             assert_eq!(model_pair, usize::from(counts));
         }
+    }
+
+    #[tokio::test]
+    async fn a_deep_find_for_an_unjudged_search_is_a_pair_the_sweep_scores() {
+        use crate::store::deep_looks::{DeepKind, DeepSource};
+        let (core, order) = seeded().await;
+        let generation = a_generation(&core).await;
+        for _ in 0..27 {
+            labelled_search(&core, &order, Some(0), &[0]).await;
+        }
+        // Nothing the search showed was relevant; a deep look found a note it left out.
+        let id = labelled_search(&core, &order, None, &[]).await;
+        let found = order.last().unwrap().clone();
+        let s = DeepSource {
+            kind: DeepKind::Labelled,
+            id,
+        };
+        core.store
+            .put_deep_look(
+                &s,
+                &[(found.clone(), 0.95)],
+                crate::core::judging::catalogue::answers_query("").version,
+                core.decider.model(),
+            )
+            .await
+            .unwrap();
+        assert!(core.labels_count().await.unwrap());
+        let (pairs, _) = evidence_pairs(&core, &generation).await.unwrap();
+        assert_eq!(pairs.len(), 28);
+        assert!(
+            pairs
+                .iter()
+                .any(|p| p.satisfies.contains(&found) && p.served_rank.is_none())
+        );
     }
 
     #[tokio::test]
