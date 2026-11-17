@@ -337,7 +337,8 @@ impl Store {
                          JOIN deep_looks d ON d.source_id = v.event_id
                                           AND d.artifact_id = v.artifact_id
                         WHERE v.event_id = e.id AND v.joint = 1
-                          AND d.source_kind IN ('second_reading', 'decide')
+                          AND d.source_kind = CASE e.weak WHEN 0 THEN 'second_reading'
+                                                          ELSE 'decide' END
                           AND d.question_version = ? AND d.model = ?) AS "top: f64"
                  FROM decide_events e
                 WHERE e.decider = ? AND e.created_at > ? AND COALESCE(e.bears_version, 1) = ?
