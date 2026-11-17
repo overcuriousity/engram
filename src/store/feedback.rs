@@ -561,6 +561,16 @@ impl Store {
     /// Named by the page, not guessed. The pool is checked for the artifact: an in-flight
     /// rewording may have folded over the row. `false` when gone, judged, or folded.
     pub async fn open_event(&self, event_id: &str, artifact_id: &str) -> Result<bool> {
+        Ok(self.open_event_first(event_id, artifact_id).await?.0)
+    }
+
+    /// `open_event`, and whether this was the search's first open: what is said once per search,
+    /// the observation and a trail's confirmation, is said on that one.
+    pub async fn open_event_first(
+        &self,
+        event_id: &str,
+        artifact_id: &str,
+    ) -> Result<(bool, bool)> {
         let generation = self.live_generation().await?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
@@ -630,7 +640,8 @@ impl Store {
         }
 
         tx.commit().await?;
-        Ok(stamped)
+        let first = stamped && before.is_some_and(|r| r.opened_at.is_none());
+        Ok((stamped, first))
     }
 
     /// `AND judged_at IS NULL`: this clears the verdict, so a stale tab would delete a pair.

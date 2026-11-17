@@ -397,6 +397,17 @@ impl Store {
             .collect())
     }
 
+    /// Whether a result of this search was opened: that open already confirmed its trail.
+    pub async fn event_opened(&self, event_id: &str) -> Result<bool> {
+        Ok(sqlx::query_scalar!(
+            "SELECT 1 FROM search_events WHERE id = ? AND opened_at IS NOT NULL",
+            event_id
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .is_some())
+    }
+
     pub async fn trail_counts(&self) -> Result<TrailCounts> {
         let r = sqlx::query!(
             r#"SELECT COUNT(*) AS "live!",

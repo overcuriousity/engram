@@ -536,9 +536,12 @@ async fn artifact_detail(
             .store
             .event_is_mine(event, &tenant.user.subject)
             .await?
-        && tenant.core.store.open_event(event, &cid).await?
+        && let (true, first) = tenant.core.store.open_event_first(event, &cid).await?
     {
-        crate::core::trails::shrug("an open", tenant.core.trails_after_open(event, &cid).await);
+        // Once a search: a reload is not a second confirmation.
+        if first {
+            crate::core::trails::shrug("an open", tenant.core.trails_after_open(event, &cid).await);
+        }
         d.search_event = Some(event.to_string());
     }
     // Opening a chunk is the deliberate act that counts as remembering it.

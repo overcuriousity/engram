@@ -311,9 +311,12 @@ impl Core {
         Ok(())
     }
 
-    /// A hit confirms as an open does, and the pairing is a person's from here.
+    /// A hit confirms as an open does, unless the search's open already did; the pairing is a
+    /// person's from here either way.
     pub async fn trails_after_hit(&self, event_id: &str, artifact_id: &str) -> Result<()> {
-        self.trails_after_open(event_id, artifact_id).await?;
+        if !self.store.event_opened(event_id).await? {
+            self.trails_after_open(event_id, artifact_id).await?;
+        }
         self.mint_trails_from(
             TrailSource::Verdict,
             event_id,
@@ -727,6 +730,29 @@ mod tests {
         let ev = searched(&core, "mount the image", &[(&n, Some(&t))]).await;
         assert!(core.store.open_event(&ev, &n).await.unwrap());
         core.trails_after_open(&ev, &n).await.unwrap();
+        assert_eq!(live(&core).await[0].matched, 1);
+    }
+
+    #[tokio::test]
+    async fn a_search_confirms_a_trail_once_however_often_its_note_is_opened() {
+        let core = learning().await;
+        let n = seed_artifact(&core, "mount").await;
+        let t = trail_on(&core, &n, "older words", TrailSource::Label).await;
+        let ev = searched(&core, "mount the image", &[(&n, Some(&t))]).await;
+        // As the open routes do it.
+        for _ in 0..2 {
+            let (stamped, first) = core.store.open_event_first(&ev, &n).await.unwrap();
+            assert!(stamped);
+            if first {
+                core.trails_after_open(&ev, &n).await.unwrap();
+            }
+        }
+        assert_eq!(live(&core).await[0].matched, 1);
+        core.store
+            .judge_hit(&ev, &n, Labeller::Confirm)
+            .await
+            .unwrap();
+        core.trails_after_hit(&ev, &n).await.unwrap();
         assert_eq!(live(&core).await[0].matched, 1);
     }
 
