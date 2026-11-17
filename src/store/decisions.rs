@@ -376,6 +376,41 @@ impl Store {
         self.decides_since(model, since).await
     }
 
+    /// Weak decisions a person called right, oldest first, whose vector is under the live embed model.
+    pub async fn weak_right_decisions(&self, embed_model: &str, limit: i64) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM decide_events
+                WHERE weak = 1 AND verdict = 'right' AND embed_model = ? AND vec_dim > 0
+                ORDER BY created_at ASC, id ASC LIMIT ?"#,
+            embed_model,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Unjudged, not weak, not `not_held`, under this decider and BEARS_VERSION, oldest first.
+    pub async fn decisions_unread(
+        &self,
+        decider: &str,
+        embed_model: &str,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT id AS "id!" FROM decide_events
+                WHERE verdict IS NULL AND weak = 0 AND not_held = 0
+                  AND decider = ? AND COALESCE(bears_version, 1) = ?
+                  AND embed_model = ? AND vec_dim > 0
+                ORDER BY created_at ASC, id ASC LIMIT ?"#,
+            decider,
+            crate::core::decide::state::BEARS_VERSION,
+            embed_model,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// `model`'s decisions made after `since` in Decide's era: one read under another wording of
     /// `bears` is not comparable.
     async fn decides_since(&self, model: &str, since: i64) -> Result<Vec<DecideRow>> {

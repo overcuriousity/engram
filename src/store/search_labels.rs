@@ -72,6 +72,42 @@ impl Store {
         .await?)
     }
 
+    /// Labelled in this era, no candidate at or above `relevant_at`, verdict not 'hit', live embed
+    /// model; those with a gave_up observation first, then oldest.
+    pub async fn searches_left_out(
+        &self,
+        relevant_at: f64,
+        version: u32,
+        model: &str,
+        embed_model: &str,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar!(
+            r#"SELECT e.id AS "id!" FROM search_events e
+                WHERE e.verdict IS NOT 'hit' AND e.verdict IS NOT 'discard'
+                  AND e.embed_model = ? AND e.vec_dim > 0
+                  AND EXISTS (SELECT 1 FROM search_labels l
+                               WHERE l.event_id = e.id AND l.artifact_id <> ''
+                                 AND l.question_version = ? AND l.model = ?)
+                  AND NOT EXISTS (SELECT 1 FROM search_labels l
+                                   WHERE l.event_id = e.id AND l.artifact_id <> ''
+                                     AND l.question_version = ? AND l.model = ? AND l.yes >= ?)
+                ORDER BY EXISTS (SELECT 1 FROM observations o
+                                  WHERE o.event_id = e.id AND o.source = 'gave_up') DESC,
+                         e.created_at ASC, e.id ASC
+                LIMIT ?"#,
+            embed_model,
+            version,
+            model,
+            version,
+            model,
+            relevant_at,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// A failed attempt at labelling a search in this era: not due again before `retry_at`, and
     /// counted when the model `refused` it, which waiting does not fix. An older era's row starts
     /// over. Returns the refusals so far in this era.
@@ -1070,5 +1106,37 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn a_search_with_only_low_labels_was_left_out_and_one_with_a_relevant_label_was_not() {
+        let store = Store::memory().await.unwrap();
+        let n = notes(&store, 2).await;
+        let low = search(&store, "low", &n).await;
+        let found = search(&store, "found", &n).await;
+        for id in [&low, &found] {
+            sqlx::query!(
+                "UPDATE search_events SET embed_model = 'clef', vec_dim = 2 WHERE id = ?",
+                id
+            )
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        }
+        store
+            .put_search_labels(&low, &[(n[0].clone(), 0.1), (n[1].clone(), 0.2)], 1, "m")
+            .await
+            .unwrap();
+        store
+            .put_search_labels(&found, &[(n[0].clone(), 0.1), (n[1].clone(), 0.9)], 1, "m")
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .searches_left_out(0.5, 1, "m", "clef", 10)
+                .await
+                .unwrap(),
+            [low]
+        );
     }
 }
