@@ -260,10 +260,9 @@ pub const DEEPEN_LOOKAHEAD: i64 = 16;
 /// What a second reading is counted at: it asks about a decision's few notes, not a whole pool.
 const SECOND_READING_COST: usize = 4;
 
-/// Deep looks, while the base is quiet and within `share`: open gaps, then weak decisions a person
-/// called right, decisions nobody judged, then searches the labeller left out. One already looked
-/// at, waiting out a failure or queued is passed. The first may overrun the share when no look is
-/// in flight, as `label` does for its first search.
+/// Deep looks while quiet, within `share`: open gaps, weak decisions judged right, unjudged
+/// decisions, then searches the labeller left out. One looked at, waiting out a failure or queued
+/// is passed; the first may overrun the share when none is in flight, as `label`'s first does.
 async fn deepen(core: &Core, share: usize) -> Result<u64> {
     if !core.learn.enabled || share == 0 || !quiet(core).await? {
         return Ok(0);

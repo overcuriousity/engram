@@ -775,9 +775,8 @@ impl Store {
     }
 
     /// `gap_id` names one of several tables, so no foreign key cascades. Also drops coverage
-    /// scored under `below`, except `capture` and `model` rows, which no line wrote, and what the
-    /// model said of a gap that is gone, and the deep looks (and their failures) of a source that is
-    /// gone. Returns the coverage dropped.
+    /// scored under `below` (not `capture` or `model` rows, which no line wrote), what the model
+    /// said of a gap that is gone, and a gone source's deep looks. Returns the coverage dropped.
     pub async fn trim_gap_coverage(&self, below: f32) -> Result<u64> {
         sqlx::query!(
             "DELETE FROM gap_rejections
